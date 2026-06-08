@@ -1224,6 +1224,232 @@
       "surface_in_doctor": false,
       "consumers": [{"location": "cli/tests/test_llm_env.py", "description": "Test fixture"}],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_ALLOW_CGNAT",
+      "category": "security_opt_out",
+      "purpose": "Allow RFC 6598 carrier-grade NAT addresses (100.64.0.0/10, used by Tailscale and similar overlays) through the SSRF / private-IP guards. When unset, CGNAT targets are blocked like other reserved ranges.",
+      "default": "unset (CGNAT blocked)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/netguard/netguard.go:94", "description": "cgnatAllowed() omits 100.64.0.0/10 from the reserved-CIDR list when set"},
+        {"location": "cli/defenseclaw/webhooks/writer.py:415", "description": "_cgnat_allowed() gates webhook URL validation for CGNAT IPs"},
+        {"location": "cli/defenseclaw/registries/ssrf.py:52", "description": "_cgnat_allowed() gates registry/manifest SSRF resolution for CGNAT"}
+      ],
+      "since": "0.7.0",
+      "security_note": "CGNAT egress guard — prevents SSRF into shared carrier-grade NAT / overlay-network address space (e.g. another tenant's Tailscale node)."
+    },
+    {
+      "name": "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
+      "category": "security_opt_out",
+      "purpose": "Bypass the action-mode fail-closed checks for unverified hook contracts and hook-contract lock drift during connector setup, allowing enforcing hooks to be installed against agent versions outside the verified contract matrix.",
+      "default": "unset (fail-closed in action mode)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/gateway/sidecar.go:1417", "description": "Blocks connector setup on an unverified hook contract in action mode unless set"},
+        {"location": "internal/gateway/sidecar.go:1422", "description": "Blocks connector setup on hook-contract lock drift in action mode unless set"},
+        {"location": "cli/defenseclaw/commands/cmd_setup.py:2499", "description": "Python setup path mirrors the gateway drift/contract enforcement"}
+      ],
+      "since": "0.7.0",
+      "security_note": "Hook contract verification — prevents installing an enforcing hook whose request/response contract has drifted from the verified matrix (a silent guardrail bypass)."
+    },
+    {
+      "name": "DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS",
+      "category": "security_opt_out",
+      "purpose": "Skip SSRF validation for MCP scan target URLs, permitting loopback, private, link-local, and cloud-metadata destinations. Intended for local development only.",
+      "default": "unset (SSRF guard enforced)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/scanner/mcp.go:56", "description": "validateMCPScanTargetURL() returns early without SSRF checks when set"}
+      ],
+      "since": "0.7.0",
+      "security_note": "MCP scan-target SSRF guard — prevents a scan request from reaching IMDS / loopback / private hosts."
+    },
+    {
+      "name": "DEFENSECLAW_BAKED_HOOK_PATH",
+      "category": "hook_internal",
+      "purpose": "Baked into the installed _hardening.sh helper at hook-generation time. When non-empty, replaces the hardened hook PATH with this colon-separated directory list instead of the default system paths.",
+      "default": "empty (default PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin)",
+      "accepted_values": ["colon-separated absolute paths", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/connector/hooks/_hardening.sh:149", "description": "defenseclaw_harden_env() uses it to set the locked-down hook PATH"}
+      ],
+      "since": "0.7.0",
+      "security_note": "Hook PATH lockdown — a mis-baked value that widens PATH could re-admit attacker-writable directories to hook execution."
+    },
+    {
+      "name": "DEFENSECLAW_DATA_DIR",
+      "category": "hook_internal",
+      "purpose": "Marker injected by the daemon launcher into the spawned gateway child process environment, recording which data directory that child belongs to. Not an operator-tunable knob; the data directory is configured via config.yaml.",
+      "default": "unset (set by the daemon on child processes)",
+      "accepted_values": ["absolute data-directory path"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/daemon/daemon.go:307", "description": "Written into the gateway child env to tag the owning data directory"}
+      ],
+      "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_GATEWAY_ADDR",
+      "category": "hook_internal",
+      "purpose": "Gateway API address for the Windows native Go hook entrypoint. Resolution precedence: explicit flag, then this env var, then the hooks/.hookcfg sidecar, then the configured default. Non-loopback values are rejected and replaced with 127.0.0.1:<api_port>.",
+      "default": "127.0.0.1:<api_port>",
+      "accepted_values": ["loopback host:port", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/hook.go:94", "description": "Primary env resolution of the hook's gateway API address"},
+        {"location": "internal/cli/hook.go:97", "description": "Sidecar .hookcfg fallback for the same key"}
+      ],
+      "since": "0.7.0",
+      "security_note": "Loopback-only enforcement — a non-loopback gateway address is rejected so a hook cannot be redirected to an off-box collector."
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_PATH_TRUSTED",
+      "category": "hook_internal",
+      "purpose": "Companion name to DEFENSECLAW_HOOK_PATH that an agent process might set. The hook-hardening preamble explicitly unsets it before locking down PATH, so a compromised agent cannot mark a hostile PATH as trusted. There is no read site — the variable is intentionally stripped.",
+      "default": "unset (always stripped before PATH lockdown)",
+      "accepted_values": ["unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/connector/hooks/_hardening.sh:148", "description": "unset DEFENSECLAW_HOOK_PATH_TRUSTED during env hardening (anti-consumed)"}
+      ],
+      "since": "0.7.0",
+      "security_note": "Hook PATH lockdown — stripped so an agent-supplied 'trusted' flag cannot re-enable an attacker-controlled PATH."
+    },
+    {
+      "name": "DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE",
+      "category": "telemetry",
+      "purpose": "Emergency boot-time override for the async judge-persistence queue depth. Controls how many judge bodies can buffer before drops are recorded (defenseclaw.judge.persist.drops, reason=queue_full). Normally set via guardrail.judge_persist_queue_depth in config.yaml.",
+      "default": "unset (config guardrail.judge_persist_queue_depth, default 1024)",
+      "accepted_values": ["positive integer", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/sidecar.go:364", "description": "Overrides cfg.Guardrail.JudgePersistQueueDepth at sidecar boot"}
+      ],
+      "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP",
+      "category": "security_opt_out",
+      "purpose": "Opt into the legacy broad regex cleanup of sandbox/openshell network namespaces when no saved namespace file exists. Used by the generated pre-sandbox and cleanup-sandbox scripts.",
+      "default": "0 (no regex sweep)",
+      "accepted_values": ["1", "0", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py:1258", "description": "Embedded pre-sandbox script reads it before namespace cleanup"},
+        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py:1481", "description": "Embedded cleanup-sandbox script reads it"}
+      ],
+      "since": "0.7.0",
+      "security_note": "Namespace cleanup scope — a broad regex sweep can delete unrelated network namespaces on a shared host."
+    },
+    {
+      "name": "DEFENSECLAW_TERRAFORM_PLUGIN_DIR",
+      "category": "splunk_bridge",
+      "purpose": "Optional Terraform provider plugin directory for offline / cached provider installs when running 'defenseclaw setup splunk-o11y-dashboards'.",
+      "default": "unset (no -plugin-dir passed to terraform init)",
+      "accepted_values": ["absolute directory path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py:92", "description": "--plugin-dir Click option bound to this env var"}
+      ],
+      "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_O11Y_DASHBOARD_NAME_PREFIX",
+      "category": "splunk_bridge",
+      "purpose": "Prefix label applied to the Splunk Observability dashboard groups, dashboards, and detectors created by the Terraform setup command. Useful for smoke-test isolation.",
+      "default": "empty (no prefix)",
+      "accepted_values": ["string", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py:137", "description": "--name-prefix Click option bound to this env var"}
+      ],
+      "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_SPLUNK_O11Y_DASHBOARDS_WORK_DIR",
+      "category": "splunk_bridge",
+      "purpose": "Terraform working directory for Splunk Observability dashboard provisioning. Overrides the default under the DefenseClaw data directory.",
+      "default": "<data_dir>/splunk_o11y_dashboards/terraform",
+      "accepted_values": ["absolute directory path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py:113", "description": "--work-dir Click option bound to this env var"}
+      ],
+      "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRACEPARENT",
+      "category": "telemetry",
+      "purpose": "W3C traceparent header value propagated from the agent/hook environment into outbound hook HTTP requests and the Codex telemetry bridge, enabling distributed-trace correlation.",
+      "default": "unset (no traceparent forwarded)",
+      "accepted_values": ["W3C traceparent string", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/hook.go:137", "description": "Native hook reads it (precedence over TRACEPARENT / OTEL_TRACEPARENT)"},
+        {"location": "internal/gateway/connector/hooks/_hardening.sh:661", "description": "Bash hook trace-context extraction"},
+        {"location": "internal/gateway/connector/codex.go:975", "description": "Codex telemetry bridge forwards it on outbound curls"}
+      ],
+      "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRACESTATE",
+      "category": "telemetry",
+      "purpose": "W3C tracestate header value propagated alongside traceparent for vendor-specific trace baggage on hook and Codex telemetry outbound requests.",
+      "default": "unset (no tracestate forwarded)",
+      "accepted_values": ["W3C tracestate string", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/hook.go:142", "description": "Native hook reads it alongside traceparent"},
+        {"location": "internal/gateway/connector/hooks/_hardening.sh:674", "description": "Bash hook trace-context extraction"},
+        {"location": "internal/gateway/connector/codex.go:976", "description": "Codex telemetry bridge forwards it on outbound curls"}
+      ],
+      "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRUSTED_PROXY_CIDRS",
+      "category": "security_opt_out",
+      "purpose": "Comma-separated CIDRs (or bare IPs) of reverse-proxy peers whose X-Forwarded-For header is trusted for client-IP attribution in logs. When unset, forwarded headers are ignored and the socket peer IP is authoritative.",
+      "default": "unset (X-Forwarded-For ignored)",
+      "accepted_values": ["comma-separated CIDRs or IPs", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/gateway/requestctx.go:369", "description": "isTrustedProxyPeer() trusts X-Forwarded-For only from these peers"}
+      ],
+      "since": "0.7.0",
+      "security_note": "Client-IP attribution — trusting forwarded headers from an untrusted peer lets a caller spoof the source IP recorded in auth-failure and audit logs."
+    },
+    {
+      "name": "DEFENSECLAW_TUI_SKIP_FIRST_RUN_PROMPT",
+      "category": "debug",
+      "purpose": "Skip the interactive first-run setup wizard prompt when launching the TUI, proceeding directly without asking whether to run setup.",
+      "default": "unset (prompt shown on a TTY)",
+      "accepted_values": ["1", "true", "yes", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/tui/__init__.py:53", "description": "Gates the interactive first-run setup prompt"}
+      ],
+      "since": "0.7.0"
     }
   ]
 }

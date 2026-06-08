@@ -110,10 +110,28 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     "docs-site/content/docs/reference/fail-modes.mdx",
     # Design docs that describe future / possible env vars.
     "docs/design/openshell-standalone-sandbox.md",
+    # Parity spec describing the Python<->Go TUI backend selector
+    # (DEFENSECLAW_TUI_BACKEND) as a design knob, not a shipped env var.
+    "docs/design/python-textual-tui-parity-spec.md",
     # Test fixtures that use synthetic env-var names as labels for
     # --auth-env / --token-env flags. The labels are example operator
     # configuration, not env vars DefenseClaw itself reads.
     "cli/tests/test_cmd_registry.py",
+    "cli/tests/test_cmd_keys.py",
+    # TUI agent-TTY smoke harness: DEFENSECLAW_AGENT_TTY_TESTS /
+    # DEFENSECLAW_AGENT_TTY_BIN gate and parameterize a test-only PTY
+    # smoke check. Never read by shipped code.
+    "cli/tests/tui/test_agent_tty_smoke.py",
+    # End-to-end harness scripts (developer-run, not shipped). They define
+    # DEFENSECLAW_E2E_* knobs to drive throwaway stacks against real
+    # providers; none are consumed by the gateway or CLI at runtime.
+    "scripts/test-e2e-bedrock-region.sh",
+    "scripts/test-e2e-custom-provider.sh",
+    "scripts/test-e2e-full-stack.sh",
+    # Docs-site policy-creator quick-start: an illustrative apply.ts
+    # snippet mentions DEFENSECLAW_LOG as an example client-side toggle;
+    # it is sample documentation, not a var DefenseClaw reads.
+    "docs-site/components/policy-creator/quick-start/apply.ts",
 )
 
 # Match DEFENSECLAW_FOO and MIGRATION_DEFENSECLAW_HOME. The trailing
