@@ -245,6 +245,45 @@ class TestAlignGatewayTokenEnv(unittest.TestCase):
         after = _read_config(self.tmp)
         self.assertIn('token_env: "DEFENSECLAW_GATEWAY_TOKEN"', after)
 
+    def test_preserves_crlf_line_endings(self):
+        """A CRLF-terminated config.yaml (Windows operator, or a config
+        copied from a Windows host) must still get rewritten, and the
+        edited line must keep its CRLF terminator so the file does not
+        end up with mixed line endings. Windows is a supported platform
+        as of this release; without newline="" + a CRLF-aware regex the
+        migration either silently no-ops (header never matches) or
+        flattens the whole file to LF.
+        """
+        _seed_dotenv(self.tmp, DEFENSECLAW_GATEWAY_TOKEN="abc123")
+        cfg_path = os.path.join(self.tmp, "config.yaml")
+        # newline="" keeps our explicit \r\n bytes verbatim on write.
+        with open(cfg_path, "w", newline="") as f:
+            f.write(
+                "gateway:\r\n"
+                "  host: 127.0.0.1\r\n"
+                "  token_env: OPENCLAW_GATEWAY_TOKEN  # legacy\r\n"
+                "  api_port: 18970\r\n"
+                "guardrail:\r\n"
+                "  enabled: true\r\n"
+            )
+
+        ctx = self._ctx()
+        _align_gateway_token_env_in_config(ctx)
+
+        with open(cfg_path, newline="") as f:
+            after = f.read()
+        # Value rewritten, inline comment preserved, CRLF terminator intact.
+        self.assertIn(
+            "  token_env: DEFENSECLAW_GATEWAY_TOKEN  # legacy\r\n", after
+        )
+        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", after)
+        # No mixed endings: every LF in the file is part of a CRLF pair.
+        self.assertEqual(after.count("\n"), after.count("\r\n"))
+        # Unrelated lines kept their CRLF too.
+        self.assertIn("  host: 127.0.0.1\r\n", after)
+        self.assertIn("  api_port: 18970\r\n", after)
+        self.assertTrue(any("repointed gateway.token_env" in c for c in ctx.changes))
+
     def test_no_op_when_config_yaml_missing(self):
         """Fresh install or partial-setup host → no config.yaml. The
         migration must not crash; just return silently.

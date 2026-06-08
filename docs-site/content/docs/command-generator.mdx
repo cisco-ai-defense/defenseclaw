@@ -21,20 +21,23 @@ Generated commands are display-only. Nothing on this page runs against your mach
 ## What the generator covers
 
 <Cards>
-  <Card title="Connector picker" description="All nine first-class connectors — proxy (OpenClaw, ZeptoClaw) and hooks (Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, Hermes). Each card surfaces whether the connector supports native ask and fail-closed enforcement so HITL decisions are informed." />
+  <Card title="Connector picker" description="All eleven first-class connectors — proxy (OpenClaw, ZeptoClaw) and hooks (Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, Hermes, OpenHands, Antigravity). Each card surfaces whether the connector supports native ask and fail-closed enforcement so HITL decisions are informed." />
   <Card title="Mode + scanner backend" description="--mode (observe / action) and --scanner-mode (local / remote / both). Picking remote or both surfaces the Cisco endpoint, API key env var, and timeout fields, and emits a placeholder export so you remember to set the key." />
-  <Card title="Detection strategy + judge" description="--detection-strategy (regex_only / regex_judge / judge_first). Switching off regex_only opens the judge model, judge API base, and judge API key env var inputs and adds the matching export line to the generated script." />
+  <Card title="Detection strategy + judge" description="--detection-strategy (regex_only / regex_judge / judge_first). Switching off regex_only opens the judge model, judge API base, and judge API key env var inputs, unlocks the provider & auth section below, and adds the matching export line to the generated script." />
+  <Card title="Judge provider & auth" description="When a judge runs: --judge-provider / --judge-region / --judge-instance-name, --llm-role, --inherit-from / --inherit-llm, and the full Bedrock / Vertex / Azure judge-auth families (region, auth-mode, credential env vars, profile, inference profile, repeatable deployment aliases), plus --judge-tls-ca-cert-file / --judge-insecure-skip-verify. Only the auth block for the selected provider is emitted, and credential env vars get placeholder export lines." />
   <Card title="Rule pack" description="--rule-pack (default / strict / permissive). Locked to action mode so the disabled state matches the CLI semantics." />
   <Card title="HITL" description="--human-approval + --hilt-min-severity (critical / high / medium / low). Disabled in observe mode. The connector card explains whether the prompt fires natively inside the agent UI or downgrades to a defenseclaw tui confirm." />
-  <Card title="Advanced knobs" description="--port, --block-message, --disable-redaction, --restart / --no-restart, --verify / --no-verify. The disable-redaction toggle emits a prominent warning so you don't ship un-redacted prompts to external sinks by accident." />
+  <Card title="Advanced knobs" description="--port, --block-message, --workspace, --disable-redaction, --restart / --no-restart, --verify / --no-verify, plus --disable (teardown). The disable-redaction toggle emits a prominent warning so you don't ship un-redacted prompts to external sinks by accident; --disable collapses the command to the guardrail-off verb." />
 </Cards>
 
 ## Conventions the generator follows
 
 1. **`--non-interactive` is always emitted** — the whole point of this page is producing a flag-driven command. Drop the flag if you want the wizard to prompt for anything the generator left blank.
-2. **`defenseclaw setup guardrail` is always the verb.** The hook-only aliases (`defenseclaw setup claude-code`, etc.) only configure observability and accept a much smaller flag surface; the guardrail verb works for all nine connectors and is the path documented for CI.
+2. **`defenseclaw setup guardrail` is always the verb.** The hook-only aliases (`defenseclaw setup claude-code`, etc.) only configure observability and accept a much smaller flag surface; the guardrail verb works for all eleven connectors and is the path documented for CI.
 3. **Values containing whitespace or shell metacharacters are POSIX-quoted.** Single quotes wrap any token outside the safe alphanumeric + `_./:@-` allow-list, with the standard `'\''` escape for embedded apostrophes. Copy-paste into `bash`, `zsh`, `dash`, or `fish` (interactive mode) without surprises.
 4. **Conflicting choices surface as warnings, not errors.** The generator never refuses to build a command — if you ask for `--human-approval` in observe mode, the flag is omitted (matching CLI behaviour) and a note explains why. Mistakes you should think about live in the **Notes & validation** panel.
+5. **Only the selected judge provider's auth block is emitted.** Bedrock, Vertex AI, and Azure OpenAI each have their own `--judge-bedrock-*` / `--judge-vertex-*` / `--judge-azure-*` flag family. Picking a provider hides the other two families so you never ship a command mixing Vertex credentials into a Bedrock judge. Repeatable flags (Bedrock/Azure deployment aliases) accept one entry per line and expand to one flag occurrence each.
+6. **`--disable` is a teardown verb, so it collapses the command.** Toggling *Disable guardrail* drops every configuration flag and emits exactly `defenseclaw setup guardrail --disable`. The CLI returns before reading any other flag — including `--connector` — so this teardown is global; the panel points you at `defenseclaw guardrail disable --connector <id>` when you need a connector-scoped teardown instead.
 
 ## Related
 

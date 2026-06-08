@@ -41,6 +41,14 @@ type ScannerMode = 'local' | 'remote' | 'both';
 type DetectionStrategy = 'regex_only' | 'regex_judge' | 'judge_first';
 type RulePack = 'default' | 'strict' | 'permissive';
 type HitlSeverity = 'high' | 'medium' | 'low' | 'critical';
+// Advanced judge-provider knobs. Empty string = "omit the flag" for the
+// select-backed fields; the tri-state covers --inherit-llm/--no-inherit-llm.
+type LlmRole = '' | 'judge_only' | 'judge_and_agent';
+type InheritFrom = '' | 'guardrail' | 'scanners.skill' | 'scanners.mcp' | 'scanners.plugin';
+type InheritLlm = 'unset' | 'yes' | 'no';
+type BedrockAuthMode = '' | 'api_key' | 'iam_credentials' | 'profile' | 'instance_role';
+type VertexAuthMode = '' | 'service_account' | 'adc' | 'workload_identity';
+type AzureAuthMode = '' | 'api_key' | 'managed_identity';
 
 interface GeneratorState {
   connector: string;
@@ -54,14 +62,42 @@ interface GeneratorState {
   judgeModel: string;
   judgeApiBase: string;
   judgeApiKeyEnv: string;
+  // Advanced judge LLM provider + auth (only meaningful when a judge runs).
+  judgeProvider: string;
+  judgeRegion: string;
+  judgeInstanceName: string;
+  llmRole: LlmRole;
+  inheritFrom: InheritFrom;
+  inheritLlm: InheritLlm;
+  judgeBedrockRegion: string;
+  judgeBedrockAuthMode: BedrockAuthMode;
+  judgeBedrockAccessKeyEnv: string;
+  judgeBedrockSecretKeyEnv: string;
+  judgeBedrockSessionTokenEnv: string;
+  judgeBedrockProfileName: string;
+  judgeBedrockInferenceProfile: string;
+  judgeBedrockDeployments: string; // one `alias=model-id` per line
+  judgeVertexProjectId: string;
+  judgeVertexRegion: string;
+  judgeVertexAuthMode: VertexAuthMode;
+  judgeVertexServiceAccountJsonEnv: string;
+  judgeAzureEndpoint: string;
+  judgeAzureApiVersion: string;
+  judgeAzureAuthMode: AzureAuthMode;
+  judgeAzureDeployments: string; // one `model=deployment` per line
+  judgeTlsCaCertFile: string;
+  judgeInsecureSkipVerify: boolean;
   humanApproval: boolean;
   hiltMinSeverity: HitlSeverity;
   port: string;
   blockMessage: string;
   disableRedaction: boolean;
+  workspaceDir: string;
+  disableGuardrail: boolean;
   restart: boolean;
   verify: boolean;
   showAdvanced: boolean;
+  showJudgeProvider: boolean;
 }
 
 const DEFAULT_STATE: GeneratorState = {
@@ -76,15 +112,68 @@ const DEFAULT_STATE: GeneratorState = {
   judgeModel: 'anthropic/claude-sonnet-4-20250514',
   judgeApiBase: '',
   judgeApiKeyEnv: 'DEFENSECLAW_LLM_KEY',
+  judgeProvider: '',
+  judgeRegion: '',
+  judgeInstanceName: '',
+  llmRole: '',
+  inheritFrom: '',
+  inheritLlm: 'unset',
+  judgeBedrockRegion: '',
+  judgeBedrockAuthMode: '',
+  judgeBedrockAccessKeyEnv: '',
+  judgeBedrockSecretKeyEnv: '',
+  judgeBedrockSessionTokenEnv: '',
+  judgeBedrockProfileName: '',
+  judgeBedrockInferenceProfile: '',
+  judgeBedrockDeployments: '',
+  judgeVertexProjectId: '',
+  judgeVertexRegion: '',
+  judgeVertexAuthMode: '',
+  judgeVertexServiceAccountJsonEnv: '',
+  judgeAzureEndpoint: '',
+  judgeAzureApiVersion: '',
+  judgeAzureAuthMode: '',
+  judgeAzureDeployments: '',
+  judgeTlsCaCertFile: '',
+  judgeInsecureSkipVerify: false,
   humanApproval: false,
   hiltMinSeverity: 'high',
   port: '',
   blockMessage: '',
   disableRedaction: false,
+  workspaceDir: '',
+  disableGuardrail: false,
   restart: true,
   verify: true,
   showAdvanced: false,
+  showJudgeProvider: false,
 };
+
+// Provider classification helpers. The CLI accepts free-text providers but
+// only Bedrock / Vertex / Azure have typed-auth flag families; we normalise
+// here so the UI and the command builder agree on which auth block applies.
+function normProvider(p: string): string {
+  return p.trim().toLowerCase();
+}
+function isBedrockProvider(p: string): boolean {
+  return normProvider(p) === 'bedrock';
+}
+function isVertexProvider(p: string): boolean {
+  const n = normProvider(p);
+  return n === 'vertex_ai' || n === 'vertex' || n === 'gemini';
+}
+function isAzureProvider(p: string): boolean {
+  const n = normProvider(p);
+  return n === 'azure' || n === 'azure_openai';
+}
+
+// Split a textarea value (repeatable flag) into trimmed, non-empty lines.
+function splitLines(value: string): string[] {
+  return value
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
 
 // Quote a value for safe inclusion as a single shell argument. Single
 // quotes are bulletproof in POSIX shells; the only character that
@@ -104,12 +193,144 @@ function shellQuote(value: string): string {
   return "'" + value.replace(/'/g, "'\\''") + "'";
 }
 
+// Emit the advanced judge-provider + provider-typed auth flags. Only the
+// auth block matching the selected provider is emitted so the generated
+// command never mixes Bedrock + Vertex + Azure families. Called only when a
+// judge actually runs (detection strategy != regex_only). We expose the
+// canonical provider-typed auth-mode flags (--judge-bedrock-auth-mode etc.)
+// rather than the generic --judge-auth-mode alias, which the CLI just maps
+// onto these; emitting both would let an operator build a self-conflicting
+// command.
+function appendJudgeProviderFlags(
+  s: GeneratorState,
+  lines: string[],
+  preExports: string[],
+  warnings: string[],
+): void {
+  if (s.judgeProvider.trim()) {
+    lines.push(`--judge-provider ${shellQuote(s.judgeProvider.trim())}`);
+  }
+  if (s.judgeRegion.trim()) {
+    lines.push(`--judge-region ${shellQuote(s.judgeRegion.trim())}`);
+  }
+  if (s.judgeInstanceName.trim()) {
+    lines.push(`--judge-instance-name ${shellQuote(s.judgeInstanceName.trim())}`);
+  }
+  if (s.llmRole) {
+    lines.push(`--llm-role ${s.llmRole}`);
+  }
+  if (s.inheritFrom) {
+    lines.push(`--inherit-from ${shellQuote(s.inheritFrom)}`);
+  }
+  if (s.inheritLlm === 'yes') {
+    lines.push('--inherit-llm');
+  } else if (s.inheritLlm === 'no') {
+    lines.push('--no-inherit-llm');
+  }
+
+  const bedrock = isBedrockProvider(s.judgeProvider);
+  const vertex = isVertexProvider(s.judgeProvider);
+  const azure = isAzureProvider(s.judgeProvider);
+
+  if (bedrock) {
+    if (s.judgeBedrockRegion.trim()) {
+      lines.push(`--judge-bedrock-region ${shellQuote(s.judgeBedrockRegion.trim())}`);
+    }
+    if (s.judgeBedrockAuthMode) {
+      lines.push(`--judge-bedrock-auth-mode ${s.judgeBedrockAuthMode}`);
+    }
+    if (s.judgeBedrockAccessKeyEnv.trim()) {
+      lines.push(`--judge-bedrock-access-key-env ${shellQuote(s.judgeBedrockAccessKeyEnv.trim())}`);
+      preExports.push(`export ${s.judgeBedrockAccessKeyEnv.trim()}=<aws-access-key-id>`);
+    }
+    if (s.judgeBedrockSecretKeyEnv.trim()) {
+      lines.push(`--judge-bedrock-secret-key-env ${shellQuote(s.judgeBedrockSecretKeyEnv.trim())}`);
+      preExports.push(`export ${s.judgeBedrockSecretKeyEnv.trim()}=<aws-secret-access-key>`);
+    }
+    if (s.judgeBedrockSessionTokenEnv.trim()) {
+      lines.push(`--judge-bedrock-session-token-env ${shellQuote(s.judgeBedrockSessionTokenEnv.trim())}`);
+      preExports.push(`export ${s.judgeBedrockSessionTokenEnv.trim()}=<aws-session-token>`);
+    }
+    if (s.judgeBedrockProfileName.trim()) {
+      lines.push(`--judge-bedrock-profile-name ${shellQuote(s.judgeBedrockProfileName.trim())}`);
+    }
+    if (s.judgeBedrockInferenceProfile.trim()) {
+      lines.push(`--judge-bedrock-inference-profile ${shellQuote(s.judgeBedrockInferenceProfile.trim())}`);
+    }
+    for (const alias of splitLines(s.judgeBedrockDeployments)) {
+      lines.push(`--judge-bedrock-deployment ${shellQuote(alias)}`);
+    }
+  } else if (vertex) {
+    if (s.judgeVertexProjectId.trim()) {
+      lines.push(`--judge-vertex-project-id ${shellQuote(s.judgeVertexProjectId.trim())}`);
+    }
+    if (s.judgeVertexRegion.trim()) {
+      lines.push(`--judge-vertex-region ${shellQuote(s.judgeVertexRegion.trim())}`);
+    }
+    if (s.judgeVertexAuthMode) {
+      lines.push(`--judge-vertex-auth-mode ${s.judgeVertexAuthMode}`);
+    }
+    if (s.judgeVertexServiceAccountJsonEnv.trim()) {
+      lines.push(
+        `--judge-vertex-service-account-json-env ${shellQuote(s.judgeVertexServiceAccountJsonEnv.trim())}`,
+      );
+      preExports.push(
+        `export ${s.judgeVertexServiceAccountJsonEnv.trim()}=<path-to-service-account-json>`,
+      );
+    }
+  } else if (azure) {
+    if (s.judgeAzureEndpoint.trim()) {
+      lines.push(`--judge-azure-endpoint ${shellQuote(s.judgeAzureEndpoint.trim())}`);
+    }
+    if (s.judgeAzureApiVersion.trim()) {
+      lines.push(`--judge-azure-api-version ${shellQuote(s.judgeAzureApiVersion.trim())}`);
+    }
+    if (s.judgeAzureAuthMode) {
+      lines.push(`--judge-azure-auth-mode ${s.judgeAzureAuthMode}`);
+    }
+    for (const alias of splitLines(s.judgeAzureDeployments)) {
+      lines.push(`--judge-azure-deployment-alias ${shellQuote(alias)}`);
+    }
+  }
+
+  // Provider-agnostic judge TLS knobs.
+  if (s.judgeTlsCaCertFile.trim()) {
+    lines.push(`--judge-tls-ca-cert-file ${shellQuote(s.judgeTlsCaCertFile.trim())}`);
+  }
+  if (s.judgeInsecureSkipVerify) {
+    lines.push('--judge-insecure-skip-verify');
+    warnings.push(
+      'TLS verification is disabled for the judge endpoint (--judge-insecure-skip-verify). Lab use only — never point this at a production judge reached over an untrusted network.',
+    );
+  }
+}
+
 function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[]; warnings: string[] } {
+  const connectorRow = CONNECTORS.find((c) => c.id === s.connector);
+
+  // Teardown short-circuit. `--disable` calls _disable_guardrail and
+  // returns *before* the CLI applies --connector or any other flag, so the
+  // generated command collapses to the bare disable verb. We deliberately
+  // do NOT emit --connector here: it parses fine but is ignored in this
+  // path, and printing it would falsely imply a connector-scoped teardown.
+  // The warning points operators at the genuinely scoped command instead.
+  if (s.disableGuardrail) {
+    const scoped = connectorRow
+      ? ` For a connector-scoped teardown, use 'defenseclaw guardrail disable --connector ${connectorRow.id}' instead.`
+      : '';
+    return {
+      lines: ['defenseclaw setup guardrail', '--disable'],
+      preExports: [],
+      warnings: [
+        `Teardown mode: --disable turns the guardrail off globally and restores direct LLM access. The CLI returns before reading any other flag, so every other knob on this page — including --connector — is ignored.${scoped}`,
+      ],
+    };
+  }
+
   const lines: string[] = ['defenseclaw setup guardrail', '--non-interactive'];
   const preExports: string[] = [];
   const warnings: string[] = [];
 
-  const connectorRow = CONNECTORS.find((c) => c.id === s.connector);
   if (connectorRow) {
     lines.push(`--connector ${shellQuote(connectorRow.id)}`);
   }
@@ -184,6 +405,9 @@ function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[
     }
     const apiKeyEnv = s.judgeApiKeyEnv.trim() || 'DEFENSECLAW_LLM_KEY';
     preExports.push(`export ${apiKeyEnv}=<your-llm-api-key>`);
+
+    // Advanced judge provider + provider-typed auth.
+    appendJudgeProviderFlags(s, lines, preExports, warnings);
   }
 
   // Advanced knobs.
@@ -201,6 +425,10 @@ function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[
     warnings.push(
       'Redaction is disabled. Sinks will receive UNREDACTED prompts. Only do this inside trusted, single-tenant environments.',
     );
+  }
+
+  if (s.workspaceDir.trim()) {
+    lines.push(`--workspace ${shellQuote(s.workspaceDir.trim())}`);
   }
 
   if (!s.restart) lines.push('--no-restart');
@@ -385,6 +613,229 @@ export function CommandGenerator() {
           )}
         </Section>
 
+        {state.detectionStrategy !== 'regex_only' && (
+          <Section
+            title="Judge LLM provider & auth"
+            subtitle="Point the judge at a managed provider (Bedrock / Vertex / Azure) or reuse a sibling LLM block. Leave blank to use a plain API-key provider via the env var above."
+          >
+            <button
+              type="button"
+              onClick={() => update('showJudgeProvider', !state.showJudgeProvider)}
+              className="text-sm font-medium text-[var(--brand-cisco-strong)] hover:underline"
+              aria-expanded={state.showJudgeProvider}
+            >
+              {state.showJudgeProvider ? 'Hide' : 'Show'} provider & auth options
+            </button>
+            {state.showJudgeProvider && (
+              <div className="mt-3 grid gap-3">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field
+                    label="Judge provider"
+                    placeholder="anthropic / bedrock / vertex_ai / azure"
+                    value={state.judgeProvider}
+                    onChange={(v) => update('judgeProvider', v)}
+                  />
+                  <Field
+                    label="Region"
+                    placeholder="us-east-1"
+                    value={state.judgeRegion}
+                    onChange={(v) => update('judgeRegion', v)}
+                  />
+                  <Field
+                    label="Instance name (custom provider)"
+                    placeholder="my-bifrost-instance"
+                    value={state.judgeInstanceName}
+                    onChange={(v) => update('judgeInstanceName', v)}
+                  />
+                  <Select<LlmRole>
+                    label="LLM role (--llm-role)"
+                    value={state.llmRole}
+                    onChange={(v) => update('llmRole', v)}
+                    options={[
+                      { value: '', label: '(connector default)' },
+                      { value: 'judge_only', label: 'judge_only' },
+                      { value: 'judge_and_agent', label: 'judge_and_agent' },
+                    ]}
+                  />
+                  <Select<InheritFrom>
+                    label="Inherit LLM from (--inherit-from)"
+                    value={state.inheritFrom}
+                    onChange={(v) => update('inheritFrom', v)}
+                    options={[
+                      { value: '', label: '(none)' },
+                      { value: 'guardrail', label: 'guardrail' },
+                      { value: 'scanners.skill', label: 'scanners.skill' },
+                      { value: 'scanners.mcp', label: 'scanners.mcp' },
+                      { value: 'scanners.plugin', label: 'scanners.plugin' },
+                    ]}
+                  />
+                  <Select<InheritLlm>
+                    label="Inherit agent LLM (shortcut)"
+                    value={state.inheritLlm}
+                    onChange={(v) => update('inheritLlm', v)}
+                    options={[
+                      { value: 'unset', label: '(leave unset)' },
+                      { value: 'yes', label: '--inherit-llm' },
+                      { value: 'no', label: '--no-inherit-llm' },
+                    ]}
+                  />
+                </div>
+
+                {isBedrockProvider(state.judgeProvider) && (
+                  <div className="grid gap-3 rounded-lg border border-fd-border bg-fd-background/60 p-3 sm:grid-cols-2">
+                    <p className="text-xs font-semibold text-fd-foreground sm:col-span-2">
+                      AWS Bedrock judge auth
+                    </p>
+                    <Field
+                      label="Bedrock region"
+                      placeholder="us-east-1"
+                      value={state.judgeBedrockRegion}
+                      onChange={(v) => update('judgeBedrockRegion', v)}
+                    />
+                    <Select<BedrockAuthMode>
+                      label="Auth mode"
+                      value={state.judgeBedrockAuthMode}
+                      onChange={(v) => update('judgeBedrockAuthMode', v)}
+                      options={[
+                        { value: '', label: '(default)' },
+                        { value: 'api_key', label: 'api_key' },
+                        { value: 'iam_credentials', label: 'iam_credentials' },
+                        { value: 'profile', label: 'profile' },
+                        { value: 'instance_role', label: 'instance_role' },
+                      ]}
+                    />
+                    <Field
+                      label="Access key env"
+                      placeholder="AWS_ACCESS_KEY_ID"
+                      value={state.judgeBedrockAccessKeyEnv}
+                      onChange={(v) => update('judgeBedrockAccessKeyEnv', v)}
+                    />
+                    <Field
+                      label="Secret key env"
+                      placeholder="AWS_SECRET_ACCESS_KEY"
+                      value={state.judgeBedrockSecretKeyEnv}
+                      onChange={(v) => update('judgeBedrockSecretKeyEnv', v)}
+                    />
+                    <Field
+                      label="Session token env"
+                      placeholder="AWS_SESSION_TOKEN"
+                      value={state.judgeBedrockSessionTokenEnv}
+                      onChange={(v) => update('judgeBedrockSessionTokenEnv', v)}
+                    />
+                    <Field
+                      label="Profile name"
+                      placeholder="(when auth mode = profile)"
+                      value={state.judgeBedrockProfileName}
+                      onChange={(v) => update('judgeBedrockProfileName', v)}
+                    />
+                    <Field
+                      label="Inference profile"
+                      placeholder="us."
+                      value={state.judgeBedrockInferenceProfile}
+                      onChange={(v) => update('judgeBedrockInferenceProfile', v)}
+                    />
+                    <TextArea
+                      label="Deployments — one alias=model-id per line"
+                      placeholder={'sonnet=anthropic.claude-3-5-sonnet-20241022-v2:0'}
+                      value={state.judgeBedrockDeployments}
+                      onChange={(v) => update('judgeBedrockDeployments', v)}
+                      className="sm:col-span-2"
+                    />
+                  </div>
+                )}
+
+                {isVertexProvider(state.judgeProvider) && (
+                  <div className="grid gap-3 rounded-lg border border-fd-border bg-fd-background/60 p-3 sm:grid-cols-2">
+                    <p className="text-xs font-semibold text-fd-foreground sm:col-span-2">
+                      GCP Vertex AI judge auth
+                    </p>
+                    <Field
+                      label="Project ID"
+                      placeholder="my-gcp-project"
+                      value={state.judgeVertexProjectId}
+                      onChange={(v) => update('judgeVertexProjectId', v)}
+                    />
+                    <Field
+                      label="Region"
+                      placeholder="us-central1"
+                      value={state.judgeVertexRegion}
+                      onChange={(v) => update('judgeVertexRegion', v)}
+                    />
+                    <Select<VertexAuthMode>
+                      label="Auth mode"
+                      value={state.judgeVertexAuthMode}
+                      onChange={(v) => update('judgeVertexAuthMode', v)}
+                      options={[
+                        { value: '', label: '(default)' },
+                        { value: 'service_account', label: 'service_account' },
+                        { value: 'adc', label: 'adc' },
+                        { value: 'workload_identity', label: 'workload_identity' },
+                      ]}
+                    />
+                    <Field
+                      label="Service-account JSON env"
+                      placeholder="GOOGLE_APPLICATION_CREDENTIALS"
+                      value={state.judgeVertexServiceAccountJsonEnv}
+                      onChange={(v) => update('judgeVertexServiceAccountJsonEnv', v)}
+                    />
+                  </div>
+                )}
+
+                {isAzureProvider(state.judgeProvider) && (
+                  <div className="grid gap-3 rounded-lg border border-fd-border bg-fd-background/60 p-3 sm:grid-cols-2">
+                    <p className="text-xs font-semibold text-fd-foreground sm:col-span-2">
+                      Azure OpenAI judge auth
+                    </p>
+                    <Field
+                      label="Endpoint"
+                      placeholder="https://name.openai.azure.com"
+                      value={state.judgeAzureEndpoint}
+                      onChange={(v) => update('judgeAzureEndpoint', v)}
+                    />
+                    <Field
+                      label="API version"
+                      placeholder="2024-10-21"
+                      value={state.judgeAzureApiVersion}
+                      onChange={(v) => update('judgeAzureApiVersion', v)}
+                    />
+                    <Select<AzureAuthMode>
+                      label="Auth mode"
+                      value={state.judgeAzureAuthMode}
+                      onChange={(v) => update('judgeAzureAuthMode', v)}
+                      options={[
+                        { value: '', label: '(default)' },
+                        { value: 'api_key', label: 'api_key' },
+                        { value: 'managed_identity', label: 'managed_identity' },
+                      ]}
+                    />
+                    <TextArea
+                      label="Deployments — one model=deployment per line"
+                      placeholder={'gpt-4o=my-gpt4o-deployment'}
+                      value={state.judgeAzureDeployments}
+                      onChange={(v) => update('judgeAzureDeployments', v)}
+                      className="sm:col-span-2"
+                    />
+                  </div>
+                )}
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field
+                    label="Judge TLS CA cert file"
+                    placeholder="/path/to/ca-bundle.pem"
+                    value={state.judgeTlsCaCertFile}
+                    onChange={(v) => update('judgeTlsCaCertFile', v)}
+                  />
+                  <Toggle
+                    label="Skip judge TLS verify (lab only)"
+                    checked={state.judgeInsecureSkipVerify}
+                    onChange={(v) => update('judgeInsecureSkipVerify', v)}
+                  />
+                </div>
+              </div>
+            )}
+          </Section>
+        )}
+
         <Section
           title="Rule pack"
           subtitle={
@@ -467,6 +918,12 @@ export function CommandGenerator() {
                 onChange={(v) => update('blockMessage', v)}
                 disabled={state.mode !== 'action'}
               />
+              <Field
+                label="Workspace dir (--workspace)"
+                placeholder="(global user config)"
+                value={state.workspaceDir}
+                onChange={(v) => update('workspaceDir', v)}
+              />
               <Toggle
                 label="Disable redaction (dangerous)"
                 checked={state.disableRedaction}
@@ -481,6 +938,11 @@ export function CommandGenerator() {
                 label="Run connectivity verify"
                 checked={state.verify}
                 onChange={(v) => update('verify', v)}
+              />
+              <Toggle
+                label="Disable guardrail (teardown)"
+                checked={state.disableGuardrail}
+                onChange={(v) => update('disableGuardrail', v)}
               />
             </div>
           )}
@@ -795,6 +1257,73 @@ function Field({
           'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground placeholder:text-fd-muted-foreground/60',
           'focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]',
           disabled ? 'cursor-not-allowed opacity-60' : '',
+        ].join(' ')}
+      />
+    </label>
+  );
+}
+
+function Select<T extends string>({
+  label,
+  value,
+  onChange,
+  options,
+  disabled,
+}: {
+  label: string;
+  value: T;
+  onChange: (v: T) => void;
+  options: Array<{ value: T; label: string }>;
+  disabled?: boolean;
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-xs font-medium text-fd-muted-foreground">{label}</span>
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value as T)}
+        className={[
+          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground',
+          'focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]',
+          disabled ? 'cursor-not-allowed opacity-60' : '',
+        ].join(' ')}
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function TextArea({
+  label,
+  value,
+  onChange,
+  placeholder,
+  className,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  className?: string;
+}) {
+  return (
+    <label className={['flex flex-col gap-1', className ?? ''].join(' ')}>
+      <span className="text-xs font-medium text-fd-muted-foreground">{label}</span>
+      <textarea
+        value={value}
+        placeholder={placeholder}
+        spellCheck={false}
+        rows={3}
+        onChange={(e) => onChange(e.target.value)}
+        className={[
+          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 font-mono text-xs text-fd-foreground placeholder:text-fd-muted-foreground/60',
+          'focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]',
         ].join(' ')}
       />
     </label>

@@ -144,14 +144,19 @@ var commandRules = []PatternRule{
 // matching ".env").
 // ---------------------------------------------------------------------------
 
-// Closes avarice F-1726: every credential-file rule below uses the
-// home-prefix sub-pattern `(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)`, which
-// matches the braced shell form `${HOME}/.aws/credentials` in
-// addition to `~`, `$HOME`, `${HOME}`, `/home/<user>`, `/root`, and `/Users/<user>` (macOS). Without the
-// `\{?...\}?` adjustment, the previous patterns missed `${HOME}` —
-// AND `normalizeShell` would strip the variable entirely, leaving
-// only `/.aws/credentials` which still didn't match. Keep this
-// sub-pattern in sync with policies/guardrail/default/rules/sensitive-paths.yaml.
+// Every credential-file rule below shares the home-prefix sub-pattern
+// `(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)`. It matches `~`, the bare and
+// braced shell forms `$HOME` and `${HOME}`, Linux `/home/<user>` and `/root`,
+// and macOS `/Users/<user>`. The brace tolerance (`\{?...\}?`) is required
+// because the previous patterns missed `${HOME}/.aws/credentials` and
+// normalizeShell would strip the variable entirely, leaving only
+// `/.aws/credentials`, which also failed to match. The macOS `/Users/<user>`
+// branch is required because the run_command tool expands `~` via the shell
+// BEFORE the regex sees it, so on macOS the command line arrives as
+// /Users/<user>/.ssh/... rather than the literal ~/.ssh/... These compiled-in
+// defaults must stay in lockstep with the externalized packs under
+// policies/guardrail/<pack>/rules/sensitive-paths.yaml, which replace this
+// category once a rule pack is installed.
 var sensitivePathRules = []PatternRule{
 	{ID: "PATH-SSH-DIR", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.ssh/`), Title: "SSH directory access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-SSH-KEY", Pattern: regexp.MustCompile(`(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])`), Title: "SSH private key file path", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
@@ -164,8 +169,8 @@ var sensitivePathRules = []PatternRule{
 	{ID: "PATH-PYPIRC", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.pypirc`), Title: "PyPI config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-GIT-CREDS", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.git-credentials`), Title: "Git credentials file", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-NETRC", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.netrc`), Title: "netrc credentials file", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	// Closes avarice F-1727: `;` (shell command separator) added to
-	// the suffix delimiter classes so `cat .env; true` also matches.
+	// `;` (shell command separator) is included in the suffix delimiter classes
+	// so `cat .env; true` also matches.
 	{ID: "PATH-ENV-FILE", Pattern: regexp.MustCompile(`(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["'\s,;\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["'\s,;\]})]`), Title: "Environment file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
 	// The /etc/{passwd,shadow,sudoers} rules tolerate common obfuscations:
 	// canonical "/etc/passwd", space-separated "etc passwd", backslash

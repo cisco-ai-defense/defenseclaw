@@ -53,7 +53,7 @@ yellow banner explaining which check failed instead of clobbering your draft.
   <Card
     title="Playground"
     href="#"
-    description="14 collapsible sections covering every knob the engine reads. Use this for fine-tuning the Quick Start output, hand-authoring rule packs, or writing custom Rego snippets."
+    description="18 collapsible sections covering every knob the engine reads. Use this for fine-tuning the Quick Start output, hand-authoring rule packs, or writing custom Rego snippets."
   />
 </Cards>
 
@@ -136,9 +136,14 @@ defenseclaw policy activate <name>
 | Suppressions     | The three layers: `pre_judge_strips`, `finding_suppressions`, `tool_suppressions`.                                                     |
 | Sensitive tools  | `sensitive_tools` array — per-tool result inspection and judge-result toggles.                                                         |
 | LLM judges       | `judges.<name>` (pii / injection / tool-injection / exfil) — system prompts and category mappings.                                     |
+| Session correlator (Layer 5) | `correlator` array — sliding-window attack patterns (lethal trifecta, escalation chain, destructive flow). Mirrors `internal/guardrail/correlator.go`. |
 | Firewall         | `firewall.default_action`, `blocked_destinations`, `allowed_domains`, `allowed_ports`.                                                 |
 | Webhooks         | `webhooks` array — Slack / Webex / PagerDuty / generic, signed via env-var secrets.                                                    |
-| Watch / Audit    | `watch.rescan_*`, `audit.log_*`, `audit.retention_days`.                                                                               |
+| Watch (rescan)   | `watch.rescan_enabled`, `watch.rescan_interval_min`.                                                                                    |
+| Enforcement      | `enforcement.max_enforcement_delay_seconds`.                                                                                            |
+| Audit            | `audit.log_all_actions`, `audit.log_scan_results`, `audit.retention_days`.                                                             |
+| Scanner profiles | `scanners.<scanner>` profile selection (codeguard / plugin-scanner / skill-scanner).                                                   |
+| Cisco AI Defense (optional · enterprise) | `cisco_ai_defense.enabled` / `endpoint` / `api_key_env` / `scan_hook_surface` — the optional remote lane read by `internal/config`. |
 | Custom Rego      | Per-snippet `package defenseclaw.custom.<name>` modules emitted into `policies/rego/custom-<name>.rego`.                               |
 | Review & export  | Renders every YAML file the engine needs + `policies/rego/data.json` + a copy-pasteable bash install script.                           |
 

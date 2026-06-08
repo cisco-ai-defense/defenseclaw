@@ -57,6 +57,23 @@ export const baseOptions: BaseLayoutProps = {
       url: '/docs/stories',
       active: 'nested-url',
     },
+    // Interactive builders — surfaced as top-level nav after the
+    // content sections (Connectors, Stories) so operators can jump
+    // straight to the two "do something" pages: assemble a
+    // non-interactive `setup guardrail` command, or author a policy
+    // with live OPA-WASM evaluation.
+    {
+      type: 'main',
+      text: 'Command generator',
+      url: '/docs/command-generator',
+      active: 'nested-url',
+    },
+    {
+      type: 'main',
+      text: 'Policy creator',
+      url: '/docs/policies/creator',
+      active: 'nested-url',
+    },
     // Secondary nav anchors the project to its sibling community
     // surfaces. Order is intentional: parent-org → Discord → repo
     // stats → repo. Keeping the GitHub identity (stats pills + icon)

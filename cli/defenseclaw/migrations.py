@@ -524,49 +524,66 @@ def _migrate_0_4_0_normalize_claw_mode(ctx: MigrationContext) -> None:
     YAML loader because the loader pulls in the entire dataclass tree
     (which has its own back-compat handling for the very fields we are
     trying to migrate) — a surgical sed-style edit is safer here. The
-    rewrite is anchored to the ``claw:`` block so a stray ``mode:
-    nemoclaw`` somewhere else in config.yaml is not touched.
+    rewrite is anchored to the ``claw:`` block (via
+    ``_find_top_level_block``) so a stray ``mode: nemoclaw`` somewhere
+    else in config.yaml is not touched. Reading through
+    ``_read_config_text`` + writing through ``_atomic_write_text``
+    preserves the file's line endings, so a CRLF config is rewritten in
+    place rather than flattened to LF.
+
+    The flow-style mapping ``claw: {mode: nemoclaw}`` is intentionally
+    NOT matched — those round-trip correctly through ``config.save()``
+    so the operator either edited them manually or the upgrade is
+    harmless.
     """
     cfg_path = os.path.join(ctx.data_dir, "config.yaml")
     if not os.path.isfile(cfg_path):
         return
 
-    try:
-        with open(cfg_path) as f:
-            text = f.read()
-    except OSError as exc:
-        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+    text = _read_config_text(cfg_path)
+    if text is None:
         return
 
-    new_text = text
+    block = _find_top_level_block(text, "claw")
+    if not block:
+        return
+
+    body = block.group("body")
+    new_body = body
     for legacy, replacement in _LEGACY_CLAW_MODE_REMAP.items():
-        # Match `mode: <legacy>` only inside the claw block. Since
-        # YAML allows arbitrary indentation we look for the literal
-        # `claw:` line followed (at any distance) by an indented
-        # `mode: <legacy>`. The trailing-context group preserves any
-        # closing quote, surrounding whitespace, and an optional
-        # YAML inline comment (``mode: nemoclaw  # legacy``) so a
-        # commented hand-edited line still normalizes cleanly. The
-        # pattern still rejects flow-style mappings (``claw: { mode:
-        # nemoclaw }``) — those round-trip correctly through
-        # ``config.save()`` so the operator either edited them
-        # manually or the upgrade is harmless.
+        # Match an indented ``mode: <legacy>`` line inside the claw
+        # body. The value may be bare or quoted; an inline comment
+        # (``mode: nemoclaw  # legacy``) is preserved because only the
+        # value group is substituted. ``(?:\r?\n|$)`` keeps a CRLF
+        # terminator intact and still matches a final line with no
+        # trailing newline.
         pattern = re.compile(
-            r"(^claw:[ \t]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+mode:[ \t]*[\"']?)"
+            r"(?P<prefix>^[ \t]+mode:[ \t]*)(?P<quote>[\"']?)"
             + re.escape(legacy)
-            + r"([\"']?[ \t]*(?:#[^\n]*)?$)",
+            + r"(?P=quote)(?P<suffix>[ \t]*(?:#[^\n]*)?(?:\r?\n|$))",
             flags=re.MULTILINE,
         )
-        new_text, count = pattern.subn(rf"\g<1>{replacement}\g<2>", new_text)
+        new_body, count = pattern.subn(
+            lambda m, repl=replacement: (
+                f"{m.group('prefix')}{m.group('quote')}{repl}"
+                f"{m.group('quote')}{m.group('suffix')}"
+            ),
+            new_body,
+        )
         if count:
             ctx.changes.append(
                 f"normalized claw.mode: {legacy} → {replacement} "
                 "(S3.1: legacy enum dropped from OTel schema)"
             )
 
-    if new_text != text:
-        if not _atomic_write_text(cfg_path, new_text):
-            ux.warn(f"could not write {cfg_path}", indent="    ")
+    if new_body == body:
+        return
+
+    new_text = text[: block.start("body")] + new_body + text[block.end("body") :]
+    if new_text == text:
+        return
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
 
 
 def _migrate_0_4_0_seed_active_connector(ctx: MigrationContext) -> None:
@@ -926,40 +943,27 @@ def _dotenv_update_keys(
 
 
 def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
-    """Atomically write ``body`` to ``path`` with the given file mode.
+    """Atomically write ``body`` to ``path``.
 
-    ("Gateway token is written through a fixed-name
-    temp file before permissions are tightened"): the previous
-    implementation used ``open(path + ".tmp", "w")``, which created a
-    new file with permissions derived from 0666 masked by the process
-    umask, *then* called :func:`os.chmod`. On a multi-user host with a
-    permissive umask -- or a stale broadly-readable ``<target>.tmp``
-    file -- another local user could race-read the gateway token (or
-    any other secret-bearing migration write) during the write window.
+    The temp-file creation is hardened: it uses :func:`tempfile.mkstemp`
+    in the *target* directory so the bytes never exist on disk under a
+    predictable name, applies the file mode from creation, refuses to
+    write through a pre-existing symlink at ``path``, and calls
+    :func:`os.fsync` before :func:`os.replace` so a crash mid-rename
+    cannot leave a half-written file. For secret-bearing writes
+    (``mode <= 0o600``) the parent directory is tightened to 0o700 first,
+    even when it already exists with a more permissive mode. Non-secret
+    writes (``mode > 0o600``, e.g. the surgical ``openclaw.json``
+    migration at 0o644) leave the parent permissions alone, since
+    restricting the parent of a world-readable file would break unrelated
+    readers without improving confidentiality.
 
-    The new implementation:
-
-    * For *secret-bearing* writes (``mode <= 0o600``), tightens the
-      parent directory to 0o700 *before* writing, including when the
-      directory already exists with a more permissive mode (the old
-      code only set 0o700 on creation via ``mode=`` to ``makedirs``).
-      Non-sensitive writes (``mode > 0o600``, e.g. the surgical
-      ``openclaw.json`` migration at 0o644) intentionally leave the
-      parent permissions alone — restricting the parent of a
-      world-readable file to 0o700 would break unrelated readers
-      (e.g. another user reading the same shared config dir) without
-      improving the file's confidentiality, since the file itself is
-      already world-readable by design.
-    * Uses :func:`tempfile.mkstemp` in the *target* directory with the
-      requested ``mode`` from creation (0o600 for secrets, the
-      caller-supplied mode otherwise), so the secret bytes never
-      exist on disk with a broader mode and the temp pathname is
-      unpredictable.
-    * Refuses pre-existing symlinks at the final ``path`` to avoid
-      writing through to an attacker-controlled target.
-    * Calls :func:`os.fsync` before :func:`os.replace` to durably flush
-      the secret bytes ahead of the rename, so a crash mid-rename does
-      not leave a half-written file.
+    File mode: secret-bearing writes (``mode <= 0o600``) always pin the
+    requested tight mode and are never widened. Non-secret rewrites
+    preserve an existing file's current permissions across the rewrite,
+    so a ``config.yaml`` an operator locked down to 0o600 is not silently
+    widened to the 0o644 default; ``mode`` is only the fallback for a
+    newly-created file.
 
     Returns True on success.
     """
@@ -984,6 +988,17 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
             indent="    ",
         )
         return False
+    # Secret-bearing writes (mode <= 0o600) pin the requested tight mode
+    # and are never widened. Non-secret rewrites preserve the existing
+    # file's permissions so an operator-tightened config is not widened to
+    # the default; ``mode`` is the fallback for a newly-created file.
+    if mode <= 0o600:
+        effective_mode = mode
+    else:
+        try:
+            effective_mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            effective_mode = mode
     fd = -1
     tmp_path: str | None = None
     try:
@@ -992,7 +1007,7 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
             suffix=os.path.basename(path) or ".tmp",
             dir=parent,
         )
-        os.fchmod(fd, mode)
+        os.fchmod(fd, effective_mode)
         # newline="" writes ``body`` byte-for-byte (no \n -> os.linesep
         # translation), so a caller that preserved a file's CRLF endings
         # does not get them doubled to \r\r\n on Windows.
@@ -1002,10 +1017,10 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
-        # Re-apply the requested mode after replace in case the FS
-        # quirks restored a different mode (e.g. tmpfs ACL inheritance).
+        # Re-apply the effective mode after replace in case the FS quirks
+        # restored a different mode (e.g. tmpfs ACL inheritance).
         try:
-            os.chmod(path, mode)
+            os.chmod(path, effective_mode)
         except OSError:
             pass
         return True
@@ -1023,6 +1038,63 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
                 os.remove(tmp_path)
             except OSError:
                 pass
+
+
+def _read_config_text(cfg_path: str) -> str | None:
+    """Read a ``config.yaml`` for in-place rewriting, preserving newlines.
+
+    ``newline=""`` disables Python's universal-newline translation so a
+    CRLF file (a Windows operator's config, or one copied from a Windows
+    host) keeps its ``\\r\\n`` bytes verbatim. Paired with
+    ``_atomic_write_text`` (which also writes byte-for-byte), a migration
+    that edits a single line does not silently reflow the whole file from
+    CRLF to LF. Returns ``None`` (after warning) when the file cannot be
+    read so callers can bail without special-casing the error themselves.
+
+    Every surgical ``config.yaml`` rewriter reads through here so the
+    newline contract lives in one place instead of being re-derived
+    (and occasionally forgotten) per migration.
+    """
+    try:
+        with open(cfg_path, newline="") as f:
+            return f.read()
+    except OSError as exc:
+        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+        return None
+
+
+# Body of a top-level YAML block: every indented or blank line beneath
+# the header, stopping at the next column-0 key or end-of-file.
+#
+#   * ``[ \t]+[^\n]*\n``  — an indented line. ``[^\n]*`` swallows a
+#     trailing ``\r`` so CRLF lines match without a dedicated branch.
+#   * ``\r?\n``           — a blank line, CRLF-aware so a blank ``\r\n``
+#     inside the block is not mistaken for the block's end (a bare
+#     ``\n`` branch would stop at the ``\r`` and truncate the body).
+#   * trailing ``(?:[ \t]+[^\n]*)?`` — an optional final indented line
+#     with NO trailing newline, so a config whose last line lacks an EOL
+#     terminator is still captured (and therefore still rewritable).
+_TOP_LEVEL_BLOCK_BODY = r"(?P<body>(?:[ \t]+[^\n]*\n|\r?\n)*(?:[ \t]+[^\n]*)?)"
+
+
+def _find_top_level_block(text: str, key: str) -> re.Match[str] | None:
+    """Locate a column-0 ``<key>:`` block and capture its indented body.
+
+    Returns the match (with a named ``body`` group spanning the block
+    body) or ``None`` when no such block exists. Header and body are both
+    CRLF-aware and tolerate a final line without a trailing newline.
+
+    The surgical config rewriters (``claw.mode`` normalize, legacy
+    enforcement-key strip, gateway ``token_env`` realign) all locate
+    their block through here so "what counts as a top-level YAML block"
+    has exactly one definition. Previously each hand-rolled its own
+    regex, which is how the CRLF handling drifted apart between them.
+    """
+    return re.search(
+        r"^" + re.escape(key) + r":[ \t]*\r?\n" + _TOP_LEVEL_BLOCK_BODY,
+        text,
+        flags=re.MULTILINE,
+    )
 
 
 def _read_active_connector_from_yaml(cfg_path: str) -> str:
@@ -1043,26 +1115,46 @@ def _read_active_connector_from_yaml(cfg_path: str) -> str:
     except OSError:
         return ""
 
-    # guardrail.connector wins if explicitly set (matches Config
-    # .activeConnector precedence in claw.go). The trailing
-    # ``[\t ]*(?:#[^\n]*)?$`` group accepts both bare values and
-    # values followed by a YAML inline comment so a hand-edited
-    # ``connector: codex  # gpt only`` still resolves cleanly.
-    m = re.search(
-        r"^guardrail:[ \t]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+connector:[ \t]*[\"']?([A-Za-z0-9_-]+)[\"']?[ \t]*(?:#[^\n]*)?$",
-        text,
-        flags=re.MULTILINE,
-    )
-    if m and m.group(1).strip():
-        return _normalize_legacy_connector(m.group(1))
+    # Scope the value search to the block body captured by
+    # ``_find_top_level_block`` instead of one monolithic regex over
+    # the whole file. The previous pattern wrapped the block body in a
+    # lazy ``(?:[ \t]+[^\n]*\n)*?`` and required a trailing
+    # ``connector:``/``mode:`` line; when that key was ABSENT from a
+    # large block (e.g. a 30-line ``guardrail:`` with no
+    # ``connector:``), the ambiguous ``[ \t]+`` / ``[^\n]*`` overlap
+    # forced catastrophic backtracking (seconds of 100% CPU on a real
+    # config) — a ReDoS that hung ``defenseclaw upgrade`` at the v3
+    # active-connector seed. ``_find_top_level_block`` captures the
+    # body in linear time, and the per-line ``^[ \t]+<field>:`` search
+    # below is anchored with no nested unbounded quantifier, so it
+    # cannot backtrack pathologically.
+    def _value_in_block(key: str, field: str) -> str:
+        block = _find_top_level_block(text, key)
+        if not block:
+            return ""
+        # ``(?:#[^\n]*)?`` accepts a trailing YAML inline comment so a
+        # hand-edited ``connector: codex  # gpt only`` still resolves;
+        # ``(?:\r?\n|$)`` keeps the match CRLF- and EOF-safe.
+        field_match = re.search(
+            r"^[ \t]+" + re.escape(field) + r":[ \t]*[\"']?"
+            r"([A-Za-z0-9_-]+)[\"']?[ \t]*(?:#[^\n]*)?(?:\r?\n|$)",
+            block.group("body"),
+            flags=re.MULTILINE,
+        )
+        if field_match and field_match.group(1).strip():
+            return field_match.group(1)
+        return ""
 
-    m = re.search(
-        r"^claw:[ \t]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+mode:[ \t]*[\"']?([A-Za-z0-9_-]+)[\"']?[ \t]*(?:#[^\n]*)?$",
-        text,
-        flags=re.MULTILINE,
-    )
-    if m and m.group(1).strip():
-        return _normalize_legacy_connector(m.group(1))
+    # guardrail.connector wins if explicitly set (matches Config
+    # .activeConnector precedence in claw.go); else fall back to
+    # claw.mode.
+    connector = _value_in_block("guardrail", "connector")
+    if connector:
+        return _normalize_legacy_connector(connector)
+
+    mode = _value_in_block("claw", "mode")
+    if mode:
+        return _normalize_legacy_connector(mode)
     return ""
 
 
@@ -1384,18 +1476,11 @@ def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
     if not os.path.isfile(cfg_path):
         return
 
-    try:
-        with open(cfg_path) as f:
-            text = f.read()
-    except OSError as exc:
-        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+    text = _read_config_text(cfg_path)
+    if text is None:
         return
 
-    block_match = re.search(
-        r"^guardrail:[ \t]*\n(?P<body>(?:[ \t]+[^\n]*\n|\n)*)",
-        text,
-        flags=re.MULTILINE,
-    )
+    block_match = _find_top_level_block(text, "guardrail")
     if not block_match:
         return
 
@@ -1406,12 +1491,14 @@ def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
     removed: list[str] = []
     new_body = body
     for key in _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS:
-        # Match the full line carrying the legacy key (with its
-        # trailing newline). The pattern accepts any value form
-        # (quoted/unquoted bool, optional inline comment) and any
-        # leading indentation the operator chose.
+        # Delete the whole line carrying the legacy key (with its
+        # terminator). The pattern accepts any value form (quoted /
+        # unquoted bool, optional inline comment) and any leading
+        # indentation the operator chose. ``(?:\r?\n|$)`` removes the
+        # CRLF terminator with the line (no orphaned ``\r`` left behind)
+        # and also matches a final key line with no trailing newline.
         pattern = re.compile(
-            r"^[ \t]+" + re.escape(key) + r"\s*:[^\n]*\n",
+            r"^[ \t]+" + re.escape(key) + r"\s*:[^\n]*(?:\r?\n|$)",
             flags=re.MULTILINE,
         )
         new_body, count = pattern.subn("", new_body)
@@ -1521,23 +1608,14 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     if not existing_env.get("DEFENSECLAW_GATEWAY_TOKEN", "").strip():
         return
 
-    try:
-        with open(cfg_path) as f:
-            text = f.read()
-    except OSError as exc:
-        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+    text = _read_config_text(cfg_path)
+    if text is None:
         return
 
-    # Find the ``gateway:`` block. Same pattern shape as
-    # ``_migrate_0_5_0_strip_codex_enforcement_keys`` — matches the
-    # block header plus indented body, stopping at the next top-level
-    # key. ``[ \t]*`` after the colon tolerates trailing whitespace
-    # that some YAML formatters add.
-    block_match = re.search(
-        r"^gateway:[ \t]*\n(?P<body>(?:[ \t]+[^\n]*\n|\n)*)",
-        text,
-        flags=re.MULTILINE,
-    )
+    # Scope the rewrite to the ``gateway:`` block (via the shared
+    # CRLF/EOF-aware block matcher) so a stray ``token_env:`` under
+    # another section is never touched.
+    block_match = _find_top_level_block(text, "gateway")
     if not block_match:
         return
 
@@ -1550,13 +1628,17 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     # we accept all three so we never miss a legitimately-formatted
     # legacy entry. An inline comment after the value is preserved
     # because the substitution only touches the captured value group.
+    # ``(?:\r?\n|$)`` in the suffix keeps a CRLF terminator intact in
+    # the rewritten line (rather than dropping the ``\r`` and leaving
+    # mixed terminators) and still matches a final line with no
+    # trailing newline.
     pattern = re.compile(
         r"""
         (?P<prefix>^[ \t]+token_env\s*:\s*)   # indent + key + colon + space
         (?P<quote>["']?)                       # optional opening quote
         OPENCLAW_GATEWAY_TOKEN                 # the literal legacy value
         (?P=quote)                             # matching closing quote
-        (?P<suffix>[ \t]*(?:\#[^\n]*)?\n)      # trailing space + optional comment + newline
+        (?P<suffix>[ \t]*(?:\#[^\n]*)?(?:\r?\n|$))  # trailing space + optional comment + EOL/EOF
         """,
         flags=re.MULTILINE | re.VERBOSE,
     )
