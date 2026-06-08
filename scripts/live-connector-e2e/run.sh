@@ -77,7 +77,11 @@ while read -r c; do
   esac
 done < <(resolve_connectors)
 
-# Always stage logs so the workflow can upload them as an artifact.
-dc_stage_logs "${TMPDIR:-/tmp}/defenseclaw-live-e2e-logs" >/dev/null || true
+# Always stage logs so the workflow can upload them as an artifact. Prefer
+# RUNNER_TEMP so the staged dir matches the actions/upload-artifact path in
+# connector-live-e2e.yml ("${{ runner.temp }}/defenseclaw-live-e2e-logs"); on
+# hosted macOS runners $TMPDIR is a per-user /var/folders path that the upload
+# step never looks at, which silently dropped the gateway logs on failure.
+dc_stage_logs "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/defenseclaw-live-e2e-logs" >/dev/null || true
 
 exit "${overall}"
