@@ -1548,17 +1548,20 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 }
 
 // extractPassthroughToolCalls returns provider-native tool-call payloads
-// found in a non-streaming response body, normalised into a JSON array of
-// {name, arguments(json string)} objects. Returns nil when the body
-// contains no recognised tool-call shape, so the caller can short-circuit
-// inspection. Avarice F-1188: pre-fix tool-call inspection only ran on the
-// OpenAI chat-completion path; Anthropic `tool_use`, Gemini `functionCall`,
-// Bedrock tool use, and OpenAI Responses `function_call` output sailed
-// through unchecked.
+// found in a non-streaming response body, normalised into the OpenAI Chat
+// Completions tool_calls shape — a JSON array of
+// {"type":"function","function":{"name","arguments"}} objects. That nested
+// shape is the exact contract inspectToolCalls parses: emitting the flat
+// {"name","arguments"} shape here would make the inspector decode every
+// Function.Name / Function.Arguments as the empty string, so Anthropic
+// `tool_use`, Gemini `functionCall`, Bedrock `toolUse`, and OpenAI Responses
+// `function_call` outputs would forward uninspected. Returns nil when the
+// body contains no recognised tool-call shape so the caller can short-circuit
+// inspection.
 func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 	type out struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
+		Name      string
+		Arguments string
 	}
 	var calls []out
 	addCall := func(name string, args interface{}) {
@@ -1571,6 +1574,20 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 			argStr = a
 		case json.RawMessage:
 			if len(a) > 0 {
+				// OpenAI Responses encodes `arguments` as a JSON string
+				// (a quoted string whose contents are themselves JSON).
+				// Unwrap that single layer so the inspector sees the same
+				// Go-string shape Chat Completions produces natively
+				// (`{"cmd":"..."}` rather than `"{\"cmd\":\"...\"}"`).
+				// Object-shaped arguments (Anthropic / Gemini / Bedrock
+				// tool inputs) pass through verbatim.
+				if a[0] == '"' {
+					var s string
+					if json.Unmarshal(a, &s) == nil {
+						argStr = s
+						break
+					}
+				}
 				argStr = string(a)
 			}
 		case nil:
@@ -1678,9 +1695,24 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 	if len(calls) == 0 {
 		return nil
 	}
-	out2 := make([]map[string]string, len(calls))
+	// Emit the nested OpenAI Chat Completions tool_calls shape so the payload
+	// round-trips through inspectToolCalls' parse contract (function.name /
+	// function.arguments). See the function doc for why the flat shape breaks
+	// inspection.
+	type fnPart struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	type nestedCall struct {
+		Type     string `json:"type"`
+		Function fnPart `json:"function"`
+	}
+	out2 := make([]nestedCall, len(calls))
 	for i, c := range calls {
-		out2[i] = map[string]string{"name": c.Name, "arguments": c.Arguments}
+		out2[i] = nestedCall{
+			Type:     "function",
+			Function: fnPart{Name: c.Name, Arguments: c.Arguments},
+		}
 	}
 	encoded, err := json.Marshal(out2)
 	if err != nil {
@@ -2192,6 +2224,75 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 	return provider
 }
 
+// guardUpstreamTargetURL applies the userinfo / scheme / private-host SSRF
+// guards to the resolved upstream target URL before the request is forwarded
+// to the provider (Bifrost performs the actual dial). The URL may come from
+// the X-DC-Target-URL header (fetch-interceptor connectors) or be hydrated
+// from the active connector's captured config snapshot (native-binary
+// connectors such as Codex / ZeptoClaw, which have no fetch interceptor).
+//
+// It must run AFTER connector hydration so a connector-resolved
+// private / IMDS / CGNAT / IPv6-ULA / userinfo / non-http upstream is rejected
+// with the same structured 400/403 + labeled egress block event as the header
+// path, instead of slipping past the guard and only failing opaquely at dial
+// time in ssrfSafeDialContext.
+//
+// Returns true when the request was rejected and the caller must stop
+// processing. An empty targetURL is a no-op (no upstream override in play).
+func guardUpstreamTargetURL(w http.ResponseWriter, r *http.Request, targetURL string) bool {
+	if targetURL == "" {
+		return false
+	}
+	u, perr := url.Parse(targetURL)
+	if perr != nil {
+		return false
+	}
+	if u.User != nil {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   u.Hostname(),
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "userinfo-in-target-url",
+			Source:       "go",
+		})
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: userinfo in upstream target URL\n")
+		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must not contain userinfo")
+		return true
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   u.Hostname(),
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "non-http-scheme",
+			Source:       "go",
+		})
+		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must use http or https")
+		return true
+	}
+	if host := u.Hostname(); host != "" && isPrivateHost(host) &&
+		!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
+		!passthroughAllowPrivateForTest {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   host,
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "private-ip",
+			Source:       "go",
+		})
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+		writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+		return true
+	}
+	return false
+}
+
 func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2242,60 +2343,6 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	req.TargetURL = r.Header.Get("X-DC-Target-URL")
 	req.TargetPath = r.URL.Path
 
-	// DeepSec hardening (mirror of handlePassthrough at proxy.go:713–747):
-	// the chat-completion path also forwards req.TargetURL into the upstream
-	// provider (Bifrost handles the actual dial); apply the same userinfo /
-	// scheme / private-host guards so an authenticated caller (or a
-	// compromised plugin) cannot SSRF the gateway into IMDS / loopback /
-	// CGNAT space, and cannot smuggle credentials via userinfo.
-	if req.TargetURL != "" {
-		if u, perr := url.Parse(req.TargetURL); perr == nil {
-			if u.User != nil {
-				emitEgress(r.Context(), gatewaylog.EgressPayload{
-					TargetHost:   u.Hostname(),
-					TargetPath:   r.URL.Path,
-					LooksLikeLLM: true,
-					Branch:       "chat",
-					Decision:     "block",
-					Reason:       "userinfo-in-target-url",
-					Source:       "go",
-				})
-				fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: userinfo in X-DC-Target-URL\n")
-				writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must not contain userinfo")
-				return
-			}
-			if u.Scheme != "https" && u.Scheme != "http" {
-				emitEgress(r.Context(), gatewaylog.EgressPayload{
-					TargetHost:   u.Hostname(),
-					TargetPath:   r.URL.Path,
-					LooksLikeLLM: true,
-					Branch:       "chat",
-					Decision:     "block",
-					Reason:       "non-http-scheme",
-					Source:       "go",
-				})
-				writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must use http or https")
-				return
-			}
-			if host := u.Hostname(); host != "" && isPrivateHost(host) &&
-				!isOllamaLoopback(req.TargetURL+r.URL.Path, 0) &&
-				!passthroughAllowPrivateForTest {
-				emitEgress(r.Context(), gatewaylog.EgressPayload{
-					TargetHost:   host,
-					TargetPath:   r.URL.Path,
-					LooksLikeLLM: true,
-					Branch:       "chat",
-					Decision:     "block",
-					Reason:       "private-ip",
-					Source:       "go",
-				})
-				fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
-				writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
-				return
-			}
-		}
-	}
-
 	// X-AI-Auth carries the real provider API key, normalized to
 	// "Bearer <key>" by the fetch interceptor regardless of which header
 	// the provider SDK originally used (Authorization, x-api-key, api-key).
@@ -2325,6 +2372,17 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				chatConnExtraHeaders = cs.ExtraHeaders
 			}
 		}
+	}
+
+	// SSRF / userinfo / scheme guards run here — AFTER connector hydration —
+	// so they see the *final* upstream, whether it came from the
+	// X-DC-Target-URL header (fetch-interceptor connectors) or was resolved by
+	// a native-binary connector's config snapshot (Codex / ZeptoClaw). Running
+	// before hydration would leave the connector-resolved upstream unguarded
+	// (it would only fail opaquely at dial time in ssrfSafeDialContext, with no
+	// structured 400/403 + labeled egress block event).
+	if guardUpstreamTargetURL(w, r, req.TargetURL) {
+		return
 	}
 
 	// Forward inbound HTTP headers to the upstream provider via

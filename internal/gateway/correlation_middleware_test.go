@@ -143,9 +143,15 @@ func TestCorrelationMiddleware_PopulatesContext(t *testing.T) {
 		gotIdentity          AgentIdentity
 	)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotSession = SessionIDFromContext(r.Context())
-		gotTrace = TraceIDFromContext(r.Context())
-		gotIdentity = AgentIdentityFromContext(r.Context())
+		// CorrelationMiddleware only peeks the agent identity so an
+		// unauthenticated flood cannot mint unbounded session entries.
+		// Stand in for an authenticated handler and promote, exactly as
+		// the proxy / api success paths do, to mint the session-scoped
+		// agent_instance_id.
+		ctx := PromoteSessionIfAuthenticated(r.Context())
+		gotSession = SessionIDFromContext(ctx)
+		gotTrace = TraceIDFromContext(ctx)
+		gotIdentity = AgentIdentityFromContext(ctx)
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -188,7 +194,11 @@ func TestCorrelationMiddleware_StampsAuditEnvelope(t *testing.T) {
 
 	var env audit.CorrelationEnvelope
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		env = audit.EnvelopeFromContext(r.Context())
+		// Promote (as an authenticated handler would) so the envelope
+		// picks up the minted agent_instance_id; the middleware alone
+		// only peeks to avoid minting on unauthenticated requests.
+		ctx := PromoteSessionIfAuthenticated(r.Context())
+		env = audit.EnvelopeFromContext(ctx)
 		w.WriteHeader(http.StatusOK)
 	}))
 
