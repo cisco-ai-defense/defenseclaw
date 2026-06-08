@@ -1572,12 +1572,12 @@ class TestInitFailModeFlag(unittest.TestCase):
         )
 
     def test_omitting_flag_is_noninvasive(self):
-        # Closes . No --fail-mode means "leave existing
-        # alone." On a brand-new config, that resolves to the secure
-        # default ("closed") via default_config(). The point of this
-        # test is to make sure the wiring does NOT clobber the default
-        # with empty string (which would be a serialization bug) AND
-        # that the new install gets the safer fail-mode.
+        # No --fail-mode means "leave existing alone." On a brand-new
+        # config, that resolves to the secure default ("closed") via
+        # default_config(). The point of this test is to make sure the
+        # wiring does NOT clobber the default with empty string (which
+        # would be a serialization bug) AND that the new install gets
+        # the safer fail-mode.
         result = self._invoke([
             "--non-interactive",
             "--yes",

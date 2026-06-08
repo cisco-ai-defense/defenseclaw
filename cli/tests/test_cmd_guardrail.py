@@ -115,10 +115,10 @@ class StatusCommandTests(unittest.TestCase):
         app = make_ctx(enabled=True, connector="openclaw", hook_fail_mode="closed")
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        # The fail mode is the most-asked-about UX knob now that hooks
-        # default open: status MUST surface it so operators can sanity-
-        # check their posture without grep-ing config.yaml. It is folded
-        # into the (uniform) per-connector block as ``fail=...``.
+        # The fail mode is a key posture knob: status MUST surface it so
+        # operators can sanity-check their posture without grep-ing
+        # config.yaml. It is folded into the (uniform) per-connector
+        # block as ``fail=...``.
         self.assertIn("fail=closed", result.output)
 
     def test_status_single_connector_uses_uniform_per_connector_block(self):
@@ -133,7 +133,9 @@ class StatusCommandTests(unittest.TestCase):
         # Uniform per-connector block: "<label> (<name>): <state> mode=... fail=...".
         self.assertIn("OpenClaw (openclaw): ", result.output)
         self.assertIn("mode=observe", result.output)
-        self.assertIn("fail=open", result.output)
+        # Default fail mode is the safer "closed" (response-layer
+        # failures block); see _normalize_hook_fail_mode / default_config.
+        self.assertIn("fail=closed", result.output)
         # The retired singular lines (and the "multi-connector"-only
         # footer hint) must NOT appear — there is exactly one rendering.
         self.assertNotIn("• connector:", result.output)

@@ -1216,7 +1216,7 @@ class GuardrailConfig:
     #     with a 4xx, malformed JSON, or a missing action field,
     #     hooks BLOCK the tool/prompt at the response-layer boundary.
     #     CodeGuard rule codeguard-0-authorization-access-control:
-    #     deny by default. Closes .
+    #     deny by default.
     #
     #   - ``"open"``: the same response-layer failures ALLOW the
     #     tool/prompt with a stderr warning and a record in
@@ -2954,7 +2954,6 @@ def _normalize_hook_fail_mode(value: Any) -> str:
     typo in config.yaml never accidentally puts the agent into
     fail-OPEN mode at the response-layer boundary (CodeGuard rule
     codeguard-0-authorization-access-control: deny by default).
-    Closes .
     """
     if isinstance(value, str) and value.strip().lower() == "open":
         return "open"

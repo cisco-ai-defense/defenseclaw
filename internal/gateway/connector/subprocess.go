@@ -45,7 +45,7 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 type templateData struct {
 	APIAddr  string
 	APIToken string // gateway bearer token; empty when unconfigured (loopback-allow)
-	FailMode string // "open" (default, response-layer fails allow with a stderr warning) or "closed" (response-layer fails block); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	FailMode string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
 }
 
 // defaultHookFailMode is the fail mode injected into the response-
@@ -58,15 +58,14 @@ type templateData struct {
 // open unless the operator opts into strict availability via
 // DEFENSECLAW_STRICT_AVAILABILITY=1.
 //
-// "open" is the default because a DefenseClaw hook that exits 2 on
-// every gateway hiccup bricks the user's agent for the duration of
-// any DefenseClaw outage, which is strictly worse UX than a brief
-// observability gap. Operators who run a strict policy posture can
-// "closed" is the safer default — response-layer failures (4xx,
-// malformed JSON, missing action) BLOCK the tool/prompt at the hook
-// boundary. Operators flip this to "open" via DEFENSECLAW_FAIL_MODE=open
-// at runtime or via the per-connector setup flow (which also persists
-// to guardrail.hook_fail_mode in config.yaml). Closes .
+// "closed" is the safer default: a response-layer failure (4xx,
+// malformed JSON, missing action) means the gateway answered but the
+// verdict is untrustworthy, so the hook BLOCKS the tool/prompt rather
+// than forwarding an uninspected action. Operators who would rather
+// accept an observability gap than a hard block during a DefenseClaw
+// outage can flip this to "open" via DEFENSECLAW_FAIL_MODE=open at
+// runtime, or through the per-connector setup flow (which also
+// persists to guardrail.hook_fail_mode in config.yaml).
 const defaultHookFailMode = "closed"
 
 // normalizeHookFailMode coerces a caller-supplied string to one of

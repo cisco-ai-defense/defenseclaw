@@ -1012,12 +1012,11 @@ class TestGuardrailConfigHookFailModeRoundTrip(unittest.TestCase):
     """
 
     def test_loader_normalizes_typos_to_closed(self):
-        # Closes . After v4 the secure default is
-        # "closed". A typo or any non-canonical value collapses to
-        # "closed" so a misconfigured config.yaml never silently puts
-        # the agent into fail-OPEN mode at the response-layer
-        # boundary. The "open" sentinel still round-trips because it
-        # is the documented opt-in.
+        # The secure default is "closed": a typo or any non-canonical
+        # value collapses to "closed" so a misconfigured config.yaml
+        # never silently puts the agent into fail-OPEN mode at the
+        # response-layer boundary. The "open" sentinel still
+        # round-trips because it is the documented opt-in.
         from defenseclaw.config import _merge_guardrail
         gc = _merge_guardrail({"hook_fail_mode": "OpEn"}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "open")

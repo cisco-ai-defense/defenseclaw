@@ -4968,11 +4968,10 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		`"connector":"claudecode"`,
 		`"hook":"claude-code-hook"`,
 		`"category":"transport"`,
-		// Closes . The response-layer default is now
-		// "closed" so the failure log metadata reflects that.
-		// Functional invariant under test (hook exits 0 / allows
-		// agent on transport failure) is unchanged — that is the
-		// `category=transport` dimension above.
+		// The response-layer default is "closed", so the failure log
+		// metadata reflects that. The functional invariant under test
+		// (hook exits 0 / allows agent on transport failure) is
+		// unchanged — that is the `category=transport` dimension above.
 		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
@@ -5218,11 +5217,11 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			// Closes . After v4 the safer default is
-			// "closed" — empty SetupOpts.HookFailMode renders the
-			// hook with FAIL_MODE=closed so response-layer failures
-			// (4xx, malformed JSON, missing action) BLOCK rather than
-			// silently allowing. Existing v3 installs are pinned to
+			// The safer default is "closed": empty
+			// SetupOpts.HookFailMode renders the hook with
+			// FAIL_MODE=closed so response-layer failures (4xx,
+			// malformed JSON, missing action) BLOCK rather than
+			// silently allowing. Pre-existing installs are pinned to
 			// "open" by _migrate_0_4_0_seed_hook_fail_mode (Python).
 			name:         "codex_empty_opts_falls_back_to_closed_default",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1"},
@@ -5245,10 +5244,9 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			// Closes . Garbage / typo values
-			// normalize to the safer "closed" sentinel so a
-			// misconfigured operator value never silently puts the
-			// agent into fail-OPEN mode.
+			// Garbage / typo values normalize to the safer "closed"
+			// sentinel so a misconfigured operator value never
+			// silently puts the agent into fail-OPEN mode.
 			name:         "codex_garbage_opts_value_normalizes_to_closed",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "this-is-not-a-real-mode"},
 			connector:    &CodexConnector{},
@@ -5322,10 +5320,10 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		// down / network error) rather than a response failure
 		// (4xx / parse error). Operators triage these differently.
 		`"category":"transport"`,
-		// Closes . Response-layer default flipped to
-		// "closed" — transport-layer fail-open behavior under test
-		// here is unchanged (the hook still exits 0 and the agent
-		// still proceeds when the gateway is unreachable).
+		// Response-layer default is "closed" — transport-layer
+		// fail-open behavior under test here is unchanged (the hook
+		// still exits 0 and the agent still proceeds when the gateway
+		// is unreachable).
 		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {

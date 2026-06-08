@@ -1570,7 +1570,7 @@ func validateGuardrailMinSeverity(sev string) error {
 // the _migrate_0_4_0_seed_hook_fail_mode migration in
 // cli/defenseclaw/migrations.py, which writes “hook_fail_mode: open“
 // into config.yaml on first upgrade. New installs and explicit-empty
-// values get the safer default. Closes .
+// values get the safer default.
 func (g *GuardrailConfig) EffectiveHookFailMode() string {
 	if g == nil {
 		return "closed"
@@ -2698,10 +2698,9 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.mode", "observe")
 	// "closed" is the safer default — response-layer failures (4xx,
 	// malformed JSON, missing action) BLOCK the tool/prompt rather
-	// than silently allowing it. Closes . Existing
-	// operators on v3 are protected by
-	// _migrate_0_4_0_seed_hook_fail_mode (migrations.py) which writes
-	// ``hook_fail_mode: open`` to existing config.yaml so prior
+	// than silently allowing it. Pre-existing operators are protected
+	// by _migrate_0_4_0_seed_hook_fail_mode (migrations.py) which
+	// writes ``hook_fail_mode: open`` to existing config.yaml so prior
 	// behavior is preserved on upgrade. Operators who explicitly want
 	// fail-open run `defenseclaw guardrail fail-mode open` (or set
 	// guardrail.hook_fail_mode: open in YAML).
