@@ -456,22 +456,31 @@ export function hasLLMPathSuffix(urlStr: string): boolean {
 }
 
 /**
- * Redact every query-parameter value before a URL is written to a console
- * log or egress telemetry event. Provider credentials are routinely smuggled
- * in the query string — Gemini's `?key=`, AWS SigV4 pre-signed
- * `?X-Amz-Signature=`/`?X-Amz-Credential=`, and assorted `?token=` shapes —
- * so logging the raw URL would leak long-lived secrets into plaintext logs.
- * The request itself is unaffected; only the string handed to the logger is
- * scrubbed. Falls back to the original string if the URL cannot be parsed.
+ * Strip credential material out of `u`, mutating the URL in place. Provider
+ * secrets are routinely smuggled in the query string — Gemini's `?key=`, AWS
+ * SigV4 pre-signed `?X-Amz-Signature=` / `?X-Amz-Credential=`, and assorted
+ * `?token=` shapes — and occasionally in `user:pass@` userinfo. Any URL
+ * written to a log line or egress telemetry event must have these stripped
+ * first. The actual outbound request is built from a separate, unmodified
+ * URL, so redaction here never perturbs the proxied call.
+ */
+function redactUrlSecrets(u: URL): void {
+  for (const k of [...u.searchParams.keys()]) {
+    u.searchParams.set(k, "<redacted>");
+  }
+  if (u.username) u.username = "";
+  if (u.password) u.password = "";
+}
+
+/**
+ * Scrub secret-bearing query parameters out of a URL before it is written to
+ * a console log. Falls back to the original string if the URL cannot be
+ * parsed.
  */
 export function scrubUrlForLog(urlStr: string): string {
   try {
     const u = new URL(urlStr);
-    const keys = [...u.searchParams.keys()];
-    if (keys.length === 0) return urlStr;
-    for (const k of keys) {
-      u.searchParams.set(k, "<redacted>");
-    }
+    redactUrlSecrets(u);
     return u.toString();
   } catch {
     return urlStr;
@@ -830,10 +839,13 @@ export function createFetchInterceptor(
 
   // Extract { host, path } from a URL string without throwing. Missing
   // pieces are tolerated so the caller's downstream fetch is never
-  // perturbed by a malformed URL in telemetry.
+  // perturbed by a malformed URL in telemetry. Query-parameter values are
+  // redacted so secret-bearing URLs (Gemini ?key=, AWS SigV4 signatures)
+  // never reach the egress telemetry sink.
   function extractHostPath(urlStr: string): { host: string; path: string } {
     try {
       const u = new URL(urlStr);
+      redactUrlSecrets(u);
       return { host: u.hostname, path: `${u.pathname}${u.search}` };
     } catch {
       return { host: "", path: urlStr };

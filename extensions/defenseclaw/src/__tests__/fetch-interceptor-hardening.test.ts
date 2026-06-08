@@ -28,6 +28,7 @@ import {
   createFetchInterceptor,
   isLLMUrl,
   hasLLMPathSuffix,
+  scrubUrlForLog,
   LLM_PATH_SUFFIXES,
 } from "../fetch-interceptor.js";
 
@@ -286,5 +287,45 @@ describe("http.request and http.get are patched", () => {
     const opts = captured[0].opts as { hostname?: string; port?: number };
     expect(opts.hostname).toBe("127.0.0.1");
     expect(opts.port).toBe(guardrailPort);
+  });
+});
+
+describe("scrubUrlForLog", () => {
+  // scrubUrlForLog and the egress telemetry path (extractHostPath) share the
+  // same redactor, so these cases pin the redaction applied before BOTH the
+  // console.log hop and the /v1/events/egress telemetry hop.
+  it("redacts secret query-parameter values but keeps host and path", () => {
+    const out = scrubUrlForLog(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=AIzaSyVERYSECRET",
+    );
+    expect(out).not.toContain("AIzaSyVERYSECRET");
+    expect(out).toContain("key=%3Credacted%3E");
+    expect(out).toContain("generativelanguage.googleapis.com");
+    expect(out).toContain("gemini-pro:generateContent");
+  });
+
+  it("redacts every query value, not just known secret names", () => {
+    const out = scrubUrlForLog(
+      "https://bedrock-runtime.us-east-1.amazonaws.com/model/x/invoke?X-Amz-Signature=DEADBEEF&X-Amz-Credential=AKIA123",
+    );
+    expect(out).not.toContain("DEADBEEF");
+    expect(out).not.toContain("AKIA123");
+    expect(out).toContain("/model/x/invoke");
+  });
+
+  it("strips user:pass@ userinfo credentials", () => {
+    const out = scrubUrlForLog("https://alice:s3cr3t@api.example.test/v1/chat/completions");
+    expect(out).not.toContain("s3cr3t");
+    expect(out).not.toContain("alice");
+    expect(out).toContain("api.example.test");
+  });
+
+  it("returns URLs without a query string unchanged", () => {
+    const url = "https://api.openai.com/v1/chat/completions";
+    expect(scrubUrlForLog(url)).toBe(url);
+  });
+
+  it("falls back to the original string when the URL cannot be parsed", () => {
+    expect(scrubUrlForLog("/api/generate?key=abc")).toBe("/api/generate?key=abc");
   });
 });
