@@ -1369,7 +1369,13 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
         return
 
     try:
-        with open(cfg_path) as f:
+        # newline="" preserves the file's existing line endings (CRLF on a
+        # Windows operator's hand-edited or cross-platform-copied config)
+        # so substituting the token_env value does not silently rewrite the
+        # whole file from CRLF to LF. Matches the CRLF-safe contract that
+        # ``_migrate_0_4_0_seed_hook_fail_mode`` already honours; Windows is
+        # a supported platform as of this release.
+        with open(cfg_path, newline="") as f:
             text = f.read()
     except OSError as exc:
         ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
@@ -1379,9 +1385,12 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     # ``_migrate_0_5_0_strip_codex_enforcement_keys`` — matches the
     # block header plus indented body, stopping at the next top-level
     # key. ``[ \t]*`` after the colon tolerates trailing whitespace
-    # that some YAML formatters add.
+    # that some YAML formatters add. ``\r?\n`` on the header (and the
+    # blank-line body branch) so a CRLF config matches too — ``[ \t]*``
+    # never consumes ``\r``, so a bare ``\n`` anchor would skip the
+    # whole block on a CRLF file and silently no-op the migration.
     block_match = re.search(
-        r"^gateway:[ \t]*\n(?P<body>(?:[ \t]+[^\n]*\n|\n)*)",
+        r"^gateway:[ \t]*\r?\n(?P<body>(?:[ \t]+[^\n]*\n|\r?\n)*)",
         text,
         flags=re.MULTILINE,
     )
@@ -1397,13 +1406,16 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     # we accept all three so we never miss a legitimately-formatted
     # legacy entry. An inline comment after the value is preserved
     # because the substitution only touches the captured value group.
+    # ``\r?\n`` in the suffix keeps a CRLF terminator intact in the
+    # rewritten line rather than dropping the ``\r`` (which would leave
+    # one LF line in an otherwise-CRLF file — mixed terminators).
     pattern = re.compile(
         r"""
         (?P<prefix>^[ \t]+token_env\s*:\s*)   # indent + key + colon + space
         (?P<quote>["']?)                       # optional opening quote
         OPENCLAW_GATEWAY_TOKEN                 # the literal legacy value
         (?P=quote)                             # matching closing quote
-        (?P<suffix>[ \t]*(?:\#[^\n]*)?\n)      # trailing space + optional comment + newline
+        (?P<suffix>[ \t]*(?:\#[^\n]*)?\r?\n)   # trailing space + optional comment + newline (CRLF-aware)
         """,
         flags=re.MULTILINE | re.VERBOSE,
     )
