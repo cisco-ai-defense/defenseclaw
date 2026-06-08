@@ -11,6 +11,7 @@ builds:
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
@@ -19,8 +20,16 @@ builds:
 
 archives:
   - id: default
+    # tar.gz everywhere except Windows, which ships .zip (the native archive
+    # format Windows users and PowerShell's Expand-Archive expect). The binary
+    # inside the Windows archive is defenseclaw.exe; scripts/install.ps1
+    # extracts and installs it as defenseclaw-gateway.exe.
     formats:
       - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
