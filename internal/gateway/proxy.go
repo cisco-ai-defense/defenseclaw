@@ -1602,11 +1602,41 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 	if len(calls) == 0 {
 		return nil
 	}
-	out2 := make([]map[string]string, len(calls))
-	for i, c := range calls {
-		out2[i] = map[string]string{"name": c.Name, "arguments": c.Arguments}
+	// Emit the OpenAI Chat Completions nested tool_calls shape so the
+	// inspector consumes a single canonical wire format regardless of
+	// the upstream provider. Arguments is always a JSON-encoded string
+	// (per OpenAI's contract), so providers that hand us a raw object
+	// or a JSON-encoded outer string both normalise to the same form.
+	type fnObj struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
 	}
-	encoded, err := json.Marshal(out2)
+	type wireCall struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function fnObj  `json:"function"`
+	}
+	wire := make([]wireCall, len(calls))
+	for i, c := range calls {
+		args := c.Arguments
+		// If the upstream already double-encoded (OpenAI Responses
+		// emits arguments as a JSON-encoded string on the wire),
+		// peel one layer so the inspector sees the same Go-string
+		// shape it gets from native OpenAI Chat Completions.
+		var unwrap string
+		if len(args) > 0 && args[0] == '"' && json.Unmarshal([]byte(args), &unwrap) == nil {
+			args = unwrap
+		}
+		wire[i] = wireCall{
+			ID:   fmt.Sprintf("call_%d", i),
+			Type: "function",
+			Function: fnObj{
+				Name:      c.Name,
+				Arguments: args,
+			},
+		}
+	}
+	encoded, err := json.Marshal(wire)
 	if err != nil {
 		return nil
 	}
@@ -2144,60 +2174,6 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	req.TargetURL = r.Header.Get("X-DC-Target-URL")
 	req.TargetPath = r.URL.Path
 
-	// DeepSec hardening (mirror of handlePassthrough at proxy.go:713–747):
-	// the chat-completion path also forwards req.TargetURL into the upstream
-	// provider (Bifrost handles the actual dial); apply the same userinfo /
-	// scheme / private-host guards so an authenticated caller (or a
-	// compromised plugin) cannot SSRF the gateway into IMDS / loopback /
-	// CGNAT space, and cannot smuggle credentials via userinfo.
-	if req.TargetURL != "" {
-		if u, perr := url.Parse(req.TargetURL); perr == nil {
-			if u.User != nil {
-				emitEgress(r.Context(), gatewaylog.EgressPayload{
-					TargetHost:   u.Hostname(),
-					TargetPath:   r.URL.Path,
-					LooksLikeLLM: true,
-					Branch:       "chat",
-					Decision:     "block",
-					Reason:       "userinfo-in-target-url",
-					Source:       "go",
-				})
-				fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: userinfo in X-DC-Target-URL\n")
-				writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must not contain userinfo")
-				return
-			}
-			if u.Scheme != "https" && u.Scheme != "http" {
-				emitEgress(r.Context(), gatewaylog.EgressPayload{
-					TargetHost:   u.Hostname(),
-					TargetPath:   r.URL.Path,
-					LooksLikeLLM: true,
-					Branch:       "chat",
-					Decision:     "block",
-					Reason:       "non-http-scheme",
-					Source:       "go",
-				})
-				writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must use http or https")
-				return
-			}
-			if host := u.Hostname(); host != "" && isPrivateHost(host) &&
-				!isOllamaLoopback(req.TargetURL+r.URL.Path, 0) &&
-				!passthroughAllowPrivateForTest {
-				emitEgress(r.Context(), gatewaylog.EgressPayload{
-					TargetHost:   host,
-					TargetPath:   r.URL.Path,
-					LooksLikeLLM: true,
-					Branch:       "chat",
-					Decision:     "block",
-					Reason:       "private-ip",
-					Source:       "go",
-				})
-				fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
-				writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
-				return
-			}
-		}
-	}
-
 	// X-AI-Auth carries the real provider API key, normalized to
 	// "Bearer <key>" by the fetch interceptor regardless of which header
 	// the provider SDK originally used (Authorization, x-api-key, api-key).
@@ -2225,6 +2201,61 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 			if cs.ExtraHeaders != nil {
 				chatConnExtraHeaders = cs.ExtraHeaders
+			}
+		}
+	}
+
+	// DeepSec hardening (post-hydration order, mirror of handlePassthrough):
+	// the chat-completion path forwards req.TargetURL into the upstream
+	// provider (Bifrost handles the actual dial). Apply userinfo / scheme /
+	// private-host guards AFTER hydrateConnectorSignalsFull so a
+	// compromised connector binary returning a private/IMDS/CGNAT upstream
+	// is refused with the same structured 400/403 + labeled egress event
+	// as the X-DC-Target-URL header path.
+	if req.TargetURL != "" {
+		if u, perr := url.Parse(req.TargetURL); perr == nil {
+			if u.User != nil {
+				emitEgress(r.Context(), gatewaylog.EgressPayload{
+					TargetHost:   u.Hostname(),
+					TargetPath:   r.URL.Path,
+					LooksLikeLLM: true,
+					Branch:       "chat",
+					Decision:     "block",
+					Reason:       "userinfo-in-target-url",
+					Source:       "go",
+				})
+				fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: userinfo in target URL\n")
+				writeOpenAIError(w, http.StatusBadRequest, "target URL must not contain userinfo")
+				return
+			}
+			if u.Scheme != "https" && u.Scheme != "http" {
+				emitEgress(r.Context(), gatewaylog.EgressPayload{
+					TargetHost:   u.Hostname(),
+					TargetPath:   r.URL.Path,
+					LooksLikeLLM: true,
+					Branch:       "chat",
+					Decision:     "block",
+					Reason:       "non-http-scheme",
+					Source:       "go",
+				})
+				writeOpenAIError(w, http.StatusBadRequest, "target URL must use http or https")
+				return
+			}
+			if host := u.Hostname(); host != "" && isPrivateHost(host) &&
+				!isOllamaLoopback(req.TargetURL+r.URL.Path, 0) &&
+				!passthroughAllowPrivateForTest {
+				emitEgress(r.Context(), gatewaylog.EgressPayload{
+					TargetHost:   host,
+					TargetPath:   r.URL.Path,
+					LooksLikeLLM: true,
+					Branch:       "chat",
+					Decision:     "block",
+					Reason:       "private-ip",
+					Source:       "go",
+				})
+				fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+				writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+				return
 			}
 		}
 	}

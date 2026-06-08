@@ -23,6 +23,9 @@ This is the canonical list of every environment variable DefenseClaw reads. The 
 
 | Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
+| `DEFENSECLAW_ALLOW_CGNAT` | low | `unset` | — | When set, the SSRF guard accepts CGNAT (100.64.0.0/10) destinations; default is to refuse. | — | `cli/defenseclaw/registries/ssrf.py:41` — Python SSRF guard reads this var to whitelist CGNAT 100.64/10 destinations |
+| `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT` | low | `unset` | — | Bypass hook-contract version check during connector setup; off by default. | — | `cli/defenseclaw/commands/cmd_setup.py:2517` — Setup flow reads this to bypass connector hook-contract version check |
+| `DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS` | low | `unset` | — | When set, MCP scanner accepts loopback / private-IP target URLs. | — | `internal/scanner/mcp.go:54` — MCP scanner accepts loopback / private-IP target URLs when set |
 | `DEFENSECLAW_CODEX_LOOPBACK_TRUST` | **HIGH** | `unset` (fail-closed) | `1`, `unset` | Restore legacy loopback-trusts-any-bearer behavior for the Codex connector. | Per-bearer Codex authentication on loopback — prevents same-host user-to-user impersonation when multiple users share an OS account. | `internal/gateway/connector/codex.go:310` — Authenticate() falls back to legacy behavior when set; emits a [SECURITY] log line |
 | `DEFENSECLAW_DEV` | low | `unset` | `1`, `true`, `unset` | Mark the process as a developer build. | — | `internal/redaction/credentials.go:173` — isCredentialScrubDevMode reads this var |
 | `DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM` | **medium** | `unset` (shim active for Bedrock) | `1`, `unset` | Disable the AWS Bedrock HTTP/1 monkey-patch the OpenClaw plugin installs to make Bedrock traffic visible to the guardrail proxy. | — | `extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts:265` — JS shim bails out when set |
@@ -37,11 +40,13 @@ This is the canonical list of every environment variable DefenseClaw reads. The 
 | `DEFENSECLAW_OTEL_TLS_INSECURE` | **HIGH** | `unset` (TLS verified) | `true`, `1`, `unset` | Disable TLS certificate verification on the OTel exporter. | — | `internal/config/config.go:2300` — viper.BindEnv binds this to otel.tls.insecure |
 | `DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA` | **medium** | `unset` (validation requires OPA) | `1`, `unset` | Accept a policy file as 'validated' even when OPA / Rego is not installed. | — | `cli/defenseclaw/commands/cmd_policy.py:1135` — Policy validate command bypass |
 | `DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY` | **HIGH** | `unset` (fail-closed) | `1`, `unset` | Bypass the provenance-sentinel check during 'defenseclaw setup sandbox' pre-pairing. <br/>**Fix:** Restart the gateway once after upgrading; LoadOrCreateIdentity auto-writes the .provenance sentinel and the env var is no longer needed. | Provenance-sentinel verification — prevents acceptance of an unauthenticated device.key file (e.g. a copy left on disk by a prior install or attacker). | `cli/defenseclaw/commands/cmd_setup_sandbox.py:1759` — _pre_pair_device gates the provenance fail-closed branch on this var |
+| `DEFENSECLAW_REDACTION_DISABLE` | low | `unset` | — | Alias for DEFENSECLAW_DISABLE_REDACTION; turning off PII / credential redaction in sinks. | — | `internal/gateway/agent_hook.go:752` — Alias-style consumer noted in agent-hook redaction docs |
 | `DEFENSECLAW_REVEAL_PII` | **medium** | `unset` (PII redacted everywhere) | `1`, `true`, `unset` | Reveal PII in operator-facing logs only (CLI stdout, TUI). | — | `internal/redaction/redaction.go:90` — Reveal() reads this env var |
 | `DEFENSECLAW_SCHEMA_VALIDATION` | **medium** | on | `off`, `unset` | Disable the runtime JSON-schema gate that validates event payloads before they hit sinks. | — | `internal/gateway/sidecar.go:243` — Gateway boot reads and toggles the schema gate |
 | `DEFENSECLAW_STRICT_AVAILABILITY` | — | `unset` (transport failures fail-open) | `1`, `unset` | Opt-IN to fail-closed on transport errors during hook execution. | — | `internal/gateway/connector/hooks/_hardening.sh:250` — Hook hardening sourced by every *-hook.sh |
 | `DEFENSECLAW_TEST` | low | `unset` | `1`, `true`, `unset` | Mark the process as running under tests. | — | `internal/redaction/credentials.go:176` — isCredentialScrubDevMode reads this var |
 | `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN` | **HIGH** | `unset` (fail-closed) | `1`, `true`, `unset` | Make the plugin-side tool-inspect hook fail-open (allow tool) when the gateway is unreachable. | — | `extensions/defenseclaw/src/index.ts:98` — OpenClaw plugin tool-inspect handler |
+| `DEFENSECLAW_TRUSTED_PROXY_CIDRS` | low | `unset` | — | Comma-separated CIDRs the gateway will trust X-Forwarded-For from. | — | `internal/gateway/requestctx.go:310` — trustedProxyEnvVar pinning for X-Forwarded-For trust |
 | `DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED` | **HIGH** | `unset` (fail-closed) | `1`, `unset` | Skip checksum / signature verification during 'defenseclaw upgrade' or scripts/upgrade.sh. | Upgrade-artifact integrity — prevents installing a tampered tarball/wheel pulled from a hijacked release CDN or MITM. | `cli/defenseclaw/commands/cmd_upgrade.py:318` — Python upgrade path checks this before downloading without a checksum<br/>`scripts/upgrade.sh:263` — Shell upgrade path checks this before proceeding without verification |
 | `DEFENSECLAW_UPGRADE_TARBALL_SHA256` | — | `unset` | `64-char hex sha256`, `unset` | Operator-provided sha256 pin for the gateway tarball downloaded by `defenseclaw upgrade`. | Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file. | `cli/defenseclaw/commands/cmd_upgrade.py:341` — Python upgrade verifier<br/>`scripts/upgrade.sh:225` — Shell upgrade verifier |
 | `DEFENSECLAW_UPGRADE_WHL_SHA256` | — | `unset` | `64-char hex sha256`, `unset` | Operator-provided sha256 pin for the Python CLI wheel downloaded by `defenseclaw upgrade`. | Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file. | `cli/defenseclaw/commands/cmd_upgrade.py:358` — Python upgrade verifier<br/>`scripts/upgrade.sh:226` — Shell upgrade verifier |
@@ -77,6 +82,7 @@ This is the canonical list of every environment variable DefenseClaw reads. The 
 | `DEFENSECLAW_API_ADDR` | low | (templated value from gateway.api_port at hook install time) | `host:port`, `unset` | Sidecar API address that hooks dial. | — | `internal/gateway/connector/hooks/inspect-tool.sh:42` — Hooks dial this |
 | `DEFENSECLAW_BIN` | low | (discovered via PATH lookup) | `any-absolute-path` | Override path to the defenseclaw CLI binary. | — | `internal/scanner/plugin_test.go:177` — Plugin test harness<br/>`scripts/setup-llm.sh:51` — LLM setup script |
 | `DEFENSECLAW_CUSTOM_PROVIDERS_PATH` | low | `unset` | `any-absolute-path`, `unset` | Path to a custom providers YAML file consulted before the embedded catalog. | — | `internal/configs/embed.go:71` — Go embedded-providers loader |
+| `DEFENSECLAW_DATA_DIR` | low | `unset` | — | Override for the gateway's data directory. | — | `internal/daemon/daemon.go:44` — Daemon resolves the data directory from this env var (overrides config) |
 | `DEFENSECLAW_DIR` | low | (templated at install time) | `any-absolute-path` | Used in generated openshell-sandbox shell wrappers to locate the DefenseClaw install dir from inside the sandbox. | — | `cli/defenseclaw/commands/cmd_setup_sandbox.py:1202` — Sandbox shell wrappers reference this |
 | `DEFENSECLAW_GATEWAY_BIN` | low | (discovered via PATH lookup) | `any-absolute-path` | Override path to the defenseclaw-gateway binary. | — | `cli/defenseclaw/gateway.py:315` — Python gateway-process spawner |
 | `DEFENSECLAW_HOME` | — | ~/.defenseclaw | `any-absolute-path` | Override the canonical data dir (default ~/.defenseclaw). | — | `internal/config/defaults.go:62` — Go default-resolver<br/>`cli/defenseclaw/config.py:98` — Python config loader<br/>`cli/defenseclaw/connector_paths.py:1305` — Connector path resolver<br/>`scripts/install.sh:50` — Installer reads this<br/>`scripts/upgrade.sh:49` — Upgrader reads this<br/>`internal/gateway/connector/hooks/inspect-tool.sh:9` — Hooks read this |
@@ -90,6 +96,7 @@ This is the canonical list of every environment variable DefenseClaw reads. The 
 
 | Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
+| `DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE` | low | `unset` | — | Override for the in-memory persist queue size for judge events. | — | `internal/config/config.go:1185` — Override for in-memory judge persist queue size |
 | `DEFENSECLAW_OTEL_ENABLED` | — | (value from otel.enabled in config.yaml) | `true`, `false`, `1`, `0`, `unset` | Master toggle for the OTel exporter. | — | `internal/config/config.go:2297` — viper.BindEnv otel.enabled |
 | `DEFENSECLAW_OTEL_ENDPOINT` | — | (value from otel.endpoint) | `any-otlp-endpoint`, `unset` | Default OTLP endpoint (host:port[/path]). | — | `internal/config/config.go:2298` — viper.BindEnv otel.endpoint |
 | `DEFENSECLAW_OTEL_LOGS_ENDPOINT` | — | (value from otel.logs.endpoint) | `any-otlp-endpoint`, `unset` | Per-signal override for logs endpoint. | — | `internal/config/config.go:2307` — viper.BindEnv otel.logs.endpoint |
@@ -112,8 +119,12 @@ This is the canonical list of every environment variable DefenseClaw reads. The 
 | `DEFENSECLAW_DEBUG` | low | `unset` | `1`, `unset` | Gateway client logs every request/response frame to stderr. | — | `internal/gateway/client.go:80` — Client struct gates verbose logging on this var |
 | `DEFENSECLAW_JUDGE_TRACE` | **medium** | `unset` | `1`, `true`, `unset` | LLM judge logs every prompt + response. | — | `internal/gateway/llm_judge.go:62` — Judge debug toggle |
 | `DEFENSECLAW_LLM_DEBUG` | **medium** | `unset` | `1`, `true`, `unset` | Python LLM bridge logs per-request prompt + response bodies. | — | `cli/defenseclaw/llm.py:110` — LLM bridge _DEBUG flag |
+| `DEFENSECLAW_LOG` | low | `unset` | — | Set to a level (debug / info / warn / error) to override gateway log verbosity. | — | `cli/defenseclaw/main.py` — CLI entrypoint reads log-level override |
 | `DEFENSECLAW_PERSIST_JUDGE` | **medium** | `unset` | `1`, `true`, `unset` | Persist every judge prompt + response to disk under data_dir. | — | `internal/gateway/sidecar.go:134` — Gateway boot enables judge persistence |
+| `DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP` | low | `unset` | — | Force the sandbox cleanup path to use the regex pruner instead of structured detection. | — | `cli/defenseclaw/commands/cmd_setup_sandbox.py:1258` — Sandbox cleanup script branches on this var |
 | `DEFENSECLAW_SIDECAR_DIAG` | low | `unset` | `1`, `true`, `unset` | Extra sidecar boot-time diagnostics (config dump, env presence). | — | `internal/cli/sidecar.go:212` — sidecarDiagEnabled helper |
+| `DEFENSECLAW_TUI_BACKEND` | low | `unset` | — | Override TUI backend selection (legacy 'go' vs new 'python textual'). | — | `cli/defenseclaw/commands/cmd_tui.py` — TUI backend selector reads this to pick legacy vs Textual |
+| `DEFENSECLAW_TUI_SKIP_FIRST_RUN_PROMPT` | low | `unset` | — | Skip the first-run TUI onboarding prompt — used by automation and tests. | — | `cli/defenseclaw/tui/__init__.py:53` — Skip the first-run TUI onboarding prompt for automation/tests |
 | `DEFENSECLAW_WEBHOOK_DEBUG` | **medium** | `unset` | `1`, `unset` | Webhook dispatcher dumps full request bodies (including secrets) to stderr. | — | `internal/gateway/webhook.go:146` — Webhook sender debug field |
 
 ## Discovery & probes
@@ -130,6 +141,7 @@ This is the canonical list of every environment variable DefenseClaw reads. The 
 | `DEFENSECLAW_AGENT_ID` | — | (set by plugin / hooks) | `any-string` | Agent identity propagated through correlation headers and OTel attributes. | — | `internal/cli/scan_v7.go:69` — Go reader<br/>`extensions/defenseclaw/src/__tests__/agent_identity.test.ts:61` — JS plugin reader (tested) |
 | `DEFENSECLAW_AGENT_INSTANCE_ID` | — | (set by plugin / hooks) | `any-string` | Per-instance agent identifier; used to disambiguate concurrent runs of the same agent. | — | `internal/cli/scan_v7.go:70` — Go reader |
 | `DEFENSECLAW_AGENT_NAME` | — | (set by plugin / hooks) | `any-string` | Human-readable agent name propagated via correlation headers. | — | `extensions/defenseclaw/src/index.ts:315` — JS plugin header emit |
+| `DEFENSECLAW_BAKED_HOOK_PATH` | low | `unset` | — | Hook script's compile-time absolute path. | — | `internal/gateway/connector/hooks/_hardening.sh:4` — Hook hardening preamble seeds this from the daemon launcher |
 | `DEFENSECLAW_CLIENT` | — | (set by plugin) | `any-string` | Client name (e.g. openclaw-plugin) stamped on the X-DefenseClaw-Client correlation header. | — | `extensions/defenseclaw/src/policy/enforcer.ts:156` — Enforcer header |
 | `DEFENSECLAW_DAEMON` | — | (set by daemon launcher; child only) | `1` | Sentinel set by the daemon launcher in the child process so it knows it's the daemon. | — | `internal/daemon/daemon.go:35` — EnvDaemon constant |
 | `DEFENSECLAW_HOOK_CONNECTOR` | — | (set by hooks) | `claudecode`, `codex`, `openclaw`, `zeptoclaw`, `inspect`, `...` | Internal label identifying which connector's hook is executing. | — | `internal/gateway/connector/hooks/inspect-tool.sh:22` — Each hook exports this |
@@ -138,9 +150,12 @@ This is the canonical list of every environment variable DefenseClaw reads. The 
 | `DEFENSECLAW_HOOK_MAX_BODY` | low | 1048576 | `positive integer` | Request-body cap (in bytes) for hooks. | — | `internal/gateway/connector/hooks/_hardening.sh:346` — Body-cap enforcement |
 | `DEFENSECLAW_HOOK_NAME` | — | (set by hooks) | `inspect-tool`, `inspect-request`, `...` | Internal label identifying which hook is executing. | — | `internal/gateway/connector/hooks/inspect-tool.sh:23` — Each hook exports this |
 | `DEFENSECLAW_HOOK_PATH` | — | (set by hooks) | `colon-separated paths` | Hardened PATH exported by hooks (system-only) so a hostile workspace can't shadow git/curl/etc. | — | `internal/gateway/connector/hooks/_hardening.sh:88` — Hook hardening |
+| `DEFENSECLAW_HOOK_PATH_TRUSTED` | low | `unset` | — | Marks the hook process as launched from the trusted DEFENSECLAW_BAKED_HOOK_PATH location. | — | `internal/gateway/connector/hooks/_hardening.sh:119` — Hardening cleanup unsets this internal flag |
 | `DEFENSECLAW_OPENCLAW_MAIN` | low | (set by plugin bootstrap) | `absolute-path` | Sentinel read by the OpenClaw plugin bootstrapper to locate its main module. | — | `extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts:163` — Plugin bootstrap sentinel |
 | `DEFENSECLAW_PLUGIN_AGENT_ID` | — | (set by plugin) | `any-string` | Plugin-side agent ID. | — | `extensions/defenseclaw/src/__tests__/agent_identity.test.ts:71` — JS plugin reader (tested) |
 | `DEFENSECLAW_SIDECAR_INSTANCE_ID` | — | (auto-generated by gateway) | `uuid-or-similar` | Sidecar instance ID; auto-generated by the gateway at boot, propagated via headers. | — | `internal/cli/scan_v7.go:71` — Go reader |
+| `DEFENSECLAW_TRACEPARENT` | low | `unset` | — | W3C traceparent set by hook scripts when forwarding the inbound trace to the gateway. | — | `internal/gateway/connector/codex.go:970` — Codex hook script forwards inbound W3C traceparent via this env var |
+| `DEFENSECLAW_TRACESTATE` | low | `unset` | — | W3C tracestate set by hook scripts when forwarding the inbound trace to the gateway. | — | `internal/gateway/connector/codex.go:971` — Codex hook script forwards inbound W3C tracestate via this env var |
 
 ## Splunk-bridge bundle
 
@@ -150,16 +165,29 @@ This is the canonical list of every environment variable DefenseClaw reads. The 
 | `DEFENSECLAW_HEC_URL` | — | (set in .env.example) | `any-hec-url` | Splunk-bridge bundle: HEC endpoint URL. | — | `bundles/splunk_local_bridge/env/.env.example:11` — Bridge .env |
 | `DEFENSECLAW_INDEX` | — | defenseclaw_local | `splunk-index-name` | Splunk-bridge target index. | — | `bundles/splunk_local_bridge/env/.env.example:13` — Bridge .env |
 | `DEFENSECLAW_INTEGRATION_ENABLED` | — | false | `true`, `false` | Splunk-bridge integration toggle. | — | `bundles/splunk_local_bridge/env/.env.example:16` — Bridge .env |
+| `DEFENSECLAW_O11Y_DASHBOARD_NAME_PREFIX` | low | `unset` | — | Optional prefix prepended to provisioned Splunk O11y dashboard names. | — | `cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py:137` — Splunk O11y dashboards installer reads this prefix |
 | `DEFENSECLAW_REF` | — | unknown | `any-string` | Splunk-bridge bundle git ref label. | — | `bundles/splunk_local_bridge/env/.env.example:17` — Bridge .env |
 | `DEFENSECLAW_SOURCE` | — | defenseclaw | `any-source-string` | Splunk-bridge source label. | — | `bundles/splunk_local_bridge/env/.env.example:15` — Bridge .env |
 | `DEFENSECLAW_SOURCETYPE` | — | defenseclaw:json | `splunk-sourcetype` | Splunk-bridge sourcetype. | — | `bundles/splunk_local_bridge/env/.env.example:14` — Bridge .env |
+| `DEFENSECLAW_SPLUNK_O11Y_DASHBOARDS_WORK_DIR` | low | `unset` | — | Working directory the Splunk O11y dashboards Terraform run uses for state. | — | `cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py:113` — Splunk O11y dashboards Terraform working dir |
+| `DEFENSECLAW_TERRAFORM_PLUGIN_DIR` | low | `unset` | — | Optional override for the Terraform plugin cache directory used by the dashboards installer. | — | `cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py:92` — Terraform plugin cache dir override |
 
 ## Test fixtures (test-only)
 
 | Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
+| `DEFENSECLAW_AGENT_TTY_BIN` | low | `unset` | — | Test-only override for the TTY-spawning helper used by agent-launcher tests. | — |  |
+| `DEFENSECLAW_AGENT_TTY_TESTS` | low | `unset` | — | Gate flag for TTY-spawning tests in agent-launcher suite. | — |  |
+| `DEFENSECLAW_E2E_BEDROCK_MODEL` | low | `unset` | — | E2E test fixture: Bedrock model id to exercise. | — |  |
+| `DEFENSECLAW_E2E_BEDROCK_REGION` | low | `unset` | — | E2E test fixture: Bedrock region. | — |  |
+| `DEFENSECLAW_E2E_INSTANCE` | low | `unset` | — | E2E test fixture: target instance label. | — |  |
+| `DEFENSECLAW_E2E_KEEP` | low | `unset` | — | E2E test fixture: keep working dirs after a run for inspection. | — |  |
+| `DEFENSECLAW_E2E_MODEL` | low | `unset` | — | E2E test fixture: model id to exercise across providers. | — |  |
+| `DEFENSECLAW_E2E_PORT` | low | `unset` | — | E2E test fixture: gateway port override. | — |  |
+| `DEFENSECLAW_E2E_PROMPT_STRATEGY` | low | `unset` | — | E2E test fixture: prompt strategy ('benign' \| 'malicious'). | — |  |
 | `DEFENSECLAW_FAKE_CLAUDE_LIST` | — | `unset` | `comma-separated mock responses`, `unset` | Test-only stub: comma-separated list of responses the fake claude CLI returns. | — | `internal/gateway/connector/codeguard_native_test.go:90` — Test stub |
 | `DEFENSECLAW_FAKE_CLAUDE_LOG` | — | `unset` | `absolute-path`, `unset` | Test-only stub: path the fake claude CLI logs invocations to. | — | `internal/gateway/connector/codeguard_native_test.go:116` — Test stub |
+| `DEFENSECLAW_TEST_CUSTOM_KEY` | low | `unset` | — | Test fixture: arbitrary custom-key env var used by keys command tests. | — |  |
 | `DEFENSECLAW_TEST_KEY` | — | `unset` | `any-string`, `unset` | Placeholder LLM key used in test fixtures only. | — | `cli/tests/test_llm_env.py` — Test fixture |
 | `DEFENSECLAW_TEST_KEY_NOTSET_12345` | — | `unset` | `unset` | Placeholder env var name used to assert 'unset' behavior in tests. | — | `cli/tests/test_llm_env.py` — Test fixture for unset assertions |
 | `DEFENSECLAW_TEST_LLM_KEY` | — | `unset` | `any-string`, `unset` | Placeholder LLM key used in some test setups when DEFENSECLAW_LLM_KEY needs an alternate target. | — | `cli/tests/test_llm_env.py` — Test fixture |

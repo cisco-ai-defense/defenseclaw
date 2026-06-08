@@ -368,7 +368,22 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 				// unauthenticated callers from amplifying
 				// sidecar memory by flooding unique
 				// X-DefenseClaw-Session-Id values.
-				id := registry.ResolvePeek(ctx, SessionIDFromContext(ctx), inboundAgent)
+				//
+				// Trusted hook routes (loopback + the same
+				// allow-list shouldExtractHookTrace enforces)
+				// are exempt: hook scripts always POST from
+				// 127.0.0.1 and tokenAuth runs after this
+				// middleware on those routes anyway, so it
+				// is safe — and necessary — to mint the
+				// agent_instance_id eagerly so the audit
+				// envelope downstream lands with a populated
+				// session-scoped uuid.
+				var id AgentIdentity
+				if shouldExtractHookTrace(r) {
+					id = registry.Resolve(ctx, SessionIDFromContext(ctx), inboundAgent)
+				} else {
+					id = registry.ResolvePeek(ctx, SessionIDFromContext(ctx), inboundAgent)
+				}
 				ctx = ContextWithAgentIdentity(ctx, id)
 				ctx = contextWithPendingAgentRegistry(ctx, registry, inboundAgent)
 				if id.AgentID != "" {
