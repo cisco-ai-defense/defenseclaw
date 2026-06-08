@@ -979,26 +979,46 @@ def _read_active_connector_from_yaml(cfg_path: str) -> str:
     except OSError:
         return ""
 
-    # guardrail.connector wins if explicitly set (matches Config
-    # .activeConnector precedence in claw.go). The trailing
-    # ``[\t ]*(?:#[^\n]*)?$`` group accepts both bare values and
-    # values followed by a YAML inline comment so a hand-edited
-    # ``connector: codex  # gpt only`` still resolves cleanly.
-    m = re.search(
-        r"^guardrail:[ \t]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+connector:[ \t]*[\"']?([A-Za-z0-9_-]+)[\"']?[ \t]*(?:#[^\n]*)?$",
-        text,
-        flags=re.MULTILINE,
-    )
-    if m and m.group(1).strip():
-        return _normalize_legacy_connector(m.group(1))
+    # Scope the value search to the block body captured by
+    # ``_find_top_level_block`` instead of one monolithic regex over
+    # the whole file. The previous pattern wrapped the block body in a
+    # lazy ``(?:[ \t]+[^\n]*\n)*?`` and required a trailing
+    # ``connector:``/``mode:`` line; when that key was ABSENT from a
+    # large block (e.g. a 30-line ``guardrail:`` with no
+    # ``connector:``), the ambiguous ``[ \t]+`` / ``[^\n]*`` overlap
+    # forced catastrophic backtracking (seconds of 100% CPU on a real
+    # config) — a ReDoS that hung ``defenseclaw upgrade`` at the v3
+    # active-connector seed. ``_find_top_level_block`` captures the
+    # body in linear time, and the per-line ``^[ \t]+<field>:`` search
+    # below is anchored with no nested unbounded quantifier, so it
+    # cannot backtrack pathologically.
+    def _value_in_block(key: str, field: str) -> str:
+        block = _find_top_level_block(text, key)
+        if not block:
+            return ""
+        # ``(?:#[^\n]*)?`` accepts a trailing YAML inline comment so a
+        # hand-edited ``connector: codex  # gpt only`` still resolves;
+        # ``(?:\r?\n|$)`` keeps the match CRLF- and EOF-safe.
+        field_match = re.search(
+            r"^[ \t]+" + re.escape(field) + r":[ \t]*[\"']?"
+            r"([A-Za-z0-9_-]+)[\"']?[ \t]*(?:#[^\n]*)?(?:\r?\n|$)",
+            block.group("body"),
+            flags=re.MULTILINE,
+        )
+        if field_match and field_match.group(1).strip():
+            return field_match.group(1)
+        return ""
 
-    m = re.search(
-        r"^claw:[ \t]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+mode:[ \t]*[\"']?([A-Za-z0-9_-]+)[\"']?[ \t]*(?:#[^\n]*)?$",
-        text,
-        flags=re.MULTILINE,
-    )
-    if m and m.group(1).strip():
-        return _normalize_legacy_connector(m.group(1))
+    # guardrail.connector wins if explicitly set (matches Config
+    # .activeConnector precedence in claw.go); else fall back to
+    # claw.mode.
+    connector = _value_in_block("guardrail", "connector")
+    if connector:
+        return _normalize_legacy_connector(connector)
+
+    mode = _value_in_block("claw", "mode")
+    if mode:
+        return _normalize_legacy_connector(mode)
     return ""
 
 

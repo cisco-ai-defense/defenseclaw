@@ -36,6 +36,7 @@ from defenseclaw.migrations import (
     _migrate_0_5_0,
     _migrate_0_5_0_strip_codex_enforcement_keys,
     _parse_dotenv,
+    _read_active_connector_from_yaml,
     run_migrations,
 )
 
@@ -799,6 +800,73 @@ class TestMigrate040SeedActiveConnector(unittest.TestCase):
         with open(state_path) as f:
             state = json.load(f)
         self.assertEqual(state["name"], "claudecode")
+
+    def test_large_guardrail_block_without_connector_is_not_redos(self):
+        """A real-world ``guardrail:`` block carries many nested keys and
+        no ``connector:``. The connector probe must stay linear: the old
+        ``^guardrail:...(?:[ \\t]+[^\\n]*\\n)*?connector:`` pattern
+        backtracked catastrophically (multi-second 100% CPU) on such a
+        block, hanging the v3 active-connector seed during upgrade.
+
+        We assert (a) the value still falls back to ``claw.mode`` and
+        (b) the lookup completes well inside a generous budget so a
+        future ReDoS regression trips this test instead of a stuck CLI.
+        """
+        import time
+
+        body_lines = "".join(
+            f"  key_{i}: value-{i}-with-some-trailing-text\n" for i in range(40)
+        )
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        with open(cfg_path, "w") as f:
+            f.write(
+                "claw:\n  mode: openclaw\n"
+                "guardrail:\n  enabled: true\n  mode: action\n" + body_lines
+            )
+
+        start = time.perf_counter()
+        name = _read_active_connector_from_yaml(cfg_path)
+        elapsed = time.perf_counter() - start
+
+        self.assertEqual(name, "openclaw")
+        self.assertLess(
+            elapsed,
+            1.0,
+            msg=f"connector probe took {elapsed:.2f}s — possible ReDoS regression",
+        )
+
+    def test_seeds_active_connector_for_real_world_shaped_config(self):
+        """End-to-end: the 0.4.0 seed must complete (not hang) on a
+        config whose guardrail block has many keys but no connector."""
+        body_lines = "".join(f"  k{i}: v{i}\n" for i in range(40))
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        with open(cfg_path, "w") as f:
+            f.write(
+                "claw:\n  mode: openclaw\n"
+                "guardrail:\n  enabled: true\n" + body_lines
+            )
+
+        ctx = _ctx(self.tmp, self.data_dir)
+        _migrate_0_4_0(ctx)
+
+        state_path = os.path.join(self.data_dir, "active_connector.json")
+        with open(state_path) as f:
+            state = json.load(f)
+        self.assertEqual(state["name"], "openclaw")
+
+    def test_explicit_connector_after_blank_line_in_block(self):
+        """``_find_top_level_block`` captures blank lines inside a block,
+        so a ``connector:`` separated from the header by a blank line is
+        still resolved (the old indented-line-only scan stopped at the
+        blank line)."""
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        with open(cfg_path, "w") as f:
+            f.write(
+                "claw:\n  mode: openclaw\n"
+                "guardrail:\n  enabled: true\n\n  connector: codex\n"
+            )
+
+        self.assertEqual(_read_active_connector_from_yaml(cfg_path), "codex")
 
 
 class TestMigrate040NoTouchOnEmptyDataDir(unittest.TestCase):
