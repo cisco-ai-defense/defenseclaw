@@ -79,16 +79,18 @@ func TestIsLLMShapedBodyCapsAtSixtyFourKiB(t *testing.T) {
 
 func TestIsLLMPathSuffix(t *testing.T) {
 	cases := map[string]bool{
-		"https://api.openai.com/v1/chat/completions":                                     true,
-		"https://api.anthropic.com/v1/messages":                                          true,
-		"https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent": true,
-		"https://bedrock-runtime.us-east-1.amazonaws.com/model/foo/converse":             true,
-		"http://localhost:11434/api/chat":                                                true,
-		"https://api.openai.com/v1/responses":                                            true,
-		"https://github.com/foo/bar":                                                     false,
-		"https://registry.npmjs.org/express":                                             false,
-		"":                                                                               false,
-		"://broken-url":                                                                  false,
+		"https://api.openai.com/v1/chat/completions":                                          true,
+		"https://api.anthropic.com/v1/messages":                                               true,
+		"https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent":      true,
+		"https://bedrock-runtime.us-east-1.amazonaws.com/model/foo/converse":                  true,
+		"https://bedrock-runtime.us-east-1.amazonaws.com/model/foo/invoke":                    true,
+		"https://bedrock-runtime.eu-west-1.amazonaws.com/model/x/invoke-with-response-stream": true,
+		"http://localhost:11434/api/chat":                                                     true,
+		"https://api.openai.com/v1/responses":                                                 true,
+		"https://github.com/foo/bar":                                                          false,
+		"https://registry.npmjs.org/express":                                                  false,
+		"":                                                                                    false,
+		"://broken-url":                                                                       false,
 	}
 	for u, want := range cases {
 		if got := isLLMPathSuffix(u); got != want {

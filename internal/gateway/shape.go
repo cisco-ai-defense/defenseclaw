@@ -39,6 +39,10 @@ var LLMPathSuffixes = []string{
 	":streamGenerateContent",
 	"/converse",
 	"/converse-stream",
+	// Bedrock InvokeModel REST shape: POST /model/<id>/invoke and the
+	// streaming /invoke-with-response-stream variant.
+	"/invoke",
+	"/invoke-with-response-stream",
 	"/api/chat",
 	"/api/generate",
 	"/responses",
