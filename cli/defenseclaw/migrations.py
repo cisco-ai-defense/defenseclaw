@@ -941,7 +941,7 @@ def _read_config_text(cfg_path: str) -> str | None:
 _TOP_LEVEL_BLOCK_BODY = r"(?P<body>(?:[ \t]+[^\n]*\n|\r?\n)*(?:[ \t]+[^\n]*)?)"
 
 
-def _find_top_level_block(text: str, key: str) -> "re.Match[str] | None":
+def _find_top_level_block(text: str, key: str) -> re.Match[str] | None:
     """Locate a column-0 ``<key>:`` block and capture its indented body.
 
     Returns the match (with a named ``body`` group spanning the block
