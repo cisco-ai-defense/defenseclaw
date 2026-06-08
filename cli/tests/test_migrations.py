@@ -27,11 +27,14 @@ from unittest.mock import patch
 from defenseclaw.migrations import (
     _LEGACY_FLAT_REGO_FILENAMES,
     MigrationContext,
+    _atomic_write_text,
     _migrate_0_3_0,
     _migrate_0_3_0_from_pristine,
     _migrate_0_3_0_surgical,
     _migrate_0_4_0,
+    _migrate_0_4_0_normalize_claw_mode,
     _migrate_0_5_0,
+    _migrate_0_5_0_strip_codex_enforcement_keys,
     _parse_dotenv,
     run_migrations,
 )
@@ -707,6 +710,47 @@ class TestMigrate040ClawModeNormalize(unittest.TestCase):
         self.assertIn("mode: openclaw  # legacy enum, retired in 0.4.0", text)
         self.assertNotIn("nemoclaw", text)
 
+    def test_rewrites_crlf_config_preserving_line_endings(self):
+        """A CRLF config (Windows operator, or one copied from a Windows
+        host) must be normalized in place — not silently flattened to
+        LF, which would churn the operator's VCS diff and diverge from
+        the other surgical rewriters that already preserve CRLF."""
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        with open(cfg_path, "w", newline="") as f:
+            f.write(
+                "claw:\r\n"
+                "  mode: nemoclaw  # legacy enum\r\n"
+                "  home_dir: ~/.openclaw\r\n"
+            )
+
+        ctx = _ctx(self.tmp, self.data_dir)
+        _migrate_0_4_0_normalize_claw_mode(ctx)
+
+        with open(cfg_path, newline="") as f:
+            text = f.read()
+        # Value flipped, inline comment + CRLF terminator preserved.
+        self.assertIn("  mode: openclaw  # legacy enum\r\n", text)
+        self.assertNotIn("nemoclaw", text)
+        # No mixed endings: every LF is part of a CRLF pair.
+        self.assertEqual(text.count("\n"), text.count("\r\n"))
+        self.assertIn("  home_dir: ~/.openclaw\r\n", text)
+
+    def test_rewrites_when_final_line_lacks_trailing_newline(self):
+        """A hand-edited config whose final line is the legacy mode
+        value with no trailing newline must still be rewritten — the
+        block matcher captures a terminator-less last line."""
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        with open(cfg_path, "w", newline="") as f:
+            f.write("claw:\n  mode: nemoclaw")  # deliberately no EOL
+
+        ctx = _ctx(self.tmp, self.data_dir)
+        _migrate_0_4_0_normalize_claw_mode(ctx)
+
+        with open(cfg_path, newline="") as f:
+            text = f.read()
+        self.assertEqual(text, "claw:\n  mode: openclaw")
+        self.assertNotIn("nemoclaw", text)
+
 
 class TestMigrate040SeedActiveConnector(unittest.TestCase):
     def setUp(self):
@@ -1277,6 +1321,168 @@ class TestRunMigrations050(unittest.TestCase):
 
             # Stale file remains because 0.5.0 wasn't in range.
             self.assertTrue(os.path.isfile(stale))
+
+
+class TestMigrate050StripCodexEnforcementKeys(unittest.TestCase):
+    """0.5.0 deletes the retired ``guardrail.*_enforcement_enabled``
+    keys from config.yaml. This step had no dedicated unit coverage
+    before the surgical config rewriters were unified onto the shared
+    CRLF/EOF-aware block matcher — these tests lock in the contract
+    (sibling preservation, comment handling, CRLF, terminator-less
+    last line, idempotency)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dclaw-mig-050-strip-")
+        self.data_dir = os.path.join(self.tmp, "data")
+        os.makedirs(self.data_dir, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _ctx(self) -> MigrationContext:
+        return MigrationContext(openclaw_home=self.tmp, data_dir=self.data_dir)
+
+    def _write(self, body: str) -> None:
+        # newline="" keeps explicit \r\n bytes verbatim on write.
+        with open(os.path.join(self.data_dir, "config.yaml"), "w", newline="") as f:
+            f.write(body)
+
+    def _read(self) -> str:
+        with open(os.path.join(self.data_dir, "config.yaml"), newline="") as f:
+            return f.read()
+
+    def test_strips_both_keys_preserving_siblings(self):
+        self._write(
+            "guardrail:\n"
+            "  enabled: true\n"
+            "  codex_enforcement_enabled: true\n"
+            "  mode: action\n"
+            "  claudecode_enforcement_enabled: false\n"
+            "  block_message: hi\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        after = self._read()
+        self.assertNotIn("codex_enforcement_enabled", after)
+        self.assertNotIn("claudecode_enforcement_enabled", after)
+        # Unrelated keys survive, ordering intact.
+        self.assertIn("  enabled: true\n", after)
+        self.assertIn("  mode: action\n", after)
+        self.assertIn("  block_message: hi\n", after)
+        self.assertLess(after.index("mode: action"), after.index("block_message"))
+        joined = "\n".join(ctx.changes)
+        self.assertIn("codex_enforcement_enabled", joined)
+        self.assertIn("claudecode_enforcement_enabled", joined)
+
+    def test_idempotent_when_keys_absent(self):
+        original = "guardrail:\n  enabled: true\n  mode: action\n"
+        self._write(original)
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        self.assertEqual(self._read(), original)
+        self.assertEqual(ctx.changes, [])
+
+    def test_strips_key_with_inline_comment(self):
+        self._write(
+            "guardrail:\n"
+            "  codex_enforcement_enabled: true  # legacy knob, retired 0.5.0\n"
+            "  mode: action\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        after = self._read()
+        self.assertNotIn("codex_enforcement_enabled", after)
+        self.assertNotIn("legacy knob", after)
+        self.assertIn("  mode: action\n", after)
+
+    def test_preserves_crlf_line_endings(self):
+        """The deleted line must take its CRLF terminator with it — no
+        orphaned ``\\r`` and no flatten of the surviving lines."""
+        self._write(
+            "guardrail:\r\n"
+            "  enabled: true\r\n"
+            "  codex_enforcement_enabled: true\r\n"
+            "  mode: action\r\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        after = self._read()
+        self.assertNotIn("codex_enforcement_enabled", after)
+        # No orphaned \r left where the line was deleted.
+        self.assertNotIn("\r\r", after)
+        # No mixed endings: every LF is part of a CRLF pair.
+        self.assertEqual(after.count("\n"), after.count("\r\n"))
+        self.assertIn("  enabled: true\r\n", after)
+        self.assertIn("  mode: action\r\n", after)
+
+    def test_strips_key_on_final_line_without_trailing_newline(self):
+        self._write(
+            "guardrail:\n"
+            "  mode: action\n"
+            "  codex_enforcement_enabled: true"  # deliberately no EOL
+        )
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        after = self._read()
+        self.assertEqual(after, "guardrail:\n  mode: action\n")
+        self.assertNotIn("codex_enforcement_enabled", after)
+
+    def test_no_op_when_no_guardrail_block(self):
+        original = "claw:\n  mode: openclaw\n"
+        self._write(original)
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        self.assertEqual(self._read(), original)
+        self.assertEqual(ctx.changes, [])
+
+    def test_no_op_when_config_missing(self):
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)  # no config.yaml
+        self.assertEqual(ctx.changes, [])
+
+
+class TestAtomicWriteTextModePreservation(unittest.TestCase):
+    """``_atomic_write_text`` must preserve an existing file's perms
+    across a rewrite — a surgical one-line config edit must never
+    silently widen a file an operator hardened to 0o600 — while still
+    honouring the explicit ``mode`` for a freshly-created file."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dclaw-mig-atomic-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_preserves_existing_file_mode_on_rewrite(self):
+        path = os.path.join(self.tmp, "config.yaml")
+        with open(path, "w") as f:
+            f.write("old\n")
+        os.chmod(path, 0o600)
+
+        # Default mode is 0o644, but the existing 0o600 must win.
+        self.assertTrue(_atomic_write_text(path, "new\n"))
+
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        with open(path) as f:
+            self.assertEqual(f.read(), "new\n")
+
+    def test_uses_mode_param_for_new_file(self):
+        path = os.path.join(self.tmp, "fresh.json")
+        # File does not exist yet → the explicit mode pins the perms.
+        self.assertTrue(_atomic_write_text(path, "{}", mode=0o600))
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
 
 
 if __name__ == "__main__":
