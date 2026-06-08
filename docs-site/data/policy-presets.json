@@ -1262,7 +1262,7 @@
               "rules": [
                 {
                   "id": "PATH-SSH-DIR",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.ssh/",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.ssh/",
                   "title": "SSH directory access",
                   "severity": "HIGH",
                   "confidence": 0.95,
@@ -1284,7 +1284,7 @@
                 },
                 {
                   "id": "PATH-AWS-CREDS",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.aws/credentials",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.aws/credentials",
                   "title": "AWS credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.98,
@@ -1295,7 +1295,7 @@
                 },
                 {
                   "id": "PATH-AWS-CONFIG",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.aws/config",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.aws/config",
                   "title": "AWS config file",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -1306,7 +1306,7 @@
                 },
                 {
                   "id": "PATH-KUBE",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.kube/config",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.kube/config",
                   "title": "Kubernetes config",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -1317,7 +1317,7 @@
                 },
                 {
                   "id": "PATH-DOCKER",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.docker/config\\.json",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.docker/config\\.json",
                   "title": "Docker config",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -1328,7 +1328,7 @@
                 },
                 {
                   "id": "PATH-GNUPG",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.gnupg/",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.gnupg/",
                   "title": "GPG keyring access",
                   "severity": "HIGH",
                   "confidence": 0.95,
@@ -1339,7 +1339,7 @@
                 },
                 {
                   "id": "PATH-NPMRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.npmrc",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.npmrc",
                   "title": "npm config (may contain tokens)",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -1350,7 +1350,7 @@
                 },
                 {
                   "id": "PATH-PYPIRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.pypirc",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.pypirc",
                   "title": "PyPI config (may contain tokens)",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -1361,7 +1361,7 @@
                 },
                 {
                   "id": "PATH-GIT-CREDS",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.git-credentials",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.git-credentials",
                   "title": "Git credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -1372,7 +1372,7 @@
                 },
                 {
                   "id": "PATH-NETRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.netrc",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.netrc",
                   "title": "netrc credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
@@ -1436,7 +1436,7 @@
                 },
                 {
                   "id": "PATH-HISTORY",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.(?:bash_history|zsh_history|python_history)",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.(?:bash_history|zsh_history|python_history)",
                   "title": "Shell history file",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -3392,7 +3392,7 @@
               "rules": [
                 {
                   "id": "PATH-SSH-DIR",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.ssh/",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.ssh/",
                   "title": "SSH directory access",
                   "severity": "HIGH",
                   "confidence": 0.95,
@@ -3414,7 +3414,7 @@
                 },
                 {
                   "id": "PATH-AWS-CREDS",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.aws/credentials",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.aws/credentials",
                   "title": "AWS credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.98,
@@ -3425,7 +3425,7 @@
                 },
                 {
                   "id": "PATH-AWS-CONFIG",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.aws/config",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.aws/config",
                   "title": "AWS config file",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -3436,7 +3436,7 @@
                 },
                 {
                   "id": "PATH-KUBE",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.kube/config",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.kube/config",
                   "title": "Kubernetes config",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -3447,7 +3447,7 @@
                 },
                 {
                   "id": "PATH-DOCKER",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.docker/config\\.json",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.docker/config\\.json",
                   "title": "Docker config",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -3458,7 +3458,7 @@
                 },
                 {
                   "id": "PATH-GNUPG",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.gnupg/",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.gnupg/",
                   "title": "GPG keyring access",
                   "severity": "HIGH",
                   "confidence": 0.95,
@@ -3469,7 +3469,7 @@
                 },
                 {
                   "id": "PATH-NPMRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.npmrc",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.npmrc",
                   "title": "npm config (may contain tokens)",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -3480,7 +3480,7 @@
                 },
                 {
                   "id": "PATH-PYPIRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.pypirc",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.pypirc",
                   "title": "PyPI config (may contain tokens)",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -3491,7 +3491,7 @@
                 },
                 {
                   "id": "PATH-GIT-CREDS",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.git-credentials",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.git-credentials",
                   "title": "Git credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -3502,7 +3502,7 @@
                 },
                 {
                   "id": "PATH-NETRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.netrc",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.netrc",
                   "title": "netrc credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
@@ -3566,7 +3566,7 @@
                 },
                 {
                   "id": "PATH-HISTORY",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.(?:bash_history|zsh_history|python_history)",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.(?:bash_history|zsh_history|python_history)",
                   "title": "Shell history file",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -5434,7 +5434,7 @@
               "rules": [
                 {
                   "id": "PATH-SSH-DIR",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.ssh/",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.ssh/",
                   "title": "SSH directory access",
                   "severity": "HIGH",
                   "confidence": 0.95,
@@ -5456,7 +5456,7 @@
                 },
                 {
                   "id": "PATH-AWS-CREDS",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.aws/credentials",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.aws/credentials",
                   "title": "AWS credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.98,
@@ -5467,7 +5467,7 @@
                 },
                 {
                   "id": "PATH-AWS-CONFIG",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.aws/config",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.aws/config",
                   "title": "AWS config file",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -5478,7 +5478,7 @@
                 },
                 {
                   "id": "PATH-KUBE",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.kube/config",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.kube/config",
                   "title": "Kubernetes config",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -5489,7 +5489,7 @@
                 },
                 {
                   "id": "PATH-DOCKER",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.docker/config\\.json",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.docker/config\\.json",
                   "title": "Docker config",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -5500,7 +5500,7 @@
                 },
                 {
                   "id": "PATH-GNUPG",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.gnupg/",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.gnupg/",
                   "title": "GPG keyring access",
                   "severity": "HIGH",
                   "confidence": 0.95,
@@ -5511,7 +5511,7 @@
                 },
                 {
                   "id": "PATH-NPMRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.npmrc",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.npmrc",
                   "title": "npm config (may contain tokens)",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -5522,7 +5522,7 @@
                 },
                 {
                   "id": "PATH-PYPIRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.pypirc",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.pypirc",
                   "title": "PyPI config (may contain tokens)",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -5533,7 +5533,7 @@
                 },
                 {
                   "id": "PATH-GIT-CREDS",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.git-credentials",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.git-credentials",
                   "title": "Git credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -5544,7 +5544,7 @@
                 },
                 {
                   "id": "PATH-NETRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.netrc",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.netrc",
                   "title": "netrc credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
@@ -5608,7 +5608,7 @@
                 },
                 {
                   "id": "PATH-HISTORY",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.(?:bash_history|zsh_history|python_history)",
+                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.(?:bash_history|zsh_history|python_history)",
                   "title": "Shell history file",
                   "severity": "MEDIUM",
                   "confidence": 0.8,

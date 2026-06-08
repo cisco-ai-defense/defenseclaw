@@ -368,6 +368,12 @@ func TestSensitivePathRules(t *testing.T) {
 		{"etc sudoers (space-obfuscated)", `append line to etc sudoers`, "PATH-ETC-SUDOERS"},
 		{"/proc environ", `/proc/1/environ`, "PATH-PROC-ENVIRON"},
 		{"bash history", `~/.bash_history`, "PATH-HISTORY"},
+		// macOS: agy's run_command expands ~ via the shell BEFORE the regex
+		// sees it, so the home dir lands as /Users/<user>/... rather than the
+		// literal ~/... These must still match the same rules.
+		{"macOS SSH directory", `{"path": "/Users/alice/.ssh/id_rsa"}`, "PATH-SSH-DIR"},
+		{"macOS AWS credentials", `cat /Users/alice/.aws/credentials`, "PATH-AWS-CREDS"},
+		{"macOS bash history", `/Users/alice/.bash_history`, "PATH-HISTORY"},
 	}
 
 	for _, tc := range cases {

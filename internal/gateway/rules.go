@@ -133,18 +133,25 @@ var commandRules = []PatternRule{
 // matching ".env").
 // ---------------------------------------------------------------------------
 
+// The home-directory alternation `(?:~|$HOME|/home/\w+|/root|/Users/\w+)`
+// intentionally includes the macOS `/Users/<user>/` branch: agy's run_command
+// tool expands ~ via the shell BEFORE the regex sees it, so on macOS the
+// command line lands as /Users/<user>/.ssh/... rather than the literal
+// ~/.ssh/... These compiled-in defaults must stay in lockstep with the
+// externalized packs under policies/guardrail/<pack>/rules/sensitive-paths.yaml,
+// which are what replace this category once a rule pack is installed.
 var sensitivePathRules = []PatternRule{
-	{ID: "PATH-SSH-DIR", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.ssh/`), Title: "SSH directory access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-SSH-DIR", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.ssh/`), Title: "SSH directory access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-SSH-KEY", Pattern: regexp.MustCompile(`(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])`), Title: "SSH private key file path", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-AWS-CREDS", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.aws/credentials`), Title: "AWS credentials file", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-AWS-CONFIG", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.aws/config`), Title: "AWS config file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-KUBE", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.kube/config`), Title: "Kubernetes config", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-DOCKER", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.docker/config\.json`), Title: "Docker config", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-GNUPG", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.gnupg/`), Title: "GPG keyring access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-NPMRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.npmrc`), Title: "npm config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-PYPIRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.pypirc`), Title: "PyPI config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-GIT-CREDS", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.git-credentials`), Title: "Git credentials file", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-NETRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.netrc`), Title: "netrc credentials file", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-AWS-CREDS", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.aws/credentials`), Title: "AWS credentials file", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-AWS-CONFIG", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.aws/config`), Title: "AWS config file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-KUBE", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.kube/config`), Title: "Kubernetes config", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-DOCKER", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.docker/config\.json`), Title: "Docker config", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-GNUPG", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.gnupg/`), Title: "GPG keyring access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-NPMRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.npmrc`), Title: "npm config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-PYPIRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.pypirc`), Title: "PyPI config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-GIT-CREDS", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.git-credentials`), Title: "Git credentials file", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-NETRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.netrc`), Title: "netrc credentials file", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-ENV-FILE", Pattern: regexp.MustCompile(`(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["'\s,\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["'\s,\]})]`), Title: "Environment file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
 	// The /etc/{passwd,shadow,sudoers} rules tolerate common obfuscations:
 	// canonical "/etc/passwd", space-separated "etc passwd", backslash
@@ -159,7 +166,7 @@ var sensitivePathRules = []PatternRule{
 	{ID: "PATH-ETC-SHADOW", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?shadow\b|\betc%2Fshadow\b)`), Title: "/etc/shadow access", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"system-file", "credential"}},
 	{ID: "PATH-ETC-SUDOERS", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?sudoers\b|\betc%2Fsudoers\b)`), Title: "/etc/sudoers access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"system-file", "privilege"}},
 	{ID: "PATH-PROC-ENVIRON", Pattern: regexp.MustCompile(`/proc/(?:\d+|self)/environ`), Title: "/proc environ access", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
-	{ID: "PATH-HISTORY", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.(?:bash_history|zsh_history|python_history)`), Title: "Shell history file", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-HISTORY", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.(?:bash_history|zsh_history|python_history)`), Title: "Shell history file", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
 }
 
 // ---------------------------------------------------------------------------
