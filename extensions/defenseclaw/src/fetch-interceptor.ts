@@ -384,6 +384,10 @@ export const LLM_PATH_SUFFIXES: ReadonlyArray<string> = [
   ":streamGenerateContent",
   "/converse",
   "/converse-stream",
+  // Bedrock InvokeModel REST shape: POST /model/<id>/invoke and the
+  // streaming /invoke-with-response-stream variant.
+  "/invoke",
+  "/invoke-with-response-stream",
   "/api/chat",
   "/api/generate",
   "/responses",
@@ -449,6 +453,29 @@ function extractPath(urlStr: string): string {
 export function hasLLMPathSuffix(urlStr: string): boolean {
   const path = extractPath(urlStr);
   return LLM_PATH_SUFFIXES.some(s => path.endsWith(s) || path.includes(s));
+}
+
+/**
+ * Redact every query-parameter value before a URL is written to a console
+ * log or egress telemetry event. Provider credentials are routinely smuggled
+ * in the query string — Gemini's `?key=`, AWS SigV4 pre-signed
+ * `?X-Amz-Signature=`/`?X-Amz-Credential=`, and assorted `?token=` shapes —
+ * so logging the raw URL would leak long-lived secrets into plaintext logs.
+ * The request itself is unaffected; only the string handed to the logger is
+ * scrubbed. Falls back to the original string if the URL cannot be parsed.
+ */
+export function scrubUrlForLog(urlStr: string): string {
+  try {
+    const u = new URL(urlStr);
+    const keys = [...u.searchParams.keys()];
+    if (keys.length === 0) return urlStr;
+    for (const k of keys) {
+      u.searchParams.set(k, "<redacted>");
+    }
+    return u.toString();
+  } catch {
+    return urlStr;
+  }
 }
 
 /** Returns true when the hostname is on the package-registry / telemetry allowlist. */
@@ -798,6 +825,7 @@ export function createFetchInterceptor(
   let originalFetch: typeof globalThis.fetch | null = null;
   let originalHttpsRequest: typeof https.request | null = null;
   let originalHttpRequest: typeof http.request | null = null;
+  let originalHttpGet: typeof http.get | null = null;
   let egressReporter: EgressReporter | null = null;
 
   // Extract { host, path } from a URL string without throwing. Missing
@@ -906,11 +934,11 @@ export function createFetchInterceptor(
 
       if (shapeBranch === "shape") {
         console.log(
-          `[defenseclaw] intercepted LLM-shaped call → ${urlStr} (body_shape=${bodyShape}) proxied via ${proxyBase}`,
+          `[defenseclaw] intercepted LLM-shaped call → ${scrubUrlForLog(urlStr)} (body_shape=${bodyShape}) proxied via ${proxyBase}`,
         );
       } else {
         console.log(
-          `[defenseclaw] intercepted LLM call → ${urlStr} proxied via ${proxyBase}`,
+          `[defenseclaw] intercepted LLM call → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`,
         );
       }
 
@@ -944,6 +972,7 @@ export function createFetchInterceptor(
     // clients are intercepted. All of them ultimately use node:https.request.
     originalHttpsRequest = https.request.bind(https);
     originalHttpRequest = http.request.bind(http);
+    originalHttpGet = http.get.bind(http);
 
     type NodeRequestOptions = Record<string, unknown>;
     type NodeIncomingMessage = unknown;
@@ -1179,9 +1208,9 @@ export function createFetchInterceptor(
         };
 
         if (!knownForHTTPS && shapedForHTTPS) {
-          console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${urlStr} (path-match) proxied via ${proxyBase}`);
+          console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubUrlForLog(urlStr)} (path-match) proxied via ${proxyBase}`);
         } else {
-          console.log(`[defenseclaw] intercepted LLM call (https.request) → ${urlStr} proxied via ${proxyBase}`);
+          console.log(`[defenseclaw] intercepted LLM call (https.request) → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`);
         }
         // Egress telemetry for the https.request branches. body_shape
         // is intentionally "none" because req.write happens after we
@@ -1262,6 +1291,27 @@ export function createFetchInterceptor(
 
     http.request = patchedHttpRequest as typeof http.request;
 
+    // `http.get` is `http.request` plus an implicit `req.end()`. Some
+    // streaming clients call it directly, so it must be patched too —
+    // otherwise an http.get to a local Ollama endpoint slips past the
+    // proxy. Delegate to the shared patched request path and preserve the
+    // auto-end semantics so the GET actually fires.
+    function patchedHttpGet(
+      urlOrOptions: string | URL | NodeRequestOptions,
+      optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
+      callback?: (res: NodeIncomingMessage) => void,
+    ): NodeClientRequest {
+      const req = patchedHttpRequest(urlOrOptions, optionsOrCallback, callback);
+      try {
+        (req as unknown as { end?: () => void }).end?.();
+      } catch {
+        // Sink/stub requests may not implement end(); ignore.
+      }
+      return req;
+    }
+
+    http.get = patchedHttpGet as typeof http.get;
+
     console.log(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
@@ -1282,6 +1332,10 @@ export function createFetchInterceptor(
     if (originalHttpRequest) {
       http.request = originalHttpRequest;
       originalHttpRequest = null;
+    }
+    if (originalHttpGet) {
+      http.get = originalHttpGet;
+      originalHttpGet = null;
     }
     if (egressReporter) {
       egressReporter.stop();
