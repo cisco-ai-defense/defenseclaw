@@ -133,8 +133,11 @@ def _accepted_values_cell(entry: EnvVar) -> str:
 
 
 def _mdx_default_needs_backticks(text: str) -> bool:
-    """MDX interprets ``${...}`` and ``{ident}`` in table cells as JS."""
-    return bool(text) and ("$" in text or "{" in text)
+    """MDX interprets ``${...}`` / ``{ident}`` in table cells as JS and
+    ``<token>`` as a JSX tag. Wrap such cells in a code span so literal
+    placeholders like ``127.0.0.1:<api_port>`` or ``<data_dir>/...`` render
+    verbatim instead of failing the MDX parse with an unclosed-tag error."""
+    return bool(text) and any(c in text for c in ("$", "{", "<", ">"))
 
 
 def _default_cell(entry: EnvVar, *, mdx: bool) -> str:
