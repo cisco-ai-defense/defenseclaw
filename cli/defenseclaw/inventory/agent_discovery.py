@@ -46,25 +46,22 @@ CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0
 
-# M-4: canonical install prefixes that we trust enough to exec
+# Canonical install prefixes that we trust enough to exec
 # `<binary> --version` against. Anything outside this allow-list is
 # refused — even when ``shutil.which`` returns it — because a user PATH
 # entry pointing to /tmp, the current directory, or some other
 # attacker-writable location could otherwise have us run a hostile
-# binary as part of a passive discovery scan. Operators with bespoke
-# install layouts can extend the allow-list at runtime via the
+# binary as part of a passive discovery scan.
+#
+# The default list is restricted to system-managed prefixes that
+# require root / package-manager privilege to write. User-writable tool
+# directories (~/.local/bin, ~/.cargo/bin, ~/.nvm, ~/.asdf, ~/.pyenv,
+# ~/.pipx, ~/Library/Application Support, /Applications) are deliberately
+# excluded: a local agent process running as the operator can write to
+# those dirs, plant `codex` (or any other discovery target), and a
+# default-trusted prefix would let the passive scan exec it. Operators
+# with bespoke install layouts extend the allow-list at runtime via the
 # ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` env var (colon-separated).
-# the default trusted-prefix list previously included
-# normal user-writable tool directories (~/.local/bin, ~/.cargo/bin,
-# ~/.nvm, ~/.asdf, ~/.pyenv, ~/.pipx, ~/Library/Application Support,
-# /Applications) and the only post-resolution check rejected
-# *world-writable* parents. A local agent process that can write to
-# the operator's tool dir could plant `codex` (or any other discovery
-# target) and DefenseClaw's passive scan would exec it. We restrict
-# the default list to system-managed prefixes that require root /
-# package-manager privilege to write. Operators with bespoke install
-# layouts can extend the list at runtime via
-# ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` (colon-separated).
 _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/usr/bin",
     "/usr/local/bin",
@@ -80,8 +77,8 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/usr/local/lib/node_modules",
     "/opt/local/bin",
     "/opt/local/sbin",
-    # Avarice F-2507: user-writable tool dirs (~/.local/bin, ~/.codex/
-    # packages, ~/.cargo/bin, ~/.nvm, ~/.asdf, ~/.pyenv, ~/.pipx,
+    # User-writable tool dirs (~/.local/bin, ~/.codex/packages,
+    # ~/.cargo/bin, ~/.nvm, ~/.asdf, ~/.pyenv, ~/.pipx,
     # ~/Library/Application Support, /Applications, …) are intentionally
     # NOT trusted by default — a local agent running as the operator can
     # plant a binary there (e.g. `codex`) and the passive scan would exec

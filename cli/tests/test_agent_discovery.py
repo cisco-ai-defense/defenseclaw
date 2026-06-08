@@ -313,24 +313,34 @@ def test_trust_check_follows_symlinks(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(link)) is False
 
 
-def test_default_trusted_prefixes_includes_codex_standalone_root():
-    # Regression guard for the actual shipped default: the modern Codex
-    # CLI symlinks ~/.local/bin/codex to a real binary under
-    # ~/.codex/packages/standalone/..., and the trust check resolves
-    # symlinks before matching. Without this entry, out-of-the-box
-    # `setup codex --mode action` fails with "not in a trusted install
-    # prefix". Keep it scoped to packages/ (not all of ~/.codex).
-    assert "~/.codex/packages" in ad._TRUSTED_BIN_PREFIXES_DEFAULT
-    assert "~/.codex" not in ad._TRUSTED_BIN_PREFIXES_DEFAULT
+def test_default_trusted_prefixes_excludes_user_writable_roots():
+    # Regression guard for the secure default: user-writable tool roots
+    # are intentionally NOT auto-trusted. A local agent running as the
+    # operator can plant a binary (e.g. `codex`) under any of these and
+    # the passive discovery scan would otherwise exec it. The modern
+    # Codex CLI symlinks ~/.local/bin/codex to a real binary under
+    # ~/.codex/packages/standalone/...; operators who want that path
+    # discovered must opt in explicitly via
+    # DEFENSECLAW_TRUSTED_BIN_PREFIXES (see the opt-in test below).
+    for writable in (
+        "~/.codex/packages",
+        "~/.codex",
+        "~/.local/bin",
+        "~/.cargo/bin",
+    ):
+        assert writable not in ad._TRUSTED_BIN_PREFIXES_DEFAULT
+    # System-managed prefixes (root / package-manager write only) stay
+    # trusted out of the box.
+    assert "/usr/bin" in ad._TRUSTED_BIN_PREFIXES_DEFAULT
+    assert "/usr/local/bin" in ad._TRUSTED_BIN_PREFIXES_DEFAULT
 
 
-def test_trust_check_accepts_codex_standalone_symlink_target(monkeypatch, tmp_path):
-    # End-to-end against the *real* default prefix list (only the env
-    # override is cleared): reproduce the Codex standalone layout under a
-    # fake HOME and assert the launcher symlink resolves as trusted.
-    # realpath() the tmp dir up front so macOS's /var -> /private/var
-    # symlink doesn't desync the resolved binary path from the abspath'd
-    # prefix.
+def test_trust_check_codex_standalone_symlink_requires_opt_in(monkeypatch, tmp_path):
+    # Reproduce the Codex standalone layout under a fake HOME and assert
+    # the secure-default behavior plus the documented opt-in escape
+    # hatch. realpath() the tmp dir up front so macOS's /var ->
+    # /private/var symlink doesn't desync the resolved binary path from
+    # the abspath'd prefix.
     home = Path(os.path.realpath(str(tmp_path)))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
@@ -355,6 +365,15 @@ def test_trust_check_accepts_codex_standalone_symlink_target(monkeypatch, tmp_pa
     link = link_dir / "codex"
     link.symlink_to(real)
 
+    # Default (no env override): the user-writable ~/.codex/packages root
+    # is NOT trusted, so discovery refuses to exec the resolved binary.
+    assert ad._is_trusted_binary_path(str(link)) is False
+
+    # Opt-in: an operator who deliberately trusts the Codex standalone
+    # root via DEFENSECLAW_TRUSTED_BIN_PREFIXES makes the same symlink
+    # resolve as trusted (the per-file / parent permission checks still
+    # apply on top — the fixture's 0o755 binary + parent satisfy them).
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(home / ".codex" / "packages"))
     assert ad._is_trusted_binary_path(str(link)) is True
 
 
