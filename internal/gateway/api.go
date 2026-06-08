@@ -112,12 +112,12 @@ type APIServer struct {
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
 
-	claudeCodeMu                 sync.Mutex
-	claudeCodeLastComponentScan  time.Time
-	codexMu                      sync.Mutex
-	codexLastComponentScan       time.Time
-	rawTelemetryMu               sync.RWMutex
-	rawTelemetryDedupe           *rawTelemetryDeduper
+	claudeCodeMu                      sync.Mutex
+	claudeCodeLastComponentScan       time.Time
+	codexMu                           sync.Mutex
+	codexLastComponentScan            time.Time
+	rawTelemetryMu                    sync.RWMutex
+	rawTelemetryDedupe                *rawTelemetryDeduper
 	llmPromptMu                       sync.Mutex
 	llmPromptBySourceSession          map[string]string
 	llmPromptBySourceSessionOrder     []string
