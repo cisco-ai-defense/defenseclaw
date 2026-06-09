@@ -228,11 +228,13 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	if mcpScanTargetLooksLikeURL(target) {
 		if err := validateMCPScanTargetURL(target); err != nil {
 			result = &ScanResult{
-				Scanner:   s.Name(),
-				Target:    target,
-				Timestamp: start,
-				ScanError: err.Error(),
-				ExitCode:  -1,
+				Scanner:    s.Name(),
+				Target:     target,
+				Timestamp:  start,
+				Duration:   time.Since(start),
+				TargetType: InferTargetType(s.Name()),
+				ScanError:  err.Error(),
+				ExitCode:   -1,
 			}
 			scanErr = err
 			exitCode = -1
@@ -323,14 +325,18 @@ type mcpScanResult struct {
 }
 
 type mcpFinding struct {
-	ID          string   `json:"id"`
-	RuleID      string   `json:"rule_id"`
-	Category    string   `json:"category"`
-	Severity    string   `json:"severity"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	Location    string   `json:"location"`
-	Line        int      `json:"line"`
+	ID          string `json:"id"`
+	RuleID      string `json:"rule_id"`
+	Category    string `json:"category"`
+	Severity    string `json:"severity"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Location    string `json:"location"`
+	// LineNumber mirrors ScanResult.to_json()'s "line_number" field
+	// (Finding.to_dict in cli/defenseclaw/models.py). The Python CLI
+	// never emits a bare "line", so reading "line" here silently
+	// dropped every line number.
+	LineNumber  int      `json:"line_number"`
 	Remediation string   `json:"remediation"`
 	Tags        []string `json:"tags"`
 	Suppressed  bool     `json:"suppressed"`
@@ -349,8 +355,8 @@ func parseMCPOutput(data []byte) ([]Finding, error) {
 			continue
 		}
 		var ln *int
-		if f.Line > 0 {
-			v := f.Line
+		if f.LineNumber > 0 {
+			v := f.LineNumber
 			ln = &v
 		}
 		findings = append(findings, Finding{

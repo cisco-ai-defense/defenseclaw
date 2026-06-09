@@ -77,8 +77,9 @@ func TestMCPScanner_BinaryCoercion(t *testing.T) {
 
 // parseMCPOutput must accept the ScanResult.to_json() shape emitted by
 // "defenseclaw mcp scan --json": a top-level object with a "findings"
-// array. Suppressed findings are dropped; positive line numbers map to
-// LineNumber.
+// array. Suppressed findings are dropped; the line number arrives as
+// "line_number" (Finding.to_dict in cli/defenseclaw/models.py), so the
+// fixture uses the real field name rather than a bare "line".
 func TestParseMCPOutput_ScanResultShape(t *testing.T) {
 	payload := []byte(`{
 		"scanner": "mcp-scanner",
@@ -88,12 +89,11 @@ func TestParseMCPOutput_ScanResultShape(t *testing.T) {
 			{
 				"id": "f1",
 				"rule_id": "R-1",
-				"category": "prompt-injection",
 				"severity": "HIGH",
 				"title": "Suspicious tool description",
 				"description": "desc",
 				"location": "tools/echo",
-				"line": 12,
+				"line_number": 12,
 				"remediation": "fix it",
 				"tags": ["mcp", "yara"],
 				"suppressed": false
