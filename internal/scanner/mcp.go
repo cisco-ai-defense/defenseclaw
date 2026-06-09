@@ -76,22 +76,13 @@ func (s *MCPScanner) Version() string            { return "1.0.0" }
 func (s *MCPScanner) SupportedTargets() []string { return []string{"mcp"} }
 
 func (s *MCPScanner) buildArgs(target string) []string {
-	args := []string{"scan", "--format", "json"}
+	args := []string{"--output", "json"}
 
 	if s.Config.Analyzers != "" {
 		args = append(args, "--analyzers", s.Config.Analyzers)
 	}
-	if s.Config.ScanPrompts {
-		args = append(args, "--scan-prompts")
-	}
-	if s.Config.ScanResources {
-		args = append(args, "--scan-resources")
-	}
-	if s.Config.ScanInstructions {
-		args = append(args, "--scan-instructions")
-	}
 
-	args = append(args, target)
+	args = append(args, "config", "--config-path", target)
 	return args
 }
 
