@@ -771,32 +771,34 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
 
 def _pid_file_running(pid_file: str) -> bool:
     """Return True only when pid_file points at a live process whose
-    /proc/<pid>/cmdline argv0 looks like the DefenseClaw gateway.
+    identity looks like the DefenseClaw gateway.
 
-    The legacy implementation accepted any
-    PID that passed `os.kill(pid, 0)` as proof that the gateway was
-    running. A local process that planted or staled gateway.pid
-    could therefore make `quickstart`/`init` skip starting the
-    sidecar — generated hooks then forwarded uninspected traffic
-    because the default fail mode for the inspect hook is "open"
-    until the gateway is up. We require the PID's process to be
-    alive AND its argv0 to match a known gateway binary name.
+    Liveness is delegated to :func:`defenseclaw.process_liveness.pid_alive`
+    so the probe is correct cross-platform. A bare ``os.kill(pid, 0)`` is
+    wrong on Windows — signal 0 is routed to a console-control event rather
+    than an existence probe, so a running gateway reads as stopped and
+    ``init``/``--restart`` decisions break.
+
+    On top of liveness we verify process identity. The legacy implementation
+    accepted any PID that passed the liveness probe, so a local process that
+    planted or staled gateway.pid could make ``quickstart``/``init`` skip
+    starting the sidecar — generated hooks then forwarded uninspected traffic
+    because the default fail mode for the inspect hook is "open" until the
+    gateway is up. We additionally require the PID's argv0 to match a known
+    gateway binary name (POSIX, via /proc or ``ps``). Windows has no equally
+    cheap argv0 probe and the Go daemon's ``processExists``
+    (internal/daemon/proc_windows.go) is liveness-only too, so there a live
+    PID is accepted.
     """
-    try:
-        with open(pid_file, encoding="utf-8") as fh:
-            raw = fh.read().strip()
-        try:
-            pid = int(raw)
-        except ValueError:
-            pid = int(json.loads(raw)["pid"])
-    except (FileNotFoundError, ValueError, KeyError, OSError, TypeError):
+    from defenseclaw.process_liveness import pid_alive, read_pid_file
+
+    pid = read_pid_file(pid_file)
+    if pid is None or pid <= 1:
         return False
-    if pid <= 1:
+    if not pid_alive(pid):
         return False
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
+    if os.name == "nt":
+        return True
     return _pid_looks_like_gateway(pid)
 
 

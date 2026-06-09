@@ -198,6 +198,16 @@ jobs:
       # hook` on Windows) and assert fire + verdict shaping + clean teardown.
       - name: Contract entrypoint smoke
         if: steps.select.outputs.run == 'true'
+        # Layer A runs agent-less, so the cached agent version is empty and the
+        # gateway resolves an "unversioned" hook contract. In action mode the
+        # gateway refuses to wire the connector (and thus never writes
+        # ~/.defenseclaw/hooks/<connector>-hook.sh) unless drift is accepted,
+        # which would make every golden-payload hook invocation exit 127. This
+        # is the intended no-agent/exploratory case, so opt in here. Belt and
+        # suspenders with the export in contract-smoke.sh, in case the gateway
+        # daemon is spawned without inheriting the script's environment.
+        env:
+          DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT: "1"
         run: bash scripts/live-connector-e2e/run.sh --layer contract --connector "${{ matrix.connector }}"
 
       - name: Upload contract results

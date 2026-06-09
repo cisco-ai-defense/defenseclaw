@@ -6230,20 +6230,17 @@ def _uninstall_plugin_from_sandbox(sandbox_home: str) -> None:
 
 
 def _is_pid_alive(pid_file: str) -> bool:
-    """Check if the process in the given PID file is alive (signal 0)."""
-    try:
-        with open(pid_file) as f:
-            raw = f.read().strip()
-        try:
-            pid = int(raw)
-        except ValueError:
-            import json as _json
+    """Check whether the process recorded in ``pid_file`` is alive.
 
-            pid = _json.loads(raw)["pid"]
-        os.kill(pid, 0)
-        return True
-    except (FileNotFoundError, ValueError, KeyError, ProcessLookupError, PermissionError, OSError):
-        return False
+    Delegates to :func:`defenseclaw.process_liveness.pid_file_alive`, which
+    probes liveness correctly on every OS. The previous inline
+    ``os.kill(pid, 0)`` check reported a live gateway as dead on Windows
+    (signal 0 is not a liveness probe there), which made
+    ``setup --restart`` no-op against the running daemon.
+    """
+    from defenseclaw.process_liveness import pid_file_alive
+
+    return pid_file_alive(pid_file)
 
 
 def _restart_services(

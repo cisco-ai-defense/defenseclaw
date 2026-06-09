@@ -118,6 +118,19 @@ var specs = map[string]spec{
 		unreachableStrict: failResult{exit: blockExit},
 		responseClosed:    failResult{exit: blockExit},
 	},
+	// antigravity-hook.sh is "Modelled on geminicli-hook.sh": the gateway
+	// encodes the verdict in hook_output, the hook echoes it and exits 0, and
+	// every failure path is a bare exit 2 with no connector-native body. Without
+	// this entry the native Windows runner returns "unknown hook connector" and
+	// fails every antigravity hook closed (exit 2) before reaching the gateway.
+	"antigravity": {
+		connector: "antigravity", hookName: "antigravity-hook", errLabel: "antigravity",
+		subject: "antigravity tool", endpoint: "/api/v1/antigravity/hook",
+		outputField: "hook_output", style: styleHookEcho,
+		oversizedClosed:   failResult{exit: blockExit},
+		unreachableStrict: failResult{exit: blockExit},
+		responseClosed:    failResult{exit: blockExit},
+	},
 	"hermes": {
 		connector: "hermes", hookName: "hermes-hook", errLabel: "hermes",
 		subject: "hermes tool", endpoint: "/api/v1/hermes/hook",

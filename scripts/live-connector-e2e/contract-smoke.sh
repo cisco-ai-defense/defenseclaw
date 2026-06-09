@@ -36,6 +36,19 @@ set -euo pipefail
 DC_E2E_CONNECTOR="${1:?usage: contract-smoke.sh <connector>}"
 export DC_E2E_CONNECTOR
 
+# Layer A deliberately runs with NO upstream agent installed — it feeds golden
+# stdin payloads into the installed hook entrypoint, never the real CLI. With no
+# agent on disk the cached agent version is empty, so ResolveHookContract returns
+# "unversioned". In action mode the gateway boot path
+# (internal/gateway/sidecar.go) then refuses to run Connector.Setup() unless this
+# override is set, which would leave ~/.defenseclaw/hooks/<connector>-hook.sh
+# unwritten and make every hook invocation exit 127. This is exactly the
+# exploratory/no-agent scenario the override exists for, so opt in here. The
+# export propagates to `defenseclaw setup` and the gateway daemon it restarts.
+# Scoped to Layer A only: the live drivers don't source this file, so Layer B
+# keeps the real agent-version hook-contract gate.
+export DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 . "${HERE}/lib/common.sh"
@@ -62,7 +75,10 @@ drive_event() {
   local before after out code
   before="$(dc_gateway_jsonl_count)"
   out="$(dc_invoke_hook "${DC_E2E_CONNECTOR}" "${label}" "${payload}")"
-  code="$(printf '%s\n' "${out}" | sed -n 's/^exit:\([0-9]\+\)$/\1/p' | tail -1)"
+  # Portable BRE: BSD sed (macOS) treats \+ as a literal '+', so use
+  # [0-9][0-9]* for "one or more digits" — otherwise the exit code parses
+  # empty on macOS and every allow assertion (which requires exit 0) fails.
+  code="$(printf '%s\n' "${out}" | sed -n 's/^exit:\([0-9][0-9]*\)$/\1/p' | tail -1)"
   # Give the gateway a beat to flush the JSONL line.
   sleep 1
   after="$(dc_gateway_jsonl_count)"

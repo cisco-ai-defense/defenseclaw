@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -542,6 +543,46 @@ func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled.
+// listenWithRetry binds a TCP listener on addr, retrying briefly while the
+// address is still in use. It exists for the `setup --restart` window: the old
+// gateway is terminated and a fresh one is spawned immediately, and the OS can
+// hold the previous listening socket for a short interval after the process
+// exits (most visibly on Windows, where the bind fails with "Only one usage of
+// each socket address ... permitted"). Retrying within a bounded budget lets the
+// kernel reclaim the port so the restarted gateway can bind it. Non-address-in-use
+// errors and context cancellation return immediately.
+func listenWithRetry(ctx context.Context, addr string, budget time.Duration) (net.Listener, error) {
+	var lc net.ListenConfig
+	deadline := time.Now().Add(budget)
+	for attempt := 1; ; attempt++ {
+		ln, err := lc.Listen(ctx, "tcp", addr)
+		if err == nil {
+			return ln, nil
+		}
+		if !isAddrInUse(err) || time.Now().After(deadline) || ctx.Err() != nil {
+			return nil, err
+		}
+		fmt.Fprintf(os.Stderr, "[sidecar-api] %s still in use after restart, retrying bind (attempt %d)\n", addr, attempt)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+}
+
+// isAddrInUse reports whether err is an "address already in use" bind failure on
+// any platform. Modern Go maps Windows WSAEADDRINUSE (10048) to syscall.EADDRINUSE,
+// but the human-readable text is matched too as a cross-version guard.
+func isAddrInUse(err error) bool {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "address already in use") ||
+		strings.Contains(msg, "only one usage of each socket address")
+}
+
 func (a *APIServer) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", a.handleHealth)
@@ -656,10 +697,25 @@ func (a *APIServer) Run(ctx context.Context) error {
 		},
 	}
 
+	// Bind with a short retry instead of a bare ListenAndServe. During
+	// `defenseclaw setup --restart` the previous gateway is terminated and a
+	// fresh, guardrail-enabled gateway is spawned immediately. On Windows the
+	// kernel can keep the old listening socket reserved for a brief interval
+	// after the process exits ("Only one usage of each socket address ...
+	// permitted"), so a naive bind in the new process loses the race, the hook
+	// API never comes up, and every connector hook posting to this port fails.
+	// Retrying for a few seconds lets the OS reclaim the port so the restarted
+	// gateway binds the same address the agent's hooks call.
+	ln, lnErr := listenWithRetry(ctx, a.addr, 6*time.Second)
+	if lnErr != nil {
+		a.health.SetAPI(StateError, lnErr.Error(), nil)
+		return fmt.Errorf("api: listen %s: %w", a.addr, lnErr)
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 		close(errCh)

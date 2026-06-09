@@ -336,3 +336,81 @@ jobs:
       - name: Python test - platform gating + config lock
         shell: bash
         run: uv run python -m pytest cli/tests/test_platform_support.py cli/tests/test_config_lock_mutex.py -q
+
+  windows-installer-smoke:
+    name: Windows Installer Smoke (install.ps1)
+    runs-on: windows-latest
+    # End-to-end check of the PowerShell installer's local-install path:
+    # build the two release artifacts it consumes (the windows gateway .zip
+    # and the CLI wheel), run scripts/install.ps1 -Local against them, then
+    # assert the gateway binary and CLI shim land on PATH and respond to
+    # --version. Guards scripts/install.ps1, the .goreleaser.yaml windows
+    # archive shape, and the install layout `defenseclaw upgrade` relies on.
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@v8.1.0
+
+      # The gateway embeds the OpenClaw extension tree via //go:embed. Windows
+      # is hook-only and needs no OpenClaw plugin, so drop the same
+      # `.placeholder` marker `make sync-openclaw-extension` writes when
+      # extensions/defenseclaw/dist is absent (matches windows-hook-path).
+      - name: Generate OpenClaw extension placeholder
+        shell: bash
+        run: |
+          set -euo pipefail
+          embed_dir=internal/gateway/connector/openclaw_extension
+          mkdir -p "$embed_dir"
+          printf '%s\n' \
+            "OpenClaw extension not built." \
+            "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
+            > "$embed_dir/.placeholder"
+
+      # Reproduce GoReleaser's windows outputs by hand so the smoke test stays
+      # fast and self-contained: the in-archive binary is defenseclaw.exe and
+      # the archive is defenseclaw_<ver>_windows_amd64.zip (the name
+      # install.ps1 -Local globs). The CLI wheel is built via `make dist-cli`,
+      # the same target `make dist` uses — it stages cli/defenseclaw/_data
+      # (policies, skills, dashboards) before `uv build`, so the wheel matches
+      # a real release. `make install` already runs this _bundle-data path on
+      # windows-latest in the green connector contract matrix.
+      - name: Build gateway binary + CLI wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/gwstage
+          CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=0.0.0-smoke" \
+            -o dist/gwstage/defenseclaw.exe ./cmd/defenseclaw
+          make dist-cli
+          ls -la dist
+
+      - name: Package windows gateway zip
+        shell: pwsh
+        run: |
+          $zip = "dist/defenseclaw_0.0.0-smoke_windows_amd64.zip"
+          Compress-Archive -Path dist/gwstage/defenseclaw.exe -DestinationPath $zip -Force
+          Get-ChildItem dist
+
+      - name: Run install.ps1 against local artifacts
+        shell: pwsh
+        run: ./scripts/install.ps1 -Local dist -Yes
+
+      # New pwsh session: install.ps1 persists the install dir to the *user*
+      # PATH, which a mid-job step does not auto-reload, so prepend it here
+      # before resolving the shim. --version short-circuits before any config
+      # load on both binaries, so neither needs `defenseclaw init`.
+      - name: Verify installed gateway + CLI resolve and run
+        shell: pwsh
+        run: |
+          $bin  = Join-Path $env:USERPROFILE ".local\bin"
+          $gw   = Join-Path $bin "defenseclaw-gateway.exe"
+          $shim = Join-Path $bin "defenseclaw.cmd"
+          if (-not (Test-Path $gw))   { throw "gateway not installed: $gw" }
+          if (-not (Test-Path $shim)) { throw "CLI shim not installed: $shim" }
+          $env:PATH = "$bin;$env:PATH"
+          & $gw --version
+          if ($LASTEXITCODE -ne 0) { throw "defenseclaw-gateway --version exit $LASTEXITCODE" }
+          & defenseclaw --version
+          if ($LASTEXITCODE -ne 0) { throw "defenseclaw --version exit $LASTEXITCODE" }

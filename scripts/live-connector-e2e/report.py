@@ -190,7 +190,14 @@ def open_or_update_issue(body: str, run_url: str) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # This module documents itself with leading "#" comments, not a string
+    # literal, so __doc__ is None — guard against it instead of crashing the
+    # whole report job on startup with AttributeError before any cell result is
+    # ever read.
+    description = (
+        __doc__ or "Connector live-E2E reporter / regression radar (alert-only)."
+    ).strip().splitlines()[0]
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--results-dir", type=Path, required=True,
                         help="Directory of per-cell *.jsonl result files (artifacts).")
     parser.add_argument("--summary-file", type=Path,

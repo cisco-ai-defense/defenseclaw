@@ -78,12 +78,22 @@ dc_assert_fired() {
 # dc_assert_verdict_block <since_line> — a block verdict was recorded after the
 # probe. Pairs with the sentinel check so we prove both the decision AND the
 # enforcement.
+#
+# The gateway expresses a blocked tool call in more than one envelope shape, so
+# accept any authoritative block signal:
+#   - event_type "verdict"  -> verdict.action  in {block, deny}
+#   - event_type "scan"     -> scan.verdict    in {block, deny}  (hook-rules
+#                              scanner verdict; the v7 hook decision path emits
+#                              this rather than a standalone "verdict" record)
+# Keying on either keeps the assertion robust across connectors and across
+# future renames of any single envelope.
 dc_assert_verdict_block() {
   local since="${1:-0}"
   [ -f "${DC_GATEWAY_JSONL}" ] || return 1
   python3 - "${DC_GATEWAY_JSONL}" "${since}" <<'PY'
 import json, sys
 path, since = sys.argv[1], int(sys.argv[2])
+blocking = ("block", "deny")
 found = False
 with open(path, encoding="utf-8") as f:
     for i, line in enumerate(f, start=1):
@@ -96,9 +106,15 @@ with open(path, encoding="utf-8") as f:
             ev = json.loads(line)
         except Exception:
             continue
-        if ev.get("event_type") == "verdict":
+        et = ev.get("event_type")
+        if et == "verdict":
             action = str(ev.get("verdict", {}).get("action", "")).lower()
-            if action in ("block", "deny"):
+            if action in blocking:
+                found = True
+                break
+        elif et == "scan":
+            verdict = str(ev.get("scan", {}).get("verdict", "")).lower()
+            if verdict in blocking:
                 found = True
                 break
 sys.exit(0 if found else 1)

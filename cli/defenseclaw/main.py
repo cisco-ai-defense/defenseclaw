@@ -212,8 +212,30 @@ def _try_launch_tui() -> bool:
     return True
 
 
+def _force_utf8_io() -> None:
+    """Reconfigure stdout/stderr to UTF-8 so framing/status glyphs never crash.
+
+    Windows Python defaults its standard streams to the active legacy code page
+    (e.g. cp1252), whose charmap codec cannot encode the box-drawing characters
+    ``ux.banner()`` and the ``✓``/``✗`` status markers emit — ``defenseclaw
+    init`` died on a hosted Windows runner with ``UnicodeEncodeError: 'charmap'
+    codec can't encode`` before printing a single banner. Forcing UTF-8 is a
+    no-op where the streams are already UTF-8 (Linux/macOS) and degrades
+    gracefully if a stream is missing or not reconfigurable (e.g. redirected to
+    a plain object, or None under pythonw)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (ValueError, OSError):
+            pass
+
+
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
+    _force_utf8_io()
     if not _try_launch_tui():
         cli()
 
