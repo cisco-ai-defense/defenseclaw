@@ -26,6 +26,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -1583,6 +1584,20 @@ def _write_dotenv(path: str, entries: dict[str, str]) -> None:
         pass
 
 
+def _add_trusted_bin_prefix(prefix: str, data_dir: str) -> None:
+    """Add a directory to DEFENSECLAW_TRUSTED_BIN_PREFIXES in .env and os.environ."""
+    dotenv_path = os.path.join(data_dir, ".env")
+    existing = _load_dotenv(dotenv_path)
+    current = existing.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", ""))
+    parts = [p.strip() for p in current.split(":") if p.strip()]
+    if prefix not in parts:
+        parts.append(prefix)
+    new_val = ":".join(parts)
+    existing["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = new_val
+    _write_dotenv(dotenv_path, existing)
+    os.environ["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = new_val
+
+
 def _print_summary(sc, llm, aid) -> None:
     click.echo()
     click.echo("  Saved to ~/.defenseclaw/config.yaml")
@@ -2548,11 +2563,34 @@ def _check_connector_version_supported_for_setup(
             detail += f" ({probe_error})"
         detail += f"; using default hook contract {contract}."
         if action_mode and not allow_drift:
-            if emit:
+            is_untrusted_path = probe_error == "binary path is not in a trusted install prefix" and signal and signal.binary_path
+            interactive = sys.stdin.isatty() and sys.stdout.isatty()
+            if emit and is_untrusted_path and interactive:
+                resolved = os.path.realpath(signal.binary_path)
+                parent = os.path.dirname(resolved)
+                ux.warn(detail)
+                ux.subhead(f"  Binary resolves to: {resolved}")
+                ux.subhead(f"  Directory '{parent}' is not in the trusted prefix list.")
+                if click.confirm(f"  Add '{parent}' to trusted binary prefixes?", default=True):
+                    _add_trusted_bin_prefix(parent, data_dir or os.path.expanduser("~/.defenseclaw"))
+                    disc2 = agent_discovery.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
+                    signal2 = disc2.agents.get(connector)
+                    if signal2 and signal2.version:
+                        ux.ok(f"{label}: version {signal2.version} verified after trusting {parent}.")
+                        return True
+                    ux.err("  Version still could not be verified after adding trusted prefix.")
+            elif emit:
                 ux.err(
                     detail + " Refusing action-mode hook setup because the installed "
                     "connector version could not be verified."
                 )
+                if is_untrusted_path:
+                    resolved = os.path.realpath(signal.binary_path)
+                    parent = os.path.dirname(resolved)
+                    ux.subhead(f"  Binary resolves to: {resolved}")
+                    ux.subhead(f"  To fix, run: defenseclaw setup {connector} --mode action")
+                    ux.subhead(f"  Or manually add to ~/.defenseclaw/.env: DEFENSECLAW_TRUSTED_BIN_PREFIXES={parent}")
+            if emit:
                 ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
             return False
         if emit:

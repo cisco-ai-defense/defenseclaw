@@ -72,6 +72,7 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
     "/opt/homebrew/Cellar",
+    "/opt/homebrew/Caskroom",
     "/opt/homebrew/lib/node_modules",
     "/usr/local/Cellar",
     "/usr/local/lib/node_modules",
