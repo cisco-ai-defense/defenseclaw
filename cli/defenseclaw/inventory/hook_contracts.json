@@ -165,12 +165,58 @@
       "version_probe": "hermes --version",
       "contracts": [
         {
-          "contract_id": "hermes-hooks-v1",
+          "contract_id": "hermes-hooks-v2",
           "agent_version": {
             "min_inclusive": "0.11.0",
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "hermes-hook.sh",
+          "hook_config_path_templates": [
+            "~/.hermes/config.yaml"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "pre_llm_call",
+            "pre_tool_call",
+            "post_tool_call",
+            "post_llm_call",
+            "on_session_start",
+            "on_session_end",
+            "subagent_stop"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result",
+            "event_content"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": false,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "pre_tool_call"
+            ],
+            "supports_fail_closed": false,
+            "scope": "user"
+          },
+          "notes": [
+            "hermes-hooks-v2 expands DefenseClaw coverage from pre_tool_call only (v1) to the full shell-hook lifecycle: pre_llm_call (context injection), pre_tool_call (block), post_tool_call/post_llm_call (observe), and on_session_start/on_session_end/subagent_stop (telemetry). The dedicated hermes profile lifts prompt/result content out of the extra envelope so prompt and tool_result rules inspect Hermes payloads.",
+            "pre_tool_call is the only blockable event; pre_llm_call injects context; Hermes never blocks on exit code or hook timeout so there is no fail-closed surface.",
+            "Multi-event registration requires hooks_auto_accept in cli-config.yaml on non-TTY/gateway runs; Setup writes it and the managed-backup heals it."
+          ]
+        },
+        {
+          "contract_id": "hermes-hooks-v1",
+          "agent_version": {
+            "min_inclusive": "0.11.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": false,
           "hook_script_version": "v6",
           "hook_script": "hermes-hook.sh",
           "hook_config_path_templates": [
@@ -196,7 +242,7 @@
             "scope": "user"
           },
           "notes": [
-            "Hermes Agent 0.11.0 introduced shell hooks for pre_tool_call and related lifecycle callbacks."
+            "Hermes Agent 0.11.0 introduced shell hooks for pre_tool_call and related lifecycle callbacks. v1 wires pre_tool_call only; retained for version pinning compatibility - v2 is the default."
           ]
         }
       ]
@@ -542,6 +588,52 @@
             "OpenHands hooks use native snake_case event keys and install to ~/.openhands/hooks.json by default, with repo-local .openhands/hooks.json when a workspace is pinned.",
             "Validated with OpenHands CLI 1.16.0; the contract stays unbounded because upstream documents the hooks as a config contract rather than a versioned hook API floor.",
             "OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask/permission prompt surface is documented, so confirm verdicts are downgraded to additionalContext alerts."
+          ]
+        }
+      ]
+    },
+    "opencode": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "opencode --version",
+      "contracts": [
+        {
+          "contract_id": "opencode-hooks-v1",
+          "agent_version": {
+            "min_inclusive": "0.0.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "opencode-plugin.js",
+          "hook_config_path_templates": [
+            "~/.config/opencode/plugins/defenseclaw.js"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "tool.execute.before",
+            "tool.execute.after"
+          ],
+          "aid_surfaces": [
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": false,
+          "native_otlp": false,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "tool.execute.before"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "opencode auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws on a block decision, aborting the tool.",
+            "Block is the only active verdict; tool.execute.after is observe-only. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
+            "Contract is unbounded (min 0.0.0): the plugin hook API is a stable contract rather than a versioned floor, matching the OpenHands precedent."
           ]
         }
       ]

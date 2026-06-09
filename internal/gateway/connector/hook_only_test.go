@@ -175,6 +175,108 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 	}
 }
 
+// TestHermesSetup_WritesFullLifecycleAndAutoAccept pins the
+// hermes-hooks-v2 setup contract: Setup must register every lifecycle
+// event in the cli-config.yaml `hooks:` block AND set hooks_auto_accept
+// so the hooks actually register on non-TTY/gateway runs (Hermes
+// silently skips un-accepted hooks there). Teardown must heal a
+// previously-missing config back to absent.
+func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, ".hermes", "config.yaml")
+	prev := HermesConfigPathOverride
+	HermesConfigPathOverride = cfgPath
+	t.Cleanup(func() { HermesConfigPathOverride = prev })
+
+	conn := NewHermesConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	cfg, err := readYAMLObject(cfgPath)
+	if err != nil {
+		t.Fatalf("read hermes config after setup: %v", err)
+	}
+	if v, _ := cfg["hooks_auto_accept"].(bool); !v {
+		t.Fatalf("hooks_auto_accept not set true after setup: %#v", cfg["hooks_auto_accept"])
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks block missing or wrong type: %#v", cfg["hooks"])
+	}
+	for _, event := range []string{
+		"pre_llm_call", "pre_tool_call", "post_tool_call", "post_llm_call",
+		"on_session_start", "on_session_end", "subagent_stop",
+	} {
+		if _, ok := hooks[event]; !ok {
+			t.Errorf("hooks block missing lifecycle event %q; got keys %v", event, mapKeys(hooks))
+		}
+	}
+
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if _, err := os.Stat(cfgPath); err == nil {
+		t.Fatalf("config still exists after teardown of previously-missing config")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat after teardown: %v", err)
+	}
+}
+
+// TestHermesSetup_RespectsExplicitAutoAcceptAndHealsUserConfig asserts
+// two coupled behaviors: (1) Setup does NOT override an operator's
+// explicit hooks_auto_accept:false, and (2) Teardown heals a
+// pre-existing config back to its pristine bytes (managed-file backup),
+// preserving the user's own hook and their auto-accept choice.
+func TestHermesSetup_RespectsExplicitAutoAcceptAndHealsUserConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, ".hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	pristine := "hooks_auto_accept: false\nhooks:\n  pre_tool_call:\n    - command: /usr/local/bin/my-own-hook.sh\n"
+	if err := os.WriteFile(cfgPath, []byte(pristine), 0o600); err != nil {
+		t.Fatalf("write pristine config: %v", err)
+	}
+	prev := HermesConfigPathOverride
+	HermesConfigPathOverride = cfgPath
+	t.Cleanup(func() { HermesConfigPathOverride = prev })
+
+	conn := NewHermesConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	cfg, err := readYAMLObject(cfgPath)
+	if err != nil {
+		t.Fatalf("read after setup: %v", err)
+	}
+	if v, ok := cfg["hooks_auto_accept"].(bool); !ok || v {
+		t.Fatalf("explicit hooks_auto_accept:false was overridden: %#v", cfg["hooks_auto_accept"])
+	}
+
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	got, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read after teardown: %v", err)
+	}
+	if string(got) != pristine {
+		t.Fatalf("teardown did not heal config to pristine bytes\n got: %q\nwant: %q", string(got), pristine)
+	}
+}
+
+func mapKeys(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // TestAntigravitySetup_WritesClaudeCodeNestedSchema pins the
 // hooks.json shape that agy v1.0.x actually evaluates and is the
 // regression guard for two cumulative empirical findings from the

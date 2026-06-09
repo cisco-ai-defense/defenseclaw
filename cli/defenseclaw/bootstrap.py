@@ -921,6 +921,18 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "Antigravity hooks not found yet",
             "defenseclaw setup mode antigravity",
         )
+    if connector == "opencode":
+        # opencode is governed by a bridge plugin DefenseClaw writes into
+        # opencode's auto-load plugin directory (no hooks.json to patch).
+        path = os.path.expanduser("~/.config/opencode/plugins/defenseclaw.js")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "OpenCode bridge plugin found")
+        return StepResult(
+            "Connector",
+            "warn",
+            "OpenCode bridge plugin not found yet",
+            "defenseclaw setup mode opencode",
+        )
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 
 

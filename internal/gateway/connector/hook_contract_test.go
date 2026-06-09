@@ -336,7 +336,7 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 		t.Fatalf("write hooks: %v", err)
 	}
 	entry := NewHookContractLockEntry(opts, conn, "test-build")
-	if entry.ContractID != "hermes-hooks-v1" {
+	if entry.ContractID != "hermes-hooks-v2" {
 		t.Fatalf("ContractID=%q", entry.ContractID)
 	}
 	if len(entry.HookScriptDigests) == 0 {
@@ -350,7 +350,7 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 		t.Fatalf("loaded ContractID=%q want %q", loaded.ContractID, entry.ContractID)
 	}
 	changed := loaded
-	changed.ContractID = "hermes-hooks-v2"
+	changed.ContractID = "hermes-hooks-v1"
 	if !HookContractLockDrifted(loaded, changed) {
 		t.Fatalf("contract change should be drift")
 	}

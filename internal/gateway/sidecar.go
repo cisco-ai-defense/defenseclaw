@@ -1978,7 +1978,13 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 	switch conn.Name() {
 	case "codex", "claudecode":
 		return false
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode":
+		// opencode is a hook-only connector (it governs tool execution via
+		// an auto-loaded JS bridge plugin, not a proxy listener), so it can
+		// share a process in multi-connector mode like the other hook
+		// connectors. Omitting it here made the gateway reject any
+		// multi-connector set containing opencode as "requires a proxy
+		// binding".
 		return false
 	default:
 		return true

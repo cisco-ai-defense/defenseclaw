@@ -1763,6 +1763,10 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 		if (action == "alert" || rawAction == "confirm") && additional != "" {
 			return map[string]interface{}{"additionalContext": additional}
 		}
+	case "opencode":
+		if action == "block" {
+			return map[string]interface{}{"decision": "deny", "reason": reason}
+		}
 	}
 	if rawAction == "confirm" && additional != "" && !caps.CanAskNative {
 		return map[string]interface{}{"systemMessage": additional}
@@ -1900,6 +1904,11 @@ func canonicalEvent(event string) string {
 	event = strings.ToLower(strings.TrimSpace(event))
 	event = strings.ReplaceAll(event, "_", "")
 	event = strings.ReplaceAll(event, "-", "")
+	// Strip dots so dotted plugin-hook names (opencode's
+	// "tool.execute.before") collapse to the same equality class as the
+	// flat/snake/camel variants other agents use. Mirrors
+	// canonicalHookEvent in the connector package.
+	event = strings.ReplaceAll(event, ".", "")
 	return event
 }
 
@@ -1907,7 +1916,11 @@ func isGenericToolInspectionEvent(event string) bool {
 	switch canonicalEvent(event) {
 	case "pretooluse", "beforetool", "pretoolcall", "permissionrequest",
 		"beforeshellexecution", "beforemcpexecution", "beforereadfile", "beforetabfileread",
-		"prereadcode", "prewritecode", "preruncommand", "premcptooluse":
+		"prereadcode", "prewritecode", "preruncommand", "premcptooluse",
+		// opencode plugin hook: tool.execute.before fires before a tool
+		// runs; the DefenseClaw bridge plugin throws to abort it. Routes
+		// through inspectToolPolicy so tool-call rules can block.
+		"toolexecutebefore":
 		return true
 	default:
 		return false
@@ -1938,6 +1951,9 @@ func isResultLikeEvent(event string) bool {
 		"postreadcode", "postwritecode", "postruncommand", "postmcptooluse",
 		"aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit",
 		"afteragentresponse", "afteragentthought", "afteragent", "aftermodel",
+		// opencode plugin hook: tool.execute.after fires after a tool
+		// returns; observe-only telemetry routed as a tool_result.
+		"toolexecuteafter",
 		// Antigravity 2.0 spec: PostInvocation fires after the LLM
 		// invocation completes and all associated tool calls have
 		// finished running. Best used for post-processing outputs,

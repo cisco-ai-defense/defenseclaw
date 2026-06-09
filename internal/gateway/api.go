@@ -497,7 +497,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
 			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
 		}
-		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"} {
+		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode"} {
 			if f, ok := connectorHookHandlerByName[name]; ok {
 				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
 			}
@@ -768,14 +768,21 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 		reg = getFallbackConnectorRegistry()
 	}
 	type connectorEntry struct {
-		Name               string                           `json:"name"`
-		Description        string                           `json:"description"`
-		Source             string                           `json:"source"`
-		ToolInspectionMode string                           `json:"tool_inspection_mode"`
-		SubprocessPolicy   string                           `json:"subprocess_policy"`
-		HookCapabilities   *connector.HookCapability        `json:"hook_capabilities,omitempty"`
-		Capabilities       *connector.ConnectorCapabilities `json:"capabilities,omitempty"`
-		Locations          *connector.ConnectorLocations    `json:"locations,omitempty"`
+		Name               string `json:"name"`
+		Description        string `json:"description"`
+		Source             string `json:"source"`
+		ToolInspectionMode string `json:"tool_inspection_mode"`
+		SubprocessPolicy   string `json:"subprocess_policy"`
+		// LLMTrafficMode ("proxy" | "hooks-only") tells the CLI whether a
+		// custom provider bound to this connector is enforced on the
+		// agent's own model traffic or only configures DefenseClaw's
+		// judge/aux model. Set for every connector (proxy connectors do
+		// not emit the ConnectorCapabilities struct, so it cannot live
+		// solely there).
+		LLMTrafficMode   string                           `json:"llm_traffic_mode"`
+		HookCapabilities *connector.HookCapability        `json:"hook_capabilities,omitempty"`
+		Capabilities     *connector.ConnectorCapabilities `json:"capabilities,omitempty"`
+		Locations        *connector.ConnectorLocations    `json:"locations,omitempty"`
 	}
 	avail := reg.Available()
 	entries := make([]connectorEntry, len(avail))
@@ -786,6 +793,7 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 			Source:             info.Source,
 			ToolInspectionMode: string(info.ToolInspectionMode),
 			SubprocessPolicy:   string(info.SubprocessPolicy),
+			LLMTrafficMode:     connector.LLMTrafficModeForConnector(info.Name),
 		}
 		if conn, ok := reg.Get(info.Name); ok {
 			opts := connector.SetupOpts{
@@ -920,7 +928,7 @@ func connectorModeFor(name string) map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode":
 		mode = "observability"
 		intercept = false
 		telemetry = []string{"hooks"}

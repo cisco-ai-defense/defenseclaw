@@ -87,12 +87,13 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/opt/local/bin",
     "/opt/local/sbin",
     # User-writable tool dirs (~/.local/bin, ~/.codex/packages,
-    # ~/.cargo/bin, ~/.nvm, ~/.asdf, ~/.pyenv, ~/.pipx,
+    # ~/.opencode/bin, ~/.cargo/bin, ~/.nvm, ~/.asdf, ~/.pyenv, ~/.pipx,
     # ~/Library/Application Support, /Applications, …) are intentionally
     # NOT trusted by default — a local agent running as the operator can
-    # plant a binary there (e.g. `codex`) and the passive scan would exec
-    # it. Operators who install discovery targets under a user-owned tool
-    # root (modern Codex CLI lives in ~/.codex/packages/standalone/...)
+    # plant a binary there (e.g. `codex` or `opencode`) and the passive
+    # scan would exec it. Operators who install discovery targets under a
+    # user-owned tool root (modern Codex CLI lives in
+    # ~/.codex/packages/standalone/...; opencode lives in ~/.opencode/bin)
     # must opt in explicitly via DEFENSECLAW_TRUSTED_BIN_PREFIXES
     # (``os.pathsep``-separated); the per-file/parent permission checks in
     # _is_trusted_binary_path still apply on top of any extension.
@@ -110,6 +111,7 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
 )
 
 
@@ -179,6 +181,19 @@ _SPECS: dict[str, _AgentSpec] = {
             "~/.gemini/antigravity-cli",
         ),
         "agy",
+        ("--version",),
+    ),
+    "opencode": _AgentSpec(
+        # opencode auto-loads plugins from ~/.config/opencode/plugins/;
+        # DefenseClaw installs its bridge there. opencode.json / the
+        # .opencode project dir are also signals the agent is present.
+        (
+            "~/.config/opencode/plugins/defenseclaw.js",
+            "~/.config/opencode/opencode.json",
+            "~/.config/opencode",
+            ".opencode",
+        ),
+        "opencode",
         ("--version",),
     ),
 }

@@ -28,7 +28,7 @@ external-script hook invocation. See **By-design connector limitations**
 below for the architectural reason and how the security guarantee is
 preserved without it.
 
-The Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, and OpenHands connectors do not
+The Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, and OpenCode connectors do not
 redirect LLM traffic through the proxy in v1. They are still first-class
 connectors with explicit hook, MCP, skill/rule/plugin/agent, CodeGuard, and
 telemetry capability rows where the vendor has documented local surfaces.
@@ -49,17 +49,34 @@ ruleset filtering by destination, with per-connector allowed hosts merged into
 one allowlist at boot (see [`ARCHITECTURE.md` → Firewall scope](ARCHITECTURE.md)
 and [`OBSERVABILITY-CONTRACT.md` → Connector dimension fields](OBSERVABILITY-CONTRACT.md)).
 
+## Custom-provider enforcement (LLM traffic mode)
+
+Provider resolution is global, but whether a [custom provider](/docs/setup/unified-llm-key)
+touches the *agent* is per-connector. Each connector reports an
+`llm_traffic_mode` on `GET /v1/connectors` (and in `ConnectorCapabilities`):
+
+| Connector class | `llm_traffic_mode` | A bound custom provider… |
+| --- | --- | --- |
+| OpenClaw, ZeptoClaw | `proxy` | is **enforced** on the agent's model traffic (agent upstream, judge, or both) |
+| every hook connector (Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot, OpenHands, Antigravity, OpenCode) | `hooks-only` | configures DefenseClaw's **judge/aux model only** — the agent's own model calls are never routed through or inspected |
+
+The CLI states this when binding (`setup llm`) and when listing
+(`setup provider list`), so an operator can't silently attach a custom provider
+to a hook connector believing it changes the agent's model.
+
 ## Platform support
 
 | Connector | macOS | Linux | Windows |
 | --------- | ----- | ----- | ------- |
 | OpenClaw, ZeptoClaw (proxy) | OK | OK | not supported |
-| Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands (hook-based) | OK | OK | OK |
+| Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, OpenCode (hook-based) | OK | OK | OK |
 
-Windows is **hook-only**: the eight hook-based connectors run their hook
+Windows is **hook-only**: the shell-hook connectors run their hook
 decisions natively in the `defenseclaw` binary (the agent invokes
 `defenseclaw hook --connector <name> --event <event>`), so no Git Bash, `jq`,
-or shell shims are required. The proxy connectors (OpenClaw, ZeptoClaw) need
+or shell shims are required. OpenCode is cross-platform without shims by a
+different route — its bridge plugin is JavaScript and calls the gateway over
+HTTP directly, so it never needs the native hook binary. The proxy connectors (OpenClaw, ZeptoClaw) need
 the local guardrail proxy, which DefenseClaw does not host on Windows; they are
 hidden from the connector pickers and rejected by setup there. The Go registry
 (`connectorSupportedOnOS`) and the Python `platform_support` module are the two
@@ -90,12 +107,13 @@ with a warning. Action mode fails closed unless
 | ZeptoClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
 | Codex | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Claude Code | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
-| Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | tool_call |
+| Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v2` / `v6` (v1 pinnable) | prompt, tool_call, tool_result, event_content |
 | Cursor | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Gemini CLI | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Copilot CLI | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | OpenHands | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| OpenCode | hook contract | unversioned / stable plugin API | `opencode-hooks-v1` / `v6` (JS bridge plugin) | tool_call, tool_result |
 
 No hook contract currently has a `max_exclusive` ceiling. We only add an upper
 bound when an upstream release publishes a breaking hook change; otherwise,
@@ -126,6 +144,7 @@ Claude Code is pinned to the current documented hook surface captured at
 | Gemini CLI | yes | no | none | `BeforeAgent`, `BeforeModel`, `BeforeTool`, `AfterTool`, `AfterAgent` | yes | user | `~/.gemini/settings.json` |
 | Copilot CLI | yes | yes | `preToolUse` / `PreToolUse` | `PreToolUse`, `PermissionRequest`, stop/failure hooks | no | user,workspace | `~/.copilot/hooks/defenseclaw.json` or `<workspace>/.github/hooks/defenseclaw.json` |
 | OpenHands | yes | no | none | `pre_tool_use`, `user_prompt_submit`, `stop` | yes | user,workspace | `~/.openhands/hooks.json` or `<workspace>/.openhands/hooks.json` |
+| OpenCode | yes | no | none | `tool.execute.before` | yes | user | `~/.config/opencode/plugins/defenseclaw.js` (JS bridge plugin) |
 
 `confirm` verdicts are rendered as native ask only when the event is listed in
 `ask_events`. Unsupported `confirm` decisions are downgraded explicitly while
@@ -141,6 +160,7 @@ preserving `raw_action: "confirm"` in the hook response.
 | Gemini CLI | `~/.gemini/settings.json` | `.gemini/skills`, `.agents/skills` | represented through skills/agents | `.gemini/extensions`, `~/.gemini/extensions` | `.gemini/agents`, `~/.gemini/agents` | opt-in skill |
 | Copilot CLI | `~/.copilot/mcp-config.json`, optional workspace `.github/mcp.json`, `.mcp.json` | `~/.copilot/skills`, optional workspace `.github/skills`, `.agents/skills` | optional workspace `.github/instructions` | CLI marketplace/plugin flow | `~/.copilot/agents`, optional workspace `.github/agents` | opt-in skill or rule |
 | OpenHands | `~/.openhands/mcp.json` | `~/.agents/skills`, `~/.openhands/skills/installed`, `~/.openhands/cache/skills/public-skills/skills` (`~/.openhands/skills`, `~/.openhands/microagents` discovery only; workspace equivalents with `--workspace`) | `AGENTS.md` discovery only when workspace-pinned | unsupported | unsupported | opt-in skill |
+| OpenCode | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) |
 
 CodeGuard native assets are never installed by CLI startup, `init`, sandbox
 setup, or sidecar setup. Operators must run `defenseclaw codeguard install`
@@ -156,7 +176,7 @@ non-CodeGuard paths require `--replace`.
 | Gemini CLI | native logs/metrics/traces in settings.json | loopback path token | hook telemetry |
 | Copilot CLI | native traces/metrics via documented env vars | header token | hook telemetry |
 | OpenHands | no documented native OTLP | header token | hook telemetry |
-| Hermes / Cursor / Windsurf | no documented native OTLP | n/a | hook-generated logs, spans, counters |
+| Hermes / Cursor / Windsurf / OpenCode | no documented native OTLP | n/a | hook-generated logs, spans, counters |
 
 ---
 
@@ -200,7 +220,8 @@ harmless (permission denied) if a regression ever lets it through.
 | Cursor | live | live | live\* | `cursor-agent -p --force` | gated on a one-time headless-hook validation |
 | Copilot CLI | live\* | live\* | live\* | `copilot -p` | user-level hooks only; entitled token |
 | OpenHands | live | — | — | `openhands --headless --json` | Docker runtime, Linux-only |
-| Hermes | contract-only | contract-only | contract-only | — | only `pre_tool_call` mapped |
+| OpenCode | contract-only | contract-only | contract-only | — | JS bridge plugin (tool.execute.before blocks); live smoke pending |
+| Hermes | contract-only | contract-only | contract-only | — | full lifecycle mapped (`hermes-hooks-v2`): `pre_tool_call` blocks, `pre_llm_call` injects context, `post_tool_call`/`post_llm_call`/session/subagent observe; live smoke pending |
 | Windsurf | contract-only | contract-only | contract-only | — | no headless CLI/SDK |
 | Antigravity | contract-only | contract-only | contract-only | — | headless auth is OAuth, no API key |
 

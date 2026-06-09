@@ -1,0 +1,72 @@
+---
+title: OpenCode
+description: The OpenCode connector wires DefenseClaw into opencode via a dependency-free JavaScript bridge plugin auto-loaded from ~/.config/opencode/plugins/, whose tool.execute.before hook blocks risky tool calls by throwing.
+keywords:
+  - DefenseClaw OpenCode connector
+  - opencode plugin
+  - opencode tool.execute.before
+  - opencode guardrail
+---
+
+The OpenCode connector wires DefenseClaw into [opencode](https://opencode.ai). Unlike the shell-hook connectors, opencode has no command-hook config surface — it auto-loads JavaScript/TypeScript plugins from `~/.config/opencode/plugins/` at startup. DefenseClaw installs a single, dependency-free **bridge plugin** (`defenseclaw.js`) there. The plugin's `tool.execute.before` hook forwards every tool call to the local DefenseClaw gateway and **throws** — aborting the tool, exactly like opencode's own `.env`-protection example — whenever the gateway returns a block decision. opencode continues to talk directly to its configured upstream model provider; DefenseClaw never inserts an LLM proxy.
+
+<Callout type="info">
+**No `opencode.json` edit, no shell shim.** Local plugins under `~/.config/opencode/plugins/` are loaded automatically, so installing the connector is just writing one file. The bridge uses the runtime's global `fetch`, so it needs no npm dependencies (and never triggers a `bun install`). Because the mechanism is a JavaScript plugin rather than a shell script, OpenCode is cross-platform — including Windows — without the native `defenseclaw hook` binary the shell-hook connectors rely on.
+</Callout>
+
+## Setup
+
+```bash
+defenseclaw setup opencode                # observe (default) - record only
+defenseclaw setup opencode --mode action  # block on policy hits by throwing
+```
+
+This connector is **global/user-scoped only**. DefenseClaw writes the bridge plugin to `~/.config/opencode/plugins/defenseclaw.js` (owner-only, `0o600`, because it carries the gateway token) with the gateway address, token, and fail mode substituted in at setup time. There is **no proxy-enforcement path** for OpenCode — blocking happens plugin-side by throwing inside `tool.execute.before`.
+
+#### Version contract
+
+The current contract is `opencode-hooks-v1` (the plugin API is documented as a stable contract rather than a versioned floor, so the contract is unbounded — `min 0.0.0`). `tool.execute.before` is the only blockable event; `tool.execute.after` is observe-only telemetry.
+
+## Lifecycle events
+
+| Event | When it fires | DefenseClaw role | Action verdict → behavior |
+| --- | --- | --- | --- |
+| `tool.execute.before` | Right before a tool (`bash`, `read`, `edit`, …) executes | Inspect tool args; intercept risky commands | `block` → gateway returns `{decision: "deny", reason}`; the bridge `throw`s `new Error(reason)`, aborting the tool |
+| `tool.execute.after` | Immediately after a tool returns | Capture diagnostics / flag secrets in output. **Cannot block** — tool already ran. | Observe-only (fire-and-forget; never adds latency) |
+
+opencode has no hook-driven ask or context-injection surface, so `confirm` verdicts fall back to allow and findings on `tool.execute.after` are telemetry only.
+
+## The bridge plugin
+
+DefenseClaw writes a single managed plugin file. Its `tool.execute.before` resolves the gateway verdict **before** throwing, so a fail-open transport error never turns into an accidental block:
+
+```js
+"tool.execute.before": async (input, output) => {
+  const verdict = await defenseclawPost("tool.execute.before", input.tool, output.args, cwd);
+  if (verdict) throw new Error(verdict.reason); // block: aborts the tool
+}
+```
+
+When the gateway is unreachable, the bridge honors the configured fail mode: `FAIL_MODE=closed` throws (fail closed); `FAIL_MODE=open` allows. Because the thrown `Error` is authoritative, OpenCode genuinely supports fail-closed — unlike the shell-hook connectors that can only fail open when their host process has already cached the hook path.
+
+## Local surfaces
+
+<Files>
+  <Folder name="~/.config/opencode/plugins" defaultOpen>
+    <File name="defenseclaw.js" />
+  </Folder>
+</Files>
+
+DefenseClaw v1 governs opencode tool execution via the bridge plugin only. opencode's MCP servers and provider config live in `opencode.json`, which DefenseClaw does not manage in v1, so MCP / skills / rules / plugins / agents surfaces are treated as unsupported and their panels are hidden while `claw.mode=opencode`.
+
+## Hook capabilities
+
+<HookEventsList connector="opencode" />
+
+## Disable
+
+```bash
+defenseclaw setup guardrail --disable
+```
+
+Teardown removes the managed `~/.config/opencode/plugins/defenseclaw.js` when it is unchanged since setup. If the operator hand-edited the file, teardown leaves it in place and `defenseclaw doctor` surfaces the lingering managed plugin. No tombstone is needed: opencode re-reads the plugins directory on each startup, so removing the file stops it loading.

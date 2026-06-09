@@ -35,7 +35,10 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 	}{
 		{"codex", func() Connector { return NewCodexConnector() }, true, true, true},
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, true, true, true},
-		{"hermes", func() Connector { return NewHermesConnector() }, false, true, true},
+		// Hermes sets Decode (like antigravity): its inspectable content
+		// is nested under a per-event `extra` object the generic
+		// normalizer can't read. See hermes_hook_profile.go.
+		{"hermes", func() Connector { return NewHermesConnector() }, true, true, true},
 		{"cursor", func() Connector { return NewCursorConnector() }, false, true, true},
 		{"windsurf", func() Connector { return NewWindsurfConnector() }, false, true, true},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, false, true, true},
@@ -46,6 +49,10 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		// wire shape that the generic normalizer can't read. See
 		// antigravity_hook_profile.go.
 		{"antigravity", func() Connector { return NewAntigravityConnector() }, true, true, true},
+		// opencode controls its own flat wire shape (the bridge plugin we
+		// ship), so it needs no Decode; Respond comes from the shared
+		// hookOnlyProfileRespond opencode case.
+		{"opencode", func() Connector { return NewOpenCodeConnector() }, false, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -300,6 +300,7 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "copilot",
         "openhands",
         "antigravity",
+        "opencode",
     }
 
 

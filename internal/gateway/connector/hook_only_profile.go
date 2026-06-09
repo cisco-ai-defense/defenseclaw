@@ -49,12 +49,9 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 	reason := connectorReasonForProfile(in.Req.ConnectorName, in.Action, in.Req.ToolName, in.Reason)
 	var output map[string]interface{}
 	switch in.Req.ConnectorName {
-	case "hermes":
-		if in.Action == "block" {
-			output = map[string]interface{}{"decision": "block", "reason": reason}
-		} else if in.Req.HookEventName == "pre_llm_call" && in.AdditionalContext != "" {
-			output = map[string]interface{}{"context": in.AdditionalContext}
-		}
+	// NOTE: hermes is intentionally absent — it owns a dedicated
+	// profile (hermes_hook_profile.go: hermesProfileRespond) wired in
+	// hookOnlyConnector.HookProfile, so it no longer shares this switch.
 	case "cursor":
 		switch in.Action {
 		case "block":
@@ -83,6 +80,14 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 			output = map[string]interface{}{"decision": "deny", "reason": reason}
 		} else if (in.Action == "alert" || in.RawAction == "confirm") && in.AdditionalContext != "" {
 			output = map[string]interface{}{"additionalContext": in.AdditionalContext}
+		}
+	case "opencode":
+		// The DefenseClaw bridge plugin reads .decision and throws on
+		// "deny"/"block" to abort the tool. opencode has no hook-driven
+		// ask or context-injection channel, so only block surfaces a
+		// body; everything else is observe-only.
+		if in.Action == "block" {
+			output = map[string]interface{}{"decision": "deny", "reason": reason}
 		}
 	case "antigravity":
 		output = antigravityHookOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, reason, in.AdditionalContext)

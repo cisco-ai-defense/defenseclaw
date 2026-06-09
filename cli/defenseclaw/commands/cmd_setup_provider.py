@@ -79,7 +79,7 @@ from typing import Any
 
 import click
 
-from defenseclaw import ux
+from defenseclaw import connector_paths, platform_support, ux
 from defenseclaw.context import AppContext, pass_ctx
 
 OVERLAY_FILENAME = "custom-providers.json"
@@ -1718,6 +1718,38 @@ def provider_list(app: AppContext) -> None:
         click.echo(f"  - {p.get('name')}: {', '.join(p.get('domains') or [])}")
     if overlay.ollama_ports:
         click.echo(f"  ollama_ports: {overlay.ollama_ports}")
+    _echo_provider_enforcement_legend(app)
+
+
+def _echo_provider_enforcement_legend(app: AppContext) -> None:
+    """Explain what binding any of these custom providers actually does,
+    keyed on the active connector's LLM traffic mode.
+
+    The overlay is global, but its *effect* is per-connector: a custom
+    provider is enforced on the agent's own model traffic only for the
+    proxy connectors (OpenClaw, ZeptoClaw); for every hook connector it
+    configures DefenseClaw's judge/aux model only.
+    """
+    guardrail = getattr(app.cfg, "guardrail", None) if app.cfg else None
+    connector = connector_paths.normalize(getattr(guardrail, "connector", "") or "openclaw")
+    click.echo()
+    if platform_support.is_proxy_connector(connector):
+        click.echo(
+            ux.dim(
+                f"  Active connector {connector!r} is a proxy connector: a bound "
+                "custom provider is enforced on the agent's model traffic "
+                "(agent upstream, judge, or both).",
+            )
+        )
+    else:
+        click.echo(
+            ux.dim(
+                f"  Active connector {connector!r} is a hook connector: a bound "
+                "custom provider configures DefenseClaw's judge/aux model only — "
+                "the agent's own model calls are not inspected. Only the proxy "
+                "connectors (openclaw, zeptoclaw) enforce it on agent traffic.",
+            )
+        )
 
 
 @provider.command("show")

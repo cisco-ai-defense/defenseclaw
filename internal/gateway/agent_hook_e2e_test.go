@@ -128,6 +128,13 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			topLevelOutput: "hook_output",
 			expectAction:   "block",
 		},
+		{
+			connector:      "opencode",
+			event:          "tool.execute.before",
+			toolName:       "bash",
+			topLevelOutput: "hook_output",
+			expectAction:   "block",
+		},
 	}
 
 	// Set up a real in-memory tracer so we can assert that the

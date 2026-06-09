@@ -118,6 +118,7 @@ import click
             "copilot",
             "openhands",
             "antigravity",
+            "opencode",
         ],
         case_sensitive=False,
     ),

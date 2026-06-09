@@ -36,7 +36,7 @@ import click
 # pulled name-by-name so the wizard call sites read like
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
-from defenseclaw import platform_support, ux
+from defenseclaw import connector_paths, platform_support, ux
 from defenseclaw.audit_actions import (
     ACTION_SETUP_CONNECTOR_MODE,
     ACTION_SETUP_GATEWAY,
@@ -663,6 +663,7 @@ def setup_llm(
             ux.kv(f"{label_prefix}.base_url", resolved.base_url)
         if resolved.instance_name:
             ux.kv(f"{label_prefix}.instance_name", resolved.instance_name)
+            _echo_custom_provider_enforcement(cfg)
         if run_ping:
             _run_llm_ping(resolved)
         return
@@ -2373,6 +2374,7 @@ _CONNECTOR_NAMES_FALLBACK = [
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
 ]
 
 
@@ -2475,6 +2477,15 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
+    "opencode": {
+        "label": "OpenCode",
+        "description": (
+            "auto-loaded JS bridge plugin (~/.config/opencode/plugins); "
+            "tool.execute.before blocking"
+        ),
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
 }
 
 _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
@@ -2549,6 +2560,13 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
             "hooks file, so DefenseClaw never patches workspace-local copies"
         ),
         "~/.defenseclaw/hooks/antigravity-hook.sh",
+    ),
+    "opencode": (
+        (
+            "~/.config/opencode/plugins/defenseclaw.js — DefenseClaw bridge "
+            "plugin auto-loaded by opencode; no opencode.json edit and no "
+            "shell-hook config patch"
+        ),
     ),
 }
 
@@ -2879,7 +2897,7 @@ def _hilt_support_note(connector: str) -> str:
             "Antigravity supports native PreToolUse ask; returning decision=ask "
             "from a hook overrides agy's --dangerously-skip-permissions flag."
         )
-    if connector in {"hermes", "windsurf", "geminicli", "openhands"}:
+    if connector in {"hermes", "windsurf", "geminicli", "openhands", "opencode"}:
         return (
             "This connector can block supported hook events but has no native human approval surface; "
             "confirm falls back explicitly."
@@ -4715,6 +4733,7 @@ for _observability_connector in (
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
 ):
     setup.add_command(_make_observability_setup_command(_observability_connector))
 
@@ -4751,6 +4770,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "copilot",
         "openhands",
         "antigravity",
+        "opencode",
     }
 )
 
@@ -4786,6 +4806,33 @@ def connector_llm_role(connector: str) -> str:
     if connector in _PROXY_BACKED_CONNECTORS:
         return "judge_and_agent"
     return "judge_only"
+
+
+def _echo_custom_provider_enforcement(cfg: Any) -> None:
+    """Print the honest, per-connector meaning of binding a custom
+    provider, keyed on the active connector's LLM traffic mode.
+
+    This closes the UX gap where an operator binds a custom provider
+    while guarding a hook connector and believes their agent now runs on
+    that model. It does not: on hook connectors a custom provider only
+    configures DefenseClaw's judge/aux model; the agent's own model
+    calls are never routed through or inspected by DefenseClaw. Only the
+    proxy connectors (OpenClaw, ZeptoClaw) enforce it on agent traffic.
+    """
+    connector = connector_paths.normalize(getattr(cfg.guardrail, "connector", "") or "openclaw")
+    if connector in _PROXY_BACKED_CONNECTORS:
+        ux.subhead(
+            f"Enforced: {connector} routes the agent's model traffic through "
+            "DefenseClaw, so this custom provider can serve the agent's "
+            "upstream model, the judge, or both.",
+        )
+    else:
+        ux.warn(
+            f"Judge/aux only: {connector} is a hook connector, so this custom "
+            "provider configures DefenseClaw's judge/aux model only. "
+            f"{connector}'s own model calls are NOT routed through or "
+            "inspected by DefenseClaw.",
+        )
 
 
 def _setup_guardrail_connector_alias(
