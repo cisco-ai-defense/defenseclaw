@@ -262,6 +262,7 @@ jobs:
           shopt -s nullglob
           assets=(
             dist/*.tar.gz
+            dist/*.zip
             dist/*.sbom.json
             dist/checksums.txt
             dist/checksums.txt.sig

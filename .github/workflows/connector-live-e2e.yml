@@ -8,7 +8,10 @@
 #     Builds DefenseClaw, then feeds golden stdin payloads into the *installed*
 #     hook entrypoint for every registry connector and asserts the gateway
 #     received the event, the verdict was shaped correctly, and teardown is
-#     clean. Fork-safe; a candidate to promote to a required PR check later.
+#     clean. Fork-safe; runs on pull requests as well — one always-on macOS
+#     cell (codex / macOS, intended as a required check) plus the full
+#     Linux + macOS + Windows matrix when connector code changes (see the
+#     `changes` gate job).
 #
 #   live-matrix (Layer B) — installs the real upstream agent at its latest
 #     version, wires it with `defenseclaw setup`, and drives lifecycle + forced
@@ -42,6 +45,13 @@ on:
   # nightly suites do not contend for the same hosted-runner pool.
   schedule:
     - cron: "0 9 * * *"
+  # Layer A also gates pull requests. Every PR runs one always-on
+  # cross-platform smoke cell (codex / macOS) so there is a required
+  # connector signal on each change; when the PR touches connector, hook,
+  # registry, contract-script, or this workflow, the run expands to the full
+  # Linux + macOS + Windows x 9-connector matrix (see the `changes` job).
+  # Layer B (live) stays manual-only and never runs for pull requests.
+  pull_request:
   workflow_dispatch:
     inputs:
       connector:
@@ -99,24 +109,76 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Gate — decide which contract cells to run for this event.
+  #
+  #   schedule / workflow_dispatch → full 3-OS x 9-connector matrix.
+  #   pull_request                 → just the always-on macOS smoke cell,
+  #                                  unless the PR touches connector / hook /
+  #                                  registry / contract-script / workflow
+  #                                  surfaces, in which case → full matrix.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Select contract cells
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.decide.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Need history back to the PR base so the path diff below is accurate.
+          fetch-depth: 0
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # Full 3-OS x 9-connector matrix for nightly + manual runs and for
+          # pull requests that touch connector-relevant code.
+          full='{"os":["ubuntu-latest","macos-latest","windows-latest"],"connector":["codex","claudecode","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity"]}'
+          # Always-on PR smoke: one connector on one cross-platform OS. macOS is
+          # chosen because ci.yml already guards the Windows hook path on every
+          # PR but has no macOS coverage at all — this adds the missing native
+          # macOS connector signal and is the cell to mark "required" in branch
+          # protection. Its check name is "Contract codex / macos-latest".
+          minimal='{"os":["macos-latest"],"connector":["codex"]}'
+
+          if [ "${EVENT}" != "pull_request" ]; then
+            echo "matrix=${full}" >> "$GITHUB_OUTPUT"
+            echo "event=${EVENT} -> full matrix"
+            exit 0
+          fi
+
+          changed="$(git diff --name-only "${BASE_SHA}"...HEAD)"
+          echo "Changed files in PR:"
+          printf '%s\n' "${changed}"
+
+          # connector / hook / registry / contract-script / workflow surfaces.
+          if printf '%s\n' "${changed}" | grep -qE \
+            -e '^internal/gateway/connector/' \
+            -e '^internal/cli/' \
+            -e '^cli/defenseclaw/inventory/' \
+            -e '^cli/defenseclaw/commands/cmd_setup\.py$' \
+            -e '^cli/defenseclaw/commands/cmd_init\.py$' \
+            -e '^test/e2e/' \
+            -e '^scripts/live-connector-e2e/' \
+            -e '^\.github/workflows/connector-live-e2e\.yml$'; then
+            echo "matrix=${full}" >> "$GITHUB_OUTPUT"
+            echo "connector-relevant change -> full Linux + macOS + Windows matrix"
+          else
+            echo "matrix=${minimal}" >> "$GITHUB_OUTPUT"
+            echo "no connector-relevant change -> macOS codex smoke only"
+          fi
+
+  # ---------------------------------------------------------------------------
   # Layer A — deterministic contract matrix (no secrets, every OS).
   # ---------------------------------------------------------------------------
   contract-matrix:
     name: Contract ${{ matrix.connector }} / ${{ matrix.os }}
+    needs: changes
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        connector:
-          - codex
-          - claudecode
-          - geminicli
-          - cursor
-          - copilot
-          - openhands
-          - hermes
-          - windsurf
-          - antigravity
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     # Native Windows hook execution is not yet proven on hosted runners;
     # keep Windows cells advisory until they go consistently green.
@@ -198,6 +260,16 @@ jobs:
       # hook` on Windows) and assert fire + verdict shaping + clean teardown.
       - name: Contract entrypoint smoke
         if: steps.select.outputs.run == 'true'
+        # Layer A runs agent-less, so the cached agent version is empty and the
+        # gateway resolves an "unversioned" hook contract. In action mode the
+        # gateway refuses to wire the connector (and thus never writes
+        # ~/.defenseclaw/hooks/<connector>-hook.sh) unless drift is accepted,
+        # which would make every golden-payload hook invocation exit 127. This
+        # is the intended no-agent/exploratory case, so opt in here. Belt and
+        # suspenders with the export in contract-smoke.sh, in case the gateway
+        # daemon is spawned without inheriting the script's environment.
+        env:
+          DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT: "1"
         run: bash scripts/live-connector-e2e/run.sh --layer contract --connector "${{ matrix.connector }}"
 
       - name: Upload contract results

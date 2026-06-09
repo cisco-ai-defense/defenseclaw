@@ -210,7 +210,7 @@ PY
 # directory the workflow uploads with actions/upload-artifact. Mirrors the
 # "Stage DefenseClaw logs" step in e2e.yml.
 dc_stage_logs() {
-  local stage="${1:-${TMPDIR:-/tmp}/defenseclaw-live-e2e-logs}"
+  local stage="${1:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/defenseclaw-live-e2e-logs}"
   rm -rf "${stage}"; mkdir -p "${stage}"
   if [ -d "${DEFENSECLAW_HOME}" ]; then
     local pat

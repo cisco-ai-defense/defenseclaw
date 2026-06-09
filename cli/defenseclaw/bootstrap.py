@@ -770,20 +770,12 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
 
 
 def _pid_file_running(pid_file: str) -> bool:
-    try:
-        with open(pid_file, encoding="utf-8") as fh:
-            raw = fh.read().strip()
-        try:
-            pid = int(raw)
-        except ValueError:
-            pid = int(json.loads(raw)["pid"])
-    except (FileNotFoundError, ValueError, KeyError, OSError, TypeError):
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
+    # Cross-platform liveness: a bare ``os.kill(pid, 0)`` is wrong on Windows
+    # (signal 0 is routed to a console-control event, not an existence probe),
+    # so a running gateway reads as stopped and init/restart decisions break.
+    from defenseclaw.process_liveness import pid_file_alive
+
+    return pid_file_alive(pid_file)
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:

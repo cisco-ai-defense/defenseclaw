@@ -36,6 +36,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import zipfile
 
 import click
 import requests
@@ -122,7 +123,7 @@ def upgrade(
         # with a clear warning rather than hard-failing operators on a
         # version they could otherwise install.
         artifact_names = [
-            f"defenseclaw_{target_version}_{os_name}_{arch}.tar.gz",
+            _gateway_archive_name(target_version, os_name, arch),
             f"defenseclaw-{target_version}-py3-none-any.whl",
             _UPGRADE_MANIFEST_FILENAME,
         ]
@@ -193,7 +194,7 @@ def upgrade(
         # incident.
         installed_gateway_path = _install_gateway(gw_binary_path, os_name, backup_dir=backup_dir)
         _verify_installed_gateway_version(installed_gateway_path, target_version)
-        _install_wheel(whl_path)
+        _install_wheel(whl_path, os_name)
 
         ux.banner("Running Migrations")
 
@@ -328,19 +329,45 @@ def _detect_platform() -> tuple[str, str]:
         ux.err(f"Unsupported architecture: {machine}", indent="  ")
         raise SystemExit(1)
 
-    if system not in ("darwin", "linux"):
+    if system not in ("darwin", "linux", "windows"):
         ux.err(f"Unsupported OS: {system}", indent="  ")
         raise SystemExit(1)
 
     return system, arch
 
 
+def _gateway_archive_name(version: str, os_name: str, arch: str) -> str:
+    """Release archive filename for the gateway, matching .goreleaser.yaml.
+
+    Windows ships a .zip (format_overrides); linux/darwin ship .tar.gz.
+    """
+    ext = "zip" if os_name == "windows" else "tar.gz"
+    return f"defenseclaw_{version}_{os_name}_{arch}.{ext}"
+
+
+def _gateway_binary_filename(os_name: str) -> str:
+    """Name of the gateway binary inside the release archive.
+
+    GoReleaser appends .exe on Windows; everywhere else it is bare.
+    """
+    return "defenseclaw.exe" if os_name == "windows" else "defenseclaw"
+
+
+def _installed_gateway_filename(os_name: str) -> str:
+    """Name the gateway is installed as on PATH.
+
+    shutil.which("defenseclaw-gateway") resolves the .exe via PATHEXT on
+    Windows, so the CLI finds it regardless of the suffix.
+    """
+    return "defenseclaw-gateway.exe" if os_name == "windows" else "defenseclaw-gateway"
+
+
 def _preflight_check(version: str, os_name: str, arch: str) -> None:
     """Verify release artifacts exist on GitHub before touching anything."""
-    tarball = f"defenseclaw_{version}_{os_name}_{arch}.tar.gz"
+    archive = _gateway_archive_name(version, os_name, arch)
     whl_name = f"defenseclaw-{version}-py3-none-any.whl"
     urls = [
-        f"{GITHUB_DL}/{version}/{tarball}",
+        f"{GITHUB_DL}/{version}/{archive}",
         f"{GITHUB_DL}/{version}/{whl_name}",
     ]
     for url in urls:
@@ -368,29 +395,36 @@ def _download_gateway(
 ) -> tuple[str, str]:
     """Download the gateway tarball, verify its checksum, and extract.
 
-    Returns ``(binary_path, tarball_name)``. The tarball name is returned
+    Returns ``(binary_path, archive_name)``. The archive name is returned
     so the caller can correlate this artifact with the published
     ``checksums.txt`` entry; we keep the binary path stable so existing
     callers don't break when checksum verification is opted into.
+
+    The archive is a .zip on Windows (containing defenseclaw.exe) and a
+    .tar.gz elsewhere (containing defenseclaw), matching .goreleaser.yaml.
     """
-    tarball = f"defenseclaw_{version}_{os_name}_{arch}.tar.gz"
-    url = f"{GITHUB_DL}/{version}/{tarball}"
+    archive = _gateway_archive_name(version, os_name, arch)
+    url = f"{GITHUB_DL}/{version}/{archive}"
 
     click.echo(f"  {ux.dim('→')} Downloading gateway binary ({os_name}/{arch}) ...")
-    dest = os.path.join(staging_dir, tarball)
+    dest = os.path.join(staging_dir, archive)
     _download_file(url, dest)
     if checksums is not None:
-        _verify_sha256(dest, tarball, checksums)
-    _extract_gateway_tarball(dest, staging_dir)
-    binary = os.path.join(staging_dir, "defenseclaw")
+        _verify_sha256(dest, archive, checksums)
+    if os_name == "windows":
+        _extract_gateway_zip(dest, staging_dir)
+    else:
+        _extract_gateway_tarball(dest, staging_dir)
+    binary_name = _gateway_binary_filename(os_name)
+    binary = os.path.join(staging_dir, binary_name)
     if not os.path.isfile(binary):
         ux.err(
-            "Gateway tarball did not contain the expected defenseclaw binary.",
+            f"Gateway archive did not contain the expected {binary_name} binary.",
             indent="  ",
         )
         raise SystemExit(1)
     ux.ok("Gateway binary downloaded")
-    return binary, tarball
+    return binary, archive
 
 
 def _download_wheel(
@@ -862,6 +896,38 @@ def _extract_gateway_tarball(tarball_path: str, staging_dir: str) -> None:
         raise SystemExit(1) from exc
 
 
+def _extract_gateway_zip(zip_path: str, staging_dir: str) -> None:
+    """Safely extract the Windows gateway .zip into ``staging_dir``.
+
+    Mirrors the defense-in-depth of ``_extract_gateway_tarball``: even a
+    checksum-verified archive is validated entry-by-entry so a malicious or
+    corrupted zip can never write outside the staging directory via absolute
+    paths or ``..`` traversal. ZIP has no symlink member type the stdlib will
+    materialize here, so the path checks are the relevant guard.
+    """
+    root = os.path.realpath(staging_dir)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for name in zf.namelist():
+                # Normalize Windows separators so a "..\\" entry is caught the
+                # same as "../" on a POSIX extractor.
+                normalized = name.replace("\\", "/")
+                if not normalized or normalized.startswith("/") or os.path.isabs(normalized):
+                    ux.err(f"Unsafe zip entry: {name!r}", indent="  ")
+                    raise SystemExit(1)
+                target = os.path.realpath(os.path.join(staging_dir, normalized))
+                if target != root and not target.startswith(root + os.sep):
+                    ux.err(f"Unsafe zip entry escapes staging dir: {name}", indent="  ")
+                    raise SystemExit(1)
+            zf.extractall(staging_dir)
+    except zipfile.BadZipFile as exc:
+        ux.err(f"Could not extract gateway zip: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+    except OSError as exc:
+        ux.err(f"Could not write gateway files from zip: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+
+
 def _verify_sha256(
     path: str,
     filename: str,
@@ -925,13 +991,16 @@ def _install_gateway(
     """
     install_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(install_dir, exist_ok=True)
-    target = os.path.join(install_dir, "defenseclaw-gateway")
+    target = os.path.join(install_dir, _installed_gateway_filename(os_name))
 
     if backup_dir and os.path.isfile(target):
-        snapshot = os.path.join(backup_dir, "defenseclaw-gateway.previous")
+        snapshot = os.path.join(
+            backup_dir, _installed_gateway_filename(os_name) + ".previous"
+        )
         try:
             shutil.copy2(target, snapshot)
-            os.chmod(snapshot, 0o755)
+            if os_name != "windows":
+                os.chmod(snapshot, 0o755)
             ux.ok(f"Snapshotted previous gateway → {snapshot}")
         except OSError as exc:
             ux.warn(
@@ -940,9 +1009,13 @@ def _install_gateway(
             )
 
     shutil.copy2(binary_path, target)
-    os.chmod(target, 0o755)
-    if os_name == "darwin":
-        subprocess.run(["codesign", "-f", "-s", "-", target], capture_output=True, check=False)
+    # chmod's executable bits are meaningless on Windows (and os.chmod there only
+    # toggles the read-only flag); the gateway was already stopped above, so the
+    # copy can overwrite the prior .exe.
+    if os_name != "windows":
+        os.chmod(target, 0o755)
+        if os_name == "darwin":
+            subprocess.run(["codesign", "-f", "-s", "-", target], capture_output=True, check=False)
     ux.ok("Gateway binary installed")
     return target
 
@@ -1067,15 +1140,26 @@ def _check_post_upgrade_drift(target_version: str) -> None:
     )
 
 
-def _install_wheel(whl_path: str) -> None:
-    """Install a pre-downloaded Python CLI wheel."""
+def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
+    """Install a pre-downloaded Python CLI wheel.
+
+    ``os_name`` defaults to the running platform; the upgrade flow passes the
+    detected OS explicitly. Windows venvs put executables under ``Scripts`` (not
+    ``bin``), and we expose the CLI via a ``defenseclaw.cmd`` shim because
+    ``os.symlink`` needs elevated/Developer-Mode privileges there.
+    """
+    if os_name is None:
+        os_name = platform.system().lower()
+
     uv = shutil.which("uv")
     if not uv:
         ux.err("uv not found on PATH — cannot update Python CLI", indent="  ")
         raise SystemExit(1)
 
     venv = os.path.expanduser("~/.defenseclaw/.venv")
-    venv_python = os.path.join(venv, "bin", "python")
+    scripts_subdir = "Scripts" if os_name == "windows" else "bin"
+    python_exe = "python.exe" if os_name == "windows" else "python"
+    venv_python = os.path.join(venv, scripts_subdir, python_exe)
 
     if not os.path.isfile(venv_python):
         click.echo(f"  {ux.dim('→')} Creating venv ...")
@@ -1085,12 +1169,22 @@ def _install_wheel(whl_path: str) -> None:
 
     install_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(install_dir, exist_ok=True)
-    symlink = os.path.join(install_dir, "defenseclaw")
-    venv_bin = os.path.join(venv, "bin", "defenseclaw")
-    if os.path.isfile(venv_bin):
-        if os.path.islink(symlink) or os.path.exists(symlink):
-            os.remove(symlink)
-        os.symlink(venv_bin, symlink)
+
+    if os_name == "windows":
+        cli_exe = os.path.join(venv, "Scripts", "defenseclaw.exe")
+        shim = os.path.join(install_dir, "defenseclaw.cmd")
+        if os.path.isfile(cli_exe):
+            # PATHEXT includes .CMD, so `defenseclaw` and
+            # shutil.which("defenseclaw") both resolve to this shim.
+            with open(shim, "w", encoding="ascii", newline="\r\n") as f:
+                f.write(f'@echo off\r\n"{cli_exe}" %*\r\n')
+    else:
+        symlink = os.path.join(install_dir, "defenseclaw")
+        venv_bin = os.path.join(venv, "bin", "defenseclaw")
+        if os.path.isfile(venv_bin):
+            if os.path.islink(symlink) or os.path.exists(symlink):
+                os.remove(symlink)
+            os.symlink(venv_bin, symlink)
     ux.ok("Python CLI installed")
 
 

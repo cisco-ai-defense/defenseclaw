@@ -12,6 +12,21 @@ RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/b
 
 DIST_DIR    := dist
 
+# Cross-platform virtualenv / executable layout. Windows Python venvs expose
+# console entry points under Scripts/ (not bin/) and binaries carry a .exe
+# suffix, which Go also appends to its build output. Detect the host once and
+# parameterize the handful of install paths that differ so `make install` works
+# on hosted Windows runners (the connector contract matrix) as well as
+# Linux/macOS. $(OS) is set to "Windows_NT" by Windows itself and inherited by
+# the MSYS/Git-Bash shell make runs there; it is unset elsewhere.
+ifeq ($(OS),Windows_NT)
+VENV_BIN := $(VENV)/Scripts
+EXE      := .exe
+else
+VENV_BIN := $(VENV)/bin
+EXE      :=
+endif
+
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
@@ -264,20 +279,20 @@ pycli: _bundle-data
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install from https://docs.astral.sh/uv/"; exit 1; }
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv venv $(VENV) --python 3.12 --clear
-	uv pip install -e . --python $(VENV)/bin/python
+	uv pip install -e . --python $(VENV_BIN)/python$(EXE)
 
 dev-pycli: pycli
-	uv pip install --group dev --python $(VENV)/bin/python
+	uv pip install --group dev --python $(VENV_BIN)/python$(EXE)
 	@echo ""
 	@echo "Done. Activate the environment and run:"
 	@echo "  source $(VENV)/bin/activate"
 	@echo "  defenseclaw --help"
 
 gateway: sync-openclaw-extension
-	go build $(GOFLAGS) -o $(GATEWAY) ./cmd/defenseclaw
-	@echo "Built $(GATEWAY)"
-	@echo "  Run with: ./$(GATEWAY)"
-	@echo "  Check status: ./$(GATEWAY) status"
+	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
+	@echo "Built $(GATEWAY)$(EXE)"
+	@echo "  Run with: ./$(GATEWAY)$(EXE)"
+	@echo "  Check status: ./$(GATEWAY)$(EXE) status"
 
 # sync-openclaw-extension copies the runtime files of the DefenseClaw
 # OpenClaw plugin into internal/gateway/connector/openclaw_extension so
@@ -352,7 +367,7 @@ gateway-cross: sync-openclaw-extension
 	@echo "Built $(BINARY)-$(GOOS)-$(GOARCH)"
 
 gateway-run: gateway
-	./$(GATEWAY)
+	./$(GATEWAY)$(EXE)
 
 start: gateway
 	@./scripts/start.sh $(ARGS)
@@ -371,8 +386,8 @@ plugin:
 
 cli-install: pycli
 	@mkdir -p $(INSTALL_DIR)
-	@ln -sf "$(CURDIR)/$(VENV)/bin/defenseclaw" "$(INSTALL_DIR)/defenseclaw"
-	@ln -sf "$(CURDIR)/$(VENV)/bin/litellm" "$(INSTALL_DIR)/litellm" 2>/dev/null || true
+	@ln -sf "$(CURDIR)/$(VENV_BIN)/defenseclaw$(EXE)" "$(INSTALL_DIR)/defenseclaw$(EXE)"
+	@ln -sf "$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" "$(INSTALL_DIR)/litellm$(EXE)" 2>/dev/null || true
 	@# Expose the scanner entry points (skill-scanner, mcp-scanner,
 	@# plus the -api / -pre-commit siblings) on PATH via the same
 	@# ~/.local/bin symlink pattern we already use for the main CLI.
@@ -384,9 +399,9 @@ cli-install: pycli
 	@# break install; the doctor check surfaces any real misses.
 	@for tool in skill-scanner skill-scanner-api skill-scanner-pre-commit \
 	             mcp-scanner mcp-scanner-api; do \
-		src="$(CURDIR)/$(VENV)/bin/$$tool"; \
+		src="$(CURDIR)/$(VENV_BIN)/$$tool$(EXE)"; \
 		if [ -x "$$src" ]; then \
-			ln -sf "$$src" "$(INSTALL_DIR)/$$tool"; \
+			ln -sf "$$src" "$(INSTALL_DIR)/$$tool$(EXE)"; \
 		fi; \
 	done
 	@echo "Installed defenseclaw CLI to $(INSTALL_DIR)"
@@ -405,16 +420,16 @@ gateway-install: cli-install gateway
 	@# entry, so the running process keeps the old inode and upgrades work
 	@# live. We copy to a sibling temp file first so a partial write can
 	@# never clobber a working binary.
-	@gwt="$(INSTALL_DIR)/$(GATEWAY)"; \
+	@gwt="$(INSTALL_DIR)/$(GATEWAY)$(EXE)"; \
 	tmp="$$gwt.new.$$$$"; \
 	trap 'rm -f "$$tmp"' EXIT INT TERM; \
-	cp $(GATEWAY) "$$tmp"; \
+	cp $(GATEWAY)$(EXE) "$$tmp"; \
 	chmod +x "$$tmp"; \
 	mv -f "$$tmp" "$$gwt"
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
-		codesign -f -s - $(INSTALL_DIR)/$(GATEWAY) 2>/dev/null || true; \
+		codesign -f -s - $(INSTALL_DIR)/$(GATEWAY)$(EXE) 2>/dev/null || true; \
 	fi
-	@echo "Installed $(GATEWAY) to $(INSTALL_DIR)"
+	@echo "Installed $(GATEWAY)$(EXE) to $(INSTALL_DIR)"
 	@# If a sidecar is already running it kept the old inode; tell the
 	@# operator so they know a restart is needed to pick up the new build.
 	@# Use pgrep -x against the *basename* only — `pgrep -f "$(GATEWAY)"`
@@ -423,7 +438,7 @@ gateway-install: cli-install gateway
 	@# it would fire a false "sidecar is running" hint on every build.
 	@if pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
 		echo "  Gateway sidecar is running an older build — restart with:"; \
-		echo "    $(INSTALL_DIR)/$(GATEWAY) restart"; \
+		echo "    $(INSTALL_DIR)/$(GATEWAY)$(EXE) restart"; \
 	fi
 	@if ! echo "$$PATH" | grep -q "$(INSTALL_DIR)"; then \
 		echo ""; \
@@ -668,15 +683,29 @@ _bundle-data:
 	@# at bundles/llm/; _data/llm/ is the gitignored build-staging copy.
 	cp bundles/llm/model_catalog.json cli/defenseclaw/_data/llm/
 	@# splunk_local_bridge and local_observability_stack are bind-mounted by Docker
-	@# (Grafana, Loki, Splunk, etc.) when `defenseclaw obs up` is running. We must
-	@# rsync-with-delete instead of `rm -rf && cp -r` because Docker Desktop on
-	@# macOS captures the directory inode at container start time; replacing the
-	@# inode silently empties the in-container view of the bind-mounted volume
-	@# until the container is recreated. rsync --inplace --delete keeps the inode
-	@# stable, mutates files in place, and prunes anything no longer in bundles/
-	@# so dashboard / dashcfg edits propagate without restarting the obs stack.
-	rsync -a --delete --inplace bundles/splunk_local_bridge/        cli/defenseclaw/_data/splunk_local_bridge/
-	rsync -a --delete --inplace bundles/local_observability_stack/  cli/defenseclaw/_data/local_observability_stack/
+	@# (Grafana, Loki, Splunk, etc.) when `defenseclaw obs up` is running. Prefer
+	@# rsync-with-delete over `rm -rf && cp -r` because Docker Desktop on macOS
+	@# captures the directory inode at container start time; replacing the inode
+	@# silently empties the in-container view of the bind-mounted volume until the
+	@# container is recreated. rsync --inplace --delete keeps the inode stable,
+	@# mutates files in place, and prunes anything no longer in bundles/ so
+	@# dashboard / dashcfg edits propagate without restarting the obs stack.
+	@#
+	@# Hosted Windows runners ship no rsync (`make install` for the connector
+	@# contract matrix died here with CreateProcess failed). Fall back to a plain
+	@# mirror there. That fallback loses inode stability, but the obs Docker stack
+	@# — the only consumer of that property — never runs on those Windows build
+	@# hosts, so the tradeoff is safe. Mirrors the rsync-or-cp guard in
+	@# sync-openclaw-extension above.
+	@for d in splunk_local_bridge local_observability_stack; do \
+	  if command -v rsync >/dev/null 2>&1; then \
+	    rsync -a --delete --inplace "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	  else \
+	    rm -rf "cli/defenseclaw/_data/$$d"; \
+	    mkdir -p "cli/defenseclaw/_data/$$d"; \
+	    cp -R "bundles/$$d/." "cli/defenseclaw/_data/$$d/"; \
+	  fi; \
+	done
 	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
@@ -737,7 +766,7 @@ dist-clean:
 	rm -rf sandbox-test-*
 
 clean:
-	rm -f $(GATEWAY) $(BINARY)-linux-* $(BINARY)-darwin-*
+	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(BINARY)-linux-* $(BINARY)-darwin-*
 	rm -rf $(VENV) cli/*.egg-info
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml
