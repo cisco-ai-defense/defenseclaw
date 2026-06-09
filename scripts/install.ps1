@@ -27,9 +27,13 @@
       * <home>\bin\defenseclaw-gateway.exe  (the Go gateway/sidecar binary)
       * <home>\bin\defenseclaw.cmd          (shim to the CLI in the venv)
 
-    and adds <home>\bin to the user PATH. Only Python + uv are required; no Go,
+    and adds that bin dir to the user PATH. Only Python + uv are required; no Go,
     Node.js, or git. Connector-specific wiring (Codex, Claude Code, ...) is done
     by the cross-platform CLI via `defenseclaw init` / `quickstart`.
+
+    Layout matches scripts/install.sh and `defenseclaw upgrade`: binaries land in
+    %USERPROFILE%\.local\bin and the CLI venv lives in
+    %USERPROFILE%\.defenseclaw\.venv, so an installed setup upgrades in place.
 
 .EXAMPLE
     irm https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.ps1 | iex
@@ -73,7 +77,10 @@ try {
 $Repo = "cisco-ai-defense/defenseclaw"
 $DefenseClawHome = if ($env:DEFENSECLAW_HOME) { $env:DEFENSECLAW_HOME } else { Join-Path $env:USERPROFILE ".defenseclaw" }
 $Venv = Join-Path $DefenseClawHome ".venv"
-$InstallDir = Join-Path $DefenseClawHome "bin"
+# Binaries go to %USERPROFILE%\.local\bin to match scripts/install.sh and
+# `defenseclaw upgrade` (which replaces the gateway there). The venv stays under
+# DEFENSECLAW_HOME so a custom home still relocates the heavy CLI environment.
+$InstallDir = Join-Path $env:USERPROFILE ".local\bin"
 $OpenClawVersion = "2026.3.24"
 
 # Keep in sync with scripts/install.sh CONNECTOR_CHOICES and

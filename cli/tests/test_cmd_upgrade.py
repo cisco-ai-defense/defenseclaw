@@ -4,6 +4,7 @@ import json
 import os
 import tarfile
 import unittest
+import zipfile
 from contextlib import ExitStack
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -14,12 +15,14 @@ from defenseclaw.commands.cmd_upgrade import (
     _assert_required_cli_migrations,
     _check_post_upgrade_drift,
     _create_backup,
+    _detect_platform,
     _download_checksums,
     _download_file,
     _download_gateway,
     _download_upgrade_manifest,
     _fetch_release_asset_digests,
     _fill_missing_checksums_from_release_assets,
+    _gateway_archive_name,
     _install_gateway,
     _install_wheel,
     _normalize_target_version,
@@ -618,6 +621,67 @@ class TestGatewayTarballExtraction(unittest.TestCase):
             with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
                 with self.assertRaises(SystemExit) as ctx:
                     _download_gateway("9.9.9", "darwin", "arm64", tmp)
+            self.assertEqual(ctx.exception.code, 1)
+
+
+class TestGatewayWindowsArchive(unittest.TestCase):
+    """Windows ships a .zip containing defenseclaw.exe; the upgrade path must
+    download, validate, and extract it the same way it does the .tar.gz."""
+
+    @staticmethod
+    def _write_zip(path, entries):
+        with zipfile.ZipFile(path, "w") as zf:
+            for name, payload in entries.items():
+                zf.writestr(name, payload)
+
+    def test_archive_name_is_zip_on_windows_tarball_elsewhere(self):
+        self.assertEqual(
+            _gateway_archive_name("9.9.9", "windows", "amd64"),
+            "defenseclaw_9.9.9_windows_amd64.zip",
+        )
+        self.assertEqual(
+            _gateway_archive_name("9.9.9", "linux", "arm64"),
+            "defenseclaw_9.9.9_linux_arm64.tar.gz",
+        )
+
+    def test_detect_platform_allows_windows(self):
+        with patch("platform.system", return_value="Windows"), \
+             patch("platform.machine", return_value="AMD64"):
+            self.assertEqual(_detect_platform(), ("windows", "amd64"))
+
+    def test_download_gateway_extracts_exe_from_zip(self):
+        with TemporaryDirectory() as tmp:
+
+            def fake_download(_url, dest):
+                self._write_zip(dest, {"defenseclaw.exe": "MZ\x00binary"})
+
+            with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
+                binary, archive_name = _download_gateway("9.9.9", "windows", "amd64", tmp)
+
+            self.assertEqual(archive_name, "defenseclaw_9.9.9_windows_amd64.zip")
+            self.assertTrue(binary.endswith("defenseclaw.exe"))
+            self.assertTrue(os.path.isfile(binary))
+
+    def test_download_gateway_rejects_zip_without_exe(self):
+        with TemporaryDirectory() as tmp:
+
+            def fake_download(_url, dest):
+                self._write_zip(dest, {"README.md": "missing binary"})
+
+            with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
+                with self.assertRaises(SystemExit) as ctx:
+                    _download_gateway("9.9.9", "windows", "amd64", tmp)
+            self.assertEqual(ctx.exception.code, 1)
+
+    def test_download_gateway_rejects_zip_path_traversal(self):
+        with TemporaryDirectory() as tmp:
+
+            def fake_download(_url, dest):
+                self._write_zip(dest, {"../evil.exe": "nope"})
+
+            with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
+                with self.assertRaises(SystemExit) as ctx:
+                    _download_gateway("9.9.9", "windows", "amd64", tmp)
             self.assertEqual(ctx.exception.code, 1)
 
 
