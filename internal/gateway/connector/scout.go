@@ -95,7 +95,7 @@ func (c *ScoutConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			InstallTargets: []string{"skill"},
 			RequiresOptIn:  true,
 			Notes: []string{
-				"Scout custom skills are documented as SKILL.md directories under ~/.copilot/skills; ~/.copilot/m-skills is discovered for Microsoft-managed workspace skills.",
+				"Scout skills are documented under ~/.copilot/bundled-skills, ~/.copilot/m-skills, and ~/.copilot/skills; DefenseClaw writes only explicit opt-in skills to ~/.copilot/skills.",
 			},
 		},
 		Rules:   unsupportedSurface("Scout does not publish a separate local rules install surface."),
@@ -147,7 +147,8 @@ func (c *ScoutConnector) ComponentTargets(cwd string) map[string][]string {
 func scoutSkillPaths(opts SetupOpts) []string {
 	_ = opts
 	return uniqueNonEmptyStrings([]string{
-		homePath(".copilot", "skills"),
+		homePath(".copilot", "bundled-skills"),
 		homePath(".copilot", "m-skills"),
+		homePath(".copilot", "skills"),
 	})
 }

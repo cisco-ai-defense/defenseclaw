@@ -134,7 +134,8 @@ enabled hooks by default, Cursor `1.7.0` introduced beta hooks, Hermes
 prompt hooks to the Cascade pre-hook set, and Copilot CLI `1.0.18` is the first
 release containing every event in the current DefenseClaw Copilot contract.
 Microsoft Scout is not hook-gated because the public preview docs expose local
-skill directories (`~/.copilot/skills`, `~/.copilot/m-skills`) but no local
+skill directories (`~/.copilot/bundled-skills`, `~/.copilot/m-skills`,
+`~/.copilot/skills`) but no local
 hook/proxy enforcement surface DefenseClaw can patch.
 OpenHands uses the current documented `.openhands/hooks.json` contract, has
 been validated with `OpenHands CLI 1.16.0`, and is accepted as unversioned
@@ -170,7 +171,7 @@ preserving `raw_action: "confirm"` in the hook response.
 | Windsurf | existing documented/user MCP paths only | unsupported | existing documented/user rules paths only | unsupported | unsupported | opt-in rule only when a rules path exists |
 | Gemini CLI | `~/.gemini/settings.json` | `.gemini/skills`, `.agents/skills` | represented through skills/agents | `.gemini/extensions`, `~/.gemini/extensions` | `.gemini/agents`, `~/.gemini/agents` | opt-in skill |
 | Copilot CLI | `~/.copilot/mcp-config.json`, optional workspace `.github/mcp.json`, `.mcp.json` | `~/.copilot/skills`, optional workspace `.github/skills`, `.agents/skills` | optional workspace `.github/instructions` | CLI marketplace/plugin flow | `~/.copilot/agents`, optional workspace `.github/agents` | opt-in skill or rule |
-| Microsoft Scout | no documented local MCP install config | `~/.copilot/skills`, `~/.copilot/m-skills` | unsupported | unsupported | unsupported | opt-in skill |
+| Microsoft Scout | no documented local MCP install config | `~/.copilot/bundled-skills`, `~/.copilot/m-skills`, `~/.copilot/skills` | unsupported | unsupported | unsupported | opt-in skill |
 | OpenHands | `~/.openhands/mcp.json` | `~/.agents/skills`, `~/.openhands/skills/installed`, `~/.openhands/cache/skills/public-skills/skills` (`~/.openhands/skills`, `~/.openhands/microagents` discovery only; workspace equivalents with `--workspace`) | `AGENTS.md` discovery only when workspace-pinned | unsupported | unsupported | opt-in skill |
 | Antigravity | `~/.gemini/config/mcp_config.json`, `<workspace>/.agents/mcp_config.json` (read/write); `<plugin>/mcp_config.json` discovery only | AgentSkills folder form read/write: `~/.gemini/config/skills/<skill>/SKILL.md`, `<workspace>/.agents/skills/<skill>/SKILL.md`; CLI direct `~/.gemini/antigravity-cli/skills/*.md` discovery only | `~/.gemini/GEMINI.md`, `<workspace>/.agents/rules/`, `<plugin>/rules/*.md` discovery only | `~/.gemini/config/plugins/<plugin>/`, `~/.gemini/antigravity-cli/plugins/<plugin>/`, `<workspace>/.agents/plugins/<plugin>/` discovery/scan only | plugin-contained `<plugin>/agents/` discovery only; standalone agents unsupported | opt-in skill |
 | OpenCode | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) |

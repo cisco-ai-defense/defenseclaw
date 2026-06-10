@@ -173,7 +173,7 @@
         "scope": "none"
       },
       "hilt": "Scout has no documented hook or proxy surface for DefenseClaw runtime approvals. DefenseClaw supports local skill discovery and explicit CodeGuard skill installation only.",
-      "notes": "Scout is powered by OpenClaw, but the public preview docs currently expose ~/.copilot/skills and ~/.copilot/m-skills rather than a DefenseClaw patchable hook contract."
+      "notes": "Scout is powered by OpenClaw, but the public preview docs currently expose ~/.copilot/bundled-skills, ~/.copilot/m-skills, and ~/.copilot/skills rather than a DefenseClaw patchable hook contract."
     },
     {
       "id": "openhands",

@@ -656,8 +656,9 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 		})
 	case "scout":
 		return dedupNonEmpty([]string{
-			filepath.Join(home, ".copilot", "skills"),
+			filepath.Join(home, ".copilot", "bundled-skills"),
 			filepath.Join(home, ".copilot", "m-skills"),
+			filepath.Join(home, ".copilot", "skills"),
 		})
 	case "openhands":
 		return dedupNonEmpty([]string{

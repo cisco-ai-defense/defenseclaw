@@ -2653,8 +2653,9 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.defenseclaw/hooks/copilot-hook.sh",
     ),
     "scout": (
+        "~/.copilot/bundled-skills documented bundled skill directory",
+        "~/.copilot/m-skills documented workspace skill directory",
         "~/.copilot/skills documented custom skill directory",
-        "~/.copilot/m-skills discovered Microsoft-managed workspace skill directory",
         "No DefenseClaw hook/proxy config is written until Microsoft publishes a Scout hook contract",
     ),
     "openhands": (

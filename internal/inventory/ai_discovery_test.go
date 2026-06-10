@@ -46,6 +46,34 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	}
 }
 
+func TestScoutSignatureAvoidsSharedCopilotIdentitySignals(t *testing.T) {
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	var scout *AISignature
+	for i := range sigs {
+		if sigs[i].ID == "scout" {
+			scout = &sigs[i]
+			break
+		}
+	}
+	if scout == nil {
+		t.Fatal("scout signature missing")
+	}
+	if len(scout.ConfigPaths) != 0 {
+		t.Fatalf("Scout config paths should not use shared .copilot paths as identity evidence: %v", scout.ConfigPaths)
+	}
+	if len(scout.DomainPatterns) != 0 {
+		t.Fatalf("Scout domain patterns should stay Scout-specific; got %v", scout.DomainPatterns)
+	}
+	for _, pattern := range scout.HistoryPatterns {
+		if pattern == "scout" {
+			t.Fatal("bare scout shell-history pattern is too generic")
+		}
+	}
+}
+
 func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
 	tmp := t.TempDir()
 	packDir := filepath.Join(tmp, "signature-packs")

@@ -404,22 +404,14 @@
         "Microsoft Scout",
         "Clawpilot"
       ],
-      "config_paths": [
-        "~/.copilot/skills",
-        "~/.copilot/m-skills",
-        "~/.copilot"
-      ],
+      "config_paths": [],
       "extension_ids": [],
       "mcp_paths": [],
       "package_names": [],
       "env_var_names": [],
-      "domain_patterns": [
-        "microsoft.com",
-        "microsoft365.com"
-      ],
+      "domain_patterns": [],
       "history_patterns": [
         "microsoft scout",
-        "scout",
         "clawpilot"
       ],
       "application_names": [
