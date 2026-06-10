@@ -29,6 +29,7 @@ from defenseclaw.registries.ssrf import (
     SSRFError,
     guard_git_url,
     guard_url,
+    pinned_getaddrinfo,
     resolve_and_pin,
 )
 
@@ -289,6 +290,58 @@ class TestGitGuard(unittest.TestCase):
     def test_file_url_rejected(self):
         with self.assertRaises(SSRFError):
             guard_git_url("file:///srv/registry.git")
+
+
+class TestPinnedGetaddrinfo(unittest.TestCase):
+    """F-0344: the getaddrinfo pin closes the DNS-rebind TOCTOU window for
+    clients (e.g. the async-httpx MCP scanner SDK) that re-resolve the host
+    at connect time instead of honouring a urllib3-level connect pin."""
+
+    def test_pinned_host_resolves_to_vetted_ip(self):
+        import socket
+
+        # Inside the pin, a lookup for the vetted host returns the pinned
+        # IP — NOT whatever a (rebinding) DNS would now answer.
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            infos = socket.getaddrinfo("rebind.example", 443)
+        addrs = {info[4][0] for info in infos}
+        self.assertEqual(addrs, {"93.184.216.34"})
+
+    def test_unexpected_host_is_refused(self):
+        import socket
+
+        # A side-channel lookup for a *different* host during the pinned
+        # operation is refused, so a library cannot escape to an unvetted
+        # (and possibly internal) destination mid-request.
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            with self.assertRaises(SSRFError):
+                socket.getaddrinfo("evil.internal", 443)
+
+    def test_getaddrinfo_restored_after_block(self):
+        import socket
+
+        original = socket.getaddrinfo
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            pass
+        self.assertIs(socket.getaddrinfo, original)
+
+    def test_getaddrinfo_restored_on_exception(self):
+        import socket
+
+        original = socket.getaddrinfo
+        with self.assertRaises(RuntimeError):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                raise RuntimeError("boom")
+        self.assertIs(socket.getaddrinfo, original)
+
+    def test_ip_literal_matching_pin_is_allowed(self):
+        import socket
+
+        # A client that pre-resolves and re-calls getaddrinfo with the IP
+        # literal equal to the pin is allowed through.
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            infos = socket.getaddrinfo("93.184.216.34", 443)
+        self.assertTrue(infos)
 
 
 if __name__ == "__main__":

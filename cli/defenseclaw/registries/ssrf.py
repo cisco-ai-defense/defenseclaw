@@ -27,10 +27,12 @@ mocked in tests by passing a custom ``resolver`` callback.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import os
 import socket
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
 from urllib.parse import urlparse
 
 # RFC 6598 carrier-grade NAT range. Python's ``ipaddress.is_private``
@@ -202,6 +204,71 @@ def resolve_and_pin(
         raise SSRFError(f"could not pin a usable IP for host {host!r}")
     port = parsed.port or (443 if scheme == "https" else 80)
     return safe_ip, host, port
+
+
+# ---------------------------------------------------------------------------
+# DNS-rebind defense at the resolver chokepoint
+# ---------------------------------------------------------------------------
+#
+# ``resolve_and_pin`` validates the hostname once. A client library then
+# resolves the SAME hostname AGAIN when it opens the socket — a low-TTL
+# rebind can answer "safe" the first time and "unsafe" the second,
+# defeating the guard. The adapters' ``_PinnedConnect`` closes this for
+# ``urllib3``-based clients, but the MCP scanner SDK connects with async
+# ``httpx``/``anyio`` (``sse_client`` / ``streamablehttp_client``), which
+# never touches urllib3. Both stacks ultimately resolve through
+# :func:`socket.getaddrinfo`, so pinning there covers every client.
+
+_GETADDRINFO_PIN_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def pinned_getaddrinfo(host: str, port: int, ip: str) -> Iterator[None]:
+    """Pin :func:`socket.getaddrinfo` to *ip* for the (*host*, *port*) pair.
+
+    While the block is active, a lookup for the vetted ``host:port`` is
+    answered with the pre-validated ``ip`` (so no second, rebindable DNS
+    query happens at connect time). A lookup for the same host on a
+    *different* port is also re-pointed at the vetted IP (clients may dial
+    a derived port). A lookup for any *other* host raises :class:`SSRFError`
+    so a library cannot side-channel a request to an unvetted destination
+    during the pinned operation.
+
+    Held under a process-wide lock for the duration of the block because it
+    monkeypatches a module global; concurrent pinned fetches serialise on
+    connect, matching the adapter ``_PinnedConnect`` contract.
+    """
+    target_host = (host or "").strip().lower()
+    family_ip = ipaddress.ip_address(ip)
+    with _GETADDRINFO_PIN_LOCK:
+        original = socket.getaddrinfo
+
+        def _pinned(node, service, *args, **kwargs):  # type: ignore[no-untyped-def]
+            asked = (str(node).strip().lower() if node is not None else "")
+            if asked == target_host:
+                # Resolve to the vetted IP literal. Preserve the requested
+                # service/port so a derived port still connects correctly;
+                # the Host header / TLS SNI continue to carry the hostname
+                # because those travel independently of the dial address.
+                fam = socket.AF_INET6 if family_ip.version == 6 else socket.AF_INET
+                return original(ip, service, fam, *args[1:], **kwargs)
+            # An IP literal that equals our pin is fine (some clients
+            # pre-resolve and re-call getaddrinfo with the IP).
+            try:
+                if ipaddress.ip_address(asked) == family_ip:
+                    return original(ip, service, *args, **kwargs)
+            except ValueError:
+                pass
+            raise SSRFError(
+                f"unexpected DNS resolution for {asked!r} during pinned "
+                f"fetch of {target_host!r} (possible DNS rebinding)"
+            )
+
+        socket.getaddrinfo = _pinned  # type: ignore[assignment]
+        try:
+            yield
+        finally:
+            socket.getaddrinfo = original  # type: ignore[assignment]
 
 
 def guard_git_url(
