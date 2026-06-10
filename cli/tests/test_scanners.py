@@ -132,7 +132,7 @@ class TestMCPScannerWrapper(unittest.TestCase):
             "mcpscanner": MagicMock(),
             "mcpscanner.core": MagicMock(),
             "mcpscanner.core.models": MagicMock(),
-        }), patch("defenseclaw.scanner.mcp.guard_url"), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
             scanner = MCPScannerWrapper(MCPScannerConfig())
             result = scanner.scan("http://localhost:3000")
 
@@ -172,7 +172,7 @@ class TestMCPScannerWrapper(unittest.TestCase):
             "mcpscanner": MagicMock(),
             "mcpscanner.core": MagicMock(),
             "mcpscanner.core.models": MagicMock(),
-        }), patch("defenseclaw.scanner.mcp.guard_url"), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
             cfg = MCPScannerConfig(analyzers="yara,aip")
             scanner = MCPScannerWrapper(cfg)
             with patch("sys.stderr", captured):
@@ -206,7 +206,7 @@ class TestMCPScannerWrapper(unittest.TestCase):
             "mcpscanner": MagicMock(),
             "mcpscanner.core": MagicMock(),
             "mcpscanner.core.models": MagicMock(),
-        }), patch("defenseclaw.scanner.mcp.guard_url"), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
             cfg = MCPScannerConfig(analyzers="bogus,typo")
             scanner = MCPScannerWrapper(cfg)
             with patch("sys.stderr", captured):
@@ -256,7 +256,7 @@ class TestMCPScannerWrapper(unittest.TestCase):
             "mcpscanner": MagicMock(),
             "mcpscanner.core": MagicMock(),
             "mcpscanner.core.models": MagicMock(),
-        }), patch("defenseclaw.scanner.mcp.guard_url"), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
             cfg = MCPScannerConfig(scan_instructions=True)
             scanner = MCPScannerWrapper(cfg)
             scanner.scan("http://localhost:3000")
@@ -733,7 +733,7 @@ class TestMCPScannerCommonConfigs(unittest.TestCase):
             "mcpscanner": mock_mcpscanner,
             "mcpscanner.core": MagicMock(),
             "mcpscanner.core.models": mock_models,
-        }), patch("defenseclaw.scanner.mcp.guard_url"), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
             s.scan("https://mcp.example.com")
 
         self.assertEqual(captured["llm_model"], "bedrock/us.anthropic.claude-haiku")
@@ -775,7 +775,7 @@ class TestMCPScannerCommonConfigs(unittest.TestCase):
             "mcpscanner": mock_mcpscanner,
             "mcpscanner.core": MagicMock(),
             "mcpscanner.core.models": mock_models,
-        }), patch("defenseclaw.scanner.mcp.guard_url"), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
             s.scan("https://mcp.example.com")
 
         self.assertEqual(captured["llm_base_url"], "https://my-azure.openai.azure.com")

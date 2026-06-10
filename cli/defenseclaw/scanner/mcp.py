@@ -47,7 +47,6 @@ from defenseclaw.config import (
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.registries.ssrf import (
     SSRFError,
-    guard_url,
     pinned_getaddrinfo,
     resolve_and_pin,
 )
