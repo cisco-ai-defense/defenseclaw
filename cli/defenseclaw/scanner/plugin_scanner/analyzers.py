@@ -29,6 +29,7 @@ import re
 import stat
 
 from defenseclaw.scanner.plugin_scanner.helpers import (
+    _SKIP_DIRS,
     collect_files,
     downgrade,
     is_comment_line,
@@ -412,6 +413,7 @@ def scan_source_files(
     capabilities: set[str],
     profile: str,
     source_files_out: list | None = None,
+    force_include: list[str] | None = None,
 ) -> tuple[int, int]:
     """Returns (file_count, total_bytes).
 
@@ -423,6 +425,17 @@ def scan_source_files(
     keep its existing pre-allocated reference (typically
     ``ctx.source_files``). When ``None`` is passed we behave exactly
     as before so the public surface stays backwards compatible.
+
+    ``force_include`` is a list of specific file paths (typically
+    resolved manifest entrypoints) that must be scanned even when they
+    fall outside the source extension allow-list or live under a
+    directory ``collect_files`` skips (e.g. ``node_modules``). Without
+    this, an extensionless launcher referenced by ``package.json``
+    ``bin``/``main`` would never be source-scanned (F-0383 / F-0809),
+    and a ``main`` entrypoint under ``node_modules`` would be skipped
+    entirely (F-0384). Force-included files are de-duplicated against
+    the collected set by real path so a normally-collected entrypoint is
+    not scanned twice.
     """
     # Imported here to avoid a hard dependency at module import time and
     # to keep the analyzer/analyzer-context coupling localised to the
@@ -445,6 +458,27 @@ def scan_source_files(
         _oversized_files=oversized_files,
     )
     _emit_collection_findings(findings, symlink_escapes, depth_truncations, directory, "source", oversized_files)
+
+    # Force-include manifest-declared entrypoints that the extension /
+    # skip-dir filters above would otherwise miss. De-duplicate against the
+    # already-collected files by real path so we never read the same file
+    # twice, and honour the same per-file size cap.
+    if force_include:
+        collected_real = {os.path.realpath(p) for p in ts_files}
+        for fp in force_include:
+            try:
+                fp_real = os.path.realpath(fp)
+            except OSError:
+                continue
+            if fp_real in collected_real:
+                continue
+            try:
+                if os.path.getsize(fp) > 2 * 1024 * 1024:
+                    continue
+            except OSError:
+                continue
+            collected_real.add(fp_real)
+            ts_files.append(fp)
 
     total_bytes = 0
 
@@ -912,6 +946,134 @@ def _check_for_cost_runaway(
 # ---------------------------------------------------------------------------
 
 
+# Bounded recursion depth for nested binary/script detection. Generous
+# enough for real plugin build trees, low enough to bound cost.
+_STRUCT_MAX_DEPTH = 20
+
+
+def _check_struct_entry(
+    directory: str,
+    entry: str,
+    findings: list[Finding],
+    *,
+    top_level: bool,
+) -> None:
+    """Emit a structure finding for a single file entry.
+
+    The ``top_level`` flag gates the generic STRUCT-HIDDEN check: hidden
+    files are only flagged at the plugin root to preserve historical
+    behaviour and avoid a flood of nested dot-file findings. Binary,
+    script, and environment files are flagged at any depth so a payload
+    cannot hide simply by living under ``dist/`` (F-0381).
+    """
+    dot_idx = entry.rfind(".")
+    ext = entry[dot_idx:] if dot_idx >= 0 else ""
+
+    if entry in (".env", ".env.local", ".env.production"):
+        findings.append(
+            make_finding(
+                len(findings) + 1,
+                rule_id="STRUCT-ENV-FILE",
+                severity="CRITICAL",
+                confidence=0.95,
+                title=f"Environment file found: {entry}",
+                evidence=f"File: {entry}",
+                description=(
+                    "Plugin directory contains an environment file that likely holds secrets. "
+                    "Secrets in a plugin directory risk being published or accessed by other plugins."
+                ),
+                location=f"{directory}/{entry}",
+                remediation="Remove the .env file and use a secrets manager or environment variables instead.",
+                tags=["credential-theft"],
+            )
+        )
+    elif ext in BINARY_EXTENSIONS:
+        findings.append(
+            make_finding(
+                len(findings) + 1,
+                rule_id="STRUCT-BINARY",
+                severity="HIGH",
+                confidence=0.9,
+                title=f"Binary executable found: {entry}",
+                evidence=f"File: {entry}",
+                description=(
+                    f'Plugin contains a binary file "{entry}". Binary executables cannot be audited '
+                    "for security and may contain malware."
+                ),
+                location=f"{directory}/{entry}",
+                remediation="Remove binary files. Plugins should contain only auditable source code.",
+                tags=["supply-chain"],
+            )
+        )
+    elif ext in SCRIPT_EXTENSIONS:
+        findings.append(
+            make_finding(
+                len(findings) + 1,
+                rule_id="STRUCT-SCRIPT",
+                severity="LOW",
+                confidence=0.6,
+                title=f"Script file found: {entry}",
+                evidence=f"File: {entry}",
+                description=(
+                    f'Plugin contains a script file "{entry}". While auditable, script files '
+                    "can execute arbitrary commands if invoked during install or build."
+                ),
+                location=f"{directory}/{entry}",
+                remediation="Review the script contents. Ensure it is not invoked by install hooks.",
+                tags=["supply-chain"],
+            )
+        )
+    elif top_level and entry.startswith(".") and entry not in SAFE_DOTFILES:
+        findings.append(
+            make_finding(
+                len(findings) + 1,
+                rule_id="STRUCT-HIDDEN",
+                severity="LOW",
+                confidence=0.5,
+                title=f"Hidden file found: {entry}",
+                evidence=f"File: {entry}",
+                description=f'Plugin contains hidden file "{entry}" which may conceal configuration or data.',
+                location=f"{directory}/{entry}",
+                remediation="Review the hidden file and remove if unnecessary.",
+            )
+        )
+
+
+def _scan_nested_structure(
+    directory: str,
+    findings: list[Finding],
+    depth: int,
+) -> None:
+    """Recurse into a subdirectory looking for nested binaries/scripts/env files.
+
+    Skips the same build-cache/VCS/venv directories as the file
+    collector (``_SKIP_DIRS``) but DOES descend into ``dist/`` and other
+    build-output directories, which is exactly where a malicious native
+    addon (``dist/addon.so`` / ``.node``) would hide. Symlinked
+    directories are not followed for containment / cycle safety.
+    """
+    if depth > _STRUCT_MAX_DEPTH:
+        return
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return
+
+    for entry in entries:
+        full_path = os.path.join(directory, entry)
+        try:
+            if os.path.islink(full_path):
+                continue
+            if os.path.isdir(full_path):
+                if entry in _SKIP_DIRS:
+                    continue
+                _scan_nested_structure(full_path, findings, depth + 1)
+            else:
+                _check_struct_entry(directory, entry, findings, top_level=False)
+        except OSError:
+            continue
+
+
 def scan_directory_structure(
     directory: str,
     findings: list[Finding],
@@ -922,80 +1084,26 @@ def scan_directory_structure(
         return
 
     for entry in entries:
-        if entry in ("node_modules", "dist"):
+        full_path = os.path.join(directory, entry)
+
+        # Top-level name-based checks. Preserve the historical skip of
+        # node_modules/dist for the flat name checks so root-level
+        # behaviour is unchanged.
+        if entry not in ("node_modules", "dist"):
+            _check_struct_entry(directory, entry, findings, top_level=True)
+
+        # Recurse into real subdirectories so nested binaries/scripts/env
+        # files (e.g. dist/addon.so) are no longer invisible (F-0381).
+        # node_modules and other _SKIP_DIRS are skipped; dist IS inspected.
+        if entry in _SKIP_DIRS:
             continue
-
-        dot_idx = entry.rfind(".")
-        ext = entry[dot_idx:] if dot_idx >= 0 else ""
-
-        if entry in (".env", ".env.local", ".env.production"):
-            findings.append(
-                make_finding(
-                    len(findings) + 1,
-                    rule_id="STRUCT-ENV-FILE",
-                    severity="CRITICAL",
-                    confidence=0.95,
-                    title=f"Environment file found: {entry}",
-                    evidence=f"File: {entry}",
-                    description=(
-                        "Plugin directory contains an environment file that likely holds secrets. "
-                        "Secrets in a plugin directory risk being published or accessed by other plugins."
-                    ),
-                    location=f"{directory}/{entry}",
-                    remediation="Remove the .env file and use a secrets manager or environment variables instead.",
-                    tags=["credential-theft"],
-                )
-            )
-        elif ext in BINARY_EXTENSIONS:
-            findings.append(
-                make_finding(
-                    len(findings) + 1,
-                    rule_id="STRUCT-BINARY",
-                    severity="HIGH",
-                    confidence=0.9,
-                    title=f"Binary executable found: {entry}",
-                    evidence=f"File: {entry}",
-                    description=(
-                        f'Plugin contains a binary file "{entry}". Binary executables cannot be audited '
-                        "for security and may contain malware."
-                    ),
-                    location=f"{directory}/{entry}",
-                    remediation="Remove binary files. Plugins should contain only auditable source code.",
-                    tags=["supply-chain"],
-                )
-            )
-        elif ext in SCRIPT_EXTENSIONS:
-            findings.append(
-                make_finding(
-                    len(findings) + 1,
-                    rule_id="STRUCT-SCRIPT",
-                    severity="LOW",
-                    confidence=0.6,
-                    title=f"Script file found: {entry}",
-                    evidence=f"File: {entry}",
-                    description=(
-                        f'Plugin contains a script file "{entry}". While auditable, script files '
-                        "can execute arbitrary commands if invoked during install or build."
-                    ),
-                    location=f"{directory}/{entry}",
-                    remediation="Review the script contents. Ensure it is not invoked by install hooks.",
-                    tags=["supply-chain"],
-                )
-            )
-        elif entry.startswith(".") and entry not in SAFE_DOTFILES:
-            findings.append(
-                make_finding(
-                    len(findings) + 1,
-                    rule_id="STRUCT-HIDDEN",
-                    severity="LOW",
-                    confidence=0.5,
-                    title=f"Hidden file found: {entry}",
-                    evidence=f"File: {entry}",
-                    description=f'Plugin contains hidden file "{entry}" which may conceal configuration or data.',
-                    location=f"{directory}/{entry}",
-                    remediation="Review the hidden file and remove if unnecessary.",
-                )
-            )
+        try:
+            if os.path.islink(full_path):
+                continue
+            if os.path.isdir(full_path):
+                _scan_nested_structure(full_path, findings, depth=1)
+        except OSError:
+            continue
 
 
 # ---------------------------------------------------------------------------

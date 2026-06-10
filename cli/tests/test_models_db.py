@@ -240,8 +240,11 @@ class ModelsDbTests(unittest.TestCase):
             else:
                 os.environ["DEFENSECLAW_RUN_ID"] = old
 
-    @patch("defenseclaw.logger.urllib.request.urlopen")
-    def test_logger_forwards_run_id_to_splunk(self, mock_urlopen):
+    @patch("defenseclaw.logger._build_hec_opener")
+    def test_logger_forwards_run_id_to_splunk(self, mock_build_opener):
+        # F-0808: the forwarder now sends through a redirect-refusing
+        # opener instead of urllib.request.urlopen, so the test patches
+        # the opener factory and inspects the request handed to open().
         old = os.environ.get("DEFENSECLAW_RUN_ID")
         os.environ["DEFENSECLAW_RUN_ID"] = "python-splunk-run"
         try:
@@ -250,12 +253,14 @@ class ModelsDbTests(unittest.TestCase):
             cm = MagicMock()
             cm.__enter__.return_value = response
             cm.__exit__.return_value = False
-            mock_urlopen.return_value = cm
+            opener = MagicMock()
+            opener.open.return_value = cm
+            mock_build_opener.return_value = opener
 
             logger = Logger(self.store, self._FakeSplunkCfg())
             logger.log_action("skill-block", "bad-skill", "reason=test")
 
-            req = mock_urlopen.call_args[0][0]
+            req = opener.open.call_args[0][0]
             self.assertTrue(req.full_url.endswith("/services/collector/event"))
             payload = json.loads(req.data.decode("utf-8"))
             self.assertEqual(payload["event"]["run_id"], "python-splunk-run")

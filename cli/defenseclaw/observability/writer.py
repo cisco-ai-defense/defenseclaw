@@ -910,6 +910,22 @@ def _load_dotenv(path: str) -> dict[str, str]:
 def _write_dotenv(path: str, entries: dict[str, str]) -> None:
     lines = [f"{k}={v}\n" for k, v in sorted(entries.items())]
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_NOFOLLOW (where available) refuses to open through a symlink so a
+    # pre-planted symlink cannot redirect the secret write elsewhere.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w") as f:
+        # The 0o600 mode argument to os.open only applies when the file is
+        # newly CREATED — POSIX preserves the existing mode on O_TRUNC. A
+        # pre-existing group/world-readable dotenv would otherwise keep
+        # its loose perms and expose the freshly written observability
+        # token (F-0442), so explicitly tighten the descriptor to 0o600.
+        try:
+            os.fchmod(f.fileno(), 0o600)
+        except (AttributeError, OSError):
+            # os.fchmod is POSIX-only; fall back to a path-based chmod.
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
         f.writelines(lines)

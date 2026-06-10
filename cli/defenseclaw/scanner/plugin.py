@@ -107,6 +107,9 @@ class PluginScannerWrapper:
             options.policy = "permissive"
         if profile:
             options.profile = profile
+        # Thread the --no-meta request through so the MetaAnalyzer is
+        # actually skipped by the scanner pipeline (F-0302).
+        options.disable_meta = disable_meta
 
         # Build the LLM override:
         #   1. Start from the resolved unified LLM config (top-level

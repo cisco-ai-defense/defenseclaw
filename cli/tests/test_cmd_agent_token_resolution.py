@@ -333,7 +333,12 @@ def test_cli_host_port_override_wins_over_config():
 
     Not strictly token-related, but documenting the contract while
     we're here — the resolver should let an operator override host
-    or port without touching the token path.
+    or port. Note (F-0261): the bearer token is now *dropped* whenever
+    the resolved host is non-loopback, so an operator pointing the CLI
+    at ``192.168.1.42`` gets host/port honoured but an empty token
+    (``_usage_client`` then fails closed instead of leaking the token
+    off-box). See ``test_token_dropped_for_non_loopback_host`` for the
+    dedicated security regression.
     """
     env = _clean_env(DEFENSECLAW_GATEWAY_TOKEN="dc-tok")
     with patch.dict(os.environ, env, clear=True):
@@ -345,4 +350,37 @@ def test_cli_host_port_override_wins_over_config():
         )
     assert host == "192.168.1.42"
     assert port == 12345
-    assert token == "dc-tok"
+    assert token == ""  # non-loopback host → token withheld (F-0261)
+
+
+def test_token_dropped_for_non_loopback_host():
+    """F-0261: the gateway bearer token is never attached to a non-loopback host.
+
+    The token authenticates to the local sidecar; sending it to an
+    arbitrary configured ``gw.host`` would leak the credential. The
+    resolver must withhold the token for any non-loopback target while
+    still preserving it for loopback (the normal sidecar case).
+    """
+    env = _clean_env(DEFENSECLAW_GATEWAY_TOKEN="dc-tok")
+
+    # Loopback variants keep the token.
+    for loopback in ("127.0.0.1", "localhost", "::1", ""):
+        with patch.dict(os.environ, env, clear=True):
+            _, _, token = _resolve_gateway_target(
+                _StubAppContext(_StubGateway(host=loopback or "127.0.0.1")),
+                gateway_host=loopback or None,
+                gateway_port=None,
+                gateway_token_env=None,
+            )
+        assert token == "dc-tok", f"loopback host {loopback!r} should keep token"
+
+    # Non-loopback hosts (LAN IP, public DNS, 0.0.0.0) drop the token.
+    for remote in ("192.168.1.42", "evil.example.com", "0.0.0.0", "10.0.0.1"):
+        with patch.dict(os.environ, env, clear=True):
+            _, _, token = _resolve_gateway_target(
+                _StubAppContext(_StubGateway(host=remote)),
+                gateway_host=remote,
+                gateway_port=None,
+                gateway_token_env=None,
+            )
+        assert token == "", f"non-loopback host {remote!r} must drop token"

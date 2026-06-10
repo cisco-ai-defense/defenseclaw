@@ -43,9 +43,28 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+from collections.abc import Iterable
 
-__all__ = ["pid_alive", "read_pid_file", "pid_file_alive"]
+__all__ = [
+    "pid_alive",
+    "read_pid_file",
+    "pid_file_alive",
+    "GATEWAY_PROCESS_NAMES",
+    "process_argv0_basename",
+    "process_is_gateway",
+]
+
+# The exact basenames the DefenseClaw gateway daemon advertises in argv0.
+# Identity verification matches these *exactly* (not by prefix): a generic
+# ``defenseclaw`` prefix would let an attacker plant a process such as
+# ``defenseclaw-not-gateway`` and have a spoofed PID file accepted as the
+# live gateway (Avarice F-0101 / F-0121 / F-0721).
+GATEWAY_PROCESS_NAMES: tuple[str, ...] = (
+    "defenseclaw-gateway",
+    "defenseclaw-gateway.exe",
+)
 
 
 def pid_alive(pid: int) -> bool:
@@ -139,3 +158,58 @@ def pid_file_alive(pid_file: str) -> bool:
     if pid is None:
         return False
     return pid_alive(pid)
+
+
+def process_argv0_basename(pid: int) -> str | None:
+    """Best-effort basename of a running process's argv0.
+
+    Reads ``/proc/<pid>/cmdline`` (Linux) and falls back to
+    ``ps -p <pid> -o command=`` (macOS/BSD). Returns the lowercased-free
+    basename, or ``None`` when the process identity cannot be determined
+    (so callers can fail closed).
+    """
+    if pid <= 0:
+        return None
+    proc_cmdline = f"/proc/{pid}/cmdline"
+    try:
+        with open(proc_cmdline, "rb") as fh:
+            raw = fh.read()
+        argv0 = raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
+    except FileNotFoundError:
+        # /proc not present (macOS) — fall back to ps.
+        try:
+            out = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            # No ps either — identity unknown.
+            return None
+        if out.returncode != 0:
+            return None
+        argv0 = out.stdout.strip().split(None, 1)[0] if out.stdout.strip() else ""
+    except OSError:
+        return None
+    base = os.path.basename(argv0.strip()).strip()
+    return base or None
+
+
+def process_is_gateway(
+    pid: int,
+    expected_names: Iterable[str] = GATEWAY_PROCESS_NAMES,
+) -> bool:
+    """Return True only when ``pid``'s argv0 basename is one of the known
+    DefenseClaw gateway binary names.
+
+    Fails closed: if the process identity cannot be read (no ``/proc`` and
+    no ``ps``), or the basename does not match exactly, returns False. This
+    blocks stale/planted ``gateway.pid`` spoofing where the recorded PID
+    points at an unrelated live process.
+    """
+    base = process_argv0_basename(pid)
+    if not base:
+        return False
+    return base in set(expected_names)

@@ -46,6 +46,14 @@ class SetupCommandIntent:
     category: str = "setup"
     origin: str = "setup"
     follow_up: tuple[SetupCommandIntent, ...] = ()
+    # Secret payload fed to the child over stdin instead of argv so it
+    # never shows up in process listings (e.g. ``keys set`` reads a hidden
+    # prompt). ``None`` means "no stdin payload".
+    secret_stdin: str | None = None
+    # Secret-bearing environment variables injected into the child process
+    # environment rather than passed as ``--env KEY=secret`` on the command
+    # line. Empty mapping means "no overrides".
+    env_overrides: tuple[tuple[str, str], ...] = ()
 
     @property
     def argv(self) -> tuple[str, ...]:

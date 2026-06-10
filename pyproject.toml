@@ -21,6 +21,10 @@ dependencies = [
     # MB and kept as an opt-in extra (see ``[vertex]``) — flip there
     # if usage analytics ever justify the disk cost.
     "boto3>=1.34",
+    # ``tomllib`` only entered the stdlib in 3.11; on 3.10 (allowed by
+    # ``requires-python = ">=3.10"``) the code falls back to ``tomli``,
+    # so it must be installed there to parse TOML.
+    "tomli>=2.0.1; python_version < '3.11'",
 ]
 
 # P3-#20: the legacy Textual TUI (`defenseclaw alerts --tui`) was

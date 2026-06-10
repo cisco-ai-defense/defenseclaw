@@ -32,11 +32,13 @@ than hand-editing YAML.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import ipaddress
 import os
 import re
 import socket
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -500,6 +502,41 @@ def validate_webhook_url(url: str) -> None:
             )
 
 
+def redact_webhook_url(url: str) -> str:
+    """Return *url* with its secret-bearing parts masked for display.
+
+    Slack/PagerDuty/Teams/Discord webhook URLs embed the bearer secret in
+    the path (e.g. ``/services/T000/B000/XXXXXXXX``) and occasionally in
+    the query string or userinfo. Operators still need to see *where* a
+    hook points, so we keep the scheme + host[:port] and replace the
+    path/query/fragment (and any ``user:pass@``) with ``***``. Used by
+    ``webhook list`` and ``config show`` so neither prints the raw secret
+    (F-0181, F-0221).
+    """
+    if not isinstance(url, str) or not url:
+        return url
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return "***"
+    if not parts.scheme or not parts.netloc:
+        # Not a recognisable absolute URL — redact wholesale rather than
+        # risk echoing an opaque secret token.
+        return "***"
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    netloc = f"***@{host}" if (parts.username or parts.password) else host
+    redacted = f"{parts.scheme}://{netloc}"
+    if parts.path and parts.path != "/":
+        redacted += "/***"
+    if parts.query:
+        redacted += "?***"
+    if parts.fragment:
+        redacted += "#***"
+    return redacted
+
+
 # ---------------------------------------------------------------------------
 # Internals — YAML I/O (atomic tmp+rename)
 # ---------------------------------------------------------------------------
@@ -521,11 +558,27 @@ def _load_yaml(path: str) -> dict[str, Any]:
 
 
 def _write_yaml(path: str, data: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-    os.replace(tmp, path)
+    """Atomically write *data* as YAML to *path* with 0600 permissions.
+
+    The staging file is created via :func:`tempfile.mkstemp` (``O_EXCL``)
+    in the target directory rather than a predictable ``<path>.tmp``. A
+    predictable temp name lets a local attacker pre-create or symlink it
+    to hijack the write or read the secret-bearing config mid-flight, and
+    a plain ``open()`` would also leave the file world-readable; we force
+    0600 since this config embeds webhook secrets (F-0441).
+    """
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".webhooks.", suffix=".tmp", dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 # ---------------------------------------------------------------------------

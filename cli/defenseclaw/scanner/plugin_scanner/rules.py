@@ -111,7 +111,7 @@ COGNITIVE_FILES: set[str] = {
 # Structural rules
 # ---------------------------------------------------------------------------
 
-BINARY_EXTENSIONS: set[str] = {".exe", ".so", ".dylib", ".wasm", ".dll"}
+BINARY_EXTENSIONS: set[str] = {".exe", ".so", ".dylib", ".wasm", ".dll", ".node"}
 SCRIPT_EXTENSIONS: set[str] = {".sh", ".bat", ".cmd"}
 
 SAFE_DOTFILES: set[str] = {

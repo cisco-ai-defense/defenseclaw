@@ -319,13 +319,13 @@ def test_credentials_matrix_actions_are_data_only_and_validate_required_fields()
 
     set_fields = _with_field(set_fields, "Env Name", "OPENAI_API_KEY")
     set_fields = _with_field(set_fields, "Secret Value", "sk-live")
-    assert build_wizard_args(SetupWizard.CREDENTIALS, set_fields) == (
-        "keys",
-        "set",
-        "OPENAI_API_KEY",
-        "--value",
-        "sk-live",
-    )
+    # F-0801: the secret value must NOT appear in argv (it would leak in
+    # process listings). ``keys set`` reads it from a hidden stdin prompt;
+    # the executor feeds it via the intent's ``secret_stdin``.
+    built = build_wizard_args(SetupWizard.CREDENTIALS, set_fields)
+    assert built == ("keys", "set", "OPENAI_API_KEY")
+    assert "--value" not in built
+    assert "sk-live" not in built
     assert render_wizard_value(set_fields[2]) == "****live"
     assert render_wizard_value(set_fields[2], reveal=True) == "sk-live"
 
@@ -436,7 +436,12 @@ def test_setup_panel_credentials_restart_and_config_save_state() -> None:
     model.form_fields = list(_with_field(model.form_fields, "Secret Value", "sk-secret"))
     result = model.submit_wizard_form()
     assert result.intent is not None
-    assert result.intent.args == ("keys", "set", "OPENAI_API_KEY", "--value", "sk-secret")
+    # F-0801: the secret is carried on ``secret_stdin`` (fed to the child's
+    # hidden prompt), never in argv where `ps` could read it.
+    assert result.intent.args == ("keys", "set", "OPENAI_API_KEY")
+    assert "sk-secret" not in result.intent.args
+    assert "--value" not in result.intent.args
+    assert result.intent.secret_stdin == "sk-secret\n"
 
     model.queue_restart("config saved from TUI", last_started_at="old")
     assert model.restart_now_intent() is not None

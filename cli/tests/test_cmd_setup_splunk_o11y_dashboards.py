@@ -449,7 +449,8 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
             )
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Splunk O11y token not found. Pass --o11y-api-token.", result.output)
+        self.assertIn("Splunk O11y token not found.", result.output)
+        self.assertIn("SFX_AUTH_TOKEN", result.output)
 
     def test_api_url_derives_from_ingest_realm(self) -> None:
         self.assertEqual(

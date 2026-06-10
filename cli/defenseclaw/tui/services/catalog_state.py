@@ -1277,7 +1277,7 @@ def plugin_action_intent(
     if key not in verbs:
         return None
     verb, label_prefix = verbs[key]
-    target = row.display_name
+    target = row.id
     args = ["plugin", verb, target]
     if connector and key in _PLUGIN_CONNECTOR_VERBS:
         args.extend(("--connector", connector))

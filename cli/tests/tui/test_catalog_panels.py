@@ -248,8 +248,10 @@ def test_plugin_parse_connector_gate_actions_and_intents() -> None:
     assert "Codex" in panel.openclaw_only_notice()
 
     assert panel.handle_key("s").intent.args == ("plugin", "scan", "plug_tutor")
-    assert panel.action_intent("s").args == ("plugin", "scan", "tutor")
-    assert panel.action_intent("u").args == ("plugin", "allow", "tutor")
+    # F-0521: action-menu intents must target the stable plugin id, not the
+    # spoofable display name (which previously let actions hit the wrong row).
+    assert panel.action_intent("s").args == ("plugin", "scan", "plug_tutor")
+    assert panel.action_intent("u").args == ("plugin", "allow", "plug_tutor")
 
 
 def test_plugin_actions_state_matrix_matches_go() -> None:

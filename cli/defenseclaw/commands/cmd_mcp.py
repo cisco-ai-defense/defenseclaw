@@ -365,7 +365,8 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
               scan_prompts: bool, scan_resources: bool,
               scan_instructions: bool,
               server_entry: MCPServerEntry | None = None,
-              quiet: bool = False) -> ScanResult | None:
+              quiet: bool = False,
+              allow_private: bool = False) -> ScanResult | None:
     """Run the MCP scanner on *target*.  Returns None on fatal error."""
     from dataclasses import replace
 
@@ -400,7 +401,9 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
     _ = quiet  # parameter kept for back-compat with existing callers
 
     try:
-        result = scanner.scan(target, server_entry=server_entry)
+        result = scanner.scan(
+            target, server_entry=server_entry, allow_private=allow_private
+        )
     except SystemExit:
         raise
     except Exception as exc:
@@ -447,6 +450,7 @@ def _scan_all_mcp(
     scan_resources: bool,
     scan_instructions: bool,
     as_json: bool,
+    allow_private: bool = False,
 ) -> None:
     """Scan every MCP server registered for ``connector``.
 
@@ -456,6 +460,7 @@ def _scan_all_mcp(
     import time
 
     from defenseclaw.commands import _scan_ui
+    from defenseclaw.enforce import PolicyEngine
 
     servers = app.cfg.mcp_servers(connector)
     if not servers:
@@ -463,7 +468,31 @@ def _scan_all_mcp(
             click.echo(f"No MCP servers configured for connector={connector!r}.")
         return
 
-    scan_targets = [(s, s.url or s.name) for s in servers]
+    # F-0324: ``--all`` previously scanned every configured server with
+    # no policy check, so a server an operator had explicitly blocked
+    # (by name or URL) was still spawned/dialed. Filter blocked servers
+    # out before scanning; checking both the name and the resolved
+    # url/spec mirrors the single-target guard (F-0323).
+    pe = PolicyEngine(app.store)
+    scan_targets = []
+    for s in servers:
+        scan_target = s.url or s.name
+        if pe.is_blocked("mcp", s.name) or pe.is_blocked("mcp", scan_target):
+            if not as_json:
+                click.echo(
+                    f"BLOCKED: {s.name} — skipping (remove from block list first)",
+                    err=True,
+                )
+            continue
+        scan_targets.append((s, scan_target))
+
+    if not scan_targets:
+        if not as_json:
+            click.echo(
+                f"No scannable MCP servers for connector={connector!r} "
+                "(all blocked or none configured)."
+            )
+        return
     ctx = _scan_ui.ScanContext.for_mcp(
         connector=connector,
         paths=sorted({t for _, t in scan_targets}),
@@ -479,6 +508,7 @@ def _scan_all_mcp(
             app, scan_target, analyzers,
             scan_prompts, scan_resources, scan_instructions,
             server_entry=s, quiet=as_json,
+            allow_private=allow_private,
         )
         if result is None:
             errored += 1
@@ -539,6 +569,14 @@ def _scan_all_mcp(
         "--connector <name> to narrow to one)."
     ),
 )
+@click.option(
+    "--allow-private", "allow_private", is_flag=True,
+    help=(
+        "Opt in to scanning remote MCP targets that resolve to private, "
+        "loopback, link-local or CGNAT addresses (blocked by default to "
+        "prevent SSRF)."
+    ),
+)
 @pass_ctx
 def scan(
     app: AppContext,
@@ -550,6 +588,7 @@ def scan(
     scan_instructions: bool,
     scan_all: bool,
     connector_flag: str,
+    allow_private: bool,
 ) -> None:
     """Scan an MCP server by name or URL.
 
@@ -577,7 +616,8 @@ def scan(
             if len(connectors) > 1 and not as_json:
                 click.secho(f"\n── connector: {c} ──", fg="cyan")
             _scan_all_mcp(
-                app, c, analyzers, scan_prompts, scan_resources, scan_instructions, as_json,
+                app, c, analyzers, scan_prompts, scan_resources, scan_instructions,
+                as_json, allow_private=allow_private,
             )
         return
 
@@ -591,9 +631,17 @@ def scan(
     # behaviour is unchanged.
     resolved, entry = _resolve_scan_target(app, target, connector)
 
-    if pe.is_blocked("mcp", target):
-        click.echo(f"BLOCKED: {target} — remove from block list first", err=True)
-        raise SystemExit(2)
+    # F-0323: a server may be blocked by its NAME or by its resolved
+    # URL. Checking only the user-supplied ``target`` lets a URL-blocked
+    # server be scanned via its alias (and a name-blocked server via its
+    # URL). Check both keys so neither path bypasses the block list.
+    for blocked_key in {target, resolved}:
+        if pe.is_blocked("mcp", blocked_key):
+            click.echo(
+                f"BLOCKED: {blocked_key} — remove from block list first",
+                err=True,
+            )
+            raise SystemExit(2)
 
     ctx = _scan_ui.ScanContext.for_mcp(
         connector=connector,
@@ -605,7 +653,8 @@ def scan(
     started = time.monotonic()
     result = _run_scan(app, resolved, analyzers,
                        scan_prompts, scan_resources, scan_instructions,
-                       server_entry=entry, quiet=as_json)
+                       server_entry=entry, quiet=as_json,
+                       allow_private=allow_private)
     if result:
         if as_json:
             _print_scan_result(result, as_json)

@@ -66,6 +66,7 @@ from defenseclaw.webhooks.writer import (
     VALID_EVENT_CATEGORIES,
     VALID_SEVERITIES,
     VALID_TYPES,
+    redact_webhook_url,
 )
 
 _WEBHOOK_TYPES = list(VALID_TYPES)
@@ -244,7 +245,8 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
     click.echo(f"  {'NAME':<32} {'TYPE':<10} {'ENABLED':<8} {'SEVERITY':<10} URL")
     click.echo(f"  {'-' * 32} {'-' * 10} {'-' * 8} {'-' * 10} {'-' * 40}")
     for v in entries:
-        u = v.url if len(v.url) <= 60 else v.url[:57] + "..."
+        safe_url = redact_webhook_url(v.url)
+        u = safe_url if len(safe_url) <= 60 else safe_url[:57] + "..."
         click.echo(
             f"  {v.name:<32} {v.type:<10} {('yes' if v.enabled else 'no'):<8} "
             f"{v.min_severity:<10} {u}",
@@ -274,7 +276,7 @@ def show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
     click.echo()
     state = ux._style("enabled", fg="green") if v.enabled else ux.dim("disabled")
     click.echo(f"  {ux.bold(v.name)} [{v.type}] {state}")
-    click.echo(f"    {ux.dim('URL:')}            {v.url}")
+    click.echo(f"    {ux.dim('URL:')}            {redact_webhook_url(v.url)}")
     if v.secret_env:
         click.echo(f"    {ux.dim('Secret env:')}     {v.secret_env} (value not shown)")
     if v.room_id:
@@ -495,7 +497,9 @@ def _view_to_dict(v: WebhookView) -> dict[str, Any]:
     return {
         "name": v.name,
         "type": v.type,
-        "url": v.url,
+        # Webhook URLs embed the bearer secret in their path/query; redact
+        # so ``list``/``show`` (and their ``--json``) never print it (F-0181).
+        "url": redact_webhook_url(v.url),
         "secret_env": v.secret_env,
         "room_id": v.room_id,
         "min_severity": v.min_severity,

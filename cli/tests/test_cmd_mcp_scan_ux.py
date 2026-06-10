@@ -172,7 +172,7 @@ class TestScanAllUX(_MCPScanUXBase):
             "http://b.example/mcp": self._blocked_result("http://b.example/mcp"),
             "http://c.example/mcp": self._clean_result("http://c.example/mcp"),
         }
-        mock_scan.side_effect = lambda target, server_entry=None: responses[target]
+        mock_scan.side_effect = lambda target, server_entry=None, **kwargs: responses[target]
 
         result = self.invoke(["scan", "--all"])
         self.assertEqual(result.exit_code, 0, result.output)

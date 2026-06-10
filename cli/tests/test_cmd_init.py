@@ -1420,6 +1420,10 @@ class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
 
         cfg = MagicMock()
         cfg.data_dir = self.data_dir
+        # F-0162: the idempotency fast-path now validates the .openclaw
+        # realpath against the pinned original home, so it must be set to the
+        # symlink target for the legitimate (untampered) case to succeed.
+        cfg.claw.openclaw_home_original = self.oc_home
 
         result = _integrate_openclaw_home(cfg, self.sandbox_home)
         self.assertTrue(result)

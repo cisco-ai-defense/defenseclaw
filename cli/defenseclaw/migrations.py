@@ -1778,6 +1778,24 @@ def run_migrations(
     # already in steady state.
     state = migration_state.load(data_dir)
     if state is None:
+        # ``load`` collapses several cases to ``None``. Most of them
+        # (missing / empty / corrupt cursor) are safe to bootstrap. But a
+        # cursor written by a NEWER build — schema greater than this
+        # build understands — must NOT be treated as a fresh host:
+        # bootstrapping would overwrite it with a stale schema-N cursor
+        # and erase the newer build's migration history (F-0081). Refuse
+        # so the operator can run ``defenseclaw doctor migration-state
+        # --reset`` instead of silently downgrading their state.
+        if migration_state.is_future_schema(data_dir):
+            raise migration_state.FutureSchemaError(
+                "migration cursor at "
+                f"{migration_state.state_path(data_dir)} was written by a "
+                "newer DefenseClaw build (schema "
+                f"{migration_state.detect_schema(data_dir)} > "
+                f"{migration_state.CURRENT_SCHEMA_VERSION}); refusing to "
+                "overwrite it. Run 'defenseclaw doctor migration-state "
+                "--reset' if you intend to run this older build."
+            )
         state = migration_state.bootstrap(
             None,
             from_version=from_version,
@@ -1804,15 +1822,19 @@ def run_migrations(
         if ver_t > to_t:
             continue
 
-        # In the upgrade case, also exclude entries strictly below
-        # ``from_version``. They should already be in the cursor;
-        # the bootstrap above handled that. Skipping here is a
-        # belt-and-suspenders against a malformed cursor that's
-        # missing entries we'd otherwise replay unnecessarily.
-        if not same_version_reapply and ver_t < from_t:
-            continue
-
         already_applied = migration_state.is_applied(state, ver)
+
+        # In the upgrade case, exclude entries strictly below
+        # ``from_version`` ONLY when the cursor already records them as
+        # applied. A lower-version migration that is MISSING from the
+        # cursor (e.g. one that failed on an earlier upgrade and was
+        # therefore never marked applied) must still be retried on a
+        # later upgrade rather than being skipped by the version
+        # comparison alone (F-0681). The cursor — not ``from_version`` —
+        # is the source of truth for what has run; migrations are
+        # idempotent, so re-attempting an unapplied lower version is safe.
+        if not same_version_reapply and ver_t < from_t and already_applied:
+            continue
 
         # Same-version reapply intentionally bypasses the cursor for
         # the matching version — see backward-compat note in the

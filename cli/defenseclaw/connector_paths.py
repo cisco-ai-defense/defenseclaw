@@ -58,6 +58,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:  # Python 3.11+ ships ``tomllib`` in the stdlib.
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 fallback to the ``tomli`` backport.
+    import tomli as tomllib
+
 import yaml
 
 # ---------------------------------------------------------------------------
@@ -720,17 +725,9 @@ def _read_codex_config_toml(path: str) -> list[MCPServerEntry]:
     callers can soft-fall back to ``./.mcp.json``.
 
     Implementation note: we use the stdlib :mod:`tomllib` (Python
-    3.11+) which is already a project requirement; no third-party
-    parser is added.
+    3.11+), falling back to the ``tomli`` backport on Python 3.10
+    (see the module-level import); no exec-based parser is used.
     """
-    try:
-        import tomllib  # Python 3.11+ stdlib — safe parser, no exec.
-    except ImportError:
-        # Defensive: cli/defenseclaw targets 3.12 in pyproject.toml,
-        # so this branch is unreachable in supported deployments.
-        # We still soft-fail rather than raising because the caller
-        # treats this as best-effort discovery.
-        return []
     try:
         with open(path, "rb") as f:
             data = tomllib.load(f)
@@ -1378,6 +1375,30 @@ def _unset_codex_global_mcp_server(name: str) -> bool:
 # carry credentials in the env: block.
 
 
+def _reject_symlink_config(path: str) -> None:
+    """Refuse to read/merge through a symlinked connector config path.
+
+    Workspace-scoped MCP configs (Codex ``.mcp.json``, Cursor
+    ``.cursor/mcp.json``, Copilot ``.github/mcp.json``) live in an
+    operator-chosen CWD. A malicious repository can pre-place that path
+    as a symlink to a private file readable by the operator (``~/.netrc``,
+    ``~/.aws/credentials``, etc.). A plain ``open(path)`` follows the
+    link, so the merge reads the private target and the subsequent
+    atomic rewrite leaks its contents into a repository-visible file.
+    Fail closed before any read so the secret never crosses the
+    workspace boundary (F-0041).
+    """
+    if os.path.islink(path):
+        try:
+            target = os.readlink(path)
+        except OSError:
+            target = "<unreadable>"
+        raise ValueError(
+            f"refusing to write MCP config {path}: path is a symlink -> "
+            f"{target!r} (following it could disclose the link target)",
+        )
+
+
 def _atomic_json_merge(
     path: str,
     keys: tuple[str, ...],
@@ -1390,6 +1411,7 @@ def _atomic_json_merge(
     0o600 on every write — these files commonly contain API keys
     in the ``env`` block.
     """
+    _reject_symlink_config(path)
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
         os.makedirs(parent, mode=0o700, exist_ok=True)
@@ -1446,6 +1468,7 @@ def _atomic_yaml_merge(
     keys: tuple[str, ...],
     value: dict[str, Any],
 ) -> None:
+    _reject_symlink_config(path)
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
         os.makedirs(parent, mode=0o700, exist_ok=True)

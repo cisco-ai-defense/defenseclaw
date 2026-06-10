@@ -150,6 +150,35 @@ def _safe_filename(rel_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _make_scan_error_finding(
+    finding_counter: list[int],
+    title: str,
+    description: str,
+) -> Finding:
+    """Build a surfaced finding for an LLM analysis failure.
+
+    An enabled LLM scan that errors or returns unparseable output must
+    not fail open to a clean result (F-0363). We emit a MEDIUM,
+    low-confidence finding so the failure is visible to operators rather
+    than silently dropped.
+    """
+    finding = make_finding(
+        finding_counter[0],
+        rule_id="LLM-SCAN-ERROR",
+        severity="MEDIUM",
+        confidence=0.5,
+        title=title,
+        description=description,
+        remediation=(
+            "Investigate the LLM bridge/provider configuration and re-run the scan. "
+            "Do not treat the result as clean while LLM analysis is failing."
+        ),
+        tags=["llm-detected", "scanner-coverage"],
+    )
+    finding_counter[0] += 1
+    return finding
+
+
 def _parse_llm_findings(
     content: str,
     finding_counter: list[int],
@@ -163,10 +192,30 @@ def _parse_llm_findings(
     try:
         parsed = json.loads(json_str)
     except json.JSONDecodeError:
-        return []
+        return [
+            _make_scan_error_finding(
+                finding_counter,
+                "LLM analysis output could not be parsed",
+                (
+                    "The LLM analyzer was enabled but returned output that is not valid JSON, "
+                    "so its semantic findings could not be read. This is surfaced instead of "
+                    "silently returning a clean result."
+                ),
+            )
+        ]
 
     if not isinstance(parsed, list):
-        return []
+        return [
+            _make_scan_error_finding(
+                finding_counter,
+                "LLM analysis returned an unexpected response shape",
+                (
+                    "The LLM analyzer was enabled but returned JSON that was not the expected "
+                    "array of findings, so no semantic findings could be read. This is surfaced "
+                    "instead of silently returning a clean result."
+                ),
+            )
+        ]
 
     findings: list[Finding] = []
     for item in parsed:
@@ -220,7 +269,17 @@ class LLMAnalyzer:
         response = call_llm(self._config, messages)
 
         if response.error:
-            return []
+            return [
+                _make_scan_error_finding(
+                    ctx.finding_counter,
+                    "LLM analysis failed to run",
+                    (
+                        "The LLM analyzer was enabled but the LLM call returned an error "
+                        f"({_safe_title(response.error)}), so no semantic analysis was performed. "
+                        "This is surfaced instead of failing open to a clean result."
+                    ),
+                )
+            ]
 
         return _parse_llm_findings(response.content, ctx.finding_counter)
 

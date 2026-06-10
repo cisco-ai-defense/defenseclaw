@@ -67,6 +67,17 @@ CURRENT_SCHEMA_VERSION = 1
 
 STATE_FILE_NAME = ".migration_state.json"
 
+
+class FutureSchemaError(RuntimeError):
+    """Raised when the on-disk cursor was written by a NEWER build.
+
+    The cursor's ``schema`` is greater than ``CURRENT_SCHEMA_VERSION``,
+    so this (older) build must not interpret or rewrite it. Callers
+    surface this and direct the operator to
+    ``defenseclaw doctor migration-state --reset`` rather than silently
+    overwriting the newer state (F-0081).
+    """
+
 # Sentinel value written into ``applied_at`` when a migration record
 # was inferred from the operator's package version on first upgrade
 # rather than observed by ``run_migrations``. ``defenseclaw doctor
@@ -170,6 +181,41 @@ def load(data_dir: str) -> MigrationState | None:
         applied=applied,
         applied_at=applied_at,
     )
+
+
+def detect_schema(data_dir: str) -> int | None:
+    """Return the raw integer ``schema`` recorded on disk, if any.
+
+    Unlike :func:`load` — which deliberately collapses every unusable
+    cursor (missing, empty, corrupt, OR future-schema) to ``None`` — this
+    peeks at the ``schema`` field even when it is newer than
+    ``CURRENT_SCHEMA_VERSION``. ``run_migrations`` uses it to tell a
+    cursor written by a newer build apart from a genuinely-absent one so
+    it never bootstraps over (and erases) newer migration history
+    (F-0081).
+
+    Returns ``None`` when the file is missing, empty, not JSON, not a
+    dict, or has no integer ``schema`` field.
+    """
+    path = state_path(data_dir)
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    schema = raw.get("schema")
+    # ``bool`` is an ``int`` subclass; a JSON ``true`` is not a schema.
+    if isinstance(schema, bool) or not isinstance(schema, int):
+        return None
+    return schema
+
+
+def is_future_schema(data_dir: str) -> bool:
+    """True when the on-disk cursor's schema is newer than this build."""
+    schema = detect_schema(data_dir)
+    return schema is not None and schema > CURRENT_SCHEMA_VERSION
 
 
 def save(data_dir: str, state: MigrationState) -> None:

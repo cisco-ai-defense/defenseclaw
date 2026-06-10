@@ -519,7 +519,7 @@ class ObservabilityCLITests(unittest.TestCase):
 
     def test_splunk_enterprise_probe_success(self) -> None:
         self._add_enterprise_sink()
-        with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse(200, "OK")):
+        with patch("urllib.request.OpenerDirector.open", return_value=_FakeHTTPResponse(200, "OK")):
             result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Splunk Enterprise (HEC)", result.output)
@@ -534,7 +534,7 @@ class ObservabilityCLITests(unittest.TestCase):
             hdrs=None,
             fp=None,
         )
-        with patch("urllib.request.urlopen", side_effect=err):
+        with patch("urllib.request.OpenerDirector.open", side_effect=err):
             result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("HTTP 401 Unauthorized", result.output)
@@ -549,7 +549,7 @@ class ObservabilityCLITests(unittest.TestCase):
             hdrs=None,
             fp=None,
         )
-        with patch("urllib.request.urlopen", side_effect=err):
+        with patch("urllib.request.OpenerDirector.open", side_effect=err):
             result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("HTTP 403 Forbidden", result.output)
@@ -557,7 +557,7 @@ class ObservabilityCLITests(unittest.TestCase):
 
     def test_splunk_enterprise_probe_unreachable(self) -> None:
         self._add_enterprise_sink()
-        with patch("urllib.request.urlopen", side_effect=OSError("network down")):
+        with patch("urllib.request.OpenerDirector.open", side_effect=OSError("network down")):
             result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("network down", result.output)

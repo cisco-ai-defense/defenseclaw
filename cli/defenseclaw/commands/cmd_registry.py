@@ -884,7 +884,7 @@ def _make_scan_callback(app: AppContext, *, allow_private: bool = False) -> Scan
         if entry.is_skill():
             return _run_skill_scan(app, cfg, source, entry, allow_private=allow_private)
         if entry.is_mcp():
-            return _run_mcp_scan(app, cfg, source, entry)
+            return _run_mcp_scan(app, cfg, source, entry, allow_private=allow_private)
         return None
 
     return _scan
@@ -1025,11 +1025,21 @@ def _scan_skill_via_http(  # type: ignore[no-untyped-def]
         raise RuntimeError(f"skill scan failed for {url}: {exc}") from exc
 
 
-def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: ManifestEntry):  # type: ignore[no-untyped-def]
+def _run_mcp_scan(  # type: ignore[no-untyped-def]
+    app: AppContext,
+    cfg: Config,
+    source: RegistrySource,
+    entry: ManifestEntry,
+    *,
+    allow_private: bool = False,
+):
     """Best-effort MCP scan via the SDK wrapper."""
     try:
         from defenseclaw.config import MCPServerEntry
-        from defenseclaw.scanner.mcp import MCPScannerWrapper
+        from defenseclaw.scanner.mcp import (
+            MCPScannerWrapper,
+            is_safe_stdio_scan_command,
+        )
     except ImportError:
         return None
     try:
@@ -1053,125 +1063,75 @@ def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: M
         # publish `command="bash"`, `args=["-c", "<rce>"]` and run
         # arbitrary code as the operator during routine
         # `defenseclaw registry sync` BEFORE any admission decision.
-        # We refuse to spawn arbitrary commands here: only allowlisted
-        # interpreters that the operator has opted into via env are
-        # permitted, and shell-style flag/arg patterns are rejected.
-        if not _is_safe_stdio_scan_command(entry.command, list(entry.args)):
+        # We refuse to spawn anything that is not an allowlisted package
+        # launcher (shared with the `mcp scan` path so the two cannot
+        # drift). MCPScannerWrapper.scan() re-validates as defense in
+        # depth, but we fail closed here too for a clear operator
+        # message and to avoid even constructing the scan config.
+        if not is_safe_stdio_scan_command(entry.command, list(entry.args)):
             click.echo(
                 f"[registry] refusing to spawn manifest-supplied stdio command for "
                 f"scan: name={entry.name!r} command={entry.command!r}",
                 err=True,
             )
             return None
+        # F-0343: do NOT forward the operator's process secrets
+        # (os.environ) into a publisher-controlled MCP server. The
+        # legacy code populated env from os.environ.get(k) for every
+        # declared env var, leaking GITHUB_TOKEN / *_API_KEY / etc. to
+        # the very server being scanned. Pass empty placeholders so the
+        # scan still exercises the server's tool surface without
+        # handing it live credentials.
         server = MCPServerEntry(
             name=entry.name,
             command=entry.command,
             args=list(entry.args),
-            env={k: os.environ.get(k, "") for k in entry.env_required},
+            env={k: "" for k in entry.env_required},
         )
         try:
-            return scanner.scan(entry.name, server_entry=server)
+            return scanner.scan(
+                entry.name, server_entry=server, allow_private=allow_private
+            )
         except SystemExit:
             return None
         except Exception:  # noqa: BLE001
             return None
     if not entry.url:
         return None
-    # validate generic registry MCP URLs against
-    # the SSRF guard (loopback / link-local / private-IP rejection)
-    # before the remote scanner reaches them.
-    if not _registry_mcp_url_allowed(entry.url):
+    # F-0344: validate generic registry MCP URLs through the central
+    # SSRF guard (loopback / link-local / private / CGNAT rejection +
+    # IP pinning) rather than an ad-hoc one-shot ipaddress check that
+    # missed the RFC 6598 CGNAT block. The scanner re-guards internally,
+    # but failing closed here gives a precise operator-facing message.
+    if not _registry_mcp_url_allowed(entry.url, allow_private=allow_private):
         click.echo(
             f"[registry] refusing to scan manifest MCP URL {entry.url!r} — "
-            f"resolves to loopback/private/link-local. Use "
+            f"resolves to loopback/private/link-local/CGNAT. Use "
             f"`defenseclaw registry sync --allow-private` to opt in.",
             err=True,
         )
         return None
     try:
-        return scanner.scan(entry.url)
+        return scanner.scan(entry.url, allow_private=allow_private)
     except SystemExit:
         return None
     except Exception:  # noqa: BLE001
         return None
 
 
-def _is_safe_stdio_scan_command(command: str, args: list[str]) -> bool:
-    """only allow stdio MCP scan when the
-    publisher-supplied command is a recognized MCP runner that does
-    NOT take arbitrary shell strings as arguments. Shell interpreters
-    (bash, sh, zsh, fish, dash, ksh, csh, tcsh, python*, perl, ruby,
-    node-with-`-e`, etc.) are rejected outright. Operators that need
-    custom MCP runners can install/scan them out-of-band. We also
-    reject any argv element that looks like a shell flag commonly
-    used to inject arbitrary code (`-c`, `--exec`, `-e`).
+def _registry_mcp_url_allowed(url: str, *, allow_private: bool = False) -> bool:
+    """Return True when *url* passes the central SSRF guard.
+
+    F-0344: delegate to :func:`defenseclaw.registries.ssrf.guard_url`
+    (the single source of truth that already blocks loopback,
+    link-local, multicast, private and RFC 6598 CGNAT ranges and pins
+    the resolved IP) instead of re-implementing a weaker check here.
+    ``allow_private`` plumbs the operator opt-in through to the guard.
     """
-    if not command:
-        return False
-    base = os.path.basename(command).lower().strip()
-    if not base:
-        return False
-    forbidden_runners = {
-        "bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh",
-        "python", "python2", "python3", "perl", "ruby",
-        "powershell", "pwsh", "cmd", "wscript", "cscript",
-        "node", "deno", "bun",  # node `-e` and friends
-    }
-    # Match python3.13 etc.
-    if base in forbidden_runners:
-        return False
-    if base.startswith(("python", "node", "deno", "ruby", "perl")):
-        return False
-    forbidden_flags = {"-c", "--command", "--eval", "-e", "--exec",
-                       "--script", "-x"}
-    for a in args:
-        if not isinstance(a, str):
-            return False
-        if a.strip() in forbidden_flags:
-            return False
-    return True
-
-
-def _registry_mcp_url_allowed(url: str) -> bool:
-    """reject loopback/link-local/private addresses
-    so a manifest cannot steer the remote scanner at internal hosts.
-    Operators that legitimately want to scan internal MCP services
-    can opt in via `--allow-private` (handled by the caller before
-    this function is invoked)."""
-    import ipaddress
-    import urllib.parse
+    from defenseclaw.registries.ssrf import SSRFError, guard_url
     try:
-        parsed = urllib.parse.urlparse(url)
-    except ValueError:
-        return False
-    host = (parsed.hostname or "").strip().lower()
-    if not host:
-        return False
-    if host in ("localhost", "ip6-localhost", "ip6-loopback"):
-        return False
-    if host.endswith(".localhost"):
-        return False
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        # Resolve once to catch DNS-pinned private targets.
-        try:
-            import socket
-            infos = socket.getaddrinfo(host, None)
-        except OSError:
-            return False
-        for info in infos:
-            try:
-                resolved = ipaddress.ip_address(info[4][0])
-            except (ValueError, IndexError):
-                continue
-            if (resolved.is_loopback or resolved.is_private
-                    or resolved.is_link_local or resolved.is_multicast
-                    or resolved.is_reserved or resolved.is_unspecified):
-                return False
-        return True
-    if (ip.is_loopback or ip.is_private or ip.is_link_local
-            or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+        guard_url(url, allow_private=allow_private)
+    except SSRFError:
         return False
     return True
 

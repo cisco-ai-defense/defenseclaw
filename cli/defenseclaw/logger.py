@@ -34,6 +34,44 @@ from defenseclaw.db import Store
 from defenseclaw.models import Event, ScanResult
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow HTTP redirects on token-bearing requests.
+
+    The Splunk HEC forwarder sends a bearer ``Authorization: Splunk
+    <token>`` header. Python's default opener follows 3xx redirects and
+    replays the request headers onto the redirected request, so a
+    response-controlled ``Location`` could leak the HEC token to an
+    arbitrary cross-origin host (F-0808). We refuse every redirect so the
+    token is only ever sent to the configured HEC endpoint; a redirect is
+    surfaced as an ``HTTPError`` that the caller logs as a warning.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            f"refusing to follow Splunk HEC redirect to {newurl!r} "
+            "(would forward the HEC Authorization token off the configured host)",
+            headers,
+            fp,
+        )
+
+
+def _build_hec_opener(ctx: Any | None) -> urllib.request.OpenerDirector:
+    """Build a urllib opener that never follows redirects.
+
+    Used for the token-bearing Splunk HEC POST so the
+    ``Authorization`` header cannot be replayed across a
+    response-selected redirect to another origin (F-0808). When ``ctx``
+    is provided it is bound to the HTTPS handler so TLS posture is
+    preserved.
+    """
+    handlers: list[urllib.request.BaseHandler] = [_NoRedirectHandler()]
+    if ctx is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    return urllib.request.build_opener(*handlers)
+
+
 class Logger:
     def __init__(self, store: Store, splunk_cfg: Any | None = None) -> None:
         self.store = store
@@ -239,7 +277,11 @@ class _SplunkForwarder:
                 import ssl
 
                 ctx = ssl._create_unverified_context()
-            with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:  # noqa: S310
+            # Use an opener that refuses redirects so the bearer
+            # ``Authorization: Splunk <token>`` header is never replayed
+            # onto a response-controlled cross-origin redirect (F-0808).
+            opener = _build_hec_opener(ctx)
+            with opener.open(req, timeout=5) as resp:  # noqa: S310
                 if getattr(resp, "status", 200) >= 400:
                     raise urllib.error.HTTPError(
                         endpoint,

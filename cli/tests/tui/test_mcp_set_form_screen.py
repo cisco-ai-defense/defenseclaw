@@ -64,6 +64,9 @@ def test_mcp_set_form_builds_cli_argv_shape() -> None:
 
     assert result.binary == "defenseclaw"
     assert result.display_name == "mcp set context7"
+    # F-0803: env pairs must NOT be placed in argv (they leak secrets in
+    # process listings). They travel via ``result.env`` and are injected
+    # into the child process environment by the executor.
     assert result.argv == (
         "mcp",
         "set",
@@ -76,12 +79,11 @@ def test_mcp_set_form_builds_cli_argv_shape() -> None:
         "https://example.com/mcp",
         "--transport",
         "sse",
-        "--env",
-        "API_KEY=xxx",
-        "--env",
-        "REGION=us-east-1",
         "--skip-scan",
     )
+    assert "--env" not in result.argv
+    assert all("API_KEY=xxx" not in arg for arg in result.argv)
+    assert result.env == (("API_KEY", "xxx"), ("REGION", "us-east-1"))
 
 
 def test_mcp_set_form_validates_required_fields_and_env_pairs() -> None:

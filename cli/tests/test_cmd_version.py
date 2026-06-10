@@ -158,7 +158,14 @@ class VersionCommandTests(unittest.TestCase):
 
     def test_missing_gateway_reports_missing_status(self):
         runner = CliRunner()
-        with patch("defenseclaw.commands.cmd_version.shutil.which", return_value=None), \
+        # F-0001: the version probe now resolves the gateway through
+        # gateway.resolve_gateway_binary() (honouring DEFENSECLAW_GATEWAY_BIN
+        # and the canonical install fallback) instead of a bare
+        # shutil.which, so patch the resolver to report nothing installed.
+        with patch(
+            "defenseclaw.commands.cmd_version.gateway.resolve_gateway_binary",
+            return_value=None,
+        ), \
              patch("defenseclaw.commands.cmd_version._plugin_component") as pl:
             pl.return_value = cmd_version.Component(
                 name="plugin", version=__version__, origin="~/.openclaw",

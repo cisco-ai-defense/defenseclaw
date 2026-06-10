@@ -302,14 +302,23 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     ]
 
     data_dir_real = os.path.realpath(cfg.data_dir)
+    # F-0122: these directories hold operator-private state — the audit
+    # database, quarantined payloads, plugins and policies. Bare
+    # ``os.makedirs`` honors the process umask, so under the common 022
+    # umask the audit DB's parent is created world-readable (0755),
+    # leaking audit state to other local users. Force 0700 on creation
+    # *and* tighten any pre-existing directory so the perms are
+    # deterministic regardless of umask.
     for d in dirs:
-        os.makedirs(d, exist_ok=True)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
 
     external_dirs = list(cfg.skill_dirs())
     for d in external_dirs:
         d_real = os.path.realpath(d)
         if d_real.startswith(data_dir_real + os.sep):
-            os.makedirs(d, exist_ok=True)
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            os.chmod(d, 0o700)
     click.echo("  Directories:   " + ux._style("created", fg="green"))
 
     _seed_rego_policies(cfg.policy_dir)
@@ -1976,30 +1985,18 @@ def _is_sidecar_running(pid_file: str) -> bool:
 
 
 def _pid_looks_like_gateway(pid: int) -> bool:
-    candidates = ("defenseclaw-gateway", "defenseclaw_gateway", "defenseclaw")
-    proc_cmdline = f"/proc/{pid}/cmdline"
-    try:
-        with open(proc_cmdline, "rb") as fh:
-            raw = fh.read()
-        argv0 = raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
-    except FileNotFoundError:
-        # /proc absent (macOS) — fall back to ps.
-        try:
-            out = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "command="],
-                capture_output=True, text=True, check=False, timeout=5,
-            )
-        except (FileNotFoundError, subprocess.SubprocessError):
-            return False
-        if out.returncode != 0:
-            return False
-        argv0 = out.stdout.strip().split(None, 1)[0] if out.stdout.strip() else ""
-    except OSError:
-        return False
-    base = os.path.basename(argv0).strip()
-    if not base:
-        return False
-    return any(base == c or base.startswith(c) for c in candidates)
+    """Require the live process's argv0 basename to match a known
+    DefenseClaw gateway binary name *exactly*.
+
+    Delegates to the shared, fail-closed identity check in
+    ``process_liveness`` (same as bootstrap). Avarice F-0121: the previous
+    check accepted any basename starting with the generic ``defenseclaw``
+    prefix, so a planted process such as ``defenseclaw-not-gateway`` was
+    accepted as the live sidecar and init skipped starting the real one.
+    """
+    from defenseclaw.process_liveness import process_is_gateway
+
+    return process_is_gateway(pid)
 
 
 def _read_pid(pid_file: str) -> int | None:

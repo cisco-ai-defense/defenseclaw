@@ -1591,7 +1591,16 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
                 policy_dir=cfg.policy_dir, cfg=cfg,
             )
 
-            self.assertEqual(inv["skills"][0]["policy_verdict"], "allowed")
+            # F-0742: the codeguard row is ``source: user`` (operator-supplied
+            # provenance). It must NOT be blessed by the first-party allow
+            # list just because its resolved path lands under
+            # ``.openclaw/skills`` — that bypass is reserved for genuinely
+            # bundled first-party assets. The user-sourced row stays
+            # unscanned (its only scan target, /tmp/downloads/codeguard,
+            # does not match the resolved on-disk path — F-0423).
+            self.assertEqual(inv["skills"][0]["policy_verdict"], "unscanned")
+            # The defenseclaw plugin has no untrusted source marker, so the
+            # first-party allow still applies on its resolved provenance.
             self.assertEqual(inv["plugins"][0]["policy_verdict"], "allowed")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

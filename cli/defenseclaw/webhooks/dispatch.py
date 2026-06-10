@@ -450,7 +450,11 @@ def _redact_payload_preview(payload: bytes, webhook_type: str, secret: str) -> s
     body. The literal ``secret`` value is also redacted defensively in
     case future formats embed it elsewhere in the payload.
     """
-    raw = payload[:400].decode("utf-8", errors="replace")
+    # Redact the *full* payload before truncating. Slicing first can cut a
+    # long secret value (e.g. an overlong PagerDuty ``routing_key``) so its
+    # closing quote falls outside the window, the regex no longer matches,
+    # and the leading bytes of the secret leak into the preview (F-0443).
+    raw = payload.decode("utf-8", errors="replace")
     scrubbed = raw
     for field_name in _SECRET_PAYLOAD_FIELDS:
         scrubbed = re.sub(
@@ -460,8 +464,7 @@ def _redact_payload_preview(payload: bytes, webhook_type: str, secret: str) -> s
         )
     if secret and secret in scrubbed:
         scrubbed = scrubbed.replace(secret, "<redacted>")
-    # Keep the same ~200-char target as before so existing callers that
-    # truncate further still see a short preview.
+    # Truncate only after redaction so the preview stays short.
     return scrubbed[:200]
 
 

@@ -243,12 +243,28 @@ def enrich_with_policy(
             source_path = _inventory_source_path(
                 item, target_type, candidates, scan_entry, action_entry, cfg,
             )
+            # F-0423: prior scans are indexed by both full target and
+            # ``basename(target)``. A basename hit alone must NOT credit a
+            # *different* on-disk asset that merely shares the basename with
+            # a clean/already-scanned verdict. Once the item resolved to a
+            # concrete path, require the matched scan's target to refer to
+            # the same path; otherwise drop the scan so the asset is treated
+            # as unscanned rather than inheriting a stranger's result.
+            if scan_entry is not None and not _scan_entry_matches_path(scan_entry, source_path):
+                scan_entry = None
+            # F-0742: a ``source: user`` (or other operator/third-party)
+            # AIBOM row must not be silently blessed by the first-party
+            # allow list just because its resolved path lands under a
+            # first-party provenance dir. Suppress the first-party bypass
+            # for untrusted provenance so those rows still get scanned.
+            allow_first_party = _source_allows_first_party(item.get("source"))
             verdict, detail = _admission_verdict(
                 pe, target_type, policy_name,
                 scan_entry, action_entry,
                 fallback_actions,
                 policy_dir=policy_dir,
                 source_path=source_path,
+                allow_first_party=allow_first_party,
             )
             item["policy_verdict"] = verdict
             item["policy_detail"] = detail
@@ -289,6 +305,58 @@ def _fallback_actions_for(
     return skill_actions
 
 
+# F-0742: AIBOM rows carry a ``source`` describing where the asset came
+# from. Anything that is operator-, workspace-, or third-party-sourced is
+# untrusted provenance and must not be auto-allowed by the first-party
+# allow list (which is meant only for genuinely bundled first-party
+# assets). Unknown/empty sources keep the prior behaviour so we don't
+# regress legitimate first-party (e.g. bundled plugin) detection.
+_UNTRUSTED_INVENTORY_SOURCES: frozenset[str] = frozenset(
+    {"user", "workspace", "local", "project", "third-party", "thirdparty", "external"}
+)
+
+
+def _source_allows_first_party(source: Any) -> bool:
+    """Return ``False`` when an inventory ``source`` is untrusted provenance.
+
+    A ``source: user`` row (and similar operator/third-party provenance)
+    must not bypass scanning via the first-party allow list (F-0742).
+    """
+    return str(source or "").strip().lower() not in _UNTRUSTED_INVENTORY_SOURCES
+
+
+def _paths_equivalent(a: str, b: str) -> bool:
+    """True if two paths/identifiers refer to the same location.
+
+    Compares raw strings first (covers URLs / commands / identical paths)
+    then falls back to ``realpath`` so symlink or ``..`` differences don't
+    register as a spurious mismatch.
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except (OSError, ValueError):
+        return False
+
+
+def _scan_entry_matches_path(scan_entry: dict[str, Any], source_path: str) -> bool:
+    """F-0423: gate a (possibly basename-indexed) scan hit by full path.
+
+    A scan entry selected via ``basename(target)`` must only be trusted for
+    the inventory item when the item resolved to the *same* path as the
+    scan target. When we have no independent path to compare (the source
+    path itself fell back to the scan target, or no path is known) we keep
+    the name/basename match so existing no-path inventories still resolve.
+    """
+    target = str(scan_entry.get("target") or "")
+    if not target or not source_path:
+        return True
+    return _paths_equivalent(source_path, target)
+
+
 def _admission_verdict(
     pe: Any,
     target_type: str,
@@ -298,6 +366,7 @@ def _admission_verdict(
     skill_actions: SkillActionsConfig,
     policy_dir: str = "",
     source_path: str = "",
+    allow_first_party: bool = True,
 ) -> tuple[str, str]:
     """Replicate admission ordering for offline inventory evaluation."""
     from defenseclaw.enforce.admission import evaluate_admission
@@ -312,6 +381,7 @@ def _admission_verdict(
         action_entry=action_entry,
         fallback_actions=skill_actions,
         include_quarantine=True,
+        allow_first_party=allow_first_party,
     )
     if decision.verdict == "scan":
         return "unscanned", "no scan result"
@@ -332,13 +402,22 @@ def _inventory_source_path(
 ) -> str:
     import os
 
-    if action_entry is not None and action_entry.source_path:
-        return action_entry.source_path
-
+    # F-0422: prefer the LIVE on-disk location advertised by the inventory
+    # item over the stored ``ActionEntry.source_path``. The stored path is
+    # recorded at allow/scan time and can be stale; returning it first hid a
+    # mismatch between where the asset actually lives now and the pinned
+    # path, letting admission honour a path-pinned allow for a *different*
+    # on-disk asset that merely shares the registered name. The live path is
+    # authoritative for the admission decision (it is what gets compared
+    # against the pin / first-party provenance); the stored path is only a
+    # fallback when the item advertises no concrete location.
     for key in ("path", "baseDir", "filePath", "scan_target", "url", "command"):
         raw = item.get(key)
         if raw:
             return str(raw)
+
+    if action_entry is not None and action_entry.source_path:
+        return action_entry.source_path
 
     if cfg is None:
         if scan_entry is not None and scan_entry.get("target"):
@@ -1587,9 +1666,13 @@ def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
     if not os.path.isfile(path):
         return []
     try:
-        # Python 3.11+: tomllib in stdlib. Earlier we'd need tomli;
-        # the project pins 3.12 so this is safe.
-        import tomllib
+        # tomllib ships in the stdlib on Python 3.11+. On 3.10 (still an
+        # advertised target) it is absent, so fall back to the tomli
+        # backport rather than silently dropping Codex tool definitions.
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib
 
         with open(path, "rb") as fh:
             raw = tomllib.load(fh)
@@ -1860,10 +1943,33 @@ def _read_skill_description(path: str) -> str:
     """
     for marker in ("SKILL.md", "README.md"):
         marker_path = os.path.join(path, marker)
+        # F-0424: a skill directory is attacker-influenced content. A
+        # ``SKILL.md``/``README.md`` that is a symlink could point at an
+        # arbitrary readable file (``~/.ssh/id_rsa``, ``/etc/passwd``, …)
+        # and leak its first lines into the inventory ``description``.
+        # Reject symlinked markers and open with ``O_NOFOLLOW`` so the
+        # final component cannot be a symlink even under a TOCTOU race.
+        try:
+            if os.path.islink(marker_path):
+                continue
+        except OSError:
+            continue
         if not os.path.isfile(marker_path):
             continue
         try:
-            with open(marker_path, encoding="utf-8", errors="replace") as f:
+            fd = os.open(marker_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            continue
+        try:
+            reader = os.fdopen(fd, encoding="utf-8", errors="replace")
+        except OSError:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            continue
+        try:
+            with reader as f:
                 text = f.read(2048)
         except OSError:
             continue

@@ -257,6 +257,59 @@ def collect_files(
     return files
 
 
+def resolve_entrypoint_files(directory: str, entrypoints: list[str] | None) -> list[str]:
+    """Resolve declared manifest entrypoints to existing files in *directory*.
+
+    ``package.json`` ``main``/``bin`` (and connector-manifest entrypoints)
+    routinely point at extensionless launchers (e.g. ``bin/cli``) or files
+    under directories that :func:`collect_files` skips (e.g. a ``main`` under
+    ``node_modules``). Those runtime files must still be scanned, so callers
+    use this to force-include the specific resolved files in source / LLM
+    analysis regardless of extension allow-lists or ``_SKIP_DIRS``.
+
+    Each entrypoint is treated as a path relative to the plugin directory.
+    Resolved paths that escape the plugin root (via ``..`` or symlinks) are
+    dropped for containment. Returned paths are anchored under *directory*
+    (so callers can derive a stable relative path), de-duplicated by their
+    real path.
+    """
+    if not entrypoints:
+        return []
+
+    scan_root = os.path.realpath(directory)
+    resolved: list[str] = []
+    seen_real: set[str] = set()
+
+    for raw in entrypoints:
+        if not isinstance(raw, str):
+            continue
+        rel = raw.strip()
+        if not rel:
+            continue
+        # Strip a leading "./" and any leading separators so the entry can
+        # never be interpreted as an absolute path that escapes the plugin.
+        rel = rel.lstrip("/")
+        candidate = os.path.join(directory, rel)
+        try:
+            real = os.path.realpath(candidate)
+        except OSError:
+            continue
+        # Containment: resolved file must stay inside the plugin root.
+        if real != scan_root and not real.startswith(scan_root + os.sep):
+            continue
+        try:
+            if not os.path.isfile(candidate):
+                continue
+        except OSError:
+            continue
+        if real in seen_real:
+            continue
+        seen_real.add(real)
+        resolved.append(candidate)
+
+    return resolved
+
+
 def check_lockfile_presence(directory: str) -> bool:
     for name in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml"):
         if os.path.isfile(os.path.join(directory, name)):
