@@ -334,6 +334,24 @@ def _refresh_trusted_prefix_env(data_dir: str | None) -> None:
     os.environ["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = os.pathsep.join(merged)
 
 
+_UNTRUSTED_DIR_CACHE: dict[str, str | None] = {}
+
+
+def _trust_state_token(data_dir: str | None) -> str:
+    """Fingerprint persisted + live trust state for short-lived routing cache."""
+    import os  # noqa: PLC0415
+
+    from defenseclaw.config import default_data_path  # noqa: PLC0415
+
+    resolved_dir = data_dir or str(default_data_path())
+    dotenv = os.path.join(resolved_dir, ".env")
+    try:
+        mtime = str(os.path.getmtime(dotenv))
+    except OSError:
+        mtime = "0"
+    return f"{mtime}:{os.environ.get('DEFENSECLAW_TRUSTED_BIN_PREFIXES', '')}"
+
+
 def untrusted_connector_dir(connector: str, data_dir: str | None = None) -> str | None:
     """Return the directory a connector binary lives in when it is *untrusted*.
 
@@ -342,25 +360,33 @@ def untrusted_connector_dir(connector: str, data_dir: str | None = None) -> str 
     the Trusted Paths editor instead of running a setup that the trust gate
     would refuse (where the CLI would otherwise fire ``click.confirm``).
 
-    Runs a *fresh* scan (and re-hydrates persisted trust) so the routing
-    reflects current state — a stale "trusted" cache must not let an
-    untrusted-binary setup slip past the panel.
+    Re-hydrates persisted trust and scans connectors. Results are cached per
+    connector for the current trust fingerprint so repeated mode-picker opens
+    in one session do not re-exec every binary.
     """
     import os  # noqa: PLC0415
 
     from defenseclaw.inventory import agent_discovery  # noqa: PLC0415
 
+    cache_key = f"{connector}|{_trust_state_token(data_dir)}"
+    if cache_key in _UNTRUSTED_DIR_CACHE:
+        return _UNTRUSTED_DIR_CACHE[cache_key]
+
     _refresh_trusted_prefix_env(data_dir)
     try:
         disc = agent_discovery.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
     except Exception:
+        _UNTRUSTED_DIR_CACHE[cache_key] = None
         return None
     signal = disc.agents.get(connector)
     if signal is None or not signal.binary_path:
-        return None
-    if signal.error != agent_discovery.UNTRUSTED_PREFIX_ERROR:
-        return None
-    return os.path.dirname(os.path.realpath(signal.binary_path))
+        result = None
+    elif signal.error != agent_discovery.UNTRUSTED_PREFIX_ERROR:
+        result = None
+    else:
+        result = os.path.dirname(os.path.realpath(signal.binary_path))
+    _UNTRUSTED_DIR_CACHE[cache_key] = result
+    return result
 
 
 def untrusted_connector_dirs(data_dir: str | None = None) -> list[tuple[str, str]]:

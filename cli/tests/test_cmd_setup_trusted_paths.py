@@ -195,6 +195,52 @@ class GatePromptContractGateTests(unittest.TestCase):
         if os.path.isfile(dotenv):
             self.assertNotIn("DEFENSECLAW_TRUSTED_BIN_PREFIXES", open(dotenv, encoding="utf-8").read())
 
+    def test_declined_prompt_still_emits_trusted_paths_hint(self):
+        """Review follow-up: declining the trust prompt must still show remediation."""
+        hints: list[str] = []
+
+        def _capture(msg: str) -> None:
+            hints.append(msg)
+
+        def contract(_c, v):
+            return _compat(v, STATUS_UNVERSIONED, "codex-hooks-v1")
+
+        with patch.object(cmd_setup.ux, "subhead", side_effect=_capture):
+            result, _mock_disc, _tmp, binpath = self._run(
+                None, confirm=False, contract_side_effect=contract
+            )
+        self.assertFalse(result)
+        joined = " ".join(hints)
+        self.assertIn("trusted-paths add", joined)
+        self.assertIn(os.path.dirname(os.path.realpath(binpath)), joined)
+        self.assertIn("appends to ~/.defenseclaw/.env", joined)
+
+
+class ValidateTrustedPrefixTests(unittest.TestCase):
+    def test_rejects_non_absolute_path(self):
+        resolved, err = ad.validate_trusted_prefix("relative/bin")
+        self.assertIsNotNone(err)
+        self.assertIn("not absolute", err or "")
+
+    def test_realpath_canonicalises_symlink_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "target")
+            link = os.path.join(tmp, "link")
+            os.makedirs(target)
+            os.symlink(target, link)
+            resolved, err = ad.validate_trusted_prefix(link)
+            self.assertIsNone(err)
+            self.assertEqual(resolved, os.path.realpath(target))
+
+    def test_group_writable_directory_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gdir = os.path.join(tmp, "gtools")
+            os.makedirs(gdir)
+            os.chmod(gdir, 0o770)
+            with patch.object(ad, "_trusted_prefix_dir_mode_error", return_value="directory is group-writable"):
+                _resolved, err = ad.validate_trusted_prefix(gdir)
+            self.assertEqual(err, "directory is group-writable")
+
 
 class TrustedPathsCliTests(unittest.TestCase):
     def setUp(self):
