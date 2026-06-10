@@ -449,7 +449,10 @@ async def test_activity_panel_uses_activity_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overview_mode_key_opens_native_picker_and_preview() -> None:
+async def test_overview_mode_key_opens_native_picker_and_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The untrusted-binary routing scans the live host; force "trusted" so the
+    # picker path under test stays hermetic regardless of local installs.
+    monkeypatch.setattr("defenseclaw.tui.app.untrusted_connector_dir", lambda *_a, **_k: None)
     app = DefenseClawTUI()
 
     async with app.run_test(size=(150, 44)) as pilot:
@@ -467,7 +470,8 @@ async def test_overview_mode_key_opens_native_picker_and_preview() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overview_mode_picker_mouse_click_opens_preview() -> None:
+async def test_overview_mode_picker_mouse_click_opens_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("defenseclaw.tui.app.untrusted_connector_dir", lambda *_a, **_k: None)
     app = DefenseClawTUI()
 
     async with app.run_test(size=(150, 44)) as pilot:
@@ -479,6 +483,29 @@ async def test_overview_mode_picker_mouse_click_opens_preview() -> None:
         screen = app.screen_stack[-1]
         assert screen.__class__.__name__ == "CommandPreviewScreen"
         assert "defenseclaw setup codex --yes" in screen.preview.masked_display
+
+
+@pytest.mark.asyncio
+async def test_overview_mode_picker_routes_untrusted_binary_to_trusted_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Inverse of the hermetic stubs above: when the connector binary IS in an
+    # untrusted directory, setup must route into the Trusted Paths editor
+    # instead of dispatching a setup the trust gate would refuse.
+    monkeypatch.setattr(
+        "defenseclaw.tui.app.untrusted_connector_dir", lambda *_a, **_k: "/opt/untrusted/bin"
+    )
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.press("m")
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+
+        screen = app.screen_stack[-1]
+        assert screen.__class__.__name__ == "TrustedPathsEditorScreen"
+        assert "/opt/untrusted/bin" in screen._context_text
 
 
 @pytest.mark.asyncio

@@ -115,6 +115,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Inspect LLM (legacy - read-only)",
         "Cisco AI Defense",
         "Firewall",
+        "Trusted Paths",
     )
 
 
