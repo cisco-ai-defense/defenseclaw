@@ -1071,14 +1071,14 @@
     {
       "name": "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
       "category": "discovery",
-      "purpose": "Colon-separated list of extra trusted binary prefixes for AI Discovery's binary probing. The default trust list is intentionally narrow (system bin dirs only); operators with non-standard layouts (e.g. /opt/mycorp/bin) can re-enable specific paths.",
-      "default": "unset (only /usr/bin and /usr/local/bin trusted)",
-      "accepted_values": ["colon-separated absolute paths", "unset"],
+      "purpose": "Extra trusted binary prefixes for AI Discovery's binary probing, separated by os.pathsep (':' on POSIX, ';' on Windows). The default trust list covers system bin dirs, Homebrew (incl. Caskroom), MacPorts, and global node_modules trees; operators with non-standard layouts (e.g. /opt/mycorp/bin) can trust additional roots. Prefer managing via 'defenseclaw setup trusted-paths add|remove|list', which validates the directory and persists this variable to ~/.defenseclaw/.env; interactive action-mode setup offers the same remediation inline.",
+      "default": "unset (built-in defaults only)",
+      "accepted_values": ["os.pathsep-separated absolute paths (':' POSIX, ';' Windows)", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": true,
-      "consumers": [{"location": "cli/defenseclaw/inventory/agent_discovery.py:241", "description": "Agent discovery binary probe"}],
+      "consumers": [{"location": "cli/defenseclaw/inventory/agent_discovery.py:289", "description": "Agent discovery binary probe"}, {"location": "cli/defenseclaw/commands/cmd_setup.py:1587", "description": "setup trusted-paths CLI and inline trust prompt persistence"}],
       "since": "0.5.0",
-      "security_note": "Tight binary-discovery trust list — prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime."
+      "security_note": "Tight binary-discovery trust list — prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime. 'trusted-paths add' refuses world-writable and non-absolute directories unless --force."
     },
     {
       "name": "DEFENSECLAW_ANTHROPIC_PROBE_MODEL",

@@ -130,7 +130,7 @@ This is the canonical list of every environment variable DefenseClaw reads. The 
 | Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEFENSECLAW_ANTHROPIC_PROBE_MODEL` | — | claude-3-5-haiku-latest | `any-anthropic-model-id` | Override the model used by 'defenseclaw doctor' to probe Anthropic API key validity. | — | `cli/defenseclaw/commands/cmd_doctor.py:659` — Doctor's Anthropic probe |
-| `DEFENSECLAW_TRUSTED_BIN_PREFIXES` | **medium** | `unset` (only /usr/bin and /usr/local/bin trusted) | `colon-separated absolute paths`, `unset` | Colon-separated list of extra trusted binary prefixes for AI Discovery's binary probing. | Tight binary-discovery trust list — prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime. | `cli/defenseclaw/inventory/agent_discovery.py:241` — Agent discovery binary probe |
+| `DEFENSECLAW_TRUSTED_BIN_PREFIXES` | **medium** | `unset` (built-in defaults only) | `os.pathsep-separated absolute paths (':' POSIX, ';' Windows)`, `unset` | Extra trusted binary prefixes for AI Discovery's binary probing, separated by os.pathsep (':' on POSIX, ';' on Windows). | Tight binary-discovery trust list — prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime. 'trusted-paths add' refuses world-writable and non-absolute directories unless --force. | `cli/defenseclaw/inventory/agent_discovery.py:289` — Agent discovery binary probe<br/>`cli/defenseclaw/commands/cmd_setup.py:1587` — setup trusted-paths CLI and inline trust prompt persistence |
 
 ## Hook-internal (do not override)
 
