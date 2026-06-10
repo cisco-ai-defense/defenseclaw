@@ -718,16 +718,26 @@ func (c *Config) EffectiveInspectLLM() InspectLLMConfig {
 }
 
 type OTelConfig struct {
-	Enabled  bool               `mapstructure:"enabled"  yaml:"enabled"`
-	Protocol string             `mapstructure:"protocol" yaml:"protocol"`
-	Endpoint string             `mapstructure:"endpoint" yaml:"endpoint"`
-	Headers  map[string]string  `mapstructure:"headers"  yaml:"headers"`
-	TLS      OTelTLSConfig      `mapstructure:"tls"      yaml:"tls"`
-	Traces   OTelTracesConfig   `mapstructure:"traces"   yaml:"traces"`
-	Logs     OTelLogsConfig     `mapstructure:"logs"     yaml:"logs"`
-	Metrics  OTelMetricsConfig  `mapstructure:"metrics"  yaml:"metrics"`
-	Batch    OTelBatchConfig    `mapstructure:"batch"    yaml:"batch"`
-	Resource OTelResourceConfig `mapstructure:"resource" yaml:"resource"`
+	Enabled     bool                     `mapstructure:"enabled"       yaml:"enabled"`
+	Protocol    string                   `mapstructure:"protocol"      yaml:"protocol"`
+	Endpoint    string                   `mapstructure:"endpoint"      yaml:"endpoint"`
+	Headers     map[string]string        `mapstructure:"headers"       yaml:"headers"`
+	TLS         OTelTLSConfig            `mapstructure:"tls"           yaml:"tls"`
+	Traces      OTelTracesConfig         `mapstructure:"traces"        yaml:"traces"`
+	Logs        OTelLogsConfig           `mapstructure:"logs"          yaml:"logs"`
+	Metrics     OTelMetricsConfig        `mapstructure:"metrics"       yaml:"metrics"`
+	Batch       OTelBatchConfig          `mapstructure:"batch"         yaml:"batch"`
+	Resource    OTelResourceConfig       `mapstructure:"resource"      yaml:"resource"`
+	InsightClaw InsightClawAdapterConfig `mapstructure:"insight_claw"  yaml:"insight_claw"`
+}
+
+// InsightClawAdapterConfig controls the InsightClaw (openclaw.*) metrics adapter.
+// When enabled, DefenseClaw dual-emits InsightClaw-compatible metrics alongside
+// its native defenseclaw.* instruments via the same OTLP pipeline.
+type InsightClawAdapterConfig struct {
+	Enabled      bool   `mapstructure:"enabled"      yaml:"enabled"`
+	Prefix       string `mapstructure:"prefix"       yaml:"prefix"`
+	Experimental bool   `mapstructure:"experimental" yaml:"experimental"`
 }
 
 type OTelTLSConfig struct {

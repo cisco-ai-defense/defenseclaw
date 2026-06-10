@@ -1223,6 +1223,11 @@ func (p *Provider) RecordToolCall(ctx context.Context, tool, provider string, da
 		attribute.String("tool.provider", provider),
 		attribute.Bool("dangerous", dangerous),
 	))
+
+	// Dual-emit InsightClaw tool call.
+	if p.insightClaw != nil {
+		p.insightClaw.EmitToolCall(ctx, tool, "")
+	}
 }
 
 // RecordToolDuration records a tool call duration metric.
@@ -1245,6 +1250,11 @@ func (p *Provider) RecordToolError(ctx context.Context, tool string, exitCode in
 		attribute.String("gen_ai.tool.name", tool),
 		attribute.Int("exit_code", exitCode),
 	))
+
+	// Dual-emit InsightClaw tool error.
+	if p.insightClaw != nil {
+		p.insightClaw.EmitToolError(ctx, tool)
+	}
 }
 
 // RecordApproval records an approval request metric.
@@ -1277,6 +1287,12 @@ func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerN
 	}
 	if completion > 0 {
 		p.RecordLLMTokenUsage(ctx, operationName, providerName, model, agentName, agentID, sessionID, "output", completion)
+	}
+
+	// Dual-emit InsightClaw token usage (semconv path).
+	if p.insightClaw != nil {
+		modelLabel := NormalizeModelLabel(model)
+		p.insightClaw.EmitTokenUsage(ctx, providerName, modelLabel, prompt, completion, prompt+completion)
 	}
 }
 
@@ -1329,6 +1345,14 @@ func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, provide
 		attrs = append(attrs, attribute.String("gen_ai.agent.id", agentID))
 	}
 	p.metrics.genAIOperationDuration.Record(ctx, durationSeconds, metric.WithAttributes(attrs...))
+
+	// Dual-emit InsightClaw LLM duration (convert seconds → ms) and agent turn duration.
+	if p.insightClaw != nil {
+		modelLabel := NormalizeModelLabel(model)
+		durationMs := durationSeconds * 1000
+		p.insightClaw.EmitLLMDuration(ctx, modelLabel, durationMs)
+		p.insightClaw.EmitAgentTurnDuration(ctx, modelLabel, agentID, durationMs)
+	}
 }
 
 // RecordAlert records a runtime alert metric.
@@ -1540,6 +1564,18 @@ func (p *Provider) RecordConnectorHookInvocation(ctx context.Context, connector,
 	}
 	p.metrics.hookInvocations.Add(ctx, 1, metric.WithAttributes(attrs...))
 	p.metrics.hookLatency.Record(ctx, durationMs, metric.WithAttributes(attrs...))
+
+	// Dual-emit InsightClaw message received/sent based on hook event type.
+	if p.insightClaw != nil {
+		switch eventType {
+		case "prompt", "tool_result":
+			p.insightClaw.EmitMessageReceived(ctx, connector)
+		case "tool_call":
+			p.insightClaw.EmitMessageSent(ctx, connector)
+		case "sessionstart":
+			p.insightClaw.EmitSessionReset(ctx, connector)
+		}
+	}
 }
 
 // RecordHookTokenUsage records token-usage counts attributable to a
@@ -1580,6 +1616,11 @@ func (p *Provider) RecordHookTokenUsage(ctx context.Context, connector, model st
 	record("prompt", promptTokens)
 	record("completion", completionTokens)
 	record("total", totalTokens)
+
+	// Dual-emit InsightClaw token usage.
+	if p.insightClaw != nil {
+		p.insightClaw.EmitTokenUsage(ctx, connector, modelLabel, promptTokens, completionTokens, totalTokens)
+	}
 }
 
 // modelLabelMaxLen caps the model attribute string length. Even with
@@ -2220,6 +2261,14 @@ func (p *Provider) RecordWebhookDispatch(ctx context.Context, webhookKind, outco
 		p.metrics.webhookFailures.Add(ctx, 1, attrs)
 	}
 	_ = latencyMs // latency recorded via RecordWebhookLatency for rich attributes
+
+	// Dual-emit InsightClaw webhook metrics.
+	if p.insightClaw != nil {
+		p.insightClaw.EmitWebhookReceived(ctx, webhookKind, outcome)
+		if outcome != "delivered" {
+			p.insightClaw.EmitWebhookError(ctx, webhookKind, outcome)
+		}
+	}
 }
 
 // RecordWebhookLatency records per-delivery latency on defenseclaw.webhook.latency
@@ -2233,6 +2282,11 @@ func (p *Provider) RecordWebhookLatency(ctx context.Context, webhookKind, target
 		attribute.String("webhook.target_hash", targetHash),
 		attribute.Int("http.status_code", httpStatus),
 	))
+
+	// Dual-emit InsightClaw webhook duration.
+	if p.insightClaw != nil {
+		p.insightClaw.EmitWebhookDuration(ctx, webhookKind, latencyMs)
+	}
 }
 
 // RecordWebhookCircuitBreaker records a circuit breaker state transition.
@@ -2266,6 +2320,11 @@ func (p *Provider) RecordLLMBridgeLatency(ctx context.Context, model, status str
 		attribute.String("gen_ai.request.model", model),
 		attribute.String("status", status),
 	))
+
+	// Dual-emit InsightClaw LLM duration.
+	if p.insightClaw != nil {
+		p.insightClaw.EmitLLMDuration(ctx, NormalizeModelLabel(model), durationMs)
+	}
 }
 
 // RecordOpenShellExit records an OpenShell subprocess exit (non-zero typically).
@@ -2432,6 +2491,11 @@ func (p *Provider) RecordQueueDepth(ctx context.Context, queueName string, depth
 		attribute.Int64("capacity", capacity),
 	)
 	p.metrics.queueDepthGauge.Record(ctx, depth, attrs)
+
+	// Dual-emit InsightClaw queue depth.
+	if p.insightClaw != nil {
+		p.insightClaw.EmitQueueDepth(ctx, float64(depth))
+	}
 }
 
 // RecordQueueDropped increments the drop counter (e.g. queue full).

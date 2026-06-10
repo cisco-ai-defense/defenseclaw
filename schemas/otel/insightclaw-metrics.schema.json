@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.dev/schemas/otel/insightclaw-metrics.schema.json",
+  "title": "InsightClaw Compatibility Metrics (openclaw.*)",
+  "description": "Metrics emitted by the DefenseClaw InsightClaw adapter for interoperability with InsightClaw dashboards and analytics. These are dual-emitted alongside native defenseclaw.* metrics when otel.insight_claw.enabled is true. Attribute names follow OTel semantic conventions (gen_ai.*, etc.) — no renaming.",
+  "x-emitted-metrics": [
+    {
+      "name": "openclaw.messages.received",
+      "type": "counter",
+      "unit": "{message}",
+      "description": "Messages received by the agent (prompt/tool_result hooks).",
+      "attributes": {
+        "message.channel": { "type": "string", "description": "Connector or channel that delivered the message." }
+      }
+    },
+    {
+      "name": "openclaw.messages.sent",
+      "type": "counter",
+      "unit": "{message}",
+      "description": "Messages sent by the agent (completions/tool_call hooks).",
+      "attributes": {
+        "message.channel": { "type": "string", "description": "Connector or channel the message was sent through." }
+      }
+    },
+    {
+      "name": "openclaw.tool.calls",
+      "type": "counter",
+      "unit": "{call}",
+      "description": "Tool calls observed via connector hooks.",
+      "attributes": {
+        "gen_ai.tool.name": { "type": "string", "description": "Tool name (OTel semconv)." },
+        "session.key": { "type": "string", "description": "Session key when available." }
+      }
+    },
+    {
+      "name": "openclaw.tool.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "Tool calls that resulted in an error.",
+      "attributes": {
+        "gen_ai.tool.name": { "type": "string", "description": "Tool name (OTel semconv)." }
+      }
+    },
+    {
+      "name": "openclaw.session.resets",
+      "type": "counter",
+      "unit": "{reset}",
+      "description": "Session resets (new/reset commands).",
+      "attributes": {
+        "command.source": { "type": "string", "description": "Source of the reset command." }
+      }
+    },
+    {
+      "name": "openclaw.llm.requests",
+      "type": "counter",
+      "unit": "{request}",
+      "description": "LLM requests observed.",
+      "attributes": {
+        "gen_ai.request.model": { "type": "string", "description": "Model identifier (OTel semconv)." },
+        "gen_ai.provider.name": { "type": "string", "description": "Provider name (OTel semconv)." },
+        "connector": { "type": "string", "description": "Connector that triggered the request." }
+      }
+    },
+    {
+      "name": "openclaw.llm.tokens.prompt",
+      "type": "counter",
+      "unit": "{token}",
+      "description": "Prompt (input) tokens consumed.",
+      "attributes": {
+        "gen_ai.request.model": { "type": "string" },
+        "connector": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.llm.tokens.completion",
+      "type": "counter",
+      "unit": "{token}",
+      "description": "Completion (output) tokens consumed.",
+      "attributes": {
+        "gen_ai.request.model": { "type": "string" },
+        "connector": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.llm.tokens.total",
+      "type": "counter",
+      "unit": "{token}",
+      "description": "Total tokens consumed.",
+      "attributes": {
+        "gen_ai.request.model": { "type": "string" },
+        "connector": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.agent.turn_duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Agent turn duration.",
+      "attributes": {
+        "gen_ai.request.model": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.llm.duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "LLM request duration (model round-trip, not full turn).",
+      "attributes": {
+        "gen_ai.request.model": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.cost.usd",
+      "type": "counter",
+      "unit": "USD",
+      "description": "Accumulated LLM cost in USD.",
+      "attributes": {
+        "gen_ai.request.model": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.webhook.received",
+      "type": "counter",
+      "unit": "{webhook}",
+      "description": "Webhooks received.",
+      "attributes": {
+        "channel": { "type": "string" },
+        "webhook.type": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.webhook.error",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "Webhook processing errors.",
+      "attributes": {
+        "channel": { "type": "string" },
+        "webhook.type": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.webhook.duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Webhook ingress processing duration.",
+      "attributes": {
+        "channel": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.message.queued",
+      "type": "counter",
+      "unit": "{message}",
+      "description": "Messages enqueued for processing.",
+      "attributes": {
+        "channel": { "type": "string" },
+        "source": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.message.processed",
+      "type": "counter",
+      "unit": "{message}",
+      "description": "Messages processed.",
+      "attributes": {
+        "channel": { "type": "string" },
+        "outcome": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.message.duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Message processing duration.",
+      "attributes": {
+        "channel": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.queue.depth",
+      "type": "histogram",
+      "unit": "{item}",
+      "description": "Queue depth snapshot (backlog pressure).",
+      "attributes": {}
+    },
+    {
+      "name": "openclaw.queue.wait_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Time spent waiting in the queue.",
+      "attributes": {
+        "lane": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.queue.lane.enqueue",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "Queue lane enqueue events.",
+      "attributes": {
+        "lane": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.queue.lane.dequeue",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "Queue lane dequeue events.",
+      "attributes": {
+        "lane": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.session.state",
+      "type": "counter",
+      "unit": "{transition}",
+      "description": "Session state transitions.",
+      "attributes": {
+        "state": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.session.stuck",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "Sessions detected as stuck.",
+      "attributes": {
+        "state": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.session.stuck_age_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "How long sessions have been stuck.",
+      "attributes": {
+        "state": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.run.attempt",
+      "type": "counter",
+      "unit": "{attempt}",
+      "description": "Run attempts (including retries).",
+      "attributes": {
+        "attempt": { "type": "integer" }
+      }
+    },
+    {
+      "name": "openclaw.tool.loop",
+      "type": "counter",
+      "unit": "{loop}",
+      "description": "Tool loop detections.",
+      "attributes": {
+        "gen_ai.tool.name": { "type": "string" },
+        "detector": { "type": "string" },
+        "action": { "type": "string" },
+        "severity": { "type": "string" }
+      }
+    }
+  ]
+}

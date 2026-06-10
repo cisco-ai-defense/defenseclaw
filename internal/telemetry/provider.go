@@ -52,6 +52,7 @@ import (
 	tracehttp "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry/insightclaw"
 )
 
 // Provider holds the OTel SDK providers and exposes telemetry emission methods.
@@ -81,6 +82,11 @@ type Provider struct {
 	// guard it with an atomic load rather than a mutex; writes
 	// happen exactly once during NewSidecar.
 	agentInstanceID atomic.Value // string
+
+	// insightClaw is the InsightClaw metrics adapter. When non-nil,
+	// Record* methods also emit openclaw.* metrics for InsightClaw
+	// compatibility. Nil when otel.insight_claw.enabled is false.
+	insightClaw *insightclaw.Adapter
 }
 
 // NewProvider initializes the OTel SDK providers and exporters. When
@@ -146,6 +152,18 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 	}
 	p.metrics = ms
 
+	// Initialize InsightClaw adapter for dual-emit when configured.
+	icCfg := insightclaw.Config{
+		Enabled:      fullCfg.OTel.InsightClaw.Enabled,
+		Prefix:       fullCfg.OTel.InsightClaw.Prefix,
+		Experimental: fullCfg.OTel.InsightClaw.Experimental,
+	}
+	ic, err := insightclaw.NewAdapter(p.meter, icCfg)
+	if err != nil {
+		return nil, fmt.Errorf("telemetry: insightclaw adapter: %w", err)
+	}
+	p.insightClaw = ic
+
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
 		if err == nil || p.metrics == nil {
 			return
@@ -179,6 +197,15 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 // Enabled reports whether OTel export is active.
 func (p *Provider) Enabled() bool {
 	return p != nil && p.enabled
+}
+
+// InsightClaw returns the InsightClaw adapter for direct emission from
+// hook handlers. Returns nil when the adapter is disabled.
+func (p *Provider) InsightClaw() *insightclaw.Adapter {
+	if p == nil {
+		return nil
+	}
+	return p.insightClaw
 }
 
 // Tracer returns the defenseclaw tracer, or a no-op tracer when the
