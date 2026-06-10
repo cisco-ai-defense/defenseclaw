@@ -78,27 +78,37 @@ def _load_module(name: str, path: Path, stubs: dict[str, types.ModuleType] | Non
 
 
 # --------------------------------------------------------------------------- #
-# F-0561 — Grafana admin password required, anonymous access disabled
+# F-0561 — local Grafana opens without a login (loopback-only dashboard)
 # --------------------------------------------------------------------------- #
-def test_f0561_grafana_admin_password_required_and_anon_disabled() -> None:
+def test_f0561_local_grafana_is_loopback_bound_and_loginless() -> None:
+    # Operator decision: a login prompt on a localhost-only dashboard is pure
+    # friction. The security boundary for this developer-laptop stack is the
+    # loopback port bind, NOT a Grafana password. So we assert the dashboard
+    # opens with no login (anonymous Admin, login form disabled) AND that the
+    # port is published on the loopback default rather than all interfaces.
     text = _read(COMPOSE)
-    assert "GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:?" in text
-    assert "GF_AUTH_ANONYMOUS_ENABLED=false" in text
-    # insecure originals are gone
-    assert "GF_SECURITY_ADMIN_PASSWORD=admin" not in text
-    assert "GF_AUTH_ANONYMOUS_ENABLED=true" not in text
+    assert "GF_AUTH_ANONYMOUS_ENABLED=true" in text
+    assert "GF_AUTH_DISABLE_LOGIN_FORM=true" in text
+    # the loopback bind is what actually protects the stack
+    assert "${HOST_BIND:-127.0.0.1}:3000:3000" in text
+    # no required-password gate (the :? form) and no all-interfaces publish
+    assert "GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:?" not in text
+    assert '"0.0.0.0:3000:3000"' not in text
 
 
 # --------------------------------------------------------------------------- #
-# F-0562 — Prometheus admin API / remote-write receiver disabled
+# F-0562 — local Prometheus admin/remote-write enabled but loopback-bound
 # --------------------------------------------------------------------------- #
-def test_f0562_prometheus_admin_api_and_remote_write_disabled() -> None:
+def test_f0562_local_prometheus_apis_enabled_but_loopback_bound() -> None:
+    # The admin + remote-write APIs are useful for local dev; they are kept
+    # off the network by the loopback port bind rather than disabled.
     text = _read(COMPOSE)
-    # the active command flags (quoted YAML list items) must be absent
-    assert '"--web.enable-admin-api"' not in text
-    assert '"--web.enable-remote-write-receiver"' not in text
-    # sanity: the benign flags are still present
+    assert '"--web.enable-admin-api"' in text
+    assert '"--web.enable-remote-write-receiver"' in text
     assert '"--web.enable-lifecycle"' in text
+    # the loopback bind is the security boundary, not the absence of the APIs
+    assert "${HOST_BIND:-127.0.0.1}:9090:9090" in text
+    assert '"0.0.0.0:9090:9090"' not in text
 
 
 # --------------------------------------------------------------------------- #
