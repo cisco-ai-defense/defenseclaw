@@ -710,6 +710,23 @@ class DefenseClawTUI(App[None]):
         # Rich ``Group`` we cannot fingerprint reliably).
         self._last_body_signature: tuple[object, ...] | None = None
         self._last_detail_signature: tuple[object, ...] | None = None
+        # Same idempotence guard for the shared ``#panel-table`` DataTable.
+        # ``_render_panel_table`` clears and rebuilds every row, resets the
+        # cursor, and refocuses the table on every call. Under the 2 s
+        # ``_periodic_refresh`` ticker that meant the Logs / Audit feeds reset
+        # their scroll + cursor twice a second, so operators couldn't read or
+        # scroll a row before it jumped back to the top (and the constant
+        # ``table.focus()`` stole focus, which read as the UI "jumping"). We
+        # now skip the rebuild when the panel, columns, rows, and cursor are
+        # all unchanged. ``None`` forces a repaint.
+        self._last_table_signature: tuple[object, ...] | None = None
+        # Set while ``_render_panel_table`` programmatically restores the
+        # DataTable cursor. Textual fires ``RowHighlighted`` for that move just
+        # like a real keypress, and the handler would call the model's
+        # ``set_cursor`` — which for Logs flips ``paused = True``. That
+        # silently paused the live log stream the moment the panel opened. The
+        # flag lets the handler ignore cursor changes it caused itself.
+        self._restoring_table_cursor = False
         # Command-progress strip state machine. The strip is the single
         # source of truth for command lifecycle messaging — what ran,
         # what it's doing, and what to do next. ``idle`` means hidden;
@@ -2047,6 +2064,19 @@ class DefenseClawTUI(App[None]):
 
     @on(DataTable.RowHighlighted, "#panel-table")
     def _on_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        # Ignore highlight events that match the cursor the model already
+        # holds. Textual fires RowHighlighted both for genuine user
+        # navigation AND for the programmatic move_cursor()/clear() that
+        # _render_panel_table issues every render. Routing the latter into a
+        # model set_cursor() would (for Logs) flip paused=True the moment the
+        # panel renders or a filter is applied, silently pausing the live
+        # stream. ``_restoring_table_cursor`` covers the synchronous restore;
+        # the per-panel current-cursor comparison covers the async highlight
+        # events Textual delivers a tick later (e.g. after clear()+add_row()).
+        if self._restoring_table_cursor:
+            return
+        if event.cursor_row == self._active_table_cursor():
+            return
         if self.active_panel == "alerts":
             self.alerts_model.set_cursor(event.cursor_row)
         elif self.active_panel == "registries":
@@ -2318,6 +2348,14 @@ class DefenseClawTUI(App[None]):
             # that overview itself paints every tick (cheap; no
             # DataTable underneath it).
             self._last_body_signature = None
+            # Overview has no DataTable of its own and skips _body_text()
+            # (the only place these are reset), so clear the panel-table
+            # state here. Otherwise the columns/rows left over from the
+            # previously-viewed Audit/Logs panel survive and
+            # _render_panel_table() paints that stale feed at the bottom
+            # of the overview.
+            self._table_columns = ()
+            self._table_rows = ()
         else:
             text = self._body_text()
             # Skip the layout-triggering ``Static.update`` when the body
@@ -3654,6 +3692,9 @@ class DefenseClawTUI(App[None]):
                 f"# saved {datetime.now(timezone.utc).isoformat()}\n\n"
             )
             target.write_text(header + "\n".join(entry.output) + "\n", encoding="utf-8")
+            # F-0782: command output frequently contains tokens/secrets, so
+            # the saved transcript must be owner-only, not world-readable.
+            os.chmod(target, 0o600)
         except OSError as exc:
             self._set_status(f"Save failed: {exc}")
             return
@@ -5810,6 +5851,13 @@ class DefenseClawTUI(App[None]):
         ]
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        # F-0781: audit exports can carry sensitive identifiers (targets,
+        # actors, run ids), so the file must be owner-only rather than
+        # world-readable under the operator's umask.
+        try:
+            os.chmod(target, 0o600)
+        except OSError:
+            pass
         return target
 
     def _refresh_hint(self) -> None:
@@ -5926,6 +5974,24 @@ class DefenseClawTUI(App[None]):
         if not self._table_columns:
             table.add_class("hidden")
             table.clear(columns=True)
+            self._last_table_signature = None
+            return
+
+        # Idempotence guard: only tear down and rebuild the DataTable when the
+        # panel, columns, rows, or target cursor actually changed. Without this
+        # the 2 s refresh ticker cleared every row, reset the cursor, and
+        # re-stole focus twice a second — so the Logs/Audit feeds were
+        # unreadable (scroll + cursor jumped to the top continuously) and the
+        # constant table.focus() read as the UI spontaneously jumping around.
+        cursor_row = self._active_table_cursor() if self._table_rows else -1
+        signature = (
+            self.active_panel,
+            self._table_columns,
+            self._table_rows,
+            cursor_row,
+            self.active_panel == "setup" and self.setup_model.form_active,
+        )
+        if signature == self._last_table_signature:
             return
 
         table.remove_class("hidden")
@@ -5939,8 +6005,13 @@ class DefenseClawTUI(App[None]):
             table.add_row(*cells, key=str(index))
 
         if self._table_rows:
-            row = self._active_table_cursor()
-            table.move_cursor(row=row, column=0, animate=False)
+            # move_cursor fires RowHighlighted; suppress the handler's model
+            # write so restoring the cursor here can't pause the Logs stream.
+            self._restoring_table_cursor = True
+            try:
+                table.move_cursor(row=cursor_row, column=0, animate=False)
+            finally:
+                self._restoring_table_cursor = False
             # Textual's DataTable binds left/right/enter to its own cursor
             # actions, which silently swallows the keys the setup wizard
             # form relies on (cycle choice, toggle bool, Ctrl+R submit).
@@ -5954,6 +6025,7 @@ class DefenseClawTUI(App[None]):
                     self.set_focus(None)
             else:
                 table.focus()
+        self._last_table_signature = signature
 
     def _render_detail_panel(self) -> None:
         panel = self.query_one("#detail-panel", VerticalScroll)
@@ -8349,6 +8421,13 @@ def _panel_key(event: events.Key) -> str:
         return "escape"
     if event.key in {"up", "down"}:
         return event.key
+    # Normalize backspace/delete BEFORE the event.character branch. Textual
+    # delivers the DEL control char (\x7f) as event.character, so without this
+    # a backspace in a panel search field appended a literal \x7f instead of
+    # deleting (the alerts search showed "critical\x7f\x7f..."). Panels expect
+    # the logical key name "backspace".
+    if event.key in {"backspace", "delete"} or event.character in {"\x7f", "\x08"}:
+        return "backspace"
     if event.character:
         # Capital-letter keys that panels distinguish from their
         # lowercase form (e.g. ``M`` materialize bundled vs ``m`` no-op,
