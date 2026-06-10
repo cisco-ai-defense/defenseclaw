@@ -1773,7 +1773,7 @@ class TestMultiConnectorInit(unittest.TestCase):
             cfg.guardrail.enabled = True
             cfg.save()
 
-            active = _activate_additional_connectors(
+            active, sidecar_step = _activate_additional_connectors(
                 {"connector": "codex", "profile": "observe", "fail_mode": "open",
                  "human_approval": None, "hilt_min_severity": None},
                 [{"connector": "claudecode", "profile": "action", "fail_mode": "closed",
@@ -1781,6 +1781,8 @@ class TestMultiConnectorInit(unittest.TestCase):
                 start_gateway=False,
             )
             self.assertEqual(active, ["claudecode", "codex"])
+            # Gateway start not requested → no sidecar step to fold into report.
+            self.assertIsNone(sidecar_step)
 
             reloaded = cfg_mod.load()
             gc = reloaded.guardrail
@@ -1862,15 +1864,22 @@ class TestMultiConnectorInit(unittest.TestCase):
             reloaded = cfg_mod.load()
             self.assertEqual(reloaded.guardrail.connectors["claudecode"].mode, "action")
 
-    def test_prompt_first_run_fans_out_per_connector(self):
+    def test_prompt_first_run_observes_all_and_actions_subset(self):
+        """The wizard pre-selects every detected connector in observe, then
+        only the named subset is promoted to action with shared fail/HITL."""
         from defenseclaw.commands import cmd_init
 
         disc = self._disc({"codex", "claudecode"})
-        prompts = iter(["codex,claudecode", "local", "observe", "open", "action", "closed", "MEDIUM"])
-        confirms = iter([False, True, False, True])  # judge, claudecode HITL, start_gateway, verify
+        # connector list, scanner mode, action subset, fail mode, HITL severity
+        prompts = iter(["codex,claudecode", "local", "claudecode", "closed", "MEDIUM"])
+        confirms = iter([False, True, False, True])  # judge, action HITL, start_gateway, verify
 
         with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
                 patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    return_value=True,
+                ), \
                 patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
                 patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
             settings, scanner_mode, with_judge, start_gateway, verify = cmd_init._prompt_first_run(
@@ -1879,22 +1888,340 @@ class TestMultiConnectorInit(unittest.TestCase):
                 start_gateway=False, verify=None, rescan_agents=False,
             )
 
+        by_name = {s["connector"]: s for s in settings}
         self.assertEqual([s["connector"] for s in settings], ["codex", "claudecode"])
-        self.assertEqual(settings[0]["profile"], "observe")
-        self.assertEqual(settings[1]["profile"], "action")
-        self.assertEqual(settings[1]["fail_mode"], "closed")
-        self.assertTrue(settings[1]["human_approval"])
-        self.assertEqual(settings[1]["hilt_min_severity"], "MEDIUM")
+        # Unnamed connectors stay in observe with no action-only knobs.
+        self.assertEqual(by_name["codex"]["profile"], "observe")
+        self.assertIsNone(by_name["codex"]["fail_mode"])
+        self.assertIsNone(by_name["codex"]["human_approval"])
+        # The named subset is promoted to action and carries the shared
+        # fail-mode/HITL answers.
+        self.assertEqual(by_name["claudecode"]["profile"], "action")
+        self.assertEqual(by_name["claudecode"]["fail_mode"], "closed")
+        self.assertTrue(by_name["claudecode"]["human_approval"])
+        self.assertEqual(by_name["claudecode"]["hilt_min_severity"], "MEDIUM")
         self.assertEqual(scanner_mode, "local")
         self.assertFalse(with_judge)
         self.assertFalse(start_gateway)
         self.assertTrue(verify)
+
+    def test_prompt_first_run_blank_action_keeps_all_observe(self):
+        """Pressing Enter at the action prompt keeps every connector observe
+        and never asks the action-only fail-mode/HITL questions."""
+        from defenseclaw.commands import cmd_init
+
+        disc = self._disc({"codex", "claudecode"})
+        prompts = iter(["codex,claudecode", "local", ""])  # connectors, scanner, action (blank)
+        confirms = iter([False, False, True])  # judge, start_gateway, verify
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
+                patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
+            settings, _scanner, _judge, _start, _verify = cmd_init._prompt_first_run(
+                connector=None, profile=None, scanner_mode="local", with_judge=False,
+                fail_mode=None, human_approval=None, hilt_min_severity=None,
+                start_gateway=False, verify=None, rescan_agents=False,
+            )
+
+        self.assertTrue(all(s["profile"] == "observe" for s in settings))
+        self.assertEqual({s["connector"] for s in settings}, {"codex", "claudecode"})
+
+    def test_prompt_action_connectors_intersects_with_configured(self):
+        from defenseclaw.commands import cmd_init
+
+        with patch.object(cmd_init.click, "prompt", return_value="claudecode, bogus, codex"):
+            got = cmd_init._prompt_action_connectors(["codex", "claudecode"])
+        # Out-of-set entries (bogus) are dropped; configured ones are kept.
+        self.assertEqual(sorted(got), ["claudecode", "codex"])
+
+        with patch.object(cmd_init.click, "prompt", return_value=""):
+            self.assertEqual(cmd_init._prompt_action_connectors(["codex"]), [])
 
     def test_single_connector_selection_keeps_legacy_shape(self):
         from defenseclaw.commands.cmd_init import _prompt_connector_selection
 
         # An explicit single connector short-circuits discovery entirely.
         self.assertEqual(_prompt_connector_selection("codex", False), ["codex"])
+
+
+class TestInitObserveAllActionConnectors(unittest.TestCase):
+    """Non-interactive --observe-all / --action-connectors wiring.
+
+    These pin the scripted contract: detect every hook connector and bring
+    them up in observe by default, promoting only the named subset to action.
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-observe-all-")
+        self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
+        self.runner = CliRunner()
+
+    def _invoke(self, args, env=None):
+        full_env = {"DEFENSECLAW_HOME": self.tmp_dir}
+        if env:
+            full_env.update(env)
+        return self.runner.invoke(init_cmd, args, obj=AppContext(), env=full_env)
+
+    def _disc(self, installed):
+        return AgentDiscovery(
+            scanned_at="2026-06-09T00:00:00Z",
+            cache_hit=False,
+            agents={
+                name: AgentSignal(
+                    name=name,
+                    installed=name in installed,
+                    config_path=f"/tmp/{name}.cfg" if name in installed else "",
+                    binary_path="",
+                    version="",
+                    error="",
+                )
+                for name in KNOWN_CONNECTORS
+            },
+        )
+
+    def _load_cfg(self) -> dict:
+        import yaml
+
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            return yaml.safe_load(fh)
+
+    def test_help_lists_new_flags(self):
+        result = self.runner.invoke(init_cmd, ["--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("--observe-all", result.output)
+        self.assertIn("--action-connectors", result.output)
+
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_observe_all_configures_every_detected_in_observe(self, mock_discover):
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+
+        result = self._invoke([
+            "--non-interactive", "--yes", "--observe-all",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        summary = json.loads(result.output)
+        self.assertEqual(sorted(summary.get("connectors", [])), ["claudecode", "codex"])
+
+        cfg = self._load_cfg()
+        self.assertEqual(cfg["guardrail"]["mode"], "observe")
+        connectors = cfg["guardrail"]["connectors"]
+        self.assertEqual(sorted(connectors), ["claudecode", "codex"])
+        # No connector enforces: the explicit override is observe and the
+        # global mode is observe (empty override inherits it).
+        self.assertIn(connectors["claudecode"].get("mode", ""), ("", "observe"))
+        self.assertIn(connectors["codex"].get("mode", ""), ("", "observe"))
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_observe_all_with_action_subset_sets_per_connector_override(self, mock_discover, _gate):
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--observe-all", "--action-connectors", "claudecode",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        cfg = self._load_cfg()
+        # Primary (codex) is observe → global mode observe; claudecode is the
+        # enforcing peer via a per-connector override.
+        self.assertEqual(cfg["guardrail"]["mode"], "observe")
+        self.assertEqual(cfg["guardrail"]["connectors"]["claudecode"]["mode"], "action")
+        self.assertIn(cfg["guardrail"]["connectors"]["codex"].get("mode", ""), ("", "observe"))
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_action_connectors_only_configures_named_connector(self, mock_discover, _gate):
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--action-connectors", "codex",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        summary = json.loads(result.output)
+        # Without --observe-all only the named connector is configured.
+        self.assertEqual(summary["connector"], "codex")
+        self.assertNotIn("connectors", summary)
+
+        cfg = self._load_cfg()
+        self.assertEqual(cfg["guardrail"]["mode"], "action")
+        self.assertEqual(cfg["guardrail"]["connector"], "codex")
+        self.assertNotIn("claudecode", cfg["guardrail"].get("connectors", {}) or {})
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=False)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_unverified_action_connector_downgrades_to_observe(self, mock_discover, _gate):
+        mock_discover.return_value = self._disc({"codex"})
+
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--action-connectors", "codex",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertIn("configuring in observe mode", result.output)
+
+        cfg = self._load_cfg()
+        self.assertEqual(cfg["guardrail"]["mode"], "observe")
+
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_no_multi_flags_keeps_single_connector_default(self, mock_discover):
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        summary = json.loads(result.output)
+        # Backward compatible: discovery-backed single connector, no multi set.
+        self.assertEqual(summary["connector"], "codex")
+        self.assertNotIn("connectors", summary)
+
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_observe_all_excludes_detected_proxy_connectors(self, mock_discover):
+        # openclaw is a proxy connector: it owns the single LLM proxy port and
+        # cannot be a multi-connector hook peer, so --observe-all must skip it.
+        mock_discover.return_value = self._disc({"codex", "claudecode", "openclaw"})
+
+        result = self._invoke([
+            "--non-interactive", "--yes", "--observe-all",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        summary = json.loads(result.output)
+        self.assertEqual(sorted(summary.get("connectors", [])), ["claudecode", "codex"])
+        cfg = self._load_cfg()
+        self.assertNotIn("openclaw", cfg["guardrail"].get("connectors", {}) or {})
+
+    @patch("defenseclaw.bootstrap._start_gateway_structured")
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_deferred_gateway_start_replaces_stale_sidecar_step(self, mock_discover, mock_start):
+        # Multi-connector + --start-gateway defers the gateway boot to a single
+        # reconcile after all connectors are merged. run_first_run records a
+        # placeholder "Sidecar not started (--no-start-gateway)" step while the
+        # start is deferred; the real reconcile result must overwrite it so the
+        # report does not contradict the gateway it just (re)started.
+        from defenseclaw.bootstrap import StepResult
+
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+        mock_start.return_value = StepResult(
+            "Sidecar", "pass", "restarted (was codex, now claudecode)"
+        )
+
+        result = self._invoke([
+            "--non-interactive", "--yes", "--observe-all", "--start-gateway",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        mock_start.assert_called_once()
+
+        summary = json.loads(result.output)
+        sidecar = [s for s in summary["setup"] if s["name"] == "Sidecar"]
+        self.assertEqual(len(sidecar), 1, summary["setup"])
+        self.assertEqual(sidecar[0]["status"], "pass")
+        self.assertIn("restarted", sidecar[0]["detail"])
+        self.assertNotIn("not started", sidecar[0]["detail"])
+        # The stale "start the gateway" hint (from the deferred skip step) must
+        # be recomputed away now that the gateway is actually running.
+        self.assertNotIn("defenseclaw-gateway start", summary["next_commands"])
+
+    @patch("defenseclaw.bootstrap._start_gateway_structured")
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_deferred_gateway_warn_marks_report_partial(self, mock_discover, mock_start):
+        # A failed reconcile restart returns a warn step; folding it back into
+        # the report must re-roll the overall status to "partial" instead of
+        # leaving the stale "ready" computed against the skipped placeholder.
+        from defenseclaw.bootstrap import StepResult
+
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+        mock_start.return_value = StepResult(
+            "Sidecar", "warn", "connector drift detected (codex → claudecode) but restart failed"
+        )
+
+        result = self._invoke([
+            "--non-interactive", "--yes", "--observe-all", "--start-gateway",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "partial")
+        sidecar = [s for s in summary["setup"] if s["name"] == "Sidecar"]
+        self.assertEqual(sidecar[0]["status"], "warn")
+
+    @patch("defenseclaw.commands.cmd_init._prompt_first_run")
+    @patch("defenseclaw.commands.cmd_init._stdin_is_tty", return_value=True)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_observe_all_bypasses_wizard_on_tty(self, mock_discover, _tty, prompt):
+        # The multi flags are an explicit scripted selection; they must NOT
+        # drop into the interactive wizard even on a TTY (where it would
+        # otherwise prompt and silently ignore the flags).
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+
+        result = self._invoke([
+            "--observe-all",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        prompt.assert_not_called()
+        cfg = self._load_cfg()
+        self.assertEqual(sorted(cfg["guardrail"]["connectors"]), ["claudecode", "codex"])
+
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_connector_takes_precedence_over_multi_flags_with_warning(self, mock_discover):
+        # --connector wins over --observe-all/--action-connectors and must not
+        # trigger discovery; the operator is warned the multi flags were dropped.
+        mock_discover.side_effect = AssertionError("must not discover when --connector is set")
+
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--connector", "codex", "--observe-all",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertIn("takes precedence", result.output)
+
+        cfg = self._load_cfg()
+        self.assertEqual(cfg["guardrail"]["connector"], "codex")
+        self.assertNotIn("claudecode", cfg["guardrail"].get("connectors", {}) or {})
+
+    def test_note_proxy_connectors_points_to_dedicated_setup(self):
+        from defenseclaw.commands import cmd_init
+
+        disc = self._disc({"codex", "openclaw"})
+        with patch.object(cmd_init.ux, "subhead") as subhead:
+            cmd_init._note_proxy_connectors(disc)
+        emitted = " ".join(call.args[0] for call in subhead.call_args_list if call.args)
+        self.assertIn("openclaw", emitted)
+        self.assertIn("defenseclaw setup openclaw", emitted)
+
+    def test_note_proxy_connectors_silent_without_proxy(self):
+        from defenseclaw.commands import cmd_init
+
+        disc = self._disc({"codex", "claudecode"})
+        with patch.object(cmd_init.ux, "subhead") as subhead:
+            cmd_init._note_proxy_connectors(disc)
+        subhead.assert_not_called()
 
 
 if __name__ == "__main__":

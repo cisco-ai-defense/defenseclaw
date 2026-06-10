@@ -68,6 +68,20 @@ If a different connector is already wired, the wizard asks whether to **Add** or
 
 Choose **Add** to build a multi-connector install. Each added connector starts from the global guardrail defaults; tune it afterward with the per-connector CLI (below).
 
+### Stand up several at once with `defenseclaw init`
+
+The Add/Replace flow above is the **incremental** path — layer in one connector at a time. To stand up a multi-connector install in a single pass, use [`defenseclaw init`](/docs/get-started/quickstart): it auto-detects every installed hook connector, configures them **all in `observe`**, and asks you to name the action-mode subset in one question. Everything you have lands under `guardrail.connectors.<name>` in one go; tune individual connectors afterward with the per-connector CLI below.
+
+For scripted or non-interactive setups, the same fan-out is available through two init-only flags — `--observe-all` (every detected hook connector in observe) and `--action-connectors codex,claudecode` (the named subset in action, composable with `--observe-all`):
+
+```bash
+defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
+```
+
+<Callout type="info">
+`init` only fans out to **hook** connectors. Proxy connectors (OpenClaw, ZeptoClaw) are detected but excluded from the observe-all set — they can't be multi peers — and `init` points you at `defenseclaw setup <proxy>` to configure them on their own.
+</Callout>
+
 ## Per-connector overrides
 
 The five fields you can override per connector mirror the global guardrail knobs:
