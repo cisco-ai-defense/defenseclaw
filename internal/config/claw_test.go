@@ -219,6 +219,7 @@ func TestScoutConnectorPathsDoNotFallBackToOpenClaw(t *testing.T) {
 
 	dirs := cfg.SkillDirsForConnector("scout")
 	for _, want := range []string{
+		filepath.Join(home, ".copilot", "bundled-skills"),
 		filepath.Join(home, ".copilot", "skills"),
 		filepath.Join(home, ".copilot", "m-skills"),
 	} {

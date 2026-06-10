@@ -981,7 +981,7 @@ def connector_source_label(connector: str, category: str) -> str:
         ("windsurf", "skills"): ("unsupported/documented paths only",),
         ("geminicli", "skills"): ("./.gemini/skills", "./.agents/skills"),
         ("copilot", "skills"): ("./.github/skills", "./.agents/skills", "~/.copilot/skills"),
-        ("scout", "skills"): ("~/.copilot/skills", "~/.copilot/m-skills"),
+        ("scout", "skills"): ("~/.copilot/bundled-skills", "~/.copilot/m-skills", "~/.copilot/skills"),
         ("openhands", "skills"): ("~/.openhands/skills", "~/.openhands/microagents", "~/.agents/skills"),
         ("antigravity", "skills"): ("unsupported/hooks-only surface",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
@@ -1017,7 +1017,7 @@ def connector_source_label(connector: str, category: str) -> str:
         ("windsurf", "config"): ("~/.codeium/windsurf/hooks.json",),
         ("geminicli", "config"): ("~/.gemini/settings.json",),
         ("copilot", "config"): ("./.github/hooks/*.json",),
-        ("scout", "config"): ("~/.copilot/skills", "~/.copilot/m-skills"),
+        ("scout", "config"): ("~/.copilot/bundled-skills", "~/.copilot/m-skills", "~/.copilot/skills"),
         ("openhands", "config"): ("~/.openhands/hooks.json",),
         ("antigravity", "config"): ("~/.gemini/config/hooks.json",),
     }

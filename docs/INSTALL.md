@@ -52,9 +52,10 @@ setup on Windows with a clear error. Use them on macOS or Linux instead.
 
 Microsoft Scout is supported as a surface-only connector on every OS where its
 local files are present. DefenseClaw can inventory Scout skills under
-`~/.copilot/skills` and `~/.copilot/m-skills`, and can explicitly install a
-CodeGuard skill asset, but Scout is not a guardrail setup target until
-Microsoft publishes a hook or proxy enforcement contract.
+`~/.copilot/bundled-skills`, `~/.copilot/m-skills`, and
+`~/.copilot/skills`, and can explicitly install a CodeGuard skill asset, but
+Scout is not a guardrail setup target until Microsoft publishes a hook or
+proxy enforcement contract.
 
 ## Splunk Terms And Scope For The Local Preset
 

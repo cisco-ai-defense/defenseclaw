@@ -127,8 +127,9 @@ class TestSkillDirs:
         )
         scout = connector_paths.skill_dirs("scout")
         assert scout == [
-            os.path.join(str(tmp_path / "home"), ".copilot", "skills"),
+            os.path.join(str(tmp_path / "home"), ".copilot", "bundled-skills"),
             os.path.join(str(tmp_path / "home"), ".copilot", "m-skills"),
+            os.path.join(str(tmp_path / "home"), ".copilot", "skills"),
         ]
         openhands = connector_paths.skill_dirs("openhands")
         assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in openhands

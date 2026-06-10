@@ -55,6 +55,17 @@ def test_packaged_catalog_matches_go_catalog():
     assert py_catalog == go_catalog
 
 
+def test_scout_signature_uses_only_scout_specific_identity_signals():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    scout = signatures["scout"]
+
+    assert scout.config_paths == ()
+    assert scout.domain_patterns == ()
+    assert "scout" not in scout.history_patterns
+    assert "microsoft scout" in scout.history_patterns
+    assert "clawpilot" in scout.history_patterns
+
+
 def test_custom_signature_pack_loads_from_managed_dir(tmp_path):
     pack_dir = tmp_path / "signature-packs"
     pack_dir.mkdir()

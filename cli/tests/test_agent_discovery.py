@@ -187,6 +187,19 @@ OpenHands CLI 1.16.0
     assert kwargs["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
 
 
+def test_scout_shared_copilot_dirs_do_not_mark_installed(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    (tmp_path / ".copilot" / "skills").mkdir(parents=True)
+    (tmp_path / ".copilot" / "m-skills").mkdir(parents=True)
+    monkeypatch.setattr(ad.shutil, "which", lambda name: None)
+
+    signal = ad._scan_agent("scout")
+
+    assert signal.installed is False
+    assert signal.config_path == ""
+    assert signal.binary_path == ""
+
+
 def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     calls = []

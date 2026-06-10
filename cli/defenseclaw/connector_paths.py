@@ -316,8 +316,9 @@ def connector_config_files(
         ]
     elif name == "scout":
         paths = [
-            os.path.join(home, ".copilot", "skills"),
+            os.path.join(home, ".copilot", "bundled-skills"),
             os.path.join(home, ".copilot", "m-skills"),
+            os.path.join(home, ".copilot", "skills"),
         ]
     elif name == "openhands":
         paths = [
@@ -586,8 +587,9 @@ def _scout_skill_dirs() -> list[str]:
     home = str(Path.home())
     return _dedup(
         [
-            os.path.join(home, ".copilot", "skills"),
+            os.path.join(home, ".copilot", "bundled-skills"),
             os.path.join(home, ".copilot", "m-skills"),
+            os.path.join(home, ".copilot", "skills"),
         ]
     )
 
