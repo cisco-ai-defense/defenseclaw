@@ -49,6 +49,8 @@ class TestNormalize:
             ("  CODEX  ", "codex"),
             ("Claudecode", "claudecode"),
             ("zeptoclaw", "zeptoclaw"),
+            ("Microsoft-Scout", "scout"),
+            ("clawpilot", "scout"),
             ("future-connector", "future-connector"),
         ],
     )
@@ -58,7 +60,7 @@ class TestNormalize:
 
 class TestIsKnown:
     def test_known_lowercase(self):
-        for name in ("openclaw", "codex", "claudecode", "zeptoclaw"):
+        for name in ("openclaw", "codex", "claudecode", "zeptoclaw", "scout"):
             assert connector_paths.is_known(name)
 
     def test_known_mixed_case(self):
@@ -138,6 +140,11 @@ class TestSkillDirs:
             "copilot",
             workspace_dir=str(tmp_path),
         )
+        scout = connector_paths.skill_dirs("scout")
+        assert scout == [
+            os.path.join(str(tmp_path / "home"), ".copilot", "skills"),
+            os.path.join(str(tmp_path / "home"), ".copilot", "m-skills"),
+        ]
         openhands = connector_paths.skill_dirs("openhands")
         assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in openhands
         assert os.path.join(str(tmp_path / "home"), ".openhands", "skills") in openhands
@@ -248,6 +255,7 @@ class TestPluginDirs:
             workspace_dir=str(tmp_path),
         )
         assert connector_paths.plugin_dirs("copilot") == []
+        assert connector_paths.plugin_dirs("scout") == []
         assert connector_paths.plugin_dirs("openhands") == []
         antigravity = connector_paths.plugin_dirs("antigravity", workspace_dir=str(tmp_path))
         assert os.path.join(str(tmp_path), ".agents", "plugins") in antigravity
@@ -333,6 +341,8 @@ class TestMCPServers:
         copilot.parent.mkdir(parents=True)
         copilot.write_text(json.dumps({"mcpServers": {"p": {"command": "copilot-mcp"}}}))
         assert connector_paths.mcp_servers("copilot", workspace_dir=str(tmp_path))[0].command == "copilot-mcp"
+
+        assert connector_paths.mcp_servers("scout") == []
 
         openhands = fake_home / ".openhands" / "mcp.json"
         openhands.parent.mkdir(parents=True)

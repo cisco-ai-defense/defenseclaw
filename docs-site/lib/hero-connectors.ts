@@ -3,9 +3,9 @@
 // (which renders the per-connector block) can import it without
 // creating a circular dependency. Order is by adoption / popularity so
 // the rotation leads with the connectors most visitors recognize
-// first; the docs nav (content/docs/connectors/meta.json) and the
-// capability matrix (data/capability-matrix.json) follow the same
-// ordering.
+// first. Surface-only connectors such as Scout are documented in the
+// docs nav and capability matrix but intentionally omitted here because
+// the terminal demo renders setup commands.
 //
 // Setup aliases verified against docs/setup/guardrail/aliases/:
 //   - proxies (OpenClaw, ZeptoClaw) → defenseclaw setup guardrail

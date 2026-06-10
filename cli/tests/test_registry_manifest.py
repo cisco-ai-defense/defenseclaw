@@ -443,6 +443,7 @@ class TestKnownConstants(unittest.TestCase):
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "opencode",

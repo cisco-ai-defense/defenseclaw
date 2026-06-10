@@ -1,6 +1,6 @@
 ---
 title: Setup skill scanner
-description: Scan configured connector skills before an agent can execute them. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same skill_actions admission policy as the watcher.
+description: Scan configured connector skills, including Scout skill surfaces, before an agent can execute them. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same skill_actions admission policy as the watcher.
 keywords:
   - DefenseClaw skill scanner
   - cisco-ai-skill-scanner
@@ -41,9 +41,11 @@ For each skill it runs:
   <Tab value="All local skills">
 ```bash
 defenseclaw skill scan --all
+defenseclaw skill scan --all --connector scout
 ```
 
 Walks every configured connector's skill directory, scans each bundle, prints connector-tagged findings, and exits non-zero if anything is high severity. Add `--json` to pipe into CI. Use `--connector <name>` to narrow the scan to one connector.
+Use `--connector scout` to target Scout's local skill surfaces even though Scout is not a guardrail-wired connector.
   </Tab>
   <Tab value="Specific path">
 ```bash

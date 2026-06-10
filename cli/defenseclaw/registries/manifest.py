@@ -80,6 +80,7 @@ KNOWN_CONNECTORS = {
     "windsurf",
     "geminicli",
     "copilot",
+    "scout",
     "openhands",
     "antigravity",
     "opencode",

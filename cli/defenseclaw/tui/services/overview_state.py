@@ -1160,6 +1160,11 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
                 f"{name} connector has seen 0 hook events after {formatted} - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
             )
+        case "scout":
+            return (
+                f"{name} connector has no runtime hook surface - "
+                "skill discovery and CodeGuard asset checks are the supported signals"
+            )
         case _:
             return (
                 f"{name} connector has seen 0 requests after {formatted} - "
@@ -1187,6 +1192,8 @@ def friendly_connector_name(connector: str) -> str:
             return "Gemini CLI"
         case "copilot":
             return "GitHub Copilot CLI"
+        case "scout":
+            return "Microsoft Scout"
         case "openhands":
             return "OpenHands"
         case "antigravity":
@@ -1209,6 +1216,7 @@ def connector_source_label(connector: str, category: str) -> str:
         ("windsurf", "skills"): ("unsupported/documented paths only",),
         ("geminicli", "skills"): ("./.gemini/skills", "./.agents/skills"),
         ("copilot", "skills"): ("./.github/skills", "./.agents/skills", "~/.copilot/skills"),
+        ("scout", "skills"): ("~/.copilot/skills", "~/.copilot/m-skills"),
         ("openhands", "skills"): ("~/.openhands/skills", "~/.openhands/microagents", "~/.agents/skills"),
         ("antigravity", "skills"): (
             "~/.gemini/config/skills/<skill>/SKILL.md",
@@ -1225,6 +1233,7 @@ def connector_source_label(connector: str, category: str) -> str:
         ("windsurf", "mcps"): ("~/.codeium/windsurf/mcp_config.json", "~/.codeium/windsurf/mcp.json"),
         ("geminicli", "mcps"): ("~/.gemini/settings.json (mcpServers)", "./.mcp.json"),
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
+        ("scout", "mcps"): ("unsupported/no documented local MCP install config",),
         ("openhands", "mcps"): ("~/.openhands/mcp.json",),
         ("antigravity", "mcps"): (
             "~/.gemini/config/mcp_config.json",
@@ -1241,6 +1250,7 @@ def connector_source_label(connector: str, category: str) -> str:
         ("windsurf", "plugins"): ("unsupported",),
         ("geminicli", "plugins"): ("./.gemini/extensions",),
         ("copilot", "plugins"): ("copilot plugin list",),
+        ("scout", "plugins"): ("unsupported",),
         ("openhands", "plugins"): ("unsupported",),
         ("antigravity", "plugins"): (
             "~/.gemini/config/plugins/<plugin>/ (discovery-only)",
@@ -1257,6 +1267,7 @@ def connector_source_label(connector: str, category: str) -> str:
         ("windsurf", "config"): ("~/.codeium/windsurf/hooks.json",),
         ("geminicli", "config"): ("~/.gemini/settings.json",),
         ("copilot", "config"): ("./.github/hooks/*.json",),
+        ("scout", "config"): ("~/.copilot/skills", "~/.copilot/m-skills"),
         ("openhands", "config"): ("~/.openhands/hooks.json",),
         ("antigravity", "config"): ("~/.gemini/config/hooks.json",),
         ("opencode", "config"): ("~/.config/opencode/plugins/defenseclaw.js",),

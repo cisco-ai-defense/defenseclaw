@@ -23,6 +23,8 @@ from typing import Any
 
 import click
 
+SURFACE_ONLY_CONNECTORS: frozenset[str] = frozenset({"scout"})
+
 
 def hint(*lines: str) -> None:
     """Print dim post-command hints, only when stdout is a terminal."""
@@ -40,9 +42,11 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     specific connector's catalog (the TUI focus selector relies on this).
     When ``requested`` is empty the active connector is returned unchanged,
     so single-connector behaviour is untouched. When supplied, it must be
-    one of the configured active connectors (case-insensitive) — otherwise
-    a ``UsageError`` is raised so a typo can't silently fall back to the
-    active connector and show the wrong catalog.
+    one of the configured active connectors (case-insensitive). Surface-only
+    connectors are also accepted explicitly so discovery and asset commands can
+    target documented local paths that are not guardrail-wired yet. Everything
+    else raises ``UsageError`` so a typo can't silently fall back to the active
+    connector and show the wrong catalog.
     """
     cfg = getattr(app, "cfg", None)
     active = (
@@ -71,7 +75,10 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
         return connector_paths.normalize(normalize_connector(name))
 
     by_norm = {_normalize_alias(name): name for name in configured if name}
-    match = by_norm.get(_normalize_alias(requested))
+    requested_norm = _normalize_alias(requested)
+    match = by_norm.get(requested_norm)
+    if match is None and requested_norm in SURFACE_ONLY_CONNECTORS:
+        return requested_norm
     if match is None:
         allowed = ", ".join(sorted(configured)) or active
         raise click.UsageError(
@@ -145,9 +152,8 @@ def list_scope_title(label: str, connector: str, detail: str = "") -> str:
 # validated peer. Stating that here keeps the flag help consistent with the
 # actual default if this constant is reused.
 LIST_CONNECTOR_HELP = (
-    "Narrow the listing to one configured connector. "
-    "Default: every active connector; pass --connector <name> to scope to a "
-    "single configured peer."
+    "Narrow the listing to one configured connector, or to a supported "
+    "surface-only connector such as scout. Default: every active connector."
 )
 
 

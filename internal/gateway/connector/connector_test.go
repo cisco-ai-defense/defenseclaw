@@ -265,7 +265,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode"}
+	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "scout", "openhands", "antigravity", "opencode"}
 	for _, name := range expected {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -439,13 +439,12 @@ func TestRegistry_RegisterPlugin_AcceptsUniqueName(t *testing.T) {
 // --- Connector interface compliance tests ---
 
 func TestAllConnectors_ImplementInterface(t *testing.T) {
-	connectors := []Connector{
-		NewOpenClawConnector(),
-		NewZeptoClawConnector(),
-		NewClaudeCodeConnector(),
-		NewCodexConnector(),
-	}
-	for _, c := range connectors {
+	reg := NewDefaultRegistry()
+	for _, name := range reg.Names() {
+		c, ok := reg.Get(name)
+		if !ok {
+			t.Fatalf("registry missing %s", name)
+		}
 		if c.Name() == "" {
 			t.Error("connector has empty Name()")
 		}
@@ -453,7 +452,7 @@ func TestAllConnectors_ImplementInterface(t *testing.T) {
 			t.Errorf("connector %q has empty Description()", c.Name())
 		}
 		mode := c.ToolInspectionMode()
-		if mode != ToolModePreExecution && mode != ToolModeResponseScan && mode != ToolModeBoth {
+		if mode != ToolModePreExecution && mode != ToolModeResponseScan && mode != ToolModeBoth && mode != ToolModeNone {
 			t.Errorf("connector %q has invalid ToolInspectionMode: %q", c.Name(), mode)
 		}
 		policy := c.SubprocessPolicy()
@@ -571,6 +570,21 @@ func TestZeptoClaw_ImplementsComponentScanner(t *testing.T) {
 		if _, ok := targets[tp]; !ok {
 			t.Errorf("missing component type %q", tp)
 		}
+	}
+}
+
+func TestScout_ImplementsComponentScanner(t *testing.T) {
+	c := NewScoutConnector()
+	var _ ComponentScanner = c
+	if !c.SupportsComponentScanning() {
+		t.Error("expected SupportsComponentScanning to be true")
+	}
+	targets := c.ComponentTargets("/tmp/workspace")
+	if _, ok := targets["skill"]; !ok {
+		t.Errorf("missing component type %q", "skill")
+	}
+	if _, ok := targets["mcp"]; ok {
+		t.Errorf("scout should not report an MCP component target without a documented local MCP config")
 	}
 }
 
@@ -4147,7 +4161,7 @@ func TestSecuritySurfaceCoverage(t *testing.T) {
 	}
 }
 
-// --- Route correctness for all connectors ---
+// --- Route correctness for traffic-routing connectors ---
 
 func TestAllConnectors_Route_ReturnsConnectorName(t *testing.T) {
 	reg := NewDefaultRegistry()
@@ -4155,6 +4169,9 @@ func TestAllConnectors_Route_ReturnsConnectorName(t *testing.T) {
 
 	for _, info := range reg.Available() {
 		c, _ := reg.Get(info.Name)
+		if c.ToolInspectionMode() == ToolModeNone {
+			continue
+		}
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		r.RemoteAddr = "127.0.0.1:54321"
 		r.Header.Set("Authorization", "Bearer sk-test")
@@ -4189,6 +4206,9 @@ func TestAllConnectors_Route_PassthroughNonChat(t *testing.T) {
 
 	for _, info := range reg.Available() {
 		c, _ := reg.Get(info.Name)
+		if c.ToolInspectionMode() == ToolModeNone {
+			continue
+		}
 		r := httptest.NewRequest("POST", "/v1/embeddings", nil)
 		r.RemoteAddr = "127.0.0.1:54321"
 		r.Header.Set("Authorization", "Bearer sk-test")
@@ -4285,12 +4305,13 @@ func TestShimTemplateRendering(t *testing.T) {
 func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	r := NewDefaultRegistry()
+	wantBuiltins := r.Len()
 	if err := r.DiscoverPlugins(dir); err != nil {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 12 {
-		t.Errorf("expected 12 built-in connectors, got %d", r.Len())
+	if r.Len() != wantBuiltins {
+		t.Errorf("expected %d built-in connectors, got %d", wantBuiltins, r.Len())
 	}
 }
 
@@ -5966,20 +5987,23 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 	}
 
 	type tc struct {
-		name string
-		ctor func() Connector
+		name      string
+		ctor      func() Connector
+		allowNoop bool
 	}
 	cases := []tc{
-		{"zeptoclaw", func() Connector { return NewZeptoClawConnector() }},
-		{"openclaw", func() Connector { return NewOpenClawConnector() }},
-		{"codex", func() Connector { return NewCodexConnector() }},
-		{"claudecode", func() Connector { return NewClaudeCodeConnector() }},
-		{"hermes", func() Connector { return NewHermesConnector() }},
-		{"cursor", func() Connector { return NewCursorConnector() }},
-		{"windsurf", func() Connector { return NewWindsurfConnector() }},
-		{"geminicli", func() Connector { return NewGeminiCLIConnector() }},
-		{"copilot", func() Connector { return NewCopilotConnector() }},
-		{"openhands", func() Connector { return NewOpenHandsConnector() }},
+		{name: "zeptoclaw", ctor: func() Connector { return NewZeptoClawConnector() }},
+		{name: "openclaw", ctor: func() Connector { return NewOpenClawConnector() }},
+		{name: "codex", ctor: func() Connector { return NewCodexConnector() }},
+		{name: "claudecode", ctor: func() Connector { return NewClaudeCodeConnector() }},
+		{name: "hermes", ctor: func() Connector { return NewHermesConnector() }},
+		{name: "cursor", ctor: func() Connector { return NewCursorConnector() }},
+		{name: "windsurf", ctor: func() Connector { return NewWindsurfConnector() }},
+		{name: "geminicli", ctor: func() Connector { return NewGeminiCLIConnector() }},
+		{name: "copilot", ctor: func() Connector { return NewCopilotConnector() }},
+		{name: "scout", ctor: func() Connector { return NewScoutConnector() }, allowNoop: true},
+		{name: "openhands", ctor: func() Connector { return NewOpenHandsConnector() }},
+		{name: "antigravity", ctor: func() Connector { return NewAntigravityConnector() }},
 	}
 
 	for _, c := range cases {
@@ -5995,7 +6019,7 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 			// the operator should know about (PatchedFiles or
 			// CreatedDirs). Pure-metadata-only connectors are
 			// not allowed at this layer.
-			if len(paths.PatchedFiles) == 0 && len(paths.CreatedDirs) == 0 {
+			if !c.allowNoop && len(paths.PatchedFiles) == 0 && len(paths.CreatedDirs) == 0 {
 				t.Errorf("%s: neither PatchedFiles nor CreatedDirs declared — connector appears to be a no-op", c.name)
 			}
 
@@ -6063,6 +6087,7 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		{func() Connector { return NewWindsurfConnector() }, "windsurf", withVendor("windsurf-hook.sh")},
 		{func() Connector { return NewGeminiCLIConnector() }, "geminicli", withVendor("geminicli-hook.sh")},
 		{func() Connector { return NewCopilotConnector() }, "copilot", withVendor("copilot-hook.sh")},
+		{func() Connector { return NewScoutConnector() }, "scout", nil},
 		{func() Connector { return NewOpenHandsConnector() }, "openhands", withVendor("openhands-hook.sh")},
 		{func() Connector { return NewAntigravityConnector() }, "antigravity", withVendor("antigravity-hook.sh")},
 	}
@@ -6113,7 +6138,9 @@ func TestConnector_HookScriptProvider_MatchesAgentPaths(t *testing.T) {
 		NewWindsurfConnector(),
 		NewGeminiCLIConnector(),
 		NewCopilotConnector(),
+		NewScoutConnector(),
 		NewOpenHandsConnector(),
+		NewAntigravityConnector(),
 	}
 	for _, conn := range connectors {
 		hsp, ok := conn.(HookScriptProvider)
@@ -6155,7 +6182,9 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 		{"windsurf", func() Connector { return NewWindsurfConnector() }, []EnvScope{EnvScopeNone}},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []EnvScope{EnvScopeNone}},
 		{"copilot", func() Connector { return NewCopilotConnector() }, []EnvScope{EnvScopeNone}},
+		{"scout", func() Connector { return NewScoutConnector() }, []EnvScope{EnvScopeNone}},
 		{"openhands", func() Connector { return NewOpenHandsConnector() }, []EnvScope{EnvScopeNone}},
+		{"antigravity", func() Connector { return NewAntigravityConnector() }, []EnvScope{EnvScopeNone}},
 	}
 
 	for _, c := range cases {

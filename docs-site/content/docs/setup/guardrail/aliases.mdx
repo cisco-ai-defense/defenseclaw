@@ -18,6 +18,8 @@ keywords:
 
 Each connector has a top-level alias that wraps `defenseclaw setup guardrail --connector <name>` with the right defaults. Use them for fast subsequent runs and CI scripts.
 
+Microsoft Scout is supported separately as a local surface connector. It has no setup alias because Microsoft has not published a Scout hook or proxy contract; use `defenseclaw skill scan --all --connector scout` and `defenseclaw codeguard install --connector scout --target skill` instead.
+
 ## Observability-only aliases (no enforcement)
 
 These connectors talk directly to their native upstream. DefenseClaw collects telemetry (hooks, native OTel, optional notify bridge) without sitting in the LLM data path.

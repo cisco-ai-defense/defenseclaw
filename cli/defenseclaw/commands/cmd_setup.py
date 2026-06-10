@@ -2475,6 +2475,7 @@ _CONNECTOR_NAMES_FALLBACK = [
     "windsurf",
     "geminicli",
     "copilot",
+    "scout",
     "openhands",
     "antigravity",
     "opencode",
@@ -2565,6 +2566,12 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
+    "scout": {
+        "label": "Microsoft Scout",
+        "description": "documented local skill discovery; no published hook/proxy enforcement surface",
+        "tool_mode": "none",
+        "subprocess_policy": "none",
+    },
     "openhands": {
         "label": "OpenHands",
         "description": "~/.openhands/hooks.json command hooks by default; optional repo-local override",
@@ -2644,6 +2651,11 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.copilot/skills and ~/.copilot/agents install surfaces; optional workspace surfaces with --workspace",
         "Native OTLP env vars are documented for the process env; shell rc files are not mutated",
         "~/.defenseclaw/hooks/copilot-hook.sh",
+    ),
+    "scout": (
+        "~/.copilot/skills documented custom skill directory",
+        "~/.copilot/m-skills discovered Microsoft-managed workspace skill directory",
+        "No DefenseClaw hook/proxy config is written until Microsoft publishes a Scout hook contract",
     ),
     "openhands": (
         "~/.openhands/hooks.json hooks by default",
@@ -3970,6 +3982,14 @@ def setup_guardrail(
     if not gc.enabled:
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
         return
+
+    guardrail_connector = gc.connector or "openclaw"
+    if guardrail_connector in _SURFACE_ONLY_CONNECTORS:
+        label = _CONNECTOR_META.get(guardrail_connector, {}).get("label", guardrail_connector)
+        raise click.ClickException(
+            f"{label} is supported for local skill discovery and opt-in CodeGuard skill assets only; "
+            "Microsoft has not published a Scout hook/proxy enforcement surface for DefenseClaw setup."
+        )
 
     if not _check_guardrail_setup_connector_versions(
         app,
@@ -6537,6 +6557,8 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "opencode",
     }
 )
+
+_SURFACE_ONLY_CONNECTORS = frozenset({"scout"})
 
 # Legacy alias retained as a backstop for any out-of-tree code that
 # imported the old name. New call sites must use one of the two named

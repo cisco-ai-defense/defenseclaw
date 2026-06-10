@@ -44,6 +44,10 @@ for target/kind/signal inventory and `--dry-run` before `add`. The TUI exposes
 the runtime-loaded inventory under **Overview → Observability Destinations** and
 the management wizard under **0 Setup → Observability / Galileo**.
 
+Microsoft Scout is not a `setup` target yet. Use `skill list/scan --connector
+scout` and `codeguard install --connector scout --target skill` for Scout's
+documented local skill surfaces.
+
 ### guardrail
 
 Per-connector guardrail controls. Each verb prints the current value when run

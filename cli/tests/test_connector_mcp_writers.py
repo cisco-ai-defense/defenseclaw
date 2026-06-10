@@ -498,6 +498,11 @@ class TestCoverage:
                     assert (
                         tmp_path / "agy-home" / ".gemini" / "config" / "mcp_config.json"
                     ).is_file()
+            elif name == "scout":
+                # Scout exposes skill scan/list surfaces only; do not guess a
+                # Microsoft MCP write location.
+                with pytest.raises(MCPWriteUnsupportedError):
+                    set_mcp_server(name, "x", {"command": "y"})
             elif name == "opencode":
                 # opencode now has full MCP write parity (mcp.md M2/M5):
                 # set writes the global ~/.config/opencode/opencode.json.

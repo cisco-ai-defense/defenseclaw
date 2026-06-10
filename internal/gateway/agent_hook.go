@@ -46,10 +46,10 @@ import (
 // capabilities BEFORE APIServer.connectorRegistry is set (early
 // init, tests that bypass NewAPIServer, plugin discovery probes).
 //
-// Why a singleton: NewDefaultRegistry registers ten builtin
+// Why a singleton: NewDefaultRegistry registers twelve builtin
 // connectors and walks the plugin directory; on the hook hot path
 // (every hookCapabilities call), constructing it per-invocation
-// turns each block-vs-allow decision into ten allocations and a
+// turns each block-vs-allow decision into repeated allocations and a
 // directory walk. The singleton amortises that to once per process.
 //
 // Thread-safety: sync.Once gives us a happens-before guarantee on

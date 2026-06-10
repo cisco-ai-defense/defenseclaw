@@ -34,6 +34,7 @@ def test_ai_signature_catalog_contains_supported_and_shadow_agents():
         "windsurf",
         "geminicli",
         "copilot",
+        "scout",
         "aider",
         "ai-sdks",
         "qwen-code",

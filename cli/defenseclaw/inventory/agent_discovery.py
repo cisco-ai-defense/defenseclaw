@@ -109,6 +109,7 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "windsurf",
     "geminicli",
     "copilot",
+    "scout",
     "openhands",
     "antigravity",
     "opencode",
@@ -164,6 +165,15 @@ _SPECS: dict[str, _AgentSpec] = {
         ),
         "copilot",
         ("version",),
+    ),
+    "scout": _AgentSpec(
+        (
+            "~/.copilot/skills",
+            "~/.copilot/m-skills",
+            "~/.copilot",
+        ),
+        "scout",
+        ("--version",),
     ),
     "openhands": _AgentSpec(
         (".openhands/hooks.json", ".openhands", "~/.openhands/mcp.json"), "openhands", ("--version",)

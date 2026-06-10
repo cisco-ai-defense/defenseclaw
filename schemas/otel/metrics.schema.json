@@ -1063,7 +1063,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1073,6 +1073,7 @@
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "unknown"
@@ -1130,7 +1131,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1140,6 +1141,7 @@
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "unknown"
@@ -1197,7 +1199,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1207,6 +1209,7 @@
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "unknown"
@@ -1233,7 +1236,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1243,6 +1246,7 @@
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "unknown"
@@ -1296,7 +1300,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1306,6 +1310,7 @@
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "unknown"
@@ -1330,7 +1335,7 @@
             },
             "source": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1340,6 +1345,7 @@
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "unknown"
@@ -1371,7 +1377,7 @@
             },
             "source": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1381,6 +1387,7 @@
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "unknown"
@@ -1405,7 +1412,7 @@
             },
             "source": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1415,6 +1422,7 @@
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "unknown"
@@ -1439,7 +1447,7 @@
             },
             "source": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1449,6 +1457,7 @@
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "unknown"
@@ -1473,7 +1482,7 @@
             },
             "source": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1483,6 +1492,7 @@
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "unknown"
