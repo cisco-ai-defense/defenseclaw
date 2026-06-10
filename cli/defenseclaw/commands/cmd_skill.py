@@ -835,7 +835,7 @@ def scan(
             )
 
     if not result.is_clean() and action:
-        _apply_scan_enforcement(app, pe, name, scan_dir, result)
+        _apply_scan_enforcement(app, pe, name, scan_dir, result, connector=connector)
 
 
 def _apply_scan_enforcement(
@@ -888,14 +888,20 @@ def _apply_scan_enforcement(
     applied_actions: list[str] = []
 
     if action_cfg.file == "quarantine":
-        pe.set_source_path("skill", skill_name, skill_path)
-        se = SkillEnforcer(app.cfg.quarantine_dir)
-        dest = se.quarantine(skill_name, skill_path)
-        if dest:
-            applied_actions.append(f"quarantined to {dest}")
-            pe.quarantine("skill", skill_name, enforcement_reason)
+        if _is_read_only_skill_path(app, resolved_connector, skill_path):
+            click.echo(
+                f"[scan] enforcement: {skill_name!r}: "
+                "skipped file quarantine for read-only Scout bundled skill"
+            )
         else:
-            click.echo(f"[scan] quarantine failed for {skill_name!r}", err=True)
+            pe.set_source_path("skill", skill_name, skill_path)
+            se = SkillEnforcer(app.cfg.quarantine_dir)
+            dest = se.quarantine(skill_name, skill_path)
+            if dest:
+                applied_actions.append(f"quarantined to {dest}")
+                pe.quarantine("skill", skill_name, enforcement_reason)
+            else:
+                click.echo(f"[scan] quarantine failed for {skill_name!r}", err=True)
 
     if action_cfg.runtime == "disable":
         try:
@@ -1074,14 +1080,7 @@ def _resolve_path(app: AppContext, target: str) -> str | None:
     return None
 
 
-def _all_active_skill_dirs(app: AppContext) -> list[str]:
-    """Union of skill directories across every active connector.
-
-    Quarantine/restore resolve and validate against this union so a skill that
-    lives in a NON-primary connector can still be managed; single-connector
-    installs collapse to that one connector's dirs, so their behavior is
-    unchanged. Order-preserving and de-duplicated.
-    """
+def _active_skill_connectors(app: AppContext) -> list[str | None]:
     cfg = app.cfg
     if hasattr(cfg, "active_connectors"):
         try:
@@ -1090,9 +1089,79 @@ def _all_active_skill_dirs(app: AppContext) -> list[str]:
             connectors = [None]
     else:
         connectors = [None]
+    return connectors
+
+
+def _path_in_roots(path: str, roots: list[str]) -> bool:
+    real = os.path.realpath(path)
+    for root in roots:
+        root_real = os.path.realpath(root)
+        if real == root_real or real.startswith(root_real + os.sep):
+            return True
+    return False
+
+
+def _read_only_skill_roots(app: AppContext, connector: str | None) -> list[str]:
+    from defenseclaw import connector_paths
+
+    if not connector and hasattr(app.cfg, "active_connector"):
+        try:
+            connector = app.cfg.active_connector()
+        except Exception:  # noqa: BLE001 — read-only roots are best-effort.
+            connector = None
+
+    if connector_paths.normalize(connector) != "scout":
+        return []
+    roots: list[str] = []
+    try:
+        skill_dirs = app.cfg.skill_dirs("scout")
+    except Exception:
+        return roots
+    for d in skill_dirs:
+        if os.path.basename(os.path.normpath(d)) == "bundled-skills":
+            roots.append(os.path.realpath(d))
+    return roots
+
+
+def _is_read_only_skill_path(app: AppContext, connector: str | None, path: str) -> bool:
+    return _path_in_roots(path, _read_only_skill_roots(app, connector))
+
+
+def _mutable_skill_dirs(app: AppContext, connector: str | None) -> list[str]:
+    dirs = app.cfg.skill_dirs(connector)
+    read_only = _read_only_skill_roots(app, connector)
+    if not read_only:
+        return dirs
+    return [d for d in dirs if not _path_in_roots(d, read_only)]
+
+
+def _all_active_read_only_skill_roots(app: AppContext) -> list[str]:
+    roots: list[str] = []
+    for c in _active_skill_connectors(app):
+        for root in _read_only_skill_roots(app, c):
+            if root not in roots:
+                roots.append(root)
+    return roots
+
+
+def _all_active_mutable_skill_dirs(app: AppContext) -> list[str]:
     dirs: list[str] = []
-    for c in connectors:
-        for d in cfg.skill_dirs(c):
+    for c in _active_skill_connectors(app):
+        for d in _mutable_skill_dirs(app, c):
+            if d not in dirs:
+                dirs.append(d)
+    return dirs
+
+
+def _all_active_skill_dirs(app: AppContext) -> list[str]:
+    """Union of skill directories across every active connector.
+
+    Includes read-only discovery roots. Mutation commands use the mutable-root
+    helper above so Scout bundled skills stay inspectable but cannot be moved.
+    """
+    dirs: list[str] = []
+    for c in _active_skill_connectors(app):
+        for d in app.cfg.skill_dirs(c):
             if d not in dirs:
                 dirs.append(d)
     return dirs
@@ -1982,15 +2051,25 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
 
     # Search scope: one connector (--connector) or the union of every active
     # connector's skill dirs, so a non-primary connector's skill is reachable.
+    read_only_roots: list[str]
     if connector_flag:
         from defenseclaw.commands import resolve_list_connector
-        scope_dirs = app.cfg.skill_dirs(resolve_list_connector(app, connector_flag))
+        resolved_connector = resolve_list_connector(app, connector_flag)
+        scope_dirs = _mutable_skill_dirs(app, resolved_connector)
+        read_only_roots = _read_only_skill_roots(app, resolved_connector)
     else:
-        scope_dirs = _all_active_skill_dirs(app)
+        scope_dirs = _all_active_mutable_skill_dirs(app)
+        read_only_roots = _all_active_read_only_skill_roots(app)
 
     if os.path.isabs(name):
         # Validate absolute paths resolve inside a configured skill directory
         real = os.path.realpath(name)
+        if _path_in_roots(real, read_only_roots):
+            click.echo(
+                "error: Scout bundled skills are read-only; quarantine cannot move them",
+                err=True,
+            )
+            raise SystemExit(1)
         allowed_roots = [os.path.realpath(c) for c in scope_dirs]
         if any(real == root for root in allowed_roots):
             click.echo(
@@ -2014,6 +2093,15 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
             candidate = os.path.join(d, skill_name)
             if os.path.isdir(candidate) and candidate not in matches:
                 matches.append(candidate)
+        if not matches:
+            for d in read_only_roots:
+                candidate = os.path.join(d, skill_name)
+                if os.path.isdir(candidate):
+                    click.echo(
+                        "error: Scout bundled skills are read-only; quarantine cannot move them",
+                        err=True,
+                    )
+                    raise SystemExit(1)
         if len(matches) > 1:
             click.echo(
                 f"error: skill {skill_name!r} exists under multiple connectors:\n"
@@ -2026,6 +2114,13 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
 
     if not skill_path:
         click.echo(f"error: could not locate skill {skill_name!r} — provide an absolute path", err=True)
+        raise SystemExit(1)
+
+    if _path_in_roots(skill_path, read_only_roots):
+        click.echo(
+            "error: Scout bundled skills are read-only; quarantine cannot move them",
+            err=True,
+        )
         raise SystemExit(1)
 
     se = SkillEnforcer(app.cfg.quarantine_dir)
@@ -2094,14 +2189,24 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
             raise SystemExit(1)
         restore_path = entry.source_path
 
+    read_only_roots: list[str] = []
     if not (hasattr(app.cfg, "skill_dirs") and callable(app.cfg.skill_dirs)):
         allowed_roots = None
     elif connector_flag:
         from defenseclaw.commands import resolve_list_connector
-        allowed_roots = app.cfg.skill_dirs(resolve_list_connector(app, connector_flag))
+        resolved_connector = resolve_list_connector(app, connector_flag)
+        allowed_roots = _mutable_skill_dirs(app, resolved_connector)
+        read_only_roots = _read_only_skill_roots(app, resolved_connector)
     else:
-        allowed_roots = _all_active_skill_dirs(app)
+        allowed_roots = _all_active_mutable_skill_dirs(app)
+        read_only_roots = _all_active_read_only_skill_roots(app)
     real_restore = os.path.realpath(restore_path)
+    if _path_in_roots(real_restore, read_only_roots):
+        click.echo(
+            "error: Scout bundled skills are read-only; restore cannot write to them",
+            err=True,
+        )
+        raise SystemExit(1)
     if allowed_roots:
         if not any(
             real_restore.startswith(os.path.realpath(r) + os.sep) or real_restore == os.path.realpath(r)
