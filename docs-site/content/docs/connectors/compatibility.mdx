@@ -35,6 +35,8 @@ The floors come from upstream release notes or current vendor docs: Codex `0.124
 
 Every `defenseclaw setup ...` path that chooses a connector refreshes local agent discovery, reads the installed connector version, and checks it against the manifest before writing config. Unsupported or unverified hook connector versions are allowed in observe mode with a warning, but action mode fails closed unless `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing.
 
+The most common reason a version can't be read is the connector binary living outside a trusted install prefix (for example a bespoke install under `~/.local`). Interactive action-mode setup detects this and offers to trust the directory (defaulting to No, persisting to `~/.defenseclaw/.env`, then re-running the full contract check — trusting a path never bypasses the version gate). Non-interactive runs print the equivalent remediation: `defenseclaw setup trusted-paths add <dir>`. See the `trusted-paths` group on the [CLI reference](/docs/reference/cli) and the trust model in [AI Discovery](/docs/ai-discovery).
+
 Proxy connectors are recorded in the manifest too, but they are marked `not-gated` because their enforcement surface is the DefenseClaw proxy instead of an agent hook contract.
 
 ## Runtime lock

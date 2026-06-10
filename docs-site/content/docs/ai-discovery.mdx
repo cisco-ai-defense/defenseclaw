@@ -306,7 +306,7 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
     **No raw values.** Env var *names* are recorded, never values. File paths are hashed (`config_path_hash`, `binary_path_hash`) — only basenames are kept.
   </Step>
   <Step>
-    **Trusted-prefix binary probing.** Version probes (`<binary> --version`) only run inside an allow-listed set of prefixes (`/usr/bin`, `/opt/homebrew`, …) plus anything in `DEFENSECLAW_TRUSTED_BIN_PREFIXES`. Untrusted binaries are recorded as present but not executed.
+    **Trusted-prefix binary probing.** Version probes (`<binary> --version`) only run inside an allow-listed set of prefixes (`/usr/bin`, `/opt/homebrew`, …) plus anything in `DEFENSECLAW_TRUSTED_BIN_PREFIXES`. Untrusted binaries are recorded as present but not executed — `defenseclaw agent discover` prints the offending directory and the command to trust it. Manage the allow-list with `defenseclaw setup trusted-paths list|add|remove` (or the TUI's Trusted Paths panel): `add` validates the directory (refusing world-writable or relative paths unless `--force`) and persists it to `~/.defenseclaw/.env`; built-in defaults can never be removed.
   </Step>
   <Step>
     **HMAC-stamped events.** Continuous-discovery events are signed with a per-installation HMAC (`PayloadHMAC` on the gateway envelope). Tampering downstream of the gateway is detectable.

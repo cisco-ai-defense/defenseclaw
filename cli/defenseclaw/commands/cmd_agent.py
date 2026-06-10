@@ -40,6 +40,41 @@ def agent() -> None:
     """Inspect locally installed agent surfaces."""
 
 
+def _emit_untrusted_prefix_hint(disc: agent_discovery.AgentDiscovery) -> None:
+    """Point operators at the generic remediation when a connector binary
+    was skipped for living outside a trusted install prefix.
+
+    Without this, the only signal is the per-row "binary path is not in a
+    trusted install prefix" error — accurate but not actionable. The hint
+    is connector-agnostic and recommends the same ``trusted-paths`` command
+    the setup gate now points at, so discovery and setup stay consistent.
+    """
+    from defenseclaw import ux
+
+    dirs: list[str] = []
+    seen: set[str] = set()
+    for sig in disc.agents.values():
+        if sig.error == agent_discovery.UNTRUSTED_PREFIX_ERROR and sig.binary_path:
+            parent = os.path.dirname(os.path.realpath(sig.binary_path))
+            if parent and parent not in seen:
+                seen.add(parent)
+                dirs.append(parent)
+    if not dirs:
+        return
+    n = len(dirs)
+    click.echo()
+    ux.warn(
+        f"{n} director{'y' if n == 1 else 'ies'} hold connector binaries outside a "
+        "trusted install prefix; they were skipped during version discovery."
+    )
+    for d in dirs:
+        ux.subhead(f"  Trust it with: defenseclaw setup trusted-paths add {d}")
+    ux.subhead(
+        "  Only trust directories you control — a trusted directory lets "
+        "DefenseClaw execute any binary placed there during discovery."
+    )
+
+
 @agent.command("discover")
 @click.option("--refresh", is_flag=True, help="Refresh cached discovery before rendering.")
 @click.option("--no-cache", is_flag=True, help="Bypass the discovery cache for this run.")
@@ -75,6 +110,15 @@ def discover(
     gateway_token_env: str | None,
 ) -> None:
     """Run local agent discovery and optionally emit OTel telemetry."""
+    # `agent` is in main.SKIP_LOAD_COMMANDS, so the root group never loads
+    # config — and thus never hydrates ~/.defenseclaw/.env. Without this, a
+    # prefix persisted via `setup trusted-paths add` would be ignored here, so
+    # the untrusted-binary hint below would point at a fix this very command
+    # then disregards. Hydrate just the .env (cheap; no full config load or
+    # validation, keeping `agent` fast) so discovery honours persisted trust.
+    from defenseclaw.config import _load_dotenv_into_os, default_data_path  # noqa: PLC0415
+
+    _load_dotenv_into_os(str(default_data_path()))
     started = time.monotonic()
     disc = agent_discovery.discover_agents(use_cache=not no_cache, refresh=refresh)
     duration_ms = int((time.monotonic() - started) * 1000)
@@ -99,6 +143,7 @@ def discover(
         return
 
     click.echo(agent_discovery.render_discovery_table(disc).rstrip())
+    _emit_untrusted_prefix_hint(disc)
     if emit_otel:
         if otel_result["emitted"]:
             click.echo("  OTel: emitted agent discovery telemetry")

@@ -1411,6 +1411,12 @@ def build_setup_sections(cfg: object | Mapping[str, Any] | None) -> tuple[Config
             "Cisco AI Defense", tuple(_cisco_ai_defense_fields(cfg)), "Cloud-hosted prompt/response moderation."
         ),
         ConfigSection("Firewall", tuple(_firewall_fields(cfg)), "Host firewall anchor paths. Read-only in the TUI."),
+        ConfigSection(
+            "Trusted Paths",
+            tuple(_trusted_paths_summary_fields(cfg)),
+            "Binary locations trusted for connector discovery. Read-only here; "
+            "manage via 'defenseclaw setup trusted-paths'.",
+        ),
     ]
     return tuple(sections)
 
@@ -4885,6 +4891,71 @@ def _webhook_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[Con
         summary = f"\\[{'enabled' if enabled else 'disabled'}] {url}"
         out.append(ConfigField(name, f"webhooks.{index}", "header", summary, summary))
     out.append(hint)
+    return tuple(out)
+
+
+def _trusted_paths_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
+    """Read-only summary of the binary-discovery trusted-prefix allow-list.
+
+    Mutations go through the CLI (``defenseclaw setup trusted-paths ...``) so
+    the TUI, the inline setup prompt, and the discovery gate all share a single
+    persistence path and can't drift. We reuse ``_collect_trusted_prefixes`` —
+    the exact view the CLI renders — so the panel can never disagree with it.
+    """
+    from defenseclaw.commands.cmd_setup import _collect_trusted_prefixes  # noqa: PLC0415
+
+    data_dir = ""
+    for attr in ("data_dir", "config_dir", "home"):
+        val = getattr(cfg, attr, "")
+        if isinstance(val, str) and val:
+            data_dir = val
+            break
+    if not data_dir:
+        data_dir = os.environ.get("DEFENSECLAW_HOME") or os.path.expanduser("~/.defenseclaw")
+
+    try:
+        rows = _collect_trusted_prefixes(data_dir)
+    except Exception:
+        rows = []
+
+    defaults = [r for r in rows if r.get("source") == "default"]
+    operator = [r for r in rows if r.get("source") != "default"]
+    present = sum(1 for r in defaults if r.get("status") == "ok")
+
+    # NOTE: the *proactive* "which connectors are in an untrusted dir" highlight
+    # lives in the interactive editor (TrustedPathsEditorScreen), opened from
+    # this section. We deliberately do NOT run connector discovery here — this
+    # builder feeds the static Setup panel that re-renders on every refresh, so
+    # a subprocess discovery pass would be both slow and host-dependent.
+    out: list[ConfigField] = [
+        _header(
+            "Built-in defaults",
+            "trusted_paths.defaults",
+            f"{len(defaults)} default prefixes, {present} present on this host",
+        )
+    ]
+    if operator:
+        for index, row in enumerate(operator):
+            # Escape the opening bracket so Rich renders ``[src/status]`` as
+            # literal text rather than parsing it as a style tag (which would
+            # crash the panel — see the webhook summary note above).
+            summary = f"\\[{row.get('source')}/{row.get('status')}] {row.get('resolved')}"
+            out.append(_header(f"Operator path {index + 1}", f"trusted_paths.op.{index}", summary))
+    else:
+        out.append(
+            _header(
+                "Operator-added",
+                "trusted_paths.operator",
+                "none — all trust comes from built-in defaults",
+            )
+        )
+    out.append(
+        _header(
+            "How to edit",
+            "trusted_paths.hint",
+            "defenseclaw setup trusted-paths add|remove <dir>",
+        )
+    )
     return tuple(out)
 
 

@@ -41,6 +41,14 @@ except ImportError:  # pragma: no cover - non-POSIX
 from defenseclaw.config import default_data_path
 from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand
 
+# Sentinel error returned by ``_version_for_binary`` when a connector
+# binary resolves outside the trusted install prefixes. Callers (e.g.
+# ``cmd_setup``) key off this exact value to decide whether to offer the
+# "trust this directory" remediation, so it lives here as a shared
+# constant rather than being duplicated as a string literal on both
+# sides — if the wording ever changes, the consumer can't silently drift.
+UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
+
 CACHE_SCHEMA_VERSION = 1
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
@@ -72,6 +80,7 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
     "/opt/homebrew/Cellar",
+    "/opt/homebrew/Caskroom",
     "/opt/homebrew/lib/node_modules",
     "/usr/local/Cellar",
     "/usr/local/lib/node_modules",
@@ -278,7 +287,9 @@ def _trusted_bin_prefixes() -> tuple[str, ...]:
     """
     extras: list[str] = []
     raw = os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
-    for piece in raw.split(":"):
+    # Split on os.pathsep (':' POSIX, ';' Windows) so a Windows
+    # drive-qualified path like 'C:\\Tools' survives unmangled.
+    for piece in raw.split(os.pathsep):
         piece = piece.strip()
         if piece:
             extras.append(piece)
@@ -301,6 +312,44 @@ def _trusted_bin_prefixes() -> tuple[str, ...]:
             continue
         expanded.append(absolute)
     return tuple(expanded)
+
+
+def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
+    """Validate a candidate trusted-bin-prefix directory.
+
+    Returns ``(resolved_abspath, error)`` where ``error`` is ``None`` when the
+    directory is a safe place to trust, or a short human-readable reason
+    otherwise. Shared by the ``setup trusted-paths`` CLI (and any other
+    caller) so the security rules can never drift from the discovery gate.
+
+    Rules:
+      * a *non-absolute* input is rejected — the resolved location would
+        otherwise depend on the caller's working directory;
+      * a *world-writable* directory is rejected — anyone on the host could
+        drop a malicious binary into it, the exact threat the allow-list
+        defends against;
+      * a path that exists but is not a directory is rejected;
+      * a path that does not yet exist is allowed (the caller may warn) — it
+        is not itself unsafe to trust.
+    """
+    raw = (path or "").strip()
+    if not raw:
+        return "", "path is empty"
+    expanded = _expand(raw)
+    if not os.path.isabs(expanded):
+        return os.path.abspath(expanded), "path is not absolute"
+    resolved = os.path.abspath(expanded)
+    try:
+        st = os.stat(resolved)
+    except FileNotFoundError:
+        return resolved, None
+    except OSError as exc:  # pragma: no cover - rare stat failure
+        return resolved, f"cannot stat path ({exc})"
+    if not os.path.isdir(resolved):
+        return resolved, "path is not a directory"
+    if st.st_mode & 0o002:
+        return resolved, "directory is world-writable"
+    return resolved, None
 
 
 def _is_trusted_binary_path(binary_path: str) -> bool:
@@ -376,7 +425,7 @@ def _version_for_binary(binary_path: str, version_args: tuple[str, ...]) -> tupl
     # exec their binary as part of a passive discovery scan. Refuse
     # anything outside the canonical install prefixes.
     if not _is_trusted_binary_path(binary_path):
-        return "", "binary path is not in a trusted install prefix"
+        return "", UNTRUSTED_PREFIX_ERROR
     binary_name = os.path.basename(binary_path).lower()
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
