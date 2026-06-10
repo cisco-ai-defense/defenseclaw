@@ -262,15 +262,18 @@ class TrustedPathsCliTests(unittest.TestCase):
             app = _make_app_context(tmp)
             newdir = os.path.join(tmp, "tools")
             os.makedirs(newdir)
+            resolved, err = ad.validate_trusted_prefix(newdir)
+            self.assertIsNone(err)
             with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
                 add = self.runner.invoke(cmd_setup.trusted_paths, ["add", newdir, "--json"], obj=app)
                 self.assertEqual(add.exit_code, 0, msg=add.output)
                 self.assertTrue(json.loads(add.output)["ok"])
                 listing = self.runner.invoke(cmd_setup.trusted_paths, ["list", "--json"], obj=app)
                 rows = {r["resolved"]: r for r in json.loads(listing.output)}
-            self.assertIn(newdir, open(os.path.join(tmp, ".env"), encoding="utf-8").read())
-            self.assertTrue(rows[newdir]["removable"])
-            self.assertEqual(rows[newdir]["source"], ".env")
+            dotenv_body = open(os.path.join(tmp, ".env"), encoding="utf-8").read()
+            self.assertIn(resolved, dotenv_body)
+            self.assertTrue(rows[resolved]["removable"])
+            self.assertEqual(rows[resolved]["source"], ".env")
 
     def test_add_world_writable_refused_without_force(self):
         with tempfile.TemporaryDirectory() as tmp:
