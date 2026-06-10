@@ -189,6 +189,33 @@ def build_payload(args: argparse.Namespace) -> Dict[str, Any]:
     return payload
 
 
+class _NoRedirectHandler(request.HTTPRedirectHandler):
+    """Refuse to follow HTTP redirects on the token-bearing telemetry POST.
+
+    The HEC POST carries an ``Authorization: Splunk <token>`` header.
+    urllib's default opener follows 3xx redirects and replays the request
+    headers onto the redirected request, so a response-controlled
+    ``Location`` could leak the HEC token to an arbitrary cross-origin host
+    (F-0602). We refuse every redirect so the token only ever reaches the
+    configured HEC endpoint; a redirect surfaces as an ``HTTPError``.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        raise error.HTTPError(
+            req.full_url,
+            code,
+            f"refusing to follow HEC redirect to {newurl!r} "
+            "(would forward the HEC Authorization token off the configured host)",
+            headers,
+            fp,
+        )
+
+
+def _build_no_redirect_opener() -> request.OpenerDirector:
+    """Build a urllib opener that never follows redirects (F-0602)."""
+    return request.build_opener(_NoRedirectHandler())
+
+
 def post_event(hec_url: str, hec_token: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
     body = json.dumps(
         {
@@ -206,7 +233,8 @@ def post_event(hec_url: str, hec_token: str, payload: Dict[str, Any], timeout: i
         },
         method="POST",
     )
-    with request.urlopen(req, timeout=timeout) as response:
+    opener = _build_no_redirect_opener()
+    with opener.open(req, timeout=timeout) as response:
         response_body = response.read().decode("utf-8")
         return {
             "status": "sent",

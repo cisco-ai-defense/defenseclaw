@@ -36,7 +36,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--services-app", default="defenseclaw_local_mode", help="Splunk services app namespace. Default: defenseclaw_local_mode")
     parser.add_argument("--query", required=True, help="SPL search string to run")
     parser.add_argument("--output-mode", default="json", help="Splunk export output mode. Default: json")
-    parser.add_argument("--verify-tls", action="store_true", help="Verify TLS when connecting to the management API")
+    # F-0603: TLS is verified by default. Disabling verification requires an
+    # explicit, clearly-named opt-out so credentialed requests are not sent
+    # over an unauthenticated channel unless the operator deliberately asks.
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable TLS certificate verification (UNSAFE; only for local self-signed dev).",
+    )
     return parser.parse_args()
 
 
@@ -116,8 +123,11 @@ def main() -> int:
         method="POST",
         headers=headers,
     )
+    # F-0603: default to a verified TLS context (context = None lets urllib
+    # use the system trust store with hostname checking). Only fall back to an
+    # unverified context when the operator explicitly passes --insecure.
     context = None
-    if endpoint.startswith("https://") and not args.verify_tls:
+    if endpoint.startswith("https://") and args.insecure:
         context = ssl._create_unverified_context()
 
     try:

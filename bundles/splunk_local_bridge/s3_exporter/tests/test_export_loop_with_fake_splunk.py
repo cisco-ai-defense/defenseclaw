@@ -36,6 +36,9 @@ def _set_env(monkeypatch, tmp_path):
     monkeypatch.setenv("S3_BUCKET", "agentwatch-demo")
     monkeypatch.setenv("S3_PREFIX", "agentwatch/defenseclaw")
     monkeypatch.setenv("SPLUNK_BASE_URL", "https://splunk:8089")
+    # F-0585: the exporter no longer ships a hardcoded password, so a real
+    # credential must be supplied via the environment.
+    monkeypatch.setenv("SPLUNK_PASSWORD", "operator-secret")
     monkeypatch.setenv("SPLUNK_VERIFY_TLS", "false")
     monkeypatch.setenv("S3_EXPORT_CHECKPOINT_FILE", str(tmp_path / "checkpoint.json"))
     monkeypatch.setenv("S3_SSE", "")
@@ -82,13 +85,28 @@ def test_splunk_export_reads_line_delimited_results(monkeypatch):
     assert 'latest="1714953900"' in captured["data"]["search"]
 
 
-def test_load_config_uses_local_splunk_defaults(monkeypatch, tmp_path):
+def test_load_config_uses_operator_supplied_password(monkeypatch, tmp_path):
+    # F-0585: username still defaults to "admin", but the password must come
+    # from the environment — there is no shipped fallback secret.
     _set_env(monkeypatch, tmp_path)
 
     config = exporter.load_config()
 
     assert config.splunk_username == "admin"
-    assert config.splunk_password == "DefenseClawLocalMode1!"
+    assert config.splunk_password == "operator-secret"
+
+
+def test_load_config_requires_password(monkeypatch, tmp_path):
+    # F-0585: enabling the exporter without a SPLUNK_PASSWORD must fail closed.
+    _set_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("SPLUNK_PASSWORD", raising=False)
+
+    try:
+        exporter.load_config()
+    except ValueError as exc:
+        assert "SPLUNK_PASSWORD" in str(exc)
+    else:
+        raise AssertionError("expected load_config to require SPLUNK_PASSWORD")
 
 
 def test_run_once_uploads_and_advances_checkpoint(monkeypatch, tmp_path):

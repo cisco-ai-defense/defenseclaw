@@ -31,7 +31,7 @@
       <title>Scoped investigation results</title>
       <table>
         <search>
-          <query>`dcso_investigation_events($run_id$,$session_id$)` | where "$pivot$"="all" OR ("$pivot$"="policy" AND event_domain="policy") OR ("$pivot$"="runtime" AND event_domain="runtime") OR ("$pivot$"="diagnostics" AND event_domain="operations") OR ("$pivot$"="usage" AND event_domain="usage") OR ("$pivot$"="trace" AND event_domain="trace") OR (match("$pivot$", "^event_type:") AND event_type=replace("$pivot$", "^event_type:", "")) | table timestamp event_domain event_type component action status severity actor target message request_id trace_id | sort - timestamp | head 50</query>
+          <query>`dcso_investigation_events($run_id|s$,$session_id|s$)` | where $pivot|s$="all" OR ($pivot|s$="policy" AND event_domain="policy") OR ($pivot|s$="runtime" AND event_domain="runtime") OR ($pivot|s$="diagnostics" AND event_domain="operations") OR ($pivot|s$="usage" AND event_domain="usage") OR ($pivot|s$="trace" AND event_domain="trace") OR (match($pivot|s$, "^event_type:") AND event_type=replace($pivot|s$, "^event_type:", "")) | table timestamp event_domain event_type component action status severity actor target message request_id trace_id | sort - timestamp | head 50</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -45,7 +45,7 @@
       <title>Scoped policy results</title>
       <table>
         <search>
-          <query>`dcso_policy_events` | where ("$run_id$"="*" OR run_id="$run_id$") AND ("$session_id$"="*" OR session_id="$session_id$") AND ("$pivot$"="all" OR "$pivot$"="policy" OR "$pivot$"="event_type:policy.decision") | table timestamp run_id session_id action status severity actor target policy_id disposition reason message details | sort - timestamp | head 25</query>
+          <query>`dcso_policy_events` | where ($run_id|s$="*" OR run_id=$run_id|s$) AND ($session_id|s$="*" OR session_id=$session_id|s$) AND ($pivot|s$="all" OR $pivot|s$="policy" OR $pivot|s$="event_type:policy.decision") | table timestamp run_id session_id action status severity actor target policy_id disposition reason message details | sort - timestamp | head 25</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -57,7 +57,7 @@
       <title>Scoped runtime results</title>
       <table>
         <search>
-          <query>`dcso_runtime_events` | where ("$run_id$"="*" OR run_id="$run_id$") AND ("$session_id$"="*" OR session_id="$session_id$") AND ("$pivot$"="all" OR "$pivot$"="runtime" OR (match("$pivot$", "^event_type:") AND event_type=replace("$pivot$", "^event_type:", ""))) | table timestamp run_id session_id event_type component action status severity target error_code request_id trace_id message details | sort - timestamp | head 25</query>
+          <query>`dcso_runtime_events` | where ($run_id|s$="*" OR run_id=$run_id|s$) AND ($session_id|s$="*" OR session_id=$session_id|s$) AND ($pivot|s$="all" OR $pivot|s$="runtime" OR (match($pivot|s$, "^event_type:") AND event_type=replace($pivot|s$, "^event_type:", ""))) | table timestamp run_id session_id event_type component action status severity target error_code request_id trace_id message details | sort - timestamp | head 25</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -71,7 +71,7 @@
       <title>Scoped diagnostics results</title>
       <table>
         <search>
-          <query>`dcso_diagnostics_events` | where ("$run_id$"="*" OR run_id="$run_id$") AND ("$session_id$"="*" OR session_id="$session_id$") AND ("$pivot$"="all" OR "$pivot$"="diagnostics" OR (match("$pivot$", "^event_type:") AND event_type=replace("$pivot$", "^event_type:", ""))) | table timestamp run_id session_id event_type component action status severity target queue_name retry_count health_state wait_ms queue_depth message details | sort - timestamp | head 25</query>
+          <query>`dcso_diagnostics_events` | where ($run_id|s$="*" OR run_id=$run_id|s$) AND ($session_id|s$="*" OR session_id=$session_id|s$) AND ($pivot|s$="all" OR $pivot|s$="diagnostics" OR (match($pivot|s$, "^event_type:") AND event_type=replace($pivot|s$, "^event_type:", ""))) | table timestamp run_id session_id event_type component action status severity target queue_name retry_count health_state wait_ms queue_depth message details | sort - timestamp | head 25</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -83,7 +83,7 @@
       <title>Scoped usage results</title>
       <table>
         <search>
-          <query>`dcso_usage_events` | where ("$run_id$"="*" OR run_id="$run_id$") AND ("$session_id$"="*" OR session_id="$session_id$") AND ("$pivot$"="all" OR "$pivot$"="usage" OR (match("$pivot$", "^event_type:") AND event_type=replace("$pivot$", "^event_type:", ""))) | table timestamp run_id session_id event_type provider model cost token_count duration_ms metric_name metric_value status severity message | sort - timestamp | head 25</query>
+          <query>`dcso_usage_events` | where ($run_id|s$="*" OR run_id=$run_id|s$) AND ($session_id|s$="*" OR session_id=$session_id|s$) AND ($pivot|s$="all" OR $pivot|s$="usage" OR (match($pivot|s$, "^event_type:") AND event_type=replace($pivot|s$, "^event_type:", ""))) | table timestamp run_id session_id event_type provider model cost token_count duration_ms metric_name metric_value status severity message | sort - timestamp | head 25</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -97,7 +97,7 @@
       <title>Scoped trace results</title>
       <table>
         <search>
-          <query>`dcso_trace_events` | where ("$run_id$"="*" OR run_id="$run_id$") AND ("$session_id$"="*" OR session_id="$session_id$") AND ("$pivot$"="all" OR "$pivot$"="trace" OR (match("$pivot$", "^event_type:") AND event_type=replace("$pivot$", "^event_type:", ""))) | table timestamp run_id session_id trace_id span_id parent_span_id span_name duration_ms status component message | sort - timestamp | head 25</query>
+          <query>`dcso_trace_events` | where ($run_id|s$="*" OR run_id=$run_id|s$) AND ($session_id|s$="*" OR session_id=$session_id|s$) AND ($pivot|s$="all" OR $pivot|s$="trace" OR (match($pivot|s$, "^event_type:") AND event_type=replace($pivot|s$, "^event_type:", ""))) | table timestamp run_id session_id trace_id span_id parent_span_id span_name duration_ms status component message | sort - timestamp | head 25</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -111,7 +111,7 @@
       <title>Guided SPL pivots</title>
       <table>
         <search>
-          <query>| makeresults count=6 | streamstats count as row | eval pivot_name=case(row=1, "Workbench summary", row=2, "Policy summary", row=3, "Correlated timeline", row=4, "Runtime evidence", row=5, "Diagnostics health", row=6, "Usage and trace"), spl=case(row=1, "`dcso_workbench_summary($run_id$,$session_id$,$pivot$)`", row=2, "`dcso_workbench_policy_summary($run_id$,$session_id$)`", row=3, "`dcso_workbench_timeline($run_id$,$session_id$)`", row=4, "`dcso_workbench_runtime_evidence($run_id$,$session_id$)`", row=5, "`dcso_workbench_diagnostics_health($run_id$,$session_id$)`", row=6, "`dcso_workbench_usage_evidence($run_id$,$session_id$)` and `dcso_workbench_trace_spans($run_id$,$session_id$)`") | table pivot_name spl</query>
+          <query>| makeresults count=6 | streamstats count as row | eval pivot_name=case(row=1, "Workbench summary", row=2, "Policy summary", row=3, "Correlated timeline", row=4, "Runtime evidence", row=5, "Diagnostics health", row=6, "Usage and trace"), spl=case(row=1, "`dcso_workbench_summary($run_id|s$,$session_id|s$,$pivot|s$)`", row=2, "`dcso_workbench_policy_summary($run_id|s$,$session_id|s$)`", row=3, "`dcso_workbench_timeline($run_id|s$,$session_id|s$)`", row=4, "`dcso_workbench_runtime_evidence($run_id|s$,$session_id|s$)`", row=5, "`dcso_workbench_diagnostics_health($run_id|s$,$session_id|s$)`", row=6, "`dcso_workbench_usage_evidence($run_id|s$,$session_id|s$)` and `dcso_workbench_trace_spans($run_id|s$,$session_id|s$)`") | table pivot_name spl</query>
           <earliest>0</earliest>
           <latest></latest>
         </search>

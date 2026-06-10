@@ -83,14 +83,7 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=7d"
-      - "--web.enable-remote-write-receiver"
       - "--web.enable-lifecycle"
-      # admin api enables /api/v1/admin/tsdb/{delete_series,clean_tombstones}
-      # so operators can purge stale series after a sidecar restart that
-      # changed histogram bucket boundaries (or any schema change). Bound
-      # to 127.0.0.1 only via the ports stanza below, so the admin API
-      # surface stays inside the developer laptop.
-      - "--web.enable-admin-api"
       - "--enable-feature=exemplar-storage,native-histograms"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -134,8 +127,8 @@ services:
     container_name: defenseclaw-grafana
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:?set a Grafana admin password}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
       - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
       - GF_USERS_DEFAULT_THEME=dark

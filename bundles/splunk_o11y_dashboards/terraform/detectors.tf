@@ -87,7 +87,8 @@ locals {
       tags             = ["pipeline", "telemetry"]
       program          = <<-EOT
         A = data('defenseclaw.telemetry.exporter.last_export_ts', rollup='latest').max(by=['exporter']).publish(label='Last export timestamp')
-        detect(when(A is None, '5m')).publish('DefenseClawOTLPExporterStalled')
+        B = (time() / 1000 - A).publish(label='Seconds since last export')
+        detect(when(B > 300, '5m')).publish('DefenseClawOTLPExporterStalled')
       EOT
     }
     otlp_exporter_errors = {
