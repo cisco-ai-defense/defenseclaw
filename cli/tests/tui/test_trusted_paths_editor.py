@@ -20,6 +20,7 @@ from unittest.mock import patch
 import pytest
 from defenseclaw.inventory import agent_discovery as ad
 from defenseclaw.tui.screens.setup_resource_editor import SetupResourceResult
+from defenseclaw.tui.screens import trusted_paths_editor as tpe
 from defenseclaw.tui.screens.trusted_paths_editor import (
     TrustedPathRow,
     TrustedPathsEditorScreen,
@@ -40,9 +41,11 @@ def _isolate_trusted_env(tmp_path, monkeypatch):
     """Point DEFENSECLAW_HOME at an empty dir so the new ``_refresh`` helper
     reads no persisted ``.env`` and never mutates the real process env across
     tests. Individual tests that need a populated ``.env`` write into tmp_path."""
+    tpe._UNTRUSTED_DIR_CACHE.clear()
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
-    return tmp_path
+    yield tmp_path
+    tpe._UNTRUSTED_DIR_CACHE.clear()
 
 
 class _Harness(App):
@@ -86,8 +89,10 @@ def _sig(binary_path: str, error: str, version: str = "") -> ad.AgentSignal:
 
 def test_untrusted_connector_dir_detects_untrusted_binary() -> None:
     disc = _disc(_sig("/home/u/.local/bin/codex", ad.UNTRUSTED_PREFIX_ERROR))
-    with patch.object(ad, "discover_agents", return_value=disc):
+    with patch.object(ad, "discover_agents", return_value=disc) as mock_disc:
         result = untrusted_connector_dir("codex")
+        untrusted_connector_dir("codex")
+    assert mock_disc.call_count == 1
     assert result == os.path.dirname(os.path.realpath("/home/u/.local/bin/codex"))
 
 

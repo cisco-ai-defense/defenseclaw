@@ -69,7 +69,7 @@ VERSION_TIMEOUT_SECONDS = 2.0
 # those dirs, plant `codex` (or any other discovery target), and a
 # default-trusted prefix would let the passive scan exec it. Operators
 # with bespoke install layouts extend the allow-list at runtime via the
-# ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` env var (colon-separated).
+# ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` env var (``os.pathsep``-separated).
 _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/usr/bin",
     "/usr/local/bin",
@@ -94,7 +94,7 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     # it. Operators who install discovery targets under a user-owned tool
     # root (modern Codex CLI lives in ~/.codex/packages/standalone/...)
     # must opt in explicitly via DEFENSECLAW_TRUSTED_BIN_PREFIXES
-    # (colon-separated); the per-file/parent permission checks in
+    # (``os.pathsep``-separated); the per-file/parent permission checks in
     # _is_trusted_binary_path still apply on top of any extension.
 )
 
@@ -282,7 +282,7 @@ def _trusted_bin_prefixes() -> tuple[str, ...]:
     The defaults cover platform-package, Homebrew, MacPorts, and common
     user-scoped tooling (cargo, npm, pyenv, asdf, pipx, etc.). Operators
     can extend the list at runtime via ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``
-    (colon-separated). Each entry is tilde-expanded and absolutised
+    (``os.pathsep``-separated). Each entry is tilde-expanded and absolutised
     before comparison.
     """
     extras: list[str] = []
@@ -314,6 +314,27 @@ def _trusted_bin_prefixes() -> tuple[str, ...]:
     return tuple(expanded)
 
 
+def _trusted_prefix_dir_mode_error(st: os.stat_result) -> str | None:
+    """Return a human-readable refusal when a directory mode is unsafe to trust.
+
+    Mirrors the parent-directory permission checks in ``_is_trusted_binary_path``
+    so ``trusted-paths add`` cannot succeed on directories discovery would still
+    reject for version probing.
+    """
+    if st.st_mode & 0o002:
+        return "directory is world-writable"
+    if st.st_mode & 0o020:
+        grp_name = ""
+        if _grp is not None:
+            try:
+                grp_name = _grp.getgrgid(st.st_gid).gr_name
+            except (KeyError, OSError):
+                grp_name = ""
+        if grp_name not in ("root", "wheel", "admin"):
+            return "directory is group-writable"
+    return None
+
+
 def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
     """Validate a candidate trusted-bin-prefix directory.
 
@@ -325,9 +346,11 @@ def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
     Rules:
       * a *non-absolute* input is rejected — the resolved location would
         otherwise depend on the caller's working directory;
-      * a *world-writable* directory is rejected — anyone on the host could
-        drop a malicious binary into it, the exact threat the allow-list
-        defends against;
+      * existing paths are canonicalised with ``realpath`` so symlink aliases
+        match the discovery gate;
+      * a *world-writable* or unsafe *group-writable* directory is rejected —
+        anyone on the host (or anyone sharing the group) could drop a malicious
+        binary into it, the exact threat the allow-list defends against;
       * a path that exists but is not a directory is rejected;
       * a path that does not yet exist is allowed (the caller may warn) — it
         is not itself unsafe to trust.
@@ -338,7 +361,10 @@ def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
     expanded = _expand(raw)
     if not os.path.isabs(expanded):
         return os.path.abspath(expanded), "path is not absolute"
-    resolved = os.path.abspath(expanded)
+    try:
+        resolved = os.path.realpath(expanded)
+    except OSError:
+        resolved = os.path.abspath(expanded)
     try:
         st = os.stat(resolved)
     except FileNotFoundError:
@@ -347,8 +373,9 @@ def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
         return resolved, f"cannot stat path ({exc})"
     if not os.path.isdir(resolved):
         return resolved, "path is not a directory"
-    if st.st_mode & 0o002:
-        return resolved, "directory is world-writable"
+    mode_err = _trusted_prefix_dir_mode_error(st)
+    if mode_err:
+        return resolved, mode_err
     return resolved, None
 
 

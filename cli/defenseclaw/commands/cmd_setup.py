@@ -1808,6 +1808,16 @@ def trusted_paths_remove(app: AppContext, directory: str, as_json: bool) -> None
     _emit_trusted_path_result(as_json, ok=True, path=resolved, message="removed from trusted prefixes")
 
 
+def _emit_untrusted_prefix_setup_hints(resolved_binary: str, parent: str) -> None:
+    """Actionable remediation when action-mode setup cannot probe a connector binary."""
+    ux.subhead(f"  Binary resolves to: {resolved_binary}")
+    ux.subhead(f"  Trust it with: defenseclaw setup trusted-paths add {parent}")
+    ux.subhead(
+        "  `trusted-paths add` appends to ~/.defenseclaw/.env "
+        f"(DEFENSECLAW_TRUSTED_BIN_PREFIXES entries are {os.pathsep!r}-separated)."
+    )
+
+
 def _print_summary(sc, llm, aid) -> None:
     click.echo()
     click.echo("  Saved to ~/.defenseclaw/config.yaml")
@@ -2785,11 +2795,14 @@ def _check_connector_version_supported_for_setup(
                 and signal.binary_path
             )
             interactive = _allow_prompt and sys.stdin.isatty() and sys.stdout.isatty()
+            resolved_bin = ""
+            parent = ""
+            if is_untrusted_path:
+                resolved_bin = os.path.realpath(signal.binary_path)
+                parent = os.path.dirname(resolved_bin)
             if emit and is_untrusted_path and interactive:
-                resolved = os.path.realpath(signal.binary_path)
-                parent = os.path.dirname(resolved)
                 ux.warn(detail)
-                ux.subhead(f"  Binary resolves to: {resolved}")
+                ux.subhead(f"  Binary resolves to: {resolved_bin}")
                 ux.subhead(f"  Directory '{parent}' is not in the trusted prefix list.")
                 ux.subhead(
                     "  Trusting a directory lets DefenseClaw execute any binary placed "
@@ -2816,22 +2829,15 @@ def _check_connector_version_supported_for_setup(
                         data_dir=data_dir,
                         _allow_prompt=False,
                     )
-                # Declined: fall through to the refusal/hint below.
-            if emit and not (is_untrusted_path and interactive):
-                ux.err(
-                    detail + " Refusing action-mode hook setup because the installed "
-                    "connector version could not be verified."
-                )
-                if is_untrusted_path:
-                    resolved = os.path.realpath(signal.binary_path)
-                    parent = os.path.dirname(resolved)
-                    ux.subhead(f"  Binary resolves to: {resolved}")
-                    ux.subhead(f"  Trust it with: defenseclaw setup trusted-paths add {parent}")
-                    ux.subhead(
-                        f"  (or add manually to ~/.defenseclaw/.env: "
-                        f"DEFENSECLAW_TRUSTED_BIN_PREFIXES={parent})"
-                    )
+                # Declined: fall through — still emit the trusted-paths hint below.
             if emit:
+                if not (is_untrusted_path and interactive):
+                    ux.err(
+                        detail + " Refusing action-mode hook setup because the installed "
+                        "connector version could not be verified."
+                    )
+                if is_untrusted_path:
+                    _emit_untrusted_prefix_setup_hints(resolved_bin, parent)
                 ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
             return False
         if emit:

@@ -6970,6 +6970,10 @@ class DefenseClawTUI(App[None]):
             self._set_status(f"{connector} setup paused — '{parent}' was not trusted.")
             return False
         self._handle_setup_resource_result(result)
+        label = friendly_connector_name(connector)
+        self._set_status(
+            f"{label}: trusted-paths command queued — when it finishes, press m again to re-run setup."
+        )
         return False
 
     async def _cancel_running_command(self) -> None:
