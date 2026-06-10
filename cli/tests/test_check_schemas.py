@@ -64,6 +64,7 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 # Sentinel set by telemetry/resource.go when more than one
