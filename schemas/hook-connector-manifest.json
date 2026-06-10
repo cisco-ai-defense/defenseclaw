@@ -1,0 +1,378 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.io/schemas/hook-connector-manifest.json",
+  "title": "DefenseClaw Hook Connector Manifest",
+  "description": "Declarative description of a hook-based agent harness connector. A manifest lets DefenseClaw discover, install, decode, evaluate, and respond to a harness's lifecycle hooks without a bespoke native (Go) connector. Manifests load from a first-party embedded set shipped with the gateway and from an operator-managed drop-in directory (default ~/.defenseclaw/connectors/). Manifests are pure data interpreted by a constrained engine; they never carry executable code.",
+  "type": "object",
+  "required": ["schema_version", "name", "kind", "contract", "capabilities", "wiring", "response"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Manifest format version. Bump only for incompatible manifest-shape changes."
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+      "description": "Connector identifier and hook route segment (/api/v1/<name>/hook). Must not collide with a built-in connector name; the registry refuses shadowing registrations."
+    },
+    "display_name": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Human-facing harness name shown in setup/doctor output."
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "One-line summary of the harness and what DefenseClaw wires for it."
+    },
+    "kind": {
+      "type": "string",
+      "const": "hook",
+      "description": "Manifest connectors describe hook-based integrations only. Proxy connectors remain code-backed."
+    },
+    "homepage": { "type": "string", "format": "uri", "maxLength": 512 },
+    "docs_url": { "type": "string", "format": "uri", "maxLength": 512 },
+    "discovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How DefenseClaw detects whether this harness is installed on the host (feeds agent discovery and setup gating).",
+      "properties": {
+        "version_probe": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Command run to read the harness version, for example 'opencode --version'. The first token must be the binary; arguments are passed verbatim. DefenseClaw resolves the binary on PATH under trusted prefixes only."
+        },
+        "binary_names": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 128 },
+          "maxItems": 16,
+          "uniqueItems": true,
+          "description": "Executable names looked up on PATH to detect installation."
+        },
+        "config_globs": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 512 },
+          "maxItems": 32,
+          "uniqueItems": true,
+          "description": "Path templates (~ and <workspace> expanded) whose existence implies the harness is installed."
+        },
+        "trusted_bin_prefixes": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 512 },
+          "maxItems": 32,
+          "uniqueItems": true,
+          "description": "Optional additional trusted install-prefix allowlist for the probed binary. The built-in default prefixes always apply; this only extends them."
+        }
+      }
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_id", "events"],
+      "description": "Versioned compatibility contract. DefenseClaw resolves the installed harness version to one contract before deciding what is blockable/askable/inspectable.",
+      "properties": {
+        "contract_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+          "description": "Stable identifier for this hook surface, for example 'opencode-hooks-v1'. Recorded in the runtime hook-contract lock for drift detection."
+        },
+        "agent_version": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Inclusive lower / exclusive upper version bounds the contract applies to. Empty bounds mean open-ended.",
+          "properties": {
+            "min_inclusive": { "type": "string", "maxLength": 64 },
+            "max_exclusive": { "type": "string", "maxLength": 64 }
+          }
+        },
+        "default_for_unversioned": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the harness version cannot be probed, use this contract. Exactly one contract per connector should set this."
+        },
+        "hook_script_version": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Version tag stamped into the installed hook script and audit envelope for provenance."
+        },
+        "supports_traceparent": {
+          "type": "boolean",
+          "default": true,
+          "description": "True when the installed hook forwards W3C traceparent/tracestate so the gateway continues the remote trace instead of minting a fresh root span."
+        },
+        "native_otlp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Descriptive only in this schema version: declares the harness can emit native OTLP. Native OTLP wiring itself remains code-backed."
+        },
+        "events": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 128 },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "description": "Harness-native lifecycle event names this contract recognizes (for example PreToolUse, beforeShellExecution, pre_tool_call)."
+        },
+        "aid_surfaces": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "event_content"] },
+          "maxItems": 8,
+          "uniqueItems": true,
+          "description": "Inspection target categories DefenseClaw exposes for this connector's AI discovery surface."
+        },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 1024 },
+          "maxItems": 32
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["can_block"],
+      "description": "The lifecycle controls this harness can actually exercise. The gateway never escalates beyond what is declared here: a verdict cannot block on an event absent from block_events, and cannot ask natively unless can_ask_native and the event is in ask_events.",
+      "properties": {
+        "can_block": {
+          "type": "boolean",
+          "description": "True when the harness can stop a pending action from a hook decision."
+        },
+        "can_ask_native": {
+          "type": "boolean",
+          "default": false,
+          "description": "True when the harness can surface a native human-approval prompt from a hook decision."
+        },
+        "ask_events": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 128 },
+          "maxItems": 128,
+          "uniqueItems": true,
+          "description": "Subset of events on which a 'confirm' verdict renders as a native ask. Events outside this set downgrade confirm to alert."
+        },
+        "block_events": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 128 },
+          "maxItems": 128,
+          "uniqueItems": true,
+          "description": "Events on which a 'block' verdict is enforceable. Block verdicts on other events downgrade to allow with would_block=true."
+        },
+        "supports_fail_closed": {
+          "type": "boolean",
+          "default": false,
+          "description": "True when the harness honors a fail-closed (deny on hook error) posture; gates whether setup may install fail-closed wiring."
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["user", "workspace", "user,workspace", "workspace,user"],
+          "default": "user",
+          "description": "Where the harness reads hook configuration."
+        }
+      }
+    },
+    "wiring": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targets", "install_events", "layout", "entry_template"],
+      "description": "Declarative recipe DefenseClaw uses to install (Setup), verify, and remove (Teardown) the hook entries in the harness's own configuration file.",
+      "properties": {
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "description": "Candidate config files to patch. The first writable, in-scope target is used. Paths must resolve under $HOME or the selected workspace; targets resolving inside the DefenseClaw data dir or to absolute system paths are rejected.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path_template", "format"],
+            "properties": {
+              "path_template": {
+                "type": "string",
+                "maxLength": 512,
+                "description": "Config path with ~ (home) and <workspace> (selected workspace root) placeholders, for example '~/.cursor/hooks.json' or '<workspace>/.github/hooks/defenseclaw.json'."
+              },
+              "format": { "type": "string", "enum": ["json", "yaml", "toml"] },
+              "scope": { "type": "string", "enum": ["user", "workspace"], "default": "user" }
+            }
+          }
+        },
+        "install_events": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 128 },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "description": "Events to register in the harness config. May be a superset of contract.events so future events are wired ahead of upstream emitting them."
+        },
+        "layout": {
+          "type": "string",
+          "enum": ["flat_map", "grouped_matcher", "top_level_grouped", "nested_named"],
+          "description": "Shape of the inserted hook configuration. flat_map: container[event]=[entry...]. grouped_matcher: container[event]=[{matcher,hooks:[entry...]}]. top_level_grouped: root[event]=[{matcher,hooks:[entry...]}] (no container key). nested_named: root[<owner_key_prefix><event>]={event:[{matcher,hooks:[entry...]}]}."
+        },
+        "container_key": {
+          "type": "string",
+          "maxLength": 64,
+          "default": "hooks",
+          "description": "Parent object key under which events are written for flat_map and grouped_matcher layouts. Ignored by top_level_grouped and nested_named."
+        },
+        "matcher": {
+          "type": "string",
+          "maxLength": 128,
+          "default": "*",
+          "description": "Matcher value used by grouped_matcher / top_level_grouped / nested_named layouts."
+        },
+        "entry_template": {
+          "type": "object",
+          "description": "The per-event command entry object to insert. String values support the tokens ${hook_command}, ${api_addr}, and ${fail_closed}. ${hook_command} resolves to the platform-correct invocation (the installed shell script on Unix, the native 'defenseclaw hook --connector <name>' on Windows).",
+          "minProperties": 1
+        },
+        "ownership": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "How DefenseClaw recognizes its own entries for idempotent re-setup and clean teardown without disturbing third-party entries in the same file.",
+          "properties": {
+            "match": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "Substring that identifies a DefenseClaw-owned entry. Defaults to the installed hook command/script path."
+            },
+            "owner_key_prefix": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "Required for nested_named layout: the stable per-event outer key prefix, for example 'defenseclaw-opencode-'."
+            }
+          }
+        },
+        "extra_keys": {
+          "type": "object",
+          "description": "Optional fixed top-level keys to set on the config root, for example {\"version\": 1}. Applied additively and removed on teardown only if DefenseClaw set them.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exit_style"],
+      "description": "Declarative rendering of the gateway verdict into the harness-native hook response and process exit behavior.",
+      "properties": {
+        "response_field": {
+          "type": "string",
+          "maxLength": 64,
+          "default": "hook_output",
+          "description": "Top-level JSON key under which the harness-native output map is returned in the HTTP response and echoed by the hook to stdout."
+        },
+        "exit_style": {
+          "type": "string",
+          "enum": ["hook_echo", "hook_echo_decision", "action_stderr", "claude_code", "codex"],
+          "description": "How the hook turns a 2xx gateway response into stdout + exit code. hook_echo: echo response_field, exit 0 (decision already encoded in the JSON). hook_echo_decision: echo response_field, exit 2 when its decision is deny/block. action_stderr: no stdout echo, write reason to stderr + exit 2 on block. claude_code / codex: vendor-specific tails."
+        },
+        "default_block_reason": {
+          "type": "string",
+          "maxLength": 512,
+          "description": "Reason text used when a block verdict carries no upstream reason."
+        },
+        "templates": {
+          "type": "array",
+          "maxItems": 64,
+          "description": "Ordered rules mapping a (verdict action, event) to the harness-native output object. The first matching rule wins. Omit to fall back to the built-in generic renderer.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["when", "output"],
+            "properties": {
+              "when": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Match predicate. An empty predicate matches everything. actions and events are matched after canonicalization.",
+                "properties": {
+                  "actions": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["allow", "block", "alert", "confirm"] },
+                    "maxItems": 4,
+                    "uniqueItems": true
+                  },
+                  "events": {
+                    "type": "array",
+                    "items": { "type": "string", "maxLength": 128 },
+                    "maxItems": 128,
+                    "uniqueItems": true
+                  }
+                }
+              },
+              "output": {
+                "type": "object",
+                "minProperties": 1,
+                "description": "Harness-native output object emitted under response_field. String values support the tokens ${reason}, ${additional_context}, ${tool}, ${event}, and ${severity}."
+              }
+            }
+          }
+        }
+      }
+    },
+    "decode": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional payload normalizer for harnesses whose hook JSON is not the flat {hook_event_name, tool_name, tool_input} shape the built-in normalizer understands. Omit for flat payloads.",
+      "properties": {
+        "field_map": {
+          "type": "object",
+          "description": "Canonical field -> dotted path into the raw payload, for example {\"tool_name\": \"toolCall.name\", \"tool_input\": \"toolCall.args\", \"session_id\": \"conversationId\"}. Only the listed canonical keys are honored.",
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*$"
+          },
+          "propertyNames": {
+            "enum": [
+              "hook_event_name",
+              "session_id",
+              "turn_id",
+              "agent_id",
+              "agent_name",
+              "agent_type",
+              "cwd",
+              "tool_name",
+              "tool_input",
+              "content",
+              "direction",
+              "model"
+            ]
+          }
+        },
+        "event_aliases": {
+          "type": "object",
+          "description": "Map a raw harness event name to a canonical event name DefenseClaw classifies (prompt-like / tool-call / tool-result).",
+          "additionalProperties": { "type": "string", "maxLength": 128 },
+          "maxProperties": 128
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Trust metadata for third-party drop-in manifests. Required for a drop-in manifest to run in action (enforcing) mode; embedded first-party manifests are implicitly trusted. Unverified drop-ins are forced to observe mode unless the operator opts in.",
+      "properties": {
+        "publisher": { "type": "string", "maxLength": 256 },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "Lowercase hex SHA-256 of the canonicalized manifest bytes (excluding the provenance.signature field)."
+        },
+        "signature": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Base64 detached signature over the canonicalized manifest bytes, verified against a configured trusted public key."
+        },
+        "signature_alg": { "type": "string", "enum": ["ed25519", "ecdsa-p256"] },
+        "public_key_id": { "type": "string", "maxLength": 256 }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 1024 },
+      "maxItems": 32
+    }
+  }
+}
