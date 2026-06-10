@@ -62,6 +62,7 @@ EXPECTED_CLAW_MODE_ENUM = {
     "windsurf",
     "geminicli",
     "copilot",
+    "scout",
     "openhands",
     "antigravity",
     # Sentinel emitted when one gateway process serves >1 connector at once.
