@@ -28,6 +28,7 @@ from defenseclaw.commands.cmd_setup import (
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACT_MANIFEST,
     HOOK_CONTRACTS,
+    NOT_GATED_CONNECTORS,
     PROXY_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
@@ -69,6 +70,15 @@ class TestConnectorContractManifest(unittest.TestCase):
             compat = resolve_connector_contract(connector, "9.9.9")
             self.assertEqual(compat.status, STATUS_NOT_GATED)
             self.assertTrue(compat.supported)
+
+    def test_surface_connectors_are_not_hook_gated_but_not_proxy(self) -> None:
+        self.assertIn("scout", NOT_GATED_CONNECTORS)
+        self.assertNotIn("scout", PROXY_CONNECTORS)
+
+        compat = resolve_connector_contract("scout", "Scout 0.1.0")
+        self.assertEqual(compat.status, STATUS_NOT_GATED)
+        self.assertTrue(compat.supported)
+        self.assertIn("surface-only", compat.reason)
 
     def test_codex_version_range_matches_contract(self) -> None:
         known = resolve_connector_contract("codex", "codex 0.124.0")
@@ -113,7 +123,7 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertIn("event_content", compat.contract.aid_surfaces)
 
     def test_manifest_loader_preserves_unversioned_default_marker(self) -> None:
-        _, contracts = _load_contracts_from_manifest(
+        _, _, contracts = _load_contracts_from_manifest(
             {
                 "connectors": {
                     "codex": {

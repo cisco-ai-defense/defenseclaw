@@ -16,7 +16,7 @@ This page is the single source of truth for "can this connector do X?". Every ro
 ## Reading the matrix
 
 <Cards>
-  <Card title="Family" description="proxy = DefenseClaw sits in the LLM data path. hooks = DefenseClaw hooks into the agent's lifecycle; the agent talks directly to its upstream." />
+  <Card title="Family" description="proxy = DefenseClaw sits in the LLM data path. hooks = DefenseClaw hooks into the agent's lifecycle. surface = local inventory / asset support without runtime blocking." />
   <Card title="Tool inspection" description="When DefenseClaw can see the tool call. pre-execution + response-scan means we score before the call fires and after it returns." />
   <Card title="Subprocess policy" description="sandbox = DefenseClaw wires the agent into the openshell sandbox. none = the agent's own runtime executes commands; we observe via hooks." />
   <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
@@ -37,6 +37,8 @@ This page is the single source of truth for "can this connector do X?". Every ro
 | HITL behaviour | `_hilt_support_note(<id>)` in `cli/defenseclaw/commands/cmd_setup.py` |
 
 The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change.
+
+Microsoft Scout appears as `surface`: DefenseClaw can inventory Scout skills and install an opt-in CodeGuard skill asset, but it does not expose runtime block or HITL controls until Microsoft publishes a Scout hook or proxy contract.
 
 ## Common patterns
 

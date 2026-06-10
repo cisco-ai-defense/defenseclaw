@@ -23,6 +23,7 @@ from defenseclaw.commands.cmd_setup import (
     _CONNECTOR_NAMES_FALLBACK,
     _HOOK_ENFORCED_CONNECTORS,
     _PROXY_BACKED_CONNECTORS,
+    _SURFACE_ONLY_CONNECTORS,
 )
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.platform_support import (
@@ -61,6 +62,10 @@ HOOK_CONNECTORS = {
     "antigravity",
 }
 
+SURFACE_ONLY_CONNECTORS = {"scout"}
+SETUP_CONNECTORS = PROXY_CONNECTORS | HOOK_CONNECTORS
+ALL_CONNECTORS = SETUP_CONNECTORS | SURFACE_ONLY_CONNECTORS
+
 
 def test_windows_unsupported_set_matches_go_proxy_connectors() -> None:
     assert set(WINDOWS_UNSUPPORTED_CONNECTORS) == PROXY_CONNECTORS
@@ -78,23 +83,27 @@ def test_hook_enforced_set_is_the_hook_connectors() -> None:
     assert set(_HOOK_ENFORCED_CONNECTORS) == HOOK_CONNECTORS
 
 
+def test_surface_only_set_is_the_surface_connectors() -> None:
+    assert set(_SURFACE_ONLY_CONNECTORS) == SURFACE_ONLY_CONNECTORS
+
+
 def test_is_proxy_connector() -> None:
     assert is_proxy_connector("openclaw")
     assert is_proxy_connector("zeptoclaw")
-    for name in HOOK_CONNECTORS:
+    for name in HOOK_CONNECTORS | SURFACE_ONLY_CONNECTORS:
         assert not is_proxy_connector(name)
 
 
 def test_connector_supported_on_os_windows_excludes_only_proxy() -> None:
     for name in PROXY_CONNECTORS:
         assert connector_supported_on_os(name, "windows") is False
-    for name in HOOK_CONNECTORS:
+    for name in HOOK_CONNECTORS | SURFACE_ONLY_CONNECTORS:
         assert connector_supported_on_os(name, "windows") is True
 
 
 def test_connector_supported_on_os_unix_allows_everything() -> None:
     for os_name in ("linux", "darwin"):
-        for name in PROXY_CONNECTORS | HOOK_CONNECTORS:
+        for name in ALL_CONNECTORS:
             assert connector_supported_on_os(name, os_name) is True
 
 
@@ -111,12 +120,11 @@ def test_host_os_returns_known_token() -> None:
 def test_all_connector_lists_share_one_taxonomy() -> None:
     # Fixing the historical openhands drift: every Python enumeration of
     # connectors must contain exactly the proxy + hook connectors.
-    expected = PROXY_CONNECTORS | HOOK_CONNECTORS
-    assert set(KNOWN_CONNECTORS) == expected
-    assert set(_CONNECTOR_NAMES_FALLBACK) == expected
-    assert set(CONNECTORS) == expected
-    assert {c.wire for c in MODE_PICKER_CHOICES} == expected
-    assert set(CONNECTOR_CHOICES) == expected
+    assert set(KNOWN_CONNECTORS) == ALL_CONNECTORS
+    assert set(_CONNECTOR_NAMES_FALLBACK) == ALL_CONNECTORS
+    assert set(CONNECTORS) == SETUP_CONNECTORS
+    assert {c.wire for c in MODE_PICKER_CHOICES} == SETUP_CONNECTORS
+    assert set(CONNECTOR_CHOICES) == SETUP_CONNECTORS
 
 
 def test_windows_views_exclude_proxy_and_keep_all_hook_connectors() -> None:

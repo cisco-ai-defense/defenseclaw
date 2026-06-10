@@ -81,9 +81,10 @@ type HookContractResolution struct {
 
 var versionNumberRE = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?`)
 
-var proxyConnectorsWithoutHookGate = map[string]bool{
-	"openclaw":  true,
-	"zeptoclaw": true,
+var connectorsWithoutHookGate = map[string]string{
+	"openclaw":  "proxy/chat connector; no hook contract gate",
+	"zeptoclaw": "proxy/chat connector; no hook contract gate",
+	"scout":     "surface-only connector; no documented hook contract gate",
 }
 
 var builtinHookContracts = map[string][]HookContract{
@@ -472,14 +473,14 @@ func hookContractByID(connectorName, contractID string) (HookContract, bool) {
 
 func ResolveHookContract(connectorName, rawVersion string) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
-	if proxyConnectorsWithoutHookGate[name] {
+	if reason, ok := connectorsWithoutHookGate[name]; ok {
 		raw := strings.TrimSpace(rawVersion)
 		return HookContractResolution{
 			Connector:         name,
 			RawVersion:        raw,
 			NormalizedVersion: NormalizeAgentVersion(name, raw),
 			Status:            HookCompatibilityNotGated,
-			Reason:            "proxy/chat connector; no hook contract gate",
+			Reason:            reason,
 		}
 	}
 	contracts := KnownHookContracts(name)
@@ -631,6 +632,8 @@ func normalizeConnectorName(name string) string {
 		return "geminicli"
 	case "open-hands", "open_hands":
 		return "openhands"
+	case "microsoft-scout", "microsoft_scout", "ms-scout", "clawpilot":
+		return "scout"
 	default:
 		return name
 	}

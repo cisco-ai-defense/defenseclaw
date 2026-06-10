@@ -35,6 +35,10 @@ Use `<binary> --help` for any command.
 | `setup geminicli` / `setup copilot` | Configure observability aliases with native OTel where supported |
 | `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
 
+Microsoft Scout is not a `setup` target yet. Use `skill list/scan --connector
+scout` and `codeguard install --connector scout --target skill` for Scout's
+documented local skill surfaces.
+
 ### guardrail
 
 Per-connector guardrail controls. Each verb prints the current value when run

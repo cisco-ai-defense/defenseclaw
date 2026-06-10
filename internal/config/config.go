@@ -67,8 +67,9 @@ const (
 	// Connector.Name() in internal/gateway/connector and with the
 	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
 	// "zeptoclaw", "claudecode", "codex", "hermes", "cursor",
-	// "windsurf", "geminicli", "copilot", "openhands". Constants for those modes
-	// are intentionally not introduced here yet — they're used as
+	// "windsurf", "geminicli", "copilot", "scout", "openhands",
+	// "antigravity". Constants for those modes are intentionally not
+	// introduced here yet — they're used as
 	// raw strings by Config.activeConnector() (see internal/config/
 	// claw.go) which dispatches to per-connector readers. Promoting
 	// them to typed constants is part of S1.2 and tracked in the

@@ -1,0 +1,81 @@
+---
+title: Microsoft Scout
+description: Microsoft Scout surface connector supports local skill discovery under ~/.copilot/skills and ~/.copilot/m-skills plus opt-in CodeGuard skill installation. Runtime hook/proxy enforcement waits for a published Scout hook contract.
+keywords:
+  - DefenseClaw Microsoft Scout connector
+  - Microsoft Scout skills
+  - Scout CodeGuard skill
+  - Scout OpenClaw
+  - Clawpilot
+---
+
+Microsoft Scout is a Microsoft 365 Frontier preview agent powered by OpenClaw. The public Scout docs expose local skill directories, app/admin entitlement requirements, and MCP-backed tools, but they do **not** publish a local hook config path or proxy contract that DefenseClaw can patch for runtime blocking.
+
+DefenseClaw therefore supports Scout as a **surface connector**:
+
+- Skill discovery from `~/.copilot/skills` and `~/.copilot/m-skills`
+- `agent discover` / AI inventory recognition for Scout and the preview `Clawpilot` process name
+- Explicit CodeGuard skill installation into `~/.copilot/skills/codeguard`
+- No `setup scout`, no `setup mode scout`, and no runtime HITL/block decisions yet
+
+## Supported commands
+
+```bash
+defenseclaw agent discover
+defenseclaw skill list --connector scout
+defenseclaw skill scan --all --connector scout
+defenseclaw codeguard status --connector scout --target skill
+defenseclaw codeguard install --connector scout --target skill
+```
+
+`--connector scout` works even when Scout is not the active guardrail connector, because Scout has no guardrail setup surface to make active. The flag explicitly scopes the command to Scout's documented local paths.
+
+## Files DefenseClaw reads
+
+<Files>
+  <Folder name="~/.copilot" defaultOpen>
+    <Folder name="skills">
+      <File name="*/SKILL.md" />
+    </Folder>
+    <Folder name="m-skills">
+      <File name="*/SKILL.md" />
+    </Folder>
+  </Folder>
+</Files>
+
+`~/.copilot/skills` is the documented custom skill directory. `~/.copilot/m-skills` is treated as a discovered Microsoft-managed workspace skill directory and is read-only from DefenseClaw's perspective.
+
+## Files DefenseClaw can write
+
+<Files>
+  <Folder name="~/.copilot" defaultOpen>
+    <Folder name="skills">
+      <Folder name="codeguard">
+        <File name="SKILL.md" />
+      </Folder>
+    </Folder>
+  </Folder>
+</Files>
+
+CodeGuard installation is explicit and opt-in. DefenseClaw does not install Scout assets during `init`, gateway startup, or scanner setup.
+
+## Not supported yet
+
+Scout is not a hook connector today. These commands intentionally fail with a clear message:
+
+```bash
+defenseclaw setup mode scout
+defenseclaw setup guardrail --connector scout
+```
+
+DefenseClaw will add runtime enforcement when Microsoft publishes a Scout hook/proxy contract or another local configuration surface that can carry block/ask decisions safely.
+
+## Microsoft prerequisites
+
+Scout access is controlled by Microsoft 365 Frontier and admin policy. Microsoft documents the current requirements in:
+
+- [Microsoft Scout overview](https://learn.microsoft.com/en-us/microsoft-scout/overview)
+- [Get started with Microsoft Scout](https://learn.microsoft.com/en-us/microsoft-scout/get-started)
+- [Scout admin access overview](https://learn.microsoft.com/en-us/microsoft-scout/admin-access-overview)
+
+Those controls are outside DefenseClaw. If Scout is not installed or entitled on the host, DefenseClaw can still scan any existing `~/.copilot/skills` files, but it cannot enable Scout for the user.

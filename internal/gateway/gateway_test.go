@@ -289,6 +289,7 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 		{"windsurf_observability", &stubConnector{name: "windsurf"}, false},
 		{"geminicli_observability", &stubConnector{name: "geminicli"}, false},
 		{"copilot_observability", &stubConnector{name: "copilot"}, false},
+		{"scout_surface", &stubConnector{name: "scout"}, false},
 		{"openhands_observability", &stubConnector{name: "openhands"}, false},
 		{"antigravity_observability", &stubConnector{name: "antigravity"}, false},
 		// Unknown connectors default to bind=true (conservative
@@ -325,6 +326,7 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 		{"windsurf", "windsurf", false},
 		{"geminicli", "geminicli", false},
 		{"copilot", "copilot", false},
+		{"scout", "scout", false},
 		{"openhands", "openhands", false},
 		{"unknown", "frobozz", true},
 	}
@@ -452,6 +454,8 @@ func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
 		{"geminicli_remote", "geminicli", "gw.example.com", "", false},
 		{"copilot_loopback", "copilot", "127.0.0.1", "", false},
 		{"copilot_remote", "copilot", "10.0.0.5", "", false},
+		{"scout_loopback", "scout", "127.0.0.1", "", false},
+		{"scout_remote", "scout", "gw.example.com", "", false},
 		{"openhands_loopback", "openhands", "127.0.0.1", "", false},
 		{"openhands_remote", "openhands", "gw.example.com", "", false},
 
@@ -747,6 +751,12 @@ func TestShouldRunProviderProbeForConnector(t *testing.T) {
 			name: "claudecode_hook_only_skips_probe",
 			conn: &stubConnector{name: "claudecode"},
 			gc:   config.GuardrailConfig{Connector: "claudecode"},
+			want: false,
+		},
+		{
+			name: "scout_surface_only_skips_probe",
+			conn: &stubConnector{name: "scout"},
+			gc:   config.GuardrailConfig{Connector: "scout"},
 			want: false,
 		},
 		{
@@ -2567,6 +2577,13 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantMode:         "observability",
 			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks", "otel"},
+		},
+		{
+			name:             "scout_surface_only",
+			connector:        "scout",
+			wantMode:         "surface",
+			wantIntercept:    false,
+			wantTelemetryAll: nil,
 		},
 		{
 			name:             "openhands_observability_hooks",

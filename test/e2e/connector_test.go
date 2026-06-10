@@ -193,6 +193,7 @@ func TestConnectorToolInspectionModes(t *testing.T) {
 		connector.ToolModePreExecution: true,
 		connector.ToolModeResponseScan: true,
 		connector.ToolModeBoth:         true,
+		connector.ToolModeNone:         true,
 	}
 
 	for _, name := range reg.Names() {

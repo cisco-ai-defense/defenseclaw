@@ -551,6 +551,12 @@ class TestResolveListConnector(unittest.TestCase):
         app = self._app(connector="claudecode", connectors=["openhands", "codex"])
         self.assertEqual(resolve_list_connector(app, "open-hands"), "openhands")
 
+    def test_surface_only_connector_can_be_requested_explicitly(self):
+        from defenseclaw.commands import resolve_list_connector
+
+        app = self._app(connector="claudecode", connectors=["codex"])
+        self.assertEqual(resolve_list_connector(app, "Microsoft-Scout"), "scout")
+
     def test_unknown_connector_raises(self):
         import click
         from defenseclaw.commands import resolve_list_connector

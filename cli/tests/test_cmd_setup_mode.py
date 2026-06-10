@@ -328,6 +328,14 @@ class TestSetupMode_NoOp(_ModeBase):
 class TestSetupMode_InvalidArguments(_ModeBase):
     """Click-level validation rejects non-connector inputs."""
 
+    def test_scout_is_known_but_not_guardrail_mode(self):
+        result = self._run("scout")
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertEqual(self.save_calls, 0)
+        self.assertEqual(self.app.cfg.claw.mode, "openclaw")
+        self.assertIn("Microsoft Scout is supported for local skill discovery", result.output)
+
     def test_unknown_connector_rejected_by_click(self):
         result = _invoke(["mode", "bogus"], self.app)
         # Click's ``Choice`` enforces this — exit 2 == usage error.

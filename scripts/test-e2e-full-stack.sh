@@ -1522,7 +1522,7 @@ phase_connector() {
 
     if [ -n "$conn_tool_mode" ]; then
         case "$conn_tool_mode" in
-            pre-execution|response-scan|both)
+            pre-execution|response-scan|both|none)
                 pass "connector health: tool_inspection_mode='$conn_tool_mode'"
                 ;;
             *)

@@ -39,7 +39,7 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	for _, sig := range sigs {
 		seen[sig.ID] = true
 	}
-	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "ai-sdks"} {
+	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "scout", "openhands", "antigravity", "ai-sdks"} {
 		if !seen[id] {
 			t.Fatalf("signature %q missing", id)
 		}

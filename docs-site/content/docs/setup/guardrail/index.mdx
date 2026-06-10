@@ -142,6 +142,10 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 **Two genuinely interactive-only choices** on this command: hook fail mode (use `defenseclaw guardrail fail-mode` afterward), and judge fallback models (edit `config.yaml`). Everything else round-trips through flags.
 </Callout>
 
+<Callout type="info">
+Microsoft Scout is intentionally absent from the guardrail setup list. DefenseClaw supports Scout local skill surfaces through `skill list/scan --connector scout` and `codeguard install --connector scout --target skill`, but does not install Scout runtime hooks until Microsoft publishes a hook or proxy contract.
+</Callout>
+
 ## Two modes you have to choose between
 
 <Cards>
@@ -262,7 +266,7 @@ If the same Bedrock / Vertex / Azure posture is already configured on a custom-p
   type={{
     "--connector / --agent": {
       type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity",
-      description: "Agent framework connector. Drives traffic interception, tool inspection, and subprocess enforcement defaults.",
+      description: "Guardrail-capable agent framework connector. Microsoft Scout is supported separately for local skill surfaces and is not a guardrail setup target.",
     },
     "--mode": {
       type: "observe|action",

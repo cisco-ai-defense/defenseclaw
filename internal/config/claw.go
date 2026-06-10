@@ -173,6 +173,8 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 		return readMCPServersGeminiCLI()
 	case "copilot":
 		return readMCPServersCopilot(workspaceDir)
+	case "scout":
+		return nil, nil
 	case "openhands":
 		return readMCPServersOpenHands()
 	default:
@@ -420,6 +422,8 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 		return filepath.Join(home, ".gemini")
 	case "copilot":
 		return filepath.Join(home, ".copilot")
+	case "scout":
+		return filepath.Join(home, ".copilot")
 	case "openhands":
 		if workspace := c.ConnectorWorkspaceDir(); workspace != "" {
 			return filepath.Join(workspace, ".openhands")
@@ -551,6 +555,11 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".github", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		})
+	case "scout":
+		return dedupNonEmpty([]string{
+			filepath.Join(home, ".copilot", "skills"),
+			filepath.Join(home, ".copilot", "m-skills"),
+		})
 	case "openhands":
 		return dedupNonEmpty([]string{
 			workspaceJoin(cwd, ".agents", "skills"),
@@ -597,7 +606,7 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			filepath.Join(home, ".gemini", "extensions"),
 			workspaceJoin(cwd, ".gemini", "extensions"),
 		})
-	case "cursor", "windsurf", "copilot", "openhands", "antigravity":
+	case "cursor", "windsurf", "copilot", "scout", "openhands", "antigravity":
 		return nil
 	default:
 		return c.pluginDirsOpenClaw()

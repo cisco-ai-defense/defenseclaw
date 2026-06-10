@@ -1761,14 +1761,16 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertEqual(_parse_connector_list(""), [])
         self.assertEqual(_parse_connector_list(None), [])
 
-    def test_installed_hook_connectors_excludes_proxy_backed(self):
+    def test_installed_hook_connectors_excludes_proxy_backed_and_surface_only(self):
         from defenseclaw.commands.cmd_init import _installed_hook_connectors
 
-        got = _installed_hook_connectors(self._disc({"codex", "claudecode", "openclaw"}))
+        got = _installed_hook_connectors(self._disc({"codex", "claudecode", "openclaw", "scout"}))
         self.assertIn("codex", got)
         self.assertIn("claudecode", got)
         # openclaw is proxy-backed and cannot be a multi-connector peer.
         self.assertNotIn("openclaw", got)
+        # scout is surface-only until Microsoft publishes a hook contract.
+        self.assertNotIn("scout", got)
 
     def test_activate_additional_connectors_writes_per_connector_overrides(self):
         from defenseclaw import config as cfg_mod

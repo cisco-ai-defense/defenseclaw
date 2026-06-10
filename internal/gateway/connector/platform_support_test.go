@@ -40,6 +40,10 @@ var hookConnectorNames = []string{
 	"windsurf",
 }
 
+// surfaceConnectorNames have documented local component surfaces but no
+// DefenseClaw hook/proxy enforcement path.
+var surfaceConnectorNames = []string{"scout"}
+
 func TestProxyConnectorsSetMatchesMirror(t *testing.T) {
 	got := make([]string, 0, len(proxyConnectors))
 	for name := range proxyConnectors {
@@ -69,6 +73,11 @@ func TestIsProxyConnector(t *testing.T) {
 			t.Errorf("IsProxyConnector(%q) = true, want false", name)
 		}
 	}
+	for _, name := range surfaceConnectorNames {
+		if IsProxyConnector(name) {
+			t.Errorf("IsProxyConnector(%q) = true, want false", name)
+		}
+	}
 }
 
 func TestConnectorSupportedOnOS(t *testing.T) {
@@ -83,9 +92,15 @@ func TestConnectorSupportedOnOS(t *testing.T) {
 			t.Errorf("connectorSupportedOnOS(%q, windows) = false, want true", name)
 		}
 	}
+	for _, name := range surfaceConnectorNames {
+		if !connectorSupportedOnOS(name, "windows") {
+			t.Errorf("connectorSupportedOnOS(%q, windows) = false, want true", name)
+		}
+	}
 	// Unix: everything supported.
 	for _, goos := range []string{"linux", "darwin"} {
-		for _, name := range append(append([]string(nil), proxyConnectorNames...), hookConnectorNames...) {
+		names := append(append(append([]string(nil), proxyConnectorNames...), hookConnectorNames...), surfaceConnectorNames...)
+		for _, name := range names {
 			if !connectorSupportedOnOS(name, goos) {
 				t.Errorf("connectorSupportedOnOS(%q, %s) = false, want true", name, goos)
 			}
@@ -95,7 +110,7 @@ func TestConnectorSupportedOnOS(t *testing.T) {
 
 // TestRegistryNamesFilterToHookConnectorsOnWindows takes the full built-in
 // registry (Available() returns all connectors on this non-Windows host) and
-// asserts that applying the Windows OS filter yields exactly the hook
+// asserts that applying the Windows OS filter yields exactly the non-proxy
 // connectors, with both proxy connectors removed.
 func TestRegistryNamesFilterToHookConnectorsOnWindows(t *testing.T) {
 	reg := NewDefaultRegistry()
@@ -113,6 +128,7 @@ func TestRegistryNamesFilterToHookConnectorsOnWindows(t *testing.T) {
 	sort.Strings(onWindows)
 
 	want := append([]string(nil), hookConnectorNames...)
+	want = append(want, surfaceConnectorNames...)
 	sort.Strings(want)
 	if len(onWindows) != len(want) {
 		t.Fatalf("windows-filtered connectors = %v, want %v", onWindows, want)
