@@ -29,7 +29,7 @@ from defenseclaw.commands.cmd_doctor import _CONNECTOR_LABELS
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
-from defenseclaw.inventory.agent_discovery import DISCOVERY_PRECEDENCE, _SPECS
+from defenseclaw.inventory.agent_discovery import _SPECS, DISCOVERY_PRECEDENCE
 from defenseclaw.tui.services.catalog_state import friendly_connector_name as catalog_friendly_name
 from defenseclaw.tui.services.overview_state import friendly_connector_name as overview_friendly_name
 
@@ -67,3 +67,31 @@ def test_tui_label_maps_have_explicit_opencode_case() -> None:
     # returns "OpenCode". Asserting the latter proves the case exists.
     assert overview_friendly_name("opencode") == "OpenCode"
     assert catalog_friendly_name("opencode") == "OpenCode"
+
+
+def test_command_palette_offers_setup_for_every_known_connector() -> None:
+    from defenseclaw.tui.registry_data import GO_PARITY_REGISTRY
+
+    # Palette args may spell a connector with a hyphen alias
+    # (claude-code); KNOWN_CONNECTORS uses the squashed form.
+    targets = {
+        entry[2][1].replace("-", "")
+        for entry in GO_PARITY_REGISTRY
+        if len(entry[2]) >= 2 and entry[2][0] == "setup"
+    }
+    missing = {c for c in KNOWN if c not in targets}
+    assert not missing, f"command palette 'setup <connector>' missing: {missing}"
+
+
+def test_status_friendly_names_cover_every_known_connector() -> None:
+    from defenseclaw.commands.cmd_status import _FRIENDLY_CONNECTOR_NAMES
+
+    missing = KNOWN - set(_FRIENDLY_CONNECTOR_NAMES)
+    assert not missing, f"status friendly names missing: {missing}"
+
+
+def test_guardrail_labels_cover_every_known_connector() -> None:
+    from defenseclaw.commands.cmd_guardrail import _CONNECTOR_LABELS as _GUARDRAIL_LABELS
+
+    missing = KNOWN - set(_GUARDRAIL_LABELS)
+    assert not missing, f"guardrail labels missing: {missing}"

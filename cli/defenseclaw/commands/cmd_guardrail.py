@@ -74,6 +74,7 @@ _CONNECTOR_LABELS = {
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
+    "opencode": "OpenCode",
 }
 
 
