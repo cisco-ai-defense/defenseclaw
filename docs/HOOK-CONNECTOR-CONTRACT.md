@@ -21,8 +21,12 @@ sends and receives on the wire; Tier 2 is how DefenseClaw is configured to
 produce and interpret that wire traffic on behalf of a harness that cannot
 hand-roll it.
 
-> Status: design contract. This file and the JSON Schema define the target
-> behavior; the engine that consumes manifests is implemented separately.
+> Status: draft design contract. This file and the JSON Schema define the
+> target behavior; the engine that consumes manifests is implemented
+> separately. This contract should not be treated as frozen until a managed
+> built-in connector (the parity target is `cursor`) has been re-expressed as
+> an embedded manifest with byte-identical setup output, equivalent wire
+> verdicts, equivalent failure behavior, and equivalent hook exit codes.
 
 ---
 
@@ -30,7 +34,7 @@ hand-roll it.
 
 | You are… | Use | Why |
 | --- | --- | --- |
-| A harness author who can ship a hook/script that calls an HTTP endpoint | Tier 1 | Self-contained; you own the client; DefenseClaw needs nothing. |
+| A harness author who can ship a hook/script that calls an HTTP endpoint | Tier 1 | Self-contained; you own the client and enforcement semantics; DefenseClaw needs no harness-specific code. |
 | An operator who wants DefenseClaw to *manage* (install, verify, remove, decode, render) a harness's hooks for you | Tier 2 | DefenseClaw does the wiring; you ship a manifest, not code. |
 | DefenseClaw maintainers adding a first-party harness with no special behavior | Tier 2 (embedded) | New harness ships as embedded data, not a new connector package. |
 
@@ -44,32 +48,42 @@ it yet.
 
 ### 2.1 Endpoint
 
+Registered connectors (built-in or manifest-backed) post to their connector
+route:
+
 ```
 POST http://127.0.0.1:18970/api/v1/<connector>/hook
 ```
 
-- `<connector>` is the connector name (built-in name, or a manifest `name`).
+- `<connector>` is a registered connector name: a built-in connector, an
+  embedded manifest connector, or a validated drop-in manifest connector.
 - The gateway binds to loopback by default. The address is discoverable from
   the gateway-written hook environment / token files; do not hardcode a remote
   host.
-- A generic, connector-agnostic alias is also defined for harnesses that
-  self-wire without a manifest:
+- Unknown connector names are rejected. The gateway must not silently treat a
+  misspelled or attacker-chosen connector as a managed connector, because that
+  would bypass manifest provenance, capability, and route-registration checks.
+
+Harnesses that self-wire without a manifest use the deliberately generic route:
 
 ```
-POST http://127.0.0.1:18970/api/v1/hook        (connector via ?connector=<name> or X-DefenseClaw-Connector header)
+POST http://127.0.0.1:18970/api/v1/generic/hook
 ```
 
-When the connector cannot be resolved, the gateway falls back to a generic
-profile (flat decode, generic render) so the call still produces a valid
-verdict.
+Self-integrators may set `X-DefenseClaw-Harness: <name>` for telemetry labels,
+but that value is not a connector identity and cannot shadow a built-in or
+manifest connector. Generic Tier-1 calls use flat decode and generic rendering;
+the harness author owns the client-side stdout / exit-code interpretation. To
+get managed setup, teardown, capability gating, and connector-scoped telemetry,
+ship a Tier-2 manifest instead.
 
 ### 2.2 Request headers
 
 | Header | Required | Purpose |
 | --- | --- | --- |
 | `Content-Type: application/json` | yes | Body is a single JSON object. |
-| `Authorization: Bearer <token>` | yes when a token exists | Gateway hook token. Read from the gateway-provisioned hook token file / env. Loopback calls without a token are accepted with a logged warning to keep first-run UX working, but a token is the supported posture. |
-| `X-DefenseClaw-Client: <name>-hook/<v>` | yes | CSRF / origin marker. Mutating hook calls require a recognized client marker. |
+| `Authorization: Bearer <token>` | yes | Gateway hook token. Read from the gateway-provisioned hook token file / env. Legacy loopback no-token tolerance is not part of the public contract for new custom harnesses. |
+| `X-DefenseClaw-Client: <name>-hook/<v>` | yes | CSRF / origin marker. Managed connectors use the manifest/built-in name; Tier-1 generic clients use `generic-hook/<v>` and may add `X-DefenseClaw-Harness` for display. |
 | `traceparent` / `tracestate` | optional | W3C trace context. When present and the contract advertises `supports_traceparent`, the gateway continues the remote trace instead of minting a new root span. |
 | `X-DefenseClaw-Session-Id` | optional | Stable session correlation when the payload has no session id. |
 | `X-DefenseClaw-Run-Id`, `X-DefenseClaw-Agent-Id` | optional | Additional correlation dimensions surfaced on telemetry. |
@@ -91,6 +105,7 @@ maps your shape onto these canonical fields.
 | content | `prompt`, `user_prompt`, `message`, `text`, `content` | Prompt or message text for prompt-class events. |
 | cwd | `cwd`, `working_directory` | Working directory, if provided. |
 | model | `model`, `model_id` | Model identifier, if provided. |
+| surface | `surface`, `direction` | Optional explicit inspection surface: `prompt`, `tool_call`, `tool_result`, or `event_content`. |
 
 Events are classified into surfaces — **prompt** (user prompt submitted),
 **tool_call** (a tool/command is about to run), **tool_result** (a tool/command
@@ -128,9 +143,16 @@ fields and read only `<response_field>`, or vice versa.
 | `confirm` | Ask a human to approve. | Only when the connector advertises native ask **and** the event is ask-capable; otherwise downgraded to `alert`. |
 | `alert` | Surface a warning, proceed. | Always permitted. |
 
-The gateway never asks a harness to do something it cannot do: a manifest's
-`capabilities` (`can_block`, `can_ask_native`, `ask_events`, `block_events`)
-are the ceiling. `raw_action` preserves the pre-gating intent for audit.
+For registered managed connectors, the gateway never asks a harness to do
+something it cannot do: a manifest's `capabilities` (`can_block`,
+`can_ask_native`, `ask_events`, `block_events`) are the ceiling. `raw_action`
+preserves the pre-gating intent for audit.
+
+For the generic Tier-1 route, DefenseClaw returns the canonical policy verdict
+and generic output. The harness author owns whether and how that verdict maps to
+the harness's stdout and exit-code protocol. Operators who need DefenseClaw to
+own enforcement semantics should use a manifest connector rather than the
+generic route.
 
 ### 2.6 Exit-code styles
 
@@ -197,6 +219,8 @@ into one file:
 | `patchXHooks()` config writer | `wiring` |
 | `HookProfile.Decode` | `decode` |
 | `HookProfile.Respond` + `hookexec` style + `response_field` | `response` |
+| `hookexec` fail-closed / strict-availability tails | `response.failure` |
+| `ConnectorCapabilities` / component path discovery | `surfaces` |
 | Per-connector `X-hook.sh` | `wiring.entry_template` + generic hook template |
 
 ### 3.2 Loading model
@@ -239,13 +263,17 @@ for the authoritative field list. Summary:
   surface and drift-lock identity.
 - `capabilities` — `can_block`, `can_ask_native`, `ask_events`,
   `block_events`, `supports_fail_closed`, `scope`: the enforcement ceiling.
-- `wiring` — `targets`, `install_events`, `layout`, `container_key`, `matcher`,
-  `entry_template`, `ownership`, `extra_keys`: the config-patch recipe used by
-  Setup / verify / Teardown.
+- `wiring` — `targets`, `install_events`, `layout`, `command_invocation`,
+  `container_key`, `matcher`, `entry_template`, `ownership`, `extra_keys`: the
+  config-patch recipe used by Setup / verify / Teardown.
 - `response` — `response_field`, `exit_style`, `default_block_reason`,
-  `templates`: how a verdict renders into harness-native output and exit code.
+  `templates`, `failure`: how a verdict and response-layer failure render into
+  harness-native output and exit code.
 - `decode` — `field_map`, `event_aliases`: optional normalizer for non-flat
   payloads.
+- `surfaces` — optional connector-local MCP / skills / rules / plugins / agents
+  / CodeGuard / telemetry metadata consumed by setup, doctor, inventory, and
+  registry UX.
 - `provenance` — publisher/sha256/signature for drop-in trust.
 
 ### 3.4 Wiring layouts
@@ -267,6 +295,12 @@ nested_named        root[<owner_key_prefix><event>] = { event: [ { matcher, hook
                     e.g. { "defenseclaw-opencode-PreToolUse": { "PreToolUse": [ {matcher:"*", hooks:[{…}]} ] } }
 ```
 
+`wiring.command_invocation` declares how the harness invokes the configured
+command. Most harnesses execute through a shell and need a shell-escaped hook
+path; some execute a configured command directly and need a bare path. This is a
+manifest-level behavior because changing quoting can turn a valid config into a
+silent no-fire.
+
 `ownership.match` (and `ownership.owner_key_prefix` for `nested_named`) lets
 Setup be idempotent and lets Teardown remove only DefenseClaw's entries from a
 file that may contain unrelated hooks.
@@ -279,13 +313,14 @@ language — just these literal substitutions:
 
 | Token | Expands to | Valid in |
 | --- | --- | --- |
-| `${hook_command}` | Platform-correct hook invocation (installed script on Unix; `defenseclaw hook --connector <name>` on Windows) | wiring entry/extra |
+| `${hook_command}` | Platform-correct hook invocation, rendered according to `wiring.command_invocation` (`shell` means shell-escaped script path on Unix; `direct_exec` means a bare executable path; Windows uses the native `defenseclaw hook --connector <name>` entrypoint) | wiring entry/extra |
 | `${api_addr}` | Gateway host:port | wiring entry/extra |
 | `${fail_closed}` | `true`/`false` per resolved fail mode | wiring entry/extra |
 | `${reason}` | Verdict reason text | response output |
 | `${additional_context}` | Extra context for the agent | response output |
 | `${tool}` | Tool/command name | response output |
 | `${event}` | Canonical event name | response output |
+| `${raw_event}` | Harness-native event name before aliasing / surface mapping | response output |
 | `${severity}` | Verdict severity | response output |
 
 Substitution is **type-preserving when a value is exactly one token**: a value
@@ -299,10 +334,36 @@ gated `action` (and optionally `event`) wins. Its `output` object is rendered
 (tokens substituted) and returned under `response_field`. If no template
 matches, or `templates` is omitted, the built-in generic renderer is used.
 
+`response.failure` describes the same connector-native failure tails that
+`hookexec/spec.go` currently hardcodes: oversized payload while fail-closed,
+gateway unavailable under strict availability, and response-layer failures while
+fail-closed. A manifest cannot claim parity with a native connector unless these
+failure bodies and exit codes match too.
+
 ### 3.7 Decode
 
 For flat payloads, omit `decode`. For nested payloads, `decode.field_map` maps
-each canonical field to a dotted path (`toolCall.args`).
+each canonical field to one or more dotted paths (`toolCall.args`). The simple
+form is a string path:
+
+```yaml
+decode:
+  field_map:
+    tool_name: toolCall.name
+```
+
+The expanded form supports alternate paths and constrained conversions:
+
+```yaml
+decode:
+  field_map:
+    turn_id:
+      paths: [stepIdx, step_idx]
+      type: string
+    content:
+      paths: [messages.content]
+      join: "\n\n"
+```
 
 `decode.event_aliases` is **classification-only**: it tells the surface
 classifier that a harness-native event behaves like a known one (for example
@@ -310,6 +371,63 @@ classifier that a harness-native event behaves like a known one (for example
 does **not** rename the event used for capability gating or wiring —
 `capabilities.block_events`, `capabilities.ask_events`, and
 `wiring.install_events` always use the harness-native event names.
+
+Prefer `decode.event_surfaces` for new manifests when the desired surface is
+known directly (`pre_prompt: prompt`, `pre_tool: tool_call`). Use
+`event_aliases` only when compatibility with an existing built-in event's
+classification is intentional.
+
+`decode.event_inference` is intentionally constrained: rules may infer an event
+only from field presence, not arbitrary expressions. If a harness needs
+branching based on arbitrary payload values, multi-field computation, or
+protocol-specific state, use Tier 1 self-integration or a thin native connector.
+
+### 3.8 Surface metadata
+
+The manifest's `surfaces` section describes connector-local assets beyond hook
+delivery: MCP servers, skills, rules, plugins, agents, optional CodeGuard asset
+installation, and telemetry. This keeps setup, doctor, TUI, inventory, and
+registry UX consistent with the gateway. Hook-only custom harnesses may omit
+`surfaces`; managed first-party manifests should populate it so Python and Go do
+not maintain parallel hardcoded connector matrices.
+
+### 3.9 Semantic validation beyond JSON Schema
+
+The JSON Schema validates shape. The manifest loader must also reject semantic
+drift that JSON Schema cannot express cleanly:
+
+- `name` must not collide with built-ins, aliases, `generic`, or another loaded
+  manifest.
+- `capabilities.ask_events` requires `can_ask_native: true`.
+- `ask_events` and `block_events` must be subsets of `contract.events` or
+  explicitly marked future-wired via `wiring.install_events`.
+- `nested_named` requires `ownership.owner_key_prefix`; other layouts require a
+  stable `ownership.match` or default to the resolved hook command.
+- `response.response_field` must not collide with canonical response fields
+  (`action`, `raw_action`, `reason`, `mode`, `would_block`, etc.).
+- Every substitution token must be known for the section where it appears.
+- Every `wiring.target.path_template` must resolve under `$HOME` or the selected
+  workspace, never inside the DefenseClaw data dir, and symlinks must be
+  resolved before the allowlist check.
+- Drop-in provenance is all-or-nothing for enforcement: `sha256`, `signature`,
+  `signature_alg`, and `public_key_id` must verify together before action mode
+  is allowed without an explicit operator override.
+
+### 3.10 Registration model
+
+A manifest loads into a real connector object that implements the same local
+interfaces as built-ins:
+
+- `Connector` for setup, teardown, auth, and clean verification.
+- `HookEndpoint` for `/api/v1/<name>/hook`.
+- `HookProfileProvider` for decode, verdict mapping, response rendering, and
+  compatibility metadata.
+- `ConnectorCapabilityProvider`, `AgentPathProvider`, and
+  `ComponentScanner` when `surfaces` are present.
+
+The gateway route registrar should be able to attach the existing unified hook
+handler to any registered connector with a `HookEndpoint` and a `HookProfile`;
+manifest connectors must not need a per-name `registerHookHandler()` init block.
 
 ---
 
@@ -351,6 +469,10 @@ binary) but still pass schema validation.
 | Drop-in, verified provenance | yes | yes | yes | action (operator-confirmed) |
 | Drop-in, unverified | yes | yes | n/a | observe |
 
+The generic Tier-1 route is not a trust tier for managed connectors. It is a
+wire compatibility endpoint for self-integrators and must not register, shadow,
+or impersonate connector identities.
+
 ---
 
 ## 5. Parity with native connectors
@@ -367,11 +489,14 @@ section):
 - `HookCapability` (block/ask events, scope, fail-closed) ↔ `capabilities`.
 - `HookContract` (version bounds, script version, events, AID surfaces) ↔
   `contract`.
-- `hookexec` decision style ↔ `response.exit_style`.
+- `hookexec` decision style and failure tails ↔ `response.exit_style` +
+  `response.failure`.
+- `ConnectorCapabilities` / component discovery ↔ `surfaces`.
 
 The acceptance bar: re-expressing a built-in (for example `cursor`) as a
-manifest yields byte-identical installed config, the same wire verdicts, and the
-same exit codes as the native connector.
+manifest yields byte-identical installed config, the same wire verdicts, the
+same failure responses, the same exit codes, and equivalent setup/doctor
+metadata as the native connector.
 
 ---
 

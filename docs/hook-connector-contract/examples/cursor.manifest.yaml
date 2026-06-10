@@ -91,6 +91,7 @@ wiring:
     - sessionEnd
     - preCompact
   layout: flat_map
+  command_invocation: shell
   container_key: hooks
   entry_template:
     type: command
@@ -123,7 +124,86 @@ response:
         continue: true
         permission: allow
         agent_message: "${additional_context}"
+  failure:
+    oversized_closed:
+      stdout:
+        continue: true
+        permission: deny
+        user_message: "DefenseClaw hook payload too large"
+        agent_message: "DefenseClaw hook payload too large"
+      exit_code: 2
+    unavailable_strict:
+      stdout:
+        continue: true
+        permission: deny
+        user_message: "DefenseClaw hook failed closed"
+        agent_message: "DefenseClaw hook failed closed"
+      exit_code: 2
+    response_closed:
+      stdout:
+        continue: true
+        permission: deny
+        user_message: "DefenseClaw hook failed closed"
+        agent_message: "DefenseClaw hook failed closed"
+      exit_code: 0
+
+surfaces:
+  mcp:
+    supported: true
+    scope: "workspace,user"
+    config_paths:
+      - "<workspace>/.cursor/mcp.json"
+      - "~/.cursor/mcp.json"
+    write_paths:
+      - "<workspace>/.cursor/mcp.json"
+    supports_backup: true
+    supports_restore: true
+  skills:
+    supported: true
+    scope: "workspace,user"
+    read_paths:
+      - "~/.cursor/skills"
+      - "~/.agents/skills"
+      - "<workspace>/.cursor/skills"
+      - "<workspace>/.agents/skills"
+    write_paths:
+      - "<workspace>/.cursor/skills"
+    install_targets: [skill]
+    requires_opt_in: true
+  rules:
+    supported: true
+    scope: workspace
+    read_paths:
+      - "<workspace>/.cursor/rules"
+      - "<workspace>/AGENTS.md"
+    write_paths:
+      - "<workspace>/.cursor/rules"
+    install_targets: [rule]
+    requires_opt_in: true
+  plugins:
+    supported: false
+    notes:
+      - "DefenseClaw plugins are an OpenClaw-only concept; this connector ships no plugin install surface."
+  agents:
+    supported: false
+    notes:
+      - "Cursor subagent installation is not a documented local surface for this connector."
+  codeguard:
+    supported: true
+    install_targets: [skill, rule]
+    opt_in_only: true
+    auto_install: false
+    idempotent: true
+    conflict_safe: true
+  telemetry:
+    native_otlp: false
+    hook_signals: [logs, metrics, traces]
+    auth_mode: header-token
+    source_modes: [hook]
+    notes:
+      - "Hook-generated telemetry is emitted by DefenseClaw for every hook invocation."
 
 notes:
   - "Cursor payloads are flat ({hook_event_name, tool_name, tool_input, prompt}), so no decode block is needed."
   - "exit_style hook_echo: the gateway encodes the decision inside hook_output; the hook echoes it and exits 0."
+  - "failure responses mirror hookexec/spec.go for cursor so manifest parity includes fail-closed and strict-availability behavior."

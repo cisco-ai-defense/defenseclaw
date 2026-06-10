@@ -73,6 +73,7 @@ wiring:
   # removes only DefenseClaw's entries from a file that may hold others.
   #   { "defenseclaw-opencode-pre_tool": { "pre_tool": [ {matcher, hooks:[entry]} ] } }
   layout: nested_named
+  command_invocation: shell
   matcher: "*"
   entry_template:
     type: command
@@ -85,20 +86,49 @@ decode:
   # Map the harness's nested payload onto canonical fields via dotted paths.
   field_map:
     hook_event_name: event.type
-    session_id: session.id
-    turn_id: session.turn
-    tool_name: payload.tool.name
-    tool_input: payload.tool.arguments
-    content: payload.prompt.text
-    cwd: session.cwd
-    model: session.model
-  # Classification-only: tells the surface classifier how each native event
-  # behaves. Capability gating + wiring still use the native event names above.
+    session_id:
+      paths: [session.id, conversation.id]
+      type: string
+    turn_id:
+      paths: [session.turn, stepIdx, step_idx]
+      type: string
+    tool_name:
+      paths: [payload.tool.name, toolCall.name]
+      type: string
+    tool_input:
+      paths: [payload.tool.arguments, toolCall.args]
+      type: json
+    content:
+      paths: [payload.prompt.text, prompt.text, message.text]
+      type: string
+    cwd:
+      paths: [session.cwd, workspace.cwd]
+      type: string
+    model:
+      paths: [session.model, model.id]
+      type: string
+  # Preferred for new manifests: classify native events directly by surface.
+  # Capability gating + wiring still use the native event names above.
+  event_surfaces:
+    pre_prompt: prompt
+    pre_tool: tool_call
+    post_tool: tool_result
+    session_idle: event_content
+  # Optional compatibility aliases when downstream reports want to group these
+  # events with the nearest built-in hook family.
   event_aliases:
     pre_prompt: UserPromptSubmit
     pre_tool: PreToolUse
     post_tool: PostToolUse
     session_idle: Stop
+  # Fallback only when the payload omits event.type.
+  event_inference:
+    - event: pre_tool
+      surface: tool_call
+      when_path_exists: [payload.tool.name, toolCall.name]
+    - event: pre_prompt
+      surface: prompt
+      when_path_exists: [payload.prompt.text, prompt.text]
 
 response:
   response_field: hook_output
@@ -113,6 +143,47 @@ response:
       output:
         decision: allow
         additional_context: "${additional_context}"
+  failure:
+    oversized_closed:
+      stdout:
+        decision: deny
+        reason: "DefenseClaw hook payload too large"
+      exit_code: 2
+    unavailable_strict:
+      stdout:
+        decision: deny
+        reason: "DefenseClaw hook failed closed"
+      exit_code: 2
+    response_closed:
+      stdout:
+        decision: deny
+        reason: "DefenseClaw hook failed closed"
+      exit_code: 2
+
+surfaces:
+  mcp:
+    supported: false
+    notes:
+      - "Illustrative manifest manages hooks only; OpenCode MCP config paths must be verified before declaring this surface."
+  skills:
+    supported: false
+  rules:
+    supported: false
+  plugins:
+    supported: false
+  agents:
+    supported: false
+  codeguard:
+    supported: false
+    opt_in_only: true
+    auto_install: false
+    idempotent: true
+    conflict_safe: true
+  telemetry:
+    native_otlp: false
+    hook_signals: [logs, metrics, traces]
+    auth_mode: header-token
+    source_modes: [hook]
 
 provenance:
   publisher: "DefenseClaw community connectors"
