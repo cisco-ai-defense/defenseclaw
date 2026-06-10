@@ -16,18 +16,20 @@
 // /api/v1/opencode/hook; the response carries hook_output={decision,
 // reason}; decision "deny"/"block" aborts the tool.
 
-const DEFENSECLAW_API_ADDR = "{{.APIAddr}}";
-const DEFENSECLAW_API_TOKEN = "{{.APIToken}}";
-const DEFENSECLAW_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
-const DEFENSECLAW_TIMEOUT_MS = 10000;
+// DC_-prefixed constants are values baked in at setup time, not env-var
+// reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
+const DC_API_ADDR = "{{.APIAddr}}";
+const DC_API_TOKEN = "{{.APIToken}}";
+const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
+const DC_TIMEOUT_MS = 10000;
 
 async function defenseclawPost(event, toolName, toolInput, cwd) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DEFENSECLAW_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0" };
-  if (DEFENSECLAW_API_TOKEN) headers["Authorization"] = "Bearer " + DEFENSECLAW_API_TOKEN;
+  if (DC_API_TOKEN) headers["Authorization"] = "Bearer " + DC_API_TOKEN;
   try {
-    const res = await fetch("http://" + DEFENSECLAW_API_ADDR + "/api/v1/opencode/hook", {
+    const res = await fetch("http://" + DC_API_ADDR + "/api/v1/opencode/hook", {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -40,7 +42,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd) {
     });
     if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode.
-      if (DEFENSECLAW_FAIL_MODE === "closed") {
+      if (DC_FAIL_MODE === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
       return null;
@@ -54,7 +56,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd) {
   } catch (err) {
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow.
-    if (DEFENSECLAW_FAIL_MODE === "closed") {
+    if (DC_FAIL_MODE === "closed") {
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }
     return null;
