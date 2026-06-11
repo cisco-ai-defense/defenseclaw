@@ -158,7 +158,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			}
 		}
 	case "UserPromptSubmit":
-		verdict = a.inspectMessageContent(&ToolInspectRequest{
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:      "message",
 			Content:   req.Prompt,
 			Direction: "prompt",
@@ -178,7 +178,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
 	case "PostToolUse":
-		verdict = a.inspectMessageContent(&ToolInspectRequest{
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:      "message",
 			Content:   codexToolResponseString(req.ToolResponse),
 			Direction: "tool_result",

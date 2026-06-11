@@ -149,6 +149,21 @@ type APIServer struct {
 	// Hermes / Gemini / Copilot) so MCP tool calls and tool results
 	// reach AID without per-script changes.
 	ciscoInspector *CiscoInspectClient
+
+	// hookJudge forwards hook-lane message content (prompts + tool
+	// results delivered by hook connectors) to the LLM judge — the
+	// same judge instance the proxy lane uses, so a custom provider
+	// configured via guardrail.judge.llm sees live hook content too.
+	// nil unless guardrail.judge.enabled; wired by the sidecar at
+	// boot via SetHookJudge. Per-connector gating happens in
+	// hookJudgeInspect via guardrail.judge.hook_connectors.
+	hookJudge *LLMJudge
+	// hookJudgeSem bounds concurrent hook-lane judge executions,
+	// mirroring EventRouter.judgeSem on the proxy lane. At capacity
+	// the judge is skipped (fail-open to the regex/AID verdict)
+	// rather than queued — a queued hook would stall the agent past
+	// the hook scripts' curl --max-time budget.
+	hookJudgeSem chan struct{}
 }
 
 // SetCiscoInspector wires the Cisco AI Defense client onto the API
@@ -156,6 +171,18 @@ type APIServer struct {
 // operator did not configure cisco_ai_defense.api_key_env).
 func (a *APIServer) SetCiscoInspector(c *CiscoInspectClient) {
 	a.ciscoInspector = c
+}
+
+// SetHookJudge wires the LLM judge onto the API server so the hook
+// content lane (inspectMessageContent) can adjudicate prompts and
+// tool results for connectors listed in
+// guardrail.judge.hook_connectors. Pass nil to disable (the default
+// when guardrail.judge is off).
+func (a *APIServer) SetHookJudge(j *LLMJudge) {
+	a.hookJudge = j
+	if j != nil && a.hookJudgeSem == nil {
+		a.hookJudgeSem = make(chan struct{}, maxConcurrentHookJudges)
+	}
 }
 
 // SetOTelProvider attaches the OTel provider so guardrail events

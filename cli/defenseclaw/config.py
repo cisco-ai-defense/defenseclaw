@@ -1080,6 +1080,17 @@ class JudgeConfig:
     # so the operator's choice survives a process restart.
     exfil: bool = True
     timeout: float = 30.0
+    # ``hook_connectors`` gates the hook-lane judge per connector
+    # (mirrors Go ``JudgeConfig.HookConnectors``): hook connectors
+    # listed here forward prompts / tool results to the LLM judge in
+    # addition to the regex + Cisco AID lanes. Empty = hook lane off
+    # (the proxy lane is unaffected); ``"*"`` enables every connector.
+    hook_connectors: list[str] = field(default_factory=list)
+    # Hook-lane judge timeout in seconds (Go ``JudgeConfig.HookTimeout``).
+    # 0 means the gateway default (5s, sized under the hook scripts'
+    # ``curl --max-time 10`` budget — the proxy lane's 30s would let the
+    # client hang up before a verdict lands).
+    hook_timeout: float = 0.0
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
     # Prefer ``Config.resolve_llm("guardrail.judge")`` over reading this
     # directly; the legacy ``model``/``api_key_env``/``api_base`` fields
@@ -2047,6 +2058,15 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     guardrail = d.get("guardrail") or {}
     _strip_empty_llm(guardrail, "llm")
     _strip_empty_llm(guardrail.get("judge"), "llm")
+    # Mirror Go's ``yaml:",omitempty"`` on the hook-lane judge keys so a
+    # config that never opted into the hook-lane judge stays
+    # byte-identical after a load/save round-trip.
+    judge = guardrail.get("judge")
+    if isinstance(judge, dict):
+        if not judge.get("hook_connectors"):
+            judge.pop("hook_connectors", None)
+        if not judge.get("hook_timeout"):
+            judge.pop("hook_timeout", None)
     # Mirror Go's ``yaml:"connectors,omitempty"`` — drop the empty
     # per-connector overrides map so existing single-connector configs
     # stay byte-identical after a load/save round-trip. The block
@@ -2852,6 +2872,8 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         tool_injection=raw.get("tool_injection", True),
         exfil=raw.get("exfil", True),
         timeout=raw.get("timeout", 30.0),
+        hook_connectors=raw.get("hook_connectors", []),
+        hook_timeout=raw.get("hook_timeout", 0.0),
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
         api_key_env=raw.get("api_key_env", ""),

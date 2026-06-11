@@ -652,6 +652,16 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 	if override.BaseURL != "" {
 		out.BaseURL = override.BaseURL
 	}
+	// InstanceName is the ONLY signal that binds a role to a
+	// custom-providers.json overlay entry (NewProviderForLLMConfig
+	// matches the overlay by instance name, never by model prefix).
+	// Dropping it here meant a role-level binding like
+	// guardrail.judge.llm.instance_name silently fell back to the
+	// inferred provider family — live judge content went to the
+	// public provider endpoint instead of the operator's custom one.
+	if override.InstanceName != "" {
+		out.InstanceName = override.InstanceName
+	}
 	if override.Timeout > 0 {
 		out.Timeout = override.Timeout
 	}
@@ -1649,6 +1659,22 @@ type JudgeConfig struct {
 	Exfil   bool    `mapstructure:"exfil"           yaml:"exfil"`
 	Timeout float64 `mapstructure:"timeout"         yaml:"timeout"`
 
+	// HookConnectors gates the hook-lane judge per connector. Hook-based
+	// connectors (hermes / opencode / claudecode / …) deliver content to
+	// inspectMessageContent, which historically ran regex + Cisco AID
+	// only; connectors listed here additionally forward that content to
+	// the LLM judge — and therefore to a custom provider when
+	// guardrail.judge.llm points at one. Empty list keeps the hook-lane
+	// judge off (the proxy lane is unaffected); the "*" entry enables
+	// every connector.
+	HookConnectors []string `mapstructure:"hook_connectors" yaml:"hook_connectors,omitempty"`
+
+	// HookTimeout caps the hook-lane judge round-trip in seconds.
+	// Distinct from Timeout (proxy lane, default 30s) because hook
+	// scripts abandon the gateway call at curl --max-time 10; the
+	// gateway applies a 5s default when unset.
+	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
+
 	// LLM overrides the top-level llm: block for the LLM judge. Prefer
 	// Config.ResolveLLM("guardrail.judge") over reading LLM / legacy
 	// Model directly.
@@ -1663,6 +1689,28 @@ type JudgeConfig struct {
 
 	Fallbacks           []string `mapstructure:"fallbacks"            yaml:"fallbacks,omitempty"`
 	AdjudicationTimeout float64  `mapstructure:"adjudication_timeout" yaml:"adjudication_timeout,omitempty"`
+}
+
+// HookConnectorEnabled reports whether the hook-lane judge is enabled
+// for the named connector. Requires the judge itself to be enabled;
+// matching against HookConnectors is case-insensitive and the "*"
+// entry matches every connector. Empty list (the default) keeps the
+// hook lane off so existing deployments see no behavior change.
+func (c *JudgeConfig) HookConnectorEnabled(name string) bool {
+	if c == nil || !c.Enabled {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, entry := range c.HookConnectors {
+		entry = strings.TrimSpace(entry)
+		if entry == "*" || strings.EqualFold(entry, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolvedJudgeAPIKey returns the judge API key from the env var.

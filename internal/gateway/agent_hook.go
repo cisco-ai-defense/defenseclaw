@@ -1372,9 +1372,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	var assetDecisions []runtimeAssetDecision
 	switch {
 	case isPromptLikeEvent(req.HookEventName):
-		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
 	case isResultLikeEvent(req.HookEventName):
-		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a
 		// PostToolUse referencing an unregistered MCP server gets
 		// captured in audit / would-block telemetry. mergeAssetDecision

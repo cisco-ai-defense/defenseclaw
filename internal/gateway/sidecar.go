@@ -74,6 +74,12 @@ type Sidecar struct {
 	// the writer through every call site.
 	events *gatewaylog.Writer
 
+	// judge is the LLM judge instance shared between the proxy lane
+	// (EventRouter.SetJudge) and the hook lane (APIServer.SetHookJudge
+	// in runAPI) so both lanes use one Bifrost client cache and one
+	// verdict cache. nil when guardrail.judge.enabled is false.
+	judge *LLMJudge
+
 	// judgeStore is the async judge-body persistence queue.
 	// Non-nil only when guardrail.retain_judge_bodies is on.
 	// Sidecar.Run drains it on shutdown so queued bodies survive
@@ -224,6 +230,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// detection AND tool-result PII inspection (via inspectToolResult),
 	// so it must be initialized whenever judge is enabled — not only when
 	// tool_injection is on.
+	var hookJudge *LLMJudge
 	if cfg.Guardrail.Judge.Enabled {
 		dotenvPath := filepath.Join(cfg.DataDir, ".env")
 		judgeLLM := cfg.ResolveLLM("guardrail.judge")
@@ -231,12 +238,17 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, providers)
 		if judge != nil {
 			router.SetJudge(judge)
+			hookJudge = judge
 			features := "tool-result-pii"
 			if cfg.Guardrail.Judge.ToolInjection {
 				features += ", tool-injection"
 			}
 			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge enabled (%s) (model=%s)\n",
 				features, judgeLLM.Model)
+			if hooks := cfg.Guardrail.Judge.HookConnectors; len(hooks) > 0 {
+				fmt.Fprintf(os.Stderr, "[sidecar] LLM judge hook lane enabled for: %s\n",
+					strings.Join(hooks, ", "))
+			}
 		}
 	}
 
@@ -451,6 +463,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		alertCtx:       alertCtx,
 		alertCancel:    alertCancel,
 		events:         events,
+		judge:          hookJudge,
 		judgeStore:     judgeStore,
 		judgeBodyStore: judgeBodyStore,
 	}, nil
@@ -2372,6 +2385,15 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	if cisco := NewCiscoInspectClient(&s.cfg.CiscoAIDefense, filepath.Join(s.cfg.DataDir, ".env")); cisco != nil {
 		cisco.SetTelemetry(s.otel)
 		api.SetCiscoInspector(cisco)
+	}
+	// Wire the LLM judge onto the API server so hook connectors listed
+	// in guardrail.judge.hook_connectors get live-content adjudication
+	// on the hook lane (inspectMessageContent). Same instance as the
+	// proxy lane's router judge — one Bifrost client cache, one verdict
+	// cache. nil when guardrail.judge.enabled is false; the hook lane
+	// then skips the judge exactly as before.
+	if s.judge != nil {
+		api.SetHookJudge(s.judge)
 	}
 	api.SetAIDiscoveryService(s.aiDiscovery)
 	api.SetNotifier(s.osNotifier)
