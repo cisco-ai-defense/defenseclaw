@@ -366,7 +366,7 @@ jobs:
                       'index':      'defenseclaw_local',
                       'source':     'defenseclaw',
                       'sourcetype': 'defenseclaw:json',
-                      'verify_tls': False,
+                      'insecure_skip_verify': True,
                   },
               },
               # Phase 6 mock HEC collector — observability_assertions.sh
@@ -1119,7 +1119,7 @@ jobs:
                       'index':      'defenseclaw_local',
                       'source':     'defenseclaw',
                       'sourcetype': 'defenseclaw:json',
-                      'verify_tls': False,
+                      'insecure_skip_verify': True,
                   },
               },
               # Phase 6 mock HEC collector (see core job for rationale).
