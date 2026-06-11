@@ -1287,6 +1287,7 @@ export function createFetchInterceptor(
       const ollamaCandidate = Boolean(
         urlStr &&
           isLLMUrl(urlStr, guardrailPort) &&
+          hasLLMPathSuffix(urlStr) &&
           !isAlreadyProxied(urlStr, guardrailPort),
       );
       if (!ollamaCandidate) {

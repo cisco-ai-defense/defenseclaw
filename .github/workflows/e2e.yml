@@ -183,7 +183,7 @@ jobs:
           docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -211,7 +211,7 @@ jobs:
           docker compose -f docker-compose.ci.yml restart splunk
           echo "Waiting for Splunk HEC after restart..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -361,7 +361,7 @@ jobs:
                   'kind':    'splunk_hec',
                   'enabled': True,
                   'splunk_hec': {
-                      'endpoint':   'http://127.0.0.1:8088/services/collector/event',
+                      'endpoint':   'https://127.0.0.1:8088/services/collector/event',
                       'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
                       'index':      'defenseclaw_local',
                       'source':     'defenseclaw',
@@ -723,7 +723,7 @@ jobs:
           docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -749,7 +749,7 @@ jobs:
           docker compose -f docker-compose.ci.yml restart splunk
           echo "Waiting for Splunk HEC after restart..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -1114,7 +1114,7 @@ jobs:
                   'kind':    'splunk_hec',
                   'enabled': True,
                   'splunk_hec': {
-                      'endpoint':   'http://127.0.0.1:8088/services/collector/event',
+                      'endpoint':   'https://127.0.0.1:8088/services/collector/event',
                       'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
                       'index':      'defenseclaw_local',
                       'source':     'defenseclaw',

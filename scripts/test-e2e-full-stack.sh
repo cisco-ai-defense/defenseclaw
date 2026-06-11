@@ -23,7 +23,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SIDECAR_URL="http://127.0.0.1:18970"
 OPENCLAW_URL="http://127.0.0.1:18789"
 GUARDRAIL_URL="http://127.0.0.1:4000"
-SPLUNK_HEC_URL="http://127.0.0.1:8088"
+SPLUNK_HEC_URL="https://127.0.0.1:8088"
 SPLUNK_HEC_TOKEN="00000000-0000-0000-0000-000000000001"
 SPLUNK_API_URL="https://127.0.0.1:8089"
 SPLUNK_CREDS="admin:DefenseClawLocalMode1!"
@@ -3593,7 +3593,7 @@ phase_splunk() {
     phase_timer_start
 
     local hec_health hec_response schema_result
-    hec_health=$(curl -sf --max-time 5 "$SPLUNK_HEC_URL/services/collector/health" 2>&1 || echo "unreachable")
+    hec_health=$(curl -sfk --max-time 5 "$SPLUNK_HEC_URL/services/collector/health" 2>&1 || echo "unreachable")
     echo "  HEC health response: $hec_health"
     if [ "$hec_health" = "unreachable" ] || [ -z "$hec_health" ]; then
         fail "Splunk HEC reachable" "HEC health endpoint is unreachable"
@@ -3603,6 +3603,7 @@ phase_splunk() {
     pass "Splunk HEC reachable"
 
     hec_response=$(curl -sf --max-time 5 \
+        -k \
         -H "Authorization: Splunk $SPLUNK_HEC_TOKEN" \
         -H "Content-Type: application/json" \
         -d "{\"event\":{\"action\":\"e2e-suite-marker\",\"run_id\":\"$DEFENSECLAW_RUN_ID\",\"source\":\"test-e2e-full-stack\",\"timestamp\":\"$(date -u +%FT%TZ)\"},\"index\":\"$SPLUNK_INDEX\"}" \
