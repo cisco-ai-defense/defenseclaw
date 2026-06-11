@@ -10,7 +10,11 @@ dependencies = [
     "pyyaml==6.0.3",
     "requests==2.33.0",
     "rich>=13.0",
-    "cisco-ai-skill-scanner>=2.0.11",
+    # PyPI's Simple API has returned package-specific 503s for this
+    # project while the JSON API and locked file URL remain healthy.
+    # Pin the exact audited wheel URL so fresh CI venvs do not depend on
+    # resolving this package through /simple/.
+    "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/b4/cc/824d4033d5e684fd05a0e726fa32d2070c36bcaa9e99af49ed1014716613/cisco_ai_skill_scanner-2.0.11-py3-none-any.whl#sha256=9e0f2fd30150ab455005b9b1b288ab2047e89bf22056f7a68e9b8155c420edbe",
     "cisco-ai-mcp-scanner>=4.7.2; python_version>='3.11'",
     # AWS Bedrock support is bundled. LiteLLM lazy-imports boto3 for
     # SigV4 (iam_credentials / profile / instance_role) and for the
