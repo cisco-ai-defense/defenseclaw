@@ -479,10 +479,10 @@ plugin-install: cli-install plugin
 
 test: cli-test gateway-test
 
-cli-test:
+cli-test: _bundle-data
 	$(VENV)/bin/python -m pytest cli/tests -q
 
-cli-test-cov:
+cli-test-cov: _bundle-data
 	$(VENV)/bin/python -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
 cli-test-snap:

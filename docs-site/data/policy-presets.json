@@ -72,13 +72,11 @@
               "target_name": "defenseclaw",
               "reason": "first-party DefenseClaw plugin",
               "source_path_contains": [
-                ".defenseclaw",
                 "extensions/defenseclaw",
-                ".openclaw/extensions",
-                ".zeptoclaw/extensions",
-                ".claude/extensions",
-                ".codex/extensions",
-                ".codex-plugin"
+                ".openclaw/extensions/defenseclaw",
+                ".zeptoclaw/extensions/defenseclaw",
+                ".claude/extensions/defenseclaw",
+                ".codex/extensions/defenseclaw"
               ]
             },
             {
@@ -86,14 +84,13 @@
               "target_name": "codeguard",
               "reason": "first-party DefenseClaw skill",
               "source_path_contains": [
-                ".defenseclaw",
-                "workspace/skills/codeguard",
                 "skills/codeguard",
-                ".openclaw/workspace/skills",
-                ".openclaw/skills",
-                ".zeptoclaw/skills",
-                ".claude/skills",
-                ".codex/skills"
+                "workspace/skills/codeguard",
+                ".openclaw/workspace/skills/codeguard",
+                ".openclaw/skills/codeguard",
+                ".zeptoclaw/skills/codeguard",
+                ".claude/skills/codeguard",
+                ".codex/skills/codeguard"
               ]
             }
           ],
@@ -319,7 +316,7 @@
                 },
                 {
                   "id": "C2-METADATA-GCP",
-                  "pattern": "metadata\\.google\\.internal",
+                  "pattern": "(?i)metadata\\.google\\.internal",
                   "title": "GCP metadata endpoint (SSRF)",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -499,7 +496,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-DEVTCP",
-                  "pattern": "/dev/tcp/\\d{1,3}\\.\\d{1,3}",
+                  "pattern": "/dev/tcp/(?:\\d{1,3}\\.\\d{1,3}|[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+)/\\d+\\b",
                   "title": "Reverse shell via /dev/tcp",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -510,7 +507,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-NC",
-                  "pattern": "(?i)\\b(?:nc|ncat|netcat)\\b\\s+(?:-[a-zA-Z]*\\s+)*\\S+\\s+\\d+\\s*(?:-e|--exec)",
+                  "pattern": "(?i)\\b(?:nc|ncat|netcat)\\b\\s+(?:(?:-[a-zA-Z]*\\s+)*\\S+\\s+\\d+\\s*(?:-e|--exec)\\b|(?:-[a-zA-Z]*\\s+)*(?:-e|--exec)\\s+\\S+\\s+\\S+\\s+\\d+\\b)",
                   "title": "Netcat reverse shell with -e",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -532,7 +529,7 @@
                 },
                 {
                   "id": "CMD-PIPE-CURL",
-                  "pattern": "(?i)\\bcurl\\b\\s+[^|]*\\|\\s*(?:ba)?sh\\b",
+                  "pattern": "(?i)\\bcurl\\b\\s+[^|]*\\|\\s*(?:[/\\w]+/)?(?:bash|zsh|sh)\\b",
                   "title": "curl piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -543,7 +540,7 @@
                 },
                 {
                   "id": "CMD-PIPE-WGET",
-                  "pattern": "(?i)\\bwget\\b\\s+[^|]*\\|\\s*(?:ba)?sh\\b",
+                  "pattern": "(?i)\\bwget\\b\\s+[^|]*\\|\\s*(?:[/\\w]+/)?(?:bash|zsh|sh)\\b",
                   "title": "wget piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -554,7 +551,7 @@
                 },
                 {
                   "id": "CMD-PIPE-BASE64",
-                  "pattern": "(?i)base64\\s+(?:-[dD]|--decode)\\s*\\|\\s*(?:ba)?sh\\b",
+                  "pattern": "(?i)base64\\s+(?:-[dD]|--decode)\\s*\\|\\s*(?:[/\\w]+/)?(?:bash|zsh|sh)\\b",
                   "title": "base64 decode piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -1262,7 +1259,7 @@
               "rules": [
                 {
                   "id": "PATH-SSH-DIR",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.ssh/",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.ssh/",
                   "title": "SSH directory access",
                   "severity": "HIGH",
                   "confidence": 0.95,
@@ -1284,7 +1281,7 @@
                 },
                 {
                   "id": "PATH-AWS-CREDS",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.aws/credentials",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.aws/credentials",
                   "title": "AWS credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.98,
@@ -1295,7 +1292,7 @@
                 },
                 {
                   "id": "PATH-AWS-CONFIG",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.aws/config",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.aws/config",
                   "title": "AWS config file",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -1306,7 +1303,7 @@
                 },
                 {
                   "id": "PATH-KUBE",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.kube/config",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.kube/config",
                   "title": "Kubernetes config",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -1317,7 +1314,7 @@
                 },
                 {
                   "id": "PATH-DOCKER",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.docker/config\\.json",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.docker/config\\.json",
                   "title": "Docker config",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -1328,7 +1325,7 @@
                 },
                 {
                   "id": "PATH-GNUPG",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.gnupg/",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.gnupg/",
                   "title": "GPG keyring access",
                   "severity": "HIGH",
                   "confidence": 0.95,
@@ -1339,7 +1336,7 @@
                 },
                 {
                   "id": "PATH-NPMRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.npmrc",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.npmrc",
                   "title": "npm config (may contain tokens)",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -1350,7 +1347,7 @@
                 },
                 {
                   "id": "PATH-PYPIRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.pypirc",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.pypirc",
                   "title": "PyPI config (may contain tokens)",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -1361,7 +1358,7 @@
                 },
                 {
                   "id": "PATH-GIT-CREDS",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.git-credentials",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.git-credentials",
                   "title": "Git credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -1372,7 +1369,7 @@
                 },
                 {
                   "id": "PATH-NETRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.netrc",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.netrc",
                   "title": "netrc credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
@@ -1383,7 +1380,7 @@
                 },
                 {
                   "id": "PATH-ENV-FILE",
-                  "pattern": "(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?\\s*[\"'\\s,\\]})]*$|(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?[\"'\\s,\\]})]",
+                  "pattern": "(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?\\s*[\"'\\s,;\\]})]*$|(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?[\"'\\s,;\\]})]",
                   "title": "Environment file",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -1436,7 +1433,7 @@
                 },
                 {
                   "id": "PATH-HISTORY",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.(?:bash_history|zsh_history|python_history)",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.(?:bash_history|zsh_history|python_history)",
                   "title": "Shell history file",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -2219,12 +2216,11 @@
               "target_name": "defenseclaw",
               "reason": "first-party DefenseClaw plugin",
               "source_path_contains": [
-                ".defenseclaw",
-                ".openclaw/extensions",
-                ".zeptoclaw/extensions",
-                ".claude/extensions",
-                ".codex/extensions",
-                ".codex-plugin"
+                "extensions/defenseclaw",
+                ".openclaw/extensions/defenseclaw",
+                ".zeptoclaw/extensions/defenseclaw",
+                ".claude/extensions/defenseclaw",
+                ".codex/extensions/defenseclaw"
               ]
             },
             {
@@ -2232,12 +2228,12 @@
               "target_name": "codeguard",
               "reason": "first-party DefenseClaw skill",
               "source_path_contains": [
-                ".defenseclaw",
-                ".openclaw/workspace/skills",
-                ".openclaw/skills",
-                ".zeptoclaw/skills",
-                ".claude/skills",
-                ".codex/skills"
+                "skills/codeguard",
+                ".openclaw/workspace/skills/codeguard",
+                ".openclaw/skills/codeguard",
+                ".zeptoclaw/skills/codeguard",
+                ".claude/skills/codeguard",
+                ".codex/skills/codeguard"
               ]
             }
           ],
@@ -2455,7 +2451,7 @@
                 },
                 {
                   "id": "C2-METADATA-GCP",
-                  "pattern": "metadata\\.google\\.internal",
+                  "pattern": "(?i)metadata\\.google\\.internal",
                   "title": "GCP metadata endpoint (SSRF)",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -2635,7 +2631,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-DEVTCP",
-                  "pattern": "/dev/tcp/\\d{1,3}\\.\\d{1,3}",
+                  "pattern": "/dev/tcp/(?:\\d{1,3}\\.\\d{1,3}|[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+)/\\d+\\b",
                   "title": "Reverse shell via /dev/tcp",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -2646,7 +2642,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-NC",
-                  "pattern": "(?i)\\b(?:nc|ncat|netcat)\\b\\s+(?:-[a-zA-Z]*\\s+)*\\S+\\s+\\d+\\s*(?:-e|--exec)",
+                  "pattern": "(?i)\\b(?:nc|ncat|netcat)\\b\\s+(?:(?:-[a-zA-Z]*\\s+)*\\S+\\s+\\d+\\s*(?:-e|--exec)\\b|(?:-[a-zA-Z]*\\s+)*(?:-e|--exec)\\s+\\S+\\s+\\S+\\s+\\d+\\b)",
                   "title": "Netcat reverse shell with -e",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -2668,7 +2664,7 @@
                 },
                 {
                   "id": "CMD-PIPE-CURL",
-                  "pattern": "(?i)\\bcurl\\b\\s+[^|]*\\|\\s*(?:ba)?sh\\b",
+                  "pattern": "(?i)\\bcurl\\b\\s+[^|]*\\|\\s*(?:[/\\w]+/)?(?:bash|zsh|sh)\\b",
                   "title": "curl piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -2679,7 +2675,7 @@
                 },
                 {
                   "id": "CMD-PIPE-WGET",
-                  "pattern": "(?i)\\bwget\\b\\s+[^|]*\\|\\s*(?:ba)?sh\\b",
+                  "pattern": "(?i)\\bwget\\b\\s+[^|]*\\|\\s*(?:[/\\w]+/)?(?:bash|zsh|sh)\\b",
                   "title": "wget piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -2690,7 +2686,7 @@
                 },
                 {
                   "id": "CMD-PIPE-BASE64",
-                  "pattern": "(?i)base64\\s+(?:-[dD]|--decode)\\s*\\|\\s*(?:ba)?sh\\b",
+                  "pattern": "(?i)base64\\s+(?:-[dD]|--decode)\\s*\\|\\s*(?:[/\\w]+/)?(?:bash|zsh|sh)\\b",
                   "title": "base64 decode piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -3392,7 +3388,7 @@
               "rules": [
                 {
                   "id": "PATH-SSH-DIR",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.ssh/",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.ssh/",
                   "title": "SSH directory access",
                   "severity": "HIGH",
                   "confidence": 0.95,
@@ -3414,7 +3410,7 @@
                 },
                 {
                   "id": "PATH-AWS-CREDS",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.aws/credentials",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.aws/credentials",
                   "title": "AWS credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.98,
@@ -3425,7 +3421,7 @@
                 },
                 {
                   "id": "PATH-AWS-CONFIG",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.aws/config",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.aws/config",
                   "title": "AWS config file",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -3436,7 +3432,7 @@
                 },
                 {
                   "id": "PATH-KUBE",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.kube/config",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.kube/config",
                   "title": "Kubernetes config",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -3447,7 +3443,7 @@
                 },
                 {
                   "id": "PATH-DOCKER",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.docker/config\\.json",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.docker/config\\.json",
                   "title": "Docker config",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -3458,7 +3454,7 @@
                 },
                 {
                   "id": "PATH-GNUPG",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.gnupg/",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.gnupg/",
                   "title": "GPG keyring access",
                   "severity": "HIGH",
                   "confidence": 0.95,
@@ -3469,7 +3465,7 @@
                 },
                 {
                   "id": "PATH-NPMRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.npmrc",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.npmrc",
                   "title": "npm config (may contain tokens)",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -3480,7 +3476,7 @@
                 },
                 {
                   "id": "PATH-PYPIRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.pypirc",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.pypirc",
                   "title": "PyPI config (may contain tokens)",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -3491,7 +3487,7 @@
                 },
                 {
                   "id": "PATH-GIT-CREDS",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.git-credentials",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.git-credentials",
                   "title": "Git credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -3502,7 +3498,7 @@
                 },
                 {
                   "id": "PATH-NETRC",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.netrc",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.netrc",
                   "title": "netrc credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
@@ -3513,7 +3509,7 @@
                 },
                 {
                   "id": "PATH-ENV-FILE",
-                  "pattern": "(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?\\s*[\"'\\s,\\]})]*$|(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?[\"'\\s,\\]})]",
+                  "pattern": "(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?\\s*[\"'\\s,;\\]})]*$|(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?[\"'\\s,;\\]})]",
                   "title": "Environment file",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -3566,7 +3562,7 @@
                 },
                 {
                   "id": "PATH-HISTORY",
-                  "pattern": "(?:~|\\$HOME|/home/\\w+|/root|/Users/\\w+)/\\.(?:bash_history|zsh_history|python_history)",
+                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.(?:bash_history|zsh_history|python_history)",
                   "title": "Shell history file",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -4286,12 +4282,11 @@
               "target_name": "defenseclaw",
               "reason": "first-party DefenseClaw plugin",
               "source_path_contains": [
-                ".defenseclaw",
-                ".openclaw/extensions",
-                ".zeptoclaw/extensions",
-                ".claude/extensions",
-                ".codex/extensions",
-                ".codex-plugin"
+                "extensions/defenseclaw",
+                ".openclaw/extensions/defenseclaw",
+                ".zeptoclaw/extensions/defenseclaw",
+                ".claude/extensions/defenseclaw",
+                ".codex/extensions/defenseclaw"
               ]
             },
             {
@@ -4299,12 +4294,12 @@
               "target_name": "codeguard",
               "reason": "first-party DefenseClaw skill",
               "source_path_contains": [
-                ".defenseclaw",
-                ".openclaw/workspace/skills",
-                ".openclaw/skills",
-                ".zeptoclaw/skills",
-                ".claude/skills",
-                ".codex/skills"
+                "skills/codeguard",
+                ".openclaw/workspace/skills/codeguard",
+                ".openclaw/skills/codeguard",
+                ".zeptoclaw/skills/codeguard",
+                ".claude/skills/codeguard",
+                ".codex/skills/codeguard"
               ]
             }
           ],

@@ -167,3 +167,50 @@ func TestScanResultV7RedactsSecretsFromFindingText(t *testing.T) {
 		t.Fatal("rule_id should be populated by EnsureRuleID")
 	}
 }
+
+func TestScanResultV7PreservesFindingScanner(t *testing.T) {
+	version.ResetForTesting()
+	version.SetBinaryVersion("0.0.0-test")
+
+	r := &scanner.ScanResult{
+		Scanner:   "codeguard",
+		Target:    "/tmp/payload.sh",
+		Timestamp: time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC),
+		Duration:  10 * time.Millisecond,
+		Findings: []scanner.Finding{
+			{
+				ID:       "CS-MAL-RS-DEVTCP",
+				Severity: scanner.SeverityCritical,
+				Title:    "Malicious signature",
+				Scanner:  "clawshield-malware",
+				Category: "reverse_shell",
+			},
+		},
+	}
+	b, err := marshalScanResultV7(r, "0.0.0-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top struct {
+		Scanner  string `json:"scanner"`
+		Findings []struct {
+			Scanner string `json:"scanner"`
+			RuleID  string `json:"rule_id"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatal(err)
+	}
+	if top.Scanner != "codeguard" {
+		t.Fatalf("top-level scanner = %q, want codeguard", top.Scanner)
+	}
+	if len(top.Findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(top.Findings))
+	}
+	if top.Findings[0].Scanner != "clawshield-malware" {
+		t.Fatalf("finding scanner = %q, want clawshield-malware", top.Findings[0].Scanner)
+	}
+	if !strings.HasPrefix(top.Findings[0].RuleID, "clawshield-malware.") {
+		t.Fatalf("rule_id = %q, want clawshield-malware prefix", top.Findings[0].RuleID)
+	}
+}
