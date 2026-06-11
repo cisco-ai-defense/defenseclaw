@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import urllib.error
 import urllib.parse
@@ -280,12 +281,21 @@ def _resolve_api_key(env_name: str, dotenv_path: str) -> str:
 
 
 def _http_probe(
-    url: str, *, method: str = "GET", headers: dict | None = None, body: bytes | None = None, timeout: float = 10.0
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict | None = None,
+    body: bytes | None = None,
+    timeout: float = 10.0,
+    verify_tls: bool = True,
 ) -> tuple[int, str]:
     """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure."""
     req = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
+    context = None
+    if not verify_tls and url.lower().startswith("https://"):
+        context = ssl._create_unverified_context()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
             return resp.status, resp.read().decode("utf-8", errors="replace")[:2000]
     except urllib.error.HTTPError as exc:
         body_text = ""
@@ -1988,6 +1998,7 @@ def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
     # Warn if the token is stored inline rather than via token_env.
     _check_splunk_token_posture(cfg, d, label, r)
 
+    verify_tls = _splunk_hec_tls_verify_enabled(cfg, d)
     http_code, body = _http_probe(
         endpoint,
         method="POST",
@@ -1997,6 +2008,7 @@ def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
         },
         body=json.dumps({"event": "defenseclaw-doctor-probe", "sourcetype": "_json"}).encode(),
         timeout=10.0,
+        verify_tls=verify_tls,
     )
 
     if http_code == 200:
@@ -2040,12 +2052,48 @@ def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
 
     if http_code == 0:
         if any(kw in body.lower() for kw in ("ssl", "certificate", "tls")):
-            _emit("fail", label, f"TLS error — check verify_tls setting and endpoint certificate: {body[:120]}", r=r)
+            _emit(
+                "fail",
+                label,
+                f"TLS error — check insecure_skip_verify setting and endpoint certificate: {body[:120]}",
+                r=r,
+            )
         else:
             _emit("warn", label, f"unreachable: {body[:120]}", r=r)
         return
 
     _emit("warn", label, f"HTTP {http_code}: {hec_msg or body[:120]}", r=r)
+
+
+def _truthy_config_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _splunk_hec_tls_verify_enabled(cfg, d) -> bool:
+    """Resolve effective TLS verification for a Splunk HEC doctor probe."""
+    from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
+
+    try:
+        doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
+    except Exception:
+        doc = {}
+
+    for sink in doc.get("audit_sinks") or []:
+        if not isinstance(sink, dict) or sink.get("name") != d.name:
+            continue
+        sub = sink.get("splunk_hec") or {}
+        if isinstance(sub, dict):
+            return not _truthy_config_bool(sub.get("insecure_skip_verify", False))
+        break
+
+    splunk_cfg = getattr(cfg, "splunk", None)
+    if hasattr(splunk_cfg, "tls_verify_enabled"):
+        return bool(splunk_cfg.tls_verify_enabled())
+    return True
 
 
 def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
