@@ -259,8 +259,16 @@ def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
     link = link_dir / "codex"
     link.symlink_to(real)
 
-    monkeypatch.setattr(ad, "_TRUSTED_BIN_PREFIXES_DEFAULT", (str(link_dir), str(homebrew / "lib" / "node_modules")))
+    # F-0421: built-in default prefixes now require root ownership, and the
+    # fixture dirs are owned by the (non-root) test user. The symlink-target
+    # containment behaviour this test exercises is unchanged — it just has
+    # to be reached via an operator opt-in trusted prefix (which keeps the
+    # looser per-file/parent permission checks).
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+    monkeypatch.setenv(
+        "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
+        ":".join((str(link_dir), str(homebrew / "lib" / "node_modules"))),
+    )
 
     assert ad._is_trusted_binary_path(str(link)) is True
 
@@ -276,12 +284,13 @@ def test_trust_check_accepts_claude_local_share_target(monkeypatch, tmp_path):
     link = link_dir / "claude"
     link.symlink_to(real)
 
-    monkeypatch.setattr(
-        ad,
-        "_TRUSTED_BIN_PREFIXES_DEFAULT",
-        (str(link_dir), str(tmp_path / ".local" / "share" / "claude")),
-    )
+    # F-0421: see homebrew test above — user-owned trees are trusted only
+    # via explicit operator opt-in now; defaults require root ownership.
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+    monkeypatch.setenv(
+        "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
+        ":".join((str(link_dir), str(tmp_path / ".local" / "share" / "claude"))),
+    )
 
     assert ad._is_trusted_binary_path(str(link)) is True
 

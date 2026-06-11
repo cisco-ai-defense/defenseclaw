@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import ipaddress
 import json
 import os
 import time
@@ -2105,6 +2106,26 @@ def _emit_discovery_report(
     return result
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Return True when ``host`` is the local loopback interface.
+
+    Mirrors the upgrade health-probe gate (``cmd_upgrade._is_loopback_host``):
+    ``localhost`` and any loopback IP literal (IPv4 ``127.0.0.0/8`` or IPv6
+    ``::1``) count as loopback; everything else — including ``0.0.0.0`` and
+    DNS names — is treated as non-loopback so the bearer token is not leaked.
+    """
+    candidate = (host or "").strip().lower()
+    if not candidate or candidate == "localhost":
+        return True
+    candidate = candidate.strip("[]")
+    if candidate == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
 def _resolve_gateway_target(
     app: AppContext,
     *,
@@ -2157,6 +2178,14 @@ def _resolve_gateway_target(
         token = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
     if not token:
         token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+
+    # The gateway bearer token authenticates to the *local* sidecar. Only
+    # ever attach it to a loopback target: a non-loopback ``gw.host`` (a
+    # hostile/typo'd config or a hijacked DNS name) would otherwise receive
+    # the credential. Drop it so ``_usage_client`` fails closed with a
+    # remediation message instead of leaking the token off-box (F-0261).
+    if token and not _is_loopback_host(host):
+        token = ""
 
     return host, port, token
 

@@ -3161,8 +3161,9 @@ type codeScanRequest struct {
 	Path string `json:"path"`
 }
 
-// handleCodeScan runs CodeGuard on the given filesystem path and returns
-// the ScanResult with OTel signals emitted via the shared audit logger.
+// handleCodeScan runs the built-in source-code scanner suite on the given
+// filesystem path and returns the ScanResult with OTel signals emitted via
+// the shared audit logger.
 func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3183,9 +3184,8 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	if a.scannerCfg != nil {
 		rulesDir = a.scannerCfg.Scanners.CodeGuard
 	}
-	cg := scanner.NewCodeGuardScanner(rulesDir)
 
-	result, err := cg.Scan(r.Context(), req.Path)
+	result, err := scanner.ScanCode(r.Context(), req.Path, rulesDir)
 	if err != nil {
 		if a.otel != nil {
 			a.otel.RecordScanError(r.Context(), "codeguard", "code", classifyScanError(err))

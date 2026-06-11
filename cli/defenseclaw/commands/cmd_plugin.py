@@ -387,8 +387,33 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
             plugin_name = os.path.basename(source_path)
 
     try:
+        # --- Validate the derived install name (F-0301) ---
+        # plugin_name is a basename of operator-controlled input (local
+        # path / npm spec / clawhub URI / extracted dir). A local source
+        # like ``/some/src/..`` yields basename ``..``, so
+        # ``os.path.join(plugin_dir, "..")`` escapes the managed
+        # directory and, under --force, ``shutil.rmtree(dest)`` would
+        # recursively delete the PARENT of plugin_dir. Reject empty /
+        # dot / traversal / separator names and confirm the resolved
+        # dest stays strictly inside plugin_dir before any destructive
+        # operation — mirroring the guard already in `plugin remove`.
+        if (
+            not plugin_name
+            or plugin_name in (".", "..")
+            or "/" in plugin_name
+            or "\\" in plugin_name
+            or os.sep in plugin_name
+            or (os.altsep and os.altsep in plugin_name)
+        ):
+            click.echo(f"error: invalid plugin name: {plugin_name!r}", err=True)
+            raise SystemExit(1)
+
         # --- Duplicate check ---
         dest = os.path.join(plugin_dir, plugin_name)
+        real_plugin_dir = os.path.realpath(plugin_dir)
+        if not os.path.realpath(dest).startswith(real_plugin_dir + os.sep):
+            click.echo(f"error: invalid plugin name: {plugin_name!r}", err=True)
+            raise SystemExit(1)
         if os.path.exists(dest):
             if not force:
                 click.echo(f"Plugin already installed: {plugin_name}")

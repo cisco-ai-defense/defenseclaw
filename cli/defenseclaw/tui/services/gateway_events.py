@@ -195,9 +195,17 @@ def load_gateway_egress(path: Path | str) -> tuple[EgressEvent, ...]:
 
 
 def parse_gateway_event(line: str) -> GatewayEvent:
-    """Parse one gateway JSONL line."""
+    """Parse one gateway JSONL line.
+
+    A well-formed JSONL row is a JSON object. Non-object payloads (a bare
+    number, string, list, or ``null``) are valid JSON but carry no event
+    fields, so they are coerced to an empty mapping and surface as an
+    ``unknown`` event that callers skip rather than crashing on ``.get``.
+    """
 
     payload = json.loads(line)
+    if not isinstance(payload, dict):
+        payload = {}
     event_type = str(payload.get("event_type") or "unknown")
     if event_type not in {"scan", "scan_finding", "activity"}:
         event_type = "unknown"
@@ -300,40 +308,46 @@ def load_gateway_scan_blocks(path: Path) -> tuple[ScanBlock, ...]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
+        # A single malformed gateway row must never break the Alerts
+        # refresh: tolerate bad JSON, non-numeric counters, and any other
+        # shape surprise by skipping just that row.
         try:
             event = parse_gateway_event(line)
         except json.JSONDecodeError:
             continue
-        if event.event_type == "scan" and event.scan.get("scan_id"):
-            scan_id = str(event.scan["scan_id"])
-            block = blocks.setdefault(scan_id, {"findings": []})
-            block.update(
-                scan_id=scan_id,
-                scanner=str(event.scan.get("scanner") or ""),
-                target=str(event.scan.get("target") or ""),
-                severity=str(event.scan.get("severity_max") or event.severity or "INFO"),
-                verdict=str(event.scan.get("verdict") or ""),
-                duration_ms=int(event.scan.get("duration_ms") or 0),
-                total_count=int(event.scan.get("total_count") or 0),
-                counts=_int_mapping(event.scan.get("counts")),
-                timestamp=event.timestamp,
-            )
-        elif event.event_type == "scan_finding" and event.scan_finding.get("scan_id"):
-            scan_id = str(event.scan_finding["scan_id"])
-            block = blocks.setdefault(
-                scan_id,
-                {
-                    "scan_id": scan_id,
-                    "scanner": str(event.scan_finding.get("scanner") or ""),
-                    "target": str(event.scan_finding.get("target") or ""),
-                    "severity": event.severity or "INFO",
-                    "timestamp": event.timestamp,
-                    "findings": [],
-                },
-            )
-            block["findings"].append(event.scan_finding)
-            if event.timestamp and (block.get("timestamp") is None or event.timestamp > block["timestamp"]):
-                block["timestamp"] = event.timestamp
+        try:
+            if event.event_type == "scan" and event.scan.get("scan_id"):
+                scan_id = str(event.scan["scan_id"])
+                block = blocks.setdefault(scan_id, {"findings": []})
+                block.update(
+                    scan_id=scan_id,
+                    scanner=str(event.scan.get("scanner") or ""),
+                    target=str(event.scan.get("target") or ""),
+                    severity=str(event.scan.get("severity_max") or event.severity or "INFO"),
+                    verdict=str(event.scan.get("verdict") or ""),
+                    duration_ms=_safe_int(event.scan.get("duration_ms")),
+                    total_count=_safe_int(event.scan.get("total_count")),
+                    counts=_int_mapping(event.scan.get("counts")),
+                    timestamp=event.timestamp,
+                )
+            elif event.event_type == "scan_finding" and event.scan_finding.get("scan_id"):
+                scan_id = str(event.scan_finding["scan_id"])
+                block = blocks.setdefault(
+                    scan_id,
+                    {
+                        "scan_id": scan_id,
+                        "scanner": str(event.scan_finding.get("scanner") or ""),
+                        "target": str(event.scan_finding.get("target") or ""),
+                        "severity": event.severity or "INFO",
+                        "timestamp": event.timestamp,
+                        "findings": [],
+                    },
+                )
+                block["findings"].append(event.scan_finding)
+                if event.timestamp and (block.get("timestamp") is None or event.timestamp > block["timestamp"]):
+                    block["timestamp"] = event.timestamp
+        except (AttributeError, TypeError, ValueError):
+            continue
 
     result = [
         ScanBlock(
@@ -342,8 +356,8 @@ def load_gateway_scan_blocks(path: Path) -> tuple[ScanBlock, ...]:
             target=str(block.get("target") or ""),
             severity=str(block.get("severity") or "INFO"),
             verdict=str(block.get("verdict") or ""),
-            duration_ms=int(block.get("duration_ms") or 0),
-            total_count=int(block.get("total_count") or 0),
+            duration_ms=_safe_int(block.get("duration_ms")),
+            total_count=_safe_int(block.get("total_count")),
             counts=dict(block.get("counts") or {}),
             timestamp=block.get("timestamp"),
             findings=tuple(block.get("findings") or ()),
@@ -362,6 +376,22 @@ def load_gateway_scan_blocks(path: Path) -> tuple[ScanBlock, ...]:
 
 def _mapping(raw: object) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
+
+
+def _safe_int(raw: object) -> int:
+    """Best-effort integer coercion for gateway counter fields.
+
+    Gateway rows are produced by a separate process and may carry
+    non-numeric values (``"NaN"``, ``null``, objects). Fall back to ``0``
+    instead of raising so one bad row cannot crash the Alerts panel.
+    """
+
+    if raw is None:
+        return 0
+    try:
+        return int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
 
 
 def _int_mapping(raw: object) -> dict[str, int]:

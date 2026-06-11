@@ -23,6 +23,12 @@ class ParsedCommand:
     category: str
     risk: str = "read-only"
     needs_preview: bool = False
+    # Secret fed to the child over stdin instead of argv (e.g. ``keys set``
+    # reads a hidden prompt). ``None`` means no stdin payload. See F-0801.
+    stdin_input: str | None = None
+    # Secret-bearing environment variables injected into the child process
+    # environment rather than exposed as ``--env KEY=secret`` argv. See F-0803.
+    env_overrides: tuple[tuple[str, str], ...] = ()
 
 
 def _contains_shell_operator(text: str) -> bool:

@@ -771,7 +771,24 @@ def scan(
         click.echo(f"BLOCKED: {name} — remove from block list first", err=True)
         raise SystemExit(2)
 
-    if pe.is_allowed("skill", name):
+    # F-0282: a bare ``pe.is_allowed("skill", name)`` check skips the scan
+    # on a NAME match alone. An operator allow that was registered for a
+    # trusted skill at a specific path would then also wave through a
+    # *different* on-disk skill that merely shares the name. Route the
+    # allow decision through the shared admission evaluator, which compares
+    # the presented ``source_path`` against any path-pinned allow (and fails
+    # closed on a mismatch — see F-0401). Only a genuine manual allow that
+    # matches the presented asset skips the scan; everything else falls
+    # through to a fresh scan.
+    from defenseclaw.enforce.admission import evaluate_admission as _evaluate_admission
+    allow_decision = _evaluate_admission(
+        pe,
+        policy_dir=app.cfg.policy_dir,
+        target_type="skill",
+        name=name,
+        source_path=scan_dir or "",
+    )
+    if allow_decision.verdict == "allowed" and allow_decision.source == "manual-allow":
         click.echo(ux._style(f"ALLOWED (skip scan): {name}", fg="green"))
         return
 
@@ -2246,6 +2263,11 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
         fallback_actions=app.cfg.skill_actions,
         connector=connector,
         asset_policy=app.cfg.asset_policy,
+        # F-0283: a quarantined skill must NOT be (re)installed. Without
+        # this flag the admission evaluator never consulted quarantine
+        # state, so an asset that a prior scan quarantined could be
+        # reinstalled straight past the gate. Reject quarantined installs.
+        include_quarantine=True,
     )
 
     if pre_decision.verdict == "blocked":
@@ -2254,6 +2276,16 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
         click.echo(
             f"error: skill {skill_name!r} is on the block list"
             f" — run 'defenseclaw skill allow {skill_name}' to unblock",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    if pre_decision.verdict == "rejected" and pre_decision.source == "quarantine":
+        if app.logger:
+            app.logger.log_action("install-rejected", skill_name, "reason=quarantined")
+        click.echo(
+            f"error: skill {skill_name!r} is quarantined"
+            f" — release the quarantine before reinstalling",
             err=True,
         )
         raise SystemExit(1)

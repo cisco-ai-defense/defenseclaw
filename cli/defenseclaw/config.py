@@ -125,6 +125,34 @@ else:
         fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
 
 
+def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    """Robustly coerce a YAML/JSON config scalar into a real boolean.
+
+    Plain ``bool`` values pass through unchanged. Strings are matched
+    case-insensitively against well-known truthy/falsey tokens so a
+    quoted ``"false"`` loaded from ``config.yaml`` resolves to ``False``
+    instead of collapsing to ``True`` via Python's ``bool("false")``
+    (every non-empty string is truthy). This is the security-relevant
+    case for TLS skip-verify flags: ``insecure_skip_verify: "false"``
+    must NOT disable certificate verification. Unknown / unparseable
+    values fall back to ``default``.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in ("1", "true", "yes", "on"):
+            return True
+        if token in ("0", "false", "no", "off", ""):
+            return False
+        return default
+    return default
+
+
 def _home() -> Path:
     return Path.home()
 
@@ -169,7 +197,10 @@ def _expand(p: str) -> str:
 # ---------------------------------------------------------------------------
 
 def detect_environment() -> str:
-    if platform.system() == "Darwin":
+    system = platform.system()
+    if system == "Windows":
+        return "windows"
+    if system == "Darwin":
         return "macos"
     if Path("/etc/dgx-release").exists():
         return "dgx-spark"
@@ -684,8 +715,13 @@ class SplunkConfig:
         ``insecure_skip_verify`` flag. Any other combination yields a
         secure default of True so omitting the field never silently
         leaks the HEC token to a MITM peer.
+
+        The flag is run through :func:`_coerce_bool` so a quoted
+        ``"false"`` persisted in ``config.yaml`` (a truthy non-empty
+        string under bare ``bool()``) cannot silently disable TLS
+        verification.
         """
-        return not self.insecure_skip_verify
+        return not _coerce_bool(self.insecure_skip_verify)
 
     def resolved_hec_token(self) -> str:
         """Return HEC token from env var (if set) or direct value."""
@@ -2505,9 +2541,15 @@ def _merge_azure(raw: Any) -> AzureKeyConfig | None:
 def _merge_tls(raw: Any) -> LLMTLSConfig | None:
     if not isinstance(raw, dict):
         return None
+    ca_cert_pem = str(raw.get("ca_cert_pem", "") or "")
+    insecure_skip_verify = _coerce_bool(raw.get("insecure_skip_verify", False))
+    # CA pinning and skip-verify are mutually exclusive; prefer the CA when
+    # both appear in persisted config (F-0141).
+    if ca_cert_pem.strip():
+        insecure_skip_verify = False
     return LLMTLSConfig(
-        ca_cert_pem=str(raw.get("ca_cert_pem", "") or ""),
-        insecure_skip_verify=bool(raw.get("insecure_skip_verify", False)),
+        ca_cert_pem=ca_cert_pem,
+        insecure_skip_verify=insecure_skip_verify,
     )
 
 
@@ -3345,8 +3387,8 @@ def load() -> Config:
                 # block never silently downgrades verification. The
                 # explicit opt-out lives on the new
                 # ``insecure_skip_verify`` field.
-                "verify_tls": bool(hec.get("verify_tls", True)),
-                "insecure_skip_verify": bool(hec.get("insecure_skip_verify", False)),
+                "verify_tls": _coerce_bool(hec.get("verify_tls", True), default=True),
+                "insecure_skip_verify": _coerce_bool(hec.get("insecure_skip_verify", False)),
             }
             break
 
@@ -3418,8 +3460,8 @@ def load() -> Config:
             # legacy config without the new field still get certificate
             # verification. The explicit dev-mode opt-out lives on
             # ``insecure_skip_verify`` and is wired separately.
-            verify_tls=splunk_raw.get("verify_tls", True),
-            insecure_skip_verify=splunk_raw.get("insecure_skip_verify", False),
+            verify_tls=_coerce_bool(splunk_raw.get("verify_tls", True), default=True),
+            insecure_skip_verify=_coerce_bool(splunk_raw.get("insecure_skip_verify", False)),
             enabled=splunk_raw.get("enabled", False),
             batch_size=splunk_raw.get("batch_size", 50),
             flush_interval_s=splunk_raw.get("flush_interval_s", 5),

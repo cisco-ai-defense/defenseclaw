@@ -485,6 +485,21 @@ def _ensure_sandbox_acls(target_path: str, sandbox_user: str = "sandbox") -> boo
     return ok
 
 
+def _pinned_openclaw_home(cfg) -> str:
+    """Realpath of the operator-confirmed original OpenClaw home
+    (``cfg.claw.openclaw_home_original``), or "" when nothing is pinned.
+
+    This anchor is written during the first ownership transfer and is the
+    trusted reference for validating the ``$SANDBOX_HOME/.openclaw`` symlink
+    on subsequent (idempotent) runs (Avarice F-0162).
+    """
+    claw = getattr(cfg, "claw", None)
+    pinned = (getattr(claw, "openclaw_home_original", "") or "").strip()
+    if not pinned:
+        return ""
+    return os.path.realpath(os.path.expanduser(pinned))
+
+
 def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
     """Detect existing OpenClaw install and transfer ownership to sandbox user.
 
@@ -506,8 +521,23 @@ def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
 
     if os.path.isfile(backup_path) and os.path.islink(symlink_path):
         target = os.readlink(symlink_path)
-        click.echo(f"  OpenClaw:      already configured at {target}")
         real_target = os.path.realpath(target)
+        # F-0162: the idempotency fast-path used to trust whatever
+        # $SANDBOX_HOME/.openclaw pointed at. That symlink is
+        # attacker-writable, so a local user could repoint it and have the
+        # privileged chown/ACL/traversal repair operate on an arbitrary
+        # tree. Pin against the operator-confirmed original home recorded
+        # at first integration; refuse (fail closed) on any divergence.
+        pinned = _pinned_openclaw_home(cfg)
+        if pinned and real_target != pinned:
+            click.echo(
+                "  OpenClaw:      refusing to trust existing .openclaw symlink.\n"
+                f"                 {symlink_path} -> {real_target}\n"
+                f"                 does not match the pinned original home {pinned}.\n"
+                "                 Possible symlink swap; aborting sandbox integration.",
+            )
+            return False
+        click.echo(f"  OpenClaw:      already configured at {target}")
         _ensure_parent_traversal(real_target)
         _ensure_sandbox_acls(real_target)
         return True

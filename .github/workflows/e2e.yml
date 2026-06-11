@@ -38,6 +38,12 @@ jobs:
       BIFROST_API_KEY: ${{ secrets.BIFROST_API_KEY }}
       SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
       SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
+      # docker-compose.ci.yml intentionally fails closed unless operators
+      # provide a private env file and Splunk password. CI uses the tracked
+      # non-secret example values explicitly so compose interpolation succeeds
+      # without weakening local/operator defaults.
+      SPLUNK_ENV_FILE: ../env/.env.example
+      SPLUNK_PASSWORD: DefenseClawLocalMode1!
       E2E_PROFILE: core
       DEFENSECLAW_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-core
       E2E_TEST_PREFIX: e2e-gh-${{ github.run_id }}-${{ github.run_attempt }}-core
@@ -177,7 +183,7 @@ jobs:
           docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -205,7 +211,7 @@ jobs:
           docker compose -f docker-compose.ci.yml restart splunk
           echo "Waiting for Splunk HEC after restart..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -355,12 +361,12 @@ jobs:
                   'kind':    'splunk_hec',
                   'enabled': True,
                   'splunk_hec': {
-                      'endpoint':   'http://127.0.0.1:8088/services/collector/event',
+                      'endpoint':   'https://127.0.0.1:8088/services/collector/event',
                       'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
                       'index':      'defenseclaw_local',
                       'source':     'defenseclaw',
                       'sourcetype': 'defenseclaw:json',
-                      'verify_tls': False,
+                      'insecure_skip_verify': True,
                   },
               },
               # Phase 6 mock HEC collector — observability_assertions.sh
@@ -553,6 +559,12 @@ jobs:
       AWS_REGION: us-east-1
       SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
       SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
+      # docker-compose.ci.yml intentionally fails closed unless operators
+      # provide a private env file and Splunk password. CI uses the tracked
+      # non-secret example values explicitly so compose interpolation succeeds
+      # without weakening local/operator defaults.
+      SPLUNK_ENV_FILE: ../env/.env.example
+      SPLUNK_PASSWORD: DefenseClawLocalMode1!
       E2E_PROFILE: full-live
       DEFENSECLAW_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-full-live
       E2E_TEST_PREFIX: e2e-gh-${{ github.run_id }}-${{ github.run_attempt }}-full-live
@@ -711,7 +723,7 @@ jobs:
           docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -737,7 +749,7 @@ jobs:
           docker compose -f docker-compose.ci.yml restart splunk
           echo "Waiting for Splunk HEC after restart..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -1102,12 +1114,12 @@ jobs:
                   'kind':    'splunk_hec',
                   'enabled': True,
                   'splunk_hec': {
-                      'endpoint':   'http://127.0.0.1:8088/services/collector/event',
+                      'endpoint':   'https://127.0.0.1:8088/services/collector/event',
                       'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
                       'index':      'defenseclaw_local',
                       'source':     'defenseclaw',
                       'sourcetype': 'defenseclaw:json',
-                      'verify_tls': False,
+                      'insecure_skip_verify': True,
                   },
               },
               # Phase 6 mock HEC collector (see core job for rationale).

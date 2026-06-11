@@ -24,7 +24,6 @@ SCHEMA_VERSION = "defenseclaw.splunk_s3.raw_event.v0.1"
 MANIFEST_SCHEMA_VERSION = "defenseclaw.splunk_s3.manifest.v0.1"
 SOURCE_SYSTEM = "splunk_local_bridge"
 DEFAULT_SPLUNK_USERNAME = "admin"
-DEFAULT_SPLUNK_PASSWORD = "DefenseClawLocalMode1!"
 SEARCH_FIELDS = [
     "_time",
     "_indextime",
@@ -112,7 +111,11 @@ def load_config() -> ExportConfig:
         sse=os.environ.get("S3_SSE", "AES256").strip() or None,
         splunk_base_url=os.environ.get("SPLUNK_BASE_URL", "https://splunk:8089").strip().rstrip("/"),
         splunk_username=os.environ.get("SPLUNK_USERNAME", DEFAULT_SPLUNK_USERNAME).strip(),
-        splunk_password=os.environ.get("SPLUNK_PASSWORD", DEFAULT_SPLUNK_PASSWORD),
+        # F-0585: no hardcoded fallback password — the credential must be
+        # supplied by the operator. An empty default forces load_config() to
+        # fail closed below rather than silently authenticating with a shipped
+        # secret that differs from the Splunk instance's real password.
+        splunk_password=os.environ.get("SPLUNK_PASSWORD", ""),
         splunk_verify_tls=_truthy(os.environ.get("SPLUNK_VERIFY_TLS", "true")),
         interval_seconds=_env_int("S3_EXPORT_INTERVAL_SECONDS", 60),
         window_seconds=_env_int("S3_EXPORT_WINDOW_SECONDS", 300),
@@ -126,6 +129,10 @@ def load_config() -> ExportConfig:
         missing = []
         if not config.bucket:
             missing.append("S3_BUCKET")
+        # F-0585: require an explicit Splunk password when the exporter is
+        # enabled instead of falling back to a shipped default.
+        if not config.splunk_password:
+            missing.append("SPLUNK_PASSWORD")
         if missing:
             raise ValueError(f"missing required env var(s): {', '.join(missing)}")
     return config
@@ -149,18 +156,35 @@ def to_splunk_time(value: str) -> str:
     return str(int(parse_iso(value).timestamp()))
 
 
+class CorruptCheckpointError(RuntimeError):
+    """Raised when a checkpoint file exists but cannot be parsed/understood.
+
+    F-0805: a corrupt checkpoint must NOT be silently treated like a missing
+    one. Doing so reset the export window to ``now - window_seconds`` and then
+    advanced the cursor, permanently skipping every event between the lost
+    checkpoint and the truncated window. Fail closed instead so the operator
+    notices and the cursor is not advanced past unexported data.
+    """
+
+
 def load_checkpoint(path: Path) -> str | None:
     try:
-        payload = json.loads(path.read_text())
+        raw = path.read_text()
     except FileNotFoundError:
         return None
-    except (OSError, json.JSONDecodeError):
-        return None
+    except OSError as exc:
+        raise CorruptCheckpointError(f"cannot read checkpoint {path}: {exc}") from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CorruptCheckpointError(f"checkpoint {path} is not valid JSON: {exc}") from exc
     if isinstance(payload, str):
         return payload
     if isinstance(payload, dict) and isinstance(payload.get("latest"), str):
         return payload["latest"]
-    return None
+    raise CorruptCheckpointError(
+        f"checkpoint {path} has an unexpected shape: {payload!r}"
+    )
 
 
 def save_checkpoint(path: Path, latest_iso: str) -> None:

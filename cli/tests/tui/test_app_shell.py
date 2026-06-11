@@ -394,7 +394,7 @@ async def test_command_palette_suggestions_tab_complete_and_click_execute() -> N
     app = DefenseClawTUI()
     seen: dict[str, tuple[str, tuple[str, ...]]] = {}
 
-    async def fake_run(binary: str, args: tuple[str, ...], display_name: str = "") -> None:
+    async def fake_run(binary: str, args: tuple[str, ...], display_name: str = "", **_kwargs: object) -> None:
         seen["command"] = (binary, args)
         seen["display"] = ("display", (display_name,))
 
@@ -1075,7 +1075,7 @@ async def test_periodic_refresh_reloads_logs_and_doctor_cache(tmp_path) -> None:
 async def test_successful_first_run_command_deactivates_embedded_setup() -> None:
     app = DefenseClawTUI(first_run=True)
 
-    async def fake_run(binary: str, args: tuple[str, ...]):
+    async def fake_run(binary: str, args: tuple[str, ...], **_kwargs: object):
         yield CommandEvent("start", " ".join((binary, *args)))
         yield CommandEvent("done", exit_code=0, duration=0.01)
 
@@ -1136,6 +1136,9 @@ async def test_audit_export_writes_json_without_command_preview(tmp_path) -> Non
         exported = tmp_path / "defenseclaw-audit-export.json"
         assert exported.exists()
         assert "skill://alpha" in exported.read_text(encoding="utf-8")
+        # F-0781: audit exports can carry sensitive identifiers, so the file
+        # must be owner-only rather than world-readable under the umask.
+        assert (exported.stat().st_mode & 0o777) == 0o600
         assert "Audit exported" in app.status_text
         assert app.screen_stack[-1].__class__.__name__ != "CommandPreviewScreen"
 
@@ -1705,7 +1708,7 @@ async def test_activity_rerun_button_replays_last_command(monkeypatch) -> None:
     app = DefenseClawTUI()
     seen: dict[str, tuple[str, tuple[str, ...]]] = {}
 
-    async def fake_run(binary: str, args: tuple[str, ...], display_name: str = "") -> None:
+    async def fake_run(binary: str, args: tuple[str, ...], display_name: str = "", **_kwargs: object) -> None:
         seen["command"] = (binary, args)
 
     async with app.run_test(size=(180, 50)) as pilot:
@@ -1797,6 +1800,9 @@ async def test_activity_save_button_writes_entry_output(tmp_path) -> None:
         assert "defenseclaw doctor" in contents
         assert "checking docker daemon" in contents
         assert "ok" in contents
+        # F-0782: activity output frequently contains tokens/secrets, so the
+        # saved file must be owner-only (0600), not world-readable.
+        assert (saved[0].stat().st_mode & 0o777) == 0o600
 
 
 # ---------------------------------------------------------------------------

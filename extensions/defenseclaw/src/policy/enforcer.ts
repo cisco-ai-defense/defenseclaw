@@ -226,8 +226,8 @@ export async function runRemotePluginScan(
 }
 
 /**
- * Run a CodeGuard code scan via the Go sidecar API.
- * Unlike skill scans (which shell out), CodeGuard is built into the sidecar binary.
+ * Run a built-in code scan via the Go sidecar API.
+ * Unlike skill scans (which shell out), the code scanners are built into the sidecar binary.
  */
 export async function runCodeScan(
   target: string,

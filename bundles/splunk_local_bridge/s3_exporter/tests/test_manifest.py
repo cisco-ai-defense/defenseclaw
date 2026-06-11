@@ -23,6 +23,8 @@ def _set_required_env(monkeypatch, tmp_path):
     monkeypatch.setenv("S3_EXPORT_CHECKPOINT_FILE", str(tmp_path / "checkpoint.json"))
     monkeypatch.setenv("TENANT_ID", "c3-demo-tenant")
     monkeypatch.setenv("WORKSPACE_ID", "workspace-demo")
+    # F-0585: the exporter requires an explicit Splunk password (no shipped default).
+    monkeypatch.setenv("SPLUNK_PASSWORD", "operator-secret")
     monkeypatch.setenv("S3_SSE", "")
 
 

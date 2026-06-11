@@ -1416,6 +1416,8 @@ def _apply_llm_provider_typed_flags(
                     f"--tls-ca-cert-file: {tls_ca_cert_file!r} is not a PEM certificate"
                 )
             llm.tls.ca_cert_pem = pem
+            # A later CA pin replaces a prior skip-verify opt-in (F-0141).
+            llm.tls.insecure_skip_verify = False
         if insecure_skip_verify:
             llm.tls.insecure_skip_verify = True
             ux.warn(
@@ -6546,10 +6548,19 @@ def _restart_services(
     GLOBAL change on a multi-connector install (e.g. ``guardrail hilt`` with no
     ``--connector``), pass the full active set as ``connectors`` so the
     hook-bus hint names every affected connector instead of just the primary —
-    the gateway restart itself is always global regardless."""
+    the gateway restart itself is always global regardless.
+
+    Avarice F-0142/F-0143: a failed gateway restart is fatal. We collect
+    every restart failure and raise a ``ClickException`` at the end so the
+    setup command exits non-zero (fail closed) instead of reporting
+    success while the gateway is down and hooks fail open."""
     ux.section("Restarting services")
 
-    _restart_defense_gateway(data_dir)
+    # Names of services whose restart failed; non-empty ⇒ fail the command.
+    failed: list[str] = []
+
+    if not _restart_defense_gateway(data_dir):
+        failed.append("defenseclaw-gateway")
 
     # Multi-connector global change: every active hook connector is affected
     # by the gateway bounce, so enumerate them rather than naming the primary.
@@ -6564,10 +6575,12 @@ def _restart_services(
             f"to its native upstream."
         )
         click.echo()
+        _fail_if_restart_failed(failed)
         return
 
     if connector == "openclaw":
-        _restart_openclaw_gateway()
+        if not _restart_openclaw_gateway():
+            failed.append("openclaw-gateway")
         _check_openclaw_gateway(oc_host, oc_port)
     elif connector in _PROXY_BACKED_CONNECTORS:
         # OpenClaw is the only proxy-backed connector that owns its own
@@ -6584,13 +6597,34 @@ def _restart_services(
         )
 
     click.echo()
+    _fail_if_restart_failed(failed)
 
 
-def _restart_openclaw_gateway() -> None:
+def _fail_if_restart_failed(failed: list[str]) -> None:
+    """Raise a ``ClickException`` (non-zero exit) when any service restart
+    failed, so setup fails closed instead of silently reporting success
+    against a gateway that never came back up (Avarice F-0142/F-0143)."""
+    if not failed:
+        return
+    raise click.ClickException(
+        "gateway restart failed for: "
+        + ", ".join(failed)
+        + ". Config was saved, but services are NOT running the new "
+        "configuration. Fix the error above and re-run, or start the "
+        "gateway manually before relying on enforcement."
+    )
+
+
+def _restart_openclaw_gateway() -> bool:
     """Ask OpenClaw to restart its gateway service so the updated
     plugin registration (written by OpenClawConnector.Setup) takes
-    effect. No-op when the `openclaw` CLI isn't on PATH — operators
-    using a non-standard OpenClaw install can restart manually."""
+    effect.
+
+    Returns True when the restart succeeded, False on any failure
+    (missing CLI, timeout, or non-zero exit). Avarice F-0143: this used
+    to swallow every failure and return ``None`` so the caller could not
+    tell the OpenClaw gateway never came back — setup then reported
+    success while traffic kept flowing past a down (fail-open) gateway."""
     click.echo("  openclaw-gateway: restarting...", nl=False)
     try:
         result = subprocess.run(
@@ -6601,24 +6635,48 @@ def _restart_openclaw_gateway() -> None:
         )
         if result.returncode == 0:
             click.echo(" ✓")
-        else:
-            click.echo(" ✗")
-            err = (result.stderr or result.stdout or "").strip()
-            if err:
-                for line in err.splitlines()[:3]:
-                    click.echo(f"    {line}")
+            return True
+        click.echo(" ✗")
+        err = (result.stderr or result.stdout or "").strip()
+        if err:
+            for line in err.splitlines()[:3]:
+                click.echo(f"    {line}")
+        return False
     except FileNotFoundError:
         click.echo(" ✗ (openclaw CLI not found)")
         click.echo("    Install OpenClaw or restart its gateway manually.")
+        return False
     except subprocess.TimeoutExpired:
         click.echo(" ✗ (timed out)")
+        return False
 
 
-def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) -> None:
+def _gateway_pid_file_identifies_gateway(pid_file: str) -> bool:
+    """Confirm the live process recorded in ``pid_file`` is actually the
+    DefenseClaw gateway, not a planted/stale PID pointing at an unrelated
+    process. Avarice F-0721: ``_is_pid_alive`` only proves *something* with
+    that PID is alive, so a spoofed ``gateway.pid`` made the setup restart
+    path treat a foreign process as the running gateway and issue
+    ``restart``. We additionally verify the process identity (fail closed)
+    before trusting the PID file as "our gateway is up"."""
+    from defenseclaw.process_liveness import process_is_gateway, read_pid_file
+
+    pid = read_pid_file(pid_file)
+    if pid is None:
+        return False
+    return process_is_gateway(pid)
+
+
+def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) -> bool:
     # Mark the current Click context as "restart handled" so the
     # `setup` group's auto-restart result callback doesn't bounce the
-    # gateway a second time on its way out. Safe to call outside Click
-    # (returns None).
+    # gateway a second time on its way out. Safe to call outside Click.
+    #
+    # Returns True when the gateway is up afterwards (started/restarted
+    # OK, or deliberately left stopped), False when the start/restart
+    # failed. Avarice F-0142: this used to print the error and return
+    # ``None``, so callers reported setup success even though the gateway
+    # never came back (defaulting hooks to fail-open).
     try:
         ctx = click.get_current_context(silent=True)
     except RuntimeError:
@@ -6627,11 +6685,21 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
 
     pid_file = os.path.join(data_dir, "gateway.pid")
-    was_running = _is_pid_alive(pid_file)
+    pid_alive = _is_pid_alive(pid_file)
+    # F-0721: only trust a live PID when it actually belongs to the gateway
+    # binary. If a PID file points at some live but unverified process, fail
+    # closed instead of downgrading to `start`; the Go start path treats a live
+    # PID file as already running, which can otherwise report success while the
+    # old/stale daemon keeps serving the previous config.
+    if pid_alive and not _gateway_pid_file_identifies_gateway(pid_file):
+        click.echo("  defenseclaw-gateway: live gateway.pid did not verify as DefenseClaw gateway.")
+        click.echo("    Refusing to start/restart; inspect or remove the stale PID file.")
+        return False
+    was_running = pid_alive
     if not was_running and not start_if_stopped:
         click.echo("  defenseclaw-gateway: not running — skipping restart.")
         click.echo("    Start it with: defenseclaw-gateway start")
-        return
+        return True
 
     action = "restarting" if was_running else "starting"
     click.echo(f"  defenseclaw-gateway: {action}...", nl=False)
@@ -6641,17 +6709,20 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
             click.echo(" ✓")
-        else:
-            click.echo(" ✗")
-            err = (result.stderr or result.stdout or "").strip()
-            if err:
-                for line in err.splitlines()[:3]:
-                    click.echo(f"    {line}")
+            return True
+        click.echo(" ✗")
+        err = (result.stderr or result.stdout or "").strip()
+        if err:
+            for line in err.splitlines()[:3]:
+                click.echo(f"    {line}")
+        return False
     except FileNotFoundError:
         click.echo(" ✗ (binary not found)")
         click.echo("    Build with: make gateway")
+        return False
     except subprocess.TimeoutExpired:
         click.echo(" ✗ (timed out)")
+        return False
 
 
 @setup.result_callback()

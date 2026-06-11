@@ -123,3 +123,7 @@ security_report/
 # operator-authored sweep-*.sh helpers — none of these are project
 # source.
 .smoke/
+
+# Manual run artifacts (manual-*/, plan outputs) from local harness runs.
+# Scratch only, not project source.
+outputs/

@@ -804,35 +804,19 @@ def _pid_file_running(pid_file: str) -> bool:
 
 def _pid_looks_like_gateway(pid: int) -> bool:
     """Verify that /proc/<pid>/cmdline (Linux) or `ps -o command=`
-    (macOS) advertises one of the expected DefenseClaw gateway
-    binary names. This blocks stale-PID
-    spoofing attacks where a planted gateway.pid points at an
-    unrelated long-running process (e.g. /bin/sleep)."""
-    candidates = ("defenseclaw-gateway", "defenseclaw_gateway", "defenseclaw")
-    proc_cmdline = f"/proc/{pid}/cmdline"
-    try:
-        with open(proc_cmdline, "rb") as fh:
-            raw = fh.read()
-        argv0 = raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
-    except FileNotFoundError:
-        # /proc not present (macOS) — fall back to ps.
-        try:
-            out = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "command="],
-                capture_output=True, text=True, check=False, timeout=5,
-            )
-        except (FileNotFoundError, subprocess.SubprocessError):
-            # No ps either — fail closed.
-            return False
-        if out.returncode != 0:
-            return False
-        argv0 = out.stdout.strip().split(None, 1)[0] if out.stdout.strip() else ""
-    except OSError:
-        return False
-    base = os.path.basename(argv0).strip()
-    if not base:
-        return False
-    return any(base == c or base.startswith(c) for c in candidates)
+    (macOS) advertises the DefenseClaw gateway binary name *exactly*.
+
+    Delegates to the shared, fail-closed identity check in
+    ``process_liveness`` so the setup, bootstrap and init paths all agree
+    on what "is the gateway" means. Avarice F-0101: the previous check
+    accepted any argv0 basename starting with the generic ``defenseclaw``
+    prefix, so a planted process named e.g. ``defenseclaw-not-gateway``
+    was treated as the live gateway. We now require an exact match against
+    the known gateway binary names.
+    """
+    from defenseclaw.process_liveness import process_is_gateway
+
+    return process_is_gateway(pid)
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:

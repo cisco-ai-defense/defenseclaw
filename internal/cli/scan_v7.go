@@ -98,7 +98,11 @@ func marshalScanResultV7(r *scanner.ScanResult, binaryVer string) ([]byte, error
 }
 
 func findingToV7(f *scanner.Finding, scannerName string) scanFindingV7 {
-	rid := scanner.EnsureRuleID(f, scannerName)
+	findingScanner := strings.TrimSpace(f.Scanner)
+	if findingScanner == "" {
+		findingScanner = scannerName
+	}
+	rid := scanner.EnsureRuleID(f, findingScanner)
 	ln := lineNumberFromLocation(f.Location)
 	var tags *[]string
 	if len(f.Tags) > 0 {
@@ -131,7 +135,7 @@ func findingToV7(f *scanner.Finding, scannerName string) scanFindingV7 {
 		Description: strPtrOrNil(redaction.ForSinkString(f.Description)),
 		Location:    strPtrOrNil(redaction.ForSinkString(f.Location)),
 		Remediation: strPtrOrNil(redaction.ForSinkString(f.Remediation)),
-		Scanner:     scannerName,
+		Scanner:     findingScanner,
 		Tags:        tags,
 		RuleID:      &rid,
 		LineNumber:  ln,

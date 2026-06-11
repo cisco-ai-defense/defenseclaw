@@ -46,6 +46,10 @@ class MCPSetResult:
     binary: str
     argv: tuple[str, ...]
     display_name: str
+    # Environment variables (``KEY=VAL`` from the Env field) are routed to
+    # the child process environment instead of ``--env KEY=secret`` argv so
+    # secrets never appear in process listings. See F-0803.
+    env: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -81,14 +85,20 @@ class MCPSetFormValues:
             argv.extend(("--url", url))
         if transport := self.transport.strip():
             argv.extend(("--transport", transport))
+        # Env pairs carry secrets (API keys, tokens). Keep them OUT of argv
+        # and hand them to the executor as process-environment overrides so
+        # they are not visible in `ps`/process listings. See F-0803.
+        env: list[tuple[str, str]] = []
         for pair in parse_env_pairs(self.env):
-            argv.extend(("--env", pair))
+            key, value = pair.split("=", 1)
+            env.append((key, value))
         if skip_scan_truthy(self.skip_scan):
             argv.append("--skip-scan")
         return MCPSetResult(
             binary="defenseclaw",
             argv=tuple(argv),
             display_name=f"mcp set {name}",
+            env=tuple(env),
         )
 
 

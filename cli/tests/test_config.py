@@ -114,6 +114,10 @@ class TestPaths(unittest.TestCase):
 
 
 class TestDetectEnvironment(unittest.TestCase):
+    @patch("defenseclaw.config.platform.system", return_value="Windows")
+    def test_windows(self, _mock):
+        self.assertEqual(detect_environment(), "windows")
+
     @patch("defenseclaw.config.platform.system", return_value="Darwin")
     def test_macos(self, _mock):
         self.assertEqual(detect_environment(), "macos")

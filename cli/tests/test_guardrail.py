@@ -871,7 +871,11 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("guardrail", result.output)
 
-    def test_disable_when_not_enabled(self):
+    # F-0142/F-0143: gateway restart now fails closed (non-zero exit) when the
+    # binary is missing, so mock the restart side effect — this test asserts the
+    # disable config-save + messaging, not the external restart.
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_when_not_enabled(self, _mock_restart):
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(setup, ["guardrail", "--disable"], obj=self.app)
@@ -1594,8 +1598,15 @@ class TestRestartDefenseGateway(unittest.TestCase):
             cmd = mock_run.call_args[0][0]
             self.assertEqual(cmd, ["defenseclaw-gateway", "start"])
 
+    # F-0721: a live PID is only treated as the running gateway when its
+    # identity verifies as the gateway binary. The legitimate "already
+    # running" case is simulated by stubbing that identity check True.
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
+        return_value=True,
+    )
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
-    def test_restarts_when_running(self, mock_run):
+    def test_restarts_when_running(self, mock_run, _mock_identity):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
         mock_run.return_value = MagicMock(returncode=0)
 
@@ -1608,6 +1619,23 @@ class TestRestartDefenseGateway(unittest.TestCase):
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
             self.assertEqual(cmd, ["defenseclaw-gateway", "restart"])
+
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
+        return_value=False,
+    )
+    @patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_refuses_live_unverified_pid(self, mock_run, _mock_alive, _mock_identity):
+        from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = os.path.join(tmpdir, "gateway.pid")
+            with open(pid_file, "w") as f:
+                f.write(str(os.getpid()))
+
+            self.assertFalse(_restart_defense_gateway(tmpdir))
+            mock_run.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup.subprocess.run", side_effect=FileNotFoundError)
     def test_binary_not_found(self, mock_run):

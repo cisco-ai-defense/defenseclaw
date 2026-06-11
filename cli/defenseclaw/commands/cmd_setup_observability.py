@@ -38,10 +38,12 @@ unparseable config.
 
 from __future__ import annotations
 
+import contextlib
 import json as _json
 import os
 import socket
 import ssl
+import tempfile
 import urllib.error
 import urllib.request
 from typing import Any
@@ -556,6 +558,28 @@ def _test_splunk_hec(data_dir: str, name: str, *, timeout: float) -> None:
     click.echo(f"  {'✓' if ok else '✗'} {message}")
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse 3xx redirects on the token-bearing HEC probe.
+
+    ``urllib.request.urlopen`` follows redirects by default and replays
+    request headers — including ``Authorization: Splunk <token>`` — to the
+    redirect target. A malicious/misconfigured HEC endpoint could 302 the
+    probe to an attacker host and harvest the token. Raising on any 30x
+    keeps the credential pinned to the validated origin (F-0184).
+    """
+
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(
+            req.full_url, code, "redirects disabled (token would be forwarded)",
+            headers, fp,
+        )
+
+    http_error_302 = http_error_301
+    http_error_303 = http_error_301
+    http_error_307 = http_error_301
+    http_error_308 = http_error_301
+
+
 def probe_splunk_hec(data_dir: str, name: str, *, timeout: float = 10.0) -> tuple[bool, str]:
     import yaml
 
@@ -607,8 +631,14 @@ def probe_splunk_hec(data_dir: str, name: str, *, timeout: float = 10.0) -> tupl
     if not verify_tls:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+    # Use a dedicated opener that refuses redirects so the ``Authorization:
+    # Splunk <token>`` header is never replayed to a redirect target (F-0184).
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ctx),
+        _NoRedirectHandler(),
+    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
+        with opener.open(req, timeout=timeout) as resp:  # noqa: S310
             return True, f"HEC responded {resp.status} {resp.reason}"
     except urllib.error.HTTPError as exc:
         hint = "check token/index permissions" if exc.code in (401, 403) else ""
@@ -765,11 +795,22 @@ def _slug(value: str) -> str:
 def _write_atomically(cfg_path: str, raw: dict[str, Any]) -> None:
     import yaml
 
-    tmp = cfg_path + ".tmp"
-    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-    with open(tmp, "w") as f:
-        yaml.safe_dump(raw, f, default_flow_style=False, sort_keys=False)
-    os.replace(tmp, cfg_path)
+    # Create the staging file with ``tempfile.mkstemp`` (``O_EXCL``, 0600)
+    # in the target dir instead of a predictable ``<cfg>.tmp`` name: a
+    # predictable temp path is symlink/pre-create-able by a local attacker
+    # and this config can carry HEC/OTLP tokens (F-0186).
+    directory = os.path.dirname(cfg_path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(raw, f, default_flow_style=False, sort_keys=False)
+        os.replace(tmp, cfg_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 # ---------------------------------------------------------------------------

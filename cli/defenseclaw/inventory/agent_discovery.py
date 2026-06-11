@@ -293,8 +293,12 @@ def _trusted_bin_prefixes() -> tuple[str, ...]:
         piece = piece.strip()
         if piece:
             extras.append(piece)
+    return tuple(_expand_bin_prefixes((*_TRUSTED_BIN_PREFIXES_DEFAULT, *extras)))
+
+
+def _expand_bin_prefixes(prefixes: tuple[str, ...]) -> list[str]:
     expanded: list[str] = []
-    for prefix in (*_TRUSTED_BIN_PREFIXES_DEFAULT, *extras):
+    for prefix in prefixes:
         try:
             absolute = os.path.abspath(_expand(prefix))
         except Exception:
@@ -311,7 +315,53 @@ def _trusted_bin_prefixes() -> tuple[str, ...]:
         if absolute.count(os.sep) < 1 or normalized == "":
             continue
         expanded.append(absolute)
-    return tuple(expanded)
+    return expanded
+
+
+def _default_trusted_bin_prefixes() -> frozenset[str]:
+    """The absolutised built-in (non-operator-supplied) trusted prefixes.
+
+    These are the prefixes we trust *by default*, without an operator
+    opting in via ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``. They get a stricter
+    ownership requirement (see ``_is_trusted_binary_path``).
+    """
+    return frozenset(_expand_bin_prefixes(_TRUSTED_BIN_PREFIXES_DEFAULT))
+
+
+def _bin_chain_is_system_owned(resolved: str, prefix: str) -> bool:
+    """F-0421: require root ownership along the resolved→prefix chain.
+
+    For a *default* trusted prefix (e.g. ``/opt/homebrew/bin``) we refuse to
+    exec a binary when the binary itself, or any parent directory up to and
+    including the prefix, is owner-writable while owned by a NON-root user.
+    Such a path is swappable by that (non-root) owner — including
+    operator-level malware running as that user — before the passive
+    version probe execs it. Genuine system-managed prefixes are root-owned,
+    so they pass; a user-owned Homebrew/MacPorts tree does not (operators
+    who deliberately trust a user-owned root must opt in via
+    ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``, which routes around this check).
+    """
+    prefix_norm = prefix.rstrip(os.sep)
+    current = resolved
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        try:
+            st = os.stat(current)
+        except OSError:
+            return False
+        # Owner-writable while owned by a non-root user → swappable by a
+        # non-root principal. (World/group-writable is already rejected by
+        # the per-node checks in the caller.)
+        if (st.st_mode & 0o200) and st.st_uid != 0:
+            return False
+        if current.rstrip(os.sep) == prefix_norm:
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return True
 
 
 def _trusted_prefix_dir_mode_error(st: os.stat_result) -> str | None:
@@ -434,13 +484,21 @@ def _is_trusted_binary_path(binary_path: str) -> bool:
     if bin_st.st_mode & 0o022:
         return False
     prefixes = _trusted_bin_prefixes()
+    default_prefixes = _default_trusted_bin_prefixes()
     for prefix in prefixes:
         # Both the resolved binary and the candidate need to share a
         # path-component boundary; suffix-string match would let
         # /usr/binEvil sneak past /usr/bin.
-        if resolved == prefix:
-            return True
-        if resolved.startswith(prefix.rstrip(os.sep) + os.sep):
+        if resolved == prefix or resolved.startswith(prefix.rstrip(os.sep) + os.sep):
+            # F-0421: built-in default prefixes additionally require the
+            # resolved binary and its parent chain (up to the prefix) to be
+            # root-owned. A user-owned, owner-writable binary under a
+            # default "system" prefix (the classic /opt/homebrew/bin case)
+            # is swappable by a non-root principal, so we refuse to exec it
+            # during passive discovery. Operator opt-in prefixes
+            # (DEFENSECLAW_TRUSTED_BIN_PREFIXES) keep the looser checks.
+            if prefix in default_prefixes and not _bin_chain_is_system_owned(resolved, prefix):
+                return False
             return True
     return False
 

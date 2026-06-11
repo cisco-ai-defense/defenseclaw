@@ -34,6 +34,7 @@ from defenseclaw.migrations import (
     _migrate_0_4_0_normalize_claw_mode,
     _migrate_0_5_0,
     _migrate_0_5_0_strip_codex_enforcement_keys,
+    _migrate_0_8_0,
     _parse_dotenv,
     _read_active_connector_from_yaml,
     run_migrations,
@@ -1560,6 +1561,168 @@ class TestMigrate050StripCodexEnforcementKeys(unittest.TestCase):
     def test_no_op_when_config_missing(self):
         ctx = self._ctx()
         _migrate_0_5_0_strip_codex_enforcement_keys(ctx)  # no config.yaml
+        self.assertEqual(ctx.changes, [])
+
+
+class TestMigrate080Compatibility(unittest.TestCase):
+    """0.8.0 preserves 0.7.x runtime behavior while new installs get safer
+    defaults."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dclaw-mig-080-")
+        self.data_dir = os.path.join(self.tmp, "data")
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.cfg_path = os.path.join(self.data_dir, "config.yaml")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _ctx(self) -> MigrationContext:
+        return MigrationContext(openclaw_home=self.tmp, data_dir=self.data_dir)
+
+    def _write(self, body: str) -> None:
+        with open(self.cfg_path, "w", newline="") as f:
+            f.write(body)
+
+    def _read(self) -> str:
+        with open(self.cfg_path, newline="") as f:
+            return f.read()
+
+    def test_pins_hook_fail_mode_and_legacy_sink_tls_opt_outs(self):
+        self._write(
+            "guardrail:\n"
+            "  enabled: true\n"
+            "  mode: action\n"
+            "audit_sinks:\n"
+            "  - name: local-splunk\n"
+            "    kind: splunk_hec\n"
+            "    splunk_hec:\n"
+            "      endpoint: https://splunk.local/services/collector/event\n"
+            "      verify_tls: false  # self-signed lab HEC\n"
+            "  - name: webhook\n"
+            "    kind: http_jsonl\n"
+            "    http_jsonl:\n"
+            "      url: https://hooks.local/events\n"
+            "      verify_tls: \"false\"\n"
+            "  - name: prod-splunk\n"
+            "    kind: splunk_hec\n"
+            "    splunk_hec:\n"
+            "      endpoint: https://splunk.example/services/collector/event\n"
+            "      verify_tls: true\n"
+            "  - name: explicit-new-flag\n"
+            "    kind: http_jsonl\n"
+            "    http_jsonl:\n"
+            "      url: https://hooks.example/events\n"
+            "      verify_tls: false\n"
+            "      insecure_skip_verify: false\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_8_0(ctx)
+
+        after = self._read()
+        self.assertIn("  hook_fail_mode: open\n", after)
+        self.assertIn(
+            "      verify_tls: false  # self-signed lab HEC\n"
+            "      insecure_skip_verify: true\n",
+            after,
+        )
+        self.assertIn(
+            "      verify_tls: \"false\"\n"
+            "      insecure_skip_verify: true\n",
+            after,
+        )
+        self.assertIn(
+            "      verify_tls: true\n"
+            "  - name: explicit-new-flag\n",
+            after,
+        )
+        self.assertIn(
+            "      verify_tls: false\n"
+            "      insecure_skip_verify: false\n",
+            after,
+        )
+        self.assertEqual(after.count("insecure_skip_verify: true"), 2)
+        joined = "\n".join(ctx.changes)
+        self.assertIn("hook_fail_mode", joined)
+        self.assertIn("verify_tls=false", joined)
+
+        # Idempotent: a second pass makes no byte changes.
+        ctx2 = self._ctx()
+        _migrate_0_8_0(ctx2)
+        self.assertEqual(self._read(), after)
+        self.assertFalse(any("verify_tls=false" in c for c in ctx2.changes))
+
+    def test_preserves_crlf_line_endings_for_sink_tls_insert(self):
+        self._write(
+            "guardrail:\r\n"
+            "  hook_fail_mode: open\r\n"
+            "audit_sinks:\r\n"
+            "  - name: local-splunk\r\n"
+            "    kind: splunk_hec\r\n"
+            "    splunk_hec:\r\n"
+            "      verify_tls: false\r\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_8_0(ctx)
+
+        after = self._read()
+        self.assertIn("      insecure_skip_verify: true\r\n", after)
+        self.assertEqual(after.count("\n"), after.count("\r\n"))
+
+    def test_handles_pyyaml_top_level_sequence_style(self):
+        self._write(
+            "guardrail:\n"
+            "  hook_fail_mode: open\n"
+            "audit_sinks:\n"
+            "- name: local-splunk\n"
+            "  kind: splunk_hec\n"
+            "  splunk_hec:\n"
+            "    verify_tls: false\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_8_0(ctx)
+
+        after = self._read()
+        self.assertIn(
+            "    verify_tls: false\n"
+            "    insecure_skip_verify: true\n",
+            after,
+        )
+        self.assertTrue(any("verify_tls=false" in c for c in ctx.changes))
+
+    def test_run_migrations_applies_080_after_072_bootstrap(self):
+        self._write(
+            "guardrail:\n"
+            "  enabled: true\n"
+            "audit_sinks:\n"
+            "  - name: webhook\n"
+            "    kind: http_jsonl\n"
+            "    http_jsonl:\n"
+            "      url: https://hooks.local/events\n"
+            "      verify_tls: false\n"
+        )
+
+        count = run_migrations("0.7.2", "0.8.0", self.tmp, self.data_dir)
+
+        self.assertEqual(count, 1)
+        after = self._read()
+        self.assertIn("  hook_fail_mode: open\n", after)
+        self.assertIn("      insecure_skip_verify: true\n", after)
+        cursor = _read_json(os.path.join(self.data_dir, ".migration_state.json"))
+        self.assertIn("0.7.0", cursor["applied"])
+        self.assertIn("0.8.0", cursor["applied"])
+
+    def test_no_op_when_audit_sinks_absent(self):
+        original = "guardrail:\n  hook_fail_mode: closed\n"
+        self._write(original)
+
+        ctx = self._ctx()
+        _migrate_0_8_0(ctx)
+
+        self.assertEqual(self._read(), original)
         self.assertEqual(ctx.changes, [])
 
 

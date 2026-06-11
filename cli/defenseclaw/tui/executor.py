@@ -75,17 +75,40 @@ class CommandExecutor:
         if process is not None and process.stdin is not None:
             process.stdin.write(text.encode())
 
-    async def run(self, binary: str, args: tuple[str, ...]) -> AsyncIterator[CommandEvent]:
+    async def run(
+        self,
+        binary: str,
+        args: tuple[str, ...],
+        *,
+        stdin_input: str | None = None,
+        env_overrides: dict[str, str] | None = None,
+    ) -> AsyncIterator[CommandEvent]:
+        """Run ``binary`` with ``args``.
+
+        ``stdin_input`` feeds a secret to the child over stdin instead of
+        exposing it in argv (e.g. ``keys set`` reads a hidden prompt).
+        ``env_overrides`` injects secret-bearing variables into the child
+        environment so they never appear in the process command line.
+
+        When ``stdin_input`` is supplied we always use a plain pipe rather
+        than a PTY: in canonical PTY mode the kernel would echo the fed
+        secret back onto stdout before the child disables echo, leaking it
+        into the captured output we render.
+        """
+
         if self._process is not None:
             raise CommandAlreadyRunningError("A command is already running.")
 
         resolved = _resolve_binary(binary)
         started = time.monotonic()
         self._cancelled = False
+        child_env = os.environ.copy()
+        if env_overrides:
+            child_env.update(env_overrides)
         yield CommandEvent("start", " ".join((binary, *args)))
 
-        if self.use_pty:
-            async for event in self._run_pty(resolved, args, started):
+        if self.use_pty and stdin_input is None:
+            async for event in self._run_pty(resolved, args, started, env=child_env):
                 yield event
             return
 
@@ -96,7 +119,7 @@ class CommandExecutor:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env=os.environ.copy(),
+                env=child_env,
             )
         except OSError as exc:
             yield CommandEvent("output", f"Failed to start: {exc}")
@@ -104,6 +127,10 @@ class CommandExecutor:
             return
 
         self._process = process
+        if stdin_input is not None and process.stdin is not None:
+            with contextlib.suppress(OSError):
+                process.stdin.write(stdin_input.encode())
+                await process.stdin.drain()
         try:
             assert process.stdout is not None
             while True:
@@ -125,6 +152,8 @@ class CommandExecutor:
         resolved: str,
         args: tuple[str, ...],
         started: float,
+        *,
+        env: dict[str, str] | None = None,
     ) -> AsyncIterator[CommandEvent]:
         master_fd: int | None = None
         slave_fd: int | None = None
@@ -136,7 +165,7 @@ class CommandExecutor:
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
-                env=os.environ.copy(),
+                env=os.environ.copy() if env is None else env,
             )
         except OSError as exc:
             for fd in (master_fd, slave_fd):

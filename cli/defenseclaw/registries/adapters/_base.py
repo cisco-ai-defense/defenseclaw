@@ -117,6 +117,20 @@ def http_get(
             # Manual redirect handling so we can validate every hop
             # against the SSRF policy. Cap at 5 hops to bound work.
             current_url = url
+            # F-0341: the Authorization header may only follow redirects
+            # that stay on the ORIGINAL request origin. The previous
+            # logic compared each hop against ``current_url`` (the prior
+            # hop) and re-attached the token whenever two consecutive
+            # URLs shared an origin — so a chain like
+            #   registry (auth) -> attacker/a (no auth)
+            #                    -> attacker/b (auth re-added!)
+            # let an attacker reclaim the bearer token after a single
+            # cross-origin hop. We instead latch on the first departure
+            # from the original origin: once ``auth_allowed`` flips
+            # false it never flips back, and we always compare against
+            # the original URL, never the moving ``current_url``.
+            original_url = url
+            auth_allowed = True
             hops = 0
             while resp.is_redirect and hops < 5:
                 location = resp.headers.get("Location")
@@ -138,14 +152,17 @@ def http_get(
                     raise IngestError(
                         f"redirect blocked by SSRF guard: {exc}"
                     ) from exc
-                # Defence in depth: drop Authorization on cross-origin
-                # redirects so a publisher (or compromised CDN edge)
-                # that issues a 30x to an attacker-controlled host
-                # can't harvest the operator's registry token. We
-                # match browser/curl behaviour: same scheme + host +
-                # port keeps the header, anything else strips it.
+                # Defence in depth: drop Authorization the moment a
+                # redirect leaves the original origin and keep it
+                # dropped for the rest of the chain, so a publisher (or
+                # compromised CDN edge) that bounces through an
+                # attacker host and back can't harvest the operator's
+                # registry token. Same origin == same scheme + host +
+                # port as the ORIGINAL request.
+                if not _same_origin(original_url, location):
+                    auth_allowed = False
                 next_headers = dict(base_headers)
-                if auth and _same_origin(current_url, location):
+                if auth and auth_allowed:
                     next_headers["Authorization"] = auth
                 resp.close()
                 # Re-pin the next hop without releasing the lock so a

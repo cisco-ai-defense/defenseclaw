@@ -64,7 +64,7 @@ The default local search contract is:
 - index: `defenseclaw_local`
 - source: `defenseclaw`
 - sourcetype: `defenseclaw:json`
-- local HEC endpoint: `http://127.0.0.1:8088/services/collector/event`
+- local HEC endpoint: `https://127.0.0.1:8088/services/collector/event`
 
 The app layers macros, eventtypes, saved searches, and dashboards on top of
 those signal families.

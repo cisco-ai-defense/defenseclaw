@@ -38,6 +38,7 @@ import yaml
 from defenseclaw import config as config_module
 from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.webhooks.writer import redact_webhook_url
 
 # Field names here catch both the bare form (``api_key``) and the
 # suffixed form (``virustotal_api_key``). We deliberately exclude any
@@ -259,9 +260,20 @@ def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
 
     def _walk(node, key_hint: str = "") -> None:
         if isinstance(node, dict):
+            # Header maps (``otel.headers``, audit-sink HTTP headers, …)
+            # carry bearer/API tokens under non-secret-looking keys such
+            # as ``Authorization`` and ``x-honeycomb-team``; redact every
+            # header value so none slips through (F-0221).
+            in_headers = key_hint.lower() == "headers"
+            # Webhook entries store the bearer secret inside ``url``.
+            in_webhook = key_hint.lower() == "webhooks"
             for k, v in list(node.items()):
                 if _is_secret_field(k) and isinstance(v, str) and v:
                     node[k] = mask(v) if reveal else "***"
+                elif in_headers and isinstance(v, str) and v:
+                    node[k] = mask(v) if reveal else "***"
+                elif in_webhook and k.lower() == "url" and isinstance(v, str) and v:
+                    node[k] = v if reveal else redact_webhook_url(v)
                 else:
                     _walk(v, k)
         elif isinstance(node, list):

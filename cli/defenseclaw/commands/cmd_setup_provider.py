@@ -1431,6 +1431,8 @@ def provider_add(
         )
     if ca_cert_file:
         tls_block["ca_cert_pem"] = _read_ca_cert_file(ca_cert_file)
+        # A CA pin replaces any prior skip-verify on this provider (F-0141).
+        tls_block["insecure_skip_verify"] = False
     if insecure_skip_verify:
         tls_block["insecure_skip_verify"] = True
         if app and getattr(app, "logger", None):

@@ -998,6 +998,22 @@ def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[
     return path, _load_policy(path)
 
 
+def _opa_runtime_action(runtime: str) -> str:
+    """Map a policy ``runtime`` value to the OPA ``data.json`` vocabulary.
+
+    Policy YAML may use either the enforcement vocabulary
+    (``enable``/``disable``) or the OPA vocabulary (``allow``/``block``).
+    Both ``disable`` and ``block`` mean "do not allow runtime execution"
+    and must map to ``block``; ``enable``/``allow`` (and anything
+    unrecognised) map to ``allow``. The previous
+    ``"block" if runtime == "disable" else "allow"`` silently rewrote an
+    existing ``runtime: block`` override to ``allow`` (F-0241), so a
+    bundled override meant to block runtime execution was synced as an
+    allow.
+    """
+    return "block" if str(runtime).strip().lower() in ("disable", "block") else "allow"
+
+
 def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     """Sync OPA data.json with the activated policy settings.
 
@@ -1068,7 +1084,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
         runtime = raw.get("runtime", "enable")
         file_action = raw.get("file", "none")
         install_action = raw.get("install", "none")
-        opa_runtime = "block" if runtime == "disable" else "allow"
+        opa_runtime = _opa_runtime_action(runtime)
         opa_install = install_action if install_action in ("block", "allow", "none") else "none"
         opa_actions[sev.upper()] = {
             "runtime": opa_runtime,
@@ -1088,7 +1104,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
             if not isinstance(action, dict):
                 continue
             runtime = action.get("runtime", "enable")
-            opa_runtime = "block" if runtime == "disable" else "allow"
+            opa_runtime = _opa_runtime_action(runtime)
             opa_scanner[sev.upper()] = {
                 "runtime": opa_runtime,
                 "file": action.get("file", "none"),

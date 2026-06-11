@@ -288,6 +288,25 @@ describe("http.request and http.get are patched", () => {
     expect(opts.hostname).toBe("127.0.0.1");
     expect(opts.port).toBe(guardrailPort);
   });
+
+  it("does not intercept Ollama model discovery", () => {
+    // OpenClaw probes /api/tags to discover local Ollama models. That
+    // request is metadata discovery, not generation, and proxying it through
+    // the guardrail path breaks full-live E2E when Ollama is not installed.
+    http.get(
+      {
+        hostname: "127.0.0.1",
+        port: 11434,
+        path: "/api/tags",
+      } as unknown as Parameters<typeof http.get>[0],
+      () => undefined,
+    );
+    expect(captured.length).toBeGreaterThanOrEqual(1);
+    const opts = captured[0].opts as { hostname?: string; port?: number; path?: string };
+    expect(opts.hostname).toBe("127.0.0.1");
+    expect(opts.port).toBe(11434);
+    expect(opts.path).toBe("/api/tags");
+  });
 });
 
 describe("scrubUrlForLog", () => {

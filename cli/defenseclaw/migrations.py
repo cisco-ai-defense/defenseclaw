@@ -1097,6 +1097,43 @@ def _find_top_level_block(text: str, key: str) -> re.Match[str] | None:
     )
 
 
+_TOP_LEVEL_KEY_LINE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*\s*:")
+
+
+def _find_top_level_yaml_block_body_span(text: str, key: str) -> tuple[int, int] | None:
+    """Return the body span for a top-level YAML block.
+
+    Unlike ``_find_top_level_block``, this helper treats top-level sequence
+    entries (``- name: ...``) as block body lines. PyYAML emits that style for
+    top-level lists by default, so migrations that inspect ``audit_sinks:``
+    need this broader matcher.
+    """
+    header_match = re.search(
+        r"^" + re.escape(key) + r":[ \t]*(?:#[^\n]*)?\r?\n",
+        text,
+        flags=re.MULTILINE,
+    )
+    if not header_match:
+        return None
+
+    pos = header_match.end()
+    end = pos
+    while end < len(text):
+        line_end = text.find("\n", end)
+        if line_end == -1:
+            line = text[end:]
+            next_pos = len(text)
+        else:
+            line = text[end : line_end + 1]
+            next_pos = line_end + 1
+
+        if _TOP_LEVEL_KEY_LINE_RE.match(line):
+            break
+        end = next_pos
+
+    return pos, end
+
+
 def _read_active_connector_from_yaml(cfg_path: str) -> str:
     """Best-effort extract of ``claw.mode`` / ``guardrail.connector``.
 
@@ -1667,6 +1704,172 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Migration: 0.8.0 — Preserve 0.7.x upgrade behavior under safer defaults
+# ---------------------------------------------------------------------------
+
+_AUDIT_SINK_TLS_SECTION_KEYS: tuple[str, ...] = ("splunk_hec", "http_jsonl")
+_FALSEY_YAML_BOOL_TOKENS: frozenset[str] = frozenset(("false", "no", "off", "0"))
+
+
+@dataclass(frozen=True)
+class _YamlKeyLine:
+    indent: str
+    key: str
+    value: str
+
+
+def _migrate_0_8_0(ctx: MigrationContext) -> None:
+    """Preserve explicit/implicit 0.7.x behavior during the 0.8.0 upgrade.
+
+    New installs should inherit the safer defaults added on this branch:
+    response-layer hook failures default to fail-closed, and audit sink TLS
+    verification defaults on. Existing installs are different: if a 0.7.x
+    config omitted ``guardrail.hook_fail_mode`` it had fail-open behavior, and
+    if a sink explicitly carried ``verify_tls: false`` it intentionally skipped
+    certificate verification. This migration pins those legacy choices in the
+    new explicit fields so a clean 0.7.2 -> 0.8.0 upgrade does not silently
+    change runtime behavior.
+    """
+    _migrate_0_4_0_seed_hook_fail_mode(ctx)
+    _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx)
+
+
+def _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx: MigrationContext) -> None:
+    """Map legacy sink ``verify_tls: false`` to ``insecure_skip_verify: true``.
+
+    The transport model changed from an opt-in ``verify_tls`` flag to an
+    opt-out ``insecure_skip_verify`` flag. Runtime code now intentionally
+    ignores ``verify_tls: false`` so a new config cannot accidentally disable
+    certificate verification. For upgraded configs, though, that old false
+    value was an explicit operator choice. Preserve it by adding the new
+    opt-out only under affected ``splunk_hec`` and ``http_jsonl`` sink blocks.
+
+    The rewrite is line-oriented and scoped to the top-level ``audit_sinks:``
+    block. It does not YAML round-trip the file, so comments, ordering, scalar
+    quoting, and CRLF line endings survive.
+    """
+    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    if not os.path.isfile(cfg_path):
+        return
+
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+
+    block_span = _find_top_level_yaml_block_body_span(text, "audit_sinks")
+    if block_span is None:
+        return
+
+    body_start, body_end = block_span
+    body = text[body_start:body_end]
+    new_body, inserted = _preserve_legacy_sink_tls_skip_verify_in_yaml_block(body)
+    if inserted == 0:
+        return
+
+    new_text = text[:body_start] + new_body + text[body_end:]
+    if new_text == text:
+        return
+
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+
+    ctx.changes.append(
+        "preserved legacy audit_sinks TLS behavior by adding "
+        f"insecure_skip_verify=true to {inserted} sink block(s) that had "
+        "verify_tls=false"
+    )
+
+
+def _preserve_legacy_sink_tls_skip_verify_in_yaml_block(body: str) -> tuple[str, int]:
+    """Insert ``insecure_skip_verify: true`` into affected sink sub-blocks."""
+    lines = body.splitlines(keepends=True)
+    inserted = 0
+    i = 0
+    while i < len(lines):
+        parsed = _parse_yaml_key_line(lines[i])
+        if parsed is None or parsed.key not in _AUDIT_SINK_TLS_SECTION_KEYS:
+            i += 1
+            continue
+
+        section_indent_len = len(parsed.indent)
+        j = i + 1
+        verify_idx: int | None = None
+        verify_indent = ""
+        has_insecure_skip_verify = False
+
+        while j < len(lines):
+            child = _parse_yaml_key_line(lines[j])
+            if child is None:
+                j += 1
+                continue
+
+            child_indent_len = len(child.indent)
+            if child_indent_len <= section_indent_len:
+                break
+
+            if child.key == "insecure_skip_verify":
+                has_insecure_skip_verify = True
+            elif (
+                child.key == "verify_tls"
+                and verify_idx is None
+                and _is_falsey_yaml_bool_literal(child.value)
+            ):
+                verify_idx = j
+                verify_indent = child.indent
+            j += 1
+
+        if verify_idx is not None and not has_insecure_skip_verify:
+            eol = _line_ending(lines[verify_idx])
+            if not lines[verify_idx].endswith("\n"):
+                lines[verify_idx] += eol
+                j += 1
+            lines.insert(
+                verify_idx + 1,
+                f"{verify_indent}insecure_skip_verify: true{eol}",
+            )
+            inserted += 1
+            i = j + 1
+            continue
+
+        i = max(j, i + 1)
+
+    return "".join(lines), inserted
+
+
+def _parse_yaml_key_line(line: str) -> _YamlKeyLine | None:
+    """Return basic key/value parts for a simple YAML mapping line."""
+    body = line.rstrip("\r\n")
+    stripped = body.lstrip(" \t")
+    if not stripped or stripped.startswith("#"):
+        return None
+    match = re.match(r"(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:(?P<value>.*)$", stripped)
+    if not match:
+        return None
+    return _YamlKeyLine(
+        indent=body[: len(body) - len(stripped)],
+        key=match.group("key"),
+        value=match.group("value").strip(),
+    )
+
+
+def _is_falsey_yaml_bool_literal(value: str) -> bool:
+    """Recognize YAML-style false values without evaluating arbitrary YAML."""
+    token = value.split("#", 1)[0].strip()
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
+        token = token[1:-1].strip()
+    return token.lower() in _FALSEY_YAML_BOOL_TOKENS
+
+
+def _line_ending(line: str) -> str:
+    if line.endswith("\r\n"):
+        return "\r\n"
+    if line.endswith("\n"):
+        return "\n"
+    return "\n"
+
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 
@@ -1702,6 +1905,14 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
         "trip the runtime fall-through in GatewayConfig.resolved_token already masks) "
         "— see _migrate_gateway_token_env_realign docstring",
         _migrate_gateway_token_env_realign,
+    ),
+    (
+        "0.8.0",
+        "Preserve 0.7.x upgrade behavior under safer 0.8.0 defaults: seed "
+        "guardrail.hook_fail_mode=open for existing configs that omitted it "
+        "and map legacy audit_sinks verify_tls=false to "
+        "insecure_skip_verify=true",
+        _migrate_0_8_0,
     ),
 ]
 
@@ -1778,6 +1989,24 @@ def run_migrations(
     # already in steady state.
     state = migration_state.load(data_dir)
     if state is None:
+        # ``load`` collapses several cases to ``None``. Most of them
+        # (missing / empty / corrupt cursor) are safe to bootstrap. But a
+        # cursor written by a NEWER build — schema greater than this
+        # build understands — must NOT be treated as a fresh host:
+        # bootstrapping would overwrite it with a stale schema-N cursor
+        # and erase the newer build's migration history (F-0081). Refuse
+        # so the operator can run ``defenseclaw doctor migration-state
+        # --reset`` instead of silently downgrading their state.
+        if migration_state.is_future_schema(data_dir):
+            raise migration_state.FutureSchemaError(
+                "migration cursor at "
+                f"{migration_state.state_path(data_dir)} was written by a "
+                "newer DefenseClaw build (schema "
+                f"{migration_state.detect_schema(data_dir)} > "
+                f"{migration_state.CURRENT_SCHEMA_VERSION}); refusing to "
+                "overwrite it. Run 'defenseclaw doctor migration-state "
+                "--reset' if you intend to run this older build."
+            )
         state = migration_state.bootstrap(
             None,
             from_version=from_version,
@@ -1804,15 +2033,19 @@ def run_migrations(
         if ver_t > to_t:
             continue
 
-        # In the upgrade case, also exclude entries strictly below
-        # ``from_version``. They should already be in the cursor;
-        # the bootstrap above handled that. Skipping here is a
-        # belt-and-suspenders against a malformed cursor that's
-        # missing entries we'd otherwise replay unnecessarily.
-        if not same_version_reapply and ver_t < from_t:
-            continue
-
         already_applied = migration_state.is_applied(state, ver)
+
+        # In the upgrade case, exclude entries strictly below
+        # ``from_version`` ONLY when the cursor already records them as
+        # applied. A lower-version migration that is MISSING from the
+        # cursor (e.g. one that failed on an earlier upgrade and was
+        # therefore never marked applied) must still be retried on a
+        # later upgrade rather than being skipped by the version
+        # comparison alone (F-0681). The cursor — not ``from_version`` —
+        # is the source of truth for what has run; migrations are
+        # idempotent, so re-attempting an unapplied lower version is safe.
+        if not same_version_reapply and ver_t < from_t and already_applied:
+            continue
 
         # Same-version reapply intentionally bypasses the cursor for
         # the matching version — see backward-compat note in the

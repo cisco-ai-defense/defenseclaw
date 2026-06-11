@@ -6,6 +6,7 @@ import json as _json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 
 import click
@@ -83,6 +84,51 @@ def _resolve_active_connector(cfg) -> str:
     if hasattr(cfg, "guardrail") and hasattr(cfg.guardrail, "connector"):
         return (cfg.guardrail.connector or "openclaw").strip().lower() or "openclaw"
     return "openclaw"
+
+
+def _pinned_openclaw_home(cfg) -> str:
+    """Return the realpath of the operator-confirmed original OpenClaw home
+    (``cfg.claw.openclaw_home_original``), or "" when nothing is pinned.
+
+    Init records this when it first transfers ownership of the real
+    OpenClaw home to the sandbox user, so it is the trusted anchor for the
+    privileged sandbox chown.
+    """
+    claw = getattr(cfg, "claw", None)
+    pinned = (getattr(claw, "openclaw_home_original", "") or "").strip()
+    if not pinned:
+        return ""
+    return os.path.realpath(os.path.expanduser(pinned))
+
+
+def _assert_oc_target_is_pinned_home(oc_target: str, cfg) -> None:
+    """Fail closed when the resolved ``$SANDBOX_HOME/.openclaw`` target does
+    not match the pinned original OpenClaw home (Avarice F-0161).
+
+    ``oc_target`` is ``os.path.realpath`` of an attacker-writable symlink.
+    If a local user swaps ``.openclaw`` to point elsewhere, a recursive
+    privileged chown would follow it and hand an arbitrary tree to the
+    sandbox user. We require the realpath to equal the operator-confirmed
+    home recorded at init time before any privileged operation runs.
+
+    When nothing is pinned (older configs that predate this field) we skip
+    the check to avoid a hard regression — the symlink is still created and
+    owned by the operator in that flow.
+    """
+    pinned = _pinned_openclaw_home(cfg)
+    if not pinned:
+        return
+    if os.path.realpath(oc_target) != pinned:
+        click.echo(
+            "  ERROR: refusing privileged chown of sandbox OpenClaw home.\n"
+            f"  {os.path.join('$SANDBOX_HOME', '.openclaw')} resolves to "
+            f"{os.path.realpath(oc_target)}\n"
+            f"  but the pinned original OpenClaw home is {pinned}.\n"
+            "  This looks like a symlink swap. Aborting to avoid chowning an "
+            "attacker-controlled path.",
+            err=True,
+        )
+        raise SystemExit(1)
 
 
 def _validate_sandbox_connector(cfg) -> None:
@@ -365,6 +411,12 @@ def setup_sandbox(
     #     read/write them.  Also ensure parent directories (e.g. /root/) have
     #     o+x so the sandbox user can follow the symlink to the real OpenClaw home.
     oc_target = os.path.realpath(os.path.join(sandbox_home, ".openclaw"))
+    # F-0161: $SANDBOX_HOME/.openclaw is attacker-writable (a symlink the
+    # local user controls). A recursive `chown -R sandbox:sandbox` that
+    # follows a swapped symlink would hand an arbitrary directory tree to
+    # the sandbox user. Pin the privileged chown to the operator-confirmed
+    # OpenClaw home recorded at init time; refuse if the realpath diverges.
+    _assert_oc_target_is_pinned_home(oc_target, app.cfg)
     try:
         subprocess.run(
             [*_sudo_prefix(), "chown", "-R", "sandbox:sandbox", oc_target],
@@ -627,7 +679,7 @@ def _disable_sandbox(app: AppContext) -> None:
 
     # 2. Remove iptables rules
     if app.cfg.openshell.host_networking:
-        _remove_iptables_rules(sandbox_ip, openclaw_port)
+        _remove_iptables_rules(sandbox_ip, openclaw_port, app.cfg.data_dir)
 
     # 3. Restore gateway config in openclaw.json BEFORE removing the symlink
     oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
@@ -672,7 +724,36 @@ def _disable_systemd_units() -> None:
     click.echo("  Systemd:       sandbox units stopped and disabled")
 
 
-def _remove_iptables_rules(sandbox_ip: str, openclaw_port: int) -> None:
+def _restore_route_localnet(data_dir: str) -> None:
+    """Restore ``net.ipv4.conf.all.route_localnet`` to the value the host
+    had before sandbox setup flipped it to 1.
+
+    Avarice F-0166: the disable path used to unconditionally force
+    ``route_localnet=0``, clobbering hosts that legitimately ran with it
+    enabled. The sandbox launcher records the prior value in
+    ``$data_dir/saved.route_localnet`` before changing it; we read and
+    restore that value here. When no trustworthy saved value exists we
+    leave the sysctl untouched rather than clobber unknown host state.
+    """
+    saved_path = os.path.join(data_dir, "saved.route_localnet")
+    try:
+        with open(saved_path, encoding="utf-8") as fh:
+            prior = fh.read().strip()
+    except OSError:
+        prior = ""
+    if prior not in ("0", "1"):
+        return
+    subprocess.run(
+        [*_sudo_prefix(), "sysctl", "-w", f"net.ipv4.conf.all.route_localnet={prior}"],
+        capture_output=True, check=False,
+    )
+    try:
+        os.remove(saved_path)
+    except OSError:
+        pass
+
+
+def _remove_iptables_rules(sandbox_ip: str, openclaw_port: int, data_dir: str) -> None:
     """Remove iptables NAT rules added during sandbox setup."""
     rules = [
         ["-t", "nat", "-D", "OUTPUT", "-d", "127.0.0.1",
@@ -693,10 +774,8 @@ def _remove_iptables_rules(sandbox_ip: str, openclaw_port: int) -> None:
         )
         if result.returncode == 0:
             removed += 1
-    subprocess.run(
-        [*_sudo_prefix(), "sysctl", "-w", "net.ipv4.conf.all.route_localnet=0"],
-        capture_output=True, check=False,
-    )
+    # F-0166: restore the saved prior route_localnet instead of forcing 0.
+    _restore_route_localnet(data_dir)
     if removed > 0:
         click.echo(f"  iptables:      removed {removed} NAT rules")
     else:
@@ -1074,13 +1153,47 @@ WantedBy=multi-user.target
         f.write(target_unit)
 
 
+# The exact set of files this command generates and is allowed to install
+# into root-owned system locations. F-0163: globbing ``*.service`` /
+# ``*.target`` / ``*.sh`` let an attacker who can write into
+# ``$data_dir/systemd`` or ``$data_dir/scripts`` smuggle extra units/scripts
+# into ``/etc/systemd/system`` (then run as root). We copy only these known
+# names and validate each source immediately before the privileged copy.
+_KNOWN_SYSTEMD_UNITS = ("openshell-sandbox.service", "defenseclaw-sandbox.target")
+_KNOWN_LAUNCHER_SCRIPTS = (
+    "pre-sandbox.sh",
+    "start-sandbox.sh",
+    "post-sandbox.sh",
+    "cleanup-sandbox.sh",
+)
+
+
+def _install_source_is_trusted(path: str) -> bool:
+    """Return True only when ``path`` is a safe source for a privileged copy.
+
+    Fail closed unless the source is a regular file (not a symlink), owned
+    by root or the invoking (effective) user — i.e. a file this command
+    itself generated, which an unprivileged attacker cannot forge — and not
+    writable by group or other (tamper-resistant). Avarice F-0163.
+    """
+    if os.path.islink(path) or not os.path.isfile(path):
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if st.st_uid not in (0, os.geteuid()):
+        return False
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return False
+    return True
+
+
 def _install_systemd_units(data_dir: str) -> bool:
     """Install generated systemd units and launcher scripts into system paths.
 
     Returns True if all steps succeeded.
     """
-    import glob
-
     systemd_src = os.path.join(data_dir, "systemd")
     scripts_src = os.path.join(data_dir, "scripts")
     systemd_dst = "/etc/systemd/system"
@@ -1090,22 +1203,44 @@ def _install_systemd_units(data_dir: str) -> bool:
         click.echo("    systemd install:     skipped (units not generated)")
         return False
 
+    # Resolve the fixed set of known sources that are actually present.
+    unit_sources = [
+        os.path.join(systemd_src, name)
+        for name in _KNOWN_SYSTEMD_UNITS
+        if os.path.lexists(os.path.join(systemd_src, name))
+    ]
+    script_sources = []
+    if os.path.isdir(scripts_src):
+        script_sources = [
+            os.path.join(scripts_src, name)
+            for name in _KNOWN_LAUNCHER_SCRIPTS
+            if os.path.lexists(os.path.join(scripts_src, name))
+        ]
+
+    # Validate every source up front so a single tampered file aborts the
+    # whole install before any privileged copy runs (fail closed).
+    for src in unit_sources + script_sources:
+        if not _install_source_is_trusted(src):
+            click.echo(
+                f"    systemd install:     refused — untrusted/tampered source {src}",
+                err=True,
+            )
+            return False
+
     sudo = _sudo_prefix()
     try:
-        for f in glob.glob(os.path.join(systemd_src, "*.service")) + \
-                 glob.glob(os.path.join(systemd_src, "*.target")):
+        for f in unit_sources:
             subprocess.run([*sudo, "cp", f, systemd_dst],
                            capture_output=True, check=True)
 
         subprocess.run([*sudo, "mkdir", "-p", scripts_dst],
                        capture_output=True, check=True)
-        if os.path.isdir(scripts_src):
-            for f in glob.glob(os.path.join(scripts_src, "*.sh")):
-                subprocess.run([*sudo, "cp", f, scripts_dst],
-                               capture_output=True, check=True)
-                subprocess.run([*sudo, "chmod", "755",
-                                os.path.join(scripts_dst, os.path.basename(f))],
-                               capture_output=True, check=False)
+        for f in script_sources:
+            subprocess.run([*sudo, "cp", f, scripts_dst],
+                           capture_output=True, check=True)
+            subprocess.run([*sudo, "chmod", "755",
+                            os.path.join(scripts_dst, os.path.basename(f))],
+                           capture_output=True, check=False)
 
         subprocess.run(
             [*sudo, "systemctl", "daemon-reload"],
@@ -1179,14 +1314,14 @@ if [ -L "$OC_LINK" ]; then
     if [ -z "$OC_PINNED" ] || [ "$OC_REAL" != "$OC_PINNED" ]; then
         echo "[pre-sandbox] refusing privileged repair: $OC_LINK -> $OC_REAL " \\
              "diverges from pinned $OC_PINNED" >&2
-        exit 0
+        exit 1
     fi
 elif [ -d "$OC_LINK" ]; then
     OC_REAL=$(readlink -f "$OC_LINK" || true)
     if [ -n "$OC_PINNED" ] && [ "$OC_REAL" != "$OC_PINNED" ]; then
         echo "[pre-sandbox] refusing privileged repair: $OC_LINK realpath " \\
              "$OC_REAL diverges from pinned $OC_PINNED" >&2
-        exit 0
+        exit 1
     fi
 else
     OC_REAL="$OC_LINK"

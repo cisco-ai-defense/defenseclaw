@@ -406,7 +406,35 @@ class TestChecksumVerification(unittest.TestCase):
 
         self.assertEqual(ctx.exception.code, 1)
 
-    def test_checksums_sigstore_warns_without_cosign_but_does_not_fail(self):
+    def test_checksums_sigstore_fails_closed_without_cosign(self):
+        """F-0704: a release that ships Sigstore assets must NOT be downgraded
+        to unsigned verification just because cosign is missing. The default
+        (no --allow-unverified) now fails closed."""
+        with TemporaryDirectory() as tmp:
+            checksums = os.path.join(tmp, "checksums.txt")
+            sig = os.path.join(tmp, "checksums.txt.sig")
+            cert = os.path.join(tmp, "checksums.txt.pem")
+            for path in (checksums, sig, cert):
+                with open(path, "wb") as f:
+                    f.write(b"release asset")
+
+            with patch(
+                "defenseclaw.commands.cmd_upgrade._download_optional_release_asset",
+                side_effect=[sig, cert],
+            ), patch(
+                "defenseclaw.commands.cmd_upgrade.shutil.which",
+                return_value=None,
+            ), patch(
+                "defenseclaw.commands.cmd_upgrade.subprocess.run"
+            ) as run_mock, self.assertRaises(SystemExit) as ctx:
+                _verify_checksums_sigstore("9.9.9", tmp, checksums)
+
+        self.assertEqual(ctx.exception.code, 1)
+        run_mock.assert_not_called()
+
+    def test_checksums_sigstore_allow_unverified_skips_cosign(self):
+        """With the explicit operator opt-in, a missing cosign degrades to a
+        warning instead of aborting (F-0704 escape hatch)."""
         with TemporaryDirectory() as tmp:
             checksums = os.path.join(tmp, "checksums.txt")
             sig = os.path.join(tmp, "checksums.txt.sig")
@@ -422,7 +450,9 @@ class TestChecksumVerification(unittest.TestCase):
                 "defenseclaw.commands.cmd_upgrade.shutil.which",
                 return_value=None,
             ), patch("defenseclaw.commands.cmd_upgrade.subprocess.run") as run_mock:
-                _verify_checksums_sigstore("9.9.9", tmp, checksums)
+                _verify_checksums_sigstore(
+                    "9.9.9", tmp, checksums, allow_unverified=True,
+                )
 
         run_mock.assert_not_called()
 

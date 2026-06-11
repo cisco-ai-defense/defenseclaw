@@ -45,6 +45,11 @@ from defenseclaw.config import (
     MCPServerEntry,
 )
 from defenseclaw.models import Finding, ScanResult
+from defenseclaw.registries.ssrf import (
+    SSRFError,
+    pinned_getaddrinfo,
+    resolve_and_pin,
+)
 from defenseclaw.scanner._llm_env import inject_llm_env, litellm_model
 
 if TYPE_CHECKING:
@@ -119,6 +124,60 @@ def _safe_subprocess_env(operator_env: dict | None) -> dict:
     return out
 
 
+# Launchers that resolve and run a *named package* rather than an
+# arbitrary operator/publisher-supplied script or binary. A malicious
+# manifest can at worst point one of these at a package (which the
+# scanner then inspects); it cannot turn the scan into "run this
+# absolute path / shell interpreter". Bare interpreters (bash, sh,
+# python, node -e, …), absolute paths, and relative paths are rejected
+# so the local-scan spawn cannot be coerced into arbitrary code
+# execution as the operator before any admission decision.
+_SAFE_STDIO_LAUNCHERS = frozenset({"npx", "uvx"})
+
+# argv tokens that turn an otherwise-allowlisted launcher into an
+# arbitrary-code-execution primitive (e.g. ``npx -c "<shell>"``).
+_FORBIDDEN_STDIO_FLAGS = frozenset({
+    "-c", "--command", "--eval", "-e", "--exec", "--script", "-x",
+})
+
+
+def is_safe_stdio_scan_command(command: str, args: list | None) -> bool:
+    """Return True only when *command* is an allowlisted package runner.
+
+    This is the single source of truth for "is it safe to spawn this
+    stdio MCP server during a scan" and is shared by both the registry
+    sync path (:mod:`defenseclaw.commands.cmd_registry`) and the local
+    ``mcp scan`` path so the two can never drift.
+
+    The check is a positive allowlist, not a denylist:
+
+    * the command must be a bare launcher name (no path separators) so
+      absolute / relative executable paths are rejected outright;
+    * that name must be in :data:`_SAFE_STDIO_LAUNCHERS`;
+    * no argv token may be a code-exec flag (``-c`` / ``-e`` / …).
+    """
+    if not isinstance(command, str):
+        return False
+    cmd = command.strip()
+    if not cmd:
+        return False
+    # No path components — only bare launcher names. This blocks
+    # absolute paths (``/tmp/evil``), relative paths (``./evil``,
+    # ``../evil``), and Windows-style paths regardless of host OS.
+    if "/" in cmd or "\\" in cmd:
+        return False
+    if os.sep in cmd or (os.altsep and os.altsep in cmd):
+        return False
+    if cmd.lower() not in _SAFE_STDIO_LAUNCHERS:
+        return False
+    for a in args or []:
+        if not isinstance(a, str):
+            return False
+        if a.strip() in _FORBIDDEN_STDIO_FLAGS:
+            return False
+    return True
+
+
 def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     """Translate a legacy ``InspectLLMConfig`` into the unified
     :class:`LLMConfig` shape so we can drive the shared helpers. Used
@@ -176,7 +235,13 @@ class MCPScannerWrapper:
         """
         inject_llm_env(self._llm)
 
-    def scan(self, target: str, server_entry: MCPServerEntry | None = None) -> ScanResult:
+    def scan(
+        self,
+        target: str,
+        server_entry: MCPServerEntry | None = None,
+        *,
+        allow_private: bool = False,
+    ) -> ScanResult:
         import time
         import warnings
 
@@ -215,6 +280,37 @@ class MCPScannerWrapper:
             and server_entry.command
             and not server_entry.url
         )
+
+        # Fail closed BEFORE any subprocess spawn / network call. A
+        # local stdio scan must only launch an allowlisted package
+        # runner (never an arbitrary binary / shell), and a remote scan
+        # must pass the central SSRF guard (http/https only; private,
+        # loopback, link-local and CGNAT blocked unless the operator
+        # explicitly opts in with allow_private).
+        if is_local:
+            if not is_safe_stdio_scan_command(server_entry.command, server_entry.args):
+                raise ValueError(
+                    f"refusing to scan local MCP server {server_entry.name!r}: "
+                    f"command {server_entry.command!r} is not an allowlisted "
+                    f"stdio launcher (allowed: "
+                    f"{', '.join(sorted(_SAFE_STDIO_LAUNCHERS))})"
+                )
+        pinned_target: tuple[str, str, int] | None = None
+        if not is_local:
+            try:
+                # F-0344: resolve-and-pin (not just validate). The MCP
+                # scanner SDK connects with async httpx, which re-resolves
+                # the hostname at dial time — a DNS rebind between this
+                # check and that connect would defeat a validate-only
+                # guard. We capture the vetted IP here and pin the SDK's
+                # resolver to it for the duration of the remote scan.
+                ip, host, port = resolve_and_pin(target, allow_private=allow_private)
+                pinned_target = (host, port, ip)
+            except SSRFError as exc:
+                raise ValueError(
+                    f"refusing to scan remote MCP target {target!r}: {exc}"
+                ) from exc
+
         if not is_local:
             self._inject_env()
 
@@ -249,6 +345,12 @@ class MCPScannerWrapper:
 
         if is_local:
             all_findings = self._scan_local(scanner, server_entry, analyzers)
+        elif pinned_target is not None:
+            # Pin the SDK's DNS resolution to the IP we vetted above so a
+            # rebind cannot redirect the connect to an internal address.
+            host, port, ip = pinned_target
+            with pinned_getaddrinfo(host, port, ip):
+                all_findings = self._scan_remote(scanner, target, analyzers)
         else:
             all_findings = self._scan_remote(scanner, target, analyzers)
 

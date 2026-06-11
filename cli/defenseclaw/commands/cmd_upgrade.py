@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import ipaddress
 import json
 import os
 import platform
@@ -57,12 +58,24 @@ _UPGRADE_MANIFEST_FILENAME = "upgrade-manifest.json"
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompts")
 @click.option("--version", "target_version", default=None, help="Upgrade to a specific release version (e.g. 0.3.1)")
 @click.option("--health-timeout", default=60, type=int, help="Seconds to wait for gateway health after restart")
+@click.option(
+    "--allow-unverified",
+    is_flag=True,
+    default=False,
+    help=(
+        "Proceed even when release artifacts cannot be cryptographically "
+        "verified (missing/unsigned checksums.txt, missing cosign, or "
+        "missing upgrade-manifest.json). UNSAFE: only use when you knowingly "
+        "accept the supply-chain risk."
+    ),
+)
 @pass_ctx
 def upgrade(
     app: AppContext,
     yes: bool,
     target_version: str | None,
     health_timeout: int,
+    allow_unverified: bool,
 ) -> None:
     """Upgrade DefenseClaw to the latest version.
 
@@ -127,13 +140,33 @@ def upgrade(
             f"defenseclaw-{target_version}-py3-none-any.whl",
             _UPGRADE_MANIFEST_FILENAME,
         ]
-        checksums = _download_checksums(target_version, staging_dir)
+        checksums = _download_checksums(
+            target_version, staging_dir, allow_unverified=allow_unverified,
+        )
         if checksums is None:
             checksums = _fetch_release_asset_digests(target_version)
             if checksums is None:
+                # F-0201 / F-0703: no verifiable integrity metadata is
+                # available for these artifacts. Fail closed by default so
+                # attacker-controlled release bytes never reach the install/
+                # execute sink. Operators who knowingly accept the risk can
+                # opt in with --allow-unverified.
+                if not allow_unverified:
+                    ux.err(
+                        "checksums.txt is unavailable and no GitHub release "
+                        "asset digests were found — refusing to install "
+                        "release artifacts that cannot be integrity-verified.",
+                        indent="  ",
+                    )
+                    ux.subhead(
+                        "Re-run with --allow-unverified to override (UNSAFE).",
+                        indent="    ",
+                    )
+                    raise SystemExit(1)
                 ux.warn(
                     "checksums.txt unavailable — release artifacts will be "
-                    "downloaded WITHOUT integrity verification.",
+                    "downloaded WITHOUT integrity verification "
+                    "(--allow-unverified).",
                     indent="  ",
                 )
             else:
@@ -142,7 +175,9 @@ def upgrade(
             ux.ok("Checksum manifest verified (checksums.txt)")
             _fill_missing_checksums_from_release_assets(target_version, checksums, artifact_names)
 
-        upgrade_manifest = _download_upgrade_manifest(target_version, staging_dir, checksums)
+        upgrade_manifest = _download_upgrade_manifest(
+            target_version, staging_dir, checksums, allow_unverified=allow_unverified,
+        )
         gw_binary_path, _gw_tarball_name = _download_gateway(
             target_version, os_name, arch, staging_dir, checksums,
         )
@@ -453,6 +488,7 @@ _CHECKSUMS_FILENAME = "checksums.txt"
 def _download_checksums(
     version: str,
     staging_dir: str,
+    allow_unverified: bool = False,
 ) -> dict[str, str] | None:
     """Download ``checksums.txt`` for the target release and parse it.
 
@@ -462,12 +498,19 @@ def _download_checksums(
     — the caller decides whether to warn or hard-fail. We deliberately
     parse, not just download, because a 200 with garbage body would
     otherwise look "verified" to the caller.
+
+    F-0202: a downloaded ``checksums.txt`` is only trusted once its
+    Sigstore signature verifies. ``_verify_checksums_sigstore`` fails
+    closed when the manifest is unsigned/unverifiable unless the operator
+    passed ``allow_unverified``.
     """
     dest = _download_optional_release_asset(version, _CHECKSUMS_FILENAME, staging_dir)
     if not dest:
         return None
 
-    _verify_checksums_sigstore(version, staging_dir, dest)
+    _verify_checksums_sigstore(
+        version, staging_dir, dest, allow_unverified=allow_unverified,
+    )
 
     out: dict[str, str] = {}
     try:
@@ -499,27 +542,64 @@ def _download_checksums(
     raise SystemExit(1)
 
 
-def _verify_checksums_sigstore(version: str, staging_dir: str, checksums_path: str) -> None:
-    """Verify checksums.txt with its Sigstore cert/signature when available."""
+def _fail_unsigned_checksums(message: str, allow_unverified: bool) -> None:
+    """Fail closed on an unsigned/unverifiable checksum manifest.
+
+    When ``allow_unverified`` is set the operator has knowingly opted into
+    the supply-chain risk, so we warn and let the caller proceed; otherwise
+    we abort the upgrade.
+    """
+    if allow_unverified:
+        ux.warn(f"{message} Continuing because --allow-unverified is set.", indent="  ")
+        return
+    ux.err(message, indent="  ")
+    ux.subhead("Re-run with --allow-unverified to override (UNSAFE).", indent="    ")
+    raise SystemExit(1)
+
+
+def _verify_checksums_sigstore(
+    version: str,
+    staging_dir: str,
+    checksums_path: str,
+    allow_unverified: bool = False,
+) -> None:
+    """Verify checksums.txt with its Sigstore cert/signature.
+
+    Fails closed (``SystemExit``) when the manifest cannot be
+    cryptographically authenticated, unless ``allow_unverified`` is set:
+
+    * F-0202: an unsigned manifest (no ``.sig``/``.pem`` assets, or only
+      one of them) is untrusted — a checksum match against an unsigned
+      manifest proves nothing about provenance.
+    * F-0704: a manifest that ships Sigstore assets but cannot be verified
+      because ``cosign`` is missing must not be downgraded to "unsigned".
+    """
     sig_path = _download_optional_release_asset(version, f"{_CHECKSUMS_FILENAME}.sig", staging_dir)
     cert_path = _download_optional_release_asset(version, f"{_CHECKSUMS_FILENAME}.pem", staging_dir)
 
     if not sig_path and not cert_path:
+        _fail_unsigned_checksums(
+            "checksums.txt is not signed (no Sigstore signature/certificate "
+            "assets were published) — refusing to trust an unsigned checksum "
+            "manifest.",
+            allow_unverified,
+        )
         return
     if not sig_path or not cert_path:
-        ux.warn(
-            "checksums.txt Sigstore signature assets are incomplete; "
-            "continuing without signature verification.",
-            indent="  ",
+        _fail_unsigned_checksums(
+            "checksums.txt Sigstore signature assets are incomplete — "
+            "refusing to trust a checksum manifest that cannot be verified.",
+            allow_unverified,
         )
         return
 
     cosign = shutil.which("cosign")
     if not cosign:
-        ux.warn(
+        _fail_unsigned_checksums(
             "checksums.txt Sigstore signature is present, but cosign was "
-            "not found on PATH; continuing without signature verification.",
-            indent="  ",
+            "not found on PATH — refusing to downgrade signed verification "
+            "to unsigned.",
+            allow_unverified,
         )
         return
 
@@ -592,33 +672,68 @@ def _download_optional_release_asset(
     return dest
 
 
+def _fail_missing_upgrade_manifest(message: str, allow_unverified: bool) -> None:
+    """Fail closed when the release upgrade manifest cannot be fetched.
+
+    Honors ``allow_unverified`` so an operator can deliberately upgrade a
+    release that ships no ``upgrade-manifest.json`` (e.g. a legacy build).
+    """
+    if allow_unverified:
+        ux.warn(
+            f"{message}; continuing without release-specific upgrade policy "
+            "(--allow-unverified).",
+            indent="  ",
+        )
+        return
+    ux.err(
+        f"{message} — refusing to upgrade without the release's mandatory "
+        "upgrade policy.",
+        indent="  ",
+    )
+    ux.subhead("Re-run with --allow-unverified to override (UNSAFE).", indent="    ")
+    raise SystemExit(1)
+
+
 def _download_upgrade_manifest(
     version: str,
     staging_dir: str,
     checksums: dict[str, str] | None = None,
+    allow_unverified: bool = False,
 ) -> dict[str, object] | None:
-    """Download and validate the release's upgrade contract, when present.
+    """Download and validate the release's upgrade contract.
 
     ``defenseclaw upgrade`` itself is installed on the operator's machine,
     so future releases cannot assume the local upgrader learned new rules.
     The release-owned manifest is the forward-compatibility handoff: it can
     require a newer upgrade protocol, name migrations that must be recorded
     in the cursor, and make breaking releases fail before old code guesses.
+
+    F-0203: the manifest carries mandatory upgrade policy. Silently
+    skipping it when it cannot be fetched (404, request error, non-200)
+    lets a hostile or partially-unavailable release endpoint suppress that
+    policy. We fail closed by default; operators can opt out of the policy
+    requirement with ``allow_unverified``.
     """
     url = f"{GITHUB_DL}/{version}/{_UPGRADE_MANIFEST_FILENAME}"
     dest = os.path.join(staging_dir, _UPGRADE_MANIFEST_FILENAME)
     try:
         resp = requests.get(url, timeout=15, allow_redirects=True)
     except requests.RequestException as exc:
-        ux.warn(f"Could not reach {_UPGRADE_MANIFEST_FILENAME}: {exc}", indent="  ")
+        _fail_missing_upgrade_manifest(
+            f"Could not reach {_UPGRADE_MANIFEST_FILENAME}: {exc}",
+            allow_unverified,
+        )
         return None
     if resp.status_code == 404:
+        _fail_missing_upgrade_manifest(
+            f"{_UPGRADE_MANIFEST_FILENAME} not found for release {version}",
+            allow_unverified,
+        )
         return None
     if resp.status_code != 200:
-        ux.warn(
-            f"Could not fetch {_UPGRADE_MANIFEST_FILENAME} ({resp.status_code}); "
-            "continuing without release-specific upgrade policy.",
-            indent="  ",
+        _fail_missing_upgrade_manifest(
+            f"Could not fetch {_UPGRADE_MANIFEST_FILENAME} ({resp.status_code})",
+            allow_unverified,
         )
         return None
 
@@ -1199,6 +1314,19 @@ def _poll_health(cfg, timeout_seconds: int = 60) -> None:
         api_port = cfg.gateway.api_port
         token = cfg.gateway.resolved_token()
 
+    # F-0701: the gateway bearer token authenticates to the local sidecar.
+    # ``api_bind`` is operator config and may have been tampered to point at
+    # an attacker-controlled host; never send the sidecar token anywhere but
+    # loopback. For a non-loopback bind we probe health without the token
+    # rather than leak the credential to that host.
+    if token and not _is_loopback_host(bind):
+        ux.warn(
+            f"Gateway health probe host {bind!r} is not loopback; omitting the "
+            "gateway bearer token from the health request.",
+            indent="  ",
+        )
+        token = ""
+
     client = OrchestratorClient(host=bind, port=api_port, token=token)
 
     deadline = time.monotonic() + timeout_seconds
@@ -1261,6 +1389,30 @@ def _poll_health(cfg, timeout_seconds: int = 60) -> None:
         "~/.defenseclaw/gateway.jsonl (structured)"
     )
     ux.subhead("Run:  defenseclaw-gateway status")
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True when ``host`` resolves to the local loopback interface.
+
+    Used to decide whether it is safe to attach the gateway bearer token to
+    an outbound health probe. We treat ``localhost`` and any loopback IP
+    literal (IPv4 ``127.0.0.0/8`` or IPv6 ``::1``) as loopback. Anything
+    else — including unspecified addresses like ``0.0.0.0`` and DNS names —
+    is treated as non-loopback so the token is not leaked.
+    """
+    candidate = (host or "").strip().lower()
+    if not candidate:
+        # An empty bind resolves to 127.0.0.1 in _api_bind_host.
+        return True
+    if candidate == "localhost":
+        return True
+    candidate = candidate.strip("[]")
+    if candidate == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
 
 
 def _api_bind_host(cfg) -> str:

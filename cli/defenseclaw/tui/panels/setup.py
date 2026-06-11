@@ -1132,7 +1132,8 @@ class SetupPanelModel:
         except Exception:  # noqa: BLE001
             command = WIZARD_COMMANDS.get(self.active_wizard, ())
             return "defenseclaw " + " ".join(command) if command else "defenseclaw"
-        return "defenseclaw " + " ".join(args) if args else "defenseclaw"
+        masked = mask_wizard_secret_values(self.form_fields, args)
+        return "defenseclaw " + " ".join(masked) if masked else "defenseclaw"
 
     def mark_wizard_complete(self, args: Sequence[str], *, success: bool = True) -> None:
         """Clear the per-wizard "running..." badge after a setup run.
@@ -1183,6 +1184,16 @@ class SetupPanelModel:
                 return SetupPanelAction(True)
         args = build_wizard_args(self.active_wizard, self.form_fields, self.config)
         name = WIZARD_NAMES[int(self.active_wizard)]
+        # Credentials "set" feeds the secret over stdin (hidden prompt) so
+        # it never lands in the child's argv. See F-0801.
+        secret_stdin: str | None = None
+        if (
+            self.active_wizard == SetupWizard.CREDENTIALS
+            and wizard_field_value(self.form_fields, "Action") == "set"
+        ):
+            secret_value = wizard_field_value(self.form_fields, "Secret Value", raw=True)
+            if secret_value:
+                secret_stdin = secret_value + "\n"
         follow_up: tuple[SetupCommandIntent, ...] = ()
         if self.active_wizard == SetupWizard.REGISTRIES:
             follow_up = registry_wizard_follow_up_intents(self.form_fields)
@@ -1205,6 +1216,7 @@ class SetupPanelModel:
                 category="setup",
                 origin="setup-wizard",
                 follow_up=follow_up,
+                secret_stdin=secret_stdin,
             ),
         )
 
@@ -3143,6 +3155,35 @@ def render_wizard_value(field: WizardFormField, *, reveal: bool = False) -> str:
     return mask_secret(field.value)
 
 
+def mask_wizard_secret_values(
+    fields: Sequence[WizardFormField], args: Sequence[str]
+) -> tuple[str, ...]:
+    """Redact password-field values from a rendered wizard command preview.
+
+    The wizard header echoes the exact ``defenseclaw …`` argv it will run.
+    Password fields (API keys, tokens, secrets, credentials) emit their
+    value verbatim as an argv token, so any token that equals a non-empty
+    password value — or whose ``flag=value`` tail equals one — is replaced
+    with ``<redacted>`` before display. See F-0481.
+    """
+
+    secret_values = {field.value for field in fields if field.kind == "password" and field.value}
+    if not secret_values:
+        return tuple(args)
+    masked: list[str] = []
+    for arg in args:
+        if arg in secret_values:
+            masked.append("<redacted>")
+            continue
+        if "=" in arg:
+            flag, value = arg.split("=", 1)
+            if value in secret_values:
+                masked.append(f"{flag}=<redacted>")
+                continue
+        masked.append(arg)
+    return tuple(masked)
+
+
 def redaction_desired_action(currently_disabled: bool) -> str:
     return "on" if currently_disabled else "off"
 
@@ -4237,8 +4278,10 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
         args = ["keys", "set"]
         if env_name := wizard_field_value(fields, "Env Name"):
             args.append(env_name)
-        if secret := wizard_field_value(fields, "Secret Value", raw=True):
-            args.extend(("--value", secret))
+        # The secret value is intentionally NOT placed in argv (it would be
+        # visible in process listings). ``keys set`` reads it from a hidden
+        # stdin prompt instead; the value is carried on the intent's
+        # ``secret_stdin`` and written by the executor. See F-0801.
         return tuple(args)
     return ("keys", "list", "--json")
 

@@ -560,7 +560,7 @@ wheels = [
 [[package]]
 name = "cisco-ai-skill-scanner"
 version = "2.0.11"
-source = { registry = "https://pypi.org/simple" }
+source = { url = "https://files.pythonhosted.org/packages/b4/cc/824d4033d5e684fd05a0e726fa32d2070c36bcaa9e99af49ed1014716613/cisco_ai_skill_scanner-2.0.11-py3-none-any.whl" }
 dependencies = [
     { name = "anthropic" },
     { name = "confusable-homoglyphs" },
@@ -582,10 +582,43 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "yara-x" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7d/ca/99dd38760cd5de932bf3ab13daf19de138b41f6b2267ce6df82e80834254/cisco_ai_skill_scanner-2.0.11.tar.gz", hash = "sha256:0275af93b1ad2d6c663aabd8d77527bf83678f55f640b7d021a40188b48393f0", size = 1146677, upload-time = "2026-04-30T01:54:09.246Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b4/cc/824d4033d5e684fd05a0e726fa32d2070c36bcaa9e99af49ed1014716613/cisco_ai_skill_scanner-2.0.11-py3-none-any.whl", hash = "sha256:9e0f2fd30150ab455005b9b1b288ab2047e89bf22056f7a68e9b8155c420edbe", size = 639769, upload-time = "2026-04-30T01:54:07.245Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/cc/824d4033d5e684fd05a0e726fa32d2070c36bcaa9e99af49ed1014716613/cisco_ai_skill_scanner-2.0.11-py3-none-any.whl", hash = "sha256:9e0f2fd30150ab455005b9b1b288ab2047e89bf22056f7a68e9b8155c420edbe" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=0.50,<1" },
+    { name = "azure-identity", marker = "extra == 'all'", specifier = ">=1.20,<2" },
+    { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.20,<2" },
+    { name = "boto3", marker = "extra == 'all'", specifier = ">=1.40,<2" },
+    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.40,<2" },
+    { name = "confusable-homoglyphs", specifier = ">=3.3,<4" },
+    { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "google-cloud-aiplatform", marker = "extra == 'all'", specifier = ">=1.130,<2" },
+    { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.130,<2" },
+    { name = "google-genai", marker = "extra == 'all'", specifier = ">=1.60,<2" },
+    { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.60,<2" },
+    { name = "google-generativeai", marker = "extra == 'all'", specifier = ">=0.8,<1" },
+    { name = "google-generativeai", marker = "extra == 'google'", specifier = ">=0.8,<1" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "litellm", specifier = ">=1.83.7,<2" },
+    { name = "magika", specifier = ">=1.0,<2" },
+    { name = "oletools", specifier = ">=0.60,<1" },
+    { name = "openai", specifier = ">=2.0,<3" },
+    { name = "pdfid", specifier = ">=1.1,<2" },
+    { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "python-dotenv", specifier = ">=1.0,<2" },
+    { name = "python-frontmatter", specifier = ">=1.1,<2" },
+    { name = "python-multipart", specifier = ">=0.0.22,<0.1" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "rich", specifier = ">=14.0,<15" },
+    { name = "tabulate", specifier = ">=0.9,<1" },
+    { name = "textual", specifier = ">=7.0,<8" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
+    { name = "yara-x", specifier = ">=1.10,<2" },
+]
+provides-extras = ["all", "azure", "bedrock", "google", "vertex"]
 
 [[package]]
 name = "click"
@@ -835,7 +868,7 @@ wheels = [
 
 [[package]]
 name = "defenseclaw"
-version = "0.7.0"
+version = "0.8.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
@@ -845,6 +878,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "requests" },
     { name = "rich" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.optional-dependencies]
@@ -871,13 +905,14 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.34" },
     { name = "cisco-ai-mcp-scanner", marker = "python_full_version >= '3.11'", specifier = ">=4.7.2" },
-    { name = "cisco-ai-skill-scanner", specifier = ">=2.0.11" },
+    { name = "cisco-ai-skill-scanner", url = "https://files.pythonhosted.org/packages/b4/cc/824d4033d5e684fd05a0e726fa32d2070c36bcaa9e99af49ed1014716613/cisco_ai_skill_scanner-2.0.11-py3-none-any.whl" },
     { name = "click", specifier = "==8.3.1" },
     { name = "google-auth", marker = "extra == 'vertex'", specifier = ">=2.30" },
     { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.60" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "requests", specifier = "==2.33.0" },
     { name = "rich", specifier = ">=13.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.1" },
 ]
 provides-extras = ["vertex"]
 

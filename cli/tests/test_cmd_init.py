@@ -669,6 +669,7 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
     def test_init_no_token_shows_local(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which, _mock_gw):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
+        os.environ.pop("DEFENSECLAW_GATEWAY_TOKEN", None)
         os.environ.pop("OPENCLAW_GATEWAY_TOKEN", None)
 
         app = AppContext()
@@ -1420,6 +1421,10 @@ class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
 
         cfg = MagicMock()
         cfg.data_dir = self.data_dir
+        # F-0162: the idempotency fast-path now validates the .openclaw
+        # realpath against the pinned original home, so it must be set to the
+        # symlink target for the legitimate (untampered) case to succeed.
+        cfg.claw.openclaw_home_original = self.oc_home
 
         result = _integrate_openclaw_home(cfg, self.sandbox_home)
         self.assertTrue(result)

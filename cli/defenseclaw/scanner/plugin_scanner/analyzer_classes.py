@@ -40,6 +40,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     check_lockfile_presence,
     dir_exists,
     make_finding,
+    resolve_entrypoint_files,
 )
 from defenseclaw.scanner.plugin_scanner.types import Finding
 
@@ -103,6 +104,14 @@ class SourceAnalyzer:
 
     def analyze(self, ctx: ScanContext) -> list[Finding]:
         findings: list[Finding] = []
+        # Force-include manifest-declared entrypoints (package.json
+        # bin/main values, connector-manifest entrypoints) so an
+        # extensionless launcher or an entrypoint under a skipped dir
+        # (e.g. node_modules) is still source- and LLM-scanned
+        # (F-0383 / F-0809 / F-0384).
+        force_include: list[str] = []
+        if ctx.manifest is not None:
+            force_include = resolve_entrypoint_files(ctx.plugin_dir, ctx.manifest.entrypoints)
         # Mutate ctx.source_files in place so the LLM analyzer (and the
         # meta LLM analyzer) can see the actual plugin source. Before
         # this change ``ctx.source_files`` stayed empty for the entire
@@ -115,6 +124,7 @@ class SourceAnalyzer:
             ctx.capabilities,
             ctx.profile,
             source_files_out=ctx.source_files,
+            force_include=force_include,
         )
         ctx.metadata["file_count"] = file_count
         ctx.metadata["total_size_bytes"] = total_bytes

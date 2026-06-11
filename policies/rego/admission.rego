@@ -173,9 +173,30 @@ _path_matches_provenance(entry) if {
 	count(entry.source_path_contains) == 0
 }
 
+# F-0543: match provenance markers by whole path *components* (a contiguous
+# slice of components), not a bare substring. The old
+# `contains(lower(input.path), lower(prefix))` test accepted attacker paths
+# whose components merely embedded the marker (e.g. `.defenseclaw-evil`
+# satisfying a `.defenseclaw` allow, or `.codex-plugin/defenseclaw` placed
+# anywhere). This mirrors the Python `_matches_provenance` component matcher.
 _path_matches_provenance(entry) if {
 	some prefix in entry.source_path_contains
-	contains(lower(input.path), lower(prefix))
+	_provenance_prefix_matches(input.path, prefix)
+}
+
+_provenance_prefix_matches(path, prefix) if {
+	path_comps := _path_components(path)
+	prefix_comps := _path_components(prefix)
+	n := count(prefix_comps)
+	n > 0
+	count(path_comps) >= n
+	some i in numbers.range(0, count(path_comps) - n)
+	array.slice(path_comps, i, i + n) == prefix_comps
+}
+
+_path_components(value) := comps if {
+	normalized := replace(lower(value), "\\", "/")
+	comps := [part | some part in split(normalized, "/"); part != ""]
 }
 
 _is_allow_bypassed if {

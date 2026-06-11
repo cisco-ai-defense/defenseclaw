@@ -36,7 +36,7 @@
       <title>Candidate investigations</title>
       <table>
         <search>
-          <query>`dcso_workbench_candidates($run_id$,$session_id$,$risk_state$)` | table run_id session_id risk_state risk_reason deny_count runtime_error_count session_stuck_count session_retried_count queue_pressure_count max_cost_usd max_duration_ms last_seen</query>
+          <query>`dcso_workbench_candidates($run_id|s$,$session_id|s$,$risk_state|s$)` | table run_id session_id risk_state risk_reason deny_count runtime_error_count session_stuck_count session_retried_count queue_pressure_count max_cost_usd max_duration_ms last_seen</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -55,7 +55,7 @@
       <title>Summary header</title>
       <table>
         <search>
-          <query>`dcso_workbench_summary($run_id$,$session_id$,$risk_state$)` | eval selected_investigation=run_id . " / " . session_id | table selected_investigation risk_state_label risk_reason first_seen last_seen deny_count runtime_error_count session_stuck_count session_retried_count queue_pressure_count max_cost_usd max_duration_ms risk_rule_ids</query>
+          <query>`dcso_workbench_summary($run_id|s$,$session_id|s$,$risk_state|s$)` | eval selected_investigation=run_id . " / " . session_id | table selected_investigation risk_state_label risk_reason first_seen last_seen deny_count runtime_error_count session_stuck_count session_retried_count queue_pressure_count max_cost_usd max_duration_ms risk_rule_ids</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -72,7 +72,7 @@
       <title>Policy decision summary</title>
       <table>
         <search>
-          <query>`dcso_workbench_policy_summary($run_id$,$session_id$)` | table run_id session_id action status severity policy_event_count policy_ids dispositions reasons actors targets</query>
+          <query>`dcso_workbench_policy_summary($run_id|s$,$session_id|s$)` | table run_id session_id action status severity policy_event_count policy_ids dispositions reasons actors targets</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -89,7 +89,7 @@
       <title>Correlated event timeline</title>
       <table>
         <search>
-          <query>`dcso_workbench_timeline($run_id$,$session_id$)` | table timestamp evidence_family event_type component action status severity actor target message request_id trace_id</query>
+          <query>`dcso_workbench_timeline($run_id|s$,$session_id|s$)` | table timestamp evidence_family event_type component action status severity actor target message request_id trace_id</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -106,7 +106,7 @@
       <title>Runtime evidence</title>
       <table>
         <search>
-          <query>`dcso_workbench_runtime_evidence($run_id$,$session_id$)` | table timestamp event_type component action status severity target error_code request_id trace_id message details</query>
+          <query>`dcso_workbench_runtime_evidence($run_id|s$,$session_id|s$)` | table timestamp event_type component action status severity target error_code request_id trace_id message details</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -121,7 +121,7 @@
       <title>Diagnostics and health</title>
       <table>
         <search>
-          <query>`dcso_workbench_diagnostics_health($run_id$,$session_id$)` | table timestamp event_type component action status severity target queue_name retry_count health_state wait_ms queue_depth message details</query>
+          <query>`dcso_workbench_diagnostics_health($run_id|s$,$session_id|s$)` | table timestamp event_type component action status severity target queue_name retry_count health_state wait_ms queue_depth message details</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -138,7 +138,7 @@
       <title>Metrics and cost</title>
       <table>
         <search>
-          <query>`dcso_workbench_metrics_cost($run_id$,$session_id$)` | table run_id session_id session_key max_cost_usd max_duration_ms total_tokens providers models usage_event_types</query>
+          <query>`dcso_workbench_metrics_cost($run_id|s$,$session_id|s$)` | table run_id session_id session_key max_cost_usd max_duration_ms total_tokens providers models usage_event_types</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -153,7 +153,7 @@
       <title>Usage evidence</title>
       <table>
         <search>
-          <query>`dcso_workbench_usage_evidence($run_id$,$session_id$)` | table timestamp event_type provider model cost token_count duration_ms metric_name metric_value status severity message</query>
+          <query>`dcso_workbench_usage_evidence($run_id|s$,$session_id|s$)` | table timestamp event_type provider model cost token_count duration_ms metric_name metric_value status severity message</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -170,7 +170,7 @@
       <title>Trace panel</title>
       <table>
         <search>
-          <query>`dcso_workbench_trace_spans($run_id$,$session_id$)` | table timestamp trace_id span_id parent_span_id span_name duration_ms status component message</query>
+          <query>`dcso_workbench_trace_spans($run_id|s$,$session_id|s$)` | table timestamp trace_id span_id parent_span_id span_name duration_ms status component message</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -185,7 +185,7 @@
       <title>Recommendations</title>
       <table>
         <search>
-          <query>`dcso_workbench_recommendations($run_id$,$session_id$)` | table recommendation_key why next_check search_target pivot_target operator_action</query>
+          <query>`dcso_workbench_recommendations($run_id|s$,$session_id|s$)` | table recommendation_key why next_check search_target pivot_target operator_action</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
