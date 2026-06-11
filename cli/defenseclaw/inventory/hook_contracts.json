@@ -165,7 +165,7 @@
       "version_probe": "hermes --version",
       "contracts": [
         {
-          "contract_id": "hermes-hooks-v2",
+          "contract_id": "hermes-hooks-v1",
           "agent_version": {
             "min_inclusive": "0.11.0",
             "max_exclusive": ""
@@ -194,6 +194,7 @@
           ],
           "supports_traceparent": true,
           "native_otlp": false,
+          "content_envelope_key": "extra",
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -205,44 +206,9 @@
             "scope": "user"
           },
           "notes": [
-            "hermes-hooks-v2 expands DefenseClaw coverage from pre_tool_call only (v1) to the full shell-hook lifecycle: pre_llm_call (context injection), pre_tool_call (block), post_tool_call/post_llm_call (observe), and on_session_start/on_session_end/subagent_stop (telemetry). The dedicated hermes profile lifts prompt/result content out of the extra envelope so prompt and tool_result rules inspect Hermes payloads.",
-            "pre_tool_call is the only blockable event; pre_llm_call injects context; Hermes never blocks on exit code or hook timeout so there is no fail-closed surface.",
+            "Covers the full shell-hook lifecycle: pre_llm_call (context injection), pre_tool_call (block), post_tool_call/post_llm_call (observe), and on_session_start/on_session_end/subagent_stop (telemetry). Hermes nests prompt/result content under the per-event extra envelope; the generic decoder's content_envelope_key fallback lifts it so prompt and tool_result rules inspect Hermes payloads.",
+            "pre_tool_call is the only blockable event; pre_llm_call injects context; confirm verdicts downgrade to a systemMessage alert (no native ask surface); Hermes never blocks on exit code or hook timeout so there is no fail-closed surface.",
             "Multi-event registration requires hooks_auto_accept in cli-config.yaml on non-TTY/gateway runs; Setup writes it and the managed-backup heals it."
-          ]
-        },
-        {
-          "contract_id": "hermes-hooks-v1",
-          "agent_version": {
-            "min_inclusive": "0.11.0",
-            "max_exclusive": ""
-          },
-          "default_for_unversioned": false,
-          "hook_script_version": "v6",
-          "hook_script": "hermes-hook.sh",
-          "hook_config_path_templates": [
-            "~/.hermes/config.yaml"
-          ],
-          "response_field": "hook_output",
-          "events": [
-            "pre_tool_call"
-          ],
-          "aid_surfaces": [
-            "tool_call"
-          ],
-          "supports_traceparent": true,
-          "native_otlp": false,
-          "capabilities": {
-            "can_block": true,
-            "can_ask_native": false,
-            "ask_events": [],
-            "block_events": [
-              "pre_tool_call"
-            ],
-            "supports_fail_closed": false,
-            "scope": "user"
-          },
-          "notes": [
-            "Hermes Agent 0.11.0 introduced shell hooks for pre_tool_call and related lifecycle callbacks. v1 wires pre_tool_call only; retained for version pinning compatibility - v2 is the default."
           ]
         }
       ]

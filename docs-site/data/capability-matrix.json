@@ -94,7 +94,7 @@
         "scope": "user"
       },
       "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
-      "notes": "Hooks live in ~/.hermes/config.yaml (hermes-hooks-v2, dedicated profile). Full shell-hook lifecycle: pre_tool_call blocks, pre_llm_call injects context, post_tool_call/post_llm_call/on_session_start/on_session_end/subagent_stop observe. Setup sets hooks_auto_accept so events register on non-TTY/gateway runs. Discovery surfaces for MCP, skills, plugins."
+      "notes": "Hooks live in ~/.hermes/config.yaml (hermes-hooks-v1; generic decoder lifts content from the per-event extra envelope). Full shell-hook lifecycle: pre_tool_call blocks, pre_llm_call injects context, post_tool_call/post_llm_call/on_session_start/on_session_end/subagent_stop observe. Setup sets hooks_auto_accept so events register on non-TTY/gateway runs. Discovery surfaces for MCP, skills, plugins."
     },
     {
       "id": "opencode",

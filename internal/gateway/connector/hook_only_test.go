@@ -176,7 +176,7 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 }
 
 // TestHermesSetup_WritesFullLifecycleAndAutoAccept pins the
-// hermes-hooks-v2 setup contract: Setup must register every lifecycle
+// hermes-hooks-v1 setup contract: Setup must register every lifecycle
 // event in the cli-config.yaml `hooks:` block AND set hooks_auto_accept
 // so the hooks actually register on non-TTY/gateway runs (Hermes
 // silently skips un-accepted hooks there). Teardown must heal a

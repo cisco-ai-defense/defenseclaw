@@ -10,6 +10,11 @@ keywords:
 
 The OpenCode connector wires DefenseClaw into [opencode](https://opencode.ai). Unlike the shell-hook connectors, opencode has no command-hook config surface — it auto-loads JavaScript/TypeScript plugins from `~/.config/opencode/plugins/` at startup. DefenseClaw installs a single, dependency-free **bridge plugin** (`defenseclaw.js`) there. The plugin's `tool.execute.before` hook forwards every tool call to the local DefenseClaw gateway and **throws** — aborting the tool, exactly like opencode's own `.env`-protection example — whenever the gateway returns a block decision. opencode continues to talk directly to its configured upstream model provider; DefenseClaw never inserts an LLM proxy.
 
+<Video
+  src="opencode"
+  caption="Three commands against one opencode session (v1.17.3) with the DefenseClaw bridge plugin loaded: (1) `echo hello` runs through as action=allow / severity=NONE and prints `hello`; (2) `chmod 777 /tmp/dc_test` trips a CRITICAL finding → the bridge's tool.execute.before hook throws new Error(reason), so opencode aborts the tool and strikes the command out without ever running it; (3) `cat /etc/shadow` raises another sensitive-file finding. Each tool.execute.before / tool.execute.after event streams into the Splunk Connector Activity dashboard filtered to connector=opencode on the right."
+/>
+
 <Callout type="info">
 **No `opencode.json` edit, no shell shim.** Local plugins under `~/.config/opencode/plugins/` are loaded automatically, so installing the connector is just writing one file. The bridge uses the runtime's global `fetch`, so it needs no npm dependencies (and never triggers a `bun install`). Because the mechanism is a JavaScript plugin rather than a shell script, OpenCode is cross-platform — including Windows — without the native `defenseclaw hook` binary the shell-hook connectors rely on.
 </Callout>

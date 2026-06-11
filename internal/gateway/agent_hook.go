@@ -1158,7 +1158,22 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 		toolName = "message"
 	}
 	if toolName == "" {
-		toolName = "tool"
+		// Label-only mapping for lifecycle events that carry no tool:
+		// session start/end → "session", subagent stop → "subagent",
+		// model-response events → "message". Rule evaluation dispatches
+		// on event classifiers, not ToolName, so this only improves
+		// span/log/audit labels (precedent: the antigravity profile
+		// already labels Stop as "session").
+		switch canonicalEvent(event) {
+		case "onsessionstart", "onsessionend", "sessionstart", "sessionend":
+			toolName = "session"
+		case "subagentstop":
+			toolName = "subagent"
+		case "postllmcall":
+			toolName = "message"
+		default:
+			toolName = "tool"
+		}
 	}
 
 	args := firstValue(payload, "tool_input", "toolInput", "tool_args", "toolArgs", "args", "arguments")
@@ -1219,6 +1234,7 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 
 func normalizeAgentHookRequestWithProfile(connectorName string, payload map[string]interface{}, profile connector.HookProfile) agentHookRequest {
 	req := normalizeAgentHookRequest(connectorName, payload)
+	req.Content = applyContentEnvelopeFallback(req.Content, payload, profile.ContentEnvelopeKey)
 	if profile.Decode == nil {
 		return req
 	}
@@ -1263,6 +1279,35 @@ func normalizeAgentHookRequestWithProfile(connectorName string, payload map[stri
 		req.Payload = decoded.Payload
 	}
 	return req
+}
+
+// applyContentEnvelopeFallback recovers inspectable content that a
+// connector nests one level inside a declared envelope object (hermes
+// nests prompt/result text under "extra"). It runs only after every
+// top-level content lookup in normalizeAgentHookRequest missed, and it
+// opens exactly the one sub-object the connector's hook contract
+// declares via ContentEnvelopeKey — never a recursive scan, because
+// tool inputs/results carry attacker-influenced nested JSON and any
+// broader search would let a planted decoy field shadow the real
+// content. Each enveloped event populates exactly one of the expected
+// keys (hermes: user_message on pre_llm_call, result on
+// post_tool_call, assistant_response on post_llm_call, child_summary
+// on subagent_stop), so a single shared key list — prompt-ish names
+// first — resolves the right field without per-event dispatch.
+func applyContentEnvelopeFallback(content string, payload map[string]interface{}, envelopeKey string) string {
+	if content != "" || envelopeKey == "" {
+		return content
+	}
+	env := objectAt(payload, envelopeKey)
+	if env == nil {
+		return content
+	}
+	return firstString(env,
+		"user_message", "prompt", "message",
+		"result", "tool_result", "output",
+		"assistant_response", "response",
+		"child_summary",
+	)
 }
 
 func extractAgentIdentityFromHookPayload(payload map[string]interface{}) (agentID, agentName, agentType string) {
@@ -1951,6 +1996,12 @@ func isResultLikeEvent(event string) bool {
 		"postreadcode", "postwritecode", "postruncommand", "postmcptooluse",
 		"aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit",
 		"afteragentresponse", "afteragentthought", "afteragent", "aftermodel",
+		// hermes post_llm_call carries the model's final response
+		// (extra.assistant_response); classifying it result-like routes
+		// it through tool_result inspection like antigravity's
+		// PostInvocation below. It stays non-blockable: it is absent
+		// from hermes BlockEvents, so verdicts demote to would_block.
+		"postllmcall",
 		// opencode plugin hook: tool.execute.after fires after a tool
 		// returns; observe-only telemetry routed as a tool_result.
 		"toolexecuteafter",

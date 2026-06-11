@@ -350,6 +350,19 @@ type HookProfile struct {
 	CompatibilityStatus     string
 	CompatibilityReason     string
 
+	// ContentEnvelopeKey names the single nested payload object this
+	// connector hides inspectable content in (hermes nests prompt /
+	// result text under "extra"). When set, the generic decoder —
+	// after every top-level content lookup misses — opens exactly
+	// this one declared sub-object and re-runs the expected
+	// content-key search inside it. Empty for flat-payload
+	// connectors, which therefore never take that path. Deliberately
+	// a single declared key, not a recursive scan: tool inputs /
+	// results carry attacker-influenced nested JSON, so the only
+	// sub-object ever opened is the one declared in the audited
+	// contract.
+	ContentEnvelopeKey string
+
 	// Profile-driven dispatch callbacks. All optional — the
 	// unified dispatch helper consults these fields when present
 	// (codex / claudecode set them today); generic connectors leave

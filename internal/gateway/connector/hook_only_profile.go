@@ -49,9 +49,32 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 	reason := connectorReasonForProfile(in.Req.ConnectorName, in.Action, in.Req.ToolName, in.Reason)
 	var output map[string]interface{}
 	switch in.Req.ConnectorName {
-	// NOTE: hermes is intentionally absent — it owns a dedicated
-	// profile (hermes_hook_profile.go: hermesProfileRespond) wired in
-	// hookOnlyConnector.HookProfile, so it no longer shares this switch.
+	case "hermes":
+		// Hermes shell-hook lifecycle (cli-config.yaml `hooks:` block):
+		//
+		//	pre_llm_call     → inspect prompt; inject {"context":...}
+		//	pre_tool_call    → inspect tool args; BLOCK (only blockable event)
+		//	post_tool_call   → inspect tool output (observe)
+		//	post_llm_call    → inspect model output (observe)
+		//	on_session_*     → lifecycle telemetry (observe)
+		//	subagent_stop    → delegate-task telemetry (observe)
+		//
+		// Hermes reads a blocking stdout response only for
+		// pre_tool_call and a {"context":...} injection for
+		// pre_llm_call; it ignores the stdout of every other event, so
+		// those return a nil body. Hermes accepts both
+		// {"action":"block","message"} (its canonical shape) and
+		// {"decision":"block","reason"} (the Claude-Code style it
+		// normalizes internally); we emit the latter for wire parity
+		// with the legacy shaper (hookOutputFor) and the pinned
+		// hermes/verdict-blocked golden. Confirm verdicts fall through
+		// to the shared {"systemMessage":...} epilogue below (hermes
+		// has no native ask surface).
+		if in.Action == "block" {
+			output = map[string]interface{}{"decision": "block", "reason": reason}
+		} else if canonicalHookEvent(in.Req.HookEventName) == "prellmcall" && in.AdditionalContext != "" {
+			output = map[string]interface{}{"context": in.AdditionalContext}
+		}
 	case "cursor":
 		switch in.Action {
 		case "block":

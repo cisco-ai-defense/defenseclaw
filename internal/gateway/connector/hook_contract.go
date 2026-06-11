@@ -64,7 +64,13 @@ type HookContract struct {
 	Capabilities            HookCapability
 	SupportsTraceparent     bool
 	NativeOTLP              bool
-	Notes                   []string
+	// ContentEnvelopeKey names the single nested payload object this
+	// connector hides inspectable content in (hermes: "extra"). Empty
+	// for flat-payload connectors. See HookProfile.ContentEnvelopeKey
+	// for the generic-decoder semantics and the no-recursive-scan
+	// rationale.
+	ContentEnvelopeKey string
+	Notes              []string
 }
 
 // HookContractResolution records how a raw agent --version string mapped to a
@@ -188,78 +194,54 @@ var builtinHookContracts = map[string][]HookContract{
 			"Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
 		},
 	}},
-	"hermes": {
-		{
-			Connector:               "hermes",
-			ContractID:              "hermes-hooks-v2",
-			MinAgentVersion:         "0.11.0",
-			DefaultForUnversioned:   true,
-			HookScriptVersion:       "v6",
-			HookConfigPathTemplates: []string{"~/.hermes/config.yaml"},
-			ResponseFieldName:       "hook_output",
-			// Hermes' shell-hook surface (cli-config.yaml `hooks:` block).
-			// Only pre_tool_call can block; pre_llm_call injects context;
-			// the remaining events are observe-only telemetry that the
-			// dedicated hermes profile (hermes_hook_profile.go) decodes
-			// for inspection/audit. Order follows the agent lifecycle.
-			Events: []string{
-				"pre_llm_call",
-				"pre_tool_call",
-				"post_tool_call",
-				"post_llm_call",
-				"on_session_start",
-				"on_session_end",
-				"subagent_stop",
-			},
-			// pre_llm_call → prompt; pre/post_tool_call → tool_call/tool_result;
-			// session + subagent lifecycle → event_content (audit envelope).
-			AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
-			Capabilities: HookCapability{
-				CanBlock:     true,
-				CanAskNative: false,
-				// Only pre_tool_call honors a blocking stdout response;
-				// pre_llm_call can inject context but cannot veto, and the
-				// post/session/subagent events are read-only on Hermes' side
-				// (their stdout is ignored). Hermes never blocks on exit code
-				// or hook timeout, so SupportsFailClosed stays false.
-				BlockEvents:        []string{"pre_tool_call"},
-				SupportsFailClosed: false,
-				Scope:              "user",
-			},
-			SupportsTraceparent: true,
-			Notes: []string{
-				"hermes-hooks-v2 expands DefenseClaw coverage from pre_tool_call only (v1) to the full shell-hook lifecycle: pre_llm_call (context injection), pre_tool_call (block), post_tool_call/post_llm_call (observe), and on_session_start/on_session_end/subagent_stop (telemetry). The dedicated hermes profile (hermes_hook_profile.go) lifts prompt/result content out of the `extra` envelope so prompt and tool_result rules actually inspect Hermes payloads.",
-				"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. pre_llm_call injects via {\"context\":...}. Non-zero exit codes and hook timeouts only log a warning upstream, so there is no fail-closed surface.",
-				"Multi-event registration requires hooks_auto_accept in cli-config.yaml on non-TTY/gateway runs; otherwise Hermes prompts for per-(event,command) consent on first use and silently skips unaccepted hooks. Setup writes hooks_auto_accept so all events register, and the managed-backup heals it.",
-			},
+	"hermes": {{
+		Connector:               "hermes",
+		ContractID:              "hermes-hooks-v1",
+		MinAgentVersion:         "0.11.0",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.hermes/config.yaml"},
+		ResponseFieldName:       "hook_output",
+		// Hermes' shell-hook surface (cli-config.yaml `hooks:` block).
+		// Only pre_tool_call can block; pre_llm_call injects context;
+		// the remaining events are observe-only telemetry decoded for
+		// inspection/audit. Order follows the agent lifecycle.
+		Events: []string{
+			"pre_llm_call",
+			"pre_tool_call",
+			"post_tool_call",
+			"post_llm_call",
+			"on_session_start",
+			"on_session_end",
+			"subagent_stop",
 		},
-		{
-			// Retained for explicit version pinning (opts.HookContractID =
-			// "hermes-hooks-v1"). v2 is DefaultForUnversioned and listed
-			// first, so version resolution always prefers v2; v1 is only
-			// reachable via an explicit pin and keeps older setups stable.
-			Connector:               "hermes",
-			ContractID:              "hermes-hooks-v1",
-			MinAgentVersion:         "0.11.0",
-			DefaultForUnversioned:   false,
-			HookScriptVersion:       "v6",
-			HookConfigPathTemplates: []string{"~/.hermes/config.yaml"},
-			ResponseFieldName:       "hook_output",
-			Events:                  []string{"pre_tool_call"},
-			AIDSurfaces:             []string{"tool_call"},
-			Capabilities: HookCapability{
-				CanBlock:           true,
-				CanAskNative:       false,
-				BlockEvents:        []string{"pre_tool_call"},
-				SupportsFailClosed: false,
-				Scope:              "user",
-			},
-			SupportsTraceparent: true,
-			Notes: []string{
-				"Hermes Agent 0.11.0 introduced shell hooks for pre_tool_call and related lifecycle callbacks. v1 wires pre_tool_call only; retained for version pinning compatibility — v2 is the default.",
-			},
+		// pre_llm_call → prompt; pre/post_tool_call → tool_call/tool_result;
+		// session + subagent lifecycle → event_content (audit envelope).
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
+		Capabilities: HookCapability{
+			CanBlock:     true,
+			CanAskNative: false,
+			// Only pre_tool_call honors a blocking stdout response;
+			// pre_llm_call can inject context but cannot veto, and the
+			// post/session/subagent events are read-only on Hermes' side
+			// (their stdout is ignored). Hermes never blocks on exit code
+			// or hook timeout, so SupportsFailClosed stays false.
+			BlockEvents:        []string{"pre_tool_call"},
+			SupportsFailClosed: false,
+			Scope:              "user",
 		},
-	},
+		SupportsTraceparent: true,
+		// Hermes nests inspectable content (prompt, tool result, model
+		// response, child summary) inside the per-event `extra` object;
+		// the generic decoder opens this one declared envelope when
+		// every top-level content lookup misses.
+		ContentEnvelopeKey: "extra",
+		Notes: []string{
+			"Covers the full shell-hook lifecycle: pre_llm_call (context injection), pre_tool_call (block), post_tool_call/post_llm_call (observe), and on_session_start/on_session_end/subagent_stop (telemetry). Hermes nests prompt/result content under the per-event `extra` envelope; the generic decoder's ContentEnvelopeKey fallback lifts it so prompt and tool_result rules actually inspect Hermes payloads, and hookOnlyProfileRespond shapes the wire replies.",
+			"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. pre_llm_call injects via {\"context\":...}. Confirm verdicts (no native ask surface) downgrade to a {\"systemMessage\":...} alert via the shared responder epilogue. Non-zero exit codes and hook timeouts only log a warning upstream, so there is no fail-closed surface; hermes remains live-smoke pending (docs/CONNECTOR-MATRIX.md).",
+			"Multi-event registration requires hooks_auto_accept in cli-config.yaml on non-TTY/gateway runs; otherwise Hermes prompts for per-(event,command) consent on first use and silently skips unaccepted hooks. Setup writes hooks_auto_accept so all events register, and the managed-backup heals it.",
+		},
+	}},
 	"cursor": {{
 		Connector:               "cursor",
 		ContractID:              "cursor-hooks-v1",
@@ -681,6 +663,7 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
 	profile.SupportsTraceparent = contract.SupportsTraceparent
 	profile.ResponseFieldName = contract.ResponseFieldName
+	profile.ContentEnvelopeKey = contract.ContentEnvelopeKey
 
 	contractCaps := contract.Capabilities
 	if profile.Capabilities.ConfigPath != "" && contractCaps.ConfigPath == "" {

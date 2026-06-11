@@ -350,18 +350,10 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 		// empirical agy-version notes.
 		profile.Decode = antigravityProfileDecode
 	}
-	if c.name == "hermes" {
-		// Hermes owns a dedicated profile: its inspectable content
-		// (prompt, tool result, model response) is nested under a
-		// per-event `extra` object the generic normalizer does not
-		// read, so it needs a Decode to lift that content onto the
-		// canonical request fields. Respond is wire-identical to the
-		// legacy shaper but lives in hermes_hook_profile.go so Hermes
-		// no longer shares hookOnlyProfileRespond. See that file for
-		// the full lifecycle contract.
-		profile.Decode = hermesProfileDecode
-		profile.Respond = hermesProfileRespond
-	}
+	// NOTE: hermes needs no Decode override. Its nested `extra` content
+	// is recovered by the generic decoder's ContentEnvelopeKey fallback
+	// (declared on the hermes hook contract), and its wire replies are
+	// shaped by the hermes case in hookOnlyProfileRespond.
 	return ApplyHookContract(profile, opts)
 }
 
