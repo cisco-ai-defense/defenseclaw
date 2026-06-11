@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -114,11 +115,19 @@ func validateMCPScanTargetURL(target string) error {
 	return nil
 }
 
-// MCPScanner shells out to the Python “cisco-ai-mcp-scanner“ CLI.
-// Mirrors “SkillScanner“: the LLM-facing surface is driven by the
-// unified “config.LLMConfig“ resolved at “scanners.mcp“, with the
-// legacy “InspectLLMConfig“ kept only to preserve the old
-// “NewMCPScanner“ signature for existing callers/tests.
+// MCPScanner shells out to the SDK-backed Python CLI
+// (“defenseclaw mcp scan --json“) rather than the standalone
+// “mcp-scanner“ binary. The standalone binary never had a usable
+// “scan“ subcommand, and “defenseclaw mcp scan“ already resolves
+// URL-vs-name targets (including local stdio servers), honours the
+// “--analyzers/--scan-*“ knobs, and emits “ScanResult.to_json()“ —
+// the exact contract the plugin scanner already parses, so there is a
+// single SDK code path with no drift-prone second JSON schema.
+//
+// The legacy “InspectLLMConfig“/“CiscoAIDefenseConfig“ fields are kept
+// only to preserve the existing constructor signatures; LLM and Cisco
+// AI Defense credentials are resolved by the Python CLI from its own
+// config, so they are no longer injected into the subprocess env.
 type MCPScanner struct {
 	Config         config.MCPScannerConfig
 	LLM            config.LLMConfig
@@ -126,14 +135,28 @@ type MCPScanner struct {
 	CiscoAIDefense config.CiscoAIDefenseConfig
 }
 
+// mcpScannerBinary returns the executable to invoke, coercing the
+// empty default and the legacy “mcp-scanner“ value to “defenseclaw“.
+// A bare “mcp-scanner“ can never work here (it has no “mcp scan“
+// command), so any existing config still pointing at it is routed to
+// the Python CLI on upgrade.
+func mcpScannerBinary(binary string) string {
+	if binary == "" {
+		return "defenseclaw"
+	}
+	switch filepath.Base(binary) {
+	case "mcp-scanner", "mcp-scanner.exe":
+		return "defenseclaw"
+	}
+	return binary
+}
+
 // NewMCPScanner is the back-compat constructor. Translates the legacy
 // “InspectLLMConfig“ shape into the unified “LLMConfig“ internally
 // so everything downstream only deals with one structure. Prefer
 // “NewMCPScannerFromLLM“ in new code.
 func NewMCPScanner(cfg config.MCPScannerConfig, llm config.InspectLLMConfig, aid config.CiscoAIDefenseConfig) *MCPScanner {
-	if cfg.Binary == "" {
-		cfg.Binary = "mcp-scanner"
-	}
+	cfg.Binary = mcpScannerBinary(cfg.Binary)
 	return &MCPScanner{
 		Config:         cfg,
 		LLM:            inspectToLLM(llm),
@@ -146,9 +169,7 @@ func NewMCPScanner(cfg config.MCPScannerConfig, llm config.InspectLLMConfig, aid
 // LLM config. Call sites should resolve once via
 // “rootCfg.ResolveLLM("scanners.mcp")“ and pass the result here.
 func NewMCPScannerFromLLM(cfg config.MCPScannerConfig, llm config.LLMConfig, aid config.CiscoAIDefenseConfig) *MCPScanner {
-	if cfg.Binary == "" {
-		cfg.Binary = "mcp-scanner"
-	}
+	cfg.Binary = mcpScannerBinary(cfg.Binary)
 	return &MCPScanner{
 		Config:         cfg,
 		LLM:            llm,
@@ -160,8 +181,13 @@ func (s *MCPScanner) Name() string               { return "mcp-scanner" }
 func (s *MCPScanner) Version() string            { return "1.0.0" }
 func (s *MCPScanner) SupportedTargets() []string { return []string{"mcp"} }
 
+// buildArgs builds the argument vector for “defenseclaw mcp scan“.
+// The “--json/--analyzers/--scan-*“ flags are options on the “scan“
+// subcommand, so they follow “mcp scan“; the target is positional and
+// comes last. The Python CLI resolves a bare server name or a URL via
+// its own “_resolve_scan_target“, so the gateway can pass either.
 func (s *MCPScanner) buildArgs(target string) []string {
-	args := []string{"scan", "--format", "json"}
+	args := []string{"mcp", "scan", "--json"}
 
 	if s.Config.Analyzers != "" {
 		args = append(args, "--analyzers", s.Config.Analyzers)
@@ -178,51 +204,6 @@ func (s *MCPScanner) buildArgs(target string) []string {
 
 	args = append(args, target)
 	return args
-}
-
-func (s *MCPScanner) scanEnv() []string {
-	env := os.Environ()
-
-	inject := []struct {
-		envVar string
-		value  string
-	}{
-		{"MCP_SCANNER_API_KEY", s.CiscoAIDefense.ResolvedAPIKey()},
-		{"MCP_SCANNER_ENDPOINT", s.CiscoAIDefense.Endpoint},
-		// mcp-scanner-specific env vars. The Python scanner reads
-		// these directly; ``liteLLMModel`` yields the LiteLLM-shaped
-		// ``provider/model`` string when a bare model + separate
-		// provider were configured, matching what the unified
-		// ``Config.ResolveLLM`` produces.
-		{"MCP_SCANNER_LLM_API_KEY", s.LLM.ResolvedAPIKey()},
-		{"MCP_SCANNER_LLM_MODEL", liteLLMModel(s.LLM)},
-		{"MCP_SCANNER_LLM_BASE_URL", s.LLM.BaseURL},
-	}
-
-	existing := make(map[string]bool)
-	for _, e := range env {
-		for i := 0; i < len(e); i++ {
-			if e[i] == '=' {
-				existing[e[:i]] = true
-				break
-			}
-		}
-	}
-
-	for _, kv := range inject {
-		if kv.value != "" && !existing[kv.envVar] {
-			env = append(env, kv.envVar+"="+kv.value)
-		}
-	}
-
-	if !existing["NO_COLOR"] {
-		env = append(env, "NO_COLOR=1")
-	}
-	if !existing["TERM"] {
-		env = append(env, "TERM=dumb")
-	}
-
-	return env
 }
 
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
@@ -247,11 +228,13 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	if mcpScanTargetLooksLikeURL(target) {
 		if err := validateMCPScanTargetURL(target); err != nil {
 			result = &ScanResult{
-				Scanner:   s.Name(),
-				Target:    target,
-				Timestamp: start,
-				ScanError: err.Error(),
-				ExitCode:  -1,
+				Scanner:    s.Name(),
+				Target:     target,
+				Timestamp:  start,
+				Duration:   time.Since(start),
+				TargetType: InferTargetType(s.Name()),
+				ScanError:  err.Error(),
+				ExitCode:   -1,
 			}
 			scanErr = err
 			exitCode = -1
@@ -261,7 +244,9 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 
 	args := s.buildArgs(target)
 	cmd := exec.CommandContext(ctx, s.Config.Binary, args...)
-	cmd.Env = s.scanEnv()
+	// Inherit the gateway's environment (like the plugin scanner):
+	// the Python CLI resolves LLM / Cisco AI Defense credentials from
+	// its own config, so no scanner-specific env injection is needed.
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -285,7 +270,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 			exitCode = exitErr.ExitCode()
 		}
 		if errors.Is(err, exec.ErrNotFound) {
-			scanErr = fmt.Errorf("scanner: %s not found at %q — install with: uv tool install cisco-ai-mcp-scanner", s.Name(), s.Config.Binary)
+			scanErr = fmt.Errorf("scanner: %s not found at %q — install with: pip install defenseclaw (the mcpscanner SDK is provided by cisco-ai-mcp-scanner)", s.Name(), s.Config.Binary)
 			return nil, scanErr
 		}
 		if exitCode != 0 {
@@ -328,34 +313,50 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	return result, nil
 }
 
-type mcpOutput struct {
-	Findings []mcpFinding `json:"findings"`
+// mcpScanResult matches the JSON emitted by the Python CLI
+// (“defenseclaw mcp scan --json“ → “ScanResult.to_json()“). It is the
+// same top-level shape the plugin scanner parses, so the two paths
+// share a single contract.
+type mcpScanResult struct {
+	Scanner   string       `json:"scanner"`
+	Target    string       `json:"target"`
+	Timestamp string       `json:"timestamp"`
+	Findings  []mcpFinding `json:"findings"`
 }
 
 type mcpFinding struct {
 	ID          string `json:"id"`
+	RuleID      string `json:"rule_id"`
+	Category    string `json:"category"`
 	Severity    string `json:"severity"`
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	Location    string `json:"location"`
-	Remediation string `json:"remediation"`
-	RuleID      string `json:"rule_id"`
-	Category    string `json:"category"`
-	Line        int    `json:"line"`
+	// LineNumber mirrors ScanResult.to_json()'s "line_number" field
+	// (Finding.to_dict in cli/defenseclaw/models.py). The Python CLI
+	// never emits a bare "line", so reading "line" here silently
+	// dropped every line number.
+	LineNumber  int      `json:"line_number"`
+	Remediation string   `json:"remediation"`
+	Tags        []string `json:"tags"`
+	Suppressed  bool     `json:"suppressed"`
 }
 
 func parseMCPOutput(data []byte) ([]Finding, error) {
 	clean := extractJSON(ansiRe.ReplaceAll(data, nil))
-	var out mcpOutput
+	var out mcpScanResult
 	if err := json.Unmarshal(clean, &out); err != nil {
 		return nil, err
 	}
 
 	findings := make([]Finding, 0, len(out.Findings))
 	for _, f := range out.Findings {
+		if f.Suppressed {
+			continue
+		}
 		var ln *int
-		if f.Line > 0 {
-			v := f.Line
+		if f.LineNumber > 0 {
+			v := f.LineNumber
 			ln = &v
 		}
 		findings = append(findings, Finding{
@@ -366,6 +367,7 @@ func parseMCPOutput(data []byte) ([]Finding, error) {
 			Location:    f.Location,
 			Remediation: f.Remediation,
 			Scanner:     "mcp-scanner",
+			Tags:        f.Tags,
 			RuleID:      f.RuleID,
 			Category:    f.Category,
 			LineNumber:  ln,

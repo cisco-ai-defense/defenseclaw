@@ -1111,6 +1111,24 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			upstreamAuth = auth
 		}
 	}
+	// Fallback: when the caller supplied X-DC-Target-URL but no credential
+	// headers (the "third_party_injected" mode used by ZeptoClaw/PulseClaw),
+	// consult the enterprise token resolver (secrets-sidecar hydrated key)
+	// so the proxy injects the upstream LLM credential on behalf of the
+	// caller. This mirrors the resolveConfiguredProvider path that
+	// handleChatCompletion already uses for direct-provider hydration.
+	if upstreamAuth == "" && tokenResolver != nil {
+		providerPrefix := provider
+		if providerPrefix == "" {
+			providerPrefix = inferProvider(partial.Model, "")
+		}
+		resolvedKey, err := tokenResolver(r.Context(), providerPrefix)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: token resolver error: %v\n", err)
+		} else if resolvedKey != "" {
+			upstreamAuth = "Bearer " + resolvedKey
+		}
+	}
 
 	// Apply a timeout so the proxy doesn't hang indefinitely if the upstream
 	// provider stalls. Streaming responses may take longer, so use 5 minutes;

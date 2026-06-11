@@ -1,15 +1,48 @@
 {
-  "annotations": {"list": []},
-  "description": "Policy + egress decisions surface. OPA evaluations by domain, egress shape branch decisions (Layer 1 silent-bypass observability), block-list stage hits, multi-turn injection trips, and schema violations.",
+  "annotations": {
+    "list": []
+  },
+  "description": "Guardrail policy decisions for hook connectors: inspect evaluations by action/severity, shadow blocks (would_block in observe mode), and internet egress inferred from tool commands. OPA/proxy-specific labels (policy_domain, policy_verdict) are not emitted in hook-only mode.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "liveNow": false,
   "links": [
-    {"title": "Overview",   "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",                                                                "icon": "external link", "targetBlank": false},
-    {"title": "Verdicts",   "type": "link", "url": "/d/defenseclaw-security?${__url_time_range}&var-stage=opa&var-stage=block_list&var-stage=multi_turn",         "icon": "external link", "targetBlank": false},
-    {"title": "Findings",   "type": "link", "url": "/d/defenseclaw-findings?${__url_time_range}",                                                                 "icon": "external link", "targetBlank": false},
-    {"title": "Reliability","type": "link", "url": "/d/defenseclaw-reliability?${__url_time_range}",                                                              "icon": "external link", "targetBlank": false}
+    {
+      "title": "Agent Activity (Live)",
+      "type": "link",
+      "url": "/d/defenseclaw-activity?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/defenseclaw-overview?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Verdicts",
+      "type": "link",
+      "url": "/d/defenseclaw-security?${__url_time_range}&var-stage=opa&var-stage=block_list&var-stage=multi_turn",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Findings",
+      "type": "link",
+      "url": "/d/defenseclaw-findings?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Reliability",
+      "type": "link",
+      "url": "/d/defenseclaw-reliability?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    }
   ],
   "templating": {
     "list": [
@@ -18,34 +51,74 @@
         "label": "Connector",
         "description": "Optional connector filter. Sourced from defenseclaw_connector_hook_invocations_total{connector}. Applied to the inspect/guardrail panels (block-list + multi-turn) which carry the tool=<connector>:<event> label via tool=~\"$connector:.*\". OPA and egress panels stay global (policy_evaluations/egress_events do not carry a connector label; egress 'source' is the go/ts tier, not a connector). Defaults to All (.+) so single-connector installs are unaffected.",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
         "definition": "label_values(defenseclaw_connector_hook_invocations_total, connector)",
-        "query": {"query": "label_values(defenseclaw_connector_hook_invocations_total, connector)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "query": {
+          "query": "label_values(defenseclaw_connector_hook_invocations_total, connector)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
         "refresh": 2,
         "sort": 1,
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
-        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
-        "options": [{"text": "All", "value": "$__all", "selected": true}],
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ],
         "skipUrlSync": false,
         "hide": 0
       },
       {
-        "name": "policy_domain",
-        "label": "Policy domain",
-        "description": "Filter OPA panels by policy_domain (e.g. session.message, tool.invocation, mcp.allow, …). Defaults to All.",
+        "name": "action",
+        "label": "Verdict action",
+        "description": "Filter guardrail evaluations by action (allow, block, warn, alert, confirm).",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-        "definition": "label_values(defenseclaw_policy_evaluations_total, policy_domain)",
-        "query": {"query": "label_values(defenseclaw_policy_evaluations_total, policy_domain)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_inspect_evaluations_total, action)",
+        "query": {
+          "query": "label_values(defenseclaw_inspect_evaluations_total, action)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
         "refresh": 2,
         "sort": 1,
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
-        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
-        "options": [{"text": "All", "value": "$__all", "selected": true}],
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ],
         "skipUrlSync": false,
         "hide": 0
       },
@@ -58,186 +131,647 @@
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
-        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
         "options": [
-          {"text": "All", "value": "$__all", "selected": true},
-          {"text": "known", "value": "known"},
-          {"text": "shape", "value": "shape"},
-          {"text": "passthrough", "value": "passthrough"}
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "known",
+            "value": "known"
+          },
+          {
+            "text": "shape",
+            "value": "shape"
+          },
+          {
+            "text": "passthrough",
+            "value": "passthrough"
+          }
         ],
         "skipUrlSync": false,
-        "hide": 0
+        "hide": 2
       }
     ]
   },
   "panels": [
-    {"type": "row", "title": "Policy + egress KPIs", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
-
     {
-      "type": "stat",
-      "title": "OPA evaluations / min",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_policy_evaluations_total{policy_domain=~\"$policy_domain\"}[5m])) * 60 or vector(0)", "refId": "A"}]
+      "type": "row",
+      "title": "Policy + egress KPIs",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
     },
     {
       "type": "stat",
-      "title": "OPA deny rate (1h)",
-      "description": "Verdict deny / total across policy_domain. Sustained spikes mean a policy hardened or upstream traffic shifted.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_policy_evaluations_total{policy_verdict=\"deny\", policy_domain=~\"$policy_domain\"}[1h])) / clamp_min(sum(rate(defenseclaw_policy_evaluations_total{policy_domain=~\"$policy_domain\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+      "title": "Guardrail evaluations / min",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", action=~\"$action\"}[$__rate_interval])) * 60 or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          }
+        }
+      ],
+      "description": "Inspect pipeline evaluations per minute across selected connectors."
     },
     {
       "type": "stat",
-      "title": "Egress events / min",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_egress_events_total{branch=~\"$egress_branch\"}[5m])) * 60 or vector(0)", "refId": "A"}]
+      "title": "Block rate (range)",
+      "description": "Fraction of guardrail evaluations with action=block.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", action=\"block\"}[$__range])) / clamp_min(sum(increase(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", action=~\"$action\"}[$__range])), 0.0001) or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      }
     },
     {
       "type": "stat",
-      "title": "Egress block share (1h)",
-      "description": "decision=block / total egress events. Layer 1 silent-bypass detector — if this dives to zero on a connector that previously emitted blocks, traffic is bypassing the shape filter.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_egress_events_total{decision=\"block\", branch=~\"$egress_branch\"}[1h])) / clamp_min(sum(rate(defenseclaw_egress_events_total{branch=~\"$egress_branch\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+      "title": "URL refs in commands (range)",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service_name=\"defenseclaw-audit\"} |~ \"https?://\" [$__range])) or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "description": "Log lines containing http(s) URLs in tool commands. In local dev most refs are localhost (Grafana/Loki/Prometheus); external host panels filter those out."
     },
     {
       "type": "stat",
-      "title": "Block-list hits / min",
-      "description": "verdict_stage=block_list — the static block-list pipeline that runs ahead of the LLM judge.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[5m])) * 60 or vector(0)", "refId": "A"}]
+      "title": "Shadow block rate (observe)",
+      "description": "would_block=true outcomes / all hook outcomes \u2014 policies that would block in action mode.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\"}[$__range])) / clamp_min(sum(increase(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\"}[$__range])), 0.0001) or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      }
     },
     {
       "type": "stat",
-      "title": "Schema violations / min",
-      "description": "Events dropped by the strict JSON-schema gate. ANY non-zero rate is a contract regression — open a ticket.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_schema_violations_total[5m])) * 60 or vector(0)", "refId": "A"}],
-      "options": {"colorMode": "background"},
-      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.01}]}}}
+      "title": "Shadow blocks / min",
+      "description": "Hook outcomes where would_block=true (observe-mode shadow blocks).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\"}[$__rate_interval])) * 60 or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          }
+        }
+      ]
     },
-
-    {"type": "row", "title": "OPA verdicts", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}, "collapsed": false},
-
+    {
+      "type": "stat",
+      "title": "Gateway errors / min",
+      "description": "Gateway error events per minute.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_gateway_errors_total[$__rate_interval])) * 60 or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          }
+        }
+      ],
+      "options": {
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.01
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Guardrail verdicts",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
     {
       "type": "timeseries",
-      "title": "OPA evaluations by domain × verdict",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (policy_domain, policy_verdict) (rate(defenseclaw_policy_evaluations_total{policy_domain=~\"$policy_domain\"}[$__rate_interval]))", "legendFormat": "{{policy_domain}} · {{policy_verdict}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+      "title": "Evaluations by tool × severity",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (tool, severity) (rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", action=~\"$action\"}[$__rate_interval]))",
+          "legendFormat": "{{tool}} · {{severity}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 25
+          }
+        }
+      }
     },
     {
       "type": "timeseries",
-      "title": "OPA latency p95 by domain",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
-      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, policy_domain) (rate(defenseclaw_policy_latency_milliseconds_bucket{policy_domain=~\"$policy_domain\"}[$__rate_interval])))", "legendFormat": "{{policy_domain}} p95", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "ms"}}
+      "title": "Hook latency p95 by connector",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, connector) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
+          "legendFormat": "{{connector}} p95",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
     },
     {
       "type": "timeseries",
-      "title": "OPA reloads by status",
+      "title": "Gateway events / sec by type",
       "description": "Spikes here while the system is otherwise stable mean the watcher is restarting OPA on noisy filesystem events.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (policy_status) (rate(defenseclaw_policy_reloads_total[$__rate_interval]))", "legendFormat": "{{policy_status}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps"}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (event_type) (rate(defenseclaw_gateway_events_emitted_total[$__rate_interval]))",
+          "legendFormat": "{{event_type}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
     },
     {
       "type": "table",
-      "title": "Top denying domains (1h)",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
-      "targets": [{"expr": "topk(15, sort_desc(sum by (policy_domain, policy_verdict) (increase(defenseclaw_policy_evaluations_total{policy_verdict=~\"deny|warn\"}[1h]))))", "instant": true, "format": "table", "refId": "A"}],
-      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "denies/1h"}}}]
+      "title": "Top URL hosts in commands (range)",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (host) (count_over_time({service_name=\"defenseclaw-audit\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__range])))",
+          "instant": true,
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "service_namespace": true
+            },
+            "renameByName": {
+              "Value": "denies/1h"
+            }
+          }
+        }
+      ]
     },
-
-    {"type": "row", "title": "Egress (Layer 1 shape detection)", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}, "collapsed": false},
-
+    {
+      "type": "row",
+      "title": "Internet egress (from tool commands)",
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
     {
       "type": "timeseries",
-      "title": "Egress events by branch × decision",
-      "description": "branch ∈ {known, shape, passthrough}; decision ∈ {allow, block}. passthrough+allow indicates a destination DefenseClaw cannot classify — review for silent bypass.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (branch, decision) (rate(defenseclaw_egress_events_total{branch=~\"$egress_branch\"}[$__rate_interval]))", "legendFormat": "{{branch}} · {{decision}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+      "title": "URL references by host (live)",
+      "description": "branch \u2208 {known, shape, passthrough}; decision \u2208 {allow, block}. passthrough+allow indicates a destination DefenseClaw cannot classify \u2014 review for silent bypass.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (host) (count_over_time({service_name=\"defenseclaw-audit\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" [$__interval]))",
+          "legendFormat": "{{host}}",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 25
+          }
+        }
+      }
     },
     {
       "type": "timeseries",
-      "title": "Egress events by source",
-      "description": "source ∈ {go, ts}: which tier of the gateway emitted the egress decision.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (source, branch) (rate(defenseclaw_egress_events_total{branch=~\"$egress_branch\"}[$__rate_interval]))", "legendFormat": "{{source}} · {{branch}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps"}}
+      "title": "Shadow blocks / sec by connector",
+      "description": "source \u2208 {go, ts}: which tier of the gateway emitted the egress decision.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 23,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (connector) (rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "{{connector}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
     },
-
-    {"type": "row", "title": "Block-list + multi-turn injection", "gridPos": {"x": 0, "y": 31, "w": 24, "h": 1}, "collapsed": false},
-
+    {
+      "type": "row",
+      "title": "Block-list + multi-turn injection",
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
     {
       "type": "timeseries",
       "title": "Block-list verdicts over time",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 32, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{action!=\"allow\", tool=~\"$connector:.*\"}[$__rate_interval]))", "legendFormat": "{{action}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action=~\"$action\"}[$__rate_interval]))",
+          "legendFormat": "{{action}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 25
+          }
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "Multi-turn injection trips over time",
-      "description": "verdict_stage=multi_turn — the multi-turn injection detector tripping on a session. Severity escalation here usually means an adversarial session is unfolding.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 32, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{severity!=\"NONE\", tool=~\"$connector:.*\"}[$__rate_interval]))", "legendFormat": "{{action}} · {{severity}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps"}}
+      "description": "verdict_stage=multi_turn \u2014 the multi-turn injection detector tripping on a session. Severity escalation here usually means an adversarial session is unfolding.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{severity!=\"NONE\", tool=~\"$connector:.*\"}[$__rate_interval]))",
+          "legendFormat": "{{action}} \u00b7 {{severity}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
     },
     {
       "type": "table",
       "title": "Top blocked categories on block-list / multi-turn (Loki, 1h)",
-      "description": "EventVerdict records have defenseclaw.verdict.categories — this panel ranks them for the block-list and multi-turn stages.",
-      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
-      "gridPos": {"x": 0, "y": 40, "w": 24, "h": 8},
-      "targets": [{"expr": "topk(20, sum by (event_type, severity) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=~\"error|scan\" [1h])))", "instant": true, "refId": "A"}]
+      "description": "EventVerdict records have defenseclaw.verdict.categories \u2014 this panel ranks them for the block-list and multi-turn stages.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "topk(20, sum by (audit_target) (count_over_time({service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\" |~ \"Shell|tool\" [$__range])))",
+          "instant": true,
+          "refId": "A",
+          "format": "table",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ]
     },
-
-    {"type": "row", "title": "Schema violations + recent OPA logs", "gridPos": {"x": 0, "y": 48, "w": 24, "h": 1}, "collapsed": false},
-
+    {
+      "type": "row",
+      "title": "Schema violations + recent OPA logs",
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
     {
       "type": "timeseries",
-      "title": "Schema violations by event_type × code",
+      "title": "Schema violations by event_type \u00d7 code",
       "description": "Each (event_type, code) is a stable enum so no cardinality blow-up.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 49, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (event_type, code) (rate(defenseclaw_schema_violations_total[$__rate_interval]))", "legendFormat": "{{event_type}} · {{code}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps"}}
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (event_type) (rate(defenseclaw_gateway_errors_total[$__rate_interval])) or vector(0)",
+          "legendFormat": "{{event_type}} \u00b7 {{code}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
     },
     {
       "type": "logs",
       "title": "Recent OPA + egress events",
-      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
-      "gridPos": {"x": 12, "y": 49, "w": 12, "h": 12},
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 49,
+        "w": 12,
+        "h": 12
+      },
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} |~ \"opa|egress\" | json | __error__=\"\" | event_type=~\"opa|egress\"", "refId": "A"}],
-      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+      "targets": [
+        {
+          "expr": "{service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\" |~ \"would_block|block|confirm|verdict\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "enableLogDetails": true
+      }
     }
   ],
   "preload": false,
   "refresh": "15s",
   "schemaVersion": 39,
-  "tags": ["defenseclaw", "policy", "opa", "egress"],
-  "time": {"from": "now-6h", "to": "now"},
+  "tags": [
+    "defenseclaw",
+    "policy",
+    "opa",
+    "egress"
+  ],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw — Policy decisions",
+  "title": "DefenseClaw \u2014 Policy decisions",
   "uid": "defenseclaw-policy-decisions",
   "version": 1,
   "weekStart": ""

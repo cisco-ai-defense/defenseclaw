@@ -9,6 +9,13 @@
   "liveNow": false,
   "links": [
     {
+      "title": "Agent Activity (Live)",
+      "type": "link",
+      "url": "/d/defenseclaw-activity?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
       "title": "Overview",
       "type": "link",
       "url": "/d/defenseclaw-overview?${__url_time_range}",
@@ -362,12 +369,11 @@
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ],
-          "fields": "/^rule_id$/"
+          ]
         },
         "colorMode": "value",
         "graphMode": "none",
-        "textMode": "value"
+        "textMode": "name"
       }
     },
     {
@@ -386,7 +392,7 @@
       },
       "targets": [
         {
-          "expr": "topk(1, sum by (target) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=\"scan_finding\" | connector=~\"$connector\" [1h])))",
+          "expr": "topk(1, sum by (audit_target) (count_over_time({service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\" [$__range])))",
           "refId": "A",
           "instant": true
         }
@@ -734,9 +740,14 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (target, rule_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=\"scan_finding\" | rule_id=~\"$rule_id\" | connector=~\"$connector\" [1h])))",
+          "expr": "topk(15, sum by (audit_target) (count_over_time({service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\" [$__range])))",
           "refId": "A",
-          "instant": true
+          "instant": true,
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "queryType": "instant"
         }
       ],
       "options": {
@@ -759,7 +770,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (tool, action) (increase(defenseclaw_inspect_evaluations_total{action!=\"allow\", tool=~\"$connector:.*\"}[1h]))) and on() (sum(increase(defenseclaw_scan_findings_by_rule_total{rule_id=~\"$rule_id\", connector=~\"$connector\"}[1h])) > 0)",
+          "expr": "sum by (tool, action, severity) (increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", severity=~\"$severity\"}[$__range]))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -811,8 +822,12 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=\"scan_finding\" | rule_id=~\"$rule_id\" | connector=~\"$connector\"",
-          "refId": "A"
+          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"scan_finding\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
         }
       ],
       "options": {
@@ -838,8 +853,8 @@
       "title": "Findings by connector",
       "description": "EventScanFinding records carry a connector field. Counts scan_finding events grouped by connector so multi-connector installs can compare per-connector finding volume. Filtered by $connector (All = .+). Honors $rule_id.",
       "datasource": {
-        "type": "loki",
-        "uid": "defenseclaw-loki"
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
       },
       "gridPos": {
         "x": 0,
@@ -849,7 +864,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (connector) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=\"scan_finding\" | rule_id=~\"$rule_id\" | connector=~\"$connector\" [$__rate_interval]))",
+          "expr": "sum by (connector) (rate(defenseclaw_scan_findings_by_rule_total{connector=~\"$connector\", scanner=~\"$scanner\", severity=~\"$severity\"}[$__rate_interval])) or vector(0)",
           "legendFormat": "{{connector}}",
           "refId": "A"
         }
