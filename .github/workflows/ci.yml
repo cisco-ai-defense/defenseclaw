@@ -185,7 +185,10 @@ jobs:
       #   - CVE-2026-28684 (python-dotenv arbitrary file read)
       # aiohttp>=3.14.0 (CVE-2026-34993, CVE-2026-47265) and pyjwt>=2.13.0
       # (PYSEC-2026-175/177/178/179) are likewise pinned in pyproject.toml.
-      - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196
+      # Use OSV for the vulnerability database so an outage in PyPI's
+      # package-metadata JSON API does not turn the audit red before
+      # pip-audit can evaluate the installed environment.
+      - run: uv run pip-audit --vulnerability-service osv --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196
 
   ts-build-test:
     name: TypeScript Build & Test
