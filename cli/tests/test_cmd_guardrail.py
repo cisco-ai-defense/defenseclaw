@@ -34,12 +34,13 @@ from defenseclaw.context import AppContext
 
 def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
              model: str = "openai/gpt-4o", llm_model: str = "",
-             hook_fail_mode: str = "open"):
+             hook_fail_mode: str = "closed"):
     """Build a minimal AppContext that the guardrail commands can drive.
 
-    ``hook_fail_mode`` mirrors the v3 ``guardrail.hook_fail_mode`` field
-    (defaults to "open" so fixtures without explicit fail-mode wiring
-    behave like a fresh, user-friendly install).
+    ``hook_fail_mode`` mirrors the v4 ``guardrail.hook_fail_mode`` field
+    (defaults to "closed" so fixtures without explicit fail-mode wiring
+    behave like a fresh, secure-by-default install — closes ). Tests that need to exercise the legacy fail-open path
+    pass ``hook_fail_mode="open"`` explicitly.
     """
     guardrail_cfg = SimpleNamespace(
         enabled=enabled,
@@ -114,10 +115,10 @@ class StatusCommandTests(unittest.TestCase):
         app = make_ctx(enabled=True, connector="openclaw", hook_fail_mode="closed")
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        # The fail mode is the most-asked-about UX knob now that hooks
-        # default open: status MUST surface it so operators can sanity-
-        # check their posture without grep-ing config.yaml. It is folded
-        # into the (uniform) per-connector block as ``fail=...``.
+        # The fail mode is a key posture knob: status MUST surface it so
+        # operators can sanity-check their posture without grep-ing
+        # config.yaml. It is folded into the (uniform) per-connector
+        # block as ``fail=...``.
         self.assertIn("fail=closed", result.output)
 
     def test_status_single_connector_uses_uniform_per_connector_block(self):
@@ -132,7 +133,9 @@ class StatusCommandTests(unittest.TestCase):
         # Uniform per-connector block: "<label> (<name>): <state> mode=... fail=...".
         self.assertIn("OpenClaw (openclaw): ", result.output)
         self.assertIn("mode=observe", result.output)
-        self.assertIn("fail=open", result.output)
+        # Default fail mode is the safer "closed" (response-layer
+        # failures block); see _normalize_hook_fail_mode / default_config.
+        self.assertIn("fail=closed", result.output)
         # The retired singular lines (and the "multi-connector"-only
         # footer hint) must NOT appear — there is exactly one rendering.
         self.assertNotIn("• connector:", result.output)

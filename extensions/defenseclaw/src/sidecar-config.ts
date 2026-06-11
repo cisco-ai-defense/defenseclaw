@@ -23,7 +23,12 @@ import yaml from "js-yaml";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_API_PORT = 18970;
-const DEFAULT_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN";
+// DEFENSECLAW_GATEWAY_TOKEN is the canonical env-var name written by
+// the Go sidecar's first-boot bootstrap path. OPENCLAW_GATEWAY_TOKEN
+// is preserved as a legacy fallback for installs that pre-date the
+// rename. Lookup order is consistent across process.env AND ~/.defenseclaw/.env.
+const DEFAULT_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN";
+const LEGACY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN";
 
 interface SidecarConfig {
   host: string;
@@ -33,6 +38,20 @@ interface SidecarConfig {
   guardrailPort: number;
   approvalTimeoutS: number;
   hiltEnabled: boolean;
+  /**
+   * Mirror of guardrail.mode from ~/.defenseclaw/config.yaml. Values
+   * recognised by the host enforcement code are:
+   *   - "observe" (default): inspection failures fall open (legacy
+   *     behaviour, used in development).
+   *   - "action" / "enforce": inspection failures fail CLOSED. The
+   *     extension MUST NOT silently allow tool calls when the sidecar
+   *     is unreachable, returns 401/403/413, times out, or returns
+   *     malformed JSON (finding "Tool inspection fails open
+   *     on sidecar errors").
+   * Anything else is treated as observe to preserve the existing
+   * conservative default for unknown values.
+   */
+  enforcementMode: "observe" | "action";
 }
 
 let cached: SidecarConfig | undefined;
@@ -53,6 +72,9 @@ export function loadSidecarConfig(): SidecarConfig {
   let approvalTimeoutS = 30;
   let hiltEnabled = false;
   let token = "";
+  // Default to observe to keep current dev behaviour. Production
+  // installs flip this via `guardrail.mode = action` (or `enforce`).
+  let enforcementMode: "observe" | "action" = "observe";
 
   try {
     const cfgPath = join(homedir(), ".defenseclaw", "config.yaml");
@@ -70,12 +92,24 @@ export function loadSidecarConfig(): SidecarConfig {
           typeof gw["token_env"] === "string" && gw["token_env"]
             ? gw["token_env"]
             : DEFAULT_TOKEN_ENV;
-        const envVal = process.env[tokenEnv];
+        // Mirror the Go resolver: try process.env first, then the
+        // sidecar-managed ~/.defenseclaw/.env. The .env path is the
+        // common case in production because the Go bootstrap writes
+        // DEFENSECLAW_GATEWAY_TOKEN there but does not export it
+        // into the Node process that loads this extension.
+        const envVal = process.env[tokenEnv] || readDotEnvToken(tokenEnv);
         if (envVal) token = envVal;
       }
       const gr = raw["guardrail"] as Record<string, unknown> | undefined;
       if (gr && typeof gr === "object") {
         if (typeof gr["port"] === "number") guardrailPort = gr["port"];
+        if (typeof gr["mode"] === "string") {
+          const m = gr["mode"].toLowerCase();
+          // "action" and "enforce" are accepted aliases for the
+          // fail-closed behaviour. Anything else (including the legacy
+          // empty string) stays in observe.
+          enforcementMode = m === "action" || m === "enforce" ? "action" : "observe";
+        }
         const hilt =
           (gr["hilt"] as Record<string, unknown> | undefined) ??
           (gr["hitl"] as Record<string, unknown> | undefined);
@@ -88,13 +122,23 @@ export function loadSidecarConfig(): SidecarConfig {
     // Config missing or unreadable — use defaults
   }
 
-  if (!token) {
-    const envVal = process.env[DEFAULT_TOKEN_ENV];
-    if (envVal) token = envVal;
-  }
-
-  if (!token) {
-    token = readDotEnvToken(DEFAULT_TOKEN_ENV);
+  // Last-resort fallbacks: try the canonical name, then the legacy
+  // OPENCLAW_GATEWAY_TOKEN. Both process.env and ~/.defenseclaw/.env
+  // are consulted for each name so the resolver works regardless of
+  // whether the operator exported the value into the shell or kept
+  // it solely in the sidecar-managed dotenv.
+  for (const name of [DEFAULT_TOKEN_ENV, LEGACY_TOKEN_ENV]) {
+    if (token) break;
+    const envVal = process.env[name];
+    if (envVal) {
+      token = envVal;
+      break;
+    }
+    const dotenvVal = readDotEnvToken(name);
+    if (dotenvVal) {
+      token = dotenvVal;
+      break;
+    }
   }
 
   cached = {
@@ -105,6 +149,7 @@ export function loadSidecarConfig(): SidecarConfig {
     guardrailPort,
     approvalTimeoutS,
     hiltEnabled,
+    enforcementMode,
   };
   return cached;
 }

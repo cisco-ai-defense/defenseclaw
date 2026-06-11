@@ -26,6 +26,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -1583,6 +1584,240 @@ def _write_dotenv(path: str, entries: dict[str, str]) -> None:
         pass
 
 
+def _add_trusted_bin_prefix(prefix: str, data_dir: str) -> bool:
+    """Add a directory to DEFENSECLAW_TRUSTED_BIN_PREFIXES in .env and os.environ.
+
+    Entries are separated by ``os.pathsep`` (``:`` on POSIX, ``;`` on
+    Windows) so a Windows drive-qualified path like ``C:\\Tools`` is not
+    mangled by a hard-coded colon split. Returns ``True`` when the prefix
+    was newly added, ``False`` when it was already present (idempotent).
+    """
+    dotenv_path = os.path.join(data_dir, ".env")
+    existing = _load_dotenv(dotenv_path)
+    current = existing.get(
+        "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
+        os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", ""),
+    )
+    parts = [p.strip() for p in current.split(os.pathsep) if p.strip()]
+    added = prefix not in parts
+    if added:
+        parts.append(prefix)
+    new_val = os.pathsep.join(parts)
+    existing["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = new_val
+    _write_dotenv(dotenv_path, existing)
+    os.environ["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = new_val
+    return added
+
+
+# ---------------------------------------------------------------------------
+# `defenseclaw setup trusted-paths` — manage the binary-discovery allow-list.
+#
+# Built-in defaults live in agent_discovery._TRUSTED_BIN_PREFIXES_DEFAULT and
+# are read-only here. Operator additions persist to ~/.defenseclaw/.env via
+# the same _add_trusted_bin_prefix() the interactive prompt uses, validated by
+# the same agent_discovery.validate_trusted_prefix() guard the discovery gate
+# trusts — so the CLI, the prompt, and the gate can never disagree.
+# ---------------------------------------------------------------------------
+
+
+def _trusted_prefix_status(resolved: str) -> str:
+    """Classify a resolved prefix: ok / missing / not-a-dir / world-writable."""
+    if not os.path.exists(resolved):
+        return "missing"
+    if not os.path.isdir(resolved):
+        return "not-a-dir"
+    try:
+        if os.stat(resolved).st_mode & 0o002:
+            return "world-writable"
+    except OSError:  # pragma: no cover - rare stat failure
+        return "error"
+    return "ok"
+
+
+def _default_resolved_prefixes() -> set[str]:
+    """Resolved absolute paths of the built-in (non-removable) defaults."""
+    out: set[str] = set()
+    for raw in agent_discovery._TRUSTED_BIN_PREFIXES_DEFAULT:
+        resolved, _ = agent_discovery.validate_trusted_prefix(raw)
+        if resolved:
+            out.add(resolved)
+    return out
+
+
+def _collect_trusted_prefixes(data_dir: str) -> list[dict[str, object]]:
+    """Unified trusted-prefix view: built-in defaults + .env + exported env.
+
+    Source attribution: ``default`` (built-in), ``.env`` (operator-added,
+    removable), ``env`` (exported in the process environment but not in
+    .env — we can't rewrite the parent shell, so it is shown read-only).
+    """
+    dotenv_path = os.path.join(data_dir, ".env")
+    env_file_raw = _load_dotenv(dotenv_path).get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
+    env_file = [p.strip() for p in env_file_raw.split(os.pathsep) if p.strip()]
+    proc_raw = os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
+    proc = [p.strip() for p in proc_raw.split(os.pathsep) if p.strip()]
+    env_only = [p for p in proc if p not in env_file]
+
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    def _push(raw: str, source: str, removable: bool) -> None:
+        resolved, _err = agent_discovery.validate_trusted_prefix(raw)
+        if not resolved or resolved in seen:
+            return
+        seen.add(resolved)
+        rows.append(
+            {
+                "path": raw,
+                "resolved": resolved,
+                "source": source,
+                "status": _trusted_prefix_status(resolved),
+                "removable": removable,
+            }
+        )
+
+    for raw in agent_discovery._TRUSTED_BIN_PREFIXES_DEFAULT:
+        _push(raw, "default", False)
+    for raw in env_file:
+        _push(raw, ".env", True)
+    for raw in env_only:
+        _push(raw, "env", False)
+    return rows
+
+
+def _emit_trusted_path_result(as_json: bool, *, ok: bool, path: str, message: str) -> None:
+    if as_json:
+        click.echo(_json.dumps({"ok": ok, "path": path, "message": message}, indent=2))
+    elif ok:
+        ux.ok(f"{message}: {path}" if path else message)
+    else:
+        ux.err(f"{message}: {path}" if path else message)
+
+
+@setup.group("trusted-paths")
+def trusted_paths() -> None:
+    """Manage directories DefenseClaw trusts for connector-binary discovery.
+
+    \b
+    Action-mode setup reads a connector's version by executing its binary, but
+    only when that binary lives under a trusted prefix — a guard against a
+    hostile binary planted on $PATH. Built-in defaults cover system and
+    Homebrew locations; trust additional roots here for bespoke installs.
+    Additions persist to ~/.defenseclaw/.env (DEFENSECLAW_TRUSTED_BIN_PREFIXES).
+    """
+
+
+@trusted_paths.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON instead of a table.")
+@pass_ctx
+def trusted_paths_list(app: AppContext, as_json: bool) -> None:
+    """List trusted binary prefixes (built-in defaults + operator-added)."""
+    rows = _collect_trusted_prefixes(app.cfg.data_dir)
+    if as_json:
+        click.echo(_json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.echo(f"  {ux.dim('No trusted prefixes configured.')}")
+        return
+    click.echo()
+    src_w = max(len(str(r["source"])) for r in rows)
+    st_w = max(len(str(r["status"])) for r in rows)
+    for r in rows:
+        mark = "✓" if r["status"] == "ok" else "✗"
+        source = str(r["source"]).ljust(src_w)
+        status = str(r["status"]).ljust(st_w)
+        line = f"  {mark}  {ux.dim(source)}  {status}  {r['resolved']}"
+        if r["removable"]:
+            line += f"  {ux.dim('(removable)')}"
+        click.echo(line)
+    click.echo()
+    click.echo(f"  {ux.dim('Add with: defenseclaw setup trusted-paths add <dir>')}")
+    click.echo()
+
+
+@trusted_paths.command("add")
+@click.argument("directory")
+@click.option("--force", is_flag=True, help="Add even when the directory is world-writable or missing.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON instead of text.")
+@pass_ctx
+def trusted_paths_add(app: AppContext, directory: str, force: bool, as_json: bool) -> None:
+    """Trust DIRECTORY for connector-binary discovery (persisted to .env)."""
+    resolved, err = agent_discovery.validate_trusted_prefix(directory)
+    if not resolved:
+        _emit_trusted_path_result(as_json, ok=False, path=directory, message=f"invalid path ({err})")
+        click.get_current_context().exit(1)
+    if resolved in _default_resolved_prefixes():
+        _emit_trusted_path_result(
+            as_json, ok=True, path=resolved, message="already trusted by default; nothing to do"
+        )
+        return
+    if err and not force:
+        _emit_trusted_path_result(
+            as_json,
+            ok=False,
+            path=resolved,
+            message=f"refusing to trust ({err}); re-run with --force to override",
+        )
+        click.get_current_context().exit(1)
+    added = _add_trusted_bin_prefix(resolved, app.cfg.data_dir)
+    message = "added to trusted prefixes" if added else "already an operator-added trusted prefix"
+    if err and force:
+        message += f" (forced despite: {err})"
+    _emit_trusted_path_result(as_json, ok=True, path=resolved, message=message)
+
+
+@trusted_paths.command("remove")
+@click.argument("directory")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON instead of text.")
+@pass_ctx
+def trusted_paths_remove(app: AppContext, directory: str, as_json: bool) -> None:
+    """Remove an operator-added trusted prefix (never a built-in default)."""
+    resolved, _err = agent_discovery.validate_trusted_prefix(directory)
+    if resolved in _default_resolved_prefixes():
+        _emit_trusted_path_result(
+            as_json, ok=False, path=resolved, message="refusing to remove a built-in default prefix"
+        )
+        click.get_current_context().exit(1)
+    data_dir = app.cfg.data_dir
+    dotenv_path = os.path.join(data_dir, ".env")
+    existing = _load_dotenv(dotenv_path)
+    current = existing.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
+    entries = [p.strip() for p in current.split(os.pathsep) if p.strip()]
+    target = (directory or "").strip()
+    kept = [
+        e
+        for e in entries
+        if e != target and agent_discovery.validate_trusted_prefix(e)[0] != resolved
+    ]
+    if len(kept) == len(entries):
+        _emit_trusted_path_result(
+            as_json,
+            ok=False,
+            path=resolved,
+            message="not an operator-added (.env) trusted prefix; nothing to remove",
+        )
+        click.get_current_context().exit(1)
+    new_val = os.pathsep.join(kept)
+    if new_val:
+        existing["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = new_val
+        os.environ["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = new_val
+    else:
+        existing.pop("DEFENSECLAW_TRUSTED_BIN_PREFIXES", None)
+        os.environ.pop("DEFENSECLAW_TRUSTED_BIN_PREFIXES", None)
+    _write_dotenv(dotenv_path, existing)
+    _emit_trusted_path_result(as_json, ok=True, path=resolved, message="removed from trusted prefixes")
+
+
+def _emit_untrusted_prefix_setup_hints(resolved_binary: str, parent: str) -> None:
+    """Actionable remediation when action-mode setup cannot probe a connector binary."""
+    ux.subhead(f"  Binary resolves to: {resolved_binary}")
+    ux.subhead(f"  Trust it with: defenseclaw setup trusted-paths add {parent}")
+    ux.subhead(
+        "  `trusted-paths add` appends to ~/.defenseclaw/.env "
+        f"(DEFENSECLAW_TRUSTED_BIN_PREFIXES entries are {os.pathsep!r}-separated)."
+    )
+
+
 def _print_summary(sc, llm, aid) -> None:
     click.echo()
     click.echo("  Saved to ~/.defenseclaw/config.yaml")
@@ -2485,6 +2720,7 @@ def _check_connector_version_supported_for_setup(
     mode: str = "observe",
     emit: bool = True,
     data_dir: str | os.PathLike[str] | None = None,
+    _allow_prompt: bool = True,
 ) -> bool:
     """Verify the selected connector's installed version before setup.
 
@@ -2492,6 +2728,11 @@ def _check_connector_version_supported_for_setup(
     the operator before it writes config and restarts services. Unknown hook
     contracts are fatal in action mode unless the explicit exploratory
     override used by the gateway is set.
+
+    ``_allow_prompt`` gates the interactive "trust this directory" remediation.
+    It defaults to ``True`` so direct CLI use is unchanged, but callers that
+    must never block on stdin — the TUI, or this function's own re-entry after
+    trusting a prefix — pass ``False`` to force the non-interactive path.
     """
     connector = normalize_connector(connector)
     label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
@@ -2548,11 +2789,55 @@ def _check_connector_version_supported_for_setup(
             detail += f" ({probe_error})"
         detail += f"; using default hook contract {contract}."
         if action_mode and not allow_drift:
-            if emit:
-                ux.err(
-                    detail + " Refusing action-mode hook setup because the installed "
-                    "connector version could not be verified."
+            is_untrusted_path = bool(
+                probe_error == agent_discovery.UNTRUSTED_PREFIX_ERROR
+                and signal
+                and signal.binary_path
+            )
+            interactive = _allow_prompt and sys.stdin.isatty() and sys.stdout.isatty()
+            resolved_bin = ""
+            parent = ""
+            if is_untrusted_path:
+                resolved_bin = os.path.realpath(signal.binary_path)
+                parent = os.path.dirname(resolved_bin)
+            if emit and is_untrusted_path and interactive:
+                ux.warn(detail)
+                ux.subhead(f"  Binary resolves to: {resolved_bin}")
+                ux.subhead(f"  Directory '{parent}' is not in the trusted prefix list.")
+                ux.subhead(
+                    "  Trusting a directory lets DefenseClaw execute any binary placed "
+                    "there during discovery — only trust locations you control."
                 )
+                if click.confirm(f"  Add '{parent}' to trusted binary prefixes?", default=False):
+                    _add_trusted_bin_prefix(parent, data_dir or os.path.expanduser("~/.defenseclaw"))
+                    ux.subhead(f"  Trusted '{parent}' (persisted to ~/.defenseclaw/.env); re-checking…")
+                    ux.subhead(
+                        "  Note: if this path is version-specific it may need re-trusting "
+                        "after an upgrade — `defenseclaw setup trusted-paths add <dir>`."
+                    )
+                    # Re-run the FULL gate (now non-interactive) so the
+                    # version -> hook-contract check still applies. Trusting the
+                    # path only lets us READ the version; it must not be treated
+                    # as version approval. Suppressing the prompt on re-entry
+                    # also prevents an infinite loop when trusting the directory
+                    # cannot help (e.g. a world-writable parent the per-file
+                    # guard still rejects).
+                    return _check_connector_version_supported_for_setup(
+                        connector,
+                        mode=mode,
+                        emit=emit,
+                        data_dir=data_dir,
+                        _allow_prompt=False,
+                    )
+                # Declined: fall through — still emit the trusted-paths hint below.
+            if emit:
+                if not (is_untrusted_path and interactive):
+                    ux.err(
+                        detail + " Refusing action-mode hook setup because the installed "
+                        "connector version could not be verified."
+                    )
+                if is_untrusted_path:
+                    _emit_untrusted_prefix_setup_hints(resolved_bin, parent)
                 ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
             return False
         if emit:

@@ -29,7 +29,6 @@ from defenseclaw.migrations import (
     MigrationContext,
     _atomic_write_text,
     _migrate_0_3_0,
-    _migrate_0_3_0_from_pristine,
     _migrate_0_3_0_surgical,
     _migrate_0_4_0,
     _migrate_0_4_0_normalize_claw_mode,
@@ -60,92 +59,121 @@ def _ctx(openclaw_home: str, data_dir: str | None = None) -> MigrationContext:
     )
 
 
-class TestMigrate030FromPristine(unittest.TestCase):
-    """Tests for the pristine-backup restore path."""
+class TestMigrate030PreservesOperatorChanges(unittest.TestCase):
+    """S3.HIGH_BUG ("Migration can overwrite live OpenClaw config
+    with a stale pristine snapshot"): the 0.3.0 migration MUST NOT replace
+    the live config with a pristine snapshot. Operator-added providers,
+    plugin entries, and model/workspace settings made AFTER the pristine
+    snapshot must survive the upgrade.
+    """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dclaw-mig-")
         self.oc_json = os.path.join(self.tmp, "openclaw.json")
-        self.pristine = os.path.join(self.tmp, "openclaw.json.pristine")
+        self.data_dir = os.path.join(self.tmp, "data")
+        os.makedirs(self.data_dir, exist_ok=True)
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
-    def test_restores_from_pristine_and_registers_plugin(self):
-        pristine_cfg = {
-            "models": {"providers": {"openai": {"key": "sk-test"}}},
-            "agents": {"defaults": {"model": {"primary": "claude-sonnet-4-20250514"}}},
-        }
-        _write_json(self.pristine, pristine_cfg)
+    def test_pristine_branch_is_never_used(self):
+        """Even when a pristine backup exists, the migration must not call
+        into a pristine-restore path. The dispatcher only calls the
+        surgical path now."""
+        # The pristine helper itself is gone. Keep this test as a guardrail
+        # against regressions that re-introduce the dangerous branch.
+        from defenseclaw import migrations
+        self.assertFalse(
+            hasattr(migrations, "_migrate_0_3_0_from_pristine"),
+            "_migrate_0_3_0_from_pristine must remain removed ()",
+        )
 
-        current_cfg = {
+    def test_operator_added_provider_is_preserved(self):
+        """An operator-added provider (e.g. 'azure-openai') made AFTER the
+        pristine snapshot was taken must survive the upgrade. The previous
+        pristine-restore branch silently dropped it; the surgical branch
+        keeps it."""
+        cfg = {
             "models": {
                 "providers": {
                     "openai": {"key": "sk-test"},
+                    "azure-openai": {"endpoint": "https://op-only.azure.example"},
                     "defenseclaw": {"url": "http://localhost:8080"},
                     "litellm": {"url": "http://localhost:8081"},
                 }
             },
-            "agents": {"defaults": {"model": {"primary": "defenseclaw/claude-sonnet-4-20250514"}}},
+            "agents": {
+                "defaults": {
+                    "model": {"primary": "defenseclaw/claude-sonnet-4-20250514"}
+                }
+            },
         }
-        _write_json(self.oc_json, current_cfg)
+        _write_json(self.oc_json, cfg)
 
-        _migrate_0_3_0_from_pristine(self.oc_json, self.pristine)
+        _migrate_0_3_0(_ctx(self.tmp, self.data_dir))
 
         result = _read_json(self.oc_json)
-        self.assertNotIn("defenseclaw", result.get("models", {}).get("providers", {}))
-        self.assertNotIn("litellm", result.get("models", {}).get("providers", {}))
+        providers = result["models"]["providers"]
+        # Legacy DefenseClaw entries removed.
+        self.assertNotIn("defenseclaw", providers)
+        self.assertNotIn("litellm", providers)
+        # Operator-added providers preserved.
+        self.assertIn("openai", providers)
+        self.assertIn("azure-openai", providers)
         self.assertEqual(
-            result["agents"]["defaults"]["model"]["primary"], "claude-sonnet-4-20250514"
+            providers["azure-openai"]["endpoint"], "https://op-only.azure.example"
         )
+        # Model primary unprefixed.
+        self.assertEqual(
+            result["agents"]["defaults"]["model"]["primary"],
+            "claude-sonnet-4-20250514",
+        )
+
+    def test_operator_added_plugin_entry_is_preserved(self):
+        """Plugins the operator added (other than DefenseClaw) must remain
+        registered after the upgrade."""
+        cfg = {
+            "plugins": {
+                "allow": ["my-custom-plugin"],
+                "entries": {
+                    "my-custom-plugin": {
+                        "enabled": True,
+                        "config": {"important": "value"},
+                    }
+                },
+                "load": {"paths": ["/opt/my-plugins"]},
+            },
+            "models": {"providers": {"defenseclaw": {"url": "x"}}},
+        }
+        _write_json(self.oc_json, cfg)
+
+        _migrate_0_3_0(_ctx(self.tmp, self.data_dir))
+
+        result = _read_json(self.oc_json)
+        # Operator's plugin still there.
+        self.assertIn("my-custom-plugin", result["plugins"]["allow"])
+        self.assertEqual(
+            result["plugins"]["entries"]["my-custom-plugin"]["config"]["important"],
+            "value",
+        )
+        self.assertIn("/opt/my-plugins", result["plugins"]["load"]["paths"])
+        # DefenseClaw plugin re-registered alongside it.
         self.assertIn("defenseclaw", result["plugins"]["allow"])
-        self.assertEqual(result["plugins"]["entries"]["defenseclaw"]["enabled"], True)
+        self.assertTrue(result["plugins"]["entries"]["defenseclaw"]["enabled"])
         install_path = os.path.join(self.tmp, "extensions", "defenseclaw")
         self.assertIn(install_path, result["plugins"]["load"]["paths"])
 
-    def test_creates_pre_migration_backup(self):
-        _write_json(self.pristine, {"plugins": {}})
-        _write_json(self.oc_json, {"old": True})
+    def test_creates_pre_migration_backup_when_changes_applied(self):
+        cfg = {"models": {"providers": {"defenseclaw": {"url": "x"}}}}
+        _write_json(self.oc_json, cfg)
 
-        _migrate_0_3_0_from_pristine(self.oc_json, self.pristine)
+        _migrate_0_3_0(_ctx(self.tmp, self.data_dir))
 
         backup = self.oc_json + ".pre-0.3.0-migration"
         self.assertTrue(os.path.isfile(backup))
-        self.assertEqual(_read_json(backup), {"old": True})
-
-    def test_preserves_existing_plugin_entries(self):
-        pristine_cfg = {
-            "plugins": {
-                "allow": ["other-plugin"],
-                "entries": {"other-plugin": {"enabled": True}},
-                "load": {"paths": ["/some/path"]},
-            }
-        }
-        _write_json(self.pristine, pristine_cfg)
-        _write_json(self.oc_json, {})
-
-        _migrate_0_3_0_from_pristine(self.oc_json, self.pristine)
-
-        result = _read_json(self.oc_json)
-        self.assertIn("other-plugin", result["plugins"]["allow"])
-        self.assertIn("defenseclaw", result["plugins"]["allow"])
-        self.assertIn("other-plugin", result["plugins"]["entries"])
-
-    def test_falls_back_to_surgical_on_corrupted_pristine(self):
-        with open(self.pristine, "w") as f:
-            f.write("not valid json{{{")
-
-        current_cfg = {
-            "models": {
-                "providers": {"defenseclaw": {"url": "http://localhost:8080"}}
-            },
-        }
-        _write_json(self.oc_json, current_cfg)
-
-        _migrate_0_3_0_from_pristine(self.oc_json, self.pristine)
-
-        result = _read_json(self.oc_json)
-        self.assertNotIn("defenseclaw", result.get("models", {}).get("providers", {}))
+        self.assertIn(
+            "defenseclaw", _read_json(backup)["models"]["providers"]
+        )
 
 
 class TestMigrate030Surgical(unittest.TestCase):
@@ -202,10 +230,20 @@ class TestMigrate030Surgical(unittest.TestCase):
         result = _read_json(self.oc_json)
         self.assertEqual(result["agents"]["defaults"]["model"]["primary"], "gpt-4o")
 
-    def test_noop_when_no_legacy_entries(self):
+    def test_noop_when_no_legacy_entries_and_plugin_registered(self):
+        # The surgical path now also re-registers the DefenseClaw plugin
+        # (work that previously lived in the deleted pristine-restore
+        # branch). A config that already has the plugin registered and no
+        # legacy provider entries is a true no-op.
+        install_path = os.path.join(self.tmp, "extensions", "defenseclaw")
         cfg = {
             "models": {"providers": {"openai": {"key": "sk-test"}}},
             "agents": {"defaults": {"model": {"primary": "claude-sonnet-4-20250514"}}},
+            "plugins": {
+                "allow": ["defenseclaw"],
+                "entries": {"defenseclaw": {"enabled": True}},
+                "load": {"paths": [install_path]},
+            },
         }
         _write_json(self.oc_json, cfg)
         mtime_before = os.path.getmtime(self.oc_json)
@@ -240,21 +278,12 @@ class TestMigrate030Dispatch(unittest.TestCase):
     def test_noop_when_no_openclaw_json(self):
         _migrate_0_3_0(_ctx(self.oc_home, self.data_dir))
 
-    @patch("defenseclaw.guardrail.pristine_backup_path")
-    @patch("defenseclaw.migrations._migrate_0_3_0_from_pristine")
-    def test_uses_pristine_when_available(self, mock_from_pristine, mock_pristine_path):
-        _write_json(self.oc_json, {})
-        mock_pristine_path.return_value = "/some/pristine/backup"
-
-        _migrate_0_3_0(_ctx(self.oc_home, self.data_dir))
-
-        mock_from_pristine.assert_called_once_with(self.oc_json, "/some/pristine/backup")
-
-    @patch("defenseclaw.guardrail.pristine_backup_path")
     @patch("defenseclaw.migrations._migrate_0_3_0_surgical")
-    def test_falls_back_to_surgical_when_no_pristine(self, mock_surgical, mock_pristine_path):
+    def test_always_uses_surgical_path(self, mock_surgical):
+        """S3.HIGH_BUG: the pristine-restore branch is gone.
+        Even if a pristine backup file exists, the migration MUST take
+        the surgical path so operator changes are preserved."""
         _write_json(self.oc_json, {})
-        mock_pristine_path.return_value = None
 
         _migrate_0_3_0(_ctx(self.oc_home, self.data_dir))
 
@@ -887,12 +916,17 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
     """Migration 0.4.0 surfaces ``guardrail.hook_fail_mode`` in
     pre-existing config.yaml so operators discover the new knob.
 
-    The runtime default is "open" (matches the Go-side
-    EffectiveHookFailMode + viper default) and so is the seeded
-    value. The migration MUST NOT overwrite an explicit operator
-    choice — including a "closed" choice we'd ourselves recommend
-    against — because operators have explicit override authority over
-    a no-touch upgrade migration.
+    Backwards-compat contract (closes ): pre-v3 installs
+    had no concept of a hook fail mode and shipped fail-OPEN
+    response-layer behavior at the gateway. The new v4 default is
+    fail-CLOSED, but flipping behavior under existing operators on
+    upgrade would be a noisy regression. So the seed migration writes
+    ``hook_fail_mode: open`` to ANY pre-existing config.yaml — pinning
+    legacy behavior for upgraders while letting NEW installs (which
+    skip this migration entirely) get the safer default. The migration
+    MUST NOT overwrite an explicit operator choice — including a
+    "closed" choice we'd ourselves recommend — because operators have
+    explicit override authority over a no-touch upgrade migration.
     """
 
     def setUp(self):
@@ -1089,27 +1123,35 @@ class TestGuardrailConfigHookFailModeRoundTrip(unittest.TestCase):
     silently change the agent's policy posture.
     """
 
-    def test_loader_normalizes_typos_to_open(self):
+    def test_loader_normalizes_typos_to_closed(self):
+        # The secure default is "closed": a typo or any non-canonical
+        # value collapses to "closed" so a misconfigured config.yaml
+        # never silently puts the agent into fail-OPEN mode at the
+        # response-layer boundary. The "open" sentinel still
+        # round-trips because it is the documented opt-in.
         from defenseclaw.config import _merge_guardrail
         gc = _merge_guardrail({"hook_fail_mode": "OpEn"}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "open")
 
         gc = _merge_guardrail({"hook_fail_mode": "klosed"}, "/tmp")
-        # Anything other than the canonical "closed" sentinel falls
-        # back to "open" — silently fail-open is strictly safer than
-        # silently fail-closed. Mirrors normalizeHookFailMode in
+        # Anything other than the canonical "open" sentinel falls
+        # back to "closed" — silently fail-closed is strictly safer
+        # than silently fail-open. Mirrors normalizeHookFailMode in
         # internal/gateway/connector/subprocess.go.
-        self.assertEqual(gc.hook_fail_mode, "open")
+        self.assertEqual(gc.hook_fail_mode, "closed")
 
     def test_loader_accepts_explicit_closed(self):
         from defenseclaw.config import _merge_guardrail
         gc = _merge_guardrail({"hook_fail_mode": "closed"}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "closed")
 
-    def test_default_is_open_when_missing(self):
+    def test_default_is_closed_when_missing(self):
+        # Fresh install: no ``hook_fail_mode`` key in YAML at all.
+        # New v4 default is the safer "closed". Existing v3 installs
+        # are pinned to "open" by _migrate_0_4_0_seed_hook_fail_mode.
         from defenseclaw.config import _merge_guardrail
         gc = _merge_guardrail({"enabled": True}, "/tmp")
-        self.assertEqual(gc.hook_fail_mode, "open")
+        self.assertEqual(gc.hook_fail_mode, "closed")
 
 
 class TestMigrate050PurgeLegacyFlatPolicyBundle(unittest.TestCase):

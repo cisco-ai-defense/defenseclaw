@@ -770,12 +770,69 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
 
 
 def _pid_file_running(pid_file: str) -> bool:
-    # Cross-platform liveness: a bare ``os.kill(pid, 0)`` is wrong on Windows
-    # (signal 0 is routed to a console-control event, not an existence probe),
-    # so a running gateway reads as stopped and init/restart decisions break.
-    from defenseclaw.process_liveness import pid_file_alive
+    """Return True only when pid_file points at a live process whose
+    identity looks like the DefenseClaw gateway.
 
-    return pid_file_alive(pid_file)
+    Liveness is delegated to :func:`defenseclaw.process_liveness.pid_alive`
+    so the probe is correct cross-platform. A bare ``os.kill(pid, 0)`` is
+    wrong on Windows — signal 0 is routed to a console-control event rather
+    than an existence probe, so a running gateway reads as stopped and
+    ``init``/``--restart`` decisions break.
+
+    On top of liveness we verify process identity. The legacy implementation
+    accepted any PID that passed the liveness probe, so a local process that
+    planted or staled gateway.pid could make ``quickstart``/``init`` skip
+    starting the sidecar — generated hooks then forwarded uninspected traffic
+    because the default fail mode for the inspect hook is "open" until the
+    gateway is up. We additionally require the PID's argv0 to match a known
+    gateway binary name (POSIX, via /proc or ``ps``). Windows has no equally
+    cheap argv0 probe and the Go daemon's ``processExists``
+    (internal/daemon/proc_windows.go) is liveness-only too, so there a live
+    PID is accepted.
+    """
+    from defenseclaw.process_liveness import pid_alive, read_pid_file
+
+    pid = read_pid_file(pid_file)
+    if pid is None or pid <= 1:
+        return False
+    if not pid_alive(pid):
+        return False
+    if os.name == "nt":
+        return True
+    return _pid_looks_like_gateway(pid)
+
+
+def _pid_looks_like_gateway(pid: int) -> bool:
+    """Verify that /proc/<pid>/cmdline (Linux) or `ps -o command=`
+    (macOS) advertises one of the expected DefenseClaw gateway
+    binary names. This blocks stale-PID
+    spoofing attacks where a planted gateway.pid points at an
+    unrelated long-running process (e.g. /bin/sleep)."""
+    candidates = ("defenseclaw-gateway", "defenseclaw_gateway", "defenseclaw")
+    proc_cmdline = f"/proc/{pid}/cmdline"
+    try:
+        with open(proc_cmdline, "rb") as fh:
+            raw = fh.read()
+        argv0 = raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
+    except FileNotFoundError:
+        # /proc not present (macOS) — fall back to ps.
+        try:
+            out = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            # No ps either — fail closed.
+            return False
+        if out.returncode != 0:
+            return False
+        argv0 = out.stdout.strip().split(None, 1)[0] if out.stdout.strip() else ""
+    except OSError:
+        return False
+    base = os.path.basename(argv0).strip()
+    if not base:
+        return False
+    return any(base == c or base.startswith(c) for c in candidates)
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:

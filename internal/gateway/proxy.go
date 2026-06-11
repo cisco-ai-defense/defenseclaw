@@ -986,15 +986,29 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		passthroughReqForTelemetry.Model = label
 	}
 	inspectionText := promptInspectionText(userText)
+	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
+	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
+	// or session-startup-shaped suffix inside the user-controlled OpenClaw
+	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
+	// payload from these allowlists while the original prompt still flows
+	// upstream.
 	if userText != "" &&
-		!isHeartbeatMessage(inspectionText, partial.Messages) &&
-		!isSessionStartupMessage(inspectionText) {
+		!isHeartbeatMessage(userText, partial.Messages) &&
+		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
 		passthroughPromptID = emitLLMPromptEvent(r.Context(), meta, userText, body)
 
 		t0 := time.Now()
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, partial.Messages, label, mode)
+		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
+		// any client can forge, so we additionally inspect the RAW user text
+		// when the strip actually changed the content. Either path can
+		// trigger a block; we keep the stricter verdict.
+		if inspectionText != userText {
+			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, label, mode)
+			verdict = mergePromptVerdicts(verdict, rawVerdict)
+		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
@@ -1244,6 +1258,23 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 		}
 
+		// Avarice F-1188: scan provider-native tool calls (Anthropic
+		// tool_use, Gemini functionCall, Bedrock toolUse, OpenAI
+		// Responses function_call, OpenAI Chat Completions tool_calls).
+		// Pre-fix only the OpenAI chat-completion JSON path scanned tool
+		// calls; Anthropic / Gemini / Bedrock tool-call payloads were
+		// forwarded unchecked and the agent could execute them without
+		// the configured tool-call rules ever running.
+		if toolCallsRaw := extractPassthroughToolCalls(respBody, provider); toolCallsRaw != nil {
+			if verdict := p.inspectToolCalls(r.Context(), toolCallsRaw); verdict != nil &&
+				verdict.Action == "block" && mode == "action" {
+				msg := blockMessage(customBlockMsg, "tool_call", verdict.Reason)
+				p.enqueueBlockNotification(verdict, "tool_call", partial.Model)
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
+				return
+			}
+		}
+
 		for k, vs := range resp.Header {
 			for _, v := range vs {
 				w.Header().Add(k, v)
@@ -1405,8 +1436,16 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 }
 
 // extractPassthroughResponseContent extracts assistant text from a non-streaming
-// provider-native response body. Supports Anthropic Messages API, Gemini, and
-// OpenAI Responses API formats.
+// provider-native response body. Supports Anthropic Messages API, Gemini,
+// OpenAI Responses API, OpenAI Chat Completions, Ollama native chat/generate,
+// and Bedrock Converse.
+//
+// Avarice F-1186: pre-fix Ollama and Bedrock envelopes were ignored, so
+// completion inspection silently skipped any prompt-injection that triggered
+// `block` because `content` came back empty and the proxy short-circuited
+// the inspector call. The new branches keep parity with the providers that
+// `inferProviderFromURL` recognises so action-mode passthrough enforcement
+// is uniform across the supported provider surface.
 func extractPassthroughResponseContent(body []byte, provider string) string {
 	switch provider {
 	case "anthropic":
@@ -1448,6 +1487,48 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 			return sb.String()
 		}
 
+	case "ollama":
+		// F-1186: Ollama native chat: {"message": {"content": "..."}}
+		// Ollama native generate: {"response": "..."}
+		var chatResp struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Response string `json:"response"`
+		}
+		if json.Unmarshal(body, &chatResp) == nil {
+			if chatResp.Message.Content != "" {
+				return chatResp.Message.Content
+			}
+			if chatResp.Response != "" {
+				return chatResp.Response
+			}
+		}
+
+	case "bedrock":
+		// F-1186: Bedrock Converse: {"output": {"message": {"content": [{"text": "..."}]}}}
+		// Bedrock InvokeModel responses are model-shaped and re-routed through
+		// the matching provider extractor (anthropic / cohere / etc.) by the
+		// caller, so this branch only handles the Converse envelope.
+		var bedrockResp struct {
+			Output struct {
+				Message struct {
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"message"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &bedrockResp) == nil {
+			var sb strings.Builder
+			for _, c := range bedrockResp.Output.Message.Content {
+				sb.WriteString(c.Text)
+			}
+			if sb.Len() > 0 {
+				return sb.String()
+			}
+		}
+
 	default:
 		// OpenAI Responses API: {"output": [{"content": [{"text": "..."}]}]}
 		var respAPI struct {
@@ -1484,8 +1565,192 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 	return ""
 }
 
+// extractPassthroughToolCalls returns provider-native tool-call payloads
+// found in a non-streaming response body, normalised into the OpenAI Chat
+// Completions tool_calls shape — a JSON array of
+// {"type":"function","function":{"name","arguments"}} objects. That nested
+// shape is the exact contract inspectToolCalls parses: emitting the flat
+// {"name","arguments"} shape here would make the inspector decode every
+// Function.Name / Function.Arguments as the empty string, so Anthropic
+// `tool_use`, Gemini `functionCall`, Bedrock `toolUse`, and OpenAI Responses
+// `function_call` outputs would forward uninspected. Returns nil when the
+// body contains no recognised tool-call shape so the caller can short-circuit
+// inspection.
+func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
+	type out struct {
+		Name      string
+		Arguments string
+	}
+	var calls []out
+	addCall := func(name string, args interface{}) {
+		if name == "" {
+			return
+		}
+		argStr := ""
+		switch a := args.(type) {
+		case string:
+			argStr = a
+		case json.RawMessage:
+			if len(a) > 0 {
+				// OpenAI Responses encodes `arguments` as a JSON string
+				// (a quoted string whose contents are themselves JSON).
+				// Unwrap that single layer so the inspector sees the same
+				// Go-string shape Chat Completions produces natively
+				// (`{"cmd":"..."}` rather than `"{\"cmd\":\"...\"}"`).
+				// Object-shaped arguments (Anthropic / Gemini / Bedrock
+				// tool inputs) pass through verbatim.
+				if a[0] == '"' {
+					var s string
+					if json.Unmarshal(a, &s) == nil {
+						argStr = s
+						break
+					}
+				}
+				argStr = string(a)
+			}
+		case nil:
+			argStr = ""
+		default:
+			b, err := json.Marshal(a)
+			if err == nil {
+				argStr = string(b)
+			}
+		}
+		calls = append(calls, out{Name: name, Arguments: argStr})
+	}
+
+	switch provider {
+	case "anthropic":
+		var resp struct {
+			Content []struct {
+				Type  string          `json:"type"`
+				Name  string          `json:"name"`
+				Input json.RawMessage `json:"input"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Content {
+				if c.Type == "tool_use" {
+					addCall(c.Name, c.Input)
+				}
+			}
+		}
+	case "gemini":
+		var resp struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						FunctionCall struct {
+							Name string          `json:"name"`
+							Args json.RawMessage `json:"args"`
+						} `json:"functionCall"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Candidates {
+				for _, p := range c.Content.Parts {
+					addCall(p.FunctionCall.Name, p.FunctionCall.Args)
+				}
+			}
+		}
+	case "bedrock":
+		var resp struct {
+			Output struct {
+				Message struct {
+					Content []struct {
+						ToolUse struct {
+							Name  string          `json:"name"`
+							Input json.RawMessage `json:"input"`
+						} `json:"toolUse"`
+					} `json:"content"`
+				} `json:"message"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Output.Message.Content {
+				addCall(c.ToolUse.Name, c.ToolUse.Input)
+			}
+		}
+	default:
+		// OpenAI Responses API: {"output": [{"type":"function_call","name":"...","arguments":"..."}]}
+		var respAPI struct {
+			Output []struct {
+				Type      string          `json:"type"`
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &respAPI) == nil {
+			for _, o := range respAPI.Output {
+				if o.Type == "function_call" {
+					addCall(o.Name, o.Arguments)
+				}
+			}
+		}
+		// OpenAI Chat Completions tool calls: {"choices":[{"message":{"tool_calls":[{"function":{"name":"...","arguments":"..."}}]}}]}
+		var respCC struct {
+			Choices []struct {
+				Message struct {
+					ToolCalls []struct {
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(body, &respCC) == nil {
+			for _, c := range respCC.Choices {
+				for _, tc := range c.Message.ToolCalls {
+					addCall(tc.Function.Name, tc.Function.Arguments)
+				}
+			}
+		}
+	}
+	if len(calls) == 0 {
+		return nil
+	}
+	// Emit the nested OpenAI Chat Completions tool_calls shape so the payload
+	// round-trips through inspectToolCalls' parse contract (function.name /
+	// function.arguments). See the function doc for why the flat shape breaks
+	// inspection.
+	type fnPart struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	type nestedCall struct {
+		Type     string `json:"type"`
+		Function fnPart `json:"function"`
+	}
+	out2 := make([]nestedCall, len(calls))
+	for i, c := range calls {
+		out2[i] = nestedCall{
+			Type:     "function",
+			Function: fnPart{Name: c.Name, Arguments: c.Arguments},
+		}
+	}
+	encoded, err := json.Marshal(out2)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
 // extractSSEChunkText extracts the assistant text delta from a single SSE
 // data JSON object in a streaming provider-native response.
+//
+// Avarice F-1187: pre-fix the default branch only parsed OpenAI Chat
+// Completions `choices[].delta.content`, so OpenAI Responses streams
+// (`response.output_text.delta`), Bedrock Converse streams
+// (`contentBlockDelta`), and Ollama native streams (`message.content`)
+// returned an empty string for every chunk. Empty deltas skipped both
+// the initial-buffer flush and the final completion scan, and the
+// stream was delivered to the client unchanged. The new branches
+// keep the streaming inspector in lockstep with the non-streaming
+// extractor.
 func extractSSEChunkText(data string, provider string) string {
 	switch provider {
 	case "anthropic":
@@ -1519,7 +1784,52 @@ func extractSSEChunkText(data string, provider string) string {
 			return sb.String()
 		}
 
+	case "bedrock":
+		// F-1187: Bedrock Converse streaming uses contentBlockDelta frames
+		// shaped {"contentBlockDelta":{"delta":{"text":"..."}}}.
+		var chunk struct {
+			ContentBlockDelta struct {
+				Delta struct {
+					Text string `json:"text"`
+				} `json:"delta"`
+			} `json:"contentBlockDelta"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil {
+			return chunk.ContentBlockDelta.Delta.Text
+		}
+
+	case "ollama":
+		// F-1187: Ollama native streaming chat: {"message":{"content":"..."}}
+		// generate: {"response":"..."}
+		var chunk struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Response string `json:"response"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil {
+			if chunk.Message.Content != "" {
+				return chunk.Message.Content
+			}
+			return chunk.Response
+		}
+
 	default:
+		// F-1187: OpenAI Responses API streaming uses event-shaped frames
+		// keyed by `type`, e.g.:
+		//   {"type":"response.output_text.delta","delta":"..."}
+		// Pre-fix the default branch only parsed Chat Completions, so
+		// every Responses chunk yielded an empty string. Detect the
+		// Responses shape first, then fall back to Chat Completions.
+		var rspChunk struct {
+			Type  string `json:"type"`
+			Delta string `json:"delta"`
+		}
+		if json.Unmarshal([]byte(data), &rspChunk) == nil &&
+			strings.HasPrefix(rspChunk.Type, "response.") &&
+			strings.Contains(rspChunk.Type, ".delta") {
+			return rspChunk.Delta
+		}
 		// OpenAI Chat Completions streaming: {"choices":[{"delta":{"content":"..."}}]}
 		var chunk struct {
 			Choices []struct {
@@ -1932,6 +2242,75 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 	return provider
 }
 
+// guardUpstreamTargetURL applies the userinfo / scheme / private-host SSRF
+// guards to the resolved upstream target URL before the request is forwarded
+// to the provider (Bifrost performs the actual dial). The URL may come from
+// the X-DC-Target-URL header (fetch-interceptor connectors) or be hydrated
+// from the active connector's captured config snapshot (native-binary
+// connectors such as Codex / ZeptoClaw, which have no fetch interceptor).
+//
+// It must run AFTER connector hydration so a connector-resolved
+// private / IMDS / CGNAT / IPv6-ULA / userinfo / non-http upstream is rejected
+// with the same structured 400/403 + labeled egress block event as the header
+// path, instead of slipping past the guard and only failing opaquely at dial
+// time in ssrfSafeDialContext.
+//
+// Returns true when the request was rejected and the caller must stop
+// processing. An empty targetURL is a no-op (no upstream override in play).
+func guardUpstreamTargetURL(w http.ResponseWriter, r *http.Request, targetURL string) bool {
+	if targetURL == "" {
+		return false
+	}
+	u, perr := url.Parse(targetURL)
+	if perr != nil {
+		return false
+	}
+	if u.User != nil {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   u.Hostname(),
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "userinfo-in-target-url",
+			Source:       "go",
+		})
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: userinfo in upstream target URL\n")
+		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must not contain userinfo")
+		return true
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   u.Hostname(),
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "non-http-scheme",
+			Source:       "go",
+		})
+		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must use http or https")
+		return true
+	}
+	if host := u.Hostname(); host != "" && isPrivateHost(host) &&
+		!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
+		!passthroughAllowPrivateForTest {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   host,
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "private-ip",
+			Source:       "go",
+		})
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+		writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+		return true
+	}
+	return false
+}
+
 func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2011,6 +2390,17 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				chatConnExtraHeaders = cs.ExtraHeaders
 			}
 		}
+	}
+
+	// SSRF / userinfo / scheme guards run here — AFTER connector hydration —
+	// so they see the *final* upstream, whether it came from the
+	// X-DC-Target-URL header (fetch-interceptor connectors) or was resolved by
+	// a native-binary connector's config snapshot (Codex / ZeptoClaw). Running
+	// before hydration would leave the connector-resolved upstream unguarded
+	// (it would only fail opaquely at dial time in ssrfSafeDialContext, with no
+	// structured 400/403 + labeled egress block event).
+	if guardUpstreamTargetURL(w, r, req.TargetURL) {
+		return
 	}
 
 	// Forward inbound HTTP headers to the upstream provider via
@@ -2147,9 +2537,15 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	_, promptProviderName := p.llmSystemAndProvider(req.Model)
 	promptID := ""
 	inspectionText := promptInspectionText(userText)
+	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
+	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
+	// or session-startup-shaped suffix inside the user-controlled OpenClaw
+	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
+	// payload from these allowlists while the original prompt still flows
+	// upstream.
 	if userText != "" &&
-		!isHeartbeatMessage(inspectionText, req.Messages) &&
-		!isSessionStartupMessage(inspectionText) {
+		!isHeartbeatMessage(userText, req.Messages) &&
+		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, req.Model)
 		promptID = emitLLMPromptEvent(r.Context(), meta, userText, req.RawBody)
@@ -2166,6 +2562,14 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, req.Messages, req.Model, mode)
+		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
+		// any client can forge, so we additionally inspect the RAW user text
+		// when the strip actually changed the content. Either path can
+		// trigger a block; we keep the stricter verdict.
+		if inspectionText != userText {
+			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", userText, req.Messages, req.Model, mode)
+			verdict = mergePromptVerdicts(verdict, rawVerdict)
+		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		elapsed := time.Since(t0)
 
@@ -3780,13 +4184,32 @@ func isKnownProviderDomain(targetURL string) bool {
 }
 
 // matchProviderDomain performs safe domain matching:
-//   - Domains ending in "." are hostname prefixes (e.g. "bedrock-runtime.")
-//   - Domains containing "/" match hostname+path prefix
-//   - All others require exact hostname or subdomain match
+//   - Domains containing "*" wildcard a single DNS label
+//     (e.g. "bedrock-runtime.*.amazonaws.com" matches
+//     "bedrock-runtime.us-east-1.amazonaws.com" but rejects
+//     "bedrock-runtime.attacker.example").
+//   - Domains containing "/" match hostname+path prefix.
+//   - All others require exact hostname or subdomain match.
+//
+// Avarice F-1185: pre-fix the "ends-with-dot" form was treated as a
+// raw hostname prefix, so "bedrock-runtime." matched any host that
+// began with that string — e.g. "bedrock-runtime.attacker.example".
+// An attacker-chosen X-DC-Target-URL could be admitted as a known
+// provider, bypass the unknown-domain / private-host checks, and
+// receive the upstream Authorization header. The new wildcard form
+// pins the trailing TLD, which is what the original Bedrock entry
+// always meant.
 func matchProviderDomain(host, urlPath, domain string) bool {
 	d := strings.ToLower(domain)
-	if strings.HasSuffix(d, ".") {
-		return strings.HasPrefix(host, d)
+	// Reject the legacy bare-prefix form ("bedrock-runtime.") so an
+	// older operator-supplied providers.json that still uses it
+	// can never be silently honoured: callers must migrate to the
+	// wildcard form ("bedrock-runtime.*.amazonaws.com").
+	if strings.HasSuffix(d, ".") && !strings.Contains(d, "*") {
+		return false
+	}
+	if strings.Contains(d, "*") {
+		return matchWildcardDomain(host, d)
 	}
 	if strings.Contains(d, "/") {
 		parts := strings.SplitN(d, "/", 2)
@@ -3797,6 +4220,31 @@ func matchProviderDomain(host, urlPath, domain string) bool {
 		return strings.HasPrefix(urlPath, pathPart)
 	}
 	return host == d || strings.HasSuffix(host, "."+d)
+}
+
+// matchWildcardDomain compares a hostname against a domain containing
+// one or more "*" wildcards. Each "*" matches exactly one DNS label
+// (no embedded dot, non-empty). Pattern and host are dot-split and
+// compared label-for-label so a wildcard cannot smuggle a malicious
+// suffix into the trailing components.
+func matchWildcardDomain(host, pattern string) bool {
+	hostLabels := strings.Split(host, ".")
+	patternLabels := strings.Split(pattern, ".")
+	if len(hostLabels) != len(patternLabels) {
+		return false
+	}
+	for i := range patternLabels {
+		if patternLabels[i] == "*" {
+			if hostLabels[i] == "" {
+				return false
+			}
+			continue
+		}
+		if hostLabels[i] != patternLabels[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // patchRawResponseModel overwrites only the "model" field in raw JSON bytes,

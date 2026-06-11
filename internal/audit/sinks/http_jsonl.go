@@ -39,16 +39,27 @@ import (
 // endpoint. For Splunk-specific HEC use SplunkHECSink; for OTLP use
 // OTLPLogsSink.
 type HTTPJSONLConfig struct {
-	Name           string
-	URL            string
-	Method         string
-	Headers        map[string]string
-	BearerToken    string
-	VerifyTLS      bool
-	BatchSize      int
-	FlushIntervalS int
-	TimeoutS       int
-	Filter         SinkFilter
+	Name        string
+	URL         string
+	Method      string
+	Headers     map[string]string
+	BearerToken string
+	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-the
+	// transport defaulted to InsecureSkipVerify and operators had to set
+	// verify_tls=true. Retained for backward compatibility — when present
+	// and true it is honoured (no-op against the new secure default);
+	// when present and false it is IGNORED (the secure default wins).
+	VerifyTLS bool
+	// InsecureSkipVerify is the fix: TLS verification is ON by
+	// default and operators must explicitly set this true to disable it
+	// (e.g. dev environments with self-signed log shippers). Closes the
+	// silent downgrade where omitting verify_tls leaked bearer tokens
+	// and audit payloads to any MITM peer.
+	InsecureSkipVerify bool
+	BatchSize          int
+	FlushIntervalS     int
+	TimeoutS           int
+	Filter             SinkFilter
 }
 
 type HTTPJSONLSink struct {
@@ -81,14 +92,15 @@ func NewHTTPJSONLSink(cfg HTTPJSONLConfig) (*HTTPJSONLSink, error) {
 		cfg.TimeoutS = 10
 	}
 
+	// TLS certificate verification is ON by default. Operators
+	// must opt INTO insecurity via InsecureSkipVerify. Legacy
+	// verify_tls=false in operator YAML is silently ignored (the secure
+	// default wins) — the explicit warning below tells operators which
+	// flag controls the new behaviour.
+	insecure := cfg.InsecureSkipVerify
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
-			// Mirror Splunk HEC posture: operators must explicitly set
-			// verify_tls=true to enable certificate validation. The
-			// generic-webhook sink commonly targets self-signed log
-			// shippers in dev — flipping the default to verify=true
-			// without an opt-out would break those flows.
-			InsecureSkipVerify: !cfg.VerifyTLS,
+			InsecureSkipVerify: insecure,
 			MinVersion:         tls.VersionTLS12,
 		},
 	}
@@ -102,19 +114,24 @@ func NewHTTPJSONLSink(cfg HTTPJSONLConfig) (*HTTPJSONLSink, error) {
 		done: make(chan struct{}),
 	}
 
-	if cfg.FlushIntervalS > 0 && cfg.BatchSize > 1 {
+	// S3.HIGH_BUG ("Default HTTP JSONL mode drops failed audit
+	// deliveries"): the bounded-retry queue is now shared between
+	// batched and synchronous modes. The flush loop must run for every
+	// BatchSize so events queued by Forward (including BatchSize<=1)
+	// are retried in the background after a transient outage instead of
+	// sitting in s.batch forever waiting for the next Forward call.
+	if cfg.FlushIntervalS > 0 {
 		s.ticker = time.NewTicker(time.Duration(cfg.FlushIntervalS) * time.Second)
 		go s.flushLoop()
 	}
 
-	// Surface an explicit warning when operators point an HTTPS sink
-	// at an unvalidated endpoint. The insecure default is intentional
-	// (self-signed log shippers are common in dev), but silent
-	// downgrade in production is a security risk — print once at boot
-	// so ops sees it in the sidecar logs.
-	if !cfg.VerifyTLS && strings.HasPrefix(strings.ToLower(cfg.URL), "https://") {
+	// surface an explicit warning when operators point an HTTPS
+	// sink at an unvalidated endpoint. The insecure default has been
+	// flipped — operators must opt in via insecure_skip_verify=true and
+	// will see this warning in the boot logs whenever they do.
+	if insecure && strings.HasPrefix(strings.ToLower(cfg.URL), "https://") {
 		fmt.Fprintf(os.Stderr,
-			"warning: audit sink %q (http_jsonl): TLS certificate verification disabled for %s — set verify_tls=true for production\n",
+			"warning: audit sink %q (http_jsonl): TLS certificate verification DISABLED for %s — remove insecure_skip_verify=true for production\n",
 			cfg.Name, cfg.URL)
 	}
 
@@ -128,12 +145,14 @@ func (s *HTTPJSONLSink) Forward(ctx context.Context, e Event) error {
 	if !s.cfg.Filter.Matches(e) {
 		return nil
 	}
-	if s.cfg.BatchSize <= 1 {
-		// Synchronous mode: send each event immediately. Useful for
-		// low-volume audit pipelines that need real-time delivery.
-		return s.send(ctx, []Event{e})
-	}
 
+	// S3.HIGH_BUG ("Default HTTP JSONL mode drops failed audit
+	// deliveries"): every event is now queued before any send attempt,
+	// regardless of BatchSize. The bounded-retry queue inside Flush is
+	// the single source of truth for retry semantics. The previous
+	// synchronous path (`return s.send(ctx, []Event{e})`) bypassed the
+	// queue entirely, so a single transient collector outage permanently
+	// dropped audit events from a SIEM/log-shipper pipeline.
 	s.mu.Lock()
 	s.batch = append(s.batch, e)
 	needsFlush := len(s.batch) >= s.cfg.BatchSize
@@ -264,6 +283,13 @@ func (s *HTTPJSONLSink) Close() error {
 	default:
 		close(s.done)
 	}
+	// Best-effort: try one final delivery of anything still queued so
+	// graceful shutdown does not silently drop in-flight audit events.
+	// The bounded-retry queue still applies; a failure leaves events
+	// in s.batch where the operator's Manager logs the loss.
+	flushCtx, cancel := context.WithTimeout(context.Background(), time.Duration(s.cfg.TimeoutS)*time.Second)
+	defer cancel()
+	_ = s.Flush(flushCtx)
 	return nil
 }
 

@@ -104,10 +104,86 @@ func (t tlsOverrides) id() string {
 	return "tls:sha256:" + hex.EncodeToString(sum[:8])
 }
 
+// bifrostTenantsMaxSize bounds the in-memory tenant client cache.
+// ("Bifrost tenant client cache grows without
+// eviction"): the previous package-level map grew on every cache
+// miss with no LRU/TTL/Shutdown, and authenticated callers can vary
+// `X-AI-Auth` (and Azure/Bedrock can also vary baseURL) per request.
+// On a long-running gateway with credential rotation or a hostile
+// authenticated caller, that drove permanent memory + connection
+// growth. We now keep at most bifrostTenantsMaxSize live clients,
+// evict the least-recently-used entry when we hit the cap, and call
+// the SDK's Shutdown on every eviction so each client's HTTP / queue
+// resources are released alongside the map slot.
+const bifrostTenantsMaxSize = 256
+
+type bifrostTenantEntry struct {
+	client   *bifrost.Bifrost
+	lastUsed time.Time
+}
+
 var (
 	bifrostTenantsMu sync.RWMutex
-	bifrostTenants   = make(map[tenantKey]*bifrost.Bifrost)
+	bifrostTenants   = make(map[tenantKey]*bifrostTenantEntry)
 )
+
+// tenantKeyString gives evictOldestBifrostTenantLocked a deterministic
+// tie-break order. We do NOT include the raw apiKey here — keyID is
+// already a sha256 of apiKey (see bifrostKeyID). Provider name +
+// baseURL + keyID is plenty for stable lexicographic ordering and
+// contains no secrets.
+func tenantKeyString(k tenantKey) string {
+	return string(k.provider) + "|" + k.baseURL + "|" + k.keyID
+}
+
+// evictOldestBifrostTenantLocked drops the LRU tenant client. Caller
+// must hold bifrostTenantsMu (write lock).
+//
+// Tie-break: when two entries share the same lastUsed (unlikely on a
+// busy gateway but observable under low-resolution wallclocks and in
+// unit tests), order by stringified tenantKey so eviction is
+// deterministic. Without this tie-break the victim depends on Go's
+// randomized map iteration order, which makes bursty-traffic
+// behavior — and the eviction test below — flaky.
+func evictOldestBifrostTenantLocked() {
+	var oldestKey tenantKey
+	var oldestKeyStr string
+	var oldestSeen time.Time
+	first := true
+	for k, e := range bifrostTenants {
+		ks := tenantKeyString(k)
+		if first {
+			oldestKey = k
+			oldestKeyStr = ks
+			oldestSeen = e.lastUsed
+			first = false
+			continue
+		}
+		if e.lastUsed.Before(oldestSeen) {
+			oldestKey = k
+			oldestKeyStr = ks
+			oldestSeen = e.lastUsed
+		} else if e.lastUsed.Equal(oldestSeen) && ks < oldestKeyStr {
+			oldestKey = k
+			oldestKeyStr = ks
+		}
+	}
+	if first {
+		return
+	}
+	if entry, ok := bifrostTenants[oldestKey]; ok {
+		delete(bifrostTenants, oldestKey)
+		// Shutdown asynchronously so we don't hold the write
+		// lock across an SDK teardown that may block on
+		// in-flight streams. The SDK's Shutdown is documented
+		// as safe to call once and is a no-op on subsequent
+		// invocations.
+		go func(c *bifrost.Bifrost) {
+			defer func() { _ = recover() }()
+			c.Shutdown()
+		}(entry.client)
+	}
+}
 
 // tenantAccount implements schemas.Account and is frozen at construction
 // time: it returns the same single key + config for its pinned provider and
@@ -357,17 +433,27 @@ func getBifrostClient(
 		subID:    subBlockID(bedrock, vertex, azure),
 	}
 
-	bifrostTenantsMu.RLock()
-	if c, ok := bifrostTenants[tk]; ok {
-		bifrostTenantsMu.RUnlock()
-		return c, nil
-	}
-	bifrostTenantsMu.RUnlock()
-
+	now := time.Now()
+	// Single Lock path. The previous double-checked-locking variant
+	// had an RLock-probe + Lock-recheck, which sounded like a fast
+	// path but was actually a TOCTOU footgun: between dropping RLock
+	// and acquiring Lock, a concurrent eviction could call
+	// client.Shutdown() on the snapshot client we were about to
+	// return. With the cache capped at bifrostTenantsMaxSize entries
+	// and lookups being a single map read, the lock contention from a
+	// pure write-lock path is negligible compared to the work we're
+	// otherwise doing (Bifrost's per-request payload assembly and
+	// upstream HTTP). The simpler model also lets us hold the lock
+	// across the cap-eviction and slow-path re-init below without any
+	// further race.
 	bifrostTenantsMu.Lock()
 	defer bifrostTenantsMu.Unlock()
-	if c, ok := bifrostTenants[tk]; ok {
-		return c, nil
+	if e, ok := bifrostTenants[tk]; ok {
+		e.lastUsed = now
+		return e.client, nil
+	}
+	if len(bifrostTenants) >= bifrostTenantsMaxSize {
+		evictOldestBifrostTenantLocked()
 	}
 
 	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL, tls, bedrock, vertex, azure, extraHeaders)
@@ -377,7 +463,7 @@ func getBifrostClient(
 	if err != nil {
 		return nil, fmt.Errorf("gateway: bifrost init: %w", err)
 	}
-	bifrostTenants[tk] = client
+	bifrostTenants[tk] = &bifrostTenantEntry{client: client, lastUsed: now}
 	return client, nil
 }
 

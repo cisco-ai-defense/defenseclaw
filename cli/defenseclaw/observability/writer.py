@@ -555,15 +555,34 @@ def _build_sink_entry(
             raise ValueError(
                 f"splunk HEC endpoint must start with http:// or https:// (got {endpoint!r})",
             )
-        verify_tls_default = "true" if preset.id == "splunk-enterprise" else "false"
-        base["splunk_hec"] = {
+        # / TLS verification is now ON by default on the
+        # Go sink. Presets that historically pointed at a self-signed
+        # local HEC (the docker-compose ``splunk-hec`` flavour) opt
+        # OUT explicitly via ``insecure_skip_verify=true``. Production
+        # presets (``splunk-enterprise``) omit the flag entirely so the
+        # secure default wins.
+        insecure_default = preset.id != "splunk-enterprise"
+        if "verify_tls" in inputs:
+            # Legacy callers that still pass verify_tls=true|false
+            # are mapped onto the new insecure_skip_verify field.
+            insecure = not _parse_bool(inputs.get("verify_tls", "true"))
+        else:
+            insecure = _parse_bool(inputs.get(
+                "insecure_skip_verify",
+                "true" if insecure_default else "false",
+            ))
+        block: dict[str, Any] = {
             "endpoint": endpoint,
             "token_env": preset.token_env,
             "index": inputs.get("index", "defenseclaw"),
             "source": inputs.get("source", "defenseclaw"),
             "sourcetype": inputs.get("sourcetype", "_json"),
-            "verify_tls": _parse_bool(inputs.get("verify_tls", verify_tls_default)),
         }
+        # Only emit the field when it diverges from the secure default
+        # so production sinks don't carry a redundant negative knob.
+        if insecure:
+            block["insecure_skip_verify"] = True
+        base["splunk_hec"] = block
     elif kind == _SINK_KIND_OTLP_LOGS:
         endpoint = inputs.get("endpoint", "").strip()
         protocol = (inputs.get("protocol") or preset.otel_protocol or "grpc").strip()

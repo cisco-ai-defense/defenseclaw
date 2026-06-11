@@ -129,8 +129,13 @@ def downgrade(severity: str) -> str:
 
 # Directories that are always safe to skip (build artifacts, VCS, IDE config,
 # and Python virtual environments).
+# `dist/` was previously skipped unconditionally, but
+# many npm plugins point `package.json.main` at `dist/index.js` and
+# malicious shipped JavaScript can hide there while the source
+# analyzer sees nothing. We no longer skip `dist/` so source rules
+# apply to runtime entrypoints.
 _SKIP_DIRS: frozenset[str] = frozenset({
-    "node_modules", "dist", "coverage",
+    "node_modules", "coverage",
     ".git", ".svn", ".hg",
     ".vscode", ".idea",
     ".tox", "__pycache__", ".mypy_cache",

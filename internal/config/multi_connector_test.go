@@ -185,8 +185,11 @@ func TestEffectiveResolvers_SafeFallbacks(t *testing.T) {
 	if got := g.EffectiveMode(""); got != "observe" {
 		t.Errorf("EffectiveMode empty = %q, want observe", got)
 	}
-	if got := g.EffectiveHookFailModeFor(""); got != "open" {
-		t.Errorf("EffectiveHookFailModeFor empty = %q, want open", got)
+	// An unset hook fail mode now resolves to "closed" (fail-safe / deny
+	// by default): a blank or misconfigured value blocks the tool call
+	// rather than silently allowing it through the response-layer gate.
+	if got := g.EffectiveHookFailModeFor(""); got != "closed" {
+		t.Errorf("EffectiveHookFailModeFor empty = %q, want closed", got)
 	}
 	if got := g.EffectiveBlockMessage(""); got != "" {
 		t.Errorf("EffectiveBlockMessage empty = %q, want empty", got)

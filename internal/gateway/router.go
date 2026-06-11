@@ -1450,6 +1450,27 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 		rawCmd = strings.Join(argv, " ")
 	}
 
+	// a sparse approval frame with no SystemRunPlan,
+	// nested `request`, raw command text, OR argv carries no
+	// command context for the dangerous-pattern scanner to inspect.
+	// Pre-fix the autoApprove branch treated that as a "safe
+	// command" and sent allow-once back to the peer without ever
+	// looking at a command. A malicious or compromised runtime that
+	// can shape the approval event can omit the command context and
+	// bypass every dangerous-command check, so we fail CLOSED on an
+	// empty context regardless of autoApprove.
+	if rawCmd == "" && len(argv) == 0 {
+		fmt.Fprintf(os.Stderr,
+			"[sidecar] DENIED exec approval: id=%s reason=empty-command-context\n",
+			payload.ID)
+		approvalSession, _ := r.activeAgentCorrelation()
+		r.logStreamAction(approvalSession, "gateway-approval-denied", payload.ID,
+			"reason=empty-command-context")
+		r.resolveApprovalAsync(payload.ID, false,
+			"defenseclaw: approval request has no command context")
+		return
+	}
+
 	cmdName := baseCommand(rawCmd)
 	fmt.Fprintf(os.Stderr, "[sidecar] exec.approval.requested: id=%s command=%s argc=%d cwd=%s\n",
 		payload.ID, cmdName, len(argv), cwd)

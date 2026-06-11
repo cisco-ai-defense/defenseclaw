@@ -764,7 +764,7 @@ func hookLogLabel(value string) string {
 }
 
 // hookPanicRawPayloadCap is the byte cap applied to env.RawPayload
-// when redaction is globally disabled (DEFENSECLAW_REDACTION_DISABLE=1).
+// when redaction is globally disabled (DEFENSECLAW_DISABLE_REDACTION=1).
 // 64 KiB is large enough to cover any realistic prompt + tool-call
 // payload but small enough that a 10 MiB hostile POST cannot amplify
 // through json.Marshal → strconv.Quote → SQLite insert → every audit

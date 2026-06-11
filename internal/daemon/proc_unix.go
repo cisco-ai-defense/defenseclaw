@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -49,6 +50,62 @@ func processExists(pid int) bool {
 	}
 	err = proc.Signal(syscall.Signal(0))
 	return err == nil
+}
+
+// processStartIdentity returns an opaque string that uniquely identifies a
+// process for the lifetime of that process. After PID reuse it will not match
+// the previous process's value. Used by verifyProcess() to detect that a
+// stale gateway.pid is now pointing at an unrelated process that happened to
+// reuse the same PID.
+//
+// Closes avarice F-0942 (second half of chain F-3399). The returned string is
+// platform-defined and only meaningful when compared to a value previously
+// captured by writePIDInfo() for the same PID.
+//
+//   - Linux: field 22 of /proc/<pid>/stat (starttime in clock ticks since
+//     boot). Stable for the lifetime of the process; resets after PID reuse.
+//   - Darwin: `ps -p <pid> -o lstart=` ("Sun May 10 12:34:56 2026"). The
+//     1-second granularity creates a tiny theoretical collision window
+//     immediately after PID reuse, but the executable check in verifyProcess
+//     covers that — both signals must agree.
+//
+// Returns ("", nil) on platforms where we can't read a stable identity (e.g.
+// FreeBSD); callers should treat that as "skip the start-time check" rather
+// than "process is dead".
+func processStartIdentity(pid int) (string, error) {
+	switch runtime.GOOS {
+	case "linux":
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return "", err
+		}
+		// /proc/<pid>/stat fields are space-separated, but field 2 (the
+		// process command) can contain spaces and is wrapped in
+		// parentheses. Find the LAST `)` and split the tail. Field 22 is
+		// the starttime; tail field index = 22 - 2 = 20.
+		idx := strings.LastIndex(string(data), ")")
+		if idx < 0 || idx+2 > len(data) {
+			return "", fmt.Errorf("daemon: malformed /proc/%d/stat", pid)
+		}
+		tail := strings.Fields(string(data[idx+2:]))
+		// Index 19 == field 22 of the original (we have skipped pid + comm).
+		if len(tail) < 20 {
+			return "", fmt.Errorf("daemon: /proc/%d/stat has only %d tail fields", pid, len(tail))
+		}
+		return tail[19], nil
+	case "darwin":
+		out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+		if err != nil {
+			return "", err
+		}
+		s := strings.TrimSpace(string(out))
+		if s == "" {
+			return "", fmt.Errorf("daemon: ps returned empty lstart for pid %d", pid)
+		}
+		return s, nil
+	default:
+		return "", nil
+	}
 }
 
 // killStaleProcesses finds and kills any defenseclaw-gateway processes that

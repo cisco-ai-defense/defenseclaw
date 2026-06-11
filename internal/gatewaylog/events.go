@@ -512,6 +512,17 @@ type JudgePayload struct {
 	Findings    []Finding `json:"findings,omitempty"`
 	RawResponse string    `json:"raw_response,omitempty"`
 	ParseError  string    `json:"parse_error,omitempty"`
+	// InputHash is the SHA-256 of the inspected judge *input*
+	// (the prompt/request bytes the judge was asked to evaluate),
+	// hex-encoded with the "sha256:" prefix when populated.
+	// ("Judge input_hash is computed from the
+	// response body") closure: the persistor previously hashed
+	// RawResponse and stored the resulting digest as InputHash,
+	// breaking dedup/pivot semantics. Callers that have the
+	// inspected bytes available should populate this; the audit
+	// store leaves InputHash empty when this is not provided
+	// rather than hashing the response body.
+	InputHash string `json:"input_hash,omitempty"`
 }
 
 // LifecyclePayload covers sidecar start/stop and config-reload

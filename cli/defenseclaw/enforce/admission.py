@@ -123,6 +123,28 @@ def evaluate_admission(
 
     allowed_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the allow list — scan skipped")
     if pe.is_allowed(target_type, name):
+        # an explicit operator allow that
+        # was registered with a source_path MUST NOT auto-allow a
+        # different on-disk asset just because it shares the
+        # registered name. Look up the stored entry and compare its
+        # source_path to the current source_path. If they differ
+        # we drop the allow and force a fresh scan/decision rather
+        # than honoring a name-only match. When the stored entry
+        # has no source_path (legacy allow) we keep current
+        # behavior to avoid breaking pre-fix entries; operators can
+        # re-allow with a path to opt into the strict mode.
+        existing = pe.get_action(target_type, name) if hasattr(pe, "get_action") else None
+        existing_path = getattr(existing, "source_path", None) if existing else None
+        if existing_path and source_path and existing_path != source_path:
+            return AdmissionDecision(
+                "rejected",
+                (
+                    f"allow entry for {target_type} '{name}' is pinned to "
+                    f"{existing_path!r}, but the presented asset is at "
+                    f"{source_path!r} — failing closed"
+                ),
+                source="manual-allow-path-mismatch",
+            )
         return AdmissionDecision("allowed", allowed_reason, source="manual-allow")
 
     if include_quarantine and pe.is_quarantined(target_type, name):
@@ -444,13 +466,40 @@ def _scan_summary(scan_result: Any) -> tuple[int, str]:
 
 
 def _matches_provenance(constraints: list[str], source_path: str) -> bool:
-    """True if no constraints exist, or if source_path contains one of them."""
+    """True if no constraints exist, or if source_path is a path
+    *component* match against one of them.
+
+    The previous implementation compared each
+    constraint with ``in normalised``, which is a substring test on
+    the entire path string. That accepted attacker-controlled
+    paths whose components incidentally embed the constraint
+    (``/tmp/user/.defenseclaw-evil/defenseclaw``,
+    ``/tmp/user/workspace/skills/codeguard-malicious/codeguard``).
+    The fix requires each constraint to match either as a sequence
+    of path *components* or as a normalised path *prefix*, so a
+    constraint like ``.defenseclaw`` only matches when the full
+    component is exactly ``.defenseclaw`` (not ``.defenseclaw-evil``).
+    """
     if not constraints:
         return True
     if not source_path:
         return False
     normalised = source_path.replace("\\", "/").lower()
-    return any(c.lower() in normalised for c in constraints)
+    components = [c for c in normalised.split("/") if c]
+    for raw in constraints:
+        constraint = raw.replace("\\", "/").lower().strip("/")
+        if not constraint:
+            continue
+        constraint_parts = [p for p in constraint.split("/") if p]
+        if not constraint_parts:
+            continue
+        # Match constraint as a contiguous run of full path
+        # components in the source path.
+        clen = len(constraint_parts)
+        for i in range(len(components) - clen + 1):
+            if components[i : i + clen] == constraint_parts:
+                return True
+    return False
 
 
 def _action_reason(action_entry: Any | None, *, default: str) -> str:

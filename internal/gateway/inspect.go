@@ -285,9 +285,16 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 	// enforces its own pack (empty ⇒ process-global default set).
 	ruleFindings := ScanAllRulesForConnector(req.Connector, argsStr, toolName)
 
-	// CodeGuard: scan file content for write_file/edit_file tools.
+	// CodeGuard: scan file content for any file-write tool.
+	//
+	// the legacy gate matched only the canonical
+	// `write_file` / `edit_file` names, but native connector events
+	// emit aliases like Claude Code "Write" / "Edit" / "MultiEdit",
+	// Codex "patch", and Cursor "applyDiff". Those bypassed CodeGuard
+	// entirely while carrying the same code payload. We accept any
+	// recognised file-write alias (case-insensitive).
 	tool := strings.ToLower(toolName)
-	isWriteTool := tool == "write_file" || tool == "edit_file"
+	isWriteTool := isWriteToolName(tool)
 	var cgFindings []scanner.Finding
 	if isWriteTool {
 		cgFindings = a.runCodeGuardOnArgs(req)
@@ -353,11 +360,58 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 	return verdict
 }
 
+// unmarshalArgsObject decodes a tool-call args payload that may
+// arrive either as a JSON object directly OR as a JSON string whose
+// content is the object. the managed inspect-tool
+// hook builds the request body with `jq --arg args "$TOOL_INPUT"`,
+// so well-formed tool input becomes a string field. Returns ok=false
+// when neither form yields a non-nil object.
+func unmarshalArgsObject(raw json.RawMessage) (map[string]interface{}, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var asObj map[string]interface{}
+	if err := json.Unmarshal(raw, &asObj); err == nil && asObj != nil {
+		return asObj, true
+	}
+	var asStr string
+	if err := json.Unmarshal(raw, &asStr); err == nil && asStr != "" {
+		var inner map[string]interface{}
+		if err := json.Unmarshal([]byte(asStr), &inner); err == nil && inner != nil {
+			return inner, true
+		}
+	}
+	return nil, false
+}
+
+// isWriteToolName reports whether the lowercased tool name should
+// trigger CodeGuard inspection. includes native
+// connector aliases that previously bypassed CodeGuard (Write/Edit/
+// MultiEdit/applyDiff/patch).
+func isWriteToolName(tool string) bool {
+	switch tool {
+	case "write_file", "edit_file",
+		"write", "edit", "multiedit", "multi_edit",
+		"applydiff", "apply_diff", "patch",
+		"create_file", "createfile", "fs_write", "fs_edit":
+		return true
+	}
+	return false
+}
+
 // runCodeGuardOnArgs extracts path/content from write_file/edit_file args
 // and runs CodeGuard content scanning.
 func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Finding {
-	var parsed map[string]interface{}
-	if err := json.Unmarshal(req.Args, &parsed); err != nil {
+	// the managed inspect-tool hook serializes
+	// TOOL_INPUT with `jq -n --arg args "$TOOL_INPUT"`, which yields
+	// {"args": "<json-string>"} where `args` is a JSON STRING that
+	// itself contains the object. The legacy code unmarshalled
+	// req.Args directly into map[string]interface{} and bailed on
+	// any error, so the hook path silently skipped CodeGuard. We
+	// first try the object form; on failure we attempt to interpret
+	// req.Args as a JSON string and unmarshal its contents.
+	parsed, ok := unmarshalArgsObject(req.Args)
+	if !ok {
 		return nil
 	}
 
@@ -365,6 +419,21 @@ func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Findin
 	content, _ := parsed["content"].(string)
 	if content == "" {
 		content, _ = parsed["new_string"].(string)
+	}
+	if filePath == "" || content == "" {
+		// native aliases use different field names.
+		if filePath == "" {
+			filePath, _ = parsed["file_path"].(string)
+		}
+		if filePath == "" {
+			filePath, _ = parsed["filePath"].(string)
+		}
+		if content == "" {
+			content, _ = parsed["text"].(string)
+		}
+		if content == "" {
+			content, _ = parsed["body"].(string)
+		}
 	}
 	if filePath == "" || content == "" {
 		return nil
@@ -619,9 +688,19 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 	}
 	verdict.ApprovalTimeoutMS = int(timeout / time.Millisecond)
 
+	// a HIGH-severity tool call that policy escalated
+	// to `confirm` MUST NOT be downgraded to `alert` when the caller
+	// cannot deliver a human-in-the-loop approval. The previous
+	// behavior (alert + would_block=false) caused hook callers that
+	// only block on action==block to forward the tool call as audit
+	// telemetry. Failing closed here turns "no native approval
+	// surface" into a BLOCK with would_block tracking the original
+	// confirm decision.
 	if !strings.EqualFold(a.connectorName(), "openclaw") {
-		verdict.Action = guardrailActionAlert
-		verdict.Reason = appendVerdictReason(verdict.Reason, "human approval unsupported on this connector surface")
+		verdict.Action = guardrailActionBlock
+		verdict.WouldBlock = true
+		verdict.Reason = appendVerdictReason(verdict.Reason,
+			"human approval unsupported on this connector surface; failing closed")
 		if a.logger != nil {
 			_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "connector="+a.connectorName())
 		}
@@ -631,8 +710,10 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 		return
 	}
 
-	verdict.Action = guardrailActionAlert
-	verdict.Reason = appendVerdictReason(verdict.Reason, "human approval requires native OpenClaw approval; audited as alert")
+	verdict.Action = guardrailActionBlock
+	verdict.WouldBlock = true
+	verdict.Reason = appendVerdictReason(verdict.Reason,
+		"human approval requires native OpenClaw approval; failing closed")
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "surface="+req.ApprovalSurface)
 	}

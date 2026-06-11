@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -337,6 +339,16 @@ type JudgeEmitOpts struct {
 	ToolID         string
 	PolicyID       string
 	DestinationApp string
+	// InputContent, when non-empty, is the inspected judge input
+	// (the prompt/request text the judge was asked to evaluate).
+	// emitJudge computes its sha256 digest and stores the result in
+	// JudgePayload.InputHash so the audit row carries an InputHash
+	// that actually represents the *input*. ("Judge
+	// input_hash is computed from the response body") closure: the
+	// previous implementation hashed the response, which corrupted
+	// dedup/pivot semantics. emitJudge intentionally does not log
+	// or persist InputContent itself — only the digest.
+	InputContent string
 }
 
 // emitJudge records a single LLM-judge invocation. raw may be empty
@@ -368,6 +380,17 @@ func emitJudge(
 		ParseError:  parseError,
 		RawResponse: raw,
 		Findings:    opts.Findings,
+	}
+	// ("Judge input_hash is computed from the
+	// response body") closure: when callers supply the inspected
+	// judge input via opts.InputContent, derive the canonical
+	// "sha256:<hex>" digest of that content here. Persistence
+	// (judge_store.go) propagates payload.InputHash verbatim and
+	// no longer falls back to hashing the response body, so the
+	// audit row's InputHash truly represents the input.
+	if opts.InputContent != "" {
+		sum := sha256.Sum256([]byte(opts.InputContent))
+		payload.InputHash = "sha256:" + hex.EncodeToString(sum[:])
 	}
 
 	// SQLite persistence runs first because emitEvent mutates its own

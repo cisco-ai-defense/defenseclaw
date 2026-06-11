@@ -12,13 +12,20 @@ on:
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 
-# Required for actions/deploy-pages — least-privilege scoping per
-# https://github.com/actions/deploy-pages#usage. The Pages OIDC token
-# is the only credential used; we never persist any other secret.
+# Least-privilege workflow permissions: pull-request docs builds must
+# not inherit Pages and OIDC write permissions. Workflow-scope
+# permissions are otherwise inherited by the
+# build job, which runs PR-controlled `npm ci` + `npm run build`
+# (including arbitrary lifecycle scripts). Granting `pages: write` /
+# `id-token: write` at workflow scope let a malicious PR exfiltrate the
+# Pages OIDC token via ACTIONS_ID_TOKEN_REQUEST_URL or push Pages content
+# outside the deploy job's push/workflow_dispatch guard.
+#
+# Workflow scope is now read-only. The deploy job (which never runs PR
+# code -- guarded by the `push || workflow_dispatch` `if`) elevates to
+# pages: write + id-token: write at job scope.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # Single-flight: never let two Pages deploys race; cancel pending runs
 # but never cancel an in-progress deploy half-way through.
@@ -35,7 +42,7 @@ jobs:
         working-directory: docs-site
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           # Shallow clone is enough; we don't compute git history in the
           # build path. Keeps CI minutes low.
@@ -43,7 +50,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -116,7 +123,7 @@ jobs:
         run: touch out/.nojekyll
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: docs-site/out
 
@@ -125,10 +132,16 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    # Job-scoped privileged permissions: only the deploy job ever uses
+    # them, and it never runs PR code (guarded by the `if` above).
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

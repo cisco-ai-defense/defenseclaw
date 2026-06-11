@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 
@@ -296,7 +297,16 @@ func loadYAML[T any](dir, relPath string) *T {
 		}
 	}
 
-	embeddedPath := filepath.Join("defaults", relPath)
+	// ("Embedded rule-pack fallback uses
+	// OS-specific paths"): embed.FS paths are always slash-
+	// separated regardless of GOOS. The previous filepath.Join
+	// produced `defaults\sensitive-tools.yaml` on Windows, so
+	// fs.ReadFile could not locate the embedded default and
+	// LoadRulePack silently returned a RulePack with nil
+	// SensitiveTools / Suppressions. We use path.Join (which is
+	// always slash-separated) for the embed.FS lookup while
+	// keeping filepath.Join above for the real-filesystem path.
+	embeddedPath := path.Join("defaults", filepath.ToSlash(relPath))
 	data, err := fs.ReadFile(defaultsFS, embeddedPath)
 	if err != nil {
 		return nil

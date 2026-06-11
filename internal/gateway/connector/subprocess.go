@@ -45,7 +45,7 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 type templateData struct {
 	APIAddr  string
 	APIToken string // gateway bearer token; empty when unconfigured (loopback-allow)
-	FailMode string // "open" (default, response-layer fails allow with a stderr warning) or "closed" (response-layer fails block); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	FailMode string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
 }
 
 // defaultHookFailMode is the fail mode injected into the response-
@@ -58,34 +58,66 @@ type templateData struct {
 // open unless the operator opts into strict availability via
 // DEFENSECLAW_STRICT_AVAILABILITY=1.
 //
-// "open" is the default because a DefenseClaw hook that exits 2 on
-// every gateway hiccup bricks the user's agent for the duration of
-// any DefenseClaw outage, which is strictly worse UX than a brief
-// observability gap. Operators who run a strict policy posture can
-// flip this to "closed" via DEFENSECLAW_FAIL_MODE=closed at runtime
-// or — for connectors that route through
-// WriteHookScriptsForConnectorObjectWithOpts — by enabling per-
-// connector enforcement at setup time.
-const defaultHookFailMode = "open"
+// "closed" is the safer default: a response-layer failure (4xx,
+// malformed JSON, missing action) means the gateway answered but the
+// verdict is untrustworthy, so the hook BLOCKS the tool/prompt rather
+// than forwarding an uninspected action. Operators who would rather
+// accept an observability gap than a hard block during a DefenseClaw
+// outage can flip this to "open" via DEFENSECLAW_FAIL_MODE=open at
+// runtime, or through the per-connector setup flow (which also
+// persists to guardrail.hook_fail_mode in config.yaml).
+const defaultHookFailMode = "closed"
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
 // the two values the hook scripts understand. Anything other than
-// "closed" (case-sensitive — the env var contract is documented as
-// lowercase) collapses to "open" so a typo never accidentally puts
-// the agent into fail-closed mode.
+// "open" (case-sensitive — the env var contract is documented as
+// lowercase) collapses to "closed" so a typo never accidentally puts
+// the agent into fail-OPEN mode at the response-layer boundary
+// (CodeGuard rule codeguard-0-authorization-access-control: deny by
+// default).
 func normalizeHookFailMode(mode string) string {
-	if strings.TrimSpace(mode) == "closed" {
-		return "closed"
+	if strings.TrimSpace(mode) == "open" {
+		return "open"
 	}
-	return "open"
+	return "closed"
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
 // into the given directory. Each shim calls /api/v1/inspect/tool before
 // delegating to the real binary.
+//
+// Avarice F-2029 / chain F-3397: the shim now authenticates each
+// inspection call using the gateway bearer token. The token is written
+// to ${shimDir}/.token (mode 0600) by WriteShimScriptsWithToken, the
+// same way the inspect-* hooks discover their token. WriteShimScripts
+// keeps the legacy no-token signature for backward compatibility but
+// internally always lays down a (possibly empty) token file so the
+// shim can find it; an empty token file produces shims that send no
+// Authorization header — matching the loopback-allow path used by
+// developer setups without a configured gateway token.
 func WriteShimScripts(shimDir, apiAddr string) error {
+	return WriteShimScriptsWithToken(shimDir, apiAddr, "")
+}
+
+// WriteShimScriptsWithToken generates the PATH shim scripts AND
+// persists a .token sidecar so each shim can authenticate inspection
+// calls. See F-2029 / F-3397 for the security rationale.
+func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		return fmt.Errorf("create shim dir: %w", err)
+	}
+
+	// F-2029 / F-3397: write the bearer token next to the shim
+	// scripts. The .token file is 0o600 so other workspace tooling
+	// can't slurp it; the shim sources the file at runtime via
+	// `. "${SHIM_DIR}/.token"`. An empty token still produces a
+	// well-formed file so the shim's source-or-fallback logic
+	// behaves deterministically across loopback-allow and
+	// authenticated deployments.
+	tokenPath := filepath.Join(shimDir, ".token")
+	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
+	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
+		return fmt.Errorf("write shim token file: %w", err)
 	}
 
 	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode}
@@ -504,7 +536,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
 //     “GuardrailConfig.HookFailMode“.
-//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("open").
+//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("closed").
 //  3. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
@@ -519,7 +551,7 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	failMode := normalizeHookFailMode(opts.HookFailMode)
+	failMode := resolveHookFailMode(opts, c)
 	if hp, ok := c.(HookCapabilityProvider); ok {
 		caps := hp.HookCapabilities(opts)
 		if failMode == "closed" && !caps.SupportsFailClosed {
@@ -527,6 +559,31 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 		}
 	}
 	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)
+}
+
+// resolveHookFailMode picks the response-layer fail mode for a hook
+// render given the operator's setup opts and the connector identity.
+// The explicit string in opts.HookFailMode always wins; an empty
+// value falls back to the connector-default and is upgraded to
+// "closed" when the operator has set the matching enforcement flag
+// for codex / claudecode (avarice F-0681).
+func resolveHookFailMode(opts SetupOpts, c Connector) string {
+	if strings.TrimSpace(opts.HookFailMode) != "" {
+		return normalizeHookFailMode(opts.HookFailMode)
+	}
+	if c != nil {
+		switch c.Name() {
+		case "codex":
+			if opts.CodexEnforcement {
+				return "closed"
+			}
+		case "claudecode":
+			if opts.ClaudeCodeEnforcement {
+				return "closed"
+			}
+		}
+	}
+	return defaultHookFailMode
 }
 
 // WriteHookScriptsForConnector generates the generic inspection scripts
@@ -628,13 +685,17 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 			return fmt.Errorf("sandbox policy: %w", err)
 		}
 		shimDir := filepath.Join(opts.DataDir, "shims")
-		if err := WriteShimScripts(shimDir, opts.APIAddr); err != nil {
+		// F-2029 / F-3397: persist the gateway bearer token alongside
+		// the shim scripts so every inspection call carries an
+		// Authorization header. Pre-fix the shim had no auth token
+		// available and silently downgraded a 401 to "allow".
+		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts (sandbox supplement): %w", err)
 		}
 
 	case SubprocessShims:
 		shimDir := filepath.Join(opts.DataDir, "shims")
-		if err := WriteShimScripts(shimDir, opts.APIAddr); err != nil {
+		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts: %w", err)
 		}
 

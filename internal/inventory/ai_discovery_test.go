@@ -1352,3 +1352,132 @@ func TestRunScan_RespectsCancelledContext(t *testing.T) {
 		t.Fatalf("got err=%v, want context.Canceled", err)
 	}
 }
+
+// TestIsSHA256Hash_AcceptsKeyedAndUnsalted is a regression test for the
+// remediation (SetPathHashKey wiring). When the
+// sidecar boots with a gateway token, inventory.hashPath emits the
+// keyed digest form `hmac-sha256:<64 hex>`. validateAIDiscoveryReport
+// must accept that prefix in addition to the legacy `sha256:` form,
+// otherwise every AI-discovery payload from a fully-configured gateway
+// would be rejected by validation.
+//
+// The test enumerates the prefix matrix (legacy / keyed / unrelated)
+// crossed with shape problems (good, short, long, non-hex) and
+// asserts only the two well-formed prefixes pass.
+func TestIsSHA256Hash_AcceptsKeyedAndUnsalted(t *testing.T) {
+	t.Parallel()
+	const goodHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"  // 64 hex
+	const shortHex = "0123456789abcdef"                                                 // 16 hex
+	const upperHex = "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef" // mixed case rejected
+	const nonHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"   // 'g'
+
+	cases := []struct {
+		name   string
+		input  string
+		expect bool
+	}{
+		// Accepted (legacy unsalted, set when SetPathHashKey is nil).
+		{"legacy_sha256_good", "sha256:" + goodHex, true},
+		// Accepted (per-installation keyed, set when SetPathHashKey
+		// is wired from sidecar boot — fix).
+		{"keyed_hmac_sha256_good", "hmac-sha256:" + goodHex, true},
+
+		// Rejected: empty.
+		{"empty", "", false},
+		// Rejected: missing prefix.
+		{"raw_hex_no_prefix", goodHex, false},
+		// Rejected: wrong prefix (only the two formats above are valid).
+		{"unrelated_prefix", "sha512:" + goodHex, false},
+		// Rejected: too short hex tail.
+		{"short_legacy", "sha256:" + shortHex, false},
+		{"short_keyed", "hmac-sha256:" + shortHex, false},
+		// Rejected: too long (would let a raw path through).
+		{"long_legacy", "sha256:" + goodHex + "00", false},
+		// Rejected: uppercase hex (we render lowercase deliberately).
+		{"upper_legacy", "sha256:" + upperHex, false},
+		{"upper_keyed", "hmac-sha256:" + upperHex, false},
+		// Rejected: non-hex byte sneaks past length check.
+		{"nonhex_legacy", "sha256:" + nonHex, false},
+		{"nonhex_keyed", "hmac-sha256:" + nonHex, false},
+		// Rejected: prefix only.
+		{"prefix_only_legacy", "sha256:", false},
+		{"prefix_only_keyed", "hmac-sha256:", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isSHA256Hash(tc.input)
+			if got != tc.expect {
+				t.Fatalf("isSHA256Hash(%q) = %v, want %v", tc.input, got, tc.expect)
+			}
+		})
+	}
+}
+
+// TestHashPath_KeyedVsUnsalted is the end-to-end coverage for the
+// SetPathHashKey contract. It is the assertion the cross-package
+// sidecar test deliberately can't make (hashPath is unexported), and
+// guards against future refactors that quietly drop keyed-mode
+// emission — which would re-introduce (reversible
+// path fingerprints).
+//
+// Properties asserted:
+//
+//  1. Default state (no key installed) returns the legacy
+//     "sha256:<64 hex>" form so detached scan utilities, tests, and
+//     pre-boot code continue to produce the documented digest.
+//  2. After SetPathHashKey(non-nil), hashPath transitions to the
+//     "hmac-sha256:<64 hex>" form with the same hex length, and the
+//     digest itself differs from the unsalted SHA-256 of the same
+//     path (which proves the key is actually feeding into HMAC and
+//     not being silently ignored).
+//  3. SetPathHashKey(nil) restores the legacy form, byte-for-byte
+//     identical to the pre-key digest — proving the rollback path
+//     used by tests and `disable_redaction` modes is symmetric.
+//
+// This test does NOT run with t.Parallel() because SetPathHashKey
+// mutates package-level state shared across the entire process.
+// Other tests in this package that depend on hashPath stay
+// well-defined as long as we restore the nil key on cleanup, which
+// the t.Cleanup hook guarantees.
+func TestHashPath_KeyedVsUnsalted(t *testing.T) {
+	// Save and restore any pre-existing key so this test is hermetic
+	// when run alongside others that may have set one (sidecar tests,
+	// future regression tests).
+	saved := currentPathHashKey()
+	t.Cleanup(func() { SetPathHashKey(saved) })
+
+	const samplePath = "/Users/example/.codex/config.toml"
+
+	// Property 1: legacy mode (no key installed).
+	SetPathHashKey(nil)
+	legacy := hashPath(samplePath)
+	if !strings.HasPrefix(legacy, "sha256:") {
+		t.Fatalf("legacy mode: hashPath returned %q, want sha256: prefix", legacy)
+	}
+	if len(legacy) != len("sha256:")+64 {
+		t.Fatalf("legacy mode: hashPath length = %d, want %d", len(legacy), len("sha256:")+64)
+	}
+
+	// Property 2: keyed mode (after SetPathHashKey).
+	key := []byte("test-installation-key-32-bytes-ok!!")
+	SetPathHashKey(key)
+	keyed := hashPath(samplePath)
+	if !strings.HasPrefix(keyed, "hmac-sha256:") {
+		t.Fatalf("keyed mode: hashPath returned %q, want hmac-sha256: prefix — SetPathHashKey wiring is broken", keyed)
+	}
+	if len(keyed) != len("hmac-sha256:")+64 {
+		t.Fatalf("keyed mode: hashPath length = %d, want %d", len(keyed), len("hmac-sha256:")+64)
+	}
+	// Critical anti-regression: the keyed digest must differ from the
+	// legacy SHA-256, otherwise SetPathHashKey is silently a no-op.
+	if keyed[len("hmac-sha256:"):] == legacy[len("sha256:"):] {
+		t.Fatal("keyed digest equals unsalted digest — SetPathHashKey is not affecting output, which means dictionary attacks are still possible against the redacted path hash")
+	}
+
+	// Property 3: SetPathHashKey(nil) restores legacy mode exactly.
+	SetPathHashKey(nil)
+	legacy2 := hashPath(samplePath)
+	if legacy2 != legacy {
+		t.Fatalf("after key removal, legacy digest changed: was %q, now %q — SetPathHashKey(nil) rollback is broken", legacy, legacy2)
+	}
+}

@@ -1608,17 +1608,29 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 		t.Error("expected non-loopback auth to fail when token configured")
 	}
 
-	// With token — loopback WITHOUT X-DC-Auth must still pass because
-	// codex-cli is a native Rust binary with no fetch interceptor that
-	// could inject X-DC-Auth. Its Authorization header carries the
-	// upstream provider API key, never the gateway token. Denying
-	// loopback when a gateway token is configured would make codex
-	// fundamentally unroutable. Non-loopback callers still require
-	// the token — bridge/remote deployments stay protected.
+	// with a gateway token configured, a loopback
+	// request that carries no X-DC-Auth, no master-key Authorization,
+	// and no recognized provider Authorization header MUST be
+	// rejected. The legacy code unconditionally trusted loopback
+	// here, which on a shared-user host let any local process use
+	// /c/codex/* as an unauthenticated provider relay. The native
+	// codex CLI continues to authenticate successfully because it
+	// sends Authorization: Bearer <provider-api-key>, which matches
+	// the operator-recorded provider snapshot — exercised in
+	// TestCodex_Authenticate_NativeBinaryLoopback.
 	r4 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r4.RemoteAddr = "127.0.0.1:54321"
-	if !c.Authenticate(r4) {
-		t.Error("loopback must be trusted for codex even when gateway token is set — codex cannot inject X-DC-Auth")
+	if c.Authenticate(r4) {
+		t.Error("loopback without X-DC-Auth/master-key/provider key must fail closed when gateway token is configured")
+	}
+
+	// Operator-explicit opt-in path: DEFENSECLAW_CODEX_LOOPBACK_TRUST=1
+	// preserves legacy loose behavior for single-user dev hosts.
+	t.Setenv("DEFENSECLAW_CODEX_LOOPBACK_TRUST", "1")
+	r5 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r5.RemoteAddr = "127.0.0.1:54321"
+	if !c.Authenticate(r5) {
+		t.Error("DEFENSECLAW_CODEX_LOOPBACK_TRUST=1 must restore legacy loose loopback behavior")
 	}
 }
 
@@ -1629,9 +1641,18 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 // inspection and forwarding to upstream) regardless of whether a
 // gateway token is configured — otherwise codex sees a 401 and no
 // traffic is ever inspected.
+//
+// the connector now requires the Authorization Bearer
+// to match a recorded codex provider key (operator-supplied via
+// SetProviderSnapshot), not just any string. This keeps the native
+// codex CLI working while denying arbitrary local processes that do
+// not know the provider key.
 func TestCodex_Authenticate_NativeBinaryLoopback(t *testing.T) {
 	c := NewCodexConnector()
 	c.SetCredentials("gw-tok-5c80", "")
+	c.SetProviderSnapshot(map[string]CodexProviderEntry{
+		"openrouter": {APIKey: "sk-or-v1-real-openrouter-key"},
+	})
 
 	r := httptest.NewRequest("POST", "/c/codex/responses", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
@@ -1639,8 +1660,20 @@ func TestCodex_Authenticate_NativeBinaryLoopback(t *testing.T) {
 	// Note: no X-DC-Auth — native binary has no way to inject it.
 
 	if !c.Authenticate(r) {
-		t.Fatal("codex loopback with provider Authorization must be accepted; " +
+		t.Fatal("codex loopback with recognized provider Authorization must be accepted; " +
 			"otherwise codex → proxy traffic gets 401'd and guardrail never runs")
+	}
+
+	// negative: an Authorization Bearer that does NOT
+	// match any recorded provider key must be rejected (this is the
+	// shared-host bypass that the finding documented).
+	c2 := NewCodexConnector()
+	c2.SetCredentials("gw-tok-5c80", "")
+	r2 := httptest.NewRequest("POST", "/c/codex/responses", nil)
+	r2.RemoteAddr = "127.0.0.1:54321"
+	r2.Header.Set("Authorization", "Bearer sk-attacker-supplied")
+	if c2.Authenticate(r2) {
+		t.Fatal("loopback Authorization that does not match any recorded provider key must be rejected")
 	}
 }
 
@@ -1660,15 +1693,13 @@ func TestCodex_Authenticate_NoCredentials(t *testing.T) {
 	}
 }
 
-// TestCodex_Authenticate_LoopbackWarnOnce pins PR #141 audit H1.
-// Codex cannot inject X-DC-Auth from its native binary, so loopback
-// remains trusted even when a gateway token is configured (otherwise
-// every codex request 401s and no guardrail runs — see
-// TestCodex_Authenticate_NativeBinaryLoopback for the production
-// rationale). H1 surfaces this architectural limitation by emitting a
-// one-time `[SECURITY]` line to stderr the first time the bypass is
-// exercised. We capture stderr, exercise the bypass twice, and assert
-// the warning fires exactly once and that auth still succeeds.
+// TestCodex_Authenticate_LoopbackWarnOnce pins the warn-once
+// telemetry behavior for the fail-closed default. When a
+// gateway token is configured and a loopback caller fails the
+// known-provider check, the connector logs a single
+// `[SECURITY] codex: rejecting loopback /c/codex/* request — ...`
+// line to stderr and rejects the request. Subsequent rejections do
+// not re-emit the warning.
 func TestCodex_Authenticate_LoopbackWarnOnce(t *testing.T) {
 	c := NewCodexConnector()
 	c.SetCredentials("gw-tok-h1", "")
@@ -1684,9 +1715,12 @@ func TestCodex_Authenticate_LoopbackWarnOnce(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		r := httptest.NewRequest("POST", "/c/codex/responses", nil)
 		r.RemoteAddr = "127.0.0.1:54321"
-		r.Header.Set("Authorization", "Bearer sk-or-upstream-key")
-		if !c.Authenticate(r) {
-			t.Fatalf("iter %d: codex loopback auth must still succeed (warn-only contract)", i)
+		// Authorization carries an unrecognized bearer (no provider
+		// snapshot configured) — the connector must reject and warn
+		// once.
+		r.Header.Set("Authorization", "Bearer sk-attacker-key")
+		if c.Authenticate(r) {
+			t.Fatalf("iter %d: codex loopback auth must reject when bearer is not a known provider key", i)
 		}
 	}
 
@@ -1695,11 +1729,10 @@ func TestCodex_Authenticate_LoopbackWarnOnce(t *testing.T) {
 	}
 	captured, _ := io.ReadAll(pipeR)
 	got := string(captured)
-	if !strings.Contains(got, "[SECURITY] codex: loopback request accepted") {
-		t.Errorf("stderr missing warn-once line; got:\n%s", got)
+	if !strings.Contains(got, "[SECURITY] codex: rejecting loopback") {
+		t.Errorf("stderr missing warn-once rejection line; got:\n%s", got)
 	}
-	// Three calls but only one warning line. Count occurrences.
-	if n := strings.Count(got, "[SECURITY] codex: loopback request accepted"); n != 1 {
+	if n := strings.Count(got, "[SECURITY] codex: rejecting loopback"); n != 1 {
 		t.Errorf("expected exactly 1 warn-once line, got %d:\n%s", n, got)
 	}
 }
@@ -4076,28 +4109,20 @@ func TestAllConnectors_Auth_Parity(t *testing.T) {
 			t.Errorf("%s: master key should authenticate", c.Name())
 		}
 
-		// No creds on loopback should fail for connectors with a fetch
-		// interceptor — closes the local-process bypass vector.
+		// No creds on loopback should fail for every connector now —
+		// closes the local-process bypass vector.
 		//
-		// Plan B1 / S0.3: ZeptoClaw used to trust loopback as a
-		// "native binary has no way to inject X-DC-Auth" carve-out;
-		// that was the local-IDOR vector. The hooks/inspect-*.sh
-		// shell scripts (which run on the same host) now inject
-		// X-DC-Auth bearing the synthesized gateway token, so
-		// ZeptoClaw no longer needs the loopback trust.
-		//
-		// Codex still trusts loopback because the OpenAI Python SDK
-		// inside the agent process has no equivalent shell wrapper
-		// to inject the header — that wiring is a Phase E follow-up.
+		// codex previously trusted loopback
+		// unconditionally because the native Rust binary has no
+		// fetch-interceptor seam for X-DC-Auth. That was a shared-host
+		// local-IDOR vector. The connector now requires the loopback
+		// caller to either present X-DC-Auth, the master key, or an
+		// Authorization Bearer matching a recorded provider key.
+		// Operators on single-user dev hosts can opt back into the
+		// legacy loose behavior with DEFENSECLAW_CODEX_LOOPBACK_TRUST=1.
 		r3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		r3.RemoteAddr = "127.0.0.1:54321"
-		accepted := c.Authenticate(r3)
-		loopbackTrust := c.Name() == "codex"
-		if loopbackTrust {
-			if !accepted {
-				t.Errorf("%s: loopback must be trusted so codex traffic can reach the proxy", c.Name())
-			}
-		} else if accepted {
+		if c.Authenticate(r3) {
 			t.Errorf("%s: should fail without credentials when token configured", c.Name())
 		}
 	}
@@ -4896,6 +4921,12 @@ func TestIsLoopback_IPv6Variants(t *testing.T) {
 // FAIL_MODE. A DefenseClaw outage must not brick the user's agent.
 // Operators who want strict availability must opt in explicitly via
 // DEFENSECLAW_STRICT_AVAILABILITY=1 (see the next test).
+//
+// NOTE on fail_mode in the failure log: this is metadata recording
+// the configured response-layer fail mode at write time, not the
+// transport-layer behavior under test. Post-, the safer default
+// for response-layer failures is "closed", so the metadata reflects
+// that. The transport-layer fail-open behavior remains unchanged.
 func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -4937,7 +4968,11 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		`"connector":"claudecode"`,
 		`"hook":"claude-code-hook"`,
 		`"category":"transport"`,
-		`"fail_mode":"open"`,
+		// The response-layer default is "closed", so the failure log
+		// metadata reflects that. The functional invariant under test
+		// (hook exits 0 / allows agent on transport failure) is
+		// unchanged — that is the `category=transport` dimension above.
+		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
 			t.Errorf("hook failure log missing %q:\n%s", want, logText)
@@ -5175,18 +5210,48 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			wantFailMode: "open",
 		},
 		{
-			name:         "codex_empty_opts_falls_back_to_open_default",
+			name:         "operator_closed_with_codex_enforcement_stays_closed",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "closed", CodexEnforcement: true},
+			connector:    &CodexConnector{},
+			hookFile:     "codex-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			// The safer default is "closed": empty
+			// SetupOpts.HookFailMode renders the hook with
+			// FAIL_MODE=closed so response-layer failures (4xx,
+			// malformed JSON, missing action) BLOCK rather than
+			// silently allowing. Pre-existing installs are pinned to
+			// "open" by _migrate_0_4_0_seed_hook_fail_mode (Python).
+			name:         "codex_empty_opts_falls_back_to_closed_default",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
-			wantFailMode: "open",
+			wantFailMode: "closed",
 		},
 		{
-			name:         "codex_garbage_opts_value_normalizes_to_open",
+			name:         "empty_opts_with_codex_enforcement_upgrades_to_closed",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", CodexEnforcement: true},
+			connector:    &CodexConnector{},
+			hookFile:     "codex-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			name:         "empty_opts_with_claudecode_enforcement_upgrades_to_closed",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", ClaudeCodeEnforcement: true},
+			connector:    &ClaudeCodeConnector{},
+			hookFile:     "claude-code-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			// Garbage / typo values normalize to the safer "closed"
+			// sentinel so a misconfigured operator value never
+			// silently puts the agent into fail-OPEN mode.
+			name:         "codex_garbage_opts_value_normalizes_to_closed",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "this-is-not-a-real-mode"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
-			wantFailMode: "open",
+			wantFailMode: "closed",
 		},
 	}
 
@@ -5255,7 +5320,11 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		// down / network error) rather than a response failure
 		// (4xx / parse error). Operators triage these differently.
 		`"category":"transport"`,
-		`"fail_mode":"open"`,
+		// Response-layer default is "closed" — transport-layer
+		// fail-open behavior under test here is unchanged (the hook
+		// still exits 0 and the agent still proceeds when the gateway
+		// is unreachable).
+		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("hook failure log missing %s:\n%s", want, logText)

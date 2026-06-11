@@ -99,6 +99,11 @@ from defenseclaw.tui.screens.setup_resource_editor import (
     webhook_rows_from_config,
 )
 from defenseclaw.tui.screens.theme_picker import ThemePickerScreen
+from defenseclaw.tui.screens.trusted_paths_editor import (
+    TrustedPathsEditorScreen,
+    trusted_paths_rows_from_config,
+    untrusted_connector_dir,
+)
 from defenseclaw.tui.screens.uninstall import UninstallScreen
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.catalog_state import (
@@ -6790,6 +6795,10 @@ class DefenseClawTUI(App[None]):
                 return SetupPanelAction(True, hint="Opening Audit Sinks editor.", open_resource_editor="audit_sinks")
             if section is not None and section.name == "Webhooks":
                 return SetupPanelAction(True, hint="Opening Webhooks editor.", open_resource_editor="webhooks")
+            if section is not None and section.name == "Trusted Paths":
+                return SetupPanelAction(
+                    True, hint="Opening Trusted Paths editor.", open_resource_editor="trusted_paths"
+                )
             return SetupPanelAction(True, hint="No list editor is available for this setup section.")
         if key in {"up", "k"}:
             self.setup_model.active_line = max(0, self.setup_model.active_line - 1)
@@ -6896,6 +6905,11 @@ class DefenseClawTUI(App[None]):
         elif resource_kind == "webhooks":
             rows = webhook_rows_from_config(self.config)
             screen = SetupResourceEditorScreen("webhooks", rows)
+        elif resource_kind == "trusted_paths":
+            screen = TrustedPathsEditorScreen(
+                trusted_paths_rows_from_config(self.config),
+                data_dir=getattr(self.config, "data_dir", None),
+            )
         else:
             self._set_status(f"Unknown setup editor: {resource_kind}")
             return
@@ -6931,6 +6945,36 @@ class DefenseClawTUI(App[None]):
             needs_preview=True,
         )
         self.run_worker(self._confirm_and_run_parsed(parsed), exclusive=False, thread=False)
+
+    async def _route_untrusted_binary_to_panel(self, connector: str) -> bool:
+        """Open the Trusted Paths editor when a connector binary is untrusted.
+
+        Returns ``True`` when setup may proceed (binary already trusted, or the
+        connector/discovery is unknown), or ``False`` when we routed the
+        operator into the editor instead. This is the TUI equivalent of the
+        CLI's "trust this directory?" prompt — it surfaces the same decision in
+        the panel rather than firing ``click.confirm`` under a full-screen TUI.
+        """
+        parent = untrusted_connector_dir(connector, getattr(self.config, "data_dir", None))
+        if not parent:
+            return True
+        rows = trusted_paths_rows_from_config(self.config)
+        context = (
+            f"{friendly_connector_name(connector)} binary is outside a trusted "
+            f"prefix ({parent}). Trust it below, then re-run setup."
+        )
+        result = await self.push_screen_wait(
+            TrustedPathsEditorScreen(rows, prefill=parent, context=context)
+        )
+        if result is None:
+            self._set_status(f"{connector} setup paused — '{parent}' was not trusted.")
+            return False
+        self._handle_setup_resource_result(result)
+        label = friendly_connector_name(connector)
+        self._set_status(
+            f"{label}: trusted-paths command queued — when it finishes, press m again to re-run setup."
+        )
+        return False
 
     async def _cancel_running_command(self) -> None:
         # Snapshot the running command before cancellation so we can
@@ -7241,6 +7285,11 @@ class DefenseClawTUI(App[None]):
         args, display = connector_setup_command_for_mode(choice)
         if not args:
             self._set_status(f"No setup command available for connector {choice}.")
+            return
+        # When the connector binary is outside a trusted prefix, route the
+        # operator into the Trusted Paths editor instead of running a setup the
+        # trust gate would refuse (the TUI replacement for the CLI prompt).
+        if not await self._route_untrusted_binary_to_panel(choice):
             return
         intent = OverviewCommandIntent(
             label=display,

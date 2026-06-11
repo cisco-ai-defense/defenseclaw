@@ -17,6 +17,8 @@
  */
 
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import { HEADER_DEFENSECLAW_CLIENT } from "../correlation-headers.js";
 import { DaemonClient } from "../client.js";
 import { scanMCPServer } from "../scanners/mcp-scanner.js";
@@ -329,6 +331,31 @@ const DEFAULT_CONFIG: EnforcerConfig = {
 };
 
 /**
+ * Resolve a path to its canonical absolute form, following symlinks
+ * when the path exists. Falls back to the absolute (lexically resolved)
+ * form when the path does not exist or realpath fails -- so that
+ * provenance-keyed allow checks remain stable for paths that move
+ * around but are still uniquely addressable. Returns the empty string
+ * for empty / nullish input so callers can treat "no provenance" and
+ * "unresolvable path" identically (both fail the equality check below
+ * unless explicitly set).
+ */
+function canonicalisePath(p: string | undefined | null): string {
+  if (!p) return "";
+  let absolute: string;
+  try {
+    absolute = resolvePath(p);
+  } catch {
+    return "";
+  }
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+/**
  * PolicyEnforcer delegates admission verdicts to the Go daemon's OPA
  * engine via POST /policy/evaluate. Local block/allow caches provide a
  * fast-path negative check when the daemon is unreachable.
@@ -338,7 +365,27 @@ export class PolicyEnforcer {
   private readonly config: EnforcerConfig;
 
   private readonly localBlockList = new Map<string, string>();
-  private readonly localAllowList = new Map<string, string>();
+
+  /**
+   * Local allow-list keyed by `${targetType}:${name}`. Each entry
+   * tracks an optional `provenance` (canonical path or other stable
+   * identifier such as digest / source URL). Allow-list short-circuits
+   * are ONLY honoured when the entry has provenance AND that provenance
+   * equals the canonicalised path of the target being evaluated.
+   *
+   * Name-only entries (those with `provenance === undefined`, including
+   * everything synced from the daemon today) are stored but never used
+   * to skip the scan -- they exist so the operator's intent is
+   * preserved through restarts and so the audit trail can show the
+   * original reason. This closes finding "Name-only allow-list
+   * entries skip scanning for unrelated plugins": a malicious target
+   * can no longer reuse the name of a previously allowed benign target
+   * to bypass the scanner.
+   */
+  private readonly localAllowList = new Map<
+    string,
+    { reason: string; provenance?: string }
+  >();
 
   constructor(config?: Partial<EnforcerConfig>, client?: DaemonClient) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -385,13 +432,30 @@ export class PolicyEnforcer {
     await this.client.block(targetType, name, reason).catch(() => {});
   }
 
+  /**
+   * Add `name` to the local allow-list.
+   *
+   * @param provenance Optional canonical path (or other stable
+   *  identifier such as a content digest or signed source URL). Allow
+   *  decisions only short-circuit the scan inside `evaluate()` when the
+   *  caller supplies provenance AND it matches the canonicalised path
+   *  of the target being admitted at evaluation time. Without
+   *  provenance, the entry is recorded but the scan still runs.
+   */
   async allow(
     targetType: InstallType,
     name: string,
     reason: string,
+    provenance?: string,
   ): Promise<void> {
     const key = `${targetType}:${name}`;
-    this.localAllowList.set(key, reason);
+    const canonicalProvenance = provenance
+      ? canonicalisePath(provenance)
+      : undefined;
+    this.localAllowList.set(key, {
+      reason,
+      provenance: canonicalProvenance,
+    });
     this.localBlockList.delete(key);
 
     await this.client.allow(targetType, name, reason).catch(() => {});
@@ -434,7 +498,11 @@ export class PolicyEnforcer {
       const freshKeys = new Set<string>();
       for (const entry of allowed.data) {
         const key = `${entry.target_type}:${entry.target_name}`;
-        this.localAllowList.set(key, entry.reason);
+        // Daemon does not yet emit provenance, so synced entries are
+        // recorded with `provenance: undefined`. They will NOT
+        // short-circuit `evaluate()` -- see the docstring on
+        // `localAllowList`.
+        this.localAllowList.set(key, { reason: entry.reason });
         freshKeys.add(key);
       }
       for (const key of this.localAllowList.keys()) {
@@ -465,17 +533,30 @@ export class PolicyEnforcer {
       return result;
     }
 
-    if (this.localAllowList.has(key)) {
-      const result: AdmissionResult = {
-        type: targetType,
-        name,
-        path,
-        verdict: "allowed",
-        reason: `Allow list: ${this.localAllowList.get(key)}`,
-        timestamp: now,
-      };
-      await this.reportToDaemon(result);
-      return result;
+    const allowEntry = this.localAllowList.get(key);
+    if (allowEntry) {
+      // Provenance-keyed allow short-circuit: only honour the allow
+      // when the cached provenance matches the canonicalised path of
+      // the artifact being evaluated. This prevents a malicious target
+      // from reusing the name of a previously-allowed benign target to
+      // bypass the scan. Name-only entries (provenance === undefined)
+      // never short-circuit -- the scan continues below.
+      const canonicalCurrent = canonicalisePath(path);
+      if (
+        allowEntry.provenance !== undefined &&
+        allowEntry.provenance === canonicalCurrent
+      ) {
+        const result: AdmissionResult = {
+          type: targetType,
+          name,
+          path,
+          verdict: "allowed",
+          reason: `Allow list: ${allowEntry.reason}`,
+          timestamp: now,
+        };
+        await this.reportToDaemon(result);
+        return result;
+      }
     }
 
     let scanResult: ScanResult | undefined;

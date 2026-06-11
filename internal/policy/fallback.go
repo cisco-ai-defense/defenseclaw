@@ -152,6 +152,33 @@ func EvaluateAdmissionFallback(input AdmissionInput, profile *FallbackProfile) *
 		return &AdmissionOutput{Verdict: "scan", Reason: "scan required"}
 	}
 
+	// hardening (S2.scanners): fail closed on any scanner
+	// failure even when the parsed findings list is empty. Previously
+	// a non-zero scanner exit with `{"findings":[]}` evaluated as a
+	// clean scan because we only branched on TotalFindings/MaxSeverity.
+	// Now we additionally reject any input whose ExitCode != 0 or
+	// ScanError is set; the corresponding scanner Scan() functions
+	// also return a non-nil Go error so callers normally don't even
+	// reach this gate, but we keep the policy-side defence so a
+	// future caller that ignores err can never accidentally admit a
+	// failed scan.
+	if input.ScanResult.ExitCode != 0 || strings.TrimSpace(input.ScanResult.ScanError) != "" {
+		reason := "scanner failed"
+		if input.ScanResult.ScanError != "" {
+			reason = fmt.Sprintf("scanner failed: %s", input.ScanResult.ScanError)
+		}
+		if input.ScanResult.ExitCode != 0 {
+			reason = fmt.Sprintf("%s (exit_code=%d)", reason, input.ScanResult.ExitCode)
+		}
+		return &AdmissionOutput{
+			Verdict:       "rejected",
+			Reason:        reason,
+			FileAction:    "quarantine",
+			InstallAction: "block",
+			RuntimeAction: "block",
+		}
+	}
+
 	severity := strings.ToUpper(input.ScanResult.MaxSeverity)
 	if severity == "" {
 		severity = "INFO"

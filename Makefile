@@ -278,11 +278,10 @@ dev-install:
 pycli: _bundle-data
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install from https://docs.astral.sh/uv/"; exit 1; }
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	uv venv $(VENV) --python 3.12 --clear
-	uv pip install -e . --python $(VENV_BIN)/python$(EXE)
+	uv sync --frozen --no-dev --python 3.12
 
 dev-pycli: pycli
-	uv pip install --group dev --python $(VENV_BIN)/python$(EXE)
+	uv sync --frozen --python 3.12
 	@echo ""
 	@echo "Done. Activate the environment and run:"
 	@echo "  source $(VENV)/bin/activate"

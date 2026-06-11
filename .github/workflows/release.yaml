@@ -51,8 +51,20 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # GitHub Environments protect the production secrets (cosign
+    # OIDC trust, GH release token scope) used by this pipeline.
+    # The `release` environment has the production reviewers list
+    # and the org-level deployment branch policy that pins this
+    # workflow to `main` and the v* release branches; even if a
+    # malicious push reached the workflow file the environment
+    # gate would refuse to release without an authorized approval.
+    environment: release
     steps:
-      - uses: actions/checkout@v4
+      # Action refs are SHA-pinned (with the human tag in a trailing
+      # comment) so a compromise of upstream tag signing cannot
+      # rewrite a v* tag to inject code into the release pipeline,
+      # which holds the contents:write + id-token:write permissions.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
@@ -114,6 +126,44 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Resolved release tag: $TAG (commit: $GITHUB_SHA)"
 
+      # CRITICAL provenance gate: the released commit MUST be reachable
+      # from origin/main (or an authorized release branch matching
+      # release/*), otherwise an attacker who got a feature branch
+      # merged would be able to push a release tag from that branch
+      # and ship arbitrary code with our signing identity.
+      #
+      # We resolve the commit (`$GITHUB_SHA` for workflow_dispatch
+      # targets HEAD; `refs/tags/$TAG` for push:tags) and verify it
+      # appears in `git rev-list origin/main` OR in `origin/release/*`.
+      # The fetch-depth: 0 above gives us the full ancestry needed
+      # for the merge-base check.
+      - name: Verify release commit is on main / release branch
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            COMMIT="$GITHUB_SHA"
+          else
+            COMMIT=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          fi
+          echo "Release target commit: $COMMIT"
+          git fetch --no-tags origin main "+refs/heads/release/*:refs/remotes/origin/release/*" 2>/dev/null || true
+          if git merge-base --is-ancestor "$COMMIT" origin/main; then
+            echo "OK: $COMMIT is reachable from origin/main"
+            exit 0
+          fi
+          for branch in $(git for-each-ref --format='%(refname)' refs/remotes/origin/release/); do
+            if git merge-base --is-ancestor "$COMMIT" "$branch"; then
+              echo "OK: $COMMIT is reachable from $branch"
+              exit 0
+            fi
+          done
+          echo "::error title=Provenance gate failed::Release commit $COMMIT is NOT an ancestor of origin/main or any origin/release/* branch."
+          echo "::error::Releasing from off-tree commits is forbidden — this would let an attacker ship code that never went through PR review and CI."
+          exit 1
+
       # workflow_dispatch path only: create a local lightweight tag at HEAD
       # so GoReleaser sees a real tag pointing at the commit it's releasing.
       # This is the canonical pattern documented by the GoReleaser author:
@@ -143,19 +193,19 @@ jobs:
           git tag "$RELEASE_TAG"
           echo "Created local tag $RELEASE_TAG at $(git rev-parse HEAD)"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
 
-      - uses: anchore/sbom-action/download-syft@v0
+      - uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
         with:
           python-version: "3.13"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
 
@@ -202,10 +252,18 @@ jobs:
       # release. We must instead create the release atomically with all
       # assets at the end of the job, because Immutable Releases rejects
       # post-create asset uploads.
+      # Privileged release pipeline integrity: the goreleaser-action binary
+      # is SHA-pinned above, but the `version:` parameter previously
+      # selected a mutable semver range ("~> v2"), which lets a
+      # compromised GoReleaser v2.x release execute inside this
+      # job and tamper with signed/SBOM'd artifacts. Pin to an exact
+      # released version. Bump deliberately by editing this string and
+      # verifying the matching GoReleaser release notes — never widen back
+      # to a range.
       - name: Build artifacts with GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
         with:
-          version: "~> v2"
+          version: "v2.15.4"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

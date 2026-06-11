@@ -19,6 +19,7 @@ package inventory
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -2663,11 +2664,11 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 		}
 		for _, value := range sig.PathHashes {
 			if value != "" && !isSHA256Hash(value) {
-				return errors.New("path hashes must be sha256:<64 hex>")
+				return errors.New("path hashes must be sha256:<64 hex> or hmac-sha256:<64 hex>")
 			}
 		}
 		if sig.WorkspaceHash != "" && !isSHA256Hash(sig.WorkspaceHash) {
-			return errors.New("workspace_hash must be sha256:<64 hex>")
+			return errors.New("workspace_hash must be sha256:<64 hex> or hmac-sha256:<64 hex>")
 		}
 		for _, value := range sig.Basenames {
 			if strings.Contains(value, "/") || strings.Contains(value, "\\") {
@@ -2683,7 +2684,7 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 		}
 		for _, ev := range sig.Evidence {
 			if ev.PathHash != "" && !isSHA256Hash(ev.PathHash) {
-				return errors.New("evidence path_hash must be sha256:<64 hex>")
+				return errors.New("evidence path_hash must be sha256:<64 hex> or hmac-sha256:<64 hex>")
 			}
 			if ev.Basename != "" && (strings.Contains(ev.Basename, "/") || strings.Contains(ev.Basename, "\\")) {
 				return errors.New("evidence basename must not contain path separators")
@@ -2724,18 +2725,44 @@ func SanitizeEvidenceForWire(signals []AISignal, disableRedaction, storeRawLocal
 	}
 }
 
+// isSHA256Hash returns true for the two opaque-digest formats that
+// AI-discovery payloads are allowed to carry in PathHashes,
+// WorkspaceHash, and evidence.PathHash:
+//
+//	sha256:<64 lowercase hex>       — legacy unsalted form (hashPath
+//	                                   when SetPathHashKey is unset, e.g.
+//	                                   detached scans, tests).
+//	hmac-sha256:<64 lowercase hex>  — per-installation keyed form
+//	                                   activated by SetPathHashKey at
+//	                                   sidecar boot. See
+//	                                   inventory.hashPath and the
+//	                                   sidecar's deriveAIInventoryHashKey
+//	                                   for the derivation contract.
+//
+// Both formats are exactly 64 hex chars after the prefix because
+// HMAC-SHA256 has the same 32-byte output as plain SHA-256. Accepting
+// both keeps validateAIDiscoveryReport from rejecting payloads emitted
+// by a fully-configured gateway (remediation), while
+// still rejecting raw paths, truncated digests, and unrelated formats.
 func isSHA256Hash(value string) bool {
-	const prefix = "sha256:"
-	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+64 {
-		return false
-	}
-	for _, ch := range value[len(prefix):] {
-		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') {
+	for _, prefix := range [...]string{"sha256:", "hmac-sha256:"} {
+		if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+64 {
 			continue
 		}
-		return false
+		hex := value[len(prefix):]
+		ok := true
+		for _, ch := range hex {
+			if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') {
+				continue
+			}
+			ok = false
+			break
+		}
+		if ok {
+			return true
+		}
 	}
-	return true
+	return false
 }
 
 // AIStateStore persists local discovery deltas under the DefenseClaw data dir.
@@ -3215,6 +3242,42 @@ func shouldSkipDiscoveryDir(name string) bool {
 	}
 }
 
+// pathHashKey is the per-installation HMAC key that turns the
+// otherwise-reversible path SHA-256 fingerprint into an
+// installation-scoped opaque digest. ("Redacted AI
+// discovery events expose reversible path fingerprints"): without a
+// key, a recipient of a redacted gateway event can dictionary-attack
+// well-known paths (~/.aws/credentials, repo roots, package manifest
+// paths) to recover the local layout. The key is set by
+// SetPathHashKey at sidecar boot, drawn from the gateway secret so it
+// is stable for the install but opaque to outside recipients. When
+// the key is unset (legacy callers, tests) we fall back to the plain
+// SHA-256 form so existing tooling keeps parsing the digest.
+var pathHashKey []byte
+var pathHashKeyMu sync.RWMutex
+
+// SetPathHashKey installs the per-installation HMAC key used for
+// hashPath / hashValue digests. Pass nil to revert to the legacy
+// unsalted SHA-256 form (tests).
+func SetPathHashKey(key []byte) {
+	pathHashKeyMu.Lock()
+	defer pathHashKeyMu.Unlock()
+	if len(key) == 0 {
+		pathHashKey = nil
+		return
+	}
+	pathHashKey = append([]byte(nil), key...)
+}
+
+func currentPathHashKey() []byte {
+	pathHashKeyMu.RLock()
+	defer pathHashKeyMu.RUnlock()
+	if len(pathHashKey) == 0 {
+		return nil
+	}
+	return append([]byte(nil), pathHashKey...)
+}
+
 func hashPath(path string) string {
 	if path == "" {
 		return ""
@@ -3223,7 +3286,16 @@ func hashPath(path string) string {
 	if err == nil {
 		path = abs
 	}
+	if key := currentPathHashKey(); len(key) > 0 {
+		return "hmac-sha256:" + keyedHashHex(key, path)
+	}
 	return "sha256:" + hashHex(path)
+}
+
+func keyedHashHex(key []byte, value string) string {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func hashValue(value string) string {

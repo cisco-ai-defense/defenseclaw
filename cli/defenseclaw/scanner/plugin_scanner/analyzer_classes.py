@@ -103,11 +103,18 @@ class SourceAnalyzer:
 
     def analyze(self, ctx: ScanContext) -> list[Finding]:
         findings: list[Finding] = []
+        # Mutate ctx.source_files in place so the LLM analyzer (and the
+        # meta LLM analyzer) can see the actual plugin source. Before
+        # this change ``ctx.source_files`` stayed empty for the entire
+        # pipeline and the LLM path silently degraded to manifest-only
+        # analysis (finding "LLM plugin analysis receives no
+        # source files" / other-scanner-coverage-gap).
         file_count, total_bytes = scan_source_files(
             ctx.plugin_dir,
             findings,
             ctx.capabilities,
             ctx.profile,
+            source_files_out=ctx.source_files,
         )
         ctx.metadata["file_count"] = file_count
         ctx.metadata["total_size_bytes"] = total_bytes
@@ -444,10 +451,22 @@ class MetaAnalyzer:
             )
             ctx.finding_counter[0] += 1
 
-        # LLM-powered meta analysis (when configured)
+        # LLM-powered meta analysis (when configured).
+        #
+        # Hardening notes:
+        #   * The model's false-positive verdicts are ADVISORY ONLY. We
+        #     never mutate ``f.suppressed`` based on LLM output -- a
+        #     prompt-injected plugin could otherwise hide its own static
+        #     findings ("Meta LLM can be prompt-injected into
+        #     suppressing static findings"). Suggestions are surfaced as
+        #     INFO findings so analysts can review them.
+        #   * If the LLM ran without source files we explicitly emit a
+        #     SCAN-LLM-NO-SOURCE finding instead of silently degrading
+        #     to manifest-only meta-analysis ("LLM plugin
+        #     analysis receives no source files").
         if self._llm_policy and self._llm_policy.get("enabled"):
             try:
-                from defenseclaw.scanner.plugin_scanner.llm_analyzer import run_meta_llm
+                from defenseclaw.scanner.plugin_scanner.llm_analyzer import run_meta_llm  # noqa: PLC0415
 
                 llm_config = {
                     "model": self._llm_policy.get("model", ""),
@@ -459,14 +478,12 @@ class MetaAnalyzer:
                 }
 
                 result = run_meta_llm(llm_config, ctx)
+                if result.get("no_source_files_warning") is not None:
+                    findings.append(result["no_source_files_warning"])
                 findings.extend(result["new_findings"])
-
-                # Mark false positives as suppressed in previous findings
-                if result["false_positive_rule_ids"]:
-                    for f in prev:
-                        if f.rule_id and f.rule_id in result["false_positive_rule_ids"]:
-                            f.suppressed = True
-                            f.suppression_reason = "LLM meta-analysis: likely false positive"
+                # NOTE: ``result["false_positive_advisories"]`` is intentionally
+                # not consumed here -- the advisory findings are already in
+                # ``new_findings``.
             except Exception:
                 # LLM meta not available -- pattern-based findings are still returned
                 pass

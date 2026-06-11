@@ -1286,7 +1286,16 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
             click.echo(
                 f"[scan] extracting prefix={skill_prefix!r} → {skill_dir!s}"
             )
-        _safe_tar_extract(archive_path, skill_dir, skill_prefix, strip=3)
+        # ("Untrusted skill archives can decompress
+        # without an output cap"): _safe_tar_extract enforces the same
+        # post-decompression caps as _scan_from_http; surface the
+        # rejection cleanly so the temp tree (cleaned in `finally`) does
+        # not appear to have completed extraction.
+        try:
+            _safe_tar_extract(archive_path, skill_dir, skill_prefix, strip=3)
+        except _SkillExtractTooLargeError as exc:
+            click.echo(f"error: clawhub skill archive rejected: {exc}", err=True)
+            raise SystemExit(1)
 
         os.unlink(archive_path)  # free disk immediately
 
@@ -1390,32 +1399,37 @@ def _scan_from_http(
         extract_dir = os.path.join(tmpdir, "skill")
         os.makedirs(extract_dir, exist_ok=True)
 
-        if tarfile.is_tarfile(download_path):
-            if not as_json:
-                click.echo(f"[scan] tarfile: extracting {download_path!s} -> {extract_dir!s}")
-            with tarfile.open(download_path) as tf:
-                members = tf.getnames()
+        # ("Untrusted skill archives can decompress
+        # without an output cap"): replace the legacy `tf.extractall` /
+        # `zf.extractall` calls with capped streaming extractors so a
+        # malicious registry or scan URL cannot turn a small compressed
+        # body into multi-GB extraction or a member-count flood. Caps
+        # are enforced in :func:`_safe_tar_extractall_capped` and
+        # :func:`_safe_zip_extractall_capped`. On violation we delete
+        # the temp tree (the outer ``finally`` already handles that)
+        # and surface a clear error.
+        try:
+            if tarfile.is_tarfile(download_path):
                 if not as_json:
-                    n = len(members)
-                    preview = members[:20]
-                    more = f" ... ({n} total)" if n > 20 else ""
-                    click.echo(f"[scan] tarfile: members={n} first={preview!r}{more}")
-                tf.extractall(extract_dir, filter="data")
-            if not as_json:
-                click.echo(f"[scan] tarfile: extractall done -> listing={os.listdir(extract_dir)!r}")
-        elif zipfile.is_zipfile(download_path):
-            with zipfile.ZipFile(download_path) as zf:
-                safe_root = os.path.realpath(extract_dir)
-                for member in zf.infolist():
-                    member_path = os.path.realpath(
-                        os.path.join(extract_dir, member.filename),
-                    )
-                    if not member_path.startswith(safe_root + os.sep) and member_path != safe_root:
-                        click.echo(f"error: zip contains path-traversal entry: {member.filename}", err=True)
-                        raise SystemExit(1)
-                zf.extractall(extract_dir)
-        else:
-            click.echo("error: unsupported archive format (expected .tar.gz or .zip)", err=True)
+                    click.echo(f"[scan] tarfile: extracting {download_path!s} -> {extract_dir!s}")
+                with tarfile.open(download_path) as tf:
+                    members = tf.getnames()
+                    if not as_json:
+                        n = len(members)
+                        preview = members[:20]
+                        more = f" ... ({n} total)" if n > 20 else ""
+                        click.echo(f"[scan] tarfile: members={n} first={preview!r}{more}")
+                    _safe_tar_extractall_capped(tf, extract_dir)
+                if not as_json:
+                    click.echo(f"[scan] tarfile: extractall done -> listing={os.listdir(extract_dir)!r}")
+            elif zipfile.is_zipfile(download_path):
+                with zipfile.ZipFile(download_path) as zf:
+                    _safe_zip_extractall_capped(zf, extract_dir)
+            else:
+                click.echo("error: unsupported archive format (expected .tar.gz or .zip)", err=True)
+                raise SystemExit(1)
+        except _SkillExtractTooLargeError as exc:
+            click.echo(f"error: skill archive rejected: {exc}", err=True)
             raise SystemExit(1)
 
         entries = os.listdir(extract_dir)
@@ -1477,6 +1491,144 @@ def _parse_clawhub_uri(uri: str) -> tuple[str, str | None]:
     return (name, version)
 
 
+# ("Untrusted skill archives can decompress without an
+# output cap"): MAX_SKILL_ARCHIVE_BYTES only caps the *compressed*
+# response body (128 MiB); a tiny tar/zip can still expand into many GB
+# or millions of members. The constants below bound total uncompressed
+# bytes, the member count, and per-file size on extraction. They are
+# generous enough for legitimate skill archives but bound the worst
+# case attackers can amplify into disk/CPU exhaustion.
+MAX_SKILL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024  # 512 MiB
+MAX_SKILL_MEMBER_COUNT = 10_000
+MAX_SKILL_PER_FILE_BYTES = 64 * 1024 * 1024  # 64 MiB
+
+
+class _SkillExtractTooLargeError(Exception):
+    """Raised when a tar/zip archive exceeds the post-decompression caps."""
+
+
+def _check_extract_caps(member_count: int, total_bytes: int, member_size: int, member_name: str) -> None:
+    if member_count > MAX_SKILL_MEMBER_COUNT:
+        raise _SkillExtractTooLargeError(
+            f"archive exceeds member-count cap "
+            f"({member_count} > {MAX_SKILL_MEMBER_COUNT})"
+        )
+    if member_size > MAX_SKILL_PER_FILE_BYTES:
+        raise _SkillExtractTooLargeError(
+            f"archive entry {member_name!r} exceeds per-file cap "
+            f"({member_size} > {MAX_SKILL_PER_FILE_BYTES})"
+        )
+    if total_bytes > MAX_SKILL_UNCOMPRESSED_BYTES:
+        raise _SkillExtractTooLargeError(
+            f"archive total uncompressed size exceeds cap "
+            f"({total_bytes} > {MAX_SKILL_UNCOMPRESSED_BYTES})"
+        )
+
+
+def _safe_tar_extractall_capped(tf, extract_dir: str) -> None:
+    """Extract every regular file from *tf* into *extract_dir* with caps.
+
+    Enforces `MAX_SKILL_MEMBER_COUNT`, `MAX_SKILL_PER_FILE_BYTES`, and
+    `MAX_SKILL_UNCOMPRESSED_BYTES`. Uses ``filter="data"`` semantics
+    (skip symlinks/hardlinks/devices) to avoid path-traversal and
+    privileged-bit smuggling. Raises `_SkillExtractTooLargeError` on cap
+    violation; callers must propagate so the temp directory is removed.
+    """
+    safe_root = os.path.realpath(extract_dir)
+    members = tf.getmembers()
+    if len(members) > MAX_SKILL_MEMBER_COUNT:
+        raise _SkillExtractTooLargeError(
+            f"tar archive lists {len(members)} members "
+            f"(> {MAX_SKILL_MEMBER_COUNT})"
+        )
+    total = 0
+    seen = 0
+    for member in members:
+        if member.issym() or member.islnk() or member.isdev() or member.ischr() or member.isblk() or member.isfifo():
+            continue
+        target = os.path.realpath(os.path.join(extract_dir, member.name))
+        if not (target == safe_root or target.startswith(safe_root + os.sep)):
+            raise _SkillExtractTooLargeError(
+                f"tar archive contains path-traversal entry {member.name!r}"
+            )
+        if member.isdir():
+            os.makedirs(target, exist_ok=True)
+            continue
+        if not member.isfile():
+            continue
+        seen += 1
+        size = max(member.size, 0)
+        total += size
+        _check_extract_caps(seen, total, size, member.name)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        src = tf.extractfile(member)
+        if src is None:
+            continue
+        try:
+            written = 0
+            with open(target, "wb") as dst:
+                while True:
+                    chunk = src.read(65536)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > MAX_SKILL_PER_FILE_BYTES:
+                        raise _SkillExtractTooLargeError(
+                            f"tar entry {member.name!r} streamed "
+                            f"more bytes than per-file cap "
+                            f"({written} > {MAX_SKILL_PER_FILE_BYTES})"
+                        )
+                    dst.write(chunk)
+        finally:
+            src.close()
+
+
+def _safe_zip_extractall_capped(zf, extract_dir: str) -> None:
+    """Extract every entry from *zf* into *extract_dir* with caps.
+
+    Enforces the same suite of limits as
+    :func:`_safe_tar_extractall_capped`. Refuses path traversal and
+    streams per-file content with a watchdog on the per-file cap.
+    """
+    safe_root = os.path.realpath(extract_dir)
+    infolist = zf.infolist()
+    if len(infolist) > MAX_SKILL_MEMBER_COUNT:
+        raise _SkillExtractTooLargeError(
+            f"zip archive lists {len(infolist)} members "
+            f"(> {MAX_SKILL_MEMBER_COUNT})"
+        )
+    total = 0
+    seen = 0
+    for member in infolist:
+        target = os.path.realpath(os.path.join(extract_dir, member.filename))
+        if not (target == safe_root or target.startswith(safe_root + os.sep)):
+            raise _SkillExtractTooLargeError(
+                f"zip archive contains path-traversal entry {member.filename!r}"
+            )
+        if member.is_dir():
+            os.makedirs(target, exist_ok=True)
+            continue
+        seen += 1
+        size = max(member.file_size, 0)
+        total += size
+        _check_extract_caps(seen, total, size, member.filename)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with zf.open(member, "r") as src, open(target, "wb") as dst:
+            written = 0
+            while True:
+                chunk = src.read(65536)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_SKILL_PER_FILE_BYTES:
+                    raise _SkillExtractTooLargeError(
+                        f"zip entry {member.filename!r} streamed more "
+                        f"bytes than per-file cap "
+                        f"({written} > {MAX_SKILL_PER_FILE_BYTES})"
+                    )
+                dst.write(chunk)
+
+
 def _safe_tar_extract(
     archive_path: str, dest_dir: str, prefix: str, *, strip: int = 0
 ) -> None:
@@ -1484,13 +1636,24 @@ def _safe_tar_extract(
 
     Each member name is validated after stripping *strip* leading path
     components to prevent path traversal (``..`` segments, absolute paths,
-    or symlinks escaping *dest_dir*).
+    or symlinks escaping *dest_dir*). ("Untrusted skill archives can decompress without an output cap"):
+    enforces the same global member-count, per-file, and total-bytes
+    caps that the HTTP scan path applies via
+    :func:`_safe_tar_extractall_capped`.
     """
     import tarfile
 
     real_dest = os.path.realpath(dest_dir)
     with tarfile.open(archive_path, "r:gz") as tf:
-        for member in tf.getmembers():
+        members = tf.getmembers()
+        if len(members) > MAX_SKILL_MEMBER_COUNT:
+            raise _SkillExtractTooLargeError(
+                f"tar archive lists {len(members)} members "
+                f"(> {MAX_SKILL_MEMBER_COUNT})"
+            )
+        total = 0
+        seen = 0
+        for member in members:
             if not member.name.startswith(prefix):
                 continue
             if member.issym() or member.islnk():
@@ -1506,22 +1669,30 @@ def _safe_tar_extract(
             if ".." in stripped.split(os.sep):
                 continue
 
-            member_copy = tarfile.TarInfo(name=stripped)
-            member_copy.size = member.size
-            member_copy.mode = 0o644 if not member.isdir() else 0o755
-
             if member.isdir():
                 os.makedirs(target, exist_ok=True)
             elif member.isfile():
+                seen += 1
+                size = max(member.size, 0)
+                total += size
+                _check_extract_caps(seen, total, size, member.name)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with tf.extractfile(member) as src:
                     if src is None:
                         continue
+                    written = 0
                     with open(target, "wb") as dst:
                         while True:
                             chunk = src.read(65536)
                             if not chunk:
                                 break
+                            written += len(chunk)
+                            if written > MAX_SKILL_PER_FILE_BYTES:
+                                raise _SkillExtractTooLargeError(
+                                    f"tar entry {member.name!r} streamed "
+                                    f"more bytes than per-file cap "
+                                    f"({written} > {MAX_SKILL_PER_FILE_BYTES})"
+                                )
                             dst.write(chunk)
 
 
@@ -2103,9 +2274,23 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
 
     # Locate and scan
     skill_path = _resolve_path(app, skill_name)
+    # when the post-install scan cannot run (skill
+    # unresolved, scanner crash) we must NOT leave the installed
+    # package on disk with no policy decision. Roll back the
+    # clawhub install before exiting.
     if not skill_path:
-        click.echo("[install] warning: could not locate installed skill for scan", err=True)
-        return
+        click.echo(
+            f"[install] could not locate installed skill {skill_name!r} for scan — "
+            "rolling back via clawhub uninstall",
+            err=True,
+        )
+        _run_clawhub_uninstall(skill_name)
+        if app.logger:
+            app.logger.log_action(
+                "install-rolled-back", skill_name,
+                "reason=skill-unresolved scan=skipped",
+            )
+        raise SystemExit(1)
 
     click.echo(f"[install] scanning {skill_path}...")
     scanner = SkillScannerWrapper(
@@ -2117,7 +2302,16 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
     try:
         result = scanner.scan(skill_path)
     except Exception as exc:
-        click.echo(f"error: scan failed: {exc}", err=True)
+        click.echo(
+            f"error: scan failed: {exc} — rolling back via clawhub uninstall",
+            err=True,
+        )
+        _run_clawhub_uninstall(skill_name)
+        if app.logger:
+            app.logger.log_action(
+                "install-rolled-back", skill_name,
+                f"reason=scan-failed exc={type(exc).__name__}",
+            )
         raise SystemExit(1)
 
     if app.logger:
@@ -2219,3 +2413,28 @@ def _run_clawhub_install(skill_name: str, force: bool) -> None:
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         click.echo(f"error: clawhub install failed: {exc}", err=True)
         raise SystemExit(1)
+
+
+def _run_clawhub_uninstall(skill_name: str) -> None:
+    """Best-effort rollback for a partial install.
+
+    Runs `npx clawhub uninstall <skill>` with a short timeout. We
+    intentionally do not raise on rollback failures — the caller is
+    already exiting non-zero — but we surface the error to the
+    operator so they can manually remediate.
+    """
+    args = ["npx", "clawhub", "uninstall", skill_name]
+    try:
+        subprocess.run(args, check=False, timeout=120)
+    except subprocess.TimeoutExpired:
+        click.echo(
+            f"[install] warning: clawhub uninstall of {skill_name!r} timed out — "
+            "manual cleanup may be required",
+            err=True,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        click.echo(
+            f"[install] warning: clawhub uninstall of {skill_name!r} failed: {exc} — "
+            "manual cleanup may be required",
+            err=True,
+        )

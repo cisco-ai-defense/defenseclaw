@@ -437,3 +437,67 @@ class TestExtractArchive:
 
         with pytest.raises(RegistryError, match="tar extraction failed"):
             _extract_archive(str(archive), str(dest), prefix="package/plugins/missing/")
+
+    # ----------------------------------------------------------------
+    # fallback path-traversal validation. We force the legacy
+    # fallback by stubbing tarfile.TarFile.extractall to raise
+    # TypeError on the modern `filter="data"` keyword argument, the
+    # exact shape Python <3.12 produces.
+    # ----------------------------------------------------------------
+
+    def test_tar_path_traversal_blocked_in_fallback(self, tmp_path,
+                                                     monkeypatch):
+        """traversal entries must be rejected even when running
+        under the legacy fallback that lacks the `filter="data"` arg."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            data = b"pwned"
+            ti = tarfile.TarInfo(name="../escape.txt")
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+        archive = tmp_path / "evil.tgz"
+        archive.write_bytes(buf.getvalue())
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        # Force the fallback path by making the modern keyword raise.
+        original_extractall = tarfile.TarFile.extractall
+
+        def fake_extractall(self, *args, **kwargs):
+            if "filter" in kwargs:
+                raise TypeError("simulated <3.12 tarfile")
+            return original_extractall(self, *args, **kwargs)
+
+        monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
+
+        with pytest.raises(RegistryError, match=""):
+            _extract_archive(str(archive), str(dest))
+        # Confirm nothing leaked outside the dest dir.
+        assert not (tmp_path / "escape.txt").exists()
+
+    def test_tar_symlink_member_blocked_in_fallback(self, tmp_path,
+                                                     monkeypatch):
+        """symlink members must be rejected (the 3.12+ "data"
+        filter rejects them automatically; the fallback must too)."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            ti = tarfile.TarInfo(name="link-to-secret")
+            ti.type = tarfile.SYMTYPE
+            ti.linkname = "/etc/passwd"
+            tf.addfile(ti)
+        archive = tmp_path / "evil.tgz"
+        archive.write_bytes(buf.getvalue())
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        original_extractall = tarfile.TarFile.extractall
+
+        def fake_extractall(self, *args, **kwargs):
+            if "filter" in kwargs:
+                raise TypeError("simulated <3.12 tarfile")
+            return original_extractall(self, *args, **kwargs)
+
+        monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
+
+        with pytest.raises(RegistryError, match=""):
+            _extract_archive(str(archive), str(dest))

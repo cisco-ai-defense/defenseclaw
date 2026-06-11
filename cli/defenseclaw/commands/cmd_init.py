@@ -1954,15 +1954,52 @@ def _restart_gateway_quiet() -> None:
 
 
 def _is_sidecar_running(pid_file: str) -> bool:
-    """Check if the gateway sidecar process is alive."""
+    """Check if the gateway sidecar process is alive AND its
+    process command line looks like the DefenseClaw gateway.
+
+    Avarice F-2189: a stale or planted gateway.pid containing the
+    PID of an unrelated live process used to convince the legacy
+    init flow that the sidecar was already running. Generated
+    hooks then forwarded uninspected traffic because their default
+    fail mode is "open" until the gateway is up. We require both
+    that the PID is alive AND that its argv0 is one of the known
+    gateway binary names.
+    """
     pid = _read_pid(pid_file)
-    if pid is None:
+    if pid is None or pid <= 1:
         return False
     try:
         os.kill(pid, 0)
-        return True
     except (ProcessLookupError, PermissionError, OSError):
         return False
+    return _pid_looks_like_gateway(pid)
+
+
+def _pid_looks_like_gateway(pid: int) -> bool:
+    candidates = ("defenseclaw-gateway", "defenseclaw_gateway", "defenseclaw")
+    proc_cmdline = f"/proc/{pid}/cmdline"
+    try:
+        with open(proc_cmdline, "rb") as fh:
+            raw = fh.read()
+        argv0 = raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
+    except FileNotFoundError:
+        # /proc absent (macOS) — fall back to ps.
+        try:
+            out = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            return False
+        if out.returncode != 0:
+            return False
+        argv0 = out.stdout.strip().split(None, 1)[0] if out.stdout.strip() else ""
+    except OSError:
+        return False
+    base = os.path.basename(argv0).strip()
+    if not base:
+        return False
+    return any(base == c or base.startswith(c) for c in candidates)
 
 
 def _read_pid(pid_file: str) -> int | None:

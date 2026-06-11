@@ -106,6 +106,16 @@ type SetupOpts struct {
 	// contract marks the profile incompatible instead of silently using a
 	// different hook surface.
 	HookContractID string
+
+	// CodexEnforcement signals that the operator turned on hard
+	// enforcement for the codex connector (see avarice F-0681).
+	// When true, an empty HookFailMode upgrades to "closed" instead
+	// of using the legacy "open" default — without overriding an
+	// explicit operator-supplied value.
+	CodexEnforcement bool
+
+	// ClaudeCodeEnforcement is the parallel flag for claudecode.
+	ClaudeCodeEnforcement bool
 }
 
 // Connector is the contract every agent framework adapter implements.

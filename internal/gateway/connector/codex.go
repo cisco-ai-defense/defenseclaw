@@ -53,6 +53,34 @@ type CodexConnector struct {
 	// (see Authenticate), but operators must see it surfaced at least
 	// once so they know a non-token-authed path is live.
 	loopbackWarn sync.Once
+
+	// Provider snapshot recorded at setup time (avarice F-1365). Used
+	// by Authenticate to accept loopback callers that present a
+	// Bearer token matching one of the operator-configured codex
+	// provider keys — this is how the native codex CLI continues to
+	// authenticate without an X-DC-Auth header.
+	snapshotMu sync.RWMutex
+	providers  map[string]CodexProviderEntry
+}
+
+// CodexProviderEntry mirrors the fields the codex Authenticate path
+// reads off ~/.codex/config.toml's [model_providers.*] table. Only
+// APIKey is consulted today; the struct is exported so test code can
+// inject a snapshot via SetProviderSnapshot.
+type CodexProviderEntry struct {
+	APIKey string
+}
+
+// SetProviderSnapshot replaces the operator-recorded codex provider
+// list. Called by the sidecar after parsing config.toml; tests inject
+// directly. Safe to call concurrently with Authenticate.
+func (c *CodexConnector) SetProviderSnapshot(providers map[string]CodexProviderEntry) {
+	if c == nil {
+		return
+	}
+	c.snapshotMu.Lock()
+	defer c.snapshotMu.Unlock()
+	c.providers = providers
 }
 
 // NewCodexConnector creates a new Codex connector.
@@ -184,12 +212,6 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 // loopback consumer against the threat model documented on
 // AcceptLoopbackWithWarning itself.
 func (c *CodexConnector) Authenticate(r *http.Request) bool {
-	if AcceptLoopbackWithWarning(r, c.gatewayToken, "codex",
-		"codex-cli sends Authorization: Bearer <provider-key> directly to /c/codex/responses and has no shell-script seam to inject the gateway token",
-		&c.loopbackWarn) {
-		return true
-	}
-
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
 		if c.gatewayToken != "" && SecureTokenMatch(token, c.gatewayToken) {
@@ -204,6 +226,70 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
+	if IsLoopback(r) {
+		// No gateway token configured → preserve legacy local-only
+		// behavior (any loopback caller is trusted).
+		if c.gatewayToken == "" {
+			return true
+		}
+		// Avarice F-1365: with a token configured, require proof
+		// that the loopback caller possesses either the gateway
+		// token (X-DC-Auth, handled above), the master key
+		// (Authorization Bearer master, handled above), or a known
+		// codex provider key. The native codex CLI authenticates
+		// via the last path because it already sends
+		// Authorization: Bearer <provider-key>.
+		if c.matchesKnownProviderKey(r) {
+			return true
+		}
+		// Operator escape hatch: DEFENSECLAW_CODEX_LOOPBACK_TRUST=1
+		// restores the legacy "trust any loopback" behavior for
+		// single-user dev hosts that haven't recorded a provider
+		// snapshot yet.
+		if strings.TrimSpace(os.Getenv("DEFENSECLAW_CODEX_LOOPBACK_TRUST")) == "1" {
+			AcceptLoopbackWithWarning(r, c.gatewayToken, "codex",
+				"DEFENSECLAW_CODEX_LOOPBACK_TRUST=1 — trusting loopback /c/codex/* requests without proof of credential possession",
+				&c.loopbackWarn)
+			return true
+		}
+		c.loopbackWarn.Do(func() {
+			fmt.Fprintln(os.Stderr,
+				"[SECURITY] codex: rejecting loopback /c/codex/* request — "+
+					"no X-DC-Auth, no matching master key, and no recognized "+
+					"provider Authorization header. Set "+
+					"DEFENSECLAW_CODEX_LOOPBACK_TRUST=1 to opt back into "+
+					"the legacy loose behavior on a single-user host (F-1365).")
+		})
+		return false
+	}
+
+	return false
+}
+
+// matchesKnownProviderKey returns true if r's Authorization Bearer
+// matches any operator-recorded codex provider api_key. This is how
+// the native codex Rust binary authenticates loopback calls under
+// the F-1365 hardening: it already sends the provider key, so
+// possession of that key is accepted as authentication.
+func (c *CodexConnector) matchesKnownProviderKey(r *http.Request) bool {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return false
+	}
+	token := strings.TrimPrefix(auth, "Bearer ")
+	if token == "" {
+		return false
+	}
+	c.snapshotMu.RLock()
+	defer c.snapshotMu.RUnlock()
+	for _, p := range c.providers {
+		if p.APIKey == "" {
+			continue
+		}
+		if SecureTokenMatch(token, p.APIKey) {
+			return true
+		}
+	}
 	return false
 }
 

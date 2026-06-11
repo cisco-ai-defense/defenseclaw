@@ -6,14 +6,42 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// redactedScanResultJSON serializes a copy of “result“ whose finding
+// description / location / remediation fields have been passed through
+// redaction.ForSinkString. ("Raw scan JSON stores
+// unredacted secret-bearing findings"): callers persist this JSON into
+// scan_results.raw_json, which is read back through GetScanRawJSON and
+// LatestScansByScanner -- both surfaces had previously leaked the raw
+// matched source line.
+func redactedScanResultJSON(r *ScanResult) ([]byte, error) {
+	if r == nil {
+		return []byte(`{}`), nil
+	}
+	clone := *r
+	if len(r.Findings) > 0 {
+		safe := make([]Finding, len(r.Findings))
+		for i, f := range r.Findings {
+			cf := f
+			cf.Description = redaction.ForSinkString(cf.Description)
+			cf.Location = redaction.ForSinkString(cf.Location)
+			cf.Remediation = redaction.ForSinkString(cf.Remediation)
+			safe[i] = cf
+		}
+		clone.Findings = safe
+	}
+	return json.MarshalIndent(clone, "", "  ")
+}
 
 // ScanPersistence persists scan summary + per-finding rows. Implemented by
 // *audit.Store (see audit/scan_persist.go).
@@ -177,7 +205,19 @@ func EmitScanResult(
 	}
 
 	if pers != nil {
-		raw, jerr := result.JSON()
+		// ("Raw scan JSON stores unredacted
+		// secret-bearing findings"): the per-finding rows pass
+		// description / location / remediation through
+		// redaction.ForSinkString, but the legacy emitter
+		// serialised the same Finding values via result.JSON() and
+		// stored them in scan_results.raw_json without redaction.
+		// CodeGuard finding descriptions contain the raw matched
+		// source line, so a hardcoded secret matched by CG-CRED-001
+		// would persist verbatim in the SQLite audit DB and be
+		// fetchable via GetScanRawJSON. Redact a copy of the
+		// findings before serialising so raw_json reflects the
+		// same sanitised view as the per-finding rows.
+		raw, jerr := redactedScanResultJSON(result)
 		if jerr != nil {
 			raw = []byte(`{}`)
 		}

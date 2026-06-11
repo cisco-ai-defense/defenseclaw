@@ -53,6 +53,7 @@ Tables below tag each row with the binary that owns it.
 | `defenseclaw setup splunk` | Configure the Splunk audit sink. |
 | `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
 | `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage audit-log fan-out destinations (OTLP logs, Splunk HEC, generic HTTP JSONL). Distinct from `setup webhook`, which manages notifier webhooks. |
+| `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and persists to `~/.defenseclaw/.env`; `remove` only touches operator-added entries. All verbs accept `--json`. |
 
 ## Guardrail
 
