@@ -42,6 +42,7 @@ means.
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import subprocess
 import sys
@@ -170,13 +171,20 @@ def process_argv0_basename(pid: int) -> str | None:
     """
     if pid <= 0:
         return None
+    if sys.platform == "win32":  # pragma: no cover - exercised via mocks
+        argv0 = _process_image_path_windows(pid)
+        if not argv0:
+            return None
+        base = ntpath.basename(argv0.strip()).strip()
+        return base.lower() or None
+
     proc_cmdline = f"/proc/{pid}/cmdline"
     try:
         with open(proc_cmdline, "rb") as fh:
             raw = fh.read()
         argv0 = raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
     except FileNotFoundError:
-        # /proc not present (macOS) — fall back to ps.
+        # /proc not present (macOS/BSD) — fall back to ps.
         try:
             out = subprocess.run(
                 ["ps", "-p", str(pid), "-o", "command="],
@@ -194,7 +202,46 @@ def process_argv0_basename(pid: int) -> str | None:
     except OSError:
         return None
     base = os.path.basename(argv0.strip()).strip()
-    return base or None
+    return base.lower() or None
+
+
+def _process_image_path_windows(pid: int) -> str | None:  # pragma: no cover - Windows only
+    """Return the executable image path for ``pid`` using a native Windows API."""
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_process.restype = wintypes.HANDLE
+
+    query_image_name = kernel32.QueryFullProcessImageNameW
+    query_image_name.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    query_image_name.restype = wintypes.BOOL
+
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    handle = open_process(process_query_limited_information, False, pid)
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not query_image_name(handle, 0, buf, ctypes.byref(size)):
+            return None
+        return buf.value
+    finally:
+        close_handle(handle)
 
 
 def process_is_gateway(

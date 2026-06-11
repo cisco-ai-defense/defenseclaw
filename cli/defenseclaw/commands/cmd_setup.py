@@ -6685,10 +6685,17 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
 
     pid_file = os.path.join(data_dir, "gateway.pid")
-    # F-0721: only treat the gateway as already-running when the live PID
-    # actually belongs to the gateway binary; a spoofed PID must not
-    # downgrade a start into a no-op or a restart against a foreign proc.
-    was_running = _is_pid_alive(pid_file) and _gateway_pid_file_identifies_gateway(pid_file)
+    pid_alive = _is_pid_alive(pid_file)
+    # F-0721: only trust a live PID when it actually belongs to the gateway
+    # binary. If a PID file points at some live but unverified process, fail
+    # closed instead of downgrading to `start`; the Go start path treats a live
+    # PID file as already running, which can otherwise report success while the
+    # old/stale daemon keeps serving the previous config.
+    if pid_alive and not _gateway_pid_file_identifies_gateway(pid_file):
+        click.echo("  defenseclaw-gateway: live gateway.pid did not verify as DefenseClaw gateway.")
+        click.echo("    Refusing to start/restart; inspect or remove the stale PID file.")
+        return False
+    was_running = pid_alive
     if not was_running and not start_if_stopped:
         click.echo("  defenseclaw-gateway: not running — skipping restart.")
         click.echo("    Start it with: defenseclaw-gateway start")

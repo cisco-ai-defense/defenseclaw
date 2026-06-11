@@ -20,7 +20,9 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from defenseclaw import process_liveness
 from defenseclaw.process_liveness import pid_alive, pid_file_alive, read_pid_file
 
 
@@ -87,6 +89,19 @@ class TestPidFileAlive(unittest.TestCase):
 
     def test_dead_for_missing_file(self):
         self.assertFalse(pid_file_alive("/nonexistent/gateway.pid"))
+
+
+class TestProcessIdentity(unittest.TestCase):
+    def test_windows_image_path_uses_windows_basename_rules(self):
+        with patch.object(process_liveness.sys, "platform", "win32"), patch.object(
+            process_liveness,
+            "_process_image_path_windows",
+            return_value=r"C:\Program Files\DefenseClaw\DEFENSECLAW-GATEWAY.EXE",
+        ):
+            self.assertEqual(
+                process_liveness.process_argv0_basename(1234),
+                "defenseclaw-gateway.exe",
+            )
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ const (
 	EnvDGXSpark Environment = "dgx-spark"
 	EnvMacOS    Environment = "macos"
 	EnvLinux    Environment = "linux"
+	EnvWindows  Environment = "windows"
 )
 
 type DeploymentMode string
@@ -81,8 +82,11 @@ func ConfigPath() string {
 }
 
 func DetectEnvironment() Environment {
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		return EnvMacOS
+	case "windows":
+		return EnvWindows
 	}
 
 	if _, err := os.Stat("/etc/dgx-release"); err == nil {

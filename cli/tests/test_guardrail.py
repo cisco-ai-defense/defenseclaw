@@ -1620,6 +1620,23 @@ class TestRestartDefenseGateway(unittest.TestCase):
             cmd = mock_run.call_args[0][0]
             self.assertEqual(cmd, ["defenseclaw-gateway", "restart"])
 
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
+        return_value=False,
+    )
+    @patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_refuses_live_unverified_pid(self, mock_run, _mock_alive, _mock_identity):
+        from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_file = os.path.join(tmpdir, "gateway.pid")
+            with open(pid_file, "w") as f:
+                f.write(str(os.getpid()))
+
+            self.assertFalse(_restart_defense_gateway(tmpdir))
+            mock_run.assert_not_called()
+
     @patch("defenseclaw.commands.cmd_setup.subprocess.run", side_effect=FileNotFoundError)
     def test_binary_not_found(self, mock_run):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway

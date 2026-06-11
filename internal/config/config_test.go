@@ -165,6 +165,10 @@ func TestDetectEnvironment(t *testing.T) {
 		if env != EnvMacOS {
 			t.Errorf("expected macos on darwin, got %s", env)
 		}
+	case "windows":
+		if env != EnvWindows {
+			t.Errorf("expected windows on windows, got %s", env)
+		}
 	case "linux":
 		if env != EnvLinux && env != EnvDGXSpark {
 			t.Errorf("expected linux or dgx-spark on linux, got %s", env)

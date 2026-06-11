@@ -197,7 +197,10 @@ def _expand(p: str) -> str:
 # ---------------------------------------------------------------------------
 
 def detect_environment() -> str:
-    if platform.system() == "Darwin":
+    system = platform.system()
+    if system == "Windows":
+        return "windows"
+    if system == "Darwin":
         return "macos"
     if Path("/etc/dgx-release").exists():
         return "dgx-spark"
