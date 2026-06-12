@@ -11,17 +11,17 @@ For the historical change log of how each row got to its current state, see
 
 ## At a glance
 
-| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex | Hermes | Cursor | Windsurf | Gemini CLI | Copilot CLI | OpenHands |
-| --------------------------- | -------- | --------- | ----------- | ----- | ------ | ------ | -------- | ---------- | ----------- | --------- |
-| LLM traffic interception    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       |
-| Proxy-side response scan    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       |
-| Hook telemetry              | OK       | n/a*      | OK          | OK    | OK     | OK     | OK       | OK         | OK          | OK        |
-| Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     | partial   |
-| Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | PreToolUse | no        |
-| Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          | no        |
-| Skill scan / list / enable  | OK       | OK        | OK          | OK    | skills | skills/rules | no skills | skills | skills/rules | skills |
-| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | skills/plugins | skills | discovery | skills/extensions | skills | skills |
-| Native OTLP ingest          | OK       | n/a       | OK          | OK    | hook-only | hook-only | hook-only | OK | env-opt-in | hook-only |
+| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex | Hermes | Cursor | Windsurf | Gemini CLI | Copilot CLI | Microsoft Scout | OpenHands |
+| --------------------------- | -------- | --------- | ----------- | ----- | ------ | ------ | -------- | ---------- | ----------- | --------------- | --------- |
+| LLM traffic interception    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | no              | n/a       |
+| Proxy-side response scan    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | no              | n/a       |
+| Hook telemetry              | OK       | n/a*      | OK          | OK    | OK     | OK     | OK       | OK         | OK          | no              | OK        |
+| Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     | no              | partial   |
+| Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | PreToolUse | no | no        |
+| Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          | no              | no        |
+| Skill scan / list / enable  | OK       | OK        | OK          | OK    | skills | skills/rules | no skills | skills | skills/rules | skills scan/list | skills |
+| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | skills/plugins | skills | discovery | skills/extensions | skills | no watcher | skills |
+| Native OTLP ingest          | OK       | n/a       | OK          | OK    | hook-only | hook-only | hook-only | OK | env-opt-in | no | hook-only |
 
 `*` = "not applicable" because the host agent has no schema slot for
 external-script hook invocation. See **By-design connector limitations**
@@ -32,6 +32,9 @@ The Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, and OpenHands connectors 
 redirect LLM traffic through the proxy in v1. They are still first-class
 connectors with explicit hook, MCP, skill/rule/plugin/agent, CodeGuard, and
 telemetry capability rows where the vendor has documented local surfaces.
+Microsoft Scout is first-class as a **surface connector**: DefenseClaw scans
+Scout skills and can install an opt-in CodeGuard skill, but does not claim
+runtime blocking until Microsoft publishes a Scout hook or proxy contract.
 
 ### Observability dimension (multi-connector)
 
@@ -55,8 +58,9 @@ and [`OBSERVABILITY-CONTRACT.md` → Connector dimension fields](OBSERVABILITY-C
 | --------- | ----- | ----- | ------- |
 | OpenClaw, ZeptoClaw (proxy) | OK | OK | not supported |
 | Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands (hook-based) | OK | OK | OK |
+| Microsoft Scout (surface-only skills) | OK | OK | OK |
 
-Windows is **hook-only**: the eight hook-based connectors run their hook
+Windows is **hook-only**: hook-based connectors run their hook
 decisions natively in the `defenseclaw` binary (the agent invokes
 `defenseclaw hook --connector <name> --event <event>`), so no Git Bash, `jq`,
 or shell shims are required. The proxy connectors (OpenClaw, ZeptoClaw) need
@@ -64,6 +68,8 @@ the local guardrail proxy, which DefenseClaw does not host on Windows; they are
 hidden from the connector pickers and rejected by setup there. The Go registry
 (`connectorSupportedOnOS`) and the Python `platform_support` module are the two
 sources of truth for this gating, kept in sync by a parity test.
+Scout has no hook shim or proxy lifecycle on any OS; its support is local
+filesystem discovery and explicit CodeGuard skill asset installation.
 
 ## Versioned Hook Contracts
 
@@ -95,6 +101,7 @@ with a warning. Action mode fails closed unless
 | Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Gemini CLI | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Copilot CLI | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Microsoft Scout | surface, not hook-gated | not gated by hook contract | n/a | local skills only |
 | OpenHands | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 
 No hook contract currently has a `max_exclusive` ceiling. We only add an upper
@@ -108,6 +115,10 @@ enabled hooks by default, Cursor `1.7.0` introduced beta hooks, Hermes
 `0.11.0` added shell hooks for `pre_tool_call`, Windsurf `1.12.41` added user
 prompt hooks to the Cascade pre-hook set, and Copilot CLI `1.0.18` is the first
 release containing every event in the current DefenseClaw Copilot contract.
+Microsoft Scout is not hook-gated because the public preview docs expose local
+skill directories (`~/.copilot/bundled-skills`, `~/.copilot/m-skills`,
+`~/.copilot/skills`) but no local
+hook/proxy enforcement surface DefenseClaw can patch.
 OpenHands uses the current documented `.openhands/hooks.json` contract, has
 been validated with `OpenHands CLI 1.16.0`, and is accepted as unversioned
 until upstream publishes a hook-version floor. DefenseClaw installs OpenHands
@@ -125,6 +136,7 @@ Claude Code is pinned to the current documented hook surface captured at
 | Windsurf | yes | no | none | `pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use` | no | user | `~/.codeium/windsurf/hooks.json` |
 | Gemini CLI | yes | no | none | `BeforeAgent`, `BeforeModel`, `BeforeTool`, `AfterTool`, `AfterAgent` | yes | user | `~/.gemini/settings.json` |
 | Copilot CLI | yes | yes | `preToolUse` / `PreToolUse` | `PreToolUse`, `PermissionRequest`, stop/failure hooks | no | user,workspace | `~/.copilot/hooks/defenseclaw.json` or `<workspace>/.github/hooks/defenseclaw.json` |
+| Microsoft Scout | no | no | none | none | no | none | n/a |
 | OpenHands | yes | no | none | `pre_tool_use`, `user_prompt_submit`, `stop` | yes | user,workspace | `~/.openhands/hooks.json` or `<workspace>/.openhands/hooks.json` |
 
 `confirm` verdicts are rendered as native ask only when the event is listed in
@@ -140,6 +152,7 @@ preserving `raw_action: "confirm"` in the hook response.
 | Windsurf | existing documented/user MCP paths only | unsupported | existing documented/user rules paths only | unsupported | unsupported | opt-in rule only when a rules path exists |
 | Gemini CLI | `~/.gemini/settings.json` | `.gemini/skills`, `.agents/skills` | represented through skills/agents | `.gemini/extensions`, `~/.gemini/extensions` | `.gemini/agents`, `~/.gemini/agents` | opt-in skill |
 | Copilot CLI | `~/.copilot/mcp-config.json`, optional workspace `.github/mcp.json`, `.mcp.json` | `~/.copilot/skills`, optional workspace `.github/skills`, `.agents/skills` | optional workspace `.github/instructions` | CLI marketplace/plugin flow | `~/.copilot/agents`, optional workspace `.github/agents` | opt-in skill or rule |
+| Microsoft Scout | no documented local MCP install config | `~/.copilot/bundled-skills`, `~/.copilot/m-skills`, `~/.copilot/skills` | unsupported | unsupported | unsupported | opt-in skill |
 | OpenHands | `~/.openhands/mcp.json` | `~/.agents/skills`, `~/.openhands/skills/installed`, `~/.openhands/cache/skills/public-skills/skills` (`~/.openhands/skills`, `~/.openhands/microagents` discovery only; workspace equivalents with `--workspace`) | `AGENTS.md` discovery only when workspace-pinned | unsupported | unsupported | opt-in skill |
 
 CodeGuard native assets are never installed by CLI startup, `init`, sandbox
@@ -155,6 +168,7 @@ non-CodeGuard paths require `--replace`.
 | Claude Code | native OTLP env in settings.json | header token | hook telemetry |
 | Gemini CLI | native logs/metrics/traces in settings.json | loopback path token | hook telemetry |
 | Copilot CLI | native traces/metrics via documented env vars | header token | hook telemetry |
+| Microsoft Scout | no documented native OTLP | n/a | no hook telemetry |
 | OpenHands | no documented native OTLP | header token | hook telemetry |
 | Hermes / Cursor / Windsurf | no documented native OTLP | n/a | hook-generated logs, spans, counters |
 
@@ -203,6 +217,7 @@ harmless (permission denied) if a regression ever lets it through.
 | Hermes | contract-only | contract-only | contract-only | — | only `pre_tool_call` mapped |
 | Windsurf | contract-only | contract-only | contract-only | — | no headless CLI/SDK |
 | Antigravity | contract-only | contract-only | contract-only | — | headless auth is OAuth, no API key |
+| Microsoft Scout | n/a | n/a | n/a | — | surface-only; no hook driver until Microsoft publishes a Scout hook contract |
 
 `\*` = advisory cell (`continue-on-error`) until it goes consistently green.
 All Windows live cells and every Copilot cell start advisory; they are promoted

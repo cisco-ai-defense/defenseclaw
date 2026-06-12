@@ -1304,7 +1304,7 @@ func resolveActiveConnector(reg *connector.Registry, name, surface string) (conn
 	}
 	conn, ok := reg.Get(trimmed)
 	if !ok {
-		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw, hermes, cursor, windsurf, geminicli, copilot, openhands) or remove the field to default to openclaw", surface, trimmed)
+		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw, hermes, cursor, windsurf, geminicli, copilot, scout, openhands, antigravity) or remove the field to default to openclaw", surface, trimmed)
 	}
 	return conn, nil
 }
@@ -1978,7 +1978,7 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 	switch conn.Name() {
 	case "codex", "claudecode":
 		return false
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "scout", "openhands", "antigravity":
 		return false
 	default:
 		return true
@@ -2012,7 +2012,7 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 	switch configuredConnectorName(cfg) {
 	case "codex", "claudecode":
 		return false
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "scout", "openhands", "antigravity":
 		return false
 	default:
 		return true
@@ -2047,7 +2047,7 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             gateway.host at a real upstream
 //	                             (LAN IP, FQDN, etc.); they want
 //	                             fleet integration alongside hooks.
-//	hermes / cursor / windsurf / geminicli / copilot / openhands
+//	hermes / cursor / windsurf / geminicli / copilot / scout / openhands
 //	                           → SKIP. These connectors are local
 //	                             hook/native-telemetry surfaces in
 //	                             this PR and do not use the OpenClaw
@@ -2081,7 +2081,7 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		return true
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "scout", "openhands", "antigravity":
 		return false
 	default:
 		// Empty / unknown connector: prefer DISABLED over reconnect

@@ -390,6 +390,37 @@
       "local_endpoints": []
     },
     {
+      "id": "scout",
+      "name": "Microsoft Scout",
+      "vendor": "Microsoft",
+      "category": "supported_connector",
+      "confidence": 0.92,
+      "supported_connector": "scout",
+      "binary_names": [
+        "scout"
+      ],
+      "process_names": [
+        "Scout",
+        "Microsoft Scout",
+        "Clawpilot"
+      ],
+      "config_paths": [],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [],
+      "history_patterns": [
+        "microsoft scout",
+        "clawpilot"
+      ],
+      "application_names": [
+        "Microsoft Scout.app",
+        "Scout.app"
+      ],
+      "local_endpoints": []
+    },
+    {
       "id": "antigravity",
       "name": "Antigravity",
       "vendor": "Google",

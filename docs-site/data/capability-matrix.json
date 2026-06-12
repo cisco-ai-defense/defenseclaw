@@ -1,7 +1,7 @@
 {
   "_source": "Hand-curated from internal/gateway/connector hook profiles plus cli/defenseclaw/inventory/hook_contracts.json. Re-extract on every connector or hook-contract change.",
-  "_lastVerified": "2026-05-19",
-  "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/meta.json).",
+  "_lastVerified": "2026-06-10",
+  "_order": "By adoption / popularity for guardrail connectors, with surface-only connectors near related ecosystems.",
   "connectors": [
     {
       "id": "claudecode",
@@ -140,6 +140,23 @@
       },
       "hilt": "Copilot CLI supports native ask on documented preToolUse hooks.",
       "notes": "Global hooks under ~/.copilot/hooks by default; optional workspace hooks under <workspace>/.github/hooks."
+    },
+    {
+      "id": "scout",
+      "label": "Microsoft Scout",
+      "family": "surface",
+      "toolInspection": "none",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": false,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": [],
+        "supportsFailClosed": false,
+        "scope": "none"
+      },
+      "hilt": "Scout has no documented hook or proxy surface for DefenseClaw runtime approvals. DefenseClaw supports local skill discovery and explicit CodeGuard skill installation only.",
+      "notes": "Scout is powered by OpenClaw, but the public preview docs currently expose ~/.copilot/bundled-skills, ~/.copilot/m-skills, and ~/.copilot/skills rather than a DefenseClaw patchable hook contract."
     },
     {
       "id": "openhands",

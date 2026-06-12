@@ -181,12 +181,12 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 	}
 }
 
-// TestResolveWatcherDirs_HookOnlyConnectorMatrix locks the watcher
+// TestResolveWatcherDirs_LocalSurfaceConnectorMatrix locks the watcher
 // contract for the six hook-only connectors (hermes, cursor,
-// windsurf, geminicli, copilot, openhands). Two contracts differ from the
-// claudecode/codex matrix above and are pinned here:
+// windsurf, geminicli, copilot, openhands) plus surface-only Scout. Two
+// contracts differ from the claudecode/codex matrix above and are pinned here:
 //
-//  1. Plugins is OpenClaw-only (G4): every hook-only connector
+//  1. Plugins is OpenClaw-only (G4): every local-surface connector
 //     advertises Plugins.Supported=false, so resolveWatcherDirs
 //     MUST fall back to cfg.PluginDirs() with src.Plugin=
 //     watcherDirsFromDefault. A regression that lets a hook-only
@@ -194,7 +194,7 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 //     watching directories that the connector itself does not
 //     own — exactly the behavior we eliminated.
 //
-//  2. Skills support varies: hermes/cursor/geminicli/copilot/openhands
+//  2. Skills support varies: hermes/cursor/geminicli/copilot/scout/openhands
 //     advertise their own skill paths so src.Skill must be
 //     watcherDirsFromConnector and the slice must contain a
 //     framework-owned subpath. windsurf intentionally does NOT
@@ -203,7 +203,7 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 //     watcherDirsFromDefault. This split is what justifies a
 //     dedicated matrix rather than reusing the openclaw/zeptoclaw/
 //     claudecode/codex one above.
-func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
+func TestResolveWatcherDirs_LocalSurfaceConnectorMatrix(t *testing.T) {
 	cases := []struct {
 		name            string
 		ctor            func() connector.Connector
@@ -244,6 +244,12 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 			expectSkillFrag: filepath.Join(".copilot", "skills"),
 		},
 		{
+			name:            "scout",
+			ctor:            func() connector.Connector { return connector.NewScoutConnector() },
+			expectSkillSrc:  watcherDirsFromConnector,
+			expectSkillFrag: filepath.Join(".copilot", "skills"),
+		},
+		{
 			name:            "openhands",
 			ctor:            func() connector.Connector { return connector.NewOpenHandsConnector() },
 			expectSkillSrc:  watcherDirsFromConnector,
@@ -270,11 +276,11 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 					skillDirs, tc.expectSkillFrag)
 			}
 
-			// Plugins are OpenClaw-only (G4). Every hook-only
+			// Plugins are OpenClaw-only (G4). Every local-surface
 			// connector MUST fall back to the cfg default rather
 			// than contributing connector-specific plugin paths.
 			if src.Plugin != watcherDirsFromDefault {
-				t.Errorf("plugin source = %q, want %q (hook-only connectors must not contribute plugin paths)",
+				t.Errorf("plugin source = %q, want %q (local-surface connectors must not contribute plugin paths)",
 					src.Plugin, watcherDirsFromDefault)
 			}
 		})

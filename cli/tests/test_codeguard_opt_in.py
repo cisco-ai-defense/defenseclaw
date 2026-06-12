@@ -257,6 +257,23 @@ def test_codeguard_install_connector_flag_narrows_to_one(tmp_path, monkeypatch):
     assert "[claudecode]" not in result.output
 
 
+def test_codeguard_install_explicit_surface_only_connector(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app = AppContext()
+    app.cfg = _multi_cfg(["claudecode", "codex"], tmp_path)
+
+    result = CliRunner().invoke(
+        codeguard, ["install", "--connector", "scout", "--target", "skill"], obj=app
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "CodeGuard skill [scout]: installed to " in result.output
+    assert (tmp_path / "home" / ".copilot" / "skills" / "codeguard").is_dir()
+    assert "[claudecode]" not in result.output
+    assert "[codex]" not in result.output
+
+
 def test_codeguard_install_unsupported_connector_is_skip_not_failure(tmp_path, monkeypatch):
     # A connector with no skill install target (antigravity) must be reported
     # as "unsupported" but NOT fail the command when the other connectors

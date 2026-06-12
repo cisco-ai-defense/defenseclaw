@@ -463,6 +463,29 @@ func (d *Daemon) writePIDInfo(pid int, executable string, startIdentity string) 
 	return os.WriteFile(d.pidFile, data, 0600)
 }
 
+func (d *Daemon) readWatchdogPID() int {
+	data, err := os.ReadFile(filepath.Join(d.dataDir, "watchdog.pid"))
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+func shouldKillStaleGatewayProcess(pid, myPID, trackedPID, watchdogPID int, exeName, binName string) bool {
+	if pid <= 0 || pid == myPID || pid == trackedPID || pid == watchdogPID {
+		return false
+	}
+	exeBase := filepath.Base(exeName)
+	if idx := strings.LastIndex(exeBase, `\`); idx >= 0 {
+		exeBase = exeBase[idx+1:]
+	}
+	return strings.EqualFold(exeBase, binName)
+}
+
 func IsDaemonChild() bool {
 	return os.Getenv(EnvDaemon) == "1"
 }

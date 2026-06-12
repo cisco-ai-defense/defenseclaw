@@ -72,6 +72,8 @@ def normalize_connector(name: str | None) -> str:
         return "claudecode"
     if value in {"gemini", "gemini-cli", "gemini_cli"}:
         return "geminicli"
+    if value in {"microsoft-scout", "microsoft_scout", "ms-scout", "clawpilot"}:
+        return "scout"
     return value
 
 
@@ -88,18 +90,25 @@ def hook_contract_manifest() -> dict[str, Any]:
 
 def _load_contracts_from_manifest(
     manifest: dict[str, Any],
-) -> tuple[frozenset[str], dict[str, tuple[ConnectorContract, ...]]]:
+) -> tuple[
+    frozenset[str],
+    frozenset[str],
+    dict[str, tuple[ConnectorContract, ...]],
+]:
     connectors = manifest.get("connectors", {})
     if not isinstance(connectors, dict):
         raise ValueError("hook_contracts.json connectors must be an object")
 
     proxy_connectors: set[str] = set()
+    not_gated_connectors: set[str] = set()
     hook_contracts: dict[str, tuple[ConnectorContract, ...]] = {}
     for raw_name, raw_spec in connectors.items():
         name = normalize_connector(str(raw_name))
         spec = raw_spec if isinstance(raw_spec, dict) else {}
-        if spec.get("compatibility_gate") == STATUS_NOT_GATED or spec.get("kind") == "proxy":
+        if spec.get("kind") == "proxy":
             proxy_connectors.add(name)
+        if spec.get("compatibility_gate") == STATUS_NOT_GATED or spec.get("kind") == "proxy":
+            not_gated_connectors.add(name)
 
         contracts: list[ConnectorContract] = []
         for raw_contract in spec.get("contracts", []):
@@ -133,11 +142,13 @@ def _load_contracts_from_manifest(
             )
         if contracts:
             hook_contracts[name] = tuple(contracts)
-    return frozenset(proxy_connectors), hook_contracts
+    return frozenset(proxy_connectors), frozenset(not_gated_connectors), hook_contracts
 
 
 HOOK_CONTRACT_MANIFEST = hook_contract_manifest()
-PROXY_CONNECTORS, HOOK_CONTRACTS = _load_contracts_from_manifest(HOOK_CONTRACT_MANIFEST)
+PROXY_CONNECTORS, NOT_GATED_CONNECTORS, HOOK_CONTRACTS = _load_contracts_from_manifest(
+    HOOK_CONTRACT_MANIFEST,
+)
 
 
 def normalize_agent_version(raw: str | None) -> str:
@@ -160,13 +171,16 @@ def normalize_agent_version(raw: str | None) -> str:
 def resolve_connector_contract(connector: str, raw_version: str | None) -> ConnectorCompatibility:
     name = normalize_connector(connector)
     raw = (raw_version or "").strip()
-    if name in PROXY_CONNECTORS:
+    if name in NOT_GATED_CONNECTORS:
+        reason = "proxy/chat connector; no hook contract gate"
+        if name not in PROXY_CONNECTORS:
+            reason = "surface-only connector; no documented hook contract gate"
         return ConnectorCompatibility(
             connector=name,
             raw_version=raw,
             normalized_version=normalize_agent_version(raw),
             status=STATUS_NOT_GATED,
-            reason="proxy/chat connector; no hook contract gate",
+            reason=reason,
             contract=None,
         )
     contracts = HOOK_CONTRACTS.get(name, ())

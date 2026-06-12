@@ -1,6 +1,6 @@
 ---
 title: Connectors
-description: Eleven first-class connectors — OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes — with a single enforcement contract.
+description: Eleven guardrail connectors plus Microsoft Scout surface support — OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, Microsoft Scout, OpenHands, Antigravity, Hermes.
 keywords:
   - DefenseClaw connectors
   - Claude Code connector
@@ -8,6 +8,7 @@ keywords:
   - Cursor connector
   - OpenClaw connector
   - GitHub Copilot CLI connector
+  - Microsoft Scout connector
   - OpenHands connector
   - Antigravity connector
   - Gemini CLI connector
@@ -15,13 +16,14 @@ keywords:
   - Hermes connector
 ---
 
-Connectors are the adapter layer between agent frameworks and DefenseClaw's guardrail proxy. Each connector owns all security surfaces for its agent: LLM traffic routing, tool call inspection, agent hook events, component scanning, CodeGuard file scanning, and subprocess enforcement.
+Connectors are the adapter layer between agent frameworks and DefenseClaw's guardrail proxy. Each connector owns the security surfaces the agent actually exposes: LLM traffic routing, tool call inspection, agent hook events, component scanning, CodeGuard file scanning, subprocess enforcement, or local surface discovery.
 
 ## The two families
 
 <Cards>
   <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. DefenseClaw sits in the LLM data path — every request and response is intercepted, scored, and forwarded." />
   <Card title="Hook connectors" description="Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream." />
+  <Card title="Surface connectors" description="Microsoft Scout. DefenseClaw inventories documented local assets and can install opt-in CodeGuard skill assets, but does not claim runtime blocking without a published hook or proxy contract." />
   <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
 </Cards>
 
@@ -40,6 +42,7 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw's guar
   <Card title="Windsurf" href="/docs/connectors/windsurf" description="Cascade hooks across pre_user_prompt, pre_run_command, pre_mcp_tool_use." />
   <Card title="Gemini CLI" href="/docs/connectors/geminicli" description="settings.json hooks + native OTLP exporter pointing at the gateway." />
   <Card title="GitHub Copilot CLI" href="/docs/connectors/copilot" description="Global hooks under ~/.copilot/hooks with optional workspace overrides." />
+  <Card title="Microsoft Scout" href="/docs/connectors/scout" description="Surface-only support for Scout's bundled, workspace, and global user skill directories, plus opt-in CodeGuard skill assets." />
   <Card title="OpenHands" href="/docs/connectors/openhands" description="Global ~/.openhands/hooks.json command hooks across local OpenHands sessions." />
   <Card title="Antigravity" href="/docs/connectors/antigravity" description="All five Antigravity 2.0 lifecycle hooks (PreInvocation/PreToolUse/PostToolUse/PostInvocation/Stop) in ~/.gemini/config/hooks.json, with native ask that overrides --dangerously-skip-permissions." />
   <Card title="Hermes" href="/docs/connectors/hermes" description="config.yaml hooks for the Hermes agent runtime." />

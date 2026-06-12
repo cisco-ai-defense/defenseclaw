@@ -353,8 +353,8 @@ class TestCoverage:
                     m.setenv("HOME", str(tmp_path / "isolated-home"))
                     with pytest.raises(MCPWriteUnsupportedError):
                         set_mcp_server(name, "x", {"command": "y"})
-            elif name == "antigravity":
-                # agy v1.0.0 does not document an MCP install surface;
+            elif name in {"antigravity", "scout"}:
+                # These connectors do not document an MCP install surface;
                 # both set/unset paths must raise rather than silently
                 # writing to a guessed location.
                 with pytest.raises(MCPWriteUnsupportedError):

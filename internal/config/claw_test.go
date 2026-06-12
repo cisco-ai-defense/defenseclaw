@@ -207,6 +207,38 @@ func TestPluginDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	}
 }
 
+func TestScoutConnectorPathsDoNotFallBackToOpenClaw(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+
+	cfg := &Config{}
+	if got, want := cfg.ConnectorHomeDir("scout"), filepath.Join(home, ".copilot"); got != want {
+		t.Fatalf("ConnectorHomeDir(scout) = %q, want %q", got, want)
+	}
+
+	dirs := cfg.SkillDirsForConnector("scout")
+	for _, want := range []string{
+		filepath.Join(home, ".copilot", "bundled-skills"),
+		filepath.Join(home, ".copilot", "skills"),
+		filepath.Join(home, ".copilot", "m-skills"),
+	} {
+		if !containsPath(dirs, want) {
+			t.Fatalf("SkillDirsForConnector(scout) = %v, want %q", dirs, want)
+		}
+	}
+	if plugins := cfg.PluginDirsForConnector("scout"); len(plugins) != 0 {
+		t.Fatalf("PluginDirsForConnector(scout) = %v, want empty", plugins)
+	}
+	servers, err := cfg.ReadMCPServersForConnector("scout")
+	if err != nil {
+		t.Fatalf("ReadMCPServersForConnector(scout): %v", err)
+	}
+	if len(servers) != 0 {
+		t.Fatalf("ReadMCPServersForConnector(scout) = %v, want empty", servers)
+	}
+}
+
 // TestReadMCPServers_DispatchesViaConnector hooks into the codex
 // branch — Codex reads <workspace>/.mcp.json and Codex only. We pin
 // claw.workspace_dir to a temp dir with a known .mcp.json and confirm

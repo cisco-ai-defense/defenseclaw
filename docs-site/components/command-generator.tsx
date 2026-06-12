@@ -19,7 +19,7 @@ import matrix from '@/data/capability-matrix.json';
 type ConnectorRow = {
   id: string;
   label: string;
-  family: 'proxy' | 'hooks';
+  family: 'proxy' | 'hooks' | 'surface';
   toolInspection: string;
   subprocessPolicy: string;
   hooks: {
@@ -28,13 +28,15 @@ type ConnectorRow = {
     askEvents: string[];
     blockEvents: string[];
     supportsFailClosed: boolean;
-    scope: 'user' | 'workspace';
+    scope: 'user' | 'workspace' | 'user,workspace' | 'none';
   };
   hilt: string;
   notes?: string;
 };
 
-const CONNECTORS = (matrix as { connectors: ConnectorRow[] }).connectors;
+const CONNECTORS = (matrix as { connectors: ConnectorRow[] }).connectors.filter(
+  (row) => row.family !== 'surface',
+);
 
 type Mode = 'observe' | 'action';
 type ScannerMode = 'local' | 'remote' | 'both';
