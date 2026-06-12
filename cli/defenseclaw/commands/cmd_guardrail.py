@@ -1494,3 +1494,16 @@ def block_message_cmd(
             "config",
             f"cleared={clear} restart={restart}",
         )
+
+
+# Register `defenseclaw guardrail judge` (hook-lane judge gate). The
+# judge is opt-in per hook connector via
+# ``guardrail.judge.hook_connectors`` — ``guardrail judge
+# add/remove/list`` is the authoring surface for that gate so operators
+# never have to hand-edit config.yaml. It lives here rather than under
+# ``setup`` because it is a day-to-day policy lever like ``hilt`` and
+# ``fail-mode``. cmd_judge keeps the same lazy-import discipline as
+# this module (see its docstring).
+from defenseclaw.commands.cmd_judge import judge as _judge_group  # noqa: E402
+
+guardrail.add_command(_judge_group)

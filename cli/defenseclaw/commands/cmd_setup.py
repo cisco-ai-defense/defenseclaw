@@ -3505,6 +3505,15 @@ def setup_guardrail(
                 judge_api_base = judge_api_base[:60] + "..."
             rows.append(("guardrail.judge.api_base", judge_api_base))
         rows.append(("guardrail.judge.api_key_env", gc.judge.api_key_env))
+        hook_gate = gc.judge.hook_connectors or []
+        rows.append(
+            (
+                "guardrail.judge.hook_connectors",
+                "all"
+                if hook_gate == ["*"]
+                else (", ".join(hook_gate) if hook_gate else "(none — hook lane off)"),
+            )
+        )
         if gc.judge.fallbacks:
             rows.append(("guardrail.judge.fallbacks", ", ".join(gc.judge.fallbacks)))
     if gc.scanner_mode in ("remote", "both"):
@@ -5867,6 +5876,67 @@ def _prompt_hook_fail_mode(gc) -> None:
     gc.hook_fail_mode = "open" if fail_choice == "1" else "closed"
 
 
+def _prompt_judge_hook_connectors(gc) -> None:
+    """Prompt for the hook-lane judge gate (``judge.hook_connectors``).
+
+    Only shown when at least one configured connector is hook-enforced —
+    on a proxy-only install the gate is irrelevant (that lane is always
+    judged when the judge is enabled). The default answer never mutates
+    the gate: "none" on a fresh install preserves the opt-in default,
+    and on re-runs the default reflects the current gate ("keep" when an
+    explicit multi-connector list can't be expressed as one choice), so
+    walking the wizard with Enter is always config-preserving.
+    """
+    hook_targets = [
+        c for c in _configured_connector_set(gc) if c in _HOOK_ENFORCED_CONNECTORS
+    ]
+    if not hook_targets:
+        return
+
+    current = list(gc.judge.hook_connectors or [])
+    choices = list(hook_targets) + ["all", "none"]
+    if current == ["*"]:
+        default = "all"
+    elif len(current) == 1 and current[0] in hook_targets:
+        default = current[0]
+    elif not current:
+        default = "none"
+    else:
+        choices.insert(0, "keep")
+        default = "keep"
+
+    ux.section("Hook-lane judge")
+    ux.subhead("The judge always covers the proxy lane. Hook connectors are")
+    ux.subhead("opt-in per connector — judged calls add latency (up to the")
+    ux.subhead("hook timeout, default 5s) and LLM cost.")
+    click.echo()
+    if current:
+        # Display speaks the CLI's input language: ["*"] renders as
+        # "all" (parity with `guardrail judge list`).
+        gate_label = "all" if current == ["*"] else str(current)
+        click.echo("  " + ux.dim(f"Current gate: {gate_label}"))
+    choice = click.prompt(
+        "  Run the judge on hook connectors?",
+        type=click.Choice(choices),
+        default=default,
+    )
+    if choice == "keep":
+        return
+    if choice == "all":
+        gc.judge.hook_connectors = ["*"]
+    elif choice == "none":
+        gc.judge.hook_connectors = []
+    else:
+        gc.judge.hook_connectors = [choice]
+        if len(hook_targets) > 1:
+            click.echo(
+                "  "
+                + ux.dim(
+                    "Add more later: defenseclaw guardrail judge add <connector>"
+                )
+            )
+
+
 def _interactive_guardrail_setup(
     app: AppContext,
     gc,
@@ -6180,6 +6250,19 @@ def _interactive_guardrail_setup(
     gc.judge.enabled = enable_judge
 
     if enable_judge:
+        # --- Hook-lane judge gate ---
+        #
+        # judge.enabled alone only covers the proxy lane. Hook-enforced
+        # connectors are gated per connector by
+        # ``guardrail.judge.hook_connectors`` (empty = off — deliberate,
+        # the judge adds latency + LLM cost per inspected hook call).
+        # Without this prompt an operator who answers "Enable LLM judge?
+        # y" on a hook-connector install reasonably believes the judge is
+        # running when the hook lane is in fact off. Defaults preserve
+        # the opt-in: "none" on fresh installs, the current gate on
+        # re-runs (so Enter never silently widens or clears it).
+        _prompt_judge_hook_connectors(gc)
+
         ux.section("Detection strategy")
         click.echo("    " + ux.bold("[1] regex_only ") + " — regex patterns only, no LLM calls " + ux.dim("(fastest)"))
         click.echo(

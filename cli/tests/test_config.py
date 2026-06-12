@@ -196,6 +196,115 @@ class TestAIDiscoveryConfig(unittest.TestCase):
         self.assertEqual(cfg.confidence_policy_path, "/tmp/custom-confidence.yaml")
 
 
+class TestHookJudgeGateRoundTrip(unittest.TestCase):
+    """Opt-out persistence for the hook-lane judge keys.
+
+    The omitempty strip pops empty ``hook_connectors`` / zero
+    ``hook_timeout`` from the serialized dict, and the nested merge in
+    ``save()`` used to preserve any on-disk key the new dict omitted —
+    so an operator could opt IN but never opt OUT: clearing the gate
+    reported success while ``['*']`` was resurrected from the file on
+    every save. ``_OWNED_NESTED_KEYS`` closes that; these tests pin the
+    full file round trip both ways.
+    """
+
+    def _save_and_reload(self, cfg):
+        cfg.save()
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": cfg.data_dir}):
+            return config_mod.load()
+
+    def test_opt_in_then_opt_out_persists(self):
+        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg.guardrail.judge.hook_connectors = ["*"]
+        cfg.guardrail.judge.hook_timeout = 9.0
+        loaded = self._save_and_reload(cfg)
+        self.assertEqual(loaded.guardrail.judge.hook_connectors, ["*"])
+        self.assertEqual(loaded.guardrail.judge.hook_timeout, 9.0)
+
+        # Opt out: the cleared values must survive the save/merge.
+        loaded.guardrail.judge.hook_connectors = []
+        loaded.guardrail.judge.hook_timeout = 0.0
+        reloaded = self._save_and_reload(loaded)
+        self.assertEqual(reloaded.guardrail.judge.hook_connectors, [])
+        self.assertEqual(reloaded.guardrail.judge.hook_timeout, 0.0)
+
+        # And the keys are gone from the file (omitempty parity), not
+        # merely zeroed.
+        with open(os.path.join(loaded.data_dir, "config.yaml")) as f:
+            text = f.read()
+        self.assertNotIn("hook_connectors", text)
+        self.assertNotIn("hook_timeout", text)
+
+    def test_explicit_list_replaces_star_on_disk(self):
+        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg.guardrail.judge.hook_connectors = ["*"]
+        loaded = self._save_and_reload(cfg)
+        loaded.guardrail.judge.hook_connectors = ["hermes"]
+        reloaded = self._save_and_reload(loaded)
+        self.assertEqual(reloaded.guardrail.judge.hook_connectors, ["hermes"])
+
+    def test_never_opted_in_stays_clean(self):
+        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg.save()
+        with open(os.path.join(cfg.data_dir, "config.yaml")) as f:
+            text = f.read()
+        self.assertNotIn("hook_connectors", text)
+        self.assertNotIn("hook_timeout", text)
+
+    def test_stale_writer_does_not_delete_concurrent_gate(self):
+        # A long-lived process (TUI, open wizard) that loaded the config
+        # BEFORE another terminal ran `guardrail judge add hermes` holds
+        # an empty in-memory gate. Its later save of an unrelated change
+        # must NOT delete the gate the other process wrote — only a
+        # process that actually loaded a value and cleared it may drop
+        # the key (parity with the authoritative_base rescue for dict
+        # paths).
+        data_dir = tempfile.mkdtemp()
+        Config(data_dir=data_dir).save()
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            stale = config_mod.load()  # gate absent at load
+
+            # Concurrent writer adds the gate on disk.
+            other = config_mod.load()
+            other.guardrail.judge.hook_connectors = ["hermes"]
+            other.guardrail.judge.hook_timeout = 7.0
+            other.save()
+
+            # Stale process saves an unrelated change.
+            stale.gateway.port = 19999
+            stale.save()
+
+            reloaded = config_mod.load()
+        self.assertEqual(reloaded.guardrail.judge.hook_connectors, ["hermes"])
+        self.assertEqual(reloaded.guardrail.judge.hook_timeout, 7.0)
+        self.assertEqual(reloaded.gateway.port, 19999)
+
+    def test_dotted_literal_key_is_not_dropped(self):
+        # An unmodeled YAML key whose literal name contains dots (flat
+        # dotted style: `guardrail: {"judge.hook_connectors": ...}`)
+        # must never collide with the modeled dotted PATH
+        # guardrail.judge.hook_connectors — it is an extension key and
+        # the round-trip contract preserves it.
+        data_dir = tempfile.mkdtemp()
+        Config(data_dir=data_dir).save()
+        cfg_path = os.path.join(data_dir, "config.yaml")
+        import yaml as _yaml
+
+        with open(cfg_path) as f:
+            raw = _yaml.safe_load(f)
+        raw.setdefault("guardrail", {})["judge.hook_connectors"] = ["custom-ext"]
+        with open(cfg_path, "w") as f:
+            _yaml.safe_dump(raw, f, sort_keys=False)
+
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = config_mod.load()
+            cfg.save()
+
+        with open(cfg_path) as f:
+            saved = _yaml.safe_load(f)
+        self.assertEqual(saved["guardrail"].get("judge.hook_connectors"), ["custom-ext"])
+
+
 class TestMergeFunctions(unittest.TestCase):
     def test_merge_severity_action_none(self):
         sa = _merge_severity_action(None)
