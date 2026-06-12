@@ -132,7 +132,7 @@ func (d *Daemon) killStaleProcesses() {
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		pid, err := strconv.Atoi(strings.TrimSpace(line))
-		if err != nil || pid <= 0 || pid == myPID || pid == trackedPID || pid == watchdogPID {
+		if err != nil || !shouldKillStaleGatewayProcess(pid, myPID, trackedPID, watchdogPID, binName, binName) {
 			continue
 		}
 		proc, err := os.FindProcess(pid)
@@ -142,17 +142,4 @@ func (d *Daemon) killStaleProcesses() {
 		fmt.Fprintf(os.Stderr, "[daemon] killing stale gateway process (PID %d)\n", pid)
 		_ = proc.Signal(syscall.SIGTERM)
 	}
-}
-
-// readWatchdogPID reads the watchdog PID from watchdog.pid in the data dir.
-func (d *Daemon) readWatchdogPID() int {
-	data, err := os.ReadFile(filepath.Join(d.dataDir, "watchdog.pid"))
-	if err != nil {
-		return 0
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return 0
-	}
-	return pid
 }
