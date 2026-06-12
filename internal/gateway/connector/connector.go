@@ -247,14 +247,41 @@ type TelemetryCapability struct {
 // doctor, API metadata, and future installer flows. HookCapabilityProvider
 // remains as a compatibility shim for the verdict mapper.
 type ConnectorCapabilities struct {
-	Hooks     HookCapability      `json:"hooks"`
-	MCP       SurfaceCapability   `json:"mcp"`
-	Skills    SurfaceCapability   `json:"skills"`
-	Rules     SurfaceCapability   `json:"rules"`
-	Plugins   SurfaceCapability   `json:"plugins"`
-	Agents    SurfaceCapability   `json:"agents"`
-	CodeGuard CodeGuardCapability `json:"codeguard"`
-	Telemetry TelemetryCapability `json:"telemetry"`
+	// LLMTrafficMode states whether DefenseClaw sits in the agent's LLM
+	// data path ("proxy") or only attaches to lifecycle hooks
+	// ("hooks-only"). It is the single honest signal for what a custom
+	// provider actually does when bound to this connector: on a proxy
+	// connector a custom provider can be the agent's enforced upstream
+	// model; on a hooks-only connector it can only be DefenseClaw's
+	// judge/aux model — the agent's own model traffic is never seen.
+	LLMTrafficMode string              `json:"llm_traffic_mode"`
+	Hooks          HookCapability      `json:"hooks"`
+	MCP            SurfaceCapability   `json:"mcp"`
+	Skills         SurfaceCapability   `json:"skills"`
+	Rules          SurfaceCapability   `json:"rules"`
+	Plugins        SurfaceCapability   `json:"plugins"`
+	Agents         SurfaceCapability   `json:"agents"`
+	CodeGuard      CodeGuardCapability `json:"codeguard"`
+	Telemetry      TelemetryCapability `json:"telemetry"`
+}
+
+// LLMTrafficModeProxy / LLMTrafficModeHooksOnly are the two values of
+// ConnectorCapabilities.LLMTrafficMode.
+const (
+	LLMTrafficModeProxy     = "proxy"
+	LLMTrafficModeHooksOnly = "hooks-only"
+)
+
+// LLMTrafficModeForConnector returns the traffic mode for a connector
+// name: "proxy" for the proxy/chat connectors (OpenClaw, ZeptoClaw)
+// that interpose on the LLM data path, "hooks-only" for every hook
+// connector. This is the authoritative classifier the API and CLI use
+// to describe custom-provider enforcement per connector.
+func LLMTrafficModeForConnector(name string) string {
+	if IsProxyConnector(normalizeConnectorName(name)) {
+		return LLMTrafficModeProxy
+	}
+	return LLMTrafficModeHooksOnly
 }
 
 // ConnectorCapabilityProvider — optional, connectors that can describe their
@@ -322,6 +349,19 @@ type HookProfile struct {
 	NormalizedAgentVersion  string
 	CompatibilityStatus     string
 	CompatibilityReason     string
+
+	// ContentEnvelopeKey names the single nested payload object this
+	// connector hides inspectable content in (hermes nests prompt /
+	// result text under "extra"). When set, the generic decoder —
+	// after every top-level content lookup misses — opens exactly
+	// this one declared sub-object and re-runs the expected
+	// content-key search inside it. Empty for flat-payload
+	// connectors, which therefore never take that path. Deliberately
+	// a single declared key, not a recursive scan: tool inputs /
+	// results carry attacker-influenced nested JSON, so the only
+	// sub-object ever opened is the one declared in the audited
+	// contract.
+	ContentEnvelopeKey string
 
 	// Profile-driven dispatch callbacks. All optional — the
 	// unified dispatch helper consults these fields when present

@@ -72,7 +72,7 @@ The scripted equivalent. Same backend, no prompts ever, safe defaults baked in: 
 defenseclaw quickstart --connector claudecode
 ```
 
-Replace `claudecode` with `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openclaw`, or `zeptoclaw` to target the agent you actually use. If you skip `--connector`, quickstart consults `~/.defenseclaw/picked_connector` (written by the installer when you passed `--connector` to it) and falls back to `codex`.
+Replace `claudecode` with `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `openclaw`, or `zeptoclaw` to target the agent you actually use. If you skip `--connector`, quickstart consults `~/.defenseclaw/picked_connector` (written by the installer when you passed `--connector` to it) and falls back to `codex`.
 
 </Step>
 
@@ -147,7 +147,7 @@ tail -f ~/.defenseclaw/gateway.jsonl | jq .
 <TypeTable
   type={{
     "--connector / --agent": {
-      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity",
+      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode",
       description: "Agent connector. Defaults to ~/.defenseclaw/picked_connector (written by the installer) or codex.",
     },
     "--mode": {

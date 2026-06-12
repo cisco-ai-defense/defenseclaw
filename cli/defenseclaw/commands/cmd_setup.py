@@ -36,7 +36,7 @@ import click
 # pulled name-by-name so the wizard call sites read like
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
-from defenseclaw import platform_support, ux
+from defenseclaw import connector_paths, platform_support, ux
 from defenseclaw.audit_actions import (
     ACTION_SETUP_CONNECTOR_MODE,
     ACTION_SETUP_GATEWAY,
@@ -663,6 +663,7 @@ def setup_llm(
             ux.kv(f"{label_prefix}.base_url", resolved.base_url)
         if resolved.instance_name:
             ux.kv(f"{label_prefix}.instance_name", resolved.instance_name)
+            _echo_custom_provider_enforcement(cfg)
         if run_ping:
             _run_llm_ping(resolved)
         return
@@ -2373,6 +2374,7 @@ _CONNECTOR_NAMES_FALLBACK = [
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
 ]
 
 
@@ -2475,6 +2477,15 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
+    "opencode": {
+        "label": "OpenCode",
+        "description": (
+            "auto-loaded JS bridge plugin (~/.config/opencode/plugins); "
+            "tool.execute.before blocking"
+        ),
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
 }
 
 _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
@@ -2549,6 +2560,13 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
             "hooks file, so DefenseClaw never patches workspace-local copies"
         ),
         "~/.defenseclaw/hooks/antigravity-hook.sh",
+    ),
+    "opencode": (
+        (
+            "~/.config/opencode/plugins/defenseclaw.js — DefenseClaw bridge "
+            "plugin auto-loaded by opencode; no opencode.json edit and no "
+            "shell-hook config patch"
+        ),
     ),
 }
 
@@ -2879,7 +2897,7 @@ def _hilt_support_note(connector: str) -> str:
             "Antigravity supports native PreToolUse ask; returning decision=ask "
             "from a hook overrides agy's --dangerously-skip-permissions flag."
         )
-    if connector in {"hermes", "windsurf", "geminicli", "openhands"}:
+    if connector in {"hermes", "windsurf", "geminicli", "openhands", "opencode"}:
         return (
             "This connector can block supported hook events but has no native human approval surface; "
             "confirm falls back explicitly."
@@ -3487,6 +3505,15 @@ def setup_guardrail(
                 judge_api_base = judge_api_base[:60] + "..."
             rows.append(("guardrail.judge.api_base", judge_api_base))
         rows.append(("guardrail.judge.api_key_env", gc.judge.api_key_env))
+        hook_gate = gc.judge.hook_connectors or []
+        rows.append(
+            (
+                "guardrail.judge.hook_connectors",
+                "all"
+                if hook_gate == ["*"]
+                else (", ".join(hook_gate) if hook_gate else "(none — hook lane off)"),
+            )
+        )
         if gc.judge.fallbacks:
             rows.append(("guardrail.judge.fallbacks", ", ".join(gc.judge.fallbacks)))
     if gc.scanner_mode in ("remote", "both"):
@@ -4715,6 +4742,7 @@ for _observability_connector in (
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
 ):
     setup.add_command(_make_observability_setup_command(_observability_connector))
 
@@ -4751,6 +4779,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "copilot",
         "openhands",
         "antigravity",
+        "opencode",
     }
 )
 
@@ -4786,6 +4815,33 @@ def connector_llm_role(connector: str) -> str:
     if connector in _PROXY_BACKED_CONNECTORS:
         return "judge_and_agent"
     return "judge_only"
+
+
+def _echo_custom_provider_enforcement(cfg: Any) -> None:
+    """Print the honest, per-connector meaning of binding a custom
+    provider, keyed on the active connector's LLM traffic mode.
+
+    This closes the UX gap where an operator binds a custom provider
+    while guarding a hook connector and believes their agent now runs on
+    that model. It does not: on hook connectors a custom provider only
+    configures DefenseClaw's judge/aux model; the agent's own model
+    calls are never routed through or inspected by DefenseClaw. Only the
+    proxy connectors (OpenClaw, ZeptoClaw) enforce it on agent traffic.
+    """
+    connector = connector_paths.normalize(getattr(cfg.guardrail, "connector", "") or "openclaw")
+    if connector in _PROXY_BACKED_CONNECTORS:
+        ux.subhead(
+            f"Enforced: {connector} routes the agent's model traffic through "
+            "DefenseClaw, so this custom provider can serve the agent's "
+            "upstream model, the judge, or both.",
+        )
+    else:
+        ux.warn(
+            f"Judge/aux only: {connector} is a hook connector, so this custom "
+            "provider configures DefenseClaw's judge/aux model only. "
+            f"{connector}'s own model calls are NOT routed through or "
+            "inspected by DefenseClaw.",
+        )
 
 
 def _setup_guardrail_connector_alias(
@@ -5820,6 +5876,67 @@ def _prompt_hook_fail_mode(gc) -> None:
     gc.hook_fail_mode = "open" if fail_choice == "1" else "closed"
 
 
+def _prompt_judge_hook_connectors(gc) -> None:
+    """Prompt for the hook-lane judge gate (``judge.hook_connectors``).
+
+    Only shown when at least one configured connector is hook-enforced —
+    on a proxy-only install the gate is irrelevant (that lane is always
+    judged when the judge is enabled). The default answer never mutates
+    the gate: "none" on a fresh install preserves the opt-in default,
+    and on re-runs the default reflects the current gate ("keep" when an
+    explicit multi-connector list can't be expressed as one choice), so
+    walking the wizard with Enter is always config-preserving.
+    """
+    hook_targets = [
+        c for c in _configured_connector_set(gc) if c in _HOOK_ENFORCED_CONNECTORS
+    ]
+    if not hook_targets:
+        return
+
+    current = list(gc.judge.hook_connectors or [])
+    choices = list(hook_targets) + ["all", "none"]
+    if current == ["*"]:
+        default = "all"
+    elif len(current) == 1 and current[0] in hook_targets:
+        default = current[0]
+    elif not current:
+        default = "none"
+    else:
+        choices.insert(0, "keep")
+        default = "keep"
+
+    ux.section("Hook-lane judge")
+    ux.subhead("The judge always covers the proxy lane. Hook connectors are")
+    ux.subhead("opt-in per connector — judged calls add latency (up to the")
+    ux.subhead("hook timeout, default 5s) and LLM cost.")
+    click.echo()
+    if current:
+        # Display speaks the CLI's input language: ["*"] renders as
+        # "all" (parity with `guardrail judge list`).
+        gate_label = "all" if current == ["*"] else str(current)
+        click.echo("  " + ux.dim(f"Current gate: {gate_label}"))
+    choice = click.prompt(
+        "  Run the judge on hook connectors?",
+        type=click.Choice(choices),
+        default=default,
+    )
+    if choice == "keep":
+        return
+    if choice == "all":
+        gc.judge.hook_connectors = ["*"]
+    elif choice == "none":
+        gc.judge.hook_connectors = []
+    else:
+        gc.judge.hook_connectors = [choice]
+        if len(hook_targets) > 1:
+            click.echo(
+                "  "
+                + ux.dim(
+                    "Add more later: defenseclaw guardrail judge add <connector>"
+                )
+            )
+
+
 def _interactive_guardrail_setup(
     app: AppContext,
     gc,
@@ -6133,6 +6250,19 @@ def _interactive_guardrail_setup(
     gc.judge.enabled = enable_judge
 
     if enable_judge:
+        # --- Hook-lane judge gate ---
+        #
+        # judge.enabled alone only covers the proxy lane. Hook-enforced
+        # connectors are gated per connector by
+        # ``guardrail.judge.hook_connectors`` (empty = off — deliberate,
+        # the judge adds latency + LLM cost per inspected hook call).
+        # Without this prompt an operator who answers "Enable LLM judge?
+        # y" on a hook-connector install reasonably believes the judge is
+        # running when the hook lane is in fact off. Defaults preserve
+        # the opt-in: "none" on fresh installs, the current gate on
+        # re-runs (so Enter never silently widens or clears it).
+        _prompt_judge_hook_connectors(gc)
+
         ux.section("Detection strategy")
         click.echo("    " + ux.bold("[1] regex_only ") + " — regex patterns only, no LLM calls " + ux.dim("(fastest)"))
         click.echo(

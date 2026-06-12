@@ -265,7 +265,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"}
+	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode"}
 	for _, name := range expected {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -4151,8 +4151,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 11 {
-		t.Errorf("expected 11 built-in connectors, got %d", r.Len())
+	if r.Len() != 12 {
+		t.Errorf("expected 12 built-in connectors, got %d", r.Len())
 	}
 }
 

@@ -9,6 +9,11 @@ keywords:
 
 The Hermes connector wires DefenseClaw into the Hermes agent runtime via `~/.hermes/config.yaml` hooks and discovery surfaces for MCP servers, skills, and plugins.
 
+<Video
+  src="hermes"
+  caption="Three commands against one Hermes Agent session in observe mode, every event reporting into the DefenseClaw gateway: (1) `echo hello` flows through as action=allow / severity=NONE; (2) `chmod 777 /tmp/dc_test` matches CMD-CHMOD-WORLD HIGH — DefenseClaw's finding is injected into the agent's context via Hermes' pre_llm_call hook, so the agent itself explains inline why world-writable + world-executable perms are risky; (3) `cat /etc/shadow` raises a CRITICAL sensitive-file read. Observe mode logs without blocking, so each pre_tool_call / post_tool_call / llm_prompt / session event streams live into the Splunk Connector Activity dashboard filtered to connector=hermes on the right."
+/>
+
 ## Setup
 
 ```bash

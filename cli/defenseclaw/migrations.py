@@ -295,6 +295,12 @@ _LEGACY_CODEX_ENV_FILES = ("codex_env.sh", "codex.env")
 # enabled, so for "opencode" (forward-looking placeholder for an
 # agent that never shipped) we fall back to "openclaw" too rather than
 # pretend the user opted into Codex.
+#
+# "opencode" here is ONLY the pre-0.4.0 placeholder enum, NOT the real
+# opencode connector shipped in 0.7.x. This remap is safe for the real
+# connector because it runs solely inside the cursor-gated 0.4.0
+# migration: a config old enough to be migrated across 0.4.0 cannot
+# contain the real connector. Do not apply this map outside that gate.
 _LEGACY_CLAW_MODE_REMAP = {
     "nemoclaw": "openclaw",
     "opencode": "openclaw",

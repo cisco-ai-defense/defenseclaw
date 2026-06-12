@@ -1372,6 +1372,8 @@ def friendly_connector_name(connector: str) -> str:
             return "OpenHands"
         case "antigravity":
             return "Antigravity"
+        case "opencode":
+            return "OpenCode"
         case value:
             return value[:1].upper() + value[1:] if value else "OpenClaw"
 

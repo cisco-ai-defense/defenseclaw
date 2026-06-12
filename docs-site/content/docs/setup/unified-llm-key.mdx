@@ -305,6 +305,26 @@ defenseclaw setup provider add \
   --ca-cert-file /etc/ssl/acme-root.pem
 ```
 
+### What a custom provider does depends on the connector
+
+A custom provider resolves the same globally, but a binding **enforced on the
+agent** versus **judge/aux only** depends entirely on the connector class:
+
+| Connector class | A bound custom provider… |
+| --- | --- |
+| Proxy (OpenClaw, ZeptoClaw) | **Is enforced.** The agent's model traffic routes through DefenseClaw, so the custom provider can serve the agent's upstream model, the judge, or both. |
+| Hook (Hermes, Cursor, Codex, opencode, Claude Code, Windsurf, Gemini CLI, Copilot, OpenHands, Antigravity) | **Configures DefenseClaw's judge/aux model only.** The agent talks to its own model directly — those calls are never routed through or inspected by DefenseClaw, so a custom provider cannot change the agent's model. |
+
+<Callout type="warn" title="Hook connectors: a custom provider is judge-only">
+This is the easiest thing to get wrong: attaching a custom provider while
+guarding a hook connector does **not** make the agent run on your private
+model. It only changes the model DefenseClaw uses to *judge*. The CLI states
+this for you — `setup llm` prints an "Enforced" vs "Judge/aux only" note when
+you bind an instance, and `setup provider list` prints the same legend for the
+active connector. Programmatically, `GET /v1/connectors` reports
+`llm_traffic_mode` (`"proxy"` \| `"hooks-only"`) per connector.
+</Callout>
+
 <Callout type="warn" title="Set --domain when you set --base-url">
 The gateway resolves an inbound request to a custom-provider entry by
 matching the request URL's host against each entry's `domains` list. If

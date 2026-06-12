@@ -204,6 +204,22 @@ func (a *APIServer) hookAIDInspect(toolName string, content string) *ScanVerdict
 // (allow → alert → block), severity escalates, findings concatenate.
 // Used by the hook-lane callers below.
 func mergeWithAIDVerdict(local *ToolInspectVerdict, aid *ScanVerdict) *ToolInspectVerdict {
+	return mergeWithLaneVerdict(local, aid, "ai-defense:")
+}
+
+// mergeWithJudgeVerdict folds an LLM-judge ScanVerdict into the hook
+// verdict with the same strictest-wins semantics as the AID lane.
+// Findings are tagged "llm-judge:" so audit consumers can tell the
+// lanes apart.
+func mergeWithJudgeVerdict(local *ToolInspectVerdict, v *ScanVerdict) *ToolInspectVerdict {
+	return mergeWithLaneVerdict(local, v, "llm-judge:")
+}
+
+// mergeWithLaneVerdict is the shared strictest-wins fold for the
+// hook-side scan lanes (Cisco AID, LLM judge): action escalates
+// (allow → alert → confirm → block), severity escalates, findings
+// concatenate with the lane's tag prefix.
+func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTag string) *ToolInspectVerdict {
 	if aid == nil {
 		return local
 	}
@@ -246,10 +262,10 @@ func mergeWithAIDVerdict(local *ToolInspectVerdict, aid *ScanVerdict) *ToolInspe
 		local.Severity = aid.Severity
 	}
 	if len(aid.Findings) > 0 {
-		// Tag AID findings so operators can tell them apart from
+		// Tag lane findings so operators can tell them apart from
 		// regex / CodeGuard hits when reading the audit log.
 		for _, f := range aid.Findings {
-			local.Findings = append(local.Findings, "ai-defense:"+f)
+			local.Findings = append(local.Findings, findingTag+f)
 		}
 	}
 	if aid.Reason != "" {
@@ -453,7 +469,7 @@ func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Findin
 
 // inspectMessageContent scans outbound message content for secrets, PII,
 // and data exfiltration patterns. Uses the same rule engine.
-func (a *APIServer) inspectMessageContent(req *ToolInspectRequest) *ToolInspectVerdict {
+func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
 	content := req.Content
 	if content == "" {
 		var parsed map[string]interface{}
@@ -475,46 +491,143 @@ func (a *APIServer) inspectMessageContent(req *ToolInspectRequest) *ToolInspectV
 	// its own rule pack (empty ⇒ process-global default set).
 	ruleFindings := ScanAllRulesForConnector(req.Connector, content, "message")
 
+	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 {
+		verdict = &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 		// Regex found nothing locally. Give the AID lane a turn —
 		// custom AID policies (e.g. organisation-specific PII rules)
 		// may match where the bundled regex pack didn't.
 		if aid := a.hookAIDInspect("message", content); aid != nil && aid.Action != "allow" && aid.Action != "" {
-			return mergeWithAIDVerdict(nil, aid)
+			verdict = mergeWithAIDVerdict(nil, aid)
 		}
-		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
-	}
+	} else {
+		severity := HighestSeverity(ruleFindings)
+		confidence := HighestConfidence(ruleFindings, severity)
 
-	severity := HighestSeverity(ruleFindings)
-	confidence := HighestConfidence(ruleFindings, severity)
+		action := guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, severity, strings.EqualFold(req.Direction, "outbound"))
 
-	action := guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, severity, strings.EqualFold(req.Direction, "outbound"))
-
-	reasons := make([]string, 0, minInt(len(ruleFindings), 5))
-	for i, f := range ruleFindings {
-		if i >= 5 {
-			break
+		reasons := make([]string, 0, minInt(len(ruleFindings), 5))
+		for i, f := range ruleFindings {
+			if i >= 5 {
+				break
+			}
+			reasons = append(reasons, f.RuleID+":"+f.Title)
 		}
-		reasons = append(reasons, f.RuleID+":"+f.Title)
+
+		verdict = &ToolInspectVerdict{
+			Action:           action,
+			Severity:         severity,
+			Confidence:       confidence,
+			Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
+			Findings:         FindingStrings(ruleFindings),
+			DetailedFindings: ruleFindings,
+		}
+
+		// AID lane: forward the message content to Cisco AI Defense when
+		// configured. mergeWithAIDVerdict escalates strictness — AID block
+		// trumps regex alert, AID HIGH trumps regex MEDIUM, etc. Lane is a
+		// no-op when no client is wired.
+		if aid := a.hookAIDInspect("message", content); aid != nil {
+			verdict = mergeWithAIDVerdict(verdict, aid)
+		}
 	}
 
-	verdict := &ToolInspectVerdict{
-		Action:           action,
-		Severity:         severity,
-		Confidence:       confidence,
-		Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
-		Findings:         FindingStrings(ruleFindings),
-		DetailedFindings: ruleFindings,
-	}
-
-	// AID lane: forward the message content to Cisco AI Defense when
-	// configured. mergeWithAIDVerdict escalates strictness — AID block
-	// trumps regex alert, AID HIGH trumps regex MEDIUM, etc. Lane is a
-	// no-op when no client is wired.
-	if aid := a.hookAIDInspect("message", content); aid != nil {
-		verdict = mergeWithAIDVerdict(verdict, aid)
+	// Judge lane: forward the content to the LLM judge for connectors
+	// gated on via guardrail.judge.hook_connectors. Runs after the
+	// regex + AID lanes so detection_strategy=regex_judge can skip the
+	// LLM round-trip when the local lanes were already decisive.
+	if jv := a.hookJudgeInspect(ctx, req, content, verdict); jv != nil {
+		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
 	return verdict
+}
+
+// maxConcurrentHookJudges bounds concurrent hook-lane judge executions
+// (see APIServer.hookJudgeSem). Mirrors EventRouter.judgeSem's bound on
+// the proxy lane.
+const maxConcurrentHookJudges = 16
+
+// defaultHookJudgeTimeout caps the hook-lane judge round-trip when
+// guardrail.judge.hook_timeout is unset. Hook scripts call the gateway
+// with curl --max-time 10 (see connector/hooks/*-hook.sh); the proxy
+// lane's 30s judge default would let the client sever the connection
+// before a verdict lands. 5s leaves headroom for the regex/AID phases
+// plus response rendering.
+const defaultHookJudgeTimeout = 5 * time.Second
+
+// hookJudgeInspect runs the LLM judge on hook-lane message content for
+// connectors gated on via guardrail.judge.hook_connectors. Returns nil
+// whenever the judge does not produce a usable verdict — not wired,
+// connector not gated, strategy regex_only, regex/AID already decisive
+// under regex_judge, caller deadline too short, at capacity, judge
+// failed — so the caller keeps the regex/AID verdict unchanged
+// (fail-open on judge unavailability, same contract as the AID lane).
+func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectRequest, content string, current *ToolInspectVerdict) *ScanVerdict {
+	if a == nil || a.hookJudge == nil || a.scannerCfg == nil || content == "" {
+		return nil
+	}
+	jcfg := &a.scannerCfg.Guardrail.Judge
+	if !jcfg.HookConnectorEnabled(req.Connector) {
+		return nil
+	}
+
+	// RunJudges speaks the proxy lane's direction vocabulary: "prompt"
+	// selects the injection + exfil (+ PII-prompt) judges, "completion"
+	// the PII-completion judge. Hook tool_result content is tool/model
+	// output — completion-shaped, matching how the proxy judges tool
+	// results in inspectToolResult.
+	direction := "completion"
+	if strings.EqualFold(req.Direction, "prompt") {
+		direction = "prompt"
+	}
+
+	switch a.scannerCfg.Guardrail.EffectiveStrategy(direction) {
+	case "judge_first":
+		// Judge always runs.
+	case "regex_judge":
+		// Mirror the proxy regex_judge semantics: a HIGH+ regex/AID
+		// verdict is already decisive, so the LLM round-trip is spent
+		// only on content the local lanes couldn't condemn.
+		if current != nil && severityRank[strings.ToUpper(current.Severity)] >= severityRank["HIGH"] {
+			return nil
+		}
+	default: // regex_only / unset
+		return nil
+	}
+
+	// The legacy /inspect handler runs under a 200ms deadline
+	// (inspectScanTimeout) — no judge round-trip fits, and blowing
+	// that deadline would 504 the whole verdict. Skip unless the
+	// caller's remaining budget can plausibly carry an LLM call.
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < time.Second {
+		return nil
+	}
+
+	select {
+	case a.hookJudgeSem <- struct{}{}:
+	default:
+		fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (at capacity) connector=%s direction=%s\n",
+			req.Connector, direction)
+		return nil
+	}
+	defer func() { <-a.hookJudgeSem }()
+
+	timeout := defaultHookJudgeTimeout
+	if jcfg.HookTimeout > 0 {
+		timeout = time.Duration(jcfg.HookTimeout * float64(time.Second))
+	}
+	jctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	toolName := req.Tool
+	if strings.EqualFold(toolName, "message") {
+		toolName = ""
+	}
+	v := a.hookJudge.RunJudges(jctx, direction, content, toolName)
+	if v == nil || v.JudgeFailed {
+		return nil
+	}
+	return v
 }
 
 func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
@@ -548,7 +661,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		var v *ToolInspectVerdict
 		if strings.ToLower(req.Tool) == "message" && (req.Content != "" || req.Direction == "outbound") {
-			v = a.inspectMessageContent(&req)
+			v = a.inspectMessageContent(ctx, &req)
 		} else {
 			v = a.inspectToolPolicy(&req)
 		}
