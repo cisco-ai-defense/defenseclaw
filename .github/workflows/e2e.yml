@@ -1417,14 +1417,25 @@ jobs:
           echo "event=$EVENT_NAME"
           echo "same_repo_pr=$SAME_REPO_PR"
 
-          if [ "$CORE_RESULT" != "success" ]; then
-            echo "Core E2E must succeed."
-            exit 1
-          fi
-
           if [ "$CONNECTOR_MATRIX_RESULT" != "success" ]; then
             echo "Connector Matrix must succeed (all 4 connectors)."
             exit 1
+          fi
+
+          if [ "$SAME_REPO_PR" = "true" ] || [ "$EVENT_NAME" != "pull_request" ]; then
+            if [ "$CORE_RESULT" != "success" ]; then
+              echo "Core E2E must succeed."
+              exit 1
+            fi
+          else
+            case "$CORE_RESULT" in
+              success|skipped)
+                ;;
+              *)
+                echo "Core E2E must either succeed or be skipped for fork pull requests."
+                exit 1
+                ;;
+            esac
           fi
 
           if [ "$SAME_REPO_PR" = "true" ]; then
