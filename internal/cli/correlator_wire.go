@@ -61,21 +61,25 @@ var _ guardrail.SessionFindingReader = (*auditReaderAdapter)(nil)
 
 // installCorrelator registers a SessionCorrelator with the scanner
 // package so EmitScanResult will invoke it after every persisted
-// scan. It also installs the finding-enricher so every persisted
-// finding gets its data_axis labels populated automatically from
-// the rule_id / tags — otherwise the correlator sees blank axes and
-// never matches.
+// scan. It also installs the finding enrichers so every persisted
+// finding gets its data_axis labels (from rule_id / judge category /
+// tags) and tool_capability_class (from rule_id) populated
+// automatically — otherwise the correlator sees blank axes and
+// capabilities and never matches.
 //
 // Non-fatal: a pattern-load error logs to stderrWriter and leaves
 // the correlator disabled (the rest of the guardrail stack still
 // works).
 func installCorrelator(store *audit.Store, stderrWriter io.Writer) {
 	scanner.SetFindingEnricher(func(f *scanner.Finding) []string {
-		axes := guardrail.AxesForRuleID(f.RuleID)
+		axes := guardrail.AxesForFinding(f.RuleID, f.Category, f.Tags)
 		if len(axes) == 0 {
 			return nil
 		}
 		return guardrail.AxesToStrings(axes)
+	})
+	scanner.SetCapabilityEnricher(func(f *scanner.Finding) string {
+		return string(guardrail.CapabilityForRuleID(f.RuleID))
 	})
 
 	if store == nil {

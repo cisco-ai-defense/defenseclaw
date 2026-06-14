@@ -76,3 +76,70 @@ func ClassifyToolName(tool string) ToolCapabilityClass {
 
 	return CapUnknown
 }
+
+// ruleCapabilities maps a detection rule id to the tool-capability
+// class the matched behaviour represents. Findings emitted by the
+// regex/plugin scanners don't carry a tool name (they match on
+// content), so the correlator can't derive a capability from
+// ClassifyToolName for them — this static table is the equivalent
+// rule-id → capability source. Only behaviours that actually exercise
+// a capability are listed; everything else stays CapUnknown so the
+// DESTRUCTIVE-FLOW pattern never escalates on a bare secret or
+// injection finding.
+var ruleCapabilities = map[string]ToolCapabilityClass{
+	// Shell / code execution (the destructive class).
+	"CMD-EVAL":          CapExecShell,
+	"CMD-BASH-C":        CapExecShell,
+	"CMD-PYTHON-C":      CapExecShell,
+	"CMD-PERL-E":        CapExecShell,
+	"CMD-RUBY-E":        CapExecShell,
+	"CMD-RM-RF":         CapExecShell,
+	"CMD-MKFS":          CapExecShell,
+	"CMD-DD-IF":         CapExecShell,
+	"CMD-CHMOD-WORLD":   CapExecShell,
+	"CMD-CHOWN-ROOT":    CapExecShell,
+	"CMD-SUDO":          CapExecShell,
+	"CMD-ETC-WRITE":     CapExecShell,
+	"CMD-CRONTAB":       CapExecShell,
+	"CMD-SYSTEMCTL":     CapExecShell,
+	"CMD-NETCAT-LISTEN": CapExecShell,
+	"CMD-SOCAT-EXEC":    CapExecShell,
+	"CMD-PIPE-BASE64":   CapExecShell,
+	"SRC-EVAL":          CapExecShell,
+	"SRC-NEW-FUNC":      CapExecShell,
+	"SRC-CHILD-PROC":    CapExecShell,
+	"SRC-EXEC":          CapExecShell,
+	"SRC-DENO-RUN":      CapExecShell,
+	"SRC-BUN-SPAWN":     CapExecShell,
+
+	// Outbound network fetch / listener.
+	"CMD-CURL-UPLOAD": CapNetworkFetch,
+	"CMD-WGET-POST":   CapNetworkFetch,
+	"CMD-PIPE-CURL":   CapNetworkFetch,
+	"CMD-PIPE-WGET":   CapNetworkFetch,
+	"SRC-FETCH":       CapNetworkFetch,
+	"SRC-NET-SERVER":  CapNetworkFetch,
+	"SRC-HTTP-SERVER": CapNetworkFetch,
+	"SRC-WS":          CapNetworkFetch,
+
+	// Filesystem writes.
+	"SRC-FS-WRITE": CapWriteFS,
+}
+
+// CapabilityForRuleID returns the capability class a regex/plugin
+// rule id represents, or CapUnknown when the rule exercises no
+// capability. This is the rule-id counterpart of ClassifyToolName:
+// the finding enricher uses it to populate ToolCapabilityClass on
+// content-matched findings so capability-aware correlation patterns
+// (DESTRUCTIVE-FLOW) can fire without a tool name.
+func CapabilityForRuleID(ruleID string) ToolCapabilityClass {
+	if cap, ok := ruleCapabilities[ruleID]; ok {
+		return cap
+	}
+	// Reverse-shell families share the exec_shell class; match by
+	// prefix so new CMD-REVSHELL-* variants are covered automatically.
+	if strings.HasPrefix(ruleID, "CMD-REVSHELL-") {
+		return CapExecShell
+	}
+	return CapUnknown
+}

@@ -46,6 +46,11 @@ type RuleFinding struct {
 	Confidence float64  `json:"confidence"`
 	Evidence   string   `json:"evidence,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
+	// ToolCapabilityClass is set for tool-call inspection findings
+	// from the invoked tool's name (via guardrail.ClassifyToolName).
+	// Empty for content-only matches; the emission pipeline then
+	// falls back to a rule-id-based capability (CapabilityForRuleID).
+	ToolCapabilityClass string `json:"tool_capability_class,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
