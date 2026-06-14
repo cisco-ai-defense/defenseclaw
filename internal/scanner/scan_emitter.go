@@ -86,6 +86,20 @@ var findingEnricher func(*Finding) []string
 // already sets axes (e.g. clawshield tagging by content hash) wins.
 func SetFindingEnricher(f func(*Finding) []string) { findingEnricher = f }
 
+// capabilityEnricher maps a finding's rule_id to its
+// tool_capability_class (read_fs / write_fs / exec_shell /
+// network_fetch / send_message). Nil until the guardrail wiring layer
+// installs guardrail.CapabilityForRuleID — see cli/correlator_wire.go.
+// Returning "" means "no capability", leaving the field untouched.
+var capabilityEnricher func(*Finding) string
+
+// SetCapabilityEnricher installs the capability-labeling hook that
+// runs on every finding emitted through EmitScanResult. Like the axis
+// enricher it only runs when Finding.ToolCapabilityClass is empty, so
+// surfaces that already classified the capability from a real tool
+// name (e.g. proxy tool-call inspection via ClassifyToolName) win.
+func SetCapabilityEnricher(f func(*Finding) string) { capabilityEnricher = f }
+
 // ScanSummaryParams is the v7 scan_results row payload.
 type ScanSummaryParams struct {
 	ScanID            string
@@ -167,6 +181,16 @@ func EmitScanResult(
 		if len(result.Findings[i].DataAxis) == 0 && findingEnricher != nil {
 			if axes := findingEnricher(&result.Findings[i]); len(axes) > 0 {
 				result.Findings[i].DataAxis = axes
+			}
+		}
+		// Auto-populate ToolCapabilityClass the same way: derive it
+		// from the rule_id for content-matched findings that didn't
+		// already get a class from a real tool name upstream. Without
+		// this the DESTRUCTIVE-FLOW correlator pattern (which keys on
+		// exec_shell) can never fire on regex/plugin detections.
+		if result.Findings[i].ToolCapabilityClass == "" && capabilityEnricher != nil {
+			if cap := capabilityEnricher(&result.Findings[i]); cap != "" {
+				result.Findings[i].ToolCapabilityClass = cap
 			}
 		}
 	}

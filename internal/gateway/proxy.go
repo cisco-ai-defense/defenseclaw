@@ -4814,6 +4814,19 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		args := tc.Function.Arguments
 
 		findings := ScanAllRules(args, toolName)
+		// Stamp the tool's capability class (read_fs / exec_shell /
+		// network_fetch / …) onto each finding from this call so the
+		// sliding-window correlator can reason about capability
+		// sequences (DESTRUCTIVE-FLOW). Content-only
+		// matches with an unknown tool fall back to the rule-id based
+		// capability in the emission pipeline.
+		if cap := guardrail.ClassifyToolName(toolName); cap != guardrail.CapUnknown {
+			for i := range findings {
+				if findings[i].ToolCapabilityClass == "" {
+					findings[i].ToolCapabilityClass = string(cap)
+				}
+			}
+		}
 		allFindings = append(allFindings, findings...)
 	}
 
