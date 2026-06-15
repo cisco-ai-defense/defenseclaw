@@ -19,7 +19,7 @@
 #
 # Ports (host, bound to 127.0.0.1 by default):
 #   4317 / 4318 — OTel Collector OTLP receivers
-#   3000        — Grafana UI (login: admin / admin)
+#   3000        — Grafana UI (no login; anonymous Admin, loopback only)
 #   3100        — Loki HTTP (scraped by Grafana)
 #   3200        — Tempo HTTP
 #   9090        — Prometheus UI

@@ -138,7 +138,7 @@ sidecar.
 | `prometheus`     | 9090               | Scrapes collector, receives remote-write                    |
 | `loki`           | 3100               | Receives logs via OTLP HTTP                                 |
 | `tempo`          | 3200, 9095         | HTTP query (3200), gRPC (9095). Traces enter via the collector on 4317 |
-| `grafana`        | 3000               | admin / admin; anon Viewer role enabled (loopback only)     |
+| `grafana`        | 3000               | no login (anonymous Admin, login form disabled; loopback only) |
 
 ## Teardown
 
@@ -159,9 +159,11 @@ Equivalent raw invocations (same container outcome):
 - All services are bound to loopback only — safe on multi-tenant dev
   boxes but won't be reachable from another host. Override `HOST_BIND`
   in your environment (e.g. `HOST_BIND=0.0.0.0 ./run.sh up`) if you
-  need remote access. Before doing so, change Grafana's default
-  `admin / admin` password and disable the anonymous Viewer role —
-  loopback is the only thing keeping those credentials safe.
+  need remote access. Grafana ships with no login (anonymous Admin,
+  login form disabled) because loopback is the security boundary —
+  before exposing it to a LAN, turn auth back on: set
+  `GF_AUTH_ANONYMOUS_ENABLED=false` and a real
+  `GF_SECURITY_ADMIN_PASSWORD` in the compose file.
 - The collector's `debug` exporter is on for every pipeline. Tail
   `./run.sh logs otel-collector` to watch raw OTLP frames while
   iterating on the sidecar contract.

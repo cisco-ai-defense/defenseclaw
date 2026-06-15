@@ -231,7 +231,7 @@ EOF
 print_text_banner() {
   cat <<'EOF'
 DefenseClaw local observability stack is up.
-  Grafana:    http://localhost:3000  (admin / admin)
+  Grafana:    http://localhost:3000  (no login required)
   Prometheus: http://localhost:9090
   Tempo API:  http://localhost:3200
   Loki API:   http://localhost:3100
