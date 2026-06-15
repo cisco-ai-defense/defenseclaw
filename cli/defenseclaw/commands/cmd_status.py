@@ -195,6 +195,7 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
+    "opencode": "OpenCode",
 }
 
 

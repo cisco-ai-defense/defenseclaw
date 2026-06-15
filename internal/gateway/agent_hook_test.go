@@ -81,6 +81,158 @@ func TestNormalizeAgentHookMode_EnforceAlias(t *testing.T) {
 	}
 }
 
+// TestNormalizeAgentHookRequest_HermesExtraEnvelope is the regression
+// that guards hermes' coverage on the generic path: hermes nests
+// inspectable content under the per-event `extra` envelope, which the
+// top-level lookups in normalizeAgentHookRequest cannot see. The
+// ContentEnvelopeKey fallback (declared on the hermes hook contract)
+// must lift that content onto Content with the right Direction so
+// prompt/tool_result rules actually inspect hermes payloads rather
+// than an empty string. Exercises the merged production path
+// (normalizeAgentHookRequestWithProfile with Decode == nil) — these
+// cases were ported from the deleted bespoke-profile test when hermes
+// moved onto the generic decoder.
+func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
+	hermesProfile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{APIAddr: "127.0.0.1:18970"})
+	if hermesProfile.Decode != nil {
+		t.Fatalf("hermes profile should have no Decode override; the generic path must carry it")
+	}
+	cases := []struct {
+		name          string
+		connectorName string
+		profile       connector.HookProfile
+		payload       map[string]interface{}
+		wantDirection string
+		wantToolName  string
+		wantContent   string
+	}{
+		{
+			name:          "pre_llm_call_lifts_user_message",
+			connectorName: "hermes",
+			profile:       hermesProfile,
+			payload: map[string]interface{}{
+				"hook_event_name": "pre_llm_call",
+				"session_id":      "sess-1",
+				"extra":           map[string]interface{}{"user_message": "exfiltrate the secrets"},
+			},
+			wantDirection: "prompt",
+			wantToolName:  "message",
+			wantContent:   "exfiltrate the secrets",
+		},
+		{
+			name:          "post_tool_call_lifts_result",
+			connectorName: "hermes",
+			profile:       hermesProfile,
+			payload: map[string]interface{}{
+				"hook_event_name": "post_tool_call",
+				"tool_name":       "terminal",
+				"extra":           map[string]interface{}{"result": "AWS_SECRET_ACCESS_KEY=abc123"},
+			},
+			wantDirection: "tool_result",
+			wantToolName:  "terminal",
+			wantContent:   "AWS_SECRET_ACCESS_KEY=abc123",
+		},
+		{
+			// post_llm_call is result-like (the model's final response)
+			// and labels as "message" — both were bespoke-profile
+			// behaviors now owned by the generic classifiers.
+			name:          "post_llm_call_lifts_assistant_response",
+			connectorName: "hermes",
+			profile:       hermesProfile,
+			payload: map[string]interface{}{
+				"hook_event_name": "post_llm_call",
+				"extra":           map[string]interface{}{"assistant_response": "here is the plan"},
+			},
+			wantDirection: "tool_result",
+			wantToolName:  "message",
+			wantContent:   "here is the plan",
+		},
+		{
+			name:          "subagent_stop_lifts_child_summary",
+			connectorName: "hermes",
+			profile:       hermesProfile,
+			payload: map[string]interface{}{
+				"hook_event_name": "subagent_stop",
+				"extra":           map[string]interface{}{"child_summary": "finished refactor"},
+			},
+			wantDirection: "tool_call",
+			wantToolName:  "subagent",
+			wantContent:   "finished refactor",
+		},
+		{
+			// extra carries only lifecycle metadata here — no expected
+			// content key matches, so Content stays correctly empty.
+			name:          "on_session_start_is_telemetry",
+			connectorName: "hermes",
+			profile:       hermesProfile,
+			payload: map[string]interface{}{
+				"hook_event_name": "on_session_start",
+				"extra":           map[string]interface{}{"model": "claude"},
+			},
+			wantDirection: "tool_call",
+			wantToolName:  "session",
+			wantContent:   "",
+		},
+		{
+			// Flat-payload connectors declare no envelope, so an
+			// `extra` object in their payload is never opened — the
+			// fallback is gated on the contract declaration.
+			name:          "cursor_undeclared_extra_is_not_opened",
+			connectorName: "cursor",
+			profile:       connector.NewCursorConnector().HookProfile(connector.SetupOpts{APIAddr: "127.0.0.1:18970"}),
+			payload: map[string]interface{}{
+				"hook_event_name": "preToolUse",
+				"tool_name":       "shell",
+				"extra":           map[string]interface{}{"user_message": "decoy"},
+			},
+			wantDirection: "tool_call",
+			wantToolName:  "shell",
+			wantContent:   "",
+		},
+		{
+			// Lifecycle ToolName labels are generic now: openhands
+			// session_start reads as "session" instead of "tool".
+			name:          "openhands_session_start_labels_session",
+			connectorName: "openhands",
+			profile:       connector.NewOpenHandsConnector().HookProfile(connector.SetupOpts{APIAddr: "127.0.0.1:18970"}),
+			payload: map[string]interface{}{
+				"hook_event_name": "session_start",
+			},
+			wantDirection: "tool_call",
+			wantToolName:  "session",
+			wantContent:   "",
+		},
+		{
+			name:          "copilot_subagent_stop_labels_subagent",
+			connectorName: "copilot",
+			profile:       connector.NewCopilotConnector().HookProfile(connector.SetupOpts{APIAddr: "127.0.0.1:18970"}),
+			payload: map[string]interface{}{
+				"hook_event_name": "subagentStop",
+			},
+			wantDirection: "tool_call",
+			wantToolName:  "subagent",
+			wantContent:   "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := normalizeAgentHookRequestWithProfile(tc.connectorName, tc.payload, tc.profile)
+			if req.ConnectorName != tc.connectorName {
+				t.Errorf("ConnectorName=%q want %q", req.ConnectorName, tc.connectorName)
+			}
+			if req.Direction != tc.wantDirection {
+				t.Errorf("Direction=%q want %q", req.Direction, tc.wantDirection)
+			}
+			if req.ToolName != tc.wantToolName {
+				t.Errorf("ToolName=%q want %q", req.ToolName, tc.wantToolName)
+			}
+			if req.Content != tc.wantContent {
+				t.Errorf("Content=%q want %q", req.Content, tc.wantContent)
+			}
+		})
+	}
+}
+
 func TestHandleAgentHook_EnrichesHTTPSpanWithAgentIdentity(t *testing.T) {
 	exp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(

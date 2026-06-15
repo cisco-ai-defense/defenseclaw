@@ -76,7 +76,7 @@ The reason field is operator-supplied and stored in the audit DB.
 
 ## What about connectors without native ask?
 
-[ZeptoClaw](/docs/connectors/zeptoclaw), [Codex](/docs/connectors/codex), [Hermes](/docs/connectors/hermes), [Gemini CLI](/docs/connectors/geminicli), [Windsurf](/docs/connectors/windsurf) downgrade HITL to a confirm verdict. The agent receives "blocked, awaiting operator approval"; the operator approves via `defenseclaw tui` (or the OpenClaw plugin queue). The raw_action is preserved in the audit log so the operator sees exactly what was requested.
+[ZeptoClaw](/docs/connectors/zeptoclaw), [Codex](/docs/connectors/codex), [Hermes](/docs/connectors/hermes), [Gemini CLI](/docs/connectors/geminicli), [Windsurf](/docs/connectors/windsurf), [OpenCode](/docs/connectors/opencode) downgrade HITL to a confirm verdict. The agent receives "blocked, awaiting operator approval"; the operator approves via `defenseclaw tui` (or the OpenClaw plugin queue). The raw_action is preserved in the audit log so the operator sees exactly what was requested.
 
 ```bash
 defenseclaw tui

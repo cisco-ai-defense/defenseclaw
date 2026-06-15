@@ -474,6 +474,13 @@ func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 	switch strings.ToLower(provider) {
 	case "openai":
 		return schemas.OpenAI, nil
+	// OpenAI-compatible providers the setup wizard offers. They are
+	// reached through their own base_url with the standard chat
+	// completions shape (the "@ai-sdk/openai-compatible" pattern), so
+	// they route through Bifrost's OpenAI adapter. Without these, the
+	// CLI offered the base type but the gateway failed to resolve it.
+	case "deepseek", "together_ai", "togetherai", "together", "lm_studio", "lmstudio":
+		return schemas.OpenAI, nil
 	case "anthropic":
 		return schemas.Anthropic, nil
 	case "bedrock", "amazon-bedrock":
@@ -490,7 +497,7 @@ func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 		return schemas.Mistral, nil
 	case "ollama":
 		return schemas.Ollama, nil
-	case "vertex":
+	case "vertex", "vertex_ai", "vertexai":
 		return schemas.Vertex, nil
 	case "cohere":
 		return schemas.Cohere, nil
@@ -498,7 +505,7 @@ func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 		return schemas.Perplexity, nil
 	case "cerebras":
 		return schemas.Cerebras, nil
-	case "fireworks":
+	case "fireworks", "fireworks_ai", "fireworksai":
 		return schemas.Fireworks, nil
 	case "xai":
 		return schemas.XAI, nil

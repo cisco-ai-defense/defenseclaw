@@ -46,7 +46,7 @@ Pick a row with **proxy family**, **block: yes**, **native ask: yes**, **fail-cl
 
 ### "I want enforcement on Claude Code without the proxy"
 
-Hook-only enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Gemini CLI](/docs/connectors/geminicli), [Hermes](/docs/connectors/hermes), [Windsurf](/docs/connectors/windsurf), and [Copilot CLI](/docs/connectors/copilot). The constraint: hook-only enforcement cannot block a request the agent has not yet asked the hook about. Trust the hook surface to scope what's possible.
+Hook-only enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Gemini CLI](/docs/connectors/geminicli), [Hermes](/docs/connectors/hermes), [Windsurf](/docs/connectors/windsurf), [Copilot CLI](/docs/connectors/copilot), and [OpenCode](/docs/connectors/opencode). The constraint: hook-only enforcement cannot block a request the agent has not yet asked the hook about. Trust the hook surface to scope what's possible.
 
 ### "I want HITL approvals to surface inside the agent UI"
 
@@ -54,4 +54,4 @@ Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor 
 
 ### "I want fail-closed on transport failures"
 
-Pick a row with **fail-closed: yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot CLI. For Hermes and Windsurf, configure operator-side timeouts.
+Pick a row with **fail-closed: yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot CLI, OpenCode. For Hermes and Windsurf, configure operator-side timeouts.

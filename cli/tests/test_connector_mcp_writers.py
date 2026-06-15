@@ -359,6 +359,12 @@ class TestCoverage:
                 # writing to a guessed location.
                 with pytest.raises(MCPWriteUnsupportedError):
                     set_mcp_server(name, "x", {"command": "y"})
+            elif name == "opencode":
+                # opencode MCP lives in opencode.json, which DefenseClaw
+                # does not manage in v1; the connector governs tool
+                # execution via its bridge plugin only.
+                with pytest.raises(MCPWriteUnsupportedError):
+                    set_mcp_server(name, "x", {"command": "y"})
             else:
                 # All other connectors have a documented MCP write path.
                 # Use chdir + isolated HOME so the test doesn't trash

@@ -81,6 +81,7 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
 )
 """Allow-list of recognized agent-framework connector names.
 
@@ -100,6 +101,7 @@ HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
         "copilot",
         "openhands",
         "antigravity",
+        "opencode",
     }
 )
 """Connectors added through lifecycle hook surfaces.
@@ -336,6 +338,13 @@ def connector_config_files(
         paths = [
             os.path.join(home, ".gemini", "config", "hooks.json"),
             os.path.join(home, ".gemini", "antigravity-cli", "hooks.json"),
+        ]
+    elif name == "opencode":
+        # opencode auto-loads plugins from ~/.config/opencode/plugins/;
+        # DefenseClaw installs a single bridge plugin there. There is no
+        # command-hook config file to patch.
+        paths = [
+            os.path.join(home, ".config", "opencode", "plugins", "defenseclaw.js"),
         ]
     elif name == "cursor":
         paths = [
@@ -1168,6 +1177,12 @@ def set_mcp_server(
             "surface in agy v1.0.0. DefenseClaw will pick this up via "
             "a contract bump once Google ships an MCP install path.",
         )
+    if name_n == "opencode":
+        raise MCPWriteUnsupportedError(
+            "opencode MCP servers live in opencode.json, which DefenseClaw "
+            "does not manage in v1; the opencode connector governs tool "
+            "execution via its bridge plugin only.",
+        )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. "
@@ -1258,6 +1273,12 @@ def unset_mcp_server(
         raise MCPWriteUnsupportedError(
             "antigravity does not publish a documented MCP install "
             "surface in agy v1.0.0; nothing to remove.",
+        )
+    if name_n == "opencode":
+        raise MCPWriteUnsupportedError(
+            "opencode MCP servers live in opencode.json, which DefenseClaw "
+            "does not manage in v1; the opencode connector governs tool "
+            "execution via its bridge plugin only.",
         )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(

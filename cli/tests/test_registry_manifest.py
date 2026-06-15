@@ -445,6 +445,7 @@ class TestKnownConstants(unittest.TestCase):
                 "copilot",
                 "openhands",
                 "antigravity",
+                "opencode",
             },
         )
 

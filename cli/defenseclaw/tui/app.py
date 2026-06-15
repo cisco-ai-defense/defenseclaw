@@ -3792,8 +3792,7 @@ class DefenseClawTUI(App[None]):
     def _overview_metric_data(self) -> tuple[MetricDatum, ...]:
         """Build the metric-tile row for the Overview header.
 
-        For every known connector (cursor, codex, claudecode, openclaw,
-        windsurf, geminicli, copilot, hermes, zeptoclaw) the tiles
+        For every known connector (see KNOWN_CONNECTORS) the tiles
         surface what an operator actually wants to know about the
         integration: how many tool calls have been seen, how many were
         blocked, the severity breakdown of recent findings, and the

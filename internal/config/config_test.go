@@ -1459,6 +1459,36 @@ func TestResolveLLM(t *testing.T) {
 		}
 	})
 
+	t.Run("instance_name override carries through", func(t *testing.T) {
+		// instance_name is the ONLY signal that binds a role to a
+		// custom-providers.json overlay entry. Dropping it from the
+		// merge silently rerouted role-level custom-provider bindings
+		// (e.g. guardrail.judge.llm.instance_name) to the inferred
+		// public provider endpoint.
+		c := &Config{
+			LLM: LLMConfig{Model: "ollama/llama3.1"},
+		}
+		c.Guardrail.Judge.LLM = LLMConfig{Model: "internal-gpt/mock-judge", InstanceName: "internal-gpt"}
+		got := c.ResolveLLM("guardrail.judge")
+		if got.InstanceName != "internal-gpt" {
+			t.Errorf("instance_name: got %q, want internal-gpt (override)", got.InstanceName)
+		}
+		if got.Model != "internal-gpt/mock-judge" {
+			t.Errorf("model: got %q, want internal-gpt/mock-judge (override)", got.Model)
+		}
+	})
+
+	t.Run("instance_name inherits from top-level when override empty", func(t *testing.T) {
+		c := &Config{
+			LLM: LLMConfig{Model: "internal-gpt/base", InstanceName: "internal-gpt"},
+		}
+		c.Guardrail.Judge.LLM = LLMConfig{Model: "internal-gpt/judge-model"}
+		got := c.ResolveLLM("guardrail.judge")
+		if got.InstanceName != "internal-gpt" {
+			t.Errorf("instance_name: got %q, want internal-gpt (inherited)", got.InstanceName)
+		}
+	})
+
 	t.Run("env fallback fills empty model", func(t *testing.T) {
 		t.Setenv(DefenseClawLLMModelEnv, "openai/gpt-4o-from-env")
 		c := &Config{}

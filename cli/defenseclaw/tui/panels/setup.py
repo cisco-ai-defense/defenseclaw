@@ -21,6 +21,7 @@ from enum import IntEnum
 from typing import Any, Literal
 
 from defenseclaw import config as dc_config
+from defenseclaw.tui.services.catalog_state import friendly_connector_name
 from defenseclaw.tui.services.cli_choices import (
     AI_DISCOVERY_MODES,
     AZURE_AUTH_MODES,
@@ -5073,18 +5074,13 @@ def _connector_setup_alias(wire: str) -> str:
     normalized = wire.strip().lower().replace("_", "-")
     if normalized in {"claudecode", "claude-code"}:
         return "claude-code"
-    if normalized in {"openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"}:
+    if normalized in {"openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode"}:
         return normalized
     return ""
 
 
 def _connector_hook_label(name: str) -> str:
-    return {
-        "codex": "Codex",
-        "claudecode": "Claude Code",
-        "zeptoclaw": "ZeptoClaw",
-        "openclaw": "OpenClaw",
-    }.get(name, name[:1].upper() + name[1:] if name else "Connector")
+    return friendly_connector_name(name) if name else "Connector"
 
 
 def _bifrost_providers() -> tuple[str, ...]:

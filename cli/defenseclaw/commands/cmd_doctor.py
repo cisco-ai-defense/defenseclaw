@@ -370,7 +370,7 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
             "ZeptoClaw has no native ask surface; confirm verdicts alert with raw_action preserved",
             r=r,
         )
-    elif connector in {"hermes", "windsurf", "geminicli", "openhands"}:
+    elif connector in {"hermes", "windsurf", "geminicli", "openhands", "opencode"}:
         _emit(
             "warn",
             "Human approval",
@@ -1161,6 +1161,7 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
         "copilot",
         "openhands",
         "antigravity",
+        "opencode",
     }:
         mode = (getattr(gc, "mode", "") or "observe").strip().lower()
         if mode == "action":
@@ -2717,6 +2718,7 @@ _CONNECTOR_LABELS = {
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
+    "opencode": "OpenCode",
 }
 
 

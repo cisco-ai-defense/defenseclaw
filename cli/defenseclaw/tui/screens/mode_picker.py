@@ -47,6 +47,7 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
     ModeChoice("copilot", "Copilot", "p", False, "workspace hooks + native pre-tool approval"),
     ModeChoice("openhands", "OpenHands", "n", False, "command hooks via ~/.openhands/hooks.json"),
     ModeChoice("antigravity", "Antigravity", "a", False, "PreToolUse hooks via ~/.gemini/config/hooks.json"),
+    ModeChoice("opencode", "OpenCode", "e", False, "auto-loaded JS bridge plugin; tool.execute.before blocking"),
 )
 
 
