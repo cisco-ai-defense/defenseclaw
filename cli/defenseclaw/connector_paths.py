@@ -263,6 +263,11 @@ def connector_home(
         return os.path.join(home, ".codeium", "windsurf")
     if name == "hermes":
         return os.path.join(home, ".hermes")
+    if name == "opencode":
+        # opencode keeps its config under ~/.config/opencode/ (XDG-style).
+        # Surfaced so inventory/doctor render a truthful home label rather
+        # than an empty string or — worse — OpenClaw's path.
+        return os.path.join(home, ".config", "opencode")
     if name == "openclaw":
         if openclaw_home:
             return _expand(openclaw_home)
@@ -409,6 +414,12 @@ def skill_dirs(
         # Antigravity v1 publishes only the hooks surface; no
         # documented skills install/discovery path yet.
         return []
+    if name == "opencode":
+        # opencode is governed solely by its bridge plugin; it exposes no
+        # documented skills install/discovery surface in v1. Return [] so
+        # inventory/list/scan honestly report "none" instead of falling
+        # through to OpenClaw's skill dirs (mirrors antigravity/windsurf).
+        return []
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
 
 
@@ -447,6 +458,10 @@ def plugin_dirs(
     if name == "openhands":
         return []
     if name == "antigravity":
+        return []
+    if name == "opencode":
+        # Bridge-plugin-only; no documented opencode plugin/extension
+        # discovery dir. [] keeps it out of OpenClaw's extensions path.
         return []
     return _openclaw_plugin_dirs(openclaw_home)
 
@@ -497,6 +512,12 @@ def mcp_servers(
         # Antigravity does not expose a documented MCP install
         # surface; nothing to discover.
         return []
+    if name == "opencode":
+        # opencode manages MCP servers in its own opencode.json (full
+        # read/write parity with codex/claudecode — mcp.md M2/M5), under
+        # a top-level ``mcp`` map rather than the ``mcpServers`` shape the
+        # other connectors use. Read its config, never OpenClaw's.
+        return _opencode_mcp_servers(workspace_dir)
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
@@ -838,6 +859,110 @@ def _openhands_mcp_servers() -> list[MCPServerEntry]:
     return _read_dotmcp_json(os.path.join(str(Path.home()), ".openhands", "mcp.json"))
 
 
+def _opencode_config_paths(workspace_dir: str | None) -> list[str]:
+    """Return opencode's MCP config search paths, global-first.
+
+    The global ``~/.config/opencode/opencode.json`` (and ``.jsonc``) is
+    always consulted; the project ``<workspace>/opencode.json`` (and
+    ``.jsonc``) is added only when an explicit workspace is pinned, so
+    the daemon never infers a project file from its own cwd.
+    """
+    home = str(Path.home())
+    paths = [
+        os.path.join(home, ".config", "opencode", "opencode.json"),
+        os.path.join(home, ".config", "opencode", "opencode.jsonc"),
+    ]
+    root = _workspace_dir(workspace_dir)
+    if root:
+        paths.append(os.path.join(root, "opencode.json"))
+        paths.append(os.path.join(root, "opencode.jsonc"))
+    return paths
+
+
+def _opencode_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+    """Return opencode's MCP server registrations.
+
+    opencode stores MCP servers under a top-level ``mcp`` map in its
+    JSON/JSONC config — a different schema from the ``mcpServers`` shape
+    every other connector uses. Global servers are read first, then the
+    pinned project file layers on top, matching how opencode itself
+    loads them at runtime.
+    """
+    entries: list[MCPServerEntry] = []
+    for path in _opencode_config_paths(workspace_dir):
+        entries.extend(_read_opencode_mcp(path))
+    return _dedup_mcp_entries(entries)
+
+
+def _read_opencode_mcp(path: str) -> list[MCPServerEntry]:
+    """Parse opencode's top-level ``mcp`` map into MCPServerEntry list.
+
+    Tolerates JSONC (``//`` and ``/* */`` comments) via the optional
+    ``json5`` backport — mirroring the OpenClaw reader — so a
+    hand-authored ``opencode.jsonc`` still parses. A missing file,
+    unparseable content, or missing ``mcp`` block all yield ``[]``.
+    """
+    data = _load_json_or_jsonc(path)
+    if not isinstance(data, dict):
+        return []
+    servers = data.get("mcp")
+    if not isinstance(servers, dict):
+        return []
+    out: list[MCPServerEntry] = []
+    for name, cfg in servers.items():
+        if not isinstance(cfg, dict):
+            continue
+        out.append(_opencode_entry_to_mcp(str(name), cfg))
+    return out
+
+
+def _opencode_entry_to_mcp(name: str, cfg: dict[str, Any]) -> MCPServerEntry:
+    """Map one opencode ``mcp`` entry to the connector-neutral schema.
+
+    opencode local servers carry ``command`` as a single argv array
+    (command + args fused) plus an ``environment`` map; remote servers
+    carry ``url``. We split the argv back into command/args and surface
+    ``type`` as the transport so callers can tell local from remote.
+    """
+    kind = str(cfg.get("type", "") or "").strip().lower()
+    url = str(cfg.get("url", "") or "")
+    command_list = cfg.get("command")
+    if kind == "remote" or (not kind and url and not command_list):
+        return MCPServerEntry(name=name, url=url, transport="remote")
+    command = ""
+    args: list[str] = []
+    if isinstance(command_list, list) and command_list:
+        command = str(command_list[0] or "")
+        args = [str(a) for a in command_list[1:]]
+    elif isinstance(command_list, str):
+        command = command_list
+    env = {str(k): str(v) for k, v in (cfg.get("environment", {}) or {}).items()}
+    return MCPServerEntry(name=name, command=command, args=args, env=env, transport="local")
+
+
+def _load_json_or_jsonc(path: str) -> Any:
+    """Read *path* as JSON, falling back to JSON5 for JSONC comments.
+
+    Returns the parsed value, or ``None`` when the file is missing or
+    parses as neither JSON nor JSON5 (e.g. ``json5`` not installed and
+    the file carries comments). Callers treat ``None`` as "no data".
+    """
+    try:
+        with open(path) as f:
+            raw = f.read()
+    except OSError:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            import json5  # type: ignore[import-untyped]
+
+            return json5.loads(raw)
+        except Exception:
+            return None
+
+
 # --- Low-level file/CLI helpers --------------------------------------------
 
 
@@ -1106,6 +1231,10 @@ def set_mcp_server(
     * Codex        — ``~/.codex/config.toml[mcp_servers][name]``
                      by default, or ``<workspace>/.mcp.json`` when
                      *workspace_dir* is explicit.
+    * opencode     — global ``~/.config/opencode/opencode.json[mcp][name]``
+                     by default, or ``<workspace>/opencode.json`` when
+                     *workspace_dir* is explicit, mapping the entry into
+                     opencode's ``mcp`` schema.
     * ZeptoClaw    — :class:`MCPWriteUnsupportedError`.
     * Hook-backed  — connector-owned JSON/YAML config when documented
                      (for example OpenHands writes ``~/.openhands/mcp.json``).
@@ -1178,11 +1307,8 @@ def set_mcp_server(
             "a contract bump once Google ships an MCP install path.",
         )
     if name_n == "opencode":
-        raise MCPWriteUnsupportedError(
-            "opencode MCP servers live in opencode.json, which DefenseClaw "
-            "does not manage in v1; the opencode connector governs tool "
-            "execution via its bridge plugin only.",
-        )
+        _set_opencode_mcp_server(name, entry, workspace_dir=workspace_dir)
+        return
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. "
@@ -1275,11 +1401,8 @@ def unset_mcp_server(
             "surface in agy v1.0.0; nothing to remove.",
         )
     if name_n == "opencode":
-        raise MCPWriteUnsupportedError(
-            "opencode MCP servers live in opencode.json, which DefenseClaw "
-            "does not manage in v1; the opencode connector governs tool "
-            "execution via its bridge plugin only.",
-        )
+        _unset_opencode_mcp_server(name, workspace_dir=workspace_dir)
+        return
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. Remove the server inside the ZeptoClaw UI.",
@@ -1382,6 +1505,129 @@ def _unset_codex_global_mcp_server(name: str) -> bool:
         return False
     _capture_managed_mcp_backup(path)
     _atomic_write_text(path, updated)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# opencode JSON MCP writer
+# ---------------------------------------------------------------------------
+#
+# opencode keeps MCP servers under a top-level ``mcp`` map keyed by name,
+# where each entry is ``{type: local, command: [...], environment: {...},
+# enabled: bool}`` or ``{type: remote, url: ..., enabled: bool}`` — a
+# different shape from the ``mcpServers`` schema the other JSON connectors
+# use. Writes default to the global ``~/.config/opencode/opencode.json``
+# and only touch a project ``<workspace>/opencode.json`` when an explicit
+# workspace is pinned.
+#
+# Write policy is plain JSON (documented, mcp.md M5 open decision): every
+# unrelated key is round-tripped by value, but JSONC comments are NOT
+# preserved. To avoid clobbering a config we cannot understand, the
+# writer fails closed (MCPWriteUnsupportedError) when an existing
+# non-empty file parses as neither JSON nor JSON5, rather than
+# overwriting it with just the ``mcp`` block.
+
+
+def _opencode_write_path(workspace_dir: str | None) -> str:
+    root = _workspace_dir(workspace_dir)
+    if root:
+        return os.path.join(root, "opencode.json")
+    return os.path.join(str(Path.home()), ".config", "opencode", "opencode.json")
+
+
+def _opencode_mcp_entry_from_generic(entry: dict[str, Any]) -> dict[str, Any]:
+    """Map a connector-neutral MCP entry dict to opencode's ``mcp`` schema.
+
+    A ``url`` (with no command, or an explicit ``transport: remote``)
+    becomes an opencode ``remote`` server; otherwise it is a ``local``
+    server whose ``command``/``args`` are fused into opencode's single
+    ``command`` argv array and whose ``env`` becomes ``environment``.
+    """
+    url = str(entry.get("url", "") or "")
+    transport = str(entry.get("transport", "") or "").strip().lower()
+    command = entry.get("command")
+    if url and (transport == "remote" or not command):
+        remote: dict[str, Any] = {"type": "remote", "url": url, "enabled": True}
+        headers = entry.get("headers")
+        if isinstance(headers, dict) and headers:
+            remote["headers"] = {str(k): str(v) for k, v in headers.items()}
+        return remote
+    argv: list[str] = []
+    if isinstance(command, list):
+        argv = [str(c) for c in command]
+    elif command:
+        argv = [str(command)]
+    argv += [str(a) for a in (entry.get("args", []) or [])]
+    local: dict[str, Any] = {"type": "local", "command": argv, "enabled": True}
+    env = entry.get("env")
+    if isinstance(env, dict) and env:
+        local["environment"] = {str(k): str(v) for k, v in env.items()}
+    return local
+
+
+def _read_opencode_doc_for_write(path: str) -> dict[str, Any]:
+    """Read an existing opencode config for read-modify-write.
+
+    Returns ``{}`` for a missing or empty file. Raises
+    :class:`MCPWriteUnsupportedError` when a non-empty file parses as
+    neither JSON nor JSON5 (or is not a JSON object), so a malformed or
+    unexpectedly-shaped config is never silently overwritten.
+    """
+    try:
+        with open(path) as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return {}
+    if not raw.strip():
+        return {}
+    data = _load_json_or_jsonc(path)
+    if isinstance(data, dict):
+        return data
+    raise MCPWriteUnsupportedError(
+        f"refusing to write opencode MCP config {path}: existing file is not "
+        "parseable as a JSON/JSON5 object; edit it by hand or remove it first "
+        "so DefenseClaw does not clobber unrelated configuration.",
+    )
+
+
+def _set_opencode_mcp_server(
+    name: str,
+    entry: dict[str, Any],
+    *,
+    workspace_dir: str | None = None,
+) -> None:
+    path = _opencode_write_path(workspace_dir)
+    _reject_symlink_config(path)
+    data = _read_opencode_doc_for_write(path)
+    mcp = data.get("mcp")
+    if not isinstance(mcp, dict):
+        mcp = {}
+    mcp[name] = _opencode_mcp_entry_from_generic(entry)
+    data["mcp"] = mcp
+    parent = os.path.dirname(path)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    _capture_managed_mcp_backup(path)
+    _atomic_write_json(path, data)
+
+
+def _unset_opencode_mcp_server(
+    name: str,
+    *,
+    workspace_dir: str | None = None,
+) -> bool:
+    path = _opencode_write_path(workspace_dir)
+    if not os.path.lexists(path):
+        return False
+    _reject_symlink_config(path)
+    data = _read_opencode_doc_for_write(path)
+    mcp = data.get("mcp")
+    if not isinstance(mcp, dict) or name not in mcp:
+        return False
+    del mcp[name]
+    data["mcp"] = mcp
+    _capture_managed_mcp_backup(path)
+    _atomic_write_json(path, data)
     return True
 
 
