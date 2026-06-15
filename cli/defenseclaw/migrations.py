@@ -330,11 +330,9 @@ def _migrate_0_4_0(ctx: MigrationContext) -> None:
     _migrate_0_4_0_seed_active_connector(ctx)
     _migrate_0_4_0_seed_hook_fail_mode(ctx)
 
-    if ctx.changes:
-        click.echo(f"    applied {len(ctx.changes)} change(s):")
-        for c in ctx.changes:
-            click.echo(f"      • {c}")
-    else:
+    # Per-change lines are printed generically by run_migrations from
+    # ctx.changes; only the connector-v3-specific no-op note lives here.
+    if not ctx.changes:
         click.echo("    (already on connector-v3 layout — no changes needed)")
 
 
@@ -2071,6 +2069,13 @@ def run_migrations(
         try:
             fn(ctx)
             ux.ok(f"Migration {ver} applied.", indent="    ")
+            # Surface exactly what changed in THIS host's config so the
+            # operator sees the concrete effect (e.g. "preserved legacy
+            # audit_sinks TLS behavior …"), not just the generic step
+            # description. Every migration records one line per change in
+            # ctx.changes; an empty list means the step was a no-op here.
+            for change in ctx.changes:
+                click.echo(f"      {ux.dim('•')} {change}")
         except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
             ux.err(f"migration {ver} failed: {exc}", indent="    ")
             ux.subhead(

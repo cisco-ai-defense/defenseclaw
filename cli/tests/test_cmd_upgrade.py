@@ -26,6 +26,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _install_gateway,
     _install_wheel,
     _normalize_target_version,
+    _print_breaking_change_notices,
     _print_migration_cursor_summary,
     _run_silent,
     _validate_upgrade_manifest,
@@ -927,6 +928,40 @@ class TestPostUpgradeDriftCheck(unittest.TestCase):
                 output = out.getvalue().decode()
 
         self.assertNotIn("drift", output.lower())
+
+
+class TestBreakingChangeNotices(unittest.TestCase):
+    """0.8.0 flips two defaults to fail-secure that a config migration
+    cannot fully fix; the upgrade flow must surface them once, only when
+    the host actually crosses the 0.8.0 boundary."""
+
+    def _run(self, current: str, target: str) -> str:
+        runner = CliRunner()
+        with runner.isolation() as (out, _err, _):
+            _print_breaking_change_notices(current, target)
+            return out.getvalue().decode()
+
+    def test_notice_shown_when_crossing_into_0_8_0(self):
+        output = self._run("0.7.2", "0.8.0")
+        self.assertIn("0.8.0", output)
+        self.assertIn("TLS verification is now ON", output)
+        self.assertIn("insecure_skip_verify", output)
+        self.assertIn("--allow-unverified", output)
+
+    def test_notice_shown_when_jumping_past_0_8_0(self):
+        # 0.7.x -> 0.9.0 still crosses the 0.8.0 boundary.
+        output = self._run("0.7.0", "0.9.0")
+        self.assertIn("TLS verification is now ON", output)
+
+    def test_silent_when_already_past_0_8_0(self):
+        # 0.8.0 -> 0.8.1 (and any later-to-later) must not nag.
+        self.assertEqual(self._run("0.8.0", "0.8.1"), "")
+
+    def test_silent_on_same_version_reapply(self):
+        self.assertEqual(self._run("0.8.0", "0.8.0"), "")
+
+    def test_silent_when_target_below_0_8_0(self):
+        self.assertEqual(self._run("0.6.0", "0.7.2"), "")
 
 
 class TestMigrationCursorSummary(unittest.TestCase):

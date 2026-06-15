@@ -297,6 +297,7 @@ def upgrade(
     # through OpenClaw, a stale plugin against a fresh gateway is the #1
     # source of "guardrail not enforcing" reports.
     _check_post_upgrade_drift(target_version)
+    _print_breaking_change_notices(current_version, target_version)
     click.echo()
 
     if app.logger:
@@ -1251,6 +1252,46 @@ def _check_post_upgrade_drift(target_version: str) -> None:
         "Run `defenseclaw version` for the full report. "
         "If the plugin is out of sync, reinstall it from the "
         f"{target_version} release tarball.",
+        indent="    ",
+    )
+
+
+def _print_breaking_change_notices(current_version: str, target_version: str) -> None:
+    """Surface behavior changes that a config migration cannot fix on its own.
+
+    The 0.8.0 wave flips two defaults to fail-secure: audit-sink TLS
+    verification is now ON (the runtime ignores the old ``verify_tls: false``
+    flag), and ``defenseclaw upgrade`` itself now refuses unverified release
+    artifacts. The TLS change is auto-preserved for configs that carried an
+    explicit ``verify_tls: false`` (the 0.8.0 migration maps it to
+    ``insecure_skip_verify: true`` and prints a line saying so), but an
+    operator pointing at a self-signed/internal Splunk who NEVER set that flag
+    has nothing to migrate — they'd just see TLS handshakes start failing.
+    Surface the heads-up exactly once, when crossing into 0.8.0.
+    """
+    from defenseclaw.migrations import _ver_tuple
+
+    cur = _ver_tuple(current_version)
+    tgt = _ver_tuple(target_version)
+    crossed = (0, 8, 0)
+    # Only when this upgrade moves the host across the 0.8.0 boundary.
+    if not (cur < crossed <= tgt):
+        return
+
+    click.echo()
+    ux.warn("0.8.0 changes two defaults to fail-secure:", indent="  ")
+    ux.subhead(
+        "Audit-sink TLS verification is now ON. A config with an explicit "
+        "`verify_tls: false` was auto-migrated to `insecure_skip_verify: "
+        "true` (see migration output above). If you talk to a self-signed "
+        "or internal Splunk/HEC and saw no such line, add "
+        "`insecure_skip_verify: true` under that sink, or install its CA.",
+        indent="    ",
+    )
+    ux.subhead(
+        "`defenseclaw upgrade` now refuses unsigned/unverifiable release "
+        "artifacts (and requires `cosign` on PATH). For an internal mirror "
+        "without signed checksums, re-run with `--allow-unverified`.",
         indent="    ",
     )
 
