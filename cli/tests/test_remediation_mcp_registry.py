@@ -192,6 +192,16 @@ def test_f0342_stdio_command_allowlist():
     assert is_safe_stdio_scan_command("", []) is False
     # Code-exec flags smuggled into an otherwise-allowed launcher.
     assert is_safe_stdio_scan_command("npx", ["-c", "rce"]) is False
+    # ``--call`` is the long alias of ``-c`` in ``npm exec``/``npx`` and
+    # must be blocked too, including the single-token ``--flag=value`` form
+    # (which would otherwise slip past the membership check).
+    assert is_safe_stdio_scan_command("npx", ["--call", "rce"]) is False
+    assert is_safe_stdio_scan_command("npx", ["--call=rce"]) is False
+    assert is_safe_stdio_scan_command("npx", ["--command=rce"]) is False
+    # Legitimate npx flags that are NOT code-exec primitives still pass so
+    # real package scans are not broken.
+    assert is_safe_stdio_scan_command("npx", ["-y", "@scope/mcp"]) is True
+    assert is_safe_stdio_scan_command("npx", ["--package=@scope/mcp", "mcp"]) is True
 
 
 # ---------------------------------------------------------------------------

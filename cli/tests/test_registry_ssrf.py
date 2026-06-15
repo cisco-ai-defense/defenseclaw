@@ -343,6 +343,38 @@ class TestPinnedGetaddrinfo(unittest.TestCase):
             infos = socket.getaddrinfo("93.184.216.34", 443)
         self.assertTrue(infos)
 
+    def test_family_passed_as_keyword_does_not_raise(self):
+        import socket
+
+        # A client (e.g. the httpx/anyio resolver) may call getaddrinfo with
+        # ``family=`` as a keyword. The pin injects its own positional family,
+        # so it must drop the caller's keyword to avoid
+        # ``TypeError: got multiple values for 'family'`` — which would crash
+        # the very fetch the pin protects. Other keyword args (type/proto/
+        # flags) must still be forwarded.
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            infos = socket.getaddrinfo(
+                "rebind.example", 443,
+                family=socket.AF_INET,
+                type=socket.SOCK_STREAM,
+            )
+        addrs = {info[4][0] for info in infos}
+        self.assertEqual(addrs, {"93.184.216.34"})
+        # Every returned record honours the forwarded socket type.
+        self.assertTrue(all(info[1] == socket.SOCK_STREAM for info in infos))
+
+    def test_family_passed_positionally_still_works(self):
+        import socket
+
+        # The common path — family supplied positionally — must keep working
+        # (the pin drops args[0] and substitutes the vetted family).
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            infos = socket.getaddrinfo(
+                "rebind.example", 443, socket.AF_INET, socket.SOCK_STREAM,
+            )
+        addrs = {info[4][0] for info in infos}
+        self.assertEqual(addrs, {"93.184.216.34"})
+
 
 if __name__ == "__main__":
     unittest.main()

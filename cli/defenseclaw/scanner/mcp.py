@@ -135,9 +135,11 @@ def _safe_subprocess_env(operator_env: dict | None) -> dict:
 _SAFE_STDIO_LAUNCHERS = frozenset({"npx", "uvx"})
 
 # argv tokens that turn an otherwise-allowlisted launcher into an
-# arbitrary-code-execution primitive (e.g. ``npx -c "<shell>"``).
+# arbitrary-code-execution primitive (e.g. ``npx -c "<shell>"`` or its
+# long form ``npx --call "<shell>"`` — ``-c`` and ``--call`` are aliases
+# in ``npm exec``/``npx``, so both must be blocked).
 _FORBIDDEN_STDIO_FLAGS = frozenset({
-    "-c", "--command", "--eval", "-e", "--exec", "--script", "-x",
+    "-c", "--call", "--command", "--eval", "-e", "--exec", "--script", "-x",
 })
 
 
@@ -173,7 +175,13 @@ def is_safe_stdio_scan_command(command: str, args: list | None) -> bool:
     for a in args or []:
         if not isinstance(a, str):
             return False
-        if a.strip() in _FORBIDDEN_STDIO_FLAGS:
+        # Normalise the ``--flag=value`` form to its flag so that e.g.
+        # ``--call=<shell>`` is blocked just like ``--call <shell>``;
+        # otherwise the single-token form would slip past the membership
+        # test and re-open the very RCE primitive we are gating.
+        token = a.strip()
+        flag = token.split("=", 1)[0] if token.startswith("-") else token
+        if flag in _FORBIDDEN_STDIO_FLAGS:
             return False
     return True
 

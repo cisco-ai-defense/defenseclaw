@@ -251,6 +251,14 @@ def pinned_getaddrinfo(host: str, port: int, ip: str) -> Iterator[None]:
                 # the Host header / TLS SNI continue to carry the hostname
                 # because those travel independently of the dial address.
                 fam = socket.AF_INET6 if family_ip.version == 6 else socket.AF_INET
+                # ``family`` is the 3rd getaddrinfo parameter. Drop the
+                # caller's family — whether they passed it positionally
+                # (``args[0]``) or by keyword (``family=`` in kwargs) — and
+                # force the vetted family. Without popping the keyword form
+                # the injected positional ``fam`` collides with it and
+                # raises ``TypeError: got multiple values for 'family'``,
+                # crashing the very fetch this pin is meant to protect.
+                kwargs.pop("family", None)
                 return original(ip, service, fam, *args[1:], **kwargs)
             # An IP literal that equals our pin is fine (some clients
             # pre-resolve and re-call getaddrinfo with the IP).
