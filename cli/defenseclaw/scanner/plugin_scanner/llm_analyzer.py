@@ -266,7 +266,29 @@ class LLMAnalyzer:
             {"role": "user", "content": user_prompt},
         ]
 
-        response = call_llm(self._config, messages)
+        try:
+            response = call_llm(self._config, messages)
+        except Exception as exc:
+            # ``call_llm`` raises (e.g. ``SubprocessExitError`` when the LLM
+            # bridge subprocess exits non-zero because the provider/backend
+            # is unreachable). Without this guard the exception propagates
+            # out of the analyzer loop and aborts the whole plugin scan,
+            # discarding the pattern-based findings already collected. We
+            # degrade instead: surface the failure as a finding and let the
+            # scan complete (skip-and-continue), matching the no-fail-open
+            # contract of the ``response.error`` path below.
+            return [
+                _make_scan_error_finding(
+                    ctx.finding_counter,
+                    "LLM analysis failed to run",
+                    (
+                        "The LLM analyzer was enabled but the LLM bridge raised an error "
+                        f"({_safe_title(str(exc))}), so no semantic analysis was performed. "
+                        "The scan continued with the pattern-based findings instead of "
+                        "aborting; this is surfaced instead of failing open to a clean result."
+                    ),
+                )
+            ]
 
         if response.error:
             return [
@@ -430,8 +452,6 @@ def run_meta_llm(
         )
         ctx.finding_counter[0] += 1
 
-    response = call_llm(meta_config, messages)
-
     empty = {
         "new_findings": [],
         "false_positive_advisories": [],
@@ -439,6 +459,15 @@ def run_meta_llm(
         "priority_order": None,
         "no_source_files_warning": no_source_files_warning,
     }
+
+    try:
+        response = call_llm(meta_config, messages)
+    except Exception:
+        # ``call_llm`` raising (e.g. ``SubprocessExitError`` on an
+        # unreachable provider) must not abort the scan from inside the
+        # meta analyzer. Degrade to the empty result — the
+        # no_source_files_warning, if any, is still surfaced to the caller.
+        return empty
 
     if response.error:
         return empty
