@@ -22,7 +22,7 @@ import (
 	"testing"
 )
 
-func TestInspectTool_WriteFile_CodeGuardBlock(t *testing.T) {
+func TestInspectTool_WriteFile_CodeGuardAlert(t *testing.T) {
 	api := testAPIServerWithConfig(t, "action")
 	body := `{
 		"tool": "write_file",
@@ -33,8 +33,8 @@ func TestInspectTool_WriteFile_CodeGuardBlock(t *testing.T) {
 	}`
 	_, verdict := postInspect(t, api, body)
 
-	if verdict.Action != "block" {
-		t.Errorf("action = %q, want block", verdict.Action)
+	if verdict.Action != "alert" {
+		t.Errorf("action = %q, want alert under balanced policy", verdict.Action)
 	}
 	if verdict.Severity != "HIGH" {
 		t.Errorf("severity = %q, want HIGH", verdict.Severity)
@@ -92,8 +92,8 @@ func TestInspectTool_WriteFile_SQLInjection(t *testing.T) {
 	}`
 	_, verdict := postInspect(t, api, body)
 
-	if verdict.Action != "block" {
-		t.Errorf("action = %q, want block", verdict.Action)
+	if verdict.Action != "alert" {
+		t.Errorf("action = %q, want alert under balanced policy", verdict.Action)
 	}
 	assertHasFinding(t, verdict.Findings, "codeguard:CG-SQL-001")
 }

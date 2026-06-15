@@ -36,7 +36,9 @@ import click
 import yaml
 
 from defenseclaw import config as config_module
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.webhooks.writer import redact_webhook_url
 
 # Field names here catch both the bare form (``api_key``) and the
 # suffixed form (``virustotal_api_key``). We deliberately exclude any
@@ -71,26 +73,26 @@ def config_validate(quiet: bool) -> None:
         raise SystemExit(0 if result.ok else 1)
 
     click.echo()
-    click.echo(f"  Config: {result.path}")
+    click.echo(f"  {ux.bold('Config:')} {result.path}")
     if result.exists:
-        click.echo("  ✓ file exists")
+        ux.ok("file exists", indent="  ")
     else:
-        click.echo("  ⚠ file does not exist yet — run 'defenseclaw init' or 'defenseclaw quickstart'")
+        ux.warn("file does not exist yet — run 'defenseclaw init' or 'defenseclaw quickstart'")
 
     if result.parse_error:
-        click.echo(f"  ✗ parse error: {result.parse_error}")
+        ux.err(f"parse error: {result.parse_error}", indent="  ")
     elif result.ok:
-        click.echo("  ✓ syntax OK")
+        ux.ok("syntax OK", indent="  ")
 
     for issue in result.errors:
-        click.echo(f"  ✗ {issue}")
+        ux.err(issue, indent="  ")
     for warning in result.warnings:
-        click.echo(f"  ⚠ {warning}")
+        ux.warn(warning, indent="  ")
 
     click.echo()
     if not result.ok:
         raise SystemExit(1)
-    click.echo("  ✓ config is valid")
+    ux.ok("config is valid", indent="  ")
 
 
 # ---------------------------------------------------------------------------
@@ -145,8 +147,12 @@ def config_path(app: AppContext) -> None:
     ]
     label_width = max(len(lbl) for lbl, _ in rows)
     for label, value in rows:
-        marker = "✓" if value and os.path.exists(str(value)) else "·"
-        click.echo(f"  {marker}  {label.ljust(label_width)}  {value}")
+        exists = value and os.path.exists(str(value))
+        marker = ux._style("✓", fg="green", bold=True) if exists else ux.dim("·")
+        padded = (label + ":").ljust(label_width)
+        click.echo(
+            f"  {marker}  {ux._style(padded, fg='bright_black', bold=True)}{value}"
+        )
     click.echo()
 
 
@@ -254,9 +260,20 @@ def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
 
     def _walk(node, key_hint: str = "") -> None:
         if isinstance(node, dict):
+            # Header maps (``otel.headers``, audit-sink HTTP headers, …)
+            # carry bearer/API tokens under non-secret-looking keys such
+            # as ``Authorization`` and ``x-honeycomb-team``; redact every
+            # header value so none slips through (F-0221).
+            in_headers = key_hint.lower() == "headers"
+            # Webhook entries store the bearer secret inside ``url``.
+            in_webhook = key_hint.lower() == "webhooks"
             for k, v in list(node.items()):
                 if _is_secret_field(k) and isinstance(v, str) and v:
                     node[k] = mask(v) if reveal else "***"
+                elif in_headers and isinstance(v, str) and v:
+                    node[k] = mask(v) if reveal else "***"
+                elif in_webhook and k.lower() == "url" and isinstance(v, str) and v:
+                    node[k] = v if reveal else redact_webhook_url(v)
                 else:
                     _walk(v, k)
         elif isinstance(node, list):

@@ -1,0 +1,464 @@
+---
+title: Policies
+description: How DefenseClaw decides — repo policies (OPA/Rego), guardrail rule packs (regex + LLM judge), scanner policies, and the suppression layer that keeps your alert volume sane.
+keywords:
+  - DefenseClaw policies
+  - LLM judge
+  - OPA Rego policy
+  - rule pack
+  - DefenseClaw suppressions
+  - tool_suppressions
+  - first-party allow list
+---
+
+DefenseClaw makes one decision per event: **allow, ask, or deny**. The plumbing that turns a prompt or a tool call into that decision lives in five layers.
+
+<Cards>
+  <Card
+    title="Policy creator"
+    href="/docs/policies/creator"
+    description="Build a complete policy from a preset, see live OPA-WASM verdicts in your browser, and export every YAML / data.json / Rego file ready to paste into ~/.defenseclaw/policies/."
+  />
+  <Card
+    title="Recipes"
+    href="/docs/policies/recipes"
+    description="133 pre-cooked rules, suppressions, and judge categories. Search, filter, and copy the YAML directly."
+  />
+  <Card
+    title="Suppression cookbook"
+    href="/docs/policies/suppression-cookbook"
+    description="Tune the four suppression layers (pre-judge / finding / tool / correlator) without losing real signals."
+  />
+  <Card
+    title="Regex cookbook"
+    href="/docs/policies/regex-cookbook"
+    description="RE2-compatible patterns for secrets, prompt injection, and exfiltration markers, with counterexamples and traps to avoid."
+  />
+</Cards>
+
+## How the layers fit together
+
+
+<Flow
+  direction="TB"
+  caption="Cheap deterministic rules first. The judge is only consulted when needed. The correlator watches across events. Suppression is the last line before the verdict is recorded."
+>
+  <Node id="event" kind="generic">{`Event\nprompt · tool · finding`}</Node>
+  <Node id="pre" kind="policy">{`Pre-judge strips\nredact · truncate`}</Node>
+  <Node id="rules" kind="policy">{`Regex rules\ndeterministic`}</Node>
+  <Node id="judge" kind="policy">{`LLM judge\noptional second opinion`}</Node>
+  <Node id="corr" kind="policy">{`Session correlator\ncross-event patterns`}</Node>
+  <Node id="suppr" kind="policy">{`Suppression layer\nallow lists · signatures`}</Node>
+  <Node id="repo" kind="policy">{`Repo policy\nOPA · Rego`}</Node>
+  <Node id="verdict" kind="generic">{`Verdict\nallow · ask · deny`}</Node>
+  <Edge from="event" to="pre" />
+  <Edge from="pre" to="rules" />
+  <Edge from="rules" to="judge" />
+  <Edge from="judge" to="corr" />
+  <Edge from="corr" to="suppr" />
+  <Edge from="suppr" to="repo" />
+  <Edge from="repo" to="verdict" />
+</Flow>
+
+You can enable any subset. Plain regex is enough for many secrets and obvious prompt-injection patterns; the LLM judge catches the long tail; the session correlator watches across events for multi-turn patterns like the lethal trifecta; OPA Rego owns the operator's organisational rules; suppressions keep all of it usable.
+
+## Layer 1 — Repo policies (OPA / Rego)
+
+The top-level policy file (`policies/default.yaml` and friends) is the operator's source of truth. It declares what the gateway should *do* for each domain — admission, guardrail thresholds, sandbox, audit, skill actions:
+
+```yaml title="policies/default.yaml (excerpt)"
+name: default
+admission:
+  scanners:
+    skill-scanner:
+      enabled: true
+      block_severity_min: high
+      quarantine_severity_min: medium
+    mcp-scanner:
+      enabled: true
+      block_severity_min: high
+
+guardrail:
+  judge:
+    enabled: true
+    min_severity: medium
+  rule_pack: default
+
+skill_actions:
+  default: ask
+first_party_allow_list:
+  - cisco-ai-defense/*
+```
+
+These YAML blocks are compiled into **OPA Rego inputs**. Custom Rego modules under `policies/rego/` then evaluate per-domain decisions:
+
+| Domain | Rego entry point | Inputs |
+| --- | --- | --- |
+| `admission` | `policies/rego/admission.rego` | scan result, skill / MCP metadata, allow lists |
+| `guardrail` | `policies/rego/guardrail.rego` | rule matches, judge result, severity floor |
+| `firewall` | `policies/rego/firewall.rego` | egress destination, agent identity |
+| `sandbox` | `policies/rego/sandbox.rego` | tool call, sandbox profile |
+| `audit` | `policies/rego/audit.rego` | event kind, sink targets |
+| `skill_actions` | `policies/rego/skill_actions.rego` | skill source, scan severity |
+
+You can hand-edit the Rego — the engine is just OPA — but most operators stay in the YAML layer because the bundled Rego covers the common cases.
+
+### How the engine evaluates
+
+<Sequence
+  caption="Every decision carries the matching reasons array so the audit row can name the rule that fired."
+  participants={[
+    { id: 'gw',     label: 'Gateway',             kind: 'gateway' },
+    { id: 'engine', label: 'Policy engine (OPA)', kind: 'policy' },
+    { id: 'rego',   label: 'Rego module',         kind: 'policy' },
+    { id: 'sinks',  label: 'Sinks',               kind: 'datastore' },
+  ]}
+>
+  <Message from="gw"     to="engine" label="input" />
+  <Message from="engine" to="rego"   label="data.defenseclaw.domain.decision" />
+  <Message from="rego"   to="engine" kind="return" label="decision and reasons" />
+  <Message from="engine" to="gw"     kind="return" label="verdict" />
+  <Message from="gw"     to="sinks"  label="emit decision event" />
+</Sequence>
+
+Every decision carries the matching `reasons[]` so the audit event can name the rule that fired. That's what powers the per-rule breakdowns in [Splunk](/docs/observability/splunk) and [Grafana](/docs/observability/local-observability).
+
+## Layer 2 — Guardrail rule packs
+
+The guardrail rule pack is the *content* the gateway evaluates against — the actual regex patterns, judge prompts, and category taxonomies. Three packs ship out of the box:
+
+<Cards>
+  <Card title="permissive" href="/docs/defaults#permissive" description="Permissive baseline. Patterns log; only CRITICAL findings block installs. Good for first-week pilots." />
+  <Card title="default" href="/docs/defaults#default" description="Sensible production defaults. Blocks high-severity secrets, prompts for medium." />
+  <Card title="strict" href="/docs/defaults#strict" description="Belt-and-suspenders. Blocks medium+ on most categories. Choose this for regulated workloads." />
+</Cards>
+
+Each pack is a directory:
+
+```
+policies/guardrail/<pack>/
+  rules/
+    local-patterns.yaml       # injection, secrets, PII, etc.
+    custom-org.yaml           # your org's regex extensions (optional)
+  judge/
+    judge.yaml                # categories, severities, prompt template
+  suppressions.yaml           # the suppression layer (see below)
+```
+
+Pick a pack at setup time:
+
+```bash
+defenseclaw setup guardrail --rule-pack strict
+```
+
+`--rule-pack` only accepts the three bundled profiles (`default`, `strict`, `permissive`). To run a custom pack from your own directory, point `guardrail.rule_pack_dir` at it in `~/.defenseclaw/config.yaml` — see [Authoring custom rule packs](#authoring-custom-rule-packs) below for the full workflow.
+
+### Rule shape
+
+Rules are YAML for portability and review:
+
+```yaml title="policies/guardrail/default/rules/local-patterns.yaml (excerpt)"
+version: 1
+
+# Literal substring matches (case-folded against the normalized
+# triage view, so "/ etc / passwd" still matches "/etc/passwd").
+injection:
+  - "ignore previous"
+  - "ignore all instructions"
+  - "jailbreak"
+
+# Regex matches. Compiled at load time; bad regexes are logged and
+# dropped (the rest of the file still applies).
+injection_regexes:
+  - 'ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)'
+
+# Per-family pattern sets the gateway scans on every request.
+# Omitting any key keeps the compiled-in default for that family.
+# Setting `field: []` explicitly clears it (rare, used in testbed
+# profiles that want a family disabled).
+secrets:
+  - "sk-"
+  - "ghp_"
+  - "-----begin rsa"
+
+pii_requests:
+  - "social security number"
+  - "credit card number"
+
+pii_data_regexes:
+  - '\b\d{3}-\d{2}-\d{4}\b'
+
+exfiltration:
+  - "/etc/passwd"
+  - "exfiltrate"
+```
+
+Three-state semantics for each top-level key:
+
+- **Omit the key entirely** — keep the compiled-in default for that family. Useful when you only want to tweak one thing without copying the whole baseline.
+- **`field: [...]`** — operator override; replaces the default wholesale.
+- **`field: []`** — operator explicitly cleared the family. Mostly used in testbed profiles; rarely useful in production.
+
+The bundled `default`, `strict`, and `permissive` `local-patterns.yaml` files each carry the full baseline 1:1 with what the gateway ships compiled-in. The Go test `TestLocalPatternsDefaultsParity` fails CI if the bundled YAML drifts from the Go source, so editing one without the other can't silently downgrade posture.
+
+## Layer 3 — LLM judge
+
+The LLM judge is an *optional* second opinion that fires when the deterministic rules don't have a clean answer. Four domain-specific judges ship out of the box — **injection**, **PII**, **exfil**, and **tool-injection** — each with its own category taxonomy, few-shot examples, and structured output schema. They're particularly useful for:
+
+- Subtle prompt injection that doesn't match a regex.
+- Tool calls whose stated purpose disagrees with their effects (most common in MCP).
+- Categorical content checks — "does this prompt try to extract proprietary code?"
+
+### Shared severity rubric
+
+All four judges evaluate against the same severity rubric. The rubric is embedded directly in each judge's system prompt so verdicts stay consistent across categories.
+
+| Tier | Meaning |
+| --- | --- |
+| **CRITICAL** | Direct unambiguous harm, provable from the content alone. Credential exfil, destructive shell, jailbreak succeeded, SSN/passport disclosed. |
+| **HIGH** | Clear adversarial intent or high-impact sensitive data. Prompt injection with explicit override, `/etc/passwd` probe, phone number in completion. |
+| **MEDIUM** | Suspicious but ambiguous. Benign readings are plausible. |
+| **LOW** | Weak indicator; context-dependent (e.g. user self-disclosing their own email). |
+| **NONE** | No concern. |
+
+### Signal-strength scoring
+
+For each category a judge flags, it also emits a `signal_strength` label derived from two booleans: *unambiguous* (no plausible benign reading) and *high_impact* (hard-to-reverse damage possible).
+
+| `unambiguous` | `high_impact` | `signal_strength` |
+| --- | --- | --- |
+| ✓ | ✓ | `strong_signal` |
+| ✓ | ✗ | `signal` |
+| ✗ | ✓ | `needs_review` |
+| ✗ | ✗ | `weak_signal` |
+
+The Go-side verdict aggregation uses these labels to keep weakly-corroborated flags from stacking to CRITICAL. A `weak_signal` on a single category downgrades to MEDIUM/alert; `strong_signal` on a structural category (destructive command, exfil channel) escalates to CRITICAL. The calibration metrics for this path are reproducible via `go test -run TestEval` — see the [evaluation corpus README](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/testdata/eval_corpus/README.md) for the scorecard.
+
+Configuration lives in `judge.yaml` inside each rule pack:
+
+```yaml title="policies/guardrail/default/judge/judge.yaml (excerpt)"
+version: 1
+model_hint: gpt-4o-mini
+categories:
+  - id: prompt_injection
+    severity_floor: medium
+  - id: data_exfiltration
+    severity_floor: high
+  - id: code_execution_intent
+    severity_floor: medium
+prompt_template: |
+  You are reviewing the following agent message for security issues.
+  Respond with the most-severe matching category and a one-line reason.
+  ...
+tool_suppressions:
+  - tool: fs.read_text
+    when_path_matches: "^/Users/.+/Documents/.*"
+    suppress: true
+```
+
+The judge call goes through the same Bifrost pipeline as everything else and uses the [unified LLM key](/docs/setup/unified-llm-key). Token usage is emitted as a `judge.call` event so you can monitor cost from your dashboards.
+
+You can target a different model than the rest of the stack by setting `guardrail.judge.llm` in `config.yaml`:
+
+```yaml
+guardrail:
+  judge:
+    enabled: true
+    llm:
+      provider: anthropic
+      model: claude-3-5-haiku-20241022
+      api_key_env: DEFENSECLAW_LLM_KEY
+```
+
+## Layer 4 — Suppressions
+
+Suppressions are the difference between "we deployed DefenseClaw" and "we use DefenseClaw daily." Three suppression flavours ship with every rule pack:
+
+### `pre_judge_strips` — redact before the judge sees it
+
+```yaml title="policies/guardrail/default/suppressions.yaml"
+pre_judge_strips:
+  - field: prompt
+    pattern: "secret_[a-zA-Z0-9]+"
+    replacement: "secret_***"
+```
+
+The redaction happens *before* the LLM judge is invoked, so the secret never crosses a third-party API even when the judge is enabled. Useful for fields that can never legitimately contain prompt content (auth headers, API tokens).
+
+### `finding_suppressions` — silence known-good signatures
+
+```yaml
+finding_suppressions:
+  - rule: secrets/aws_access_key
+    signature: "5e884898...sha256-of-known-test-key"
+    expires_at: "2026-12-31T00:00:00Z"
+    reason: "Public test fixture, see commit abc1234"
+```
+
+When a finding's signature matches, the verdict is downgraded to `allow` and the event is emitted with `suppressed_by: <reason>`. This is the right place to put one-off exceptions — they're auditable, they expire, and they show up in the dashboards as a separate panel.
+
+### `tool_suppressions` — scope HITL prompts
+
+```yaml
+tool_suppressions:
+  - tool: fs.read_text
+    when_path_matches: "^/Users/.+/Documents/.*"
+    suppress: true
+  - tool: shell.execute
+    when_command_matches: "^git (status|diff|log)"
+    suppress: true
+```
+
+These keep the operator from being asked to approve cosmetic actions (`git status`, opening `~/Documents` files) while still surfacing them in the audit log. The suppression is *narrow* — anything outside the predicate still prompts.
+
+### Why three layers?
+
+| Layer | Where it runs | Use it for |
+| --- | --- | --- |
+| `pre_judge_strips` | Before the LLM judge | Keeping secrets out of third-party APIs |
+| `finding_suppressions` | After rules + judge fire | One-off exceptions with audit trail and expiry |
+| `tool_suppressions` | At HITL prompt time | Cutting noise without changing what gets logged |
+
+Together they make it realistic to leave the gateway in `action` mode without operator fatigue.
+
+## Layer 5 — Session correlator
+
+The first four layers evaluate each event in isolation. The **correlator** is the cross-event layer: it watches the recent-finding stream for the same session and raises a synthetic `CORR-*` meta-finding when a pattern of individually-benign-looking events combines into something worse.
+
+This closes a class of attacks where no single event crosses the action threshold on its own, but the sequence across turns is an exfil path — for example, Simon Willison's **lethal trifecta** (untrusted content + sensitive data access + external egress in the same session).
+
+### How it runs
+
+<Flow direction="TB" caption="The correlator runs over the last N findings per session on every new finding insert. A match writes a synthetic CORR-<id> row back into scan_findings.">
+  <Node id="events" kind="generic">{`New finding\ninserted`}</Node>
+  <Node id="window" kind="policy">{`Sliding window\nlast N findings in session`}</Node>
+  <Node id="patterns" kind="policy">{`Pattern matcher\naxes · severities · fingerprints`}</Node>
+  <Node id="synth" kind="policy">{`CORR-* meta-finding\nseverity_on_match`}</Node>
+  <Node id="sinks" kind="generic">{`Audit DB\n+ webhook / Splunk / Rego`}</Node>
+  <Edge from="events" to="window" />
+  <Edge from="window" to="patterns" />
+  <Edge from="patterns" to="synth" />
+  <Edge from="synth" to="sinks" />
+</Flow>
+
+Every finding DefenseClaw records is tagged with a **data axis** (one or more of `ingress_untrusted`, `sensitive_access`, `egress_external`) and — on the tool-call surface — a **tool capability class** (`read_fs`, `write_fs`, `exec_shell`, `network_fetch`, `send_message`, `none`). Regex rules and judge categories each declare their axis in a seed mapping (`internal/guardrail/defaults/axes.go`), so patterns can reason across detectors without hard-coding rule IDs.
+
+### Bundled patterns
+
+Four patterns ship in `internal/guardrail/defaults/correlation-patterns.yaml`:
+
+| Pattern ID | Window | Match severity | Trigger |
+| --- | --- | --- | --- |
+| `LETHAL-TRIFECTA` | 30 events | CRITICAL | All three axes (`ingress_untrusted`, `sensitive_access`, `egress_external`) present in the session. |
+| `TRIFECTA-WITH-FINGERPRINT-MATCH` | 30 events | CRITICAL | Same content fingerprint seen in a `sensitive_access` finding and a later `egress_external` finding — direct exfil, not just temporal coincidence. |
+| `ESCALATION-CHAIN` | 10 events | CRITICAL | MEDIUM → HIGH → HIGH severity progression inside the same session — attacker iterating on a prompt. |
+| `DESTRUCTIVE-FLOW` | 50 events | CRITICAL | An `exec_shell` capability call matching a known destructive rule (`CMD-RM-RF`, `CMD-MKFS`, `CMD-DD-IF`) in the same session as prior `sensitive_access` findings. |
+
+Each pattern sets its own window size — `ESCALATION-CHAIN` wants the progression tight; `DESTRUCTIVE-FLOW` tolerates 50 events between a credential read and an `rm -rf`.
+
+### What the operator sees
+
+When a pattern matches, the correlator writes a synthetic row into `scan_findings`:
+
+```yaml
+scanner: "correlator"
+rule_id: "CORR-LETHAL-TRIFECTA"
+severity: CRITICAL
+tags: ["correlation", "LETHAL-TRIFECTA"]
+description: |
+  contributing findings:
+    - INJ-IGNORE-ALL   at 2026-05-12T14:03:11Z
+    - SENSITIVE-PATH-SSH-KEY at 2026-05-12T14:05:42Z
+    - SRC-FETCH        at 2026-05-12T14:06:18Z
+```
+
+The same row is emitted to every configured sink — Splunk, webhooks, the TUI audit panel, and the Rego decision engine. `CORR-*` findings are always CRITICAL, so they route to operator attention immediately without needing per-sink threshold changes.
+
+<Callout>
+The correlator is **detect-and-alert**, not detect-and-block. The contributing findings were already evaluated in-flight; the CORR row lands *after* the offending request has been allowed. Use the audit log or webhook sink to act on the correlation — or wire the `CORR-*` rule_id prefix into your Rego to quarantine subsequent requests in the same session.
+</Callout>
+
+### Why alert-only, not block
+
+Promoting a later request in the session to *deny* based on an earlier pattern match has two honest costs:
+
+- It inverts the existing "each request is evaluated on its own" contract.
+- It can cause spurious blocks on legitimate parallel/retry traffic in the same session.
+
+Three ways to act on correlations without code changes:
+
+- Tail `scan_findings` for `rule_id LIKE 'CORR-%'` and invoke a custom script.
+- Wire the existing Splunk / webhook sink to any CRITICAL severity — `CORR-*` inherits automatically.
+- Match the `CORR-*` rule_id prefix in Rego and emit stricter per-session policy decisions.
+
+## Authoring custom rule packs
+
+The path of least resistance is to extend rather than replace. Custom rule packs live on disk and are pointed at via the `guardrail.rule_pack_dir` config key — there is no built-in linter or fixture-runner today, so the workflow is git-driven.
+
+<Steps>
+  <Step>
+    **Locate the active rule-pack directory.** The bundled packs ship inside the installed Python package; the operator-editable copies live under `~/.defenseclaw/policies/guardrail/{default,strict,permissive}/`. Find the active one with:
+
+    ```bash
+    awk '/rule_pack_dir/ {print $2}' ~/.defenseclaw/config.yaml
+    ```
+  </Step>
+  <Step>
+    **Copy the closest pack.**
+
+    ```bash
+    cp -r ~/.defenseclaw/policies/guardrail/default \
+          ~/.defenseclaw/policies/guardrail/my-org
+    ```
+  </Step>
+  <Step>
+    **Add a rules file alongside `local-patterns.yaml`.** Keep your custom rules in their own file so updates to the bundled patterns don't conflict.
+  </Step>
+  <Step>
+    **Validate the surrounding config.** There is no rule-pack-specific linter, but `defenseclaw config validate` will reject obvious schema breaks before the gateway tries to load the directory:
+
+    ```bash
+    defenseclaw config validate
+    ```
+  </Step>
+  <Step>
+    **Point the gateway at the new directory.** Edit `~/.defenseclaw/config.yaml` and set:
+
+    ```yaml
+    guardrail:
+      rule_pack_dir: ~/.defenseclaw/policies/guardrail/my-org
+    ```
+
+    Then reload (no restart needed):
+
+    ```bash
+    defenseclaw-gateway policy reload
+    ```
+
+    `defenseclaw setup guardrail --rule-pack <name>` is for switching between the three bundled packs (`default`, `strict`, `permissive`); custom directories go through `rule_pack_dir`.
+  </Step>
+</Steps>
+
+## Operator commands
+
+The `policy` group manages **named OPA / asset policies** (stored under `~/.defenseclaw/policies/`) — different surface from the guardrail rule packs above. Subcommands:
+
+```bash
+defenseclaw policy list                       # every named policy on disk
+defenseclaw policy show <name>                # full content of one policy
+defenseclaw policy create <name> -d "..."     # scaffold a new one from a preset
+defenseclaw policy activate <name>            # set as active
+defenseclaw policy delete <name>              # remove
+defenseclaw policy validate                   # validates data.json schema + compiles bundled Rego
+defenseclaw policy test [-v]                  # runs `opa test` against the bundled Rego (requires `opa` on PATH)
+defenseclaw policy edit <section> ...         # actions / scanner / guardrail / firewall
+```
+
+`policy show` and `policy activate` always take a policy name, not a filesystem path. `policy validate` checks that `data.json` parses, that every severity tier in `actions` and `scanner_overrides` has the required fields, and that the bundled Rego modules compile (it is **not** an `opa fmt --diff`). Both `validate` and `test` only accept `--rego-dir` to override the bundled Rego location; neither takes a path argument or `--fixtures`. There is no `policy diff` subcommand — compare named policies by reading them back through `policy show <a>` and `policy show <b>`.
+
+## See also
+
+- [Defaults](/docs/defaults) — what each shipped rule pack actually sets, and how to pick one based on risk tolerance
+- [Setup Guardrail](/docs/setup/guardrail) — the CLI that wires the chosen pack into your connectors
+- [Unified LLM key](/docs/setup/unified-llm-key) — how the LLM judge resolves its provider key
+- [Reference → Configuration](/docs/reference/configuration) — every config key the policy layer reads

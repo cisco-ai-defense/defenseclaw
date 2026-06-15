@@ -27,18 +27,22 @@ import sys
 import click
 
 from defenseclaw import __version__
+from defenseclaw.commands.cmd_agent import agent
 from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_alerts import alerts
 from defenseclaw.commands.cmd_audit import audit
 from defenseclaw.commands.cmd_codeguard import codeguard
 from defenseclaw.commands.cmd_config import config_cmd
 from defenseclaw.commands.cmd_doctor import doctor
+from defenseclaw.commands.cmd_guardrail import guardrail
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_keys import keys_cmd
 from defenseclaw.commands.cmd_mcp import mcp
+from defenseclaw.commands.cmd_migrations import migrations_cmd
 from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_policy import policy
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
+from defenseclaw.commands.cmd_registry import registry
 from defenseclaw.commands.cmd_sandbox import sandbox
 from defenseclaw.commands.cmd_settings import settings_cmd
 from defenseclaw.commands.cmd_setup import setup
@@ -51,11 +55,17 @@ from defenseclaw.commands.cmd_upgrade import upgrade
 from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
 
-SKIP_LOAD_COMMANDS = {"init", "quickstart", "sandbox", "tui", "uninstall", "reset", "version"}
+SKIP_LOAD_COMMANDS = {
+    "agent", "init", "migrations", "quickstart", "sandbox", "tui",
+    "uninstall", "reset", "version",
+}
 
 # Commands that may legitimately run before config.yaml exists or while
 # it is being rewritten. The auto-validate hook below skips them to
 # avoid bricking recovery workflows when the file is temporarily bad.
+# ``migrations`` joins the recovery set because operators reach for it
+# precisely when something on disk is wrong; refusing to run because
+# config didn't validate would defeat its purpose.
 SKIP_AUTO_VALIDATE = SKIP_LOAD_COMMANDS | {"config", "keys", "doctor", "upgrade", "version"}
 
 
@@ -71,10 +81,20 @@ def _is_help_invocation(ctx: click.Context) -> bool:
 @click.version_option(version=__version__, prog_name="defenseclaw")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """Enterprise governance layer for OpenClaw.
+    """Enterprise governance layer for AI coding agents.
 
-    Scans skills, MCP servers, and code before they run.
-    Enforces block/allow lists. Provides audit and alerting.
+    Discovers AI usage, scans skills, MCP servers, plugins, and code
+    before they run, and provides audit, telemetry, and enforcement.
+
+    \b
+    Multi-connector:
+      One gateway enforces N hook connectors (codex, claudecode,
+      antigravity, openclaw) tracked under guardrail.connectors. Add one
+      with 'defenseclaw setup <connector>' (choose Add when prompted),
+      remove with 'defenseclaw setup remove <name>'. Scope policy per peer
+      with 'defenseclaw guardrail ... --connector X', and inspect the
+      roster with 'defenseclaw status' / 'defenseclaw guardrail status'.
+      Note: OpenClaw/ZeptoClaw use the proxy path and cannot be multi peers.
     """
     ctx.ensure_object(AppContext)
     app = ctx.obj
@@ -114,8 +134,6 @@ def cli(ctx: click.Context) -> None:
                       "'defenseclaw doctor --fix' to auto-repair.", err=True)
             raise SystemExit(1)
 
-    _ensure_codeguard_skill(app.cfg)
-
     try:
         app.store = Store(app.cfg.audit_db)
         app.store.init()
@@ -139,11 +157,13 @@ def cleanup(ctx: click.Context, *_args, **_kwargs) -> None:
 
 # Register all commands
 cli.add_command(init_cmd, "init")
+cli.add_command(agent)
 cli.add_command(quickstart_cmd)
 cli.add_command(setup)
 cli.add_command(skill)
 cli.add_command(plugin)
 cli.add_command(policy)
+cli.add_command(registry)
 cli.add_command(mcp)
 cli.add_command(aibom)
 cli.add_command(status)
@@ -153,8 +173,10 @@ cli.add_command(codeguard)
 cli.add_command(tool)
 cli.add_command(tui)
 cli.add_command(doctor)
+cli.add_command(guardrail)
 cli.add_command(sandbox)
 cli.add_command(upgrade)
+cli.add_command(migrations_cmd, "migrations")
 cli.add_command(keys_cmd, "keys")
 cli.add_command(config_cmd, "config")
 cli.add_command(settings_cmd, "settings")
@@ -164,27 +186,17 @@ cli.add_command(version_cmd, "version")
 
 
 def _ensure_codeguard_skill(cfg) -> None:
-    """Install CodeGuard skill if OpenClaw appeared since last init."""
-    try:
-        from defenseclaw.codeguard_skill import ensure_codeguard_skill
-
-        ensure_codeguard_skill(cfg.claw_home_dir(), cfg.claw.config_file)
-    except Exception:
-        pass
+    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
+    _ = cfg
 
 
 def _try_launch_tui() -> bool:
-    """When invoked with no subcommand on a TTY, hand off to the Go TUI.
+    """When invoked with no subcommand on a TTY, launch the Textual TUI.
 
-    Uses :func:`defenseclaw.gateway.resolve_gateway_binary` instead of a
-    bare ``shutil.which`` so the handoff also works immediately after
-    ``make all`` — see the module docstring of ``defenseclaw.gateway``
-    for the full resolution order and rationale.
+    We only fall through to the Click CLI when stdin is not a TTY, when
+    the user passed an actual subcommand, or when ``--help``/``--version``
+    is on the command line.
     """
-    import os
-
-    from defenseclaw.gateway import resolve_gateway_binary
-
     if not sys.stdin.isatty():
         return False
 
@@ -194,16 +206,36 @@ def _try_launch_tui() -> bool:
     if any(a in {"-h", "--help", "--version"} for a in argv):
         return False
 
-    gateway = resolve_gateway_binary()
-    if gateway is None:
-        return False
+    from defenseclaw.tui import run_textual_tui
 
-    os.execvp(gateway, [gateway, "tui"])
-    return True  # unreachable
+    run_textual_tui()
+    return True
+
+
+def _force_utf8_io() -> None:
+    """Reconfigure stdout/stderr to UTF-8 so framing/status glyphs never crash.
+
+    Windows Python defaults its standard streams to the active legacy code page
+    (e.g. cp1252), whose charmap codec cannot encode the box-drawing characters
+    ``ux.banner()`` and the ``✓``/``✗`` status markers emit — ``defenseclaw
+    init`` died on a hosted Windows runner with ``UnicodeEncodeError: 'charmap'
+    codec can't encode`` before printing a single banner. Forcing UTF-8 is a
+    no-op where the streams are already UTF-8 (Linux/macOS) and degrades
+    gracefully if a stream is missing or not reconfigurable (e.g. redirected to
+    a plain object, or None under pythonw)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (ValueError, OSError):
+            pass
 
 
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
+    _force_utf8_io()
     if not _try_launch_tui():
         cli()
 

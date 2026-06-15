@@ -39,8 +39,11 @@ SCHEMA_FILE = ROOT / "schemas" / "audit-event.json"
 
 # Capture ``ActionFoo Action = "foo-bar"`` — tolerant of spacing so a
 # future ``gofmt`` change does not silently disable the check.
+# The character class includes ``.`` so dotted families like
+# ``otel.ingest.logs`` and ``codex.notify.agent-turn-complete`` are
+# captured alongside dashed/underscored keys.
 GO_PATTERN = re.compile(
-    r'Action\w+\s+Action\s*=\s*"([a-z0-9-]+)"',
+    r'Action\w+\s+Action\s*=\s*"([a-z0-9._-]+)"',
     re.MULTILINE,
 )
 
@@ -48,7 +51,7 @@ GO_PATTERN = re.compile(
 # tolerant of the ``Final[str]`` annotation so a ``from __future__
 # import annotations`` change does not break the check.
 PY_PATTERN = re.compile(
-    r'ACTION_\w+\s*(?::\s*Final\[str\])?\s*=\s*"([a-z0-9-]+)"',
+    r'ACTION_\w+\s*(?::\s*Final\[str\])?\s*=\s*"([a-z0-9._-]+)"',
 )
 
 
@@ -63,11 +66,45 @@ def load_python_actions() -> set[str]:
 
 
 def load_schema_actions() -> set[str]:
+    """Read every literal action string from the JSON schema.
+
+    The ``action`` property historically used a flat ``enum``. v7
+    introduces a ``oneOf`` that admits *either* the canonical enum
+    *or* a ``codex.notify.<sanitized-type>`` pattern, since the
+    notify suffix is derived from operator-supplied codex payloads
+    at runtime. We only mirror static literal members on the Go +
+    Python sides, so this loader extracts every ``enum`` entry it
+    can find under ``properties.action`` regardless of nesting and
+    silently ignores ``pattern`` branches.
+    """
     doc = json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))
-    enum = doc["properties"]["action"]["enum"]
-    if not isinstance(enum, list):
-        raise SystemExit("schemas/audit-event.json: action.enum is not a list")
-    return set(enum)
+    action_node = doc["properties"]["action"]
+    return _collect_enum_members(action_node)
+
+
+def _collect_enum_members(node: object) -> set[str]:
+    """Walk a JSON-schema fragment and union every ``enum`` it sees.
+
+    Keeps support for the legacy flat shape (``enum`` directly on
+    the property) and the v7 ``oneOf`` shape (``enum`` nested under
+    one of the branches) without forcing the parity script to
+    encode the disjunction structure.
+    """
+    out: set[str] = set()
+    if isinstance(node, dict):
+        enum = node.get("enum")
+        if isinstance(enum, list):
+            for v in enum:
+                if isinstance(v, str):
+                    out.add(v)
+        for key, child in node.items():
+            if key in ("enum", "pattern"):
+                continue
+            out |= _collect_enum_members(child)
+    elif isinstance(node, list):
+        for item in node:
+            out |= _collect_enum_members(item)
+    return out
 
 
 def dump_diff(label: str, missing: set[str], extra: set[str]) -> None:

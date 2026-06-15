@@ -1,0 +1,20 @@
+{
+  "binary_version": "\u003cstripped\u003e",
+  "content_hash": "\u003cstripped\u003e",
+  "event_type": "judge",
+  "generation": 1,
+  "judge": {
+    "action": "block",
+    "input_bytes": 8,
+    "kind": "tool_injection",
+    "latency_ms": 4,
+    "model": "gpt-4",
+    "raw_response": "{}",
+    "severity": "HIGH"
+  },
+  "model": "gpt-4",
+  "schema_version": 7,
+  "severity": "HIGH",
+  "sidecar_instance_id": "\u003cstripped\u003e",
+  "ts": "2000-01-01T00:00:00Z"
+}

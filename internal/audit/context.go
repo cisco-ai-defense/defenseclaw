@@ -32,6 +32,7 @@ type CorrelationEnvelope struct {
 	TraceID           string
 	RequestID         string
 	SessionID         string
+	TurnID            string
 	AgentID           string
 	AgentName         string
 	AgentInstanceID   string
@@ -40,6 +41,12 @@ type CorrelationEnvelope struct {
 	DestinationApp    string
 	ToolName          string
 	ToolID            string
+	// Connector is the hook/proxy connector identity (codex, claudecode,
+	// antigravity, openclaw, …) that produced the request. Empty on
+	// single-connector installs where attribution is implicit. Stamped
+	// onto Event.Connector via applyEnvelope so every audit surface
+	// (SQLite, sinks, Splunk HEC, OTel logs) can filter by connector.
+	Connector string
 }
 
 type envelopeCtxKey struct{}
@@ -93,6 +100,9 @@ func MergeEnvelope(base, overlay CorrelationEnvelope) CorrelationEnvelope {
 	if base.SessionID == "" {
 		base.SessionID = overlay.SessionID
 	}
+	if base.TurnID == "" {
+		base.TurnID = overlay.TurnID
+	}
 	if base.AgentID == "" {
 		base.AgentID = overlay.AgentID
 	}
@@ -116,6 +126,9 @@ func MergeEnvelope(base, overlay CorrelationEnvelope) CorrelationEnvelope {
 	}
 	if base.ToolID == "" {
 		base.ToolID = overlay.ToolID
+	}
+	if base.Connector == "" {
+		base.Connector = overlay.Connector
 	}
 	return base
 }
@@ -155,6 +168,9 @@ func applyEnvelope(e *Event, env CorrelationEnvelope) {
 	if e.SessionID == "" {
 		e.SessionID = env.SessionID
 	}
+	if e.TurnID == "" {
+		e.TurnID = env.TurnID
+	}
 	if e.AgentID == "" {
 		e.AgentID = env.AgentID
 	}
@@ -178,5 +194,8 @@ func applyEnvelope(e *Event, env CorrelationEnvelope) {
 	}
 	if e.ToolID == "" {
 		e.ToolID = env.ToolID
+	}
+	if e.Connector == "" {
+		e.Connector = env.Connector
 	}
 }

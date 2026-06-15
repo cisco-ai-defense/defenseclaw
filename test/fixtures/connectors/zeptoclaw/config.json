@@ -1,0 +1,15 @@
+{
+  "providers": {
+    "anthropic": {
+      "api_base": "https://api.anthropic.com",
+      "api_key": "sk-ant-fixture-do-not-deploy"
+    },
+    "openai": {
+      "api_base": "https://api.openai.com/v1",
+      "api_key": "sk-oai-fixture-do-not-deploy"
+    }
+  },
+  "safety": {
+    "allow_private_endpoints": false
+  }
+}

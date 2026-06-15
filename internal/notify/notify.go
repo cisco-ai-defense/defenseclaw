@@ -15,18 +15,59 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package notify provides cross-platform desktop notification support
-// for the DefenseClaw watchdog.
+// for DefenseClaw.
+//
+// Two entry points are exposed:
+//
+//   - Send(title, message): the historical two-arg form used by the
+//     watchdog. It maps directly onto a Notification with no subtitle.
+//
+//   - SendNotification(Notification): the richer form used by the
+//     gateway notifier dispatcher. It exposes a subtitle so block /
+//     would-block / approval-pending UX can render the source and
+//     severity inline without packing them into the body string.
+//
+// Platform-native delivery happens in sendPlatform (osascript on
+// macOS, notify-send on Linux); on platforms without sendPlatform the
+// package falls back to writing a structured line on fallbackWriter.
 package notify
 
 import "fmt"
 
-// Send sends a desktop notification with the given title and message.
-// It uses the platform-native notification mechanism (osascript on macOS,
-// notify-send on Linux) and falls back to stderr on unsupported platforms.
+// Notification is a structured, multi-line desktop notification.
+// All fields are optional; empty Title/Subtitle/Body are skipped by
+// the platform back-ends so callers do not need to gate empty values.
+type Notification struct {
+	Title    string
+	Subtitle string
+	Body     string
+}
+
+// Send sends a desktop notification with the given title and body.
+// Retained as a thin wrapper for the watchdog which has historically
+// called Send(title, message). New callers should use
+// SendNotification with a structured Notification value.
 func Send(title, message string) error {
-	if err := sendPlatform(title, message); err != nil {
-		fmt.Fprintf(fallbackWriter, "[defenseclaw-watchdog] %s: %s\n", title, message)
+	return SendNotification(Notification{Title: title, Body: message})
+}
+
+// SendNotification delivers a structured Notification through the
+// platform-native channel. On failure it emits a single fallback line
+// to fallbackWriter that includes title/subtitle/body so operators
+// running with no display server still see what would have been
+// shown.
+func SendNotification(n Notification) error {
+	if err := sendPlatform(n); err != nil {
+		fmt.Fprintf(fallbackWriter, "[defenseclaw] %s%s: %s\n",
+			n.Title, formatSubtitle(n.Subtitle), n.Body)
 		return err
 	}
 	return nil
+}
+
+func formatSubtitle(subtitle string) string {
+	if subtitle == "" {
+		return ""
+	}
+	return " (" + subtitle + ")"
 }

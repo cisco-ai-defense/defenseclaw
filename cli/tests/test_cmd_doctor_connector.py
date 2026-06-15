@@ -1,0 +1,407 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""S6.5 — per-connector doctor checks.
+
+These tests pin the new per-connector inventory and scan-coverage
+sections that S6.5 added to ``defenseclaw doctor``. The checks are
+deliberately narrow: they exercise the helpers in isolation rather
+than the whole 1000-line doctor flow, so we can lock the contract
+without smoke-testing every probe.
+
+Coverage:
+
+* ``_active_connector`` resolves the connector name in the same
+  shape ``cfg.active_connector()`` exposes — including the
+  legacy-config fallback when the method isn't present.
+* ``_check_connector_inventory`` emits PASS for known connectors,
+  WARN for unknown connectors, and surfaces the per-connector
+  skill / plugin / MCP path lists.
+* ``_check_scan_coverage`` mirrors the bullet list from
+  ``_scan_ui.categories_for`` so the doctor and the scanner
+  preambles agree on what each scanner checks.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+import unittest
+from unittest.mock import MagicMock
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from defenseclaw.commands.cmd_doctor import (
+    _active_connector,
+    _check_connector_hooks,
+    _check_connector_inventory,
+    _check_hook_contract_lock,
+    _check_scan_coverage,
+    _doctor_label_suffix,
+    _DoctorResult,
+)
+
+
+class TestActiveConnectorResolver(unittest.TestCase):
+    """``_active_connector`` is the single source of truth used by every
+    per-connector doctor branch (inventory, fix_gateway_token,
+    fix_pristine_backup). A regression here cascades through all of
+    them, so the helper has its own tests.
+    """
+
+    def test_active_connector_uses_method_when_available(self) -> None:
+        cfg = MagicMock()
+        cfg.active_connector.return_value = "Codex"
+        self.assertEqual(_active_connector(cfg), "codex")
+
+    def test_active_connector_falls_back_to_guardrail_field(self) -> None:
+        cfg = MagicMock(spec=["guardrail"])  # no active_connector method
+        cfg.guardrail = MagicMock()
+        cfg.guardrail.connector = "claudecode"
+        self.assertEqual(_active_connector(cfg), "claudecode")
+
+    def test_active_connector_defaults_to_openclaw_when_unset(self) -> None:
+        cfg = MagicMock(spec=["guardrail"])
+        cfg.guardrail = MagicMock()
+        cfg.guardrail.connector = ""
+        self.assertEqual(_active_connector(cfg), "openclaw")
+
+    def test_active_connector_lowercases_method_result(self) -> None:
+        """ZeptoClaw, OpenClaw, etc. — display casing varies, but the
+        downstream connector switches all use lowercase.
+        """
+        cfg = MagicMock()
+        cfg.active_connector.return_value = "ZeptoClaw"
+        self.assertEqual(_active_connector(cfg), "zeptoclaw")
+
+    def test_active_connector_swallows_method_exception(self) -> None:
+        """A broken ``active_connector()`` must not abort the doctor —
+        fall back to the legacy field.
+        """
+        cfg = MagicMock()
+        cfg.active_connector.side_effect = RuntimeError("bad config")
+        cfg.guardrail = MagicMock()
+        cfg.guardrail.connector = "openclaw"
+        self.assertEqual(_active_connector(cfg), "openclaw")
+
+
+class TestCheckConnectorInventory(unittest.TestCase):
+    """The new "── Connector ──" section surfaces the active connector
+    plus the directories it points at."""
+
+    def _cfg(self, *, skill_dirs: list[str], plugin_dirs: list[str], servers: list) -> MagicMock:
+        cfg = MagicMock()
+        cfg.skill_dirs.return_value = skill_dirs
+        cfg.plugin_dirs.return_value = plugin_dirs
+        cfg.mcp_servers.return_value = servers
+        # Inventory now also surfaces effective mode + rule pack — keep
+        # these returning plain strings so the isolated helper test doesn't
+        # trip over MagicMock auto-attributes in os.path.isdir.
+        cfg.guardrail.effective_mode.return_value = "observe"
+        cfg.guardrail.effective_rule_pack_dir.return_value = ""
+        return cfg
+
+    def test_known_connector_passes(self) -> None:
+        cfg = self._cfg(skill_dirs=[], plugin_dirs=[], servers=[])
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "openclaw", r)
+        # First check is the connector label itself — rendered identically
+        # whether one or many connectors are active.
+        first = r.checks[0]
+        self.assertEqual(first["status"], "pass")
+        self.assertEqual(first["label"], "Connector")
+        self.assertEqual(first["detail"], "OpenClaw")
+
+    def test_unknown_connector_warns(self) -> None:
+        cfg = self._cfg(skill_dirs=[], plugin_dirs=[], servers=[])
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "totallymadeupclaw", r)
+        first = r.checks[0]
+        self.assertEqual(first["status"], "warn")
+        self.assertEqual(first["label"], "Connector")
+        self.assertIn("unknown connector", first["detail"])
+
+    def test_skill_paths_pass_when_directory_exists(self) -> None:
+        # Use the cwd as a guaranteed-real directory.
+        cfg = self._cfg(
+            skill_dirs=[os.getcwd()],
+            plugin_dirs=[],
+            servers=[],
+        )
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "openclaw", r)
+        skill_check = next(c for c in r.checks if c["label"] == "Skill paths")
+        self.assertEqual(skill_check["status"], "pass")
+        self.assertIn("1/1 present", skill_check["detail"])
+
+    def test_skill_paths_warn_when_no_directory_exists(self) -> None:
+        cfg = self._cfg(
+            skill_dirs=["/nonexistent/path/for/test"],
+            plugin_dirs=[],
+            servers=[],
+        )
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "codex", r)
+        skill_check = next(c for c in r.checks if c["label"] == "Skill paths")
+        self.assertEqual(skill_check["status"], "warn")
+        self.assertIn("0/1 present", skill_check["detail"])
+
+    def test_skill_paths_skip_when_empty_list(self) -> None:
+        cfg = self._cfg(skill_dirs=[], plugin_dirs=[], servers=[])
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "claudecode", r)
+        skill_check = next(c for c in r.checks if c["label"] == "Skill paths")
+        self.assertEqual(skill_check["status"], "skip")
+
+    def test_mcp_server_summary_truncates_after_five(self) -> None:
+        servers = [MagicMock(name=f"srv-{i}") for i in range(7)]
+        for i, s in enumerate(servers):
+            s.name = f"srv-{i}"
+        cfg = self._cfg(skill_dirs=[], plugin_dirs=[], servers=servers)
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "openclaw", r)
+        mcp_check = next(c for c in r.checks if c["label"] == "MCP servers")
+        self.assertEqual(mcp_check["status"], "pass")
+        self.assertIn("7 configured", mcp_check["detail"])
+        self.assertIn("(+2 more)", mcp_check["detail"])
+
+    def test_paths_swallow_exception_as_warn(self) -> None:
+        cfg = MagicMock()
+        cfg.skill_dirs.side_effect = RuntimeError("kaboom")
+        cfg.plugin_dirs.return_value = []
+        cfg.mcp_servers.return_value = []
+        cfg.guardrail.effective_mode.return_value = "observe"
+        cfg.guardrail.effective_rule_pack_dir.return_value = ""
+
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "openclaw", r)
+
+        skill_check = next(c for c in r.checks if c["label"] == "Skill paths")
+        self.assertEqual(skill_check["status"], "warn")
+        self.assertIn("kaboom", skill_check["detail"])
+
+
+class TestConnectorInventoryUniformLabel(unittest.TestCase):
+    """Every active connector's inventory block renders identically — there
+    is no separate single- vs multi-connector layout. The header is always
+    "Connector" and the caller tags each block with a "[<connector>]" suffix
+    via ``_doctor_label_suffix`` so the blocks stay attributable.
+    """
+
+    def _cfg(self) -> MagicMock:
+        cfg = MagicMock()
+        cfg.skill_dirs.return_value = []
+        cfg.plugin_dirs.return_value = []
+        cfg.mcp_servers.return_value = []
+        cfg.guardrail.effective_mode.return_value = "observe"
+        cfg.guardrail.effective_rule_pack_dir.return_value = ""
+        return cfg
+
+    def test_header_label_is_always_connector(self) -> None:
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(), "codex", r)
+        self.assertEqual(r.checks[0]["label"], "Connector")
+
+    def test_label_suffix_tags_rows(self) -> None:
+        r = _DoctorResult()
+        with _doctor_label_suffix("[codex]"):
+            _check_connector_inventory(self._cfg(), "codex", r)
+        self.assertTrue(r.checks[0]["label"].endswith("[codex]"))
+        self.assertEqual(r.checks[0]["label"], "Connector [codex]")
+
+    def test_inventory_emits_mode_and_rule_pack(self) -> None:
+        cfg = self._cfg()
+        cfg.guardrail.effective_mode.return_value = "action"
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "codex", r)
+        labels = {c["label"]: c for c in r.checks}
+        self.assertIn("Mode", labels)
+        self.assertEqual(labels["Mode"]["detail"], "action")
+        self.assertIn("Rule pack", labels)
+
+
+class TestCheckConnectorHooks(unittest.TestCase):
+    """``_check_connector_hooks`` dispatches the Services hook/health check
+    matching the connector, and combines with ``_doctor_label_suffix`` to
+    attribute each connector's row on multi-connector installs.
+    """
+
+    def test_codex_emits_codex_hooks_row(self) -> None:
+        cfg = MagicMock()
+        cfg.data_dir = "/nonexistent/data/dir"
+        r = _DoctorResult()
+        _check_connector_hooks(cfg, "codex", r)
+        self.assertTrue(r.checks)
+        self.assertEqual(r.checks[-1]["label"], "Codex hooks")
+
+    def test_codex_row_tagged_with_suffix(self) -> None:
+        cfg = MagicMock()
+        cfg.data_dir = "/nonexistent/data/dir"
+        r = _DoctorResult()
+        with _doctor_label_suffix("[codex]"):
+            _check_connector_hooks(cfg, "codex", r)
+        self.assertEqual(r.checks[-1]["label"], "Codex hooks [codex]")
+
+    def test_unknown_connector_is_noop(self) -> None:
+        r = _DoctorResult()
+        _check_connector_hooks(MagicMock(), "totallymadeupclaw", r)
+        self.assertEqual(r.checks, [])
+
+
+class TestCheckHookContractLock(unittest.TestCase):
+    """Doctor surfaces the deterministic hook contract selected at setup."""
+
+    def _cfg(self, data_dir: str) -> MagicMock:
+        cfg = MagicMock()
+        cfg.data_dir = data_dir
+        return cfg
+
+    def test_proxy_connector_skips(self) -> None:
+        r = _DoctorResult()
+        _check_hook_contract_lock(self._cfg("/tmp/unused"), "openclaw", r)
+        check = r.checks[-1]
+        self.assertEqual(check["status"], "skip")
+        self.assertEqual(check["label"], "Hook contract")
+
+    def test_known_contract_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "connectors": {
+                            "codex": {
+                                "contract_id": "codex-hooks-v1",
+                                "compatibility_status": "known",
+                                "raw_agent_version": "0.30.0",
+                                "normalized_agent_version": "0.30.0",
+                                "hook_script_version": "codex-hook.sh:1",
+                                "locations": {
+                                    "workspace_dir": "/tmp/repo",
+                                    "hook_config_paths": ["/home/test/.codex/config.toml"],
+                                },
+                            }
+                        }
+                    },
+                    fh,
+                )
+
+            r = _DoctorResult()
+            _check_hook_contract_lock(self._cfg(tmp), "codex", r)
+            check = r.checks[-1]
+            self.assertEqual(check["status"], "pass")
+            self.assertIn("codex-hooks-v1", check["detail"])
+            self.assertIn("0.30.0", check["detail"])
+            self.assertIn("workspace=/tmp/repo", check["detail"])
+            self.assertIn("hook_path=/home/test/.codex/config.toml", check["detail"])
+
+    def test_discovered_version_drift_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "connectors": {
+                            "claudecode": {
+                                "contract_id": "claudecode-hooks-v1",
+                                "compatibility_status": "known",
+                                "raw_agent_version": "1.2.3",
+                            }
+                        }
+                    },
+                    fh,
+                )
+            with open(os.path.join(tmp, "agent_discovery.json"), "w", encoding="utf-8") as fh:
+                json.dump({"agents": {"claudecode": {"version": "1.2.4"}}}, fh)
+
+            r = _DoctorResult()
+            _check_hook_contract_lock(self._cfg(tmp), "claudecode", r)
+            check = r.checks[-1]
+            self.assertEqual(check["status"], "fail")
+            self.assertIn("drift", check["detail"])
+
+
+class TestCheckScanCoverage(unittest.TestCase):
+    """``_check_scan_coverage`` advertises what each scanner will check.
+
+    The categories are owned by ``_scan_ui.categories_for``; this test
+    just locks the round-trip from doctor through to that helper, so a
+    drift between doctor and the scan preamble shows up in CI.
+    """
+
+    def test_all_components_emit_a_pass_check(self) -> None:
+        from defenseclaw.commands import _scan_ui
+
+        r = _DoctorResult()
+        _check_scan_coverage(MagicMock(), r)
+
+        labels_seen = {c["label"] for c in r.checks if c["status"] == "pass"}
+        # One Scanner-coverage row per supported component.
+        for component in _scan_ui.supported_components():
+            sing = _scan_ui._COMPONENT_LABELS[component][0]  # type: ignore[attr-defined]
+            self.assertIn(f"Scanner coverage ({sing})", labels_seen)
+
+    def test_categories_match_scan_ui_source_of_truth(self) -> None:
+        from defenseclaw.commands import _scan_ui
+
+        r = _DoctorResult()
+        _check_scan_coverage(MagicMock(), r)
+
+        # Plugin row should literally contain every plugin category from
+        # _scan_ui — locking the contract that doctor and the scanner
+        # preamble can never disagree on what's being checked.
+        plugin_row = next(
+            c for c in r.checks if c["label"] == "Scanner coverage (plugin)"
+        )
+        for cat in _scan_ui.categories_for("plugin"):
+            self.assertIn(cat, plugin_row["detail"])
+
+
+class TestConnectorInventoryRulePack(unittest.TestCase):
+    """The inventory block surfaces each connector's effective rule pack,
+    warning when a configured directory is missing on disk."""
+
+    def _cfg(self, *, rule_pack_dir=""):
+        cfg = MagicMock()
+        cfg.skill_dirs.return_value = []
+        cfg.plugin_dirs.return_value = []
+        cfg.mcp_servers.return_value = []
+        cfg.guardrail.effective_mode.return_value = "observe"
+        cfg.guardrail.effective_rule_pack_dir.return_value = rule_pack_dir
+        return cfg
+
+    def test_rule_pack_dir_missing_warns(self):
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/nonexistent/rule/pack/dir"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("/nonexistent/rule/pack/dir", rp["detail"])
+
+    def test_rule_pack_dir_present_passes(self):
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir=os.getcwd()), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "pass")
+
+    def test_rule_pack_dir_empty_skips(self):
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir=""), "codex", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "skip")
+
+
+if __name__ == "__main__":
+    unittest.main()

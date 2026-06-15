@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
@@ -77,6 +78,7 @@ func TestInspect_EmitsVerdictOnNonNoneVerdict(t *testing.T) {
 
 	if v == nil {
 		t.Fatal("expected verdict, got nil")
+		return
 	}
 
 	// The injection regex layer should have produced at least one
@@ -118,6 +120,32 @@ func TestInspect_SuppressesVerdictForCleanInput(t *testing.T) {
 	for _, e := range *events {
 		if e.EventType == gatewaylog.EventVerdict {
 			t.Fatalf("expected no verdict events for clean input, got %+v", e)
+		}
+	}
+}
+
+// TestEmitLifecycleAndError_PromoteConnectorToEnvelope pins the first-class
+// connector dimension on gateway.jsonl lifecycle + error events. Regression
+// guard for the gap where the heal path's lifecycle/error events carried the
+// connector only in details (lifecycle) or not at all (error), leaving the
+// envelope `connector` field — the one Splunk-local/AgentWatch filter on —
+// empty.
+func TestEmitLifecycleAndError_PromoteConnectorToEnvelope(t *testing.T) {
+	events := withCapturedEvents(t)
+
+	emitLifecycle(t.Context(), "hook_guard", "tampered", map[string]string{
+		"connector": "codex",
+		"paths":     "/Users/x/.codex/config.toml",
+	})
+	emitErrorConnector(t.Context(), "hook_guard", "self-heal-failed", "codex",
+		"failed to re-install codex hook config", nil)
+
+	if len(*events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(*events))
+	}
+	for _, e := range *events {
+		if e.Connector != "codex" {
+			t.Errorf("%s event envelope connector = %q, want codex", e.EventType, e.Connector)
 		}
 	}
 }
@@ -376,6 +404,20 @@ func TestEmit_StampsCorrelationFromContext(t *testing.T) {
 		AgentInstanceID:   "agent-inst-7",
 		SidecarInstanceID: "sidecar-9",
 	})
+	ctx = audit.ContextWithEnvelope(ctx, audit.MergeEnvelope(
+		audit.EnvelopeFromContext(ctx),
+		audit.CorrelationEnvelope{
+			RunID:          "run-from-env",
+			RequestID:      "req-from-env",
+			SessionID:      "sess-from-env",
+			TraceID:        "trace-from-env",
+			TurnID:         "turn-from-env",
+			PolicyID:       "policy-from-env",
+			DestinationApp: "builtin",
+			ToolName:       "tool-from-env",
+			ToolID:         "call-from-env",
+		},
+	))
 
 	emitVerdict(ctx, "regex", gatewaylog.DirectionPrompt, "claude",
 		"allow", "no-op", gatewaylog.SeverityInfo, nil, 1)
@@ -395,6 +437,9 @@ func TestEmit_StampsCorrelationFromContext(t *testing.T) {
 		if e.SessionID != "sess-xyz" {
 			t.Errorf("event[%d] SessionID=%q want %q (type=%s)", i, e.SessionID, "sess-xyz", e.EventType)
 		}
+		if e.TurnID != "turn-from-env" {
+			t.Errorf("event[%d] TurnID=%q want %q (type=%s)", i, e.TurnID, "turn-from-env", e.EventType)
+		}
 		if e.AgentID != "agent-1" {
 			t.Errorf("event[%d] AgentID=%q want %q (type=%s)", i, e.AgentID, "agent-1", e.EventType)
 		}
@@ -406,6 +451,12 @@ func TestEmit_StampsCorrelationFromContext(t *testing.T) {
 		}
 		if e.SidecarInstanceID != "sidecar-9" {
 			t.Errorf("event[%d] SidecarInstanceID=%q want %q (type=%s)", i, e.SidecarInstanceID, "sidecar-9", e.EventType)
+		}
+		if e.PolicyID != "policy-from-env" {
+			t.Errorf("event[%d] PolicyID=%q want %q (type=%s)", i, e.PolicyID, "policy-from-env", e.EventType)
+		}
+		if e.DestinationApp != "builtin" {
+			t.Errorf("event[%d] DestinationApp=%q want %q (type=%s)", i, e.DestinationApp, "builtin", e.EventType)
 		}
 	}
 }

@@ -3,9 +3,17 @@ name: CI
 on:
   push:
     branches: [main]
+  # Run CI on every pull request regardless of base branch so PRs that
+  # target an integration branch (not just main) are gated too — otherwise
+  # their checks (incl. the Windows hook path) never execute until the
+  # change reaches a main-targeting PR.
   pull_request:
-    branches: [main]
 
+# Top-level permissions are intentionally read-only. Per-job
+# permissions overrides (none required at the moment) must remain
+# minimum-privilege; opening up `contents: write`, `id-token: write`,
+# or `packages: write` here would let a future build step that
+# accidentally executed PR-supplied code escalate into the repo.
 permissions:
   contents: read
 
@@ -14,26 +22,70 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version-sync:
+    name: Version Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # CI action / tool version pinning: drop the GitHub
+          # credential after fetch so downstream `make` steps cannot
+          # push or fetch on our behalf if a transient compromise
+          # injects shell.
+          persist-credentials: false
+      # Catches drift between the four in-repo version sources (Makefile,
+      # pyproject.toml, cli/__init__.py, package.json) before it can ship
+      # in a release. The release workflow restamps from the git tag, but
+      # PRs still need to keep the in-repo defaults in sync so local dev
+      # builds (`make dist`) produce artifacts whose names match what
+      # install.sh / `defenseclaw upgrade` will look up at the next tag.
+      - run: make check-version-sync
+
+  upgrade-manifest:
+    name: Upgrade Manifest Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Ensures future releases carry a release-owned migration contract
+      # before the release workflow publishes upgrade-manifest.json.
+      - run: make check-upgrade-manifest
+
   go-lint:
     name: Go Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
       - run: make go-lint
 
   go-test:
     name: Go Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
       - run: make go-test-cov
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: go-coverage
           path: coverage.out
@@ -46,12 +98,20 @@ jobs:
         goos: [linux, darwin]
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
       - run: make gateway-cross GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
           path: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -60,46 +120,86 @@ jobs:
     name: Python Lint & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: uv sync
       - run: make py-lint
       - run: make cli-test-cov
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: python-coverage
           path: coverage-py.xml
+
+  connector-matrix:
+    name: Connector Matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: make plugin
+      - run: make dev-pycli
+      - run: make connector-matrix-test
 
   python-audit:
     name: Python Dependency Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: uv sync
       - run: uv pip install pip pip-audit
       # TODO: Remove --ignore-vuln CVE-2026-4539 once pygments >= 2.19.3 is released
       # CVE-2026-4539: Low severity ReDoS in AdlLexer (local attack vector only)
-      # TODO: Remove --ignore-vuln CVE-2026-28684 once cisco-ai-skill-scanner
-      # releases a version that allows python-dotenv >= 1.2.2. Scanner 2.0.9
-      # (the latest as of this commit) still pins python-dotenv==1.2.1.
-      # CVE-2026-28684: python-dotenv 1.2.1 — pulled in only via out-of-process
-      # Python scanner subprocesses, not linked into the gateway.
+      # TODO: Remove --ignore-vuln CVE-2026-3219 once a fixed pip version is
+      # released. No fix version available as of 2026-04-24. pip is only used
+      # by pip-audit itself, not by DefenseClaw at runtime.
       # TODO: Remove --ignore-vuln CVE-2026-3219 once a fixed pip is released.
       # CVE-2026-3219: pip's interpretation conflict with concatenated tar/ZIP
       # archives. Medium severity; impacts only attacker-supplied package
       # archives. We install exclusively from PyPI via uv with locked hashes
       # (uv.lock), so this attack surface is not exposed in CI or runtime.
-      - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-28684 --ignore-vuln CVE-2026-3219
+      #
+      # TODO: Remove --ignore-vuln PYSEC-2026-196 once the CI base image ships
+      # pip >= 26.1.2. Same rationale as CVE-2026-3219: pip is only used by
+      # pip-audit here, not by DefenseClaw at runtime, and we install
+      # exclusively from PyPI via uv with locked hashes (uv.lock).
+      #
+      # Previously ignored, now fixed by bumping cisco-ai-skill-scanner to
+      # >=2.0.11 + overriding starlette>=1.0.1 and python-dotenv>=1.2.2 in
+      # pyproject.toml:
+      #   - PYSEC-2026-161 (GHSA-86qp-5c8j-p5mr, starlette host-header)
+      #   - CVE-2026-28684 (python-dotenv arbitrary file read)
+      # aiohttp>=3.14.0 (CVE-2026-34993, CVE-2026-47265) and pyjwt>=2.13.0
+      # (PYSEC-2026-175/177/178/179) are likewise pinned in pyproject.toml.
+      # Use OSV for the vulnerability database so an outage in PyPI's
+      # package-metadata JSON API does not turn the audit red before
+      # pip-audit can evaluate the installed environment.
+      - run: uv run pip-audit --vulnerability-service osv --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196
 
   ts-build-test:
     name: TypeScript Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          node-version: "20"
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
@@ -112,10 +212,12 @@ jobs:
       run:
         working-directory: extensions/defenseclaw
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          node-version: "20"
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: npm ci
@@ -125,20 +227,193 @@ jobs:
     name: Rego Policy Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: open-policy-agent/setup-opa@v2
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          version: latest
+          persist-credentials: false
+      - uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
+        with:
+          # CI action / tool version pinning: a `version: latest`
+          # value let a malicious OPA release run inside CI and tamper
+          # with policy test results. Pin to a known-good release and
+          # refresh through reviewed dependency updates (Dependabot).
+          version: 0.70.0
       - run: make rego-test
+
+  schema-parity:
+    name: Schema & Parity Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: make plugin
+      - run: make dev-pycli
+      - run: make check
 
   make-test:
     name: make test (unified)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: make plugin
+      # dev-pycli installs the [dev] group (pytest, jsonschema, ruff)
+      # which `make test → cli-test` indirectly needs at import time:
+      # several cli/tests/*.py files use pytest fixtures/parametrize
+      # and `python -m unittest discover` aborts on the first failed
+      # import. The non-dev `make pycli` target only installs runtime
+      # deps and broke this job after the S4.1/S4.2 connector_paths
+      # tests landed.
+      - run: make dev-pycli
+      - run: make test
+
+  windows-hook-path:
+    name: Windows Hook Path
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: astral-sh/setup-uv@v4
-      - run: make pycli
-      - run: make test
+      - uses: astral-sh/setup-uv@v8.1.0
+      # The gateway embeds the OpenClaw extension tree, normally generated
+      # by `make sync-openclaw-extension`. Windows is hook-only and needs no
+      # OpenClaw plugin, so drop the same `.placeholder` marker that target
+      # writes when extensions/defenseclaw/dist is absent. Done in bash
+      # (Git Bash ships on the runner) to avoid GNU make's flaky shell
+      # resolution on Windows.
+      - name: Generate OpenClaw extension placeholder
+        shell: bash
+        run: |
+          set -euo pipefail
+          embed_dir=internal/gateway/connector/openclaw_extension
+          mkdir -p "$embed_dir"
+          printf '%s\n' \
+            "OpenClaw extension not built." \
+            "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
+            > "$embed_dir/.placeholder"
+      # Prove the Windows hook surfaces compile and vet cleanly.
+      - name: Go build (hook surfaces + binary)
+        run: go build ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/... ./cmd/defenseclaw
+      - name: Go vet (hook surfaces)
+        run: go vet ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/...
+      # Prove every test binary on the hook surfaces builds on Windows
+      # (compiles all test files, runs zero tests).
+      - name: Go test-compile (all hook-surface tests build on Windows)
+        run: go test -run "^$" ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/...
+      # Execute the native Go hook decision engine end to end — this is the
+      # whole Windows hook path (stdin cap, token, HTTP, per-connector
+      # output/exit, fail-open/closed, Codex/Claude block schema).
+      - name: Go test - native hook engine
+        run: go test ./internal/gateway/connector/hookexec/...
+      # Execute the per-OS connector capability model and hook-wiring tests.
+      - name: Go test - connector capability + hook wiring
+        run: go test ./internal/gateway/connector/ -run "ProxyConnector|IsProxyConnector|ConnectorSupportedOnOS|RegistryNamesFilter|HookInvocationCommand|ShellWordPassesNativeCommandThrough|BuildCodexHooksTableHashesTheCommand|IsOwnedHookRecognizesNativeCommand"
+      # Execute the native `defenseclaw hook` entrypoint + sidecar resolution.
+      - name: Go test - hook entrypoint
+        run: go test ./internal/cli/ -run "BuildHookOptions|ReadHookSidecar|HookCommandRegistered"
+      - name: Sync Python env
+        shell: bash
+        run: uv sync
+      # Execute the per-OS connector gating and the Windows config-lock
+      # contention test natively on Windows.
+      - name: Python test - platform gating + config lock
+        shell: bash
+        run: uv run python -m pytest cli/tests/test_platform_support.py cli/tests/test_config_lock_mutex.py -q
+
+  windows-installer-smoke:
+    name: Windows Installer Smoke (install.ps1)
+    runs-on: windows-latest
+    # End-to-end check of the PowerShell installer's local-install path:
+    # build the two release artifacts it consumes (the windows gateway .zip
+    # and the CLI wheel), run scripts/install.ps1 -Local against them, then
+    # assert the gateway binary and CLI shim land on PATH and respond to
+    # --version. Guards scripts/install.ps1, the .goreleaser.yaml windows
+    # archive shape, and the install layout `defenseclaw upgrade` relies on.
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@v8.1.0
+
+      # The gateway embeds the OpenClaw extension tree via //go:embed. Windows
+      # is hook-only and needs no OpenClaw plugin, so drop the same
+      # `.placeholder` marker `make sync-openclaw-extension` writes when
+      # extensions/defenseclaw/dist is absent (matches windows-hook-path).
+      - name: Generate OpenClaw extension placeholder
+        shell: bash
+        run: |
+          set -euo pipefail
+          embed_dir=internal/gateway/connector/openclaw_extension
+          mkdir -p "$embed_dir"
+          printf '%s\n' \
+            "OpenClaw extension not built." \
+            "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
+            > "$embed_dir/.placeholder"
+
+      # Reproduce GoReleaser's windows outputs by hand so the smoke test stays
+      # fast and self-contained: the in-archive binary is defenseclaw.exe and
+      # the archive is defenseclaw_<ver>_windows_amd64.zip (the name
+      # install.ps1 -Local globs). The CLI wheel is built via `make dist-cli`,
+      # the same target `make dist` uses — it stages cli/defenseclaw/_data
+      # (policies, skills, dashboards) before `uv build`, so the wheel matches
+      # a real release. `make install` already runs this _bundle-data path on
+      # windows-latest in the green connector contract matrix.
+      - name: Build gateway binary + CLI wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/gwstage
+          CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=0.0.0-smoke" \
+            -o dist/gwstage/defenseclaw.exe ./cmd/defenseclaw
+          make dist-cli
+          ls -la dist
+
+      - name: Package windows gateway zip
+        shell: pwsh
+        run: |
+          $zip = "dist/defenseclaw_0.0.0-smoke_windows_amd64.zip"
+          Compress-Archive -Path dist/gwstage/defenseclaw.exe -DestinationPath $zip -Force
+          Get-ChildItem dist
+
+      - name: Run install.ps1 against local artifacts
+        shell: pwsh
+        run: ./scripts/install.ps1 -Local dist -Yes
+
+      # New pwsh session: install.ps1 persists the install dir to the *user*
+      # PATH, which a mid-job step does not auto-reload, so prepend it here
+      # before resolving the shim. --version short-circuits before any config
+      # load on both binaries, so neither needs `defenseclaw init`.
+      - name: Verify installed gateway + CLI resolve and run
+        shell: pwsh
+        run: |
+          $bin  = Join-Path $env:USERPROFILE ".local\bin"
+          $gw   = Join-Path $bin "defenseclaw-gateway.exe"
+          $shim = Join-Path $bin "defenseclaw.cmd"
+          if (-not (Test-Path $gw))   { throw "gateway not installed: $gw" }
+          if (-not (Test-Path $shim)) { throw "CLI shim not installed: $shim" }
+          $env:PATH = "$bin;$env:PATH"
+          & $gw --version
+          if ($LASTEXITCODE -ne 0) { throw "defenseclaw-gateway --version exit $LASTEXITCODE" }
+          & defenseclaw --version
+          if ($LASTEXITCODE -ne 0) { throw "defenseclaw --version exit $LASTEXITCODE" }

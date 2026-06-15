@@ -4,12 +4,13 @@ These helpers intentionally mirror the admission ordering used by the Go
 gateway/watcher:
 
 1. Explicit block list entries override everything.
-2. Explicit allow list entries override policy and skip scan/enforcement.
-3. Policy-managed allow entries (for example first-party bundles) may bypass
+2. Asset policy can block denied/unregistered/default-denied assets.
+3. Explicit allow list entries skip scan/enforcement after asset policy.
+4. Policy-managed allow entries (for example first-party bundles) may bypass
    scan depending on the active policy data.
-4. If no scan result exists yet, the active policy decides whether scanning is
+5. If no scan result exists yet, the active policy decides whether scanning is
    required.
-5. Once a scan result exists, the effective per-target action mapping decides
+6. Once a scan result exists, the effective per-target action mapping decides
    whether the result is rejected or only warned.
 """
 
@@ -20,6 +21,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from defenseclaw import connector_paths
 from defenseclaw.config import SeverityAction
 
 
@@ -62,13 +64,17 @@ def _default_admission_policy() -> AdmissionPolicyData:
             },
         },
         first_party_allow={
+            # F-0541: provenance markers must be specific to the first-party
+            # asset's own directory, not a broad parent like ``.defenseclaw``
+            # or ``.openclaw/extensions`` that any sibling plugin/skill could
+            # be dropped into. Each marker pins the asset's leaf component.
             ("plugin", "defenseclaw"): (
                 "first-party DefenseClaw plugin",
-                [".defenseclaw", "extensions/defenseclaw"],
+                ["extensions/defenseclaw"],
             ),
             ("skill", "codeguard"): (
                 "first-party DefenseClaw skill",
-                [".defenseclaw", "workspace/skills/codeguard", "skills/codeguard"],
+                ["workspace/skills/codeguard", "skills/codeguard"],
             ),
         },
     )
@@ -81,23 +87,77 @@ def evaluate_admission(
     target_type: str,
     name: str,
     source_path: str = "",
+    connector: str = "",
+    url: str = "",
+    command: str = "",
+    args: list[str] | None = None,
+    transport: str = "",
+    runtime_surface: str = "cli",
+    asset_policy: Any | None = None,
     scan_result: Any | None = None,
     action_entry: Any | None = None,
     fallback_actions: Any | None = None,
     include_quarantine: bool = False,
+    allow_first_party: bool = True,
 ) -> AdmissionDecision:
     """Evaluate admission for a target using active policy data when available.
 
-    Explicit allow/block entries from the store are always treated as manual
-    overrides. Policy-managed allow entries from ``first_party_allow_list`` are
+    Explicit block entries always win. Explicit allow entries skip scanning
+    after asset policy has had a chance to enforce admin deny/default-deny
+    controls. Policy-managed allow entries from ``first_party_allow_list`` are
     still subject to the policy's ``allow_list_bypass_scan`` setting.
     """
     blocked_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the block list")
     if pe.is_blocked(target_type, name):
         return AdmissionDecision("blocked", blocked_reason, source="manual-block")
 
+    asset_decision = evaluate_asset_policy(
+        asset_policy,
+        target_type=target_type,
+        name=name,
+        connector=connector,
+        source_path=source_path,
+        url=url,
+        command=command,
+        args=args or [],
+        transport=transport,
+        runtime_surface=runtime_surface,
+    )
+    if asset_decision.verdict == "blocked":
+        return asset_decision
+
     allowed_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the allow list — scan skipped")
     if pe.is_allowed(target_type, name):
+        # an explicit operator allow that
+        # was registered with a source_path MUST NOT auto-allow a
+        # different on-disk asset just because it shares the
+        # registered name. Look up the stored entry and compare its
+        # source_path to the current source_path. If they differ
+        # we drop the allow and force a fresh scan/decision rather
+        # than honoring a name-only match. When the stored entry
+        # has no source_path (legacy allow) we keep current
+        # behavior to avoid breaking pre-fix entries; operators can
+        # re-allow with a path to opt into the strict mode.
+        #
+        # F-0401: when the allow IS path-pinned but the current request
+        # presents no source_path (empty/missing provenance, e.g. a
+        # non-local plugin/MCP pre-scan admission), we must NOT honor the
+        # pin as a match. An empty presented path cannot prove it is the
+        # pinned asset, so treat it as a mismatch and fail closed instead
+        # of falling through to an allow.
+        existing = pe.get_action(target_type, name) if hasattr(pe, "get_action") else None
+        existing_path = getattr(existing, "source_path", None) if existing else None
+        if existing_path and existing_path != source_path:
+            presented = source_path or "(no source path presented)"
+            return AdmissionDecision(
+                "rejected",
+                (
+                    f"allow entry for {target_type} '{name}' is pinned to "
+                    f"{existing_path!r}, but the presented asset is at "
+                    f"{presented!r} — failing closed"
+                ),
+                source="manual-allow-path-mismatch",
+            )
         return AdmissionDecision("allowed", allowed_reason, source="manual-allow")
 
     if include_quarantine and pe.is_quarantined(target_type, name):
@@ -106,8 +166,12 @@ def evaluate_admission(
 
     policy = load_admission_policy(policy_dir)
 
+    # F-0742: callers evaluating untrusted-provenance inventory rows (e.g. a
+    # ``source: user`` AIBOM entry) pass ``allow_first_party=False`` so the
+    # first-party allow list cannot bless an operator/third-party asset that
+    # merely lands under a first-party provenance directory.
     fp_entry = policy.first_party_allow.get((target_type, name))
-    if fp_entry is not None and policy.allow_list_bypass_scan:
+    if allow_first_party and fp_entry is not None and policy.allow_list_bypass_scan:
         fp_reason, fp_constraints = fp_entry
         if _matches_provenance(fp_constraints, source_path):
             return AdmissionDecision("allowed", fp_reason, source="policy-allow")
@@ -137,6 +201,163 @@ def evaluate_admission(
         return AdmissionDecision("rejected", detail, action=action, source="scan-rejected")
 
     return AdmissionDecision("warning", detail, action=action, source="scan-warning")
+
+
+def evaluate_asset_policy(
+    asset_policy: Any | None,
+    *,
+    target_type: str,
+    name: str,
+    connector: str = "",
+    source_path: str = "",
+    url: str = "",
+    command: str = "",
+    args: list[str] | None = None,
+    transport: str = "",
+    runtime_surface: str = "cli",
+) -> AdmissionDecision:
+    if not getattr(asset_policy, "enabled", False):
+        return AdmissionDecision("allowed", "asset policy disabled", source="asset-policy-disabled")
+
+    policy = getattr(asset_policy, target_type, None)
+    if policy is None:
+        return AdmissionDecision("allowed", "asset policy unsupported target", source="asset-policy-unsupported")
+
+    rule_args = args or []
+    if rule := _find_asset_rule(
+        getattr(policy, "denied", []),
+        name,
+        connector,
+        source_path,
+        url,
+        command,
+        rule_args,
+        transport,
+    ):
+        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
+        return _asset_policy_block_or_observe(asset_policy, reason, "asset-policy-deny")
+
+    if rule := _find_asset_rule(
+        getattr(policy, "allowed", []),
+        name,
+        connector,
+        source_path,
+        url,
+        command,
+        rule_args,
+        transport,
+    ):
+        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is explicitly allowed"
+        return AdmissionDecision("allowed", reason, source="asset-policy-allow")
+
+    registry = getattr(policy, "registry", [])
+    registered = _find_asset_rule(
+        registry,
+        name,
+        connector,
+        source_path,
+        url,
+        command,
+        rule_args,
+        transport,
+    ) is not None
+    if registry and registered:
+        return AdmissionDecision("allowed", f"{target_type} {name!r} is registered", source="asset-policy-registry")
+
+    if getattr(policy, "registry_required", False):
+        return _asset_policy_block_or_observe(
+            asset_policy,
+            f"{target_type} {name!r} is not in the approved registry",
+            "asset-policy-registry-required",
+        )
+
+    if str(getattr(policy, "default", "allow")).strip().lower() in {"deny", "block"}:
+        return _asset_policy_block_or_observe(
+            asset_policy,
+            f"{target_type} {name!r} is denied by default asset policy",
+            "asset-policy-default-deny",
+        )
+
+    return AdmissionDecision(
+        "allowed",
+        f"{target_type} {name!r} allowed by default asset policy",
+        source="asset-policy-default-allow",
+    )
+
+
+def _asset_policy_block_or_observe(asset_policy: Any, reason: str, source: str) -> AdmissionDecision:
+    if str(getattr(asset_policy, "mode", "observe")).strip().lower() == "action":
+        return AdmissionDecision("blocked", reason, source=source)
+    return AdmissionDecision("allowed", reason, source=source + "-observe")
+
+
+def _find_asset_rule(
+    rules: list[Any],
+    name: str,
+    connector: str,
+    source_path: str,
+    url: str,
+    command: str,
+    args: list[str],
+    transport: str,
+) -> Any | None:
+    for rule in rules:
+        if _asset_rule_matches(rule, name, connector, source_path, url, command, args, transport):
+            return rule
+    return None
+
+
+def _asset_rule_matches(
+    rule: Any,
+    name: str,
+    connector: str,
+    source_path: str,
+    url: str,
+    command: str,
+    args: list[str],
+    transport: str,
+) -> bool:
+    constrained = False
+    if getattr(rule, "name", ""):
+        constrained = True
+        if str(rule.name).strip().lower() != name.strip().lower():
+            return False
+    if getattr(rule, "connector", ""):
+        constrained = True
+        # Compare connector-name-insensitively (case + hyphen/underscore
+        # aliases) so an asset rule keyed on a documented alias such as
+        # "open-hands" still matches the registry-canonical active connector
+        # "openhands". A literal lower-case compare silently failed to fire
+        # the rule, letting a server through that policy meant to block.
+        if connector_paths.normalize(str(rule.connector)) != connector_paths.normalize(connector):
+            return False
+    if getattr(rule, "url", ""):
+        constrained = True
+        if str(rule.url).strip() != url.strip():
+            return False
+    if getattr(rule, "command", ""):
+        constrained = True
+        if os.path.basename(str(rule.command).strip()) != os.path.basename(command.strip()):
+            return False
+    prefix = getattr(rule, "args_prefix", []) or []
+    if prefix:
+        constrained = True
+        if len(args) < len(prefix):
+            return False
+        for idx, want in enumerate(prefix):
+            if str(want).strip() != str(args[idx]).strip():
+                return False
+    if getattr(rule, "transport", ""):
+        constrained = True
+        if str(rule.transport).strip().lower() != transport.strip().lower():
+            return False
+    needles = getattr(rule, "source_path_contains", []) or []
+    if needles:
+        constrained = True
+        normalized = source_path.replace("\\", "/").lower()
+        if not any(str(needle).replace("\\", "/").lower() in normalized for needle in needles):
+            return False
+    return constrained
 
 
 def effective_action_for(
@@ -262,13 +483,40 @@ def _scan_summary(scan_result: Any) -> tuple[int, str]:
 
 
 def _matches_provenance(constraints: list[str], source_path: str) -> bool:
-    """True if no constraints exist, or if source_path contains one of them."""
+    """True if no constraints exist, or if source_path is a path
+    *component* match against one of them.
+
+    The previous implementation compared each
+    constraint with ``in normalised``, which is a substring test on
+    the entire path string. That accepted attacker-controlled
+    paths whose components incidentally embed the constraint
+    (``/tmp/user/.defenseclaw-evil/defenseclaw``,
+    ``/tmp/user/workspace/skills/codeguard-malicious/codeguard``).
+    The fix requires each constraint to match either as a sequence
+    of path *components* or as a normalised path *prefix*, so a
+    constraint like ``.defenseclaw`` only matches when the full
+    component is exactly ``.defenseclaw`` (not ``.defenseclaw-evil``).
+    """
     if not constraints:
         return True
     if not source_path:
         return False
     normalised = source_path.replace("\\", "/").lower()
-    return any(c.lower() in normalised for c in constraints)
+    components = [c for c in normalised.split("/") if c]
+    for raw in constraints:
+        constraint = raw.replace("\\", "/").lower().strip("/")
+        if not constraint:
+            continue
+        constraint_parts = [p for p in constraint.split("/") if p]
+        if not constraint_parts:
+            continue
+        # Match constraint as a contiguous run of full path
+        # components in the source path.
+        clen = len(constraint_parts)
+        for i in range(len(components) - clen + 1):
+            if components[i : i + clen] == constraint_parts:
+                return True
+    return False
 
 
 def _action_reason(action_entry: Any | None, *, default: str) -> str:

@@ -245,6 +245,107 @@ class TestLoadManifestOpenClaw(unittest.TestCase):
         )
 
 
+class TestLoadManifestCodexAndClaude(unittest.TestCase):
+    """S2.3 / F8: _load_manifest must recognise the Codex per-plugin
+    manifest at .codex-plugin/plugin.json (and the matching Claude
+    Code .claude-plugin/plugin.json layout) so non-OpenClaw plugins
+    don't false-trigger MANIFEST-MISSING.
+
+    The contract this class pins down:
+      * a plugin with only .codex-plugin/plugin.json gets a manifest
+        and runs the full analyzer pipeline.
+      * the same for .claude-plugin/plugin.json.
+      * package.json still wins over either when both are present
+        (parity with the existing OpenClaw behaviour).
+      * the source label on the returned manifest is the connector-
+        specific tag, so downstream analyzers can route off it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _write_codex_plugin(self, root: str, name: str = "my-codex-plugin"):
+        os.makedirs(os.path.join(root, ".codex-plugin"))
+        with open(os.path.join(root, ".codex-plugin", "plugin.json"), "w") as f:
+            json.dump(
+                {
+                    "name": name,
+                    "version": "0.1.0",
+                    "description": "Codex plugin under test",
+                    "commands": [{"name": "ping", "exec": "echo pong"}],
+                },
+                f,
+            )
+
+    def _write_claude_plugin(self, root: str, name: str = "my-claude-plugin"):
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as f:
+            json.dump(
+                {
+                    "name": name,
+                    "version": "0.1.0",
+                    "description": "Claude Code plugin under test",
+                },
+                f,
+            )
+
+    def test_codex_plugin_manifest_is_loaded(self):
+        plugin_dir = os.path.join(self.tmp, "cx_plugin")
+        os.makedirs(plugin_dir)
+        self._write_codex_plugin(plugin_dir)
+
+        manifest = _load_manifest(plugin_dir)
+        self.assertIsNotNone(manifest)
+        self.assertEqual(manifest.name, "my-codex-plugin")
+        self.assertEqual(manifest.source, "codex.plugin.json")
+
+    def test_claude_plugin_manifest_is_loaded(self):
+        plugin_dir = os.path.join(self.tmp, "cl_plugin")
+        os.makedirs(plugin_dir)
+        self._write_claude_plugin(plugin_dir)
+
+        manifest = _load_manifest(plugin_dir)
+        self.assertIsNotNone(manifest)
+        self.assertEqual(manifest.name, "my-claude-plugin")
+        self.assertEqual(manifest.source, "claude.plugin.json")
+
+    def test_package_json_still_wins_over_codex_plugin(self):
+        plugin_dir = os.path.join(self.tmp, "dual_codex")
+        os.makedirs(plugin_dir)
+        with open(os.path.join(plugin_dir, "package.json"), "w") as f:
+            json.dump({"name": "from-pkg", "version": "1.0.0"}, f)
+        self._write_codex_plugin(plugin_dir, name="should-not-win")
+
+        manifest = _load_manifest(plugin_dir)
+        self.assertIsNotNone(manifest)
+        self.assertEqual(
+            manifest.name,
+            "from-pkg",
+            "package.json must continue to win over connector-specific manifests",
+        )
+
+    def test_codex_only_plugin_gets_full_scan(self):
+        """End-to-end: Codex-only plugin must NOT short-circuit on MANIFEST-MISSING."""
+        plugin_dir = os.path.join(self.tmp, "cx_full")
+        os.makedirs(os.path.join(plugin_dir, "src"))
+        self._write_codex_plugin(plugin_dir)
+        with open(os.path.join(plugin_dir, "src", "index.js"), "w") as f:
+            f.write("eval('malicious')")
+
+        result = scan_plugin(plugin_dir)
+        rule_ids = [f.rule_id for f in result.findings]
+        self.assertNotIn(
+            "MANIFEST-MISSING",
+            rule_ids,
+            f"Codex plugin should not trip MANIFEST-MISSING; got: {rule_ids}",
+        )
+        self.assertTrue(
+            any("EVAL" in rid for rid in rule_ids if rid),
+            f"Expected eval finding from Codex plugin scan, got: {rule_ids}",
+        )
+
+
 class TestNoManifestStillScans(unittest.TestCase):
     """A plugin with no manifest at all should still get source-scanned."""
 

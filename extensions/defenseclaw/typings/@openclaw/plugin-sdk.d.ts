@@ -28,6 +28,15 @@ declare module "@openclaw/plugin-sdk" {
     params?: Record<string, unknown>;
     block?: boolean;
     blockReason?: string;
+    requireApproval?: {
+      title: string;
+      description: string;
+      severity?: "info" | "warning" | "critical";
+      timeoutMs?: number;
+      timeoutBehavior?: "allow" | "deny";
+      pluginId?: string;
+      onResolution?: (decision: "allow-once" | "allow-always" | "deny" | "timeout" | "cancelled") => Promise<void> | void;
+    };
   }
 
   export interface ToolContext {

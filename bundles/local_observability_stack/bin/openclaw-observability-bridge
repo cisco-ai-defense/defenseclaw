@@ -44,6 +44,21 @@ WAIT_BUDGET="180"
 DO_WAIT="true"
 PASSTHROUGH=()
 
+# Compose project + service container names. Kept in lock-step with
+# docker-compose.yml's `name:` and per-service `container_name:` so
+# reconcile_orphan_containers below can spot containers that share a
+# name with a compose service but lack the compose project label
+# (which is what happens after a stray `docker run --name ...` or an
+# interrupted compose recreate).
+COMPOSE_PROJECT="defenseclaw-observability"
+SERVICE_CONTAINERS=(
+  "defenseclaw-otel-collector"
+  "defenseclaw-prometheus"
+  "defenseclaw-loki"
+  "defenseclaw-tempo"
+  "defenseclaw-grafana"
+)
+
 fail() {
   printf 'error: %s\n' "$1" >&2
   exit 1
@@ -113,6 +128,46 @@ require_docker() {
 
 compose() {
   docker compose --project-directory "${ROOT_DIR}" -f "${COMPOSE_FILE}" "$@"
+}
+
+# reconcile_orphan_containers — remove pre-existing containers that
+# share a name with one of our compose services but were NOT created
+# by this compose project (i.e. they lack the
+# `com.docker.compose.project=${COMPOSE_PROJECT}` label). If we don't
+# do this, `docker compose up -d` aborts mid-stack with
+#   "Conflict. The container name '/defenseclaw-grafana' is already
+#    in use by container '<sha>'. You have to remove (or rename) that
+#    container to be able to reuse that name."
+# which is exactly the trap operators hit after a previous stack was
+# torn down via `docker rm` or after a stray `docker run --name=...`
+# during local debugging.
+#
+# Compose-owned containers are LEFT ALONE — `docker compose up -d`
+# already knows how to reuse them. We only touch true orphans.
+#
+# Emits one stderr line per reconciled container so the operator (and
+# the parent CLI) can see what happened and report it.
+reconcile_orphan_containers() {
+  local removed=0
+  for name in "${SERVICE_CONTAINERS[@]}"; do
+    local owner
+    owner="$(docker inspect "${name}" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)"
+    if [[ -z "${owner}" ]]; then
+      # docker inspect failed -> container does not exist; skip.
+      if ! docker inspect "${name}" >/dev/null 2>&1; then
+        continue
+      fi
+      printf 'reconcile: removing orphan container %s (no compose project label)\n' "${name}" >&2
+      docker rm -f "${name}" >/dev/null 2>&1 || true
+      removed=$(( removed + 1 ))
+    elif [[ "${owner}" != "${COMPOSE_PROJECT}" ]]; then
+      printf 'reconcile: removing foreign-project container %s (compose project=%s, expected=%s)\n' \
+        "${name}" "${owner}" "${COMPOSE_PROJECT}" >&2
+      docker rm -f "${name}" >/dev/null 2>&1 || true
+      removed=$(( removed + 1 ))
+    fi
+  done
+  printf '%s' "${removed}"
 }
 
 # Probe a TCP endpoint, returns 0 on reachable.
@@ -188,7 +243,8 @@ EOF
 case "${ACTION}" in
   up)
     require_docker
-    compose up -d "${PASSTHROUGH[@]}"
+    reconcile_orphan_containers >/dev/null
+    compose up -d ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     if [[ "${DO_WAIT}" == "true" ]]; then
       if ! wait_for_ready; then
         if [[ "${OUTPUT}" == "json" ]]; then
@@ -205,11 +261,11 @@ case "${ACTION}" in
     ;;
   down)
     require_docker
-    compose down "${PASSTHROUGH[@]}"
+    compose down ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     ;;
   reset)
     require_docker
-    compose down -v "${PASSTHROUGH[@]}"
+    compose down -v ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     ;;
   status)
     require_docker
@@ -247,9 +303,9 @@ case "${ACTION}" in
       args+=(-f)
     fi
     if [[ -n "${SERVICE}" ]]; then
-      compose logs "${args[@]}" "${SERVICE}" "${PASSTHROUGH[@]}"
+      compose logs ${args[@]+"${args[@]}"} "${SERVICE}" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     else
-      compose logs "${args[@]}" "${PASSTHROUGH[@]}"
+      compose logs ${args[@]+"${args[@]}"} ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     fi
     ;;
   url)
@@ -283,6 +339,6 @@ EOF
     # users retain the original "pass-through to compose" behaviour
     # they had with run.sh.
     require_docker
-    compose "${ACTION}" "${PASSTHROUGH[@]}"
+    compose "${ACTION}" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     ;;
 esac

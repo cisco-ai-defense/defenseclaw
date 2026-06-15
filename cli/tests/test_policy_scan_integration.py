@@ -26,13 +26,13 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from click.testing import CliRunner
+from datetime import datetime, timedelta, timezone
 
+from click.testing import CliRunner
 from defenseclaw.commands.cmd_policy import policy
 from defenseclaw.models import Finding, ScanResult
-from tests.helpers import make_app_context, cleanup_app
 
-from datetime import datetime, timedelta, timezone
+from tests.helpers import cleanup_app, make_app_context
 
 
 class PolicyScanIntegrationBase(unittest.TestCase):
@@ -214,7 +214,6 @@ class TestPluginScannerOutputToActions(PolicyScanIntegrationBase):
     """Simulate plugin scanner JSON output → parse findings → check policy action."""
 
     def test_plugin_scanner_output_drives_quarantine(self):
-        import json
 
         # Simulate what the TS plugin scanner outputs
         scanner_output = {

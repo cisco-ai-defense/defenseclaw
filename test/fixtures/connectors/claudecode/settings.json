@@ -1,0 +1,15 @@
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "matcher": ".*",
+      "command": "/path/to/claude-code-hook.sh"
+    }
+  ],
+  "mcpServers": {
+    "fs": {
+      "command": "/usr/local/bin/mcp-fs",
+      "args": ["--root", "/tmp"]
+    }
+  }
+}

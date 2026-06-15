@@ -9,11 +9,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"golang.org/x/time/rate"
 )
 
@@ -127,6 +131,8 @@ func (m *mockInspector) InspectMidStream(ctx context.Context, direction, content
 
 func (m *mockInspector) SetScannerMode(_ string) {}
 
+func (m *mockInspector) SetHILTConfig(_ bool, _ string) {}
+
 func (m *mockInspector) setVerdict(direction string, v *ScanVerdict) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -157,6 +163,14 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 		dataDir:   t.TempDir(),
 		inspector: insp,
 		mode:      mode,
+		// Plan B2 / S0.2: production paths fail closed when the
+		// gateway token is empty. The legacy fixtures in this file
+		// construct a proxy directly without going through
+		// NewGuardrailProxy (no token synthesis), so flip the
+		// test-only bypass; the auth behavior itself is covered by
+		// dedicated TestTokenAuth_* / TestProxyAuth_* tests that
+		// leave skipAuthForTest false.
+		skipAuthForTest: true,
 	}
 	// Inject the mock provider — bypasses header-based resolution.
 	p.resolveProviderFn = func(_ *ChatRequest) LLMProvider { return prov }
@@ -166,6 +180,7 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 func postChat(t *testing.T, proxy *GuardrailProxy, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	proxy.handleChatCompletion(rec, req)
@@ -503,6 +518,126 @@ func TestProxyPreCallInspection(t *testing.T) {
 		}
 		if prov.getLastReq() != nil {
 			t.Error("request should NOT have been forwarded to provider")
+		}
+	})
+
+	t.Run("confirm_without_hilt_alerts_and_forwards", func(t *testing.T) {
+		prov := &mockProvider{}
+		insp := newMockInspector()
+		insp.setVerdict("prompt", &ScanVerdict{
+			Action:   guardrailActionConfirm,
+			Severity: "HIGH",
+			Reason:   "approval required",
+			Findings: []string{"high-signal"},
+		})
+		proxy := newTestProxy(t, prov, insp, "action")
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model":    "gpt-4",
+			"messages": []map[string]interface{}{{"role": "user", "content": "please inspect this high-risk request"}},
+		})
+
+		rec := postChat(t, proxy, reqBody)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+
+		var resp ChatResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.ID != "chatcmpl-test" {
+			t.Fatalf("response ID = %q, want provider response", resp.ID)
+		}
+		if prov.getLastReq() == nil {
+			t.Fatal("unsupported HILT confirmation should be audited as alert and forwarded")
+		}
+	})
+
+	t.Run("confirm_with_hilt_but_no_session_alerts_and_forwards", func(t *testing.T) {
+		prov := &mockProvider{}
+		insp := newMockInspector()
+		insp.setVerdict("prompt", &ScanVerdict{
+			Action:   guardrailActionConfirm,
+			Severity: "HIGH",
+			Reason:   "approval required",
+			Findings: []string{"high-signal"},
+		})
+		proxy := newTestProxy(t, prov, insp, "action")
+		proxy.SetHILTApprovalManager(NewHILTApprovalManager(nil, nil, nil))
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model":    "gpt-4",
+			"messages": []map[string]interface{}{{"role": "user", "content": "please inspect this high-risk request"}},
+		})
+
+		rec := postChat(t, proxy, reqBody)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if prov.getLastReq() == nil {
+			t.Fatal("unsupported HILT confirmation should be audited as alert and forwarded")
+		}
+	})
+
+	t.Run("confirm_on_prompt_skips_hilt_and_forwards", func(t *testing.T) {
+		// Prompt-surface UX contract (see resolveConfirm in proxy.go):
+		// confirm verdicts on the prompt direction must NOT trigger a
+		// HILT chat message. The chat-HITL fallback that used to fire
+		// here was unusable in practice — operators couldn't reply in
+		// the rigid `approve <id>` format because OpenClaw wraps user
+		// messages with metadata, and the approval card itself
+		// contained patterns that re-triggered the scanners. The
+		// contract is now: prompt-direction confirms degrade to alert
+		// immediately, the request is forwarded to the LLM, and if
+		// the LLM attempts a dangerous tool call the tool-call gate
+		// raises the native modal at that surface instead.
+		received := make(chan receivedRequest, 5)
+		srv := startMockGW(t, rpcRecordingLoop(received))
+		client := connectToMockGW(t, srv)
+		hilt := NewHILTApprovalManager(client, nil, nil)
+		hilt.TrackSession("session-1")
+
+		prov := &mockProvider{}
+		insp := newMockInspector()
+		insp.setVerdict("prompt", &ScanVerdict{
+			Action:   guardrailActionConfirm,
+			Severity: "HIGH",
+			Reason:   "approval required",
+			Findings: []string{"high-signal"},
+		})
+		proxy := newTestProxy(t, prov, insp, "action")
+		proxy.SetHILTApprovalManager(hilt)
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model":    "gpt-4",
+			"messages": []map[string]interface{}{{"role": "user", "content": "please inspect this high-risk request"}},
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(SessionIDHeader, "session-1")
+		rec := httptest.NewRecorder()
+		proxy.handleChatCompletion(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if prov.getLastReq() == nil {
+			t.Fatal("prompt-direction confirm should alert and forward to provider, not block on absent HITL")
+		}
+		// Critical: NO sessions.send RPC must be emitted for a
+		// prompt-direction confirm. We give the channel a brief
+		// settling window because the proxy's enqueue/notify paths
+		// run asynchronously, then assert nothing showed up.
+		select {
+		case rpc := <-received:
+			t.Fatalf("prompt-surface contract violation: HILT RPC emitted for prompt-direction confirm: method=%q params=%s",
+				rpc.Method, string(rpc.Params))
+		case <-time.After(150 * time.Millisecond):
+			// Expected: no RPC fired — the clamp demoted confirm to
+			// alert before resolveConfirm called into hilt.Request.
 		}
 	})
 
@@ -941,6 +1076,8 @@ func (c *conditionalInspector) InspectMidStream(ctx context.Context, direction, 
 
 func (c *conditionalInspector) SetScannerMode(_ string) {}
 
+func (c *conditionalInspector) SetHILTConfig(_ bool, _ string) {}
+
 // ---------------------------------------------------------------------------
 // e) Edge case tests
 // ---------------------------------------------------------------------------
@@ -983,6 +1120,9 @@ func TestProxyEdgeCases(t *testing.T) {
 		insp := newMockInspector()
 		proxy := newTestProxy(t, prov, insp, "action")
 		proxy.masterKey = "secret-key-123"
+		// This sub-test specifically exercises the auth path, so
+		// undo the test-only bypass that newTestProxy installs.
+		proxy.skipAuthForTest = false
 
 		reqBody := mustJSON(t, map[string]interface{}{
 			"model":    "gpt-4",
@@ -1268,12 +1408,133 @@ func TestResolveProvider_FetchInterceptor(t *testing.T) {
 	}
 }
 
+// TestResolveProvider_InstanceOverlay_FamilyMismatchAllowsNameMatch covers the
+// case where the inferred prefix from the URL is the overlay's own Name (the
+// URL matched a host listed in the overlay's domains) but the overlay's
+// base_provider_type is a different adapter family. The historical guard
+// required prefix == base_provider_type, which silently dropped the overlay
+// whenever a corporate proxy was registered against an overlay with a
+// non-default family. The current behavior accepts the overlay when prefix
+// matches the overlay's Name, so per-instance TLS / sub-block posture still
+// apply.
+func TestResolveProvider_InstanceOverlay_FamilyMismatchAllowsNameMatch(t *testing.T) {
+	dir := t.TempDir()
+	overlayPath := filepath.Join(dir, "custom-providers.json")
+	overlay := `{
+		"providers": [{
+			"name": "acme-bedrock",
+			"domains": ["llm.acme.internal"],
+			"base_provider_type": "bedrock",
+			"base_url": "https://llm.acme.internal:8443",
+			"tls": {"insecure_skip_verify": true}
+		}]
+	}`
+	if err := os.WriteFile(overlayPath, []byte(overlay), 0o600); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlayPath)
+	if err := ReloadProviderRegistry(); err != nil {
+		t.Fatalf("ReloadProviderRegistry: %v", err)
+	}
+	t.Cleanup(func() {
+		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
+		_ = ReloadProviderRegistry()
+	})
+
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+	proxy.cfg.LLM.InstanceName = "acme-bedrock"
+	proxy.resolveProviderFn = proxy.resolveProviderFromHeaders
+
+	req := &ChatRequest{
+		Model:        "acme-bedrock/anthropic.claude-3-opus-20240229-v1:0",
+		Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
+		TargetAPIKey: "test-key",
+		TargetURL:    "https://llm.acme.internal:8443",
+	}
+	got := proxy.resolveProviderFn(req)
+	if got == nil {
+		t.Fatalf("expected overlay-bound provider, got nil")
+	}
+	bp, ok := got.(*bifrostProvider)
+	if !ok {
+		t.Fatalf("expected *bifrostProvider, got %T", got)
+	}
+	if bp.baseURL != "https://llm.acme.internal:8443" {
+		t.Errorf("baseURL = %q; want overlay value (proves NewProviderForInstance ran)", bp.baseURL)
+	}
+	if !bp.tls.InsecureSkipVerify {
+		t.Errorf("InsecureSkipVerify did not propagate from overlay TLS posture")
+	}
+}
+
+// TestResolveProvider_InstanceOverlay_FamilyMismatchUnrelatedURLSkipsOverlay
+// asserts the guard still fires when the URL inferred to an unrelated
+// built-in family (e.g. openai) but the pinned overlay declares a different
+// base_provider_type (bedrock). In that case applying the bedrock overlay
+// would be incorrect; the resolver must log and fall back. This is the
+// case the loosened guard intentionally still catches.
+func TestResolveProvider_InstanceOverlay_FamilyMismatchUnrelatedURLSkipsOverlay(t *testing.T) {
+	dir := t.TempDir()
+	overlayPath := filepath.Join(dir, "custom-providers.json")
+	overlay := `{
+		"providers": [{
+			"name": "acme-bedrock",
+			"base_provider_type": "bedrock",
+			"base_url": "https://llm.acme.internal:8443"
+		}]
+	}`
+	if err := os.WriteFile(overlayPath, []byte(overlay), 0o600); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlayPath)
+	if err := ReloadProviderRegistry(); err != nil {
+		t.Fatalf("ReloadProviderRegistry: %v", err)
+	}
+	t.Cleanup(func() {
+		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
+		_ = ReloadProviderRegistry()
+	})
+
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+	proxy.cfg.LLM.InstanceName = "acme-bedrock"
+	proxy.resolveProviderFn = proxy.resolveProviderFromHeaders
+
+	req := &ChatRequest{
+		Model:        "gpt-4",
+		Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
+		TargetAPIKey: "sk-openai-key",
+		TargetURL:    "https://api.openai.com",
+	}
+	got := proxy.resolveProviderFn(req)
+	if got == nil {
+		t.Fatalf("expected fallback provider, got nil")
+	}
+	bp, ok := got.(*bifrostProvider)
+	if !ok {
+		t.Fatalf("expected *bifrostProvider, got %T", got)
+	}
+	if bp.baseURL == "https://llm.acme.internal:8443" {
+		t.Errorf("baseURL = overlay URL; overlay should NOT have been applied across families")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Integration: real local inspector with proxy
 // ---------------------------------------------------------------------------
 
 func TestProxyWithLocalInspector(t *testing.T) {
 	t.Run("local_scanner_blocks_injection_prompt", func(t *testing.T) {
+		// "ignore previous instructions" matches a CRITICAL-severity
+		// injection rule, so the prompt-surface clamp does not apply
+		// and the proxy still writes the [DefenseClaw] block message.
+		// HIGH-and-below prompts take the demote-to-alert path —
+		// covered by the clampPromptDirectionVerdict unit tests and
+		// the TestProxyPreCallInspection/confirm_*_alerts_and_forwards
+		// subtests.
 		prov := &mockProvider{}
 		insp := NewGuardrailInspector("local", nil, nil, "")
 		proxy := newTestProxy(t, prov, insp, "action")
@@ -1289,9 +1550,11 @@ func TestProxyWithLocalInspector(t *testing.T) {
 		}
 
 		var resp ChatResponse
-		json.Unmarshal(rec.Body.Bytes(), &resp)
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
 		if resp.ID != "chatcmpl-blocked" {
-			t.Errorf("expected blocked, got id=%q", resp.ID)
+			t.Errorf("expected blocked (CRITICAL bypasses prompt-surface clamp), got id=%q", resp.ID)
 		}
 	})
 
@@ -1827,6 +2090,15 @@ func TestIsKnownProviderDomain(t *testing.T) {
 		{"chatgpt backend-api full", "https://chatgpt.com/backend-api/codex/responses", true},
 		{"chatgpt backend-api origin only", "https://chatgpt.com/", false},
 		{"chatgpt wrong path", "https://chatgpt.com/static/app.js", false},
+		// Avarice F-1185: pre-fix the legacy "bedrock-runtime." prefix
+		// matched any host that began with that string, including
+		// attacker-controlled domains. The wildcard form pins the AWS
+		// suffix and rejects host shapes that don't terminate in
+		// .amazonaws.com.
+		{"bedrock attacker prefix spoof", "https://bedrock-runtime.attacker.example", false},
+		{"bedrock missing aws tld", "https://bedrock-runtime.us-east-1.evil.com", false},
+		{"bedrock label injection", "https://bedrock-runtime.us-east-1.evil.amazonaws.com.evil.com", false},
+		{"bedrock case insensitive", "https://Bedrock-Runtime.us-east-1.amazonaws.com/model/invoke", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3108,4 +3380,475 @@ func TestResponsesTextFromContent_PrettyPrintedArray(t *testing.T) {
 	if got != "hello" {
 		t.Errorf("responsesTextFromContent with leading whitespace = %q, want %q", got, "hello")
 	}
+}
+
+// hydrateConnectorSignals must let a native-binary connector (zeptoclaw —
+// no fetch interceptor) supply the upstream URL and provider key that the
+// rest of the proxy's header-based resolver needs. Returning empty strings
+// means "leave req.TargetURL / req.TargetAPIKey alone", so fetch-interceptor
+// paths are not affected.
+func TestHydrateConnectorSignals_UsesConnectorRoute(t *testing.T) {
+	conn := connector.NewZeptoClawConnector()
+	conn.SetProviderSnapshot(map[string]connector.ZeptoClawProviderEntry{
+		"openrouter": {APIBase: "https://openrouter.ai/api/v1", APIKey: "sk-or-test"},
+	})
+
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"anthropic/claude-sonnet-4.5"}`)))
+	body := []byte(`{"model":"anthropic/claude-sonnet-4.5"}`)
+
+	upstream, key := hydrateConnectorSignals(conn, r, body)
+	if upstream != "https://openrouter.ai/api/v1" {
+		t.Errorf("upstream = %q, want openrouter fallback", upstream)
+	}
+	if key != "sk-or-test" {
+		t.Errorf("key = %q, want openrouter snapshot key", key)
+	}
+}
+
+func TestHydrateConnectorSignals_NilConnectorIsNoOp(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{}`)))
+	upstream, key := hydrateConnectorSignals(nil, r, []byte(`{}`))
+	if upstream != "" || key != "" {
+		t.Errorf("nil connector should return empty, got upstream=%q key=%q", upstream, key)
+	}
+}
+
+func TestHydrateConnectorSignals_NoSnapshotIsNoOp(t *testing.T) {
+	// OpenClaw uses fetch-interceptor headers; its Route() does not emit
+	// RawUpstream. Hydration must leave req.TargetURL alone in that case.
+	conn := connector.NewOpenClawConnector()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"gpt-4"}`)))
+	upstream, key := hydrateConnectorSignals(conn, r, []byte(`{"model":"gpt-4"}`))
+	if upstream != "" || key != "" {
+		t.Errorf("fetch-interceptor connector should emit no upstream, got upstream=%q key=%q", upstream, key)
+	}
+}
+
+// TestHydrateConnectorSignals_PerConnector — plan E1 / item 2.
+//
+// OpenClaw uses fetch-interceptor headers; Codex and Claude Code are
+// hook-only (Route does not emit RawUpstream). ZeptoClaw resolves
+// upstream from its provider snapshot.
+func TestHydrateConnectorSignals_PerConnector(t *testing.T) {
+	cases := []struct {
+		name     string
+		build    func() connector.Connector
+		wantURL  string
+		wantKey  string
+		wantHas  bool // true → expect non-empty upstream + key
+		bodyJSON string
+	}{
+		{
+			name:     "openclaw_fetch_interceptor_no_snapshot",
+			build:    func() connector.Connector { return connector.NewOpenClawConnector() },
+			wantHas:  false,
+			bodyJSON: `{"model":"gpt-4"}`,
+		},
+		{
+			name:     "claudecode_hook_only_no_snapshot",
+			build:    func() connector.Connector { return connector.NewClaudeCodeConnector() },
+			wantHas:  false,
+			bodyJSON: `{"model":"claude-3-5-sonnet-20241022"}`,
+		},
+		{
+			name: "zeptoclaw_snapshot_drives_upstream",
+			build: func() connector.Connector {
+				c := connector.NewZeptoClawConnector()
+				c.SetProviderSnapshot(map[string]connector.ZeptoClawProviderEntry{
+					"openrouter": {APIBase: "https://openrouter.ai/api/v1", APIKey: "sk-or-zc"},
+				})
+				return c
+			},
+			wantURL:  "https://openrouter.ai/api/v1",
+			wantKey:  "sk-or-zc",
+			wantHas:  true,
+			bodyJSON: `{"model":"anthropic/claude-sonnet-4.5"}`,
+		},
+		{
+			name:     "codex_hook_only_no_snapshot",
+			build:    func() connector.Connector { return connector.NewCodexConnector() },
+			wantHas:  false,
+			bodyJSON: `{"model":"gpt-5"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			conn := tc.build()
+			r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(tc.bodyJSON)))
+			upstream, key := hydrateConnectorSignals(conn, r, []byte(tc.bodyJSON))
+			if tc.wantHas {
+				if upstream != tc.wantURL {
+					t.Errorf("upstream = %q, want %q", upstream, tc.wantURL)
+				}
+				if key != tc.wantKey {
+					t.Errorf("key = %q, want %q", key, tc.wantKey)
+				}
+			} else {
+				if upstream != "" || key != "" {
+					t.Errorf("connector %q should emit no upstream hydration, got upstream=%q key=%q",
+						conn.Name(), upstream, key)
+				}
+			}
+		})
+	}
+}
+
+func TestConnectorPrefixStripper(t *testing.T) {
+	reg := connector.NewDefaultRegistry()
+
+	cases := []struct {
+		path       string
+		want       string
+		wantStatus int
+	}{
+		{"/c/claudecode/v1/messages", "/v1/messages", 0},
+		{"/c/zeptoclaw/v1/chat/completions", "/v1/chat/completions", 0},
+		{"/c/codex/v1/responses", "/v1/responses", 0},
+		{"/c/openclaw/v1/messages", "/v1/messages", 0},
+		{"/v1/messages", "/v1/messages", 0},
+		{"/v1/chat/completions", "/v1/chat/completions", 0},
+		{"/health", "/health", 0},
+		{"/c/", "/c/", 0},
+		{"/c/claudecode", "/c/claudecode", 0},
+		{"/c/unknown/v1/messages", "", http.StatusNotFound},
+		{"/c/../v1/messages", "", http.StatusBadRequest},
+		{"/c//claudecode/v1/messages", "", http.StatusBadRequest},
+		{"/c/foo%2f..%2fadmin", "", http.StatusBadRequest},
+		{"/c/claudecode%2f..%2fadmin/v1/messages", "", http.StatusBadRequest},
+	}
+
+	for _, tc := range cases {
+		var got string
+		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.URL.Path
+		})
+		handler := connectorPrefixStripper(inner, reg)
+		req, _ := http.NewRequest("POST", "http://localhost"+tc.path, nil)
+		rec := httptest.NewRecorder()
+		got = ""
+		handler.ServeHTTP(rec, req)
+		if tc.wantStatus != 0 {
+			if rec.Code != tc.wantStatus {
+				t.Errorf("connectorPrefixStripper(%q) status = %d, want %d", tc.path, rec.Code, tc.wantStatus)
+			}
+		} else if got != tc.want {
+			t.Errorf("connectorPrefixStripper(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestSwitchConnectorLocked_TearsDownOldAndSetsUpNew(t *testing.T) {
+	if !connector.OpenClawExtensionAvailable() {
+		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
+	}
+
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+
+	// Start with codex as the active connector.
+	codexConn, _ := reg.Get("codex")
+	codexConn.SetCredentials("tok", "mk")
+
+	p := &GuardrailProxy{
+		connector:    codexConn,
+		registry:     reg,
+		gatewayToken: "tok",
+		masterKey:    "mk",
+		setupOpts: connector.SetupOpts{
+			DataDir:   dir,
+			ProxyAddr: "127.0.0.1:4000",
+			APIAddr:   "127.0.0.1:18970",
+		},
+		health: NewSidecarHealth(),
+	}
+
+	if p.connector.Name() != "codex" {
+		t.Fatalf("initial connector = %q, want codex", p.connector.Name())
+	}
+
+	// Switch to openclaw via runtime config.
+	p.switchConnectorLocked("openclaw")
+
+	if p.connector.Name() != "openclaw" {
+		t.Errorf("connector after switch = %q, want openclaw", p.connector.Name())
+	}
+
+	saved := connector.LoadActiveConnector(dir)
+	if saved != "openclaw" {
+		t.Errorf("persisted state = %q, want openclaw", saved)
+	}
+}
+
+func TestSwitchConnectorLocked_SameConnectorIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	codexConn, _ := reg.Get("codex")
+
+	p := &GuardrailProxy{
+		connector: codexConn,
+		registry:  reg,
+		setupOpts: connector.SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"},
+	}
+
+	// No state file should be written for a no-op switch.
+	p.switchConnectorLocked("codex")
+
+	if saved := connector.LoadActiveConnector(dir); saved != "" {
+		t.Errorf("no-op switch should not write state, got %q", saved)
+	}
+}
+
+func TestSwitchConnectorLocked_UnknownConnectorIgnored(t *testing.T) {
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	codexConn, _ := reg.Get("codex")
+
+	p := &GuardrailProxy{
+		connector: codexConn,
+		registry:  reg,
+		setupOpts: connector.SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"},
+	}
+
+	p.switchConnectorLocked("nonexistent")
+
+	if p.connector.Name() != "codex" {
+		t.Errorf("connector should remain codex after unknown switch, got %q", p.connector.Name())
+	}
+}
+
+func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
+	if !connector.OpenClawExtensionAvailable() {
+		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
+	}
+
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	codexConn, _ := reg.Get("codex")
+	codexConn.SetCredentials("tok", "mk")
+
+	p := &GuardrailProxy{
+		connector:    codexConn,
+		registry:     reg,
+		gatewayToken: "tok",
+		masterKey:    "mk",
+		setupOpts: connector.SetupOpts{
+			DataDir:   dir,
+			ProxyAddr: "127.0.0.1:4000",
+			APIAddr:   "127.0.0.1:18970",
+		},
+		health:    NewSidecarHealth(),
+		inspector: NewGuardrailInspector("local", nil, nil, ""),
+	}
+
+	cfg := map[string]any{"connector": "openclaw"}
+	p.applyRuntime(cfg)
+
+	if p.connector.Name() != "openclaw" {
+		t.Errorf("connector after applyRuntime = %q, want openclaw", p.connector.Name())
+	}
+}
+
+// TestApplyRuntime_HILTHotReload pins the contract that
+// `_write_guardrail_runtime`'s hilt_enabled / hilt_min_severity fields
+// are routed into the inspector via SetHILTConfig. Without this, an
+// operator who flips guardrail.hilt.enabled in config.yaml (and
+// re-runs the wizard or `setup guardrail`) would keep the boot-time
+// HILT view inside the live inspector — the same SSOT staleness the
+// input.hilt change was meant to fix, just relocated to in-memory
+// state.
+func TestApplyRuntime_HILTHotReload(t *testing.T) {
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	codexConn, ok := reg.Get("codex")
+	if !ok {
+		t.Skip("codex connector not registered in this build")
+	}
+
+	insp := newMockInspector()
+	captured := []hiltCall{}
+	mu := sync.Mutex{}
+	wrapper := &hiltCapturingInspector{
+		ContentInspector: insp,
+		onSetHILT: func(enabled bool, minSeverity string) {
+			mu.Lock()
+			defer mu.Unlock()
+			captured = append(captured, hiltCall{enabled: enabled, minSeverity: minSeverity})
+		},
+	}
+
+	p := &GuardrailProxy{
+		connector: codexConn,
+		registry:  reg,
+		setupOpts: connector.SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"},
+		health:    NewSidecarHealth(),
+		inspector: wrapper,
+	}
+
+	t.Run("bool true is forwarded with normalized min severity", func(t *testing.T) {
+		mu.Lock()
+		captured = captured[:0]
+		mu.Unlock()
+		p.applyRuntime(map[string]any{
+			"hilt_enabled":      true,
+			"hilt_min_severity": "high",
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		if len(captured) != 1 {
+			t.Fatalf("expected SetHILTConfig to fire once, got %d calls", len(captured))
+		}
+		if !captured[0].enabled || captured[0].minSeverity != "high" {
+			t.Fatalf("forwarded HILT = %+v, want {enabled=true minSeverity=high}", captured[0])
+		}
+	})
+
+	t.Run("string true accepted for forward compatibility", func(t *testing.T) {
+		mu.Lock()
+		captured = captured[:0]
+		mu.Unlock()
+		p.applyRuntime(map[string]any{
+			"hilt_enabled":      "true",
+			"hilt_min_severity": "MEDIUM",
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		if len(captured) != 1 || !captured[0].enabled || captured[0].minSeverity != "MEDIUM" {
+			t.Fatalf("forwarded HILT = %+v, want {enabled=true minSeverity=MEDIUM}", captured)
+		}
+	})
+
+	t.Run("absent hilt_enabled does not call SetHILTConfig", func(t *testing.T) {
+		mu.Lock()
+		captured = captured[:0]
+		mu.Unlock()
+		p.applyRuntime(map[string]any{"mode": "observe"})
+		mu.Lock()
+		defer mu.Unlock()
+		if len(captured) != 0 {
+			t.Fatalf("SetHILTConfig should not fire when hilt_enabled is absent, got %d calls", len(captured))
+		}
+	})
+
+	t.Run("malformed hilt_enabled value is treated as absent", func(t *testing.T) {
+		mu.Lock()
+		captured = captured[:0]
+		mu.Unlock()
+		p.applyRuntime(map[string]any{"hilt_enabled": 42})
+		mu.Lock()
+		defer mu.Unlock()
+		if len(captured) != 0 {
+			t.Fatalf("SetHILTConfig must reject non-bool/non-string hilt_enabled, got %d calls", len(captured))
+		}
+	})
+}
+
+type hiltCall struct {
+	enabled     bool
+	minSeverity string
+}
+
+// hiltCapturingInspector wraps a ContentInspector and records every
+// SetHILTConfig call so the runtime-reload tests can assert on what
+// the proxy forwarded into the inspector.
+type hiltCapturingInspector struct {
+	ContentInspector
+	onSetHILT func(enabled bool, minSeverity string)
+}
+
+func (h *hiltCapturingInspector) SetHILTConfig(enabled bool, minSeverity string) {
+	h.ContentInspector.SetHILTConfig(enabled, minSeverity)
+	if h.onSetHILT != nil {
+		h.onSetHILT(enabled, minSeverity)
+	}
+}
+
+func TestIsValidConnectorName(t *testing.T) {
+	tests := []struct {
+		name  string
+		valid bool
+	}{
+		{"claudecode", true},
+		{"codex", true},
+		{"a-b-c", true},
+		{"abc123", true},
+		{"", false},
+		{"UPPERCASE", false},
+		{"foo/bar", false},
+		{"foo..bar", false},
+		{"foo%2fbar", false},
+		{strings.Repeat("a", 65), false},
+		{strings.Repeat("a", 64), true},
+	}
+	for _, tt := range tests {
+		got := isValidConnectorName(tt.name)
+		if got != tt.valid {
+			t.Errorf("isValidConnectorName(%q) = %v, want %v", tt.name, got, tt.valid)
+		}
+	}
+}
+
+func TestSeedCustomProvidersFromLLMBaseURL(t *testing.T) {
+	t.Run("no-op for empty base_url", func(t *testing.T) {
+		err := SeedCustomProvidersFromLLMBaseURL("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("no-op for localhost", func(t *testing.T) {
+		err := SeedCustomProvidersFromLLMBaseURL("http://localhost:11434/v1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("no-op for 127.0.0.1", func(t *testing.T) {
+		err := SeedCustomProvidersFromLLMBaseURL("http://127.0.0.1:8080/v1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("writes overlay and registers domain", func(t *testing.T) {
+		dir := t.TempDir()
+		overlayPath := filepath.Join(dir, "custom-providers.json")
+		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlayPath)
+
+		err := SeedCustomProvidersFromLLMBaseURL("https://llm-gateway.example.com/v1")
+		if err != nil {
+			t.Fatalf("SeedCustomProvidersFromLLMBaseURL: %v", err)
+		}
+
+		// Verify file was written.
+		data, err := os.ReadFile(overlayPath)
+		if err != nil {
+			t.Fatalf("overlay file not written: %v", err)
+		}
+		if !strings.Contains(string(data), "llm-gateway.example.com") {
+			t.Errorf("overlay missing expected domain, got: %s", data)
+		}
+
+		// Verify domain is now recognized.
+		if !isKnownProviderDomain("https://llm-gateway.example.com/v1/responses") {
+			t.Error("expected custom gateway domain to be known after seeding")
+		}
+	})
+
+	t.Run("skips already-known domain", func(t *testing.T) {
+		dir := t.TempDir()
+		overlayPath := filepath.Join(dir, "custom-providers.json")
+		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlayPath)
+
+		// api.openai.com is already in the built-in providers.
+		err := SeedCustomProvidersFromLLMBaseURL("https://api.openai.com/v1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// File should NOT have been written since domain is already known.
+		if _, err := os.Stat(overlayPath); !os.IsNotExist(err) {
+			t.Error("expected no overlay file for already-known domain")
+		}
+	})
 }

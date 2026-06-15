@@ -30,12 +30,40 @@ const (
 	EnvDGXSpark Environment = "dgx-spark"
 	EnvMacOS    Environment = "macos"
 	EnvLinux    Environment = "linux"
+	EnvWindows  Environment = "windows"
 )
+
+type DeploymentMode string
+
+const (
+	DeploymentModeManagedEnterprise DeploymentMode = "managed_enterprise"
+	DeploymentModeUnmanagedBYOD     DeploymentMode = "unmanaged_byod"
+	DeploymentModeCICD              DeploymentMode = "ci_cd"
+	DeploymentModeSandboxed         DeploymentMode = "sandboxed"
+	DeploymentModeServer            DeploymentMode = "server"
+	DeploymentModeSaaS              DeploymentMode = "saas"
+)
+
+var validDeploymentModes = map[string]struct{}{
+	string(DeploymentModeManagedEnterprise): {},
+	string(DeploymentModeUnmanagedBYOD):     {},
+	string(DeploymentModeCICD):              {},
+	string(DeploymentModeSandboxed):         {},
+	string(DeploymentModeServer):            {},
+	string(DeploymentModeSaaS):              {},
+}
 
 const (
 	DefaultDataDirName = ".defenseclaw"
 	DefaultAuditDBName = "audit.db"
-	DefaultConfigName  = "config.yaml"
+	// DefaultJudgeBodiesDBName is the separate SQLite file that
+	// holds retained LLM judge bodies. We split it out from
+	// audit.db so the high-volume body INSERTs do not share a
+	// write lock with audit_events / activity_events; see the
+	// JudgeBodyStore design notes in
+	// internal/audit/judge_body_store.go.
+	DefaultJudgeBodiesDBName = "judge_bodies.db"
+	DefaultConfigName        = "config.yaml"
 )
 
 func DefaultDataPath() string {
@@ -54,8 +82,11 @@ func ConfigPath() string {
 }
 
 func DetectEnvironment() Environment {
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		return EnvMacOS
+	case "windows":
+		return EnvWindows
 	}
 
 	if _, err := os.Stat("/etc/dgx-release"); err == nil {
@@ -71,9 +102,11 @@ func DetectEnvironment() Environment {
 }
 
 // DefaultSkillWatchPaths returns skill directories for the default claw mode.
-// Prefer SkillDirsForMode when a config is available.
+// Prefer Config.SkillDirsForConnector when a config is available;
+// this fallback always uses the OpenClaw layout because we don't
+// know the active framework here.
 func DefaultSkillWatchPaths() []string {
-	return SkillDirsForMode(ClawOpenClaw, "")
+	return SkillDirsForOpenClaw("")
 }
 
 func DefaultConfig() *Config {
@@ -82,10 +115,12 @@ func DefaultConfig() *Config {
 	return &Config{
 		DataDir:       dataDir,
 		AuditDB:       filepath.Join(dataDir, DefaultAuditDBName),
+		JudgeBodiesDB: filepath.Join(dataDir, DefaultJudgeBodiesDBName),
 		QuarantineDir: filepath.Join(dataDir, "quarantine"),
-		PluginDir:     filepath.Join(dataDir, "plugins"),
+		PluginDir:     "",
 		PolicyDir:     filepath.Join(dataDir, "policies"),
 		Environment:   string(DetectEnvironment()),
+		AssetPolicy:   DefaultAssetPolicy(),
 		Claw: ClawConfig{
 			Mode:       clawMode,
 			HomeDir:    "~/.openclaw",
@@ -124,6 +159,26 @@ func DefaultConfig() *Config {
 			AllowListBypassScan: true,
 			RescanEnabled:       true,
 			RescanIntervalMin:   60,
+			RescanContentGated:  true,
+		},
+		AIDiscovery: AIDiscoveryConfig{
+			Enabled:                  true,
+			Mode:                     "enhanced",
+			ScanIntervalMin:          5,
+			ProcessIntervalSec:       60,
+			ScanRoots:                []string{"~"},
+			SignaturePacks:           []string{},
+			AllowWorkspaceSignatures: false,
+			DisabledSignatureIDs:     []string{},
+			IncludeShellHistory:      true,
+			IncludePackageManifests:  true,
+			IncludeEnvVarNames:       true,
+			IncludeNetworkDomains:    true,
+			MaxFilesPerScan:          1000,
+			MaxFileBytes:             512 * 1024,
+			EmitOTel:                 true,
+			StoreRawLocalPaths:       false,
+			ConfidencePolicyPath:     filepath.Join(dataDir, "confidence.yaml"),
 		},
 		Firewall: FirewallConfig{
 			ConfigFile: filepath.Join(dataDir, "firewall.yaml"),
@@ -135,6 +190,8 @@ func DefaultConfig() *Config {
 			ScannerMode:                 "both",
 			Host:                        "",
 			Port:                        4000,
+			HookSelfHeal:                true,
+			HookSelfHealDebounceMs:      500,
 			DetectionStrategy:           "regex_judge",
 			DetectionStrategyCompletion: "regex_only",
 			Judge: JudgeConfig{
@@ -143,7 +200,12 @@ func DefaultConfig() *Config {
 				PIIPrompt:     true,
 				PIICompletion: true,
 				ToolInjection: true,
+				Exfil:         true,
 				Timeout:       30.0,
+			},
+			HILT: HILTConfig{
+				Enabled:     false,
+				MinSeverity: "HIGH",
 			},
 		},
 		// AuditSinks is empty by default — operators opt in to forwarding

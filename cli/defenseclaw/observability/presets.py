@@ -74,6 +74,9 @@ class Preset:
     # Header map applied to the OTel exporter. Values may contain
     # ``${ENV_NAME}`` substitutions that resolve at sink-build time.
     otel_headers: dict[str, str] = field(default_factory=dict)
+    # Whether the gateway OTel exporter should use plaintext transport.
+    # Required for loopback collectors that expose grpc/http without TLS.
+    otel_tls_insecure: bool = False
 
     # ---- audit_sinks target ----
     sink_kind: SinkKind | None = None
@@ -132,6 +135,27 @@ SPLUNK_HEC = Preset(
     prompts=(
         ("host", "localhost", "Splunk host (name or IP without scheme)", "localhost"),
         ("port", "8088", "Splunk HEC port", "8088"),
+        ("index", "defenseclaw", "HEC index", "defenseclaw"),
+        ("source", "defenseclaw", "HEC source", "defenseclaw"),
+        ("sourcetype", "_json", "HEC sourcetype", "_json"),
+    ),
+)
+
+SPLUNK_ENTERPRISE = Preset(
+    id="splunk-enterprise",
+    display_name="Splunk Enterprise HEC",
+    target="audit_sinks",
+    sink_kind="splunk_hec",
+    description="Remote Splunk Enterprise audit events via HTTP Event Collector",
+    token_env="DEFENSECLAW_SPLUNK_HEC_TOKEN",
+    token_label="Splunk Enterprise HEC token",
+    prompts=(
+        (
+            "endpoint",
+            "https://splunk.example.com:8088/services/collector/event",
+            "Splunk Enterprise HEC endpoint",
+            "",
+        ),
         ("index", "defenseclaw", "HEC index", "defenseclaw"),
         ("source", "defenseclaw", "HEC source", "defenseclaw"),
         ("sourcetype", "_json", "HEC sourcetype", "_json"),
@@ -244,6 +268,7 @@ LOCAL_OTLP = Preset(
     # No auth: the stack binds to 127.0.0.1 by default. If an operator
     # opens it up to the LAN they are expected to add headers manually.
     otel_headers={},
+    otel_tls_insecure=True,
     token_env="",
     token_label="",
     prompts=(
@@ -297,6 +322,7 @@ PRESETS: dict[str, Preset] = {
     for p in (
         SPLUNK_O11Y,
         SPLUNK_HEC,
+        SPLUNK_ENTERPRISE,
         DATADOG,
         HONEYCOMB,
         NEWRELIC,
@@ -326,6 +352,7 @@ def preset_choices() -> list[str]:
     return [
         "splunk-o11y",
         "splunk-hec",
+        "splunk-enterprise",
         "datadog",
         "honeycomb",
         "newrelic",

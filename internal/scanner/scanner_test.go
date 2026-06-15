@@ -84,6 +84,25 @@ func TestSkillScanner_ScanEnv_InjectsLLMKey(t *testing.T) {
 	}
 }
 
+func TestSkillScanner_BuildArgsSkipsUnsupportedLLMProvider(t *testing.T) {
+	ss := NewSkillScannerFromLLM(
+		config.SkillScannerConfig{UseLLM: true, UseBehavioral: true},
+		config.LLMConfig{Provider: "bedrock", Model: "us.anthropic.claude-haiku"},
+		config.CiscoAIDefenseConfig{},
+	)
+
+	args := strings.Join(ss.buildArgs("/tmp/skill"), " ")
+	if strings.Contains(args, "--use-llm") {
+		t.Fatalf("unsupported provider must not enable skill-scanner LLM analyzer: %s", args)
+	}
+	if strings.Contains(args, "--llm-provider") {
+		t.Fatalf("unsupported provider must not pass --llm-provider: %s", args)
+	}
+	if !strings.Contains(args, "--use-behavioral") {
+		t.Fatalf("static/behavioral scan flags should remain active: %s", args)
+	}
+}
+
 func TestSkillScanner_ScanEnv_InjectsCiscoKey(t *testing.T) {
 	os.Unsetenv("AI_DEFENSE_API_KEY")
 
@@ -105,9 +124,17 @@ func TestSkillScanner_ScanEnv_InjectsCiscoKey(t *testing.T) {
 }
 
 func TestNewMCPScanner_DefaultBinary(t *testing.T) {
+	// The MCP scanner now routes through the SDK-backed Python CLI
+	// (defenseclaw mcp scan), so the empty default and the legacy
+	// "mcp-scanner" value both coerce to "defenseclaw".
 	ms := NewMCPScanner(config.MCPScannerConfig{}, config.InspectLLMConfig{}, config.CiscoAIDefenseConfig{})
-	if ms.Config.Binary != "mcp-scanner" {
-		t.Errorf("expected default binary 'mcp-scanner', got %q", ms.Config.Binary)
+	if ms.Config.Binary != "defenseclaw" {
+		t.Errorf("expected default binary 'defenseclaw', got %q", ms.Config.Binary)
+	}
+
+	legacy := NewMCPScanner(config.MCPScannerConfig{Binary: "mcp-scanner"}, config.InspectLLMConfig{}, config.CiscoAIDefenseConfig{})
+	if legacy.Config.Binary != "defenseclaw" {
+		t.Errorf("legacy 'mcp-scanner' must coerce to 'defenseclaw', got %q", legacy.Config.Binary)
 	}
 }
 
@@ -125,60 +152,7 @@ func TestNewMCPScanner_StoresCommonConfigs(t *testing.T) {
 	}
 }
 
-func TestMCPScanner_ScanEnv_InjectsCommonKeys(t *testing.T) {
-	os.Unsetenv("MCP_SCANNER_API_KEY")
-	os.Unsetenv("MCP_SCANNER_LLM_API_KEY")
-	os.Unsetenv("MCP_SCANNER_LLM_MODEL")
-	os.Unsetenv("MCP_SCANNER_LLM_BASE_URL")
-
-	llm := config.InspectLLMConfig{APIKey: "llm-key", Model: "gpt-4o", BaseURL: "https://custom.llm"}
-	aid := config.CiscoAIDefenseConfig{APIKey: "aid-key", APIKeyEnv: "", Endpoint: "https://ep.example.com"}
-
-	ms := NewMCPScanner(config.MCPScannerConfig{}, llm, aid)
-	env := ms.scanEnv()
-
-	found := map[string]string{}
-	for _, e := range env {
-		parts := strings.SplitN(e, "=", 2)
-		if len(parts) == 2 {
-			found[parts[0]] = parts[1]
-		}
-	}
-
-	if found["MCP_SCANNER_API_KEY"] != "aid-key" {
-		t.Errorf("expected MCP_SCANNER_API_KEY='aid-key', got %q", found["MCP_SCANNER_API_KEY"])
-	}
-	if found["MCP_SCANNER_ENDPOINT"] != "https://ep.example.com" {
-		t.Errorf("expected MCP_SCANNER_ENDPOINT endpoint, got %q", found["MCP_SCANNER_ENDPOINT"])
-	}
-	if found["MCP_SCANNER_LLM_API_KEY"] != "llm-key" {
-		t.Errorf("expected MCP_SCANNER_LLM_API_KEY='llm-key', got %q", found["MCP_SCANNER_LLM_API_KEY"])
-	}
-	if found["MCP_SCANNER_LLM_MODEL"] != "gpt-4o" {
-		t.Errorf("expected MCP_SCANNER_LLM_MODEL='gpt-4o', got %q", found["MCP_SCANNER_LLM_MODEL"])
-	}
-	if found["MCP_SCANNER_LLM_BASE_URL"] != "https://custom.llm" {
-		t.Errorf("expected MCP_SCANNER_LLM_BASE_URL='https://custom.llm', got %q", found["MCP_SCANNER_LLM_BASE_URL"])
-	}
-}
-
-func TestMCPScanner_ScanEnv_ResolvesKeyFromEnv(t *testing.T) {
-	t.Setenv("TEST_MCP_CISCO_ENV_KEY", "resolved-from-env")
-	os.Unsetenv("MCP_SCANNER_API_KEY")
-
-	aid := config.CiscoAIDefenseConfig{APIKey: "fallback", APIKeyEnv: "TEST_MCP_CISCO_ENV_KEY"}
-	ms := NewMCPScanner(config.MCPScannerConfig{}, config.InspectLLMConfig{}, aid)
-
-	env := ms.scanEnv()
-
-	for _, e := range env {
-		if strings.HasPrefix(e, "MCP_SCANNER_API_KEY=") {
-			val := strings.TrimPrefix(e, "MCP_SCANNER_API_KEY=")
-			if val != "resolved-from-env" {
-				t.Errorf("expected 'resolved-from-env', got %q", val)
-			}
-			return
-		}
-	}
-	t.Error("MCP_SCANNER_API_KEY not found in scanEnv()")
-}
+// The MCP scanner no longer injects MCP_SCANNER_* environment
+// variables: it shells out to "defenseclaw mcp scan", which resolves
+// LLM and Cisco AI Defense credentials from its own config. The
+// former TestMCPScanner_ScanEnv_* tests were removed with scanEnv.

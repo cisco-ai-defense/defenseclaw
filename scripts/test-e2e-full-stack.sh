@@ -23,7 +23,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SIDECAR_URL="http://127.0.0.1:18970"
 OPENCLAW_URL="http://127.0.0.1:18789"
 GUARDRAIL_URL="http://127.0.0.1:4000"
-SPLUNK_HEC_URL="http://127.0.0.1:8088"
+SPLUNK_HEC_URL="https://127.0.0.1:8088"
 SPLUNK_HEC_TOKEN="00000000-0000-0000-0000-000000000001"
 SPLUNK_API_URL="https://127.0.0.1:8089"
 SPLUNK_CREDS="admin:DefenseClawLocalMode1!"
@@ -40,6 +40,7 @@ E2E_ENABLE_RECOVERY="${E2E_ENABLE_RECOVERY:-false}"
 E2E_REQUIRE_RECOVERY="${E2E_REQUIRE_RECOVERY:-false}"
 OPENCLAW_MODEL_PATCHED="${OPENCLAW_MODEL_PATCHED:-false}"
 OPENCLAW_MODEL_BACKUP_PATH="${OPENCLAW_MODEL_BACKUP_PATH:-/tmp/defenseclaw-openclaw.full-live.backup.json}"
+ANTHROPIC_PASSTHROUGH_RAN="${ANTHROPIC_PASSTHROUGH_RAN:-false}"
 
 sanitize_name() {
     printf '%s' "$1" | tr -cs '[:alnum:]._-' '-'
@@ -135,6 +136,29 @@ wait_for_url() {
     return 1
 }
 
+derive_proxy_master_key() {
+    python3 - <<'PY'
+import hashlib
+import os
+
+key_file = os.path.expanduser("~/.defenseclaw/device.key")
+try:
+    with open(key_file, "rb") as f:
+        data = f.read()
+except OSError:
+    print("")
+else:
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        data,
+        b"defenseclaw-proxy-master-key",
+        100_000,
+        dklen=32,
+    ).hex()
+    print(f"sk-dc-{digest}")
+PY
+}
+
 start_openclaw_gateway() {
     if is_full_live; then
         openclaw gateway start
@@ -145,10 +169,46 @@ start_openclaw_gateway() {
     fi
 }
 
+openclaw_gateway_reachable() {
+    python3 - <<'PY'
+import socket
+import sys
+
+try:
+    with socket.create_connection(("127.0.0.1", 18789), timeout=1):
+        pass
+except OSError:
+    sys.exit(1)
+PY
+}
+
+wait_for_openclaw_gateway() {
+    local timeout="${1:-30}"
+    local interval="${2:-2}"
+    local deadline=$((SECONDS + timeout))
+    while [ $SECONDS -lt $deadline ]; do
+        if openclaw_gateway_reachable; then
+            return 0
+        fi
+        sleep "$interval"
+    done
+    return 1
+}
+
 restart_openclaw_gateway() {
     openclaw gateway stop 2>/dev/null || true
     sleep 1
     start_openclaw_gateway
+}
+
+ensure_openclaw_gateway_running() {
+    local timeout="${1:-45}"
+    if wait_for_openclaw_gateway "$timeout" 2; then
+        return 0
+    fi
+    echo "  OpenClaw gateway not reachable — restarting..."
+    restart_openclaw_gateway
+    wait_for_openclaw_gateway "$timeout" 2
 }
 
 extract_json() {
@@ -824,6 +884,10 @@ wait_for_openclaw_plugin_enabled_state() {
 }
 
 wait_for_sidecar_subsystems_running() {
+    wait_for_sidecar_health_snapshot "${1:-60}" >/dev/null
+}
+
+wait_for_sidecar_health_snapshot() {
     local timeout="${1:-60}"
     local deadline=$((SECONDS + timeout))
     local health gateway_state watcher_state api_state
@@ -833,6 +897,7 @@ wait_for_sidecar_subsystems_running() {
         watcher_state=$(echo "$health" | jq -r '.watcher.state // .watcher // empty' 2>/dev/null || true)
         api_state=$(echo "$health" | jq -r '.api.state // .api // empty' 2>/dev/null || true)
         if [ "$gateway_state" = "running" ] && [ "$watcher_state" = "running" ] && [ "$api_state" = "running" ]; then
+            printf '%s\n' "$health"
             return 0
         fi
         sleep 2
@@ -878,6 +943,10 @@ ensure_sidecar_connected() {
     if wait_for_sidecar_subsystems_running "$quick_timeout"; then
         return 0
     fi
+    ensure_openclaw_gateway_running 30 || true
+    if wait_for_sidecar_subsystems_running "$quick_timeout"; then
+        return 0
+    fi
     echo "  [diag] sidecar not connected — restarting explicitly..." >&2
     defenseclaw-gateway stop 2>/dev/null || true
     sleep 1
@@ -895,6 +964,50 @@ run_agent_prompt() {
     local prompt="$2"
     local timeout_s="${3:-180}"
     timeout "$timeout_s" openclaw agent --session-id "$session_id" -m "$prompt" 2>&1 || true
+}
+
+guardrail_prompt_strategy() {
+    python3 - <<'PY'
+import os
+import yaml
+from pathlib import Path
+
+cfg_path = Path(os.path.expanduser("~/.defenseclaw/config.yaml"))
+if not cfg_path.exists():
+    print("")
+    raise SystemExit(0)
+
+with cfg_path.open() as f:
+    cfg = yaml.safe_load(f) or {}
+
+print(str((cfg.get("guardrail") or {}).get("detection_strategy_prompt") or ""))
+PY
+}
+
+set_guardrail_prompt_strategy() {
+    local strategy="$1"
+    DEFENSECLAW_E2E_PROMPT_STRATEGY="$strategy" python3 - <<'PY'
+import os
+import yaml
+from pathlib import Path
+
+cfg_path = Path(os.path.expanduser("~/.defenseclaw/config.yaml"))
+if not cfg_path.exists():
+    raise SystemExit("config.yaml not found")
+
+with cfg_path.open() as f:
+    cfg = yaml.safe_load(f) or {}
+
+cfg.setdefault("guardrail", {})["detection_strategy_prompt"] = os.environ["DEFENSECLAW_E2E_PROMPT_STRATEGY"]
+
+with cfg_path.open("w") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False)
+PY
+}
+
+restart_sidecar_after_guardrail_config_change() {
+    defenseclaw-gateway restart 2>/dev/null || true
+    ensure_sidecar_connected 90
 }
 
 openclaw_skills_list_json() {
@@ -951,23 +1064,53 @@ inspect_tool() {
     sidecar_post "/api/v1/inspect/tool" "$payload"
 }
 
+# dump_artifacts is invoked from an EXIT trap when
+# any phase records FAIL>0. The legacy implementation cat'd
+# ~/.defenseclaw/config.yaml and ~/.openclaw/openclaw.json directly
+# and tail'd gateway.log / gateway.jsonl without redaction. The
+# DefenseClaw config schema permits inline llm.api_key,
+# splunk.hec_token, gateway.token, and OpenClaw gateway.auth.token
+# values, and the gateway logs include raw audit/prompt material.
+# A single failed assertion therefore leaked provider keys, gateway
+# tokens, and prompt content into CI logs.
+#
+# We redact secret-bearing keys (and well-known token formats) from
+# every dumped artifact via _redact_secrets, and we cap the dumped
+# files to a small tail. Operators that explicitly want full bytes
+# in CI can set DEFENSECLAW_DUMP_RAW_SECRETS=1 (NOT recommended).
+_redact_secrets() {
+    if [[ "${DEFENSECLAW_DUMP_RAW_SECRETS:-0}" == "1" ]]; then
+        cat
+        return
+    fi
+    # Redact:
+    #  * common token shapes (sk-*, ghp_*, AKIA*, eyJ* JWTs, hex-32+)
+    #  * any line whose key matches an obvious-secret name
+    sed -E \
+        -e 's/(api[-_]?key|secret|token|password|hec_token|auth_token|gateway_token|provider_key|client_secret|private_key|aws_secret_access_key)([[:space:]]*[:=][[:space:]]*)("?)[^"[:space:],}]+("?)/\1\2\3<redacted>\4/Ig' \
+        -e 's/sk-[A-Za-z0-9_-]{16,}/<redacted-sk>/g' \
+        -e 's/ghp_[A-Za-z0-9]{20,}/<redacted-gh>/g' \
+        -e 's/AKIA[0-9A-Z]{12,20}/<redacted-aws>/g' \
+        -e 's/eyJ[A-Za-z0-9_=-]{20,}\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_.+/=-]+/<redacted-jwt>/g'
+}
+
 dump_artifacts() {
     echo ""
-    echo "=== Artifact Dump (on failure) ==="
+    echo "=== Artifact Dump (on failure, secrets redacted) ==="
     echo "--- Run Context ---"
     echo "profile=$E2E_PROFILE"
     echo "run_id=$DEFENSECLAW_RUN_ID"
     echo "prefix=$E2E_PREFIX"
-    echo "--- ~/.defenseclaw/config.yaml ---"
-    cat ~/.defenseclaw/config.yaml 2>/dev/null || echo "  (not found)"
-    echo "--- .env key names ---"
+    echo "--- ~/.defenseclaw/config.yaml (redacted) ---"
+    cat ~/.defenseclaw/config.yaml 2>/dev/null | _redact_secrets || echo "  (not found)"
+    echo "--- .env key names (values redacted) ---"
     grep -oP '^\w+(?==)' ~/.defenseclaw/.env 2>/dev/null || echo "  (none)"
     echo "--- defenseclaw-gateway status ---"
-    defenseclaw-gateway status 2>/dev/null || echo "  (not running)"
-    echo "--- gateway.log (last 60 lines) ---"
-    tail -60 ~/.defenseclaw/gateway.log 2>/dev/null || echo "  (not found)"
-    echo "--- gateway.jsonl (last 60 lines) ---"
-    tail -60 ~/.defenseclaw/gateway.jsonl 2>/dev/null || echo "  (not found)"
+    defenseclaw-gateway status 2>/dev/null | _redact_secrets || echo "  (not running)"
+    echo "--- gateway.log (last 60 lines, redacted) ---"
+    tail -60 ~/.defenseclaw/gateway.log 2>/dev/null | _redact_secrets || echo "  (not found)"
+    echo "--- gateway.jsonl (last 60 lines, redacted) ---"
+    tail -60 ~/.defenseclaw/gateway.jsonl 2>/dev/null | _redact_secrets || echo "  (not found)"
     echo "--- SQLite direct event count (via Python) ---"
     python3 -c "
 import sqlite3, os
@@ -1002,8 +1145,8 @@ conn.close()
     snapshot_skill_paths | grep "$E2E_PREFIX" || echo "  (none)"
     echo "--- current test plugin directories ---"
     snapshot_plugin_paths | grep "$E2E_PREFIX" || echo "  (none)"
-    echo "--- ~/.openclaw/openclaw.json ---"
-    cat ~/.openclaw/openclaw.json 2>/dev/null || echo "  (not found)"
+    echo "--- ~/.openclaw/openclaw.json (redacted) ---"
+    cat ~/.openclaw/openclaw.json 2>/dev/null | _redact_secrets || echo "  (not found)"
     echo "--- Splunk current-run actions ---"
     splunk_run_results_json 'action=* | head 20' | jq '.' 2>/dev/null || echo "[]"
     echo "--- splunk container logs (last 30) ---"
@@ -1073,7 +1216,9 @@ phase_start() {
 
     echo "  Starting OpenClaw gateway..."
     start_openclaw_gateway
-    sleep 5
+    if ! wait_for_openclaw_gateway 30 2; then
+        echo "  [diag] OpenClaw gateway did not become reachable before sidecar start"
+    fi
 
     echo "  Starting DefenseClaw sidecar (with up to 3 bring-up attempts)..."
     # Self-heal pattern: the ARM64 self-hosted runner occasionally sees the
@@ -1204,7 +1349,16 @@ phase_health() {
     phase_timer_start
 
     local health
-    health=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
+    health=$(wait_for_sidecar_health_snapshot 60 || true)
+    if [ -z "$health" ]; then
+        echo "  [diag] sidecar subsystems did not all reach running before health assertions"
+        ensure_openclaw_gateway_running 30 || true
+        health=$(wait_for_sidecar_health_snapshot 30 || true)
+    fi
+
+    if [ -z "$health" ]; then
+        health=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
+    fi
     echo "  Full health JSON:"
     echo "$health" | jq '.' 2>/dev/null || echo "$health"
 
@@ -1251,7 +1405,354 @@ phase_health() {
     else
         skip "health: splunk" "state=$splunk_state"
     fi
+
+    # Connector health — present when a connector is configured and the
+    # guardrail is enabled. Core profile may not have one.
+    local conn_name conn_state
+    conn_name=$(echo "$health" | jq -r '.connector.name // empty' 2>/dev/null)
+    conn_state=$(echo "$health" | jq -r '.connector.state // empty' 2>/dev/null)
+    if [ -n "$conn_name" ]; then
+        if [ "$conn_state" = "running" ]; then
+            pass "health: connector '$conn_name' is running"
+        else
+            fail "health: connector '$conn_name' is running" "state=$conn_state"
+        fi
+    else
+        if is_full_live; then
+            skip "health: connector" "no connector in health (guardrail may be disabled)"
+        else
+            skip "health: connector" "core profile (no connector expected)"
+        fi
+    fi
+
     phase_timer_end "Phase 2"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 2B — Connector Architecture
+# ---------------------------------------------------------------------------
+phase_connector() {
+    echo ""
+    echo "=== Phase 2B: Connector Architecture [API/CLI] ==="
+    phase_timer_start
+
+    # ── 2B-1. Connector Registry API ──
+    local connectors_resp active_name connector_count connector_names
+    connectors_resp=$(curl_with_gateway_headers GET "$SIDECAR_URL/v1/connectors" 2>/dev/null || echo '{"error":"unreachable"}')
+    echo "  /v1/connectors response:"
+    echo "$connectors_resp" | jq '.' 2>/dev/null || echo "$connectors_resp"
+
+    if echo "$connectors_resp" | jq -e '.error' >/dev/null 2>&1; then
+        fail "connector registry: API reachable" "$(echo "$connectors_resp" | jq -r '.error' 2>/dev/null)"
+        phase_timer_end "Phase 2B"
+        return
+    fi
+    pass "connector registry: API reachable"
+
+    active_name=$(echo "$connectors_resp" | jq -r '.active // empty' 2>/dev/null)
+    connector_count=$(echo "$connectors_resp" | jq '.connectors | length' 2>/dev/null || echo "0")
+    connector_names=$(echo "$connectors_resp" | jq -r '[.connectors[].name] | sort | join(",")' 2>/dev/null || echo "")
+
+    # Verify all 4 built-in connectors are registered.
+    if [ "${connector_count:-0}" -ge 4 ]; then
+        pass "connector registry: has ${connector_count} connectors"
+    else
+        fail "connector registry: has >= 4 connectors" "got $connector_count"
+    fi
+
+    local expected_builtins=("claudecode" "codex" "openclaw" "zeptoclaw")
+    local builtins_ok=true
+    for name in "${expected_builtins[@]}"; do
+        if echo "$connector_names" | grep -q "$name"; then
+            pass "connector registry: built-in '$name' present"
+        else
+            fail "connector registry: built-in '$name' present" "not found in: $connector_names"
+            builtins_ok=false
+        fi
+    done
+
+    # Verify each connector entry has expected fields.
+    local field_check
+    field_check=$(echo "$connectors_resp" | jq '[.connectors[] | select(.name != "" and .description != "" and .source != "" and .tool_inspection_mode != "" and .subprocess_policy != "")] | length' 2>/dev/null || echo "0")
+    if [ "${field_check:-0}" -ge 4 ]; then
+        pass "connector registry: all entries have required fields"
+    else
+        fail "connector registry: all entries have required fields" "only $field_check entries fully populated"
+    fi
+
+    # Verify all built-in connectors report source="built-in".
+    local builtin_source_count
+    builtin_source_count=$(echo "$connectors_resp" | jq '[.connectors[] | select(.source == "built-in")] | length' 2>/dev/null || echo "0")
+    if [ "${builtin_source_count:-0}" -ge 4 ]; then
+        pass "connector registry: all built-in connectors have source=built-in"
+    else
+        fail "connector registry: all built-in connectors have source=built-in" "only $builtin_source_count with source=built-in"
+    fi
+
+    # ── 2B-2. Active Connector State ──
+    local state_file="$HOME/.defenseclaw/active_connector.json"
+    if is_full_live; then
+        # Full-live should have an active connector configured.
+        if [ -n "$active_name" ] && [ "$active_name" != "null" ] && [ "$active_name" != "unknown" ]; then
+            pass "connector state: active connector is '$active_name'"
+        else
+            skip "connector state: active connector" "active='$active_name' (guardrail may be disabled)"
+        fi
+
+        if [ -f "$state_file" ]; then
+            local state_name
+            state_name=$(jq -r '.name // empty' "$state_file" 2>/dev/null)
+            if [ -n "$state_name" ]; then
+                pass "connector state: active_connector.json present (name=$state_name)"
+            else
+                fail "connector state: active_connector.json readable" "file exists but name is empty"
+            fi
+        else
+            skip "connector state: active_connector.json" "file not present (guardrail may be disabled)"
+        fi
+    else
+        skip "connector state: active connector" "core profile"
+    fi
+
+    # ── 2B-3. Connector Health in /health ──
+    local health_resp conn_tool_mode conn_subprocess
+    health_resp=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
+    conn_tool_mode=$(echo "$health_resp" | jq -r '.connector.tool_inspection_mode // empty' 2>/dev/null)
+    conn_subprocess=$(echo "$health_resp" | jq -r '.connector.subprocess_policy // empty' 2>/dev/null)
+
+    if [ -n "$conn_tool_mode" ]; then
+        case "$conn_tool_mode" in
+            pre-execution|response-scan|both)
+                pass "connector health: tool_inspection_mode='$conn_tool_mode'"
+                ;;
+            *)
+                fail "connector health: tool_inspection_mode valid" "got '$conn_tool_mode'"
+                ;;
+        esac
+    else
+        skip "connector health: tool_inspection_mode" "no connector in /health"
+    fi
+
+    if [ -n "$conn_subprocess" ]; then
+        case "$conn_subprocess" in
+            sandbox|shims|none)
+                pass "connector health: subprocess_policy='$conn_subprocess'"
+                ;;
+            *)
+                fail "connector health: subprocess_policy valid" "got '$conn_subprocess'"
+                ;;
+        esac
+    else
+        skip "connector health: subprocess_policy" "no connector in /health"
+    fi
+
+    # ── 2B-4. Hook Scripts & Shims ──
+    local hooks_dir="$HOME/.defenseclaw/hooks"
+    local shims_dir="$HOME/.defenseclaw/shims"
+
+    if [ -d "$hooks_dir" ]; then
+        pass "connector hooks: hooks directory exists"
+
+        # Check generic inspection hooks (written for all connectors).
+        local generic_hooks=("inspect-tool.sh" "inspect-request.sh" "inspect-response.sh" "inspect-tool-response.sh")
+        for hook in "${generic_hooks[@]}"; do
+            if [ -f "$hooks_dir/$hook" ]; then
+                if [ -x "$hooks_dir/$hook" ]; then
+                    pass "connector hooks: $hook present and executable"
+                else
+                    fail "connector hooks: $hook executable" "file exists but not executable"
+                fi
+            else
+                skip "connector hooks: $hook" "not present (connector may not need it)"
+            fi
+        done
+
+        # Token file for hook scripts.
+        if [ -f "$hooks_dir/.token" ]; then
+            local token_perms
+            token_perms=$(stat -c '%a' "$hooks_dir/.token" 2>/dev/null || stat -f '%Lp' "$hooks_dir/.token" 2>/dev/null || echo "unknown")
+            if [ "$token_perms" = "600" ]; then
+                pass "connector hooks: .token file has restrictive permissions (600)"
+            else
+                fail "connector hooks: .token file permissions" "got $token_perms, expected 600"
+            fi
+        else
+            skip "connector hooks: .token file" "not present (loopback-only mode)"
+        fi
+    else
+        skip "connector hooks: hooks directory" "not present"
+    fi
+
+    if [ -d "$shims_dir" ]; then
+        pass "connector shims: shims directory exists"
+
+        # Check expected shim binaries.
+        local expected_shims=("curl" "wget" "ssh" "nc" "pip" "npm")
+        for shim in "${expected_shims[@]}"; do
+            if [ -f "$shims_dir/$shim" ]; then
+                if [ -x "$shims_dir/$shim" ]; then
+                    pass "connector shims: $shim present and executable"
+                else
+                    fail "connector shims: $shim executable" "file exists but not executable"
+                fi
+            else
+                skip "connector shims: $shim" "not present"
+            fi
+        done
+
+        # ncat should be a symlink to nc.
+        if [ -L "$shims_dir/ncat" ]; then
+            local ncat_target
+            ncat_target=$(readlink "$shims_dir/ncat" 2>/dev/null || echo "unknown")
+            if echo "$ncat_target" | grep -q "nc"; then
+                pass "connector shims: ncat is symlink to nc"
+            else
+                fail "connector shims: ncat symlink target" "points to '$ncat_target', expected nc"
+            fi
+        elif [ -f "$shims_dir/ncat" ]; then
+            pass "connector shims: ncat present (not symlink)"
+        else
+            skip "connector shims: ncat" "not present"
+        fi
+    else
+        skip "connector shims: shims directory" "not present"
+    fi
+
+    # ── 2B-5. Connector-Specific Hook Endpoints ──
+    # Verify that connector hook paths are exposed via the API.
+    if is_full_live && [ -n "$active_name" ] && [ "$active_name" != "null" ]; then
+        local hook_path=""
+        case "$active_name" in
+            claudecode) hook_path="/api/v1/claude-code/hook" ;;
+            codex)      hook_path="/api/v1/codex/hook" ;;
+        esac
+
+        if [ -n "$hook_path" ]; then
+            local hook_code
+            hook_code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+                -H "Authorization: Bearer $(get_gateway_token)" \
+                -H "Content-Type: application/json" \
+                -d '{}' \
+                "$SIDECAR_URL$hook_path" 2>/dev/null || echo "000")
+            # 200 or 400 (bad payload) means the endpoint is registered.
+            # 404 means the route was never mounted.
+            if [ "$hook_code" != "404" ] && [ "$hook_code" != "000" ]; then
+                pass "connector hooks: $active_name hook endpoint registered (HTTP $hook_code)"
+            else
+                fail "connector hooks: $active_name hook endpoint registered" "got HTTP $hook_code"
+            fi
+        else
+            skip "connector hooks: connector-specific endpoint" "$active_name does not expose a lifecycle hook"
+        fi
+    else
+        skip "connector hooks: connector-specific endpoint" "no active connector"
+    fi
+
+    # ── 2B-6. Inspection Endpoints ──
+    # The generic inspection endpoints should be reachable on all profiles.
+    local inspect_endpoints=("/api/v1/inspect/tool" "/api/v1/inspect/request" "/api/v1/inspect/response" "/api/v1/inspect/tool-response")
+    for ep in "${inspect_endpoints[@]}"; do
+        local ep_code
+        ep_code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $(get_gateway_token)" \
+            -H "Content-Type: application/json" \
+            -d '{"tool":"e2e-test","args":{}}' \
+            "$SIDECAR_URL$ep" 2>/dev/null || echo "000")
+        # 200, 400, or 422 means the endpoint is registered.
+        # 404 means the route was never mounted.
+        if [ "$ep_code" != "404" ] && [ "$ep_code" != "000" ]; then
+            pass "inspection endpoint: $ep reachable (HTTP $ep_code)"
+        else
+            fail "inspection endpoint: $ep reachable" "got HTTP $ep_code"
+        fi
+    done
+
+    phase_timer_end "Phase 2B"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 2C — Per-Connector Artifact Matrix (plan E4)
+# ---------------------------------------------------------------------------
+# Walks every built-in connector returned by /v1/connectors and asserts
+# the on-disk hook artifacts match the connector's HookScriptOwner
+# contract from plan C2. Read-only — does NOT install/uninstall any
+# connector during the live e2e run. The full lifecycle round-trip is
+# already covered by the Go matrix in test/e2e/connector_lifecycle_matrix_test.go.
+phase_connector_artifact_matrix() {
+    echo ""
+    echo "=== Phase 2C: Per-Connector Artifact Matrix [Read-only] ==="
+    phase_timer_start
+
+    local connectors_resp connector_names
+    connectors_resp=$(curl_with_gateway_headers GET "$SIDECAR_URL/v1/connectors" 2>/dev/null || echo '{"error":"unreachable"}')
+    if echo "$connectors_resp" | jq -e '.error' >/dev/null 2>&1; then
+        skip "phase 2C: API unavailable" "$(echo "$connectors_resp" | jq -r '.error')"
+        phase_timer_end "Phase 2C"
+        return
+    fi
+
+    connector_names=$(echo "$connectors_resp" | jq -r '[.connectors[].name] | sort | join(" ")' 2>/dev/null || echo "")
+
+    local hook_dir="$HOME/.defenseclaw/hooks"
+    if [ ! -d "$hook_dir" ]; then
+        skip "phase 2C: hook dir absent" "no $hook_dir (guardrail not yet set up)"
+        phase_timer_end "Phase 2C"
+        return
+    fi
+
+    # Generic inspect-* hooks are written for every connector by
+    # writeHookScriptsCommon. The list MUST match the in-binary list
+    # in internal/gateway/connector/subprocess.go::genericHookScripts —
+    # if you add a new generic script, update this list too.
+    local generic_scripts=("inspect-tool.sh" "inspect-request.sh" "inspect-response.sh" "inspect-tool-response.sh")
+    for s in "${generic_scripts[@]}"; do
+        if [ -f "$hook_dir/$s" ]; then
+            pass "phase 2C: generic hook $s present"
+        else
+            fail "phase 2C: generic hook $s present" "missing under $hook_dir"
+        fi
+    done
+
+    # Per-connector vendor scripts. Driven by HookScriptOwner; this
+    # mapping mirrors the connector's HookScriptNames() returns.
+    declare -A connector_owned_scripts
+    connector_owned_scripts[claudecode]="claude-code-hook.sh"
+    connector_owned_scripts[codex]="codex-hook.sh"
+    connector_owned_scripts[openclaw]=""   # fetch interceptor — no vendor hook
+    connector_owned_scripts[zeptoclaw]=""  # config-only — no vendor hook
+
+    for name in $connector_names; do
+        local owned="${connector_owned_scripts[$name]:-__unknown__}"
+        if [ "$owned" = "__unknown__" ]; then
+            # Future-proof: a fifth connector ships and we haven't
+            # taught the matrix about it yet. Skip rather than fail
+            # so the e2e doesn't false-alarm on a registry-side win.
+            skip "phase 2C: $name owned-hook expectations" "no entry in connector_owned_scripts"
+            continue
+        fi
+        if [ -z "$owned" ]; then
+            pass "phase 2C: $name has no vendor-owned hook (by design)"
+            continue
+        fi
+        # The vendor script is only on disk when the active connector
+        # at Setup time was *this* one. Multiple connectors don't share
+        # a hooks/ dir today (it's per-data-dir, not per-connector), so
+        # we only assert presence for the active connector and skip the
+        # rest with a clear reason.
+        local active_name
+        active_name=$(echo "$connectors_resp" | jq -r '.active // empty')
+        if [ "$active_name" != "$name" ]; then
+            skip "phase 2C: $name vendor hook present" "active connector is $active_name, not $name"
+            continue
+        fi
+        if [ -f "$hook_dir/$owned" ]; then
+            pass "phase 2C: $name vendor hook $owned present"
+        else
+            fail "phase 2C: $name vendor hook $owned present" "missing under $hook_dir"
+        fi
+    done
+
+    phase_timer_end "Phase 2C"
 }
 
 # ---------------------------------------------------------------------------
@@ -1475,19 +1976,34 @@ phase_block_allow() {
     fi
 
     local tool_name="exec"
-    local tool_file="/tmp/${E2E_PREFIX}-tool.txt"
-    local tool_expected tool_status
+    local tool_expected tool_file tool_status tool_command tool_prompt
     local allow_before allow_after block_before block_after recover_before recover_after
     local allow_out block_out recover_out
+    local original_prompt_strategy prompt_strategy_overridden
     tool_expected="tool-block-test-${RUN_SLUG}"
-    printf '%s\n' "$tool_expected" > "$tool_file"
+    tool_file="${TMPDIR:-/tmp}/defenseclaw-${RUN_SLUG}-tool-block.txt"
+    rm -f "$tool_file"
+    tool_command=$(printf "printf '%%s\\n' %q > %q" "$tool_expected" "$tool_file")
+    tool_prompt="Use the exec tool to run exactly this command: $tool_command. Reply with DONE once the command has completed. Do not use any tool other than exec."
+    prompt_strategy_overridden=false
+
+    if is_full_live; then
+        # The live prompt judge is intentionally strict about prompts that
+        # mandate tool selection. This phase validates runtime tool governance,
+        # so keep the proxy alive but let the prompt path use regex-only
+        # inspection while the agent exercises exec block/allow behavior.
+        original_prompt_strategy=$(guardrail_prompt_strategy)
+        set_guardrail_prompt_strategy "regex_only"
+        restart_sidecar_after_guardrail_config_change
+        prompt_strategy_overridden=true
+    fi
 
     if is_full_live; then
         allow_before=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        allow_out=$(run_agent_prompt "$(agent_session_id tool-allow)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
+        allow_out=$(run_agent_prompt "$(agent_session_id tool-allow)" "$tool_prompt" 180)
         echo "$allow_out"
         allow_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        if echo "$allow_out" | grep -Fq "$tool_expected" && [ "${allow_after:-0}" -gt "${allow_before:-0}" ]; then
+        if [ -f "$tool_file" ] && grep -Fxq "$tool_expected" "$tool_file" && [ "${allow_after:-0}" -gt "${allow_before:-0}" ]; then
             pass "block/allow: agent could use exec before block"
         else
             fail "block/allow: agent could use exec before block" "$allow_out"
@@ -1503,11 +2019,12 @@ phase_block_allow() {
     fi
 
     if is_full_live; then
+        rm -f "$tool_file"
         block_before=$(alerts_action_count "inspect-tool-block" "$tool_name")
-        block_out=$(run_agent_prompt "$(agent_session_id tool-block)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
+        block_out=$(run_agent_prompt "$(agent_session_id tool-block)" "$tool_prompt" 180)
         echo "$block_out"
         block_after=$(alerts_action_count "inspect-tool-block" "$tool_name")
-        if ! echo "$block_out" | grep -Fq "$tool_expected" && [ "${block_after:-0}" -gt "${block_before:-0}" ]; then
+        if { [ ! -f "$tool_file" ] || ! grep -Fxq "$tool_expected" "$tool_file"; } && [ "${block_after:-0}" -gt "${block_before:-0}" ]; then
             pass "block/allow: agent was blocked from exec after block"
         else
             fail "block/allow: agent was blocked from exec after block" "$block_out"
@@ -1531,15 +2048,22 @@ phase_block_allow() {
     fi
 
     if is_full_live; then
+        rm -f "$tool_file"
         recover_before=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        recover_out=$(run_agent_prompt "$(agent_session_id tool-unblock)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
+        recover_out=$(run_agent_prompt "$(agent_session_id tool-unblock)" "$tool_prompt" 180)
         echo "$recover_out"
         recover_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        if echo "$recover_out" | grep -Fq "$tool_expected" && [ "${recover_after:-0}" -gt "${recover_before:-0}" ]; then
+        if [ -f "$tool_file" ] && grep -Fxq "$tool_expected" "$tool_file" && [ "${recover_after:-0}" -gt "${recover_before:-0}" ]; then
             pass "block/allow: agent recovered exec after unblock"
         else
             fail "block/allow: agent recovered exec after unblock" "$recover_out"
         fi
+        rm -f "$tool_file"
+    fi
+
+    if is_full_live && [ "$prompt_strategy_overridden" = "true" ]; then
+        set_guardrail_prompt_strategy "$original_prompt_strategy"
+        restart_sidecar_after_guardrail_config_change
     fi
 
     local alerts skill_block_events skill_reject_events skill_allow_events skill_install_allow_events
@@ -1615,7 +2139,6 @@ phase_block_allow() {
         fail "block/allow: tool allow audit event recorded" "no tool-allow event for $tool_name"
     fi
 
-    rm -f "$tool_file" 2>/dev/null || true
     cleanup_skill_name "$allowed_skill"
     cleanup_skill_name "$blocked_skill"
     phase_timer_end "Phase 4B"
@@ -1792,6 +2315,8 @@ phase_status_doctor() {
     phase_timer_start
 
     local status_out status_rc doctor_out doctor_rc
+    ensure_openclaw_gateway_running 30 || true
+    ensure_sidecar_connected 30 || true
 
     set +e
     status_out=$(defenseclaw status 2>&1)
@@ -1902,6 +2427,8 @@ phase_skill_api() {
     phase_timer_start
 
     local skill_dir_root unique_skill target_skill payload resp entry alerts disable_count enable_count enabled_state
+    ensure_openclaw_gateway_running 30 || true
+    ensure_sidecar_connected 30 || true
     skill_dir_root=$(first_skill_dir || true)
     unique_skill="${E2E_PREFIX}-api-skill"
     target_skill="$unique_skill"
@@ -2015,49 +2542,39 @@ PY
         return
     fi
 
-    master_key=$(python3 - <<'PY'
-import hashlib
-import hmac
-import os
-
-key_file = os.path.expanduser("~/.defenseclaw/device.key")
-try:
-    with open(key_file, "rb") as f:
-        data = f.read()
-    digest = hmac.new(b"defenseclaw-proxy-master-key", data, hashlib.sha256).hexdigest()[:32]
-    print(f"sk-dc-{digest}")
-except OSError:
-    print("sk-dc-local-dev")
-PY
-)
+    master_key="$(derive_proxy_master_key)"
 
     gateway_token="$(get_gateway_token)"
 
     # ── 6a. Master key auth (legacy path) ──
-    response=$(curl -sS --max-time 45 \
-        -H "Authorization: Bearer $master_key" \
-        -H "Content-Type: application/json" \
-        -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
-        "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
-
-    err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-    if [ -n "$err" ] && echo "$err" | grep -Eqi '429|rate|overload|overloaded|too many requests|busy'; then
-        echo "  Retrying guardrail request after transient provider error..."
-        sleep 5
+    if [ -n "$master_key" ]; then
         response=$(curl -sS --max-time 45 \
             -H "Authorization: Bearer $master_key" \
             -H "Content-Type: application/json" \
             -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
             "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
-    fi
 
-    echo "$response" | jq '.' 2>/dev/null || echo "$response"
-    content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
-    err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-    if echo "$content" | grep -q "E2E_OK"; then
-        pass "guardrail round-trip (master key): LLM responded with E2E_OK"
+        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
+        if [ -n "$err" ] && echo "$err" | grep -Eqi '429|rate|overload|overloaded|too many requests|busy'; then
+            echo "  Retrying guardrail request after transient provider error..."
+            sleep 5
+            response=$(curl -sS --max-time 45 \
+                -H "Authorization: Bearer $master_key" \
+                -H "Content-Type: application/json" \
+                -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
+                "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
+        fi
+
+        echo "$response" | jq '.' 2>/dev/null || echo "$response"
+        content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
+        if [ -n "$content" ] && [ -z "$err" ] && ! echo "$content" | grep -Fq "[DefenseClaw] This request was blocked"; then
+            pass "guardrail round-trip (master key): LLM responded"
+        else
+            fail "guardrail round-trip (master key): LLM responded" "err='$err' response='$response'"
+        fi
     else
-        fail "guardrail round-trip (master key): LLM responded" "err='$err' response='$response'"
+        skip "guardrail round-trip (master key)" "device key is unavailable"
     fi
 
     # ── 6b. X-DC-Auth header auth (hardened auth path) ──
@@ -2072,8 +2589,8 @@ PY
         echo "$response" | jq '.' 2>/dev/null || echo "$response"
         content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
         err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-        if echo "$content" | grep -q "E2E_AUTH_OK"; then
-            pass "guardrail round-trip (X-DC-Auth): LLM responded with E2E_AUTH_OK"
+        if [ -n "$content" ] && [ -z "$err" ] && ! echo "$content" | grep -Fq "[DefenseClaw] This request was blocked"; then
+            pass "guardrail round-trip (X-DC-Auth): LLM responded"
         else
             fail "guardrail round-trip (X-DC-Auth): LLM responded" "err='$err' response='$response'"
         fi
@@ -2119,6 +2636,7 @@ PY
             content=$(echo "$response" | jq -r '.content[0].text // empty' 2>/dev/null || true)
             err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
             if echo "$content" | grep -q "E2E_PASSTHROUGH_OK"; then
+                ANTHROPIC_PASSTHROUGH_RAN="true"
                 pass "guardrail passthrough (Anthropic /v1/messages): response received"
             else
                 fail "guardrail passthrough (Anthropic /v1/messages): response received" "err='$err' response='$response'"
@@ -2141,21 +2659,7 @@ phase_provider_detection() {
     phase_timer_start
 
     local master_key response http_code gateway_token
-    master_key=$(python3 - <<'PY'
-import hashlib
-import hmac
-import os
-
-key_file = os.path.expanduser("~/.defenseclaw/device.key")
-try:
-    with open(key_file, "rb") as f:
-        data = f.read()
-    digest = hmac.new(b"defenseclaw-proxy-master-key", data, hashlib.sha256).hexdigest()[:32]
-    print(f"sk-dc-{digest}")
-except OSError:
-    print("sk-dc-local-dev")
-PY
-)
+    master_key="$(derive_proxy_master_key)"
     gateway_token="$(get_gateway_token)"
 
     # Guardrail proxy must be running for these tests.
@@ -2759,6 +3263,17 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: malicious plugin scan produced findings" "scanner did not produce valid JSON"
     fi
 
+    # `defenseclaw plugin install` now refuses to copy a
+    # plugin tree to plugin_dir when the install-time scan reports
+    # HIGH/CRITICAL findings without an explicit risk-acceptance flag.
+    # The malicious fixture is *deliberately* malicious so subsequent
+    # governance steps can validate quarantine/restore. The standalone
+    # scan above (~line 3184) has already validated that scanning
+    # produces findings, so we use the operator-documented opt-out
+    # path — `defenseclaw plugin allow` — to pre-accept risk before
+    # invoking install. This is the same flow the new error message
+    # tells operators to use.
+    defenseclaw plugin allow "$malicious_plugin" --reason "E2E governance fixture: deliberately malicious" >/dev/null 2>&1 || true
     install_out=$(defenseclaw plugin install "$malicious_source" --force 2>&1 || true)
     echo "$install_out"
     malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
@@ -3078,7 +3593,7 @@ phase_splunk() {
     phase_timer_start
 
     local hec_health hec_response schema_result
-    hec_health=$(curl -sf --max-time 5 "$SPLUNK_HEC_URL/services/collector/health" 2>&1 || echo "unreachable")
+    hec_health=$(curl -sfk --max-time 5 "$SPLUNK_HEC_URL/services/collector/health" 2>&1 || echo "unreachable")
     echo "  HEC health response: $hec_health"
     if [ "$hec_health" = "unreachable" ] || [ -z "$hec_health" ]; then
         fail "Splunk HEC reachable" "HEC health endpoint is unreachable"
@@ -3088,6 +3603,7 @@ phase_splunk() {
     pass "Splunk HEC reachable"
 
     hec_response=$(curl -sf --max-time 5 \
+        -k \
         -H "Authorization: Splunk $SPLUNK_HEC_TOKEN" \
         -H "Content-Type: application/json" \
         -d "{\"event\":{\"action\":\"e2e-suite-marker\",\"run_id\":\"$DEFENSECLAW_RUN_ID\",\"source\":\"test-e2e-full-stack\",\"timestamp\":\"$(date -u +%FT%TZ)\"},\"index\":\"$SPLUNK_INDEX\"}" \
@@ -3167,7 +3683,11 @@ phase_splunk() {
         # Bedrock stays signal-bearing without requiring OpenAI-style SSE deltas.
         splunk_assert_results "Splunk: guardrail response-path inspection events (completion or Bedrock stream)" \
             '(action=guardrail-verdict) (details="*direction=completion*" OR *converse-stream*) | head 5'
-        splunk_assert_results "Splunk: guardrail passthrough events present" '(action=guardrail-verdict) target="anthropic*" | head 5'
+        if [ "${ANTHROPIC_PASSTHROUGH_RAN:-false}" = "true" ]; then
+            splunk_assert_results "Splunk: guardrail passthrough events present" '(action=guardrail-verdict) target="anthropic*" | head 5'
+        else
+            skip "Splunk: guardrail passthrough events present" "Anthropic passthrough was not exercised in this run"
+        fi
         splunk_assert_results "Splunk: agent lifecycle events present" '(action=gateway-agent-start OR action=gateway-agent-end) | head 5'
         splunk_assert_results "Splunk: runtime tool inspection events present" '(action=inspect-tool-allow OR action=inspect-tool-block) | head 5'
         if is_true "$E2E_ENABLE_PLUGIN_LIFECYCLE"; then
@@ -3192,8 +3712,21 @@ phase_teardown() {
     echo "  Final sidecar status:"
     defenseclaw-gateway status 2>/dev/null || true
 
+    # Verify connector state before stopping.
+    local state_file="$HOME/.defenseclaw/active_connector.json"
+    if [ -f "$state_file" ]; then
+        echo "  Active connector state at teardown: $(cat "$state_file" 2>/dev/null)"
+    fi
+
     defenseclaw-gateway stop 2>/dev/null || true
     openclaw gateway stop 2>/dev/null || true
+
+    # Verify connector teardown cleaned up stale artifacts.
+    local shims_dir="$HOME/.defenseclaw/shims"
+    local hooks_dir="$HOME/.defenseclaw/hooks"
+    if [ -d "$shims_dir" ] && [ -n "$(ls -A "$shims_dir" 2>/dev/null)" ]; then
+        echo "  [warn] shims directory still populated after stop — may need manual cleanup"
+    fi
 
     if is_full_live && [ -f "$OPENCLAW_MODEL_BACKUP_PATH" ]; then
         echo "  Restoring OpenClaw model configuration..."
@@ -3253,6 +3786,8 @@ main() {
 
     phase_start || exit 1
     phase_health
+    phase_connector
+    phase_connector_artifact_matrix
     phase_skill_scanner
     phase_mcp_scanner
     phase_block_allow

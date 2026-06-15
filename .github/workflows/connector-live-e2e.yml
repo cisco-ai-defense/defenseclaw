@@ -1,0 +1,521 @@
+# Live connector hook E2E + upstream regression radar.
+#
+# This workflow is intentionally SEPARATE from e2e.yml so it can go red
+# (an upstream agent shipped a breaking hook change) without blocking the
+# OpenClaw stack gate. It has two layers:
+#
+#   contract-matrix (Layer A) — deterministic, no LLM, no secrets, all OSes.
+#     Builds DefenseClaw, then feeds golden stdin payloads into the *installed*
+#     hook entrypoint for every registry connector and asserts the gateway
+#     received the event, the verdict was shaped correctly, and teardown is
+#     clean. Fork-safe; runs on pull requests as well — one always-on macOS
+#     cell (codex / macOS, intended as a required check) plus the full
+#     Linux + macOS + Windows matrix when connector code changes (see the
+#     `changes` gate job).
+#
+#   live-matrix (Layer B) — installs the real upstream agent at its latest
+#     version, wires it with `defenseclaw setup`, and drives lifecycle + forced
+#     tool events through the real harness. Asserts observe/block/OTLP/teardown
+#     using gateway.jsonl, audit.db, and filesystem sentinel side-effects.
+#     Needs provider secrets, so it never runs for fork pull requests.
+#
+#     ROLLOUT STATUS: Layer B is currently manual-only (workflow_dispatch). The
+#     nightly schedule runs Layer A alone until the live secrets are in place.
+#     Gemini CLI, Cursor, and Copilot are deferred entirely (their native keys
+#     — GOOGLE_API_KEY / CURSOR_API_KEY / COPILOT_CLI_TOKEN — are not yet set
+#     and have no Azure/Bedrock substitute). Re-add their matrix cells and
+#     restore the schedule trigger here once those keys exist.
+#
+#   report — rolls every per-cell result up into the job summary, records the
+#     resolved upstream version, and opens/updates a `connector-regression`
+#     issue on any live-cell failure. Alert-only: it never auto-bumps an
+#     approved version (that stays a deliberate human edit of
+#     cli/defenseclaw/inventory/validated_versions.json).
+#
+# Native Windows hook execution (the agent invoking
+# `defenseclaw-gateway hook --connector <c> --event <e>`) depends on the
+# native Windows hook entrypoint. Until that is proven on hosted Windows
+# runners, all Windows cells (and Copilot everywhere) run with
+# continue-on-error so a flake does not turn the whole matrix red.
+
+name: Connector Live E2E
+
+on:
+  # Staggered two hours after the e2e.yml 07:00 cron so the two heavy
+  # nightly suites do not contend for the same hosted-runner pool.
+  schedule:
+    - cron: "0 9 * * *"
+  # Layer A also gates pull requests. Every PR runs one always-on
+  # cross-platform smoke cell (codex / macOS) so there is a required
+  # connector signal on each change; when the PR touches connector, hook,
+  # registry, contract-script, or this workflow, the run expands to the full
+  # Linux + macOS + Windows x 9-connector matrix (see the `changes` job).
+  # Layer B (live) stays manual-only and never runs for pull requests.
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      connector:
+        description: "Connector to run (or 'all')"
+        type: choice
+        default: all
+        options:
+          - all
+          - codex
+          - claudecode
+          - geminicli
+          - cursor
+          - copilot
+          - openhands
+          - hermes
+          - windsurf
+          - antigravity
+      os:
+        description: "OS to run (or 'all')"
+        type: choice
+        default: all
+        options:
+          - all
+          - linux
+          - macos
+          - windows
+      version:
+        description: "Upstream agent version to install (live layer)"
+        type: string
+        default: latest
+      mode:
+        description: "DefenseClaw enforcement mode for live drivers"
+        type: choice
+        default: action
+        options:
+          - action
+          - observe
+      use_azure:
+        description: "Route Codex + OpenHands through Azure OpenAI"
+        type: boolean
+        default: false
+      use_bedrock:
+        description: "Route Claude Code + OpenHands through Amazon Bedrock"
+        type: boolean
+        default: false
+
+concurrency:
+  group: connector-live-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege at the workflow level; the report job widens to
+# issues: write only where it is actually needed.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate — decide which contract cells to run for this event.
+  #
+  #   schedule / workflow_dispatch → full 3-OS x 9-connector matrix.
+  #   pull_request                 → just the always-on macOS smoke cell,
+  #                                  unless the PR touches connector / hook /
+  #                                  registry / contract-script / workflow
+  #                                  surfaces, in which case → full matrix.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Select contract cells
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.decide.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Need history back to the PR base so the path diff below is accurate.
+          fetch-depth: 0
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # Full 3-OS x 9-connector matrix for nightly + manual runs and for
+          # pull requests that touch connector-relevant code.
+          full='{"os":["ubuntu-latest","macos-latest","windows-latest"],"connector":["codex","claudecode","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity"]}'
+          # Always-on PR smoke: one connector on one cross-platform OS. macOS is
+          # chosen because ci.yml already guards the Windows hook path on every
+          # PR but has no macOS coverage at all — this adds the missing native
+          # macOS connector signal and is the cell to mark "required" in branch
+          # protection. Its check name is "Contract codex / macos-latest".
+          minimal='{"os":["macos-latest"],"connector":["codex"]}'
+
+          if [ "${EVENT}" != "pull_request" ]; then
+            echo "matrix=${full}" >> "$GITHUB_OUTPUT"
+            echo "event=${EVENT} -> full matrix"
+            exit 0
+          fi
+
+          changed="$(git diff --name-only "${BASE_SHA}"...HEAD)"
+          echo "Changed files in PR:"
+          printf '%s\n' "${changed}"
+
+          # connector / hook / registry / contract-script / workflow surfaces.
+          if printf '%s\n' "${changed}" | grep -qE \
+            -e '^internal/gateway/connector/' \
+            -e '^internal/cli/' \
+            -e '^cli/defenseclaw/inventory/' \
+            -e '^cli/defenseclaw/commands/cmd_setup\.py$' \
+            -e '^cli/defenseclaw/commands/cmd_init\.py$' \
+            -e '^test/e2e/' \
+            -e '^scripts/live-connector-e2e/' \
+            -e '^\.github/workflows/connector-live-e2e\.yml$'; then
+            echo "matrix=${full}" >> "$GITHUB_OUTPUT"
+            echo "connector-relevant change -> full Linux + macOS + Windows matrix"
+          else
+            echo "matrix=${minimal}" >> "$GITHUB_OUTPUT"
+            echo "no connector-relevant change -> macOS codex smoke only"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Layer A — deterministic contract matrix (no secrets, every OS).
+  # ---------------------------------------------------------------------------
+  contract-matrix:
+    name: Contract ${{ matrix.connector }} / ${{ matrix.os }}
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    # Native Windows hook execution is not yet proven on hosted runners;
+    # keep Windows cells advisory until they go consistently green.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      DC_E2E_RESULTS: ${{ github.workspace }}/connector-live-e2e-results.jsonl
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select cell + resolve OS label
+        id: select
+        run: |
+          case "${RUNNER_OS}" in
+            Linux)   dcos=linux ;;
+            macOS)   dcos=macos ;;
+            Windows) dcos=windows ;;
+            *)       dcos=unknown ;;
+          esac
+          echo "DC_E2E_OS=${dcos}" >> "$GITHUB_ENV"
+
+          run=true
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            in_conn="${{ inputs.connector }}"
+            in_os="${{ inputs.os }}"
+            [ "${in_conn}" = "all" ] || [ "${in_conn}" = "${{ matrix.connector }}" ] || run=false
+            [ "${in_os}" = "all" ] || [ "${in_os}" = "${dcos}" ] || run=false
+          fi
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
+          echo "cell ${{ matrix.connector }}/${dcos} selected=${run}"
+
+      - uses: actions/setup-go@v5
+        if: steps.select.outputs.run == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: astral-sh/setup-uv@v8.1.0
+        if: steps.select.outputs.run == 'true'
+
+      # Build + install the Python CLI and Go gateway. `make install` runs
+      # sync-openclaw-extension (drops the //go:embed placeholder so the
+      # gateway compiles without the TS plugin) and skips the OpenClaw plugin
+      # entirely because CONNECTOR is not openclaw — hook connectors do not
+      # need it. We do NOT run `make plugin` here for the same reason.
+      - name: Install DefenseClaw
+        if: steps.select.outputs.run == 'true'
+        run: make install
+
+      - name: Put DefenseClaw on PATH
+        if: steps.select.outputs.run == 'true'
+        run: |
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+          if [ -d "${{ github.workspace }}/.venv/bin" ]; then
+            echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
+          fi
+          # Windows uv venvs expose entry points under Scripts/, not bin/.
+          if [ -d "${{ github.workspace }}/.venv/Scripts" ]; then
+            echo "${{ github.workspace }}/.venv/Scripts" >> "$GITHUB_PATH"
+          fi
+
+      # Deterministic Go contract tests for this connector. The shared
+      # connector lifecycle / observability / verify matrices are
+      # connector-parameterized; filtering with -run to the active cell makes
+      # a failure point at exactly which connector regressed. A connector with
+      # no dedicated subtest matches nothing and `go test` exits 0, so the
+      # golden-payload smoke below is its real Layer-A coverage.
+      - name: Go contract tests
+        if: steps.select.outputs.run == 'true'
+        run: |
+          go test -count=1 ./test/e2e/ \
+            -run "TestConnectorLifecycle_Matrix/${{ matrix.connector }}|TestV7Observability_DestinationAppPerConnector/${{ matrix.connector }}|TestConnectorVerifyCleanOnFreshDataDir/${{ matrix.connector }}|TestGoldenPerConnectorLayout"
+
+      # Golden-payload entrypoint smoke: feed each registry event into the
+      # installed hook entrypoint (Bash script on unix, `defenseclaw-gateway
+      # hook` on Windows) and assert fire + verdict shaping + clean teardown.
+      - name: Contract entrypoint smoke
+        if: steps.select.outputs.run == 'true'
+        # Layer A runs agent-less, so the cached agent version is empty and the
+        # gateway resolves an "unversioned" hook contract. In action mode the
+        # gateway refuses to wire the connector (and thus never writes
+        # ~/.defenseclaw/hooks/<connector>-hook.sh) unless drift is accepted,
+        # which would make every golden-payload hook invocation exit 127. This
+        # is the intended no-agent/exploratory case, so opt in here. Belt and
+        # suspenders with the export in contract-smoke.sh, in case the gateway
+        # daemon is spawned without inheriting the script's environment.
+        env:
+          DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT: "1"
+        run: bash scripts/live-connector-e2e/run.sh --layer contract --connector "${{ matrix.connector }}"
+
+      - name: Upload contract results
+        if: ${{ always() && steps.select.outputs.run == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-live-e2e-results-contract-${{ matrix.connector }}-${{ env.DC_E2E_OS }}
+          path: ${{ env.DC_E2E_RESULTS }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload contract logs on failure
+        if: ${{ failure() && steps.select.outputs.run == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-live-e2e-logs-contract-${{ matrix.connector }}-${{ env.DC_E2E_OS }}
+          path: ${{ runner.temp }}/defenseclaw-live-e2e-logs/**
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: true
+
+  # ---------------------------------------------------------------------------
+  # Layer B — live agent matrix (real agents, secrets, nightly/dispatch).
+  # Never runs for fork pull requests: provider secrets must not be exposed to
+  # untrusted code, mirroring the full-live gate in e2e.yml.
+  # ---------------------------------------------------------------------------
+  live-matrix:
+    name: Live ${{ matrix.connector }} / ${{ matrix.os }}
+    # Manual-only for now: the nightly schedule runs Layer A (contract) alone
+    # until live provider secrets are in place. Trigger this layer explicitly
+    # via "Run workflow" once keys exist.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The reality matrix: which agents have a headless CLI that fires hooks
+        # on which OS. Contract-only connectors (hermes, windsurf, antigravity)
+        # are absent here — they are covered by Layer A only. `experimental`
+        # cells run advisory (continue-on-error) until proven stable.
+        #
+        # Currently scoped to the connectors we can authenticate with Azure
+        # OpenAI / Amazon Bedrock (Codex, Claude Code, OpenHands). Gemini CLI,
+        # Cursor, and Copilot are deferred until their native keys exist — add
+        # their cells back here when GOOGLE_API_KEY / CURSOR_API_KEY /
+        # COPILOT_CLI_TOKEN are configured.
+        include:
+          - { connector: codex,      os: ubuntu-latest,  dcos: linux }
+          - { connector: codex,      os: macos-latest,   dcos: macos }
+          - { connector: codex,      os: windows-latest, dcos: windows, experimental: true }
+          - { connector: claudecode, os: ubuntu-latest,  dcos: linux }
+          - { connector: claudecode, os: macos-latest,   dcos: macos }
+          - { connector: claudecode, os: windows-latest, dcos: windows, experimental: true }
+          # OpenHands needs the Docker runtime, so it is Linux-only.
+          - { connector: openhands,  os: ubuntu-latest,  dcos: linux }
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental || false }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    env:
+      DC_E2E_OS: ${{ matrix.dcos }}
+      DC_E2E_RESULTS: ${{ github.workspace }}/connector-live-e2e-results.jsonl
+      DC_DRIVER_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'action' }}
+      DC_E2E_AGENT_VERSION_REQUEST: ${{ github.event_name == 'workflow_dispatch' && inputs.version || 'latest' }}
+      # Provider keys are read directly by the agent CLIs (e.g. codex, claude)
+      # from the process environment. They are also written into
+      # ~/.defenseclaw/.env below so the gateway can reach them when needed.
+      # Empty secrets simply skip writing that key (see the seed step).
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+      # GitHub Copilot CLI authenticates with an entitled token.
+      COPILOT_CLI_TOKEN: ${{ secrets.COPILOT_CLI_TOKEN }}
+      GH_TOKEN: ${{ secrets.COPILOT_CLI_TOKEN }}
+      # Generic fallback key for the guardrail/judge if a connector needs it.
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      # --- Alternative auth backends -----------------------------------------
+      # Azure OpenAI (Codex + OpenHands when DC_USE_AZURE=1). The key is a
+      # secret; the endpoint/deployment/version are non-secret config Variables.
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+      AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION }}
+      # Amazon Bedrock (Claude Code + OpenHands when DC_USE_BEDROCK=1). Either a
+      # Bedrock bearer token OR a standard AWS key pair satisfies the chain.
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      # Optional Bedrock model-id overrides (non-secret config Variables).
+      CLAUDE_BEDROCK_MODEL: ${{ vars.CLAUDE_BEDROCK_MODEL }}
+      OPENHANDS_BEDROCK_MODEL: ${{ vars.OPENHANDS_BEDROCK_MODEL }}
+      # Provider-selection flags. A dispatch toggle wins; otherwise the repo
+      # Variable (DC_USE_AZURE / DC_USE_BEDROCK = "1") makes it the default for
+      # nightly runs; otherwise off (use the direct provider keys).
+      DC_USE_AZURE: ${{ inputs.use_azure && '1' || vars.DC_USE_AZURE || '0' }}
+      DC_USE_BEDROCK: ${{ inputs.use_bedrock && '1' || vars.DC_USE_BEDROCK || '0' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select cell
+        id: select
+        run: |
+          run=true
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            in_conn="${{ inputs.connector }}"
+            in_os="${{ inputs.os }}"
+            [ "${in_conn}" = "all" ] || [ "${in_conn}" = "${{ matrix.connector }}" ] || run=false
+            [ "${in_os}" = "all" ] || [ "${in_os}" = "${{ matrix.dcos }}" ] || run=false
+          fi
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
+          echo "cell ${{ matrix.connector }}/${{ matrix.dcos }} selected=${run}"
+
+      - uses: actions/setup-go@v5
+        if: steps.select.outputs.run == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: astral-sh/setup-uv@v8.1.0
+        if: steps.select.outputs.run == 'true'
+
+      # Most live agents (codex, claude, gemini, copilot, cursor) ship as npm
+      # packages; OpenHands installs via pipx. Node + uv cover both.
+      - uses: actions/setup-node@v5
+        if: steps.select.outputs.run == 'true'
+        with:
+          node-version: "24"
+
+      - name: Install DefenseClaw
+        if: steps.select.outputs.run == 'true'
+        run: make install
+
+      - name: Put DefenseClaw on PATH
+        if: steps.select.outputs.run == 'true'
+        run: |
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+          if [ -d "${{ github.workspace }}/.venv/bin" ]; then
+            echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
+          fi
+          if [ -d "${{ github.workspace }}/.venv/Scripts" ]; then
+            echo "${{ github.workspace }}/.venv/Scripts" >> "$GITHUB_PATH"
+          fi
+
+      # Initialize DefenseClaw and stage provider keys into ~/.defenseclaw/.env.
+      # The driver re-runs `defenseclaw init` idempotently; doing it here lets
+      # us append keys before the gateway first starts. Only non-empty secrets
+      # are written, so a missing optional key never leaves a blank line.
+      - name: Seed DefenseClaw env
+        if: steps.select.outputs.run == 'true'
+        run: |
+          defenseclaw init
+          env_file="${HOME}/.defenseclaw/.env"
+          mkdir -p "${HOME}/.defenseclaw"
+          touch "${env_file}"
+          write_key() {
+            local k="$1" v="$2"
+            [ -n "${v}" ] || return 0
+            grep -q "^${k}=" "${env_file}" 2>/dev/null && return 0
+            printf '%s=%s\n' "${k}" "${v}" >> "${env_file}"
+          }
+          write_key OPENAI_API_KEY    "${OPENAI_API_KEY:-}"
+          write_key ANTHROPIC_API_KEY "${ANTHROPIC_API_KEY:-}"
+          write_key GOOGLE_API_KEY    "${GOOGLE_API_KEY:-}"
+          write_key GEMINI_API_KEY    "${GEMINI_API_KEY:-}"
+          write_key CURSOR_API_KEY    "${CURSOR_API_KEY:-}"
+          write_key LLM_API_KEY       "${LLM_API_KEY:-}"
+
+      # For Cursor, confirm headless `cursor-agent -p` actually fires
+      # ~/.cursor/hooks.json before spending a full live run on it. If hooks
+      # never reach the gateway, the live driver is skipped (recorded as a
+      # skip) and Cursor stays Layer-A only for this cell.
+      - name: Validate Cursor headless hooks
+        id: cursor_validate
+        if: ${{ steps.select.outputs.run == 'true' && matrix.connector == 'cursor' }}
+        run: bash scripts/live-connector-e2e/cursor-validation.sh
+        continue-on-error: true
+
+      - name: Live driver
+        if: ${{ steps.select.outputs.run == 'true' && !(matrix.connector == 'cursor' && steps.cursor_validate.outputs.cursor_hooks_fire == '0') }}
+        run: bash scripts/live-connector-e2e/run.sh --layer live --connector "${{ matrix.connector }}"
+
+      - name: Upload live results
+        if: ${{ always() && steps.select.outputs.run == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-live-e2e-results-live-${{ matrix.connector }}-${{ matrix.dcos }}
+          path: ${{ env.DC_E2E_RESULTS }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload live logs on failure
+        if: ${{ failure() && steps.select.outputs.run == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-live-e2e-logs-live-${{ matrix.connector }}-${{ matrix.dcos }}
+          path: ${{ runner.temp }}/defenseclaw-live-e2e-logs/**
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: true
+
+      - name: Teardown safety net
+        if: ${{ always() && steps.select.outputs.run == 'true' }}
+        run: |
+          defenseclaw-gateway connector teardown --connector "${{ matrix.connector }}" 2>/dev/null || true
+          defenseclaw-gateway stop 2>/dev/null || true
+          rm -rf "${HOME}/.defenseclaw" 2>/dev/null || true
+
+  # ---------------------------------------------------------------------------
+  # Report — aggregate every cell, render the matrix, and alert on regressions.
+  # ---------------------------------------------------------------------------
+  report:
+    name: Report + regression radar
+    needs: [contract-matrix, live-matrix]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required so the regression radar can open/update the
+      # connector-regression issue. No write access to code.
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all cell results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: connector-live-e2e-results-*
+          path: results
+          merge-multiple: true
+
+      - name: Render summary + open regression issue on failure
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          open_flag=""
+          # Only the trusted, scheduled / manual contexts may file issues.
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            open_flag="--open-issue"
+          fi
+          python3 scripts/live-connector-e2e/report.py \
+            --results-dir results \
+            ${open_flag} \
+            --run-url "${RUN_URL}"

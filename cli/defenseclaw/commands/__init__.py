@@ -33,6 +33,100 @@ def hint(*lines: str) -> None:
         click.echo(click.style(line, dim=True))
 
 
+def resolve_list_connector(app: Any, requested: str | None) -> str:
+    """Resolve and validate a ``--connector`` override for list commands.
+
+    Multi-connector installs let ``skill``/``mcp``/``plugin list`` target a
+    specific connector's catalog (the TUI focus selector relies on this).
+    When ``requested`` is empty the active connector is returned unchanged,
+    so single-connector behaviour is untouched. When supplied, it must be
+    one of the configured active connectors (case-insensitive) — otherwise
+    a ``UsageError`` is raised so a typo can't silently fall back to the
+    active connector and show the wrong catalog.
+    """
+    cfg = getattr(app, "cfg", None)
+    active = (
+        cfg.active_connector()
+        if cfg is not None and hasattr(cfg, "active_connector")
+        else "openclaw"
+    )
+    if not requested:
+        return active
+    requested = requested.strip()
+    try:
+        if cfg is not None and hasattr(cfg, "active_connectors"):
+            configured = list(cfg.active_connectors())
+        else:
+            configured = [active]
+    except Exception:  # noqa: BLE001 — fall back to the singular active connector.
+        configured = [active]
+    # Match connector-name-insensitively: fold case AND the hyphen/underscore
+    # aliases (e.g. "open-hands" → "openhands") via connector_paths.normalize
+    # so a user passing a documented alias resolves the configured canonical
+    # peer instead of hitting "not configured".
+    from defenseclaw import connector_paths
+
+    by_norm = {connector_paths.normalize(name): name for name in configured if name}
+    match = by_norm.get(connector_paths.normalize(requested))
+    if match is None:
+        allowed = ", ".join(sorted(configured)) or active
+        raise click.UsageError(
+            f"connector {requested!r} is not configured. Active connectors: {allowed}."
+        )
+    return match
+
+
+def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
+    """Resolve which connector(s) a *list* command should cover.
+
+    This is the plural companion to :func:`resolve_list_connector` and
+    encodes the uniform UX rule for ``skill``/``mcp``/``plugin list``:
+
+    * An explicit ``--connector X`` narrows to exactly that one validated
+      peer.
+    * With no flag the listing covers **every active connector**.
+      ``Config.active_connectors()`` returns a single name on a
+      single-connector install and N names on a fan-out install, so the
+      caller renders the same way regardless of count — the operator never
+      has to think about "single vs multi".
+    """
+    if requested and requested.strip():
+        return [resolve_list_connector(app, requested)]
+    cfg = getattr(app, "cfg", None)
+    try:
+        if cfg is not None and hasattr(cfg, "active_connectors"):
+            names = [n for n in cfg.active_connectors() if n]
+            if names:
+                return names
+    except Exception:  # noqa: BLE001 — fall back to the singular active connector.
+        pass
+    return [resolve_list_connector(app, "")]
+
+
+def list_scope_title(label: str, connector: str, detail: str = "") -> str:
+    """Build a rich table title that names the connector in scope.
+
+    Mirrors the MCP list table's ``(connector=...)`` banner so Skills and
+    Plugins list output also makes the active-connector default
+    discoverable on multi-connector installs. ``detail`` is the existing
+    count suffix (e.g. ``"(2/3 ready)"``) appended after the connector tag.
+    """
+    head = f"{label} (connector={connector})"
+    return f"{head} {detail}" if detail else head
+
+
+# Shared ``--connector`` help text for the *list* commands (skill/mcp/plugin
+# list). Bare (no flag) these fan out to EVERY active connector via
+# ``resolve_list_connectors``; passing ``--connector X`` narrows to one
+# validated peer. Stating that here keeps the flag help consistent with the
+# actual default if this constant is reused.
+LIST_CONNECTOR_HELP = (
+    "Narrow the listing to one configured connector. "
+    "Default: every active connector; pass --connector <name> to scope to a "
+    "single configured peer."
+)
+
+
 def compute_verdict(
     action_entry: Any | None = None,
     scan_entry: dict[str, Any] | None = None,

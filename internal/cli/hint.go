@@ -23,14 +23,15 @@ import (
 	"golang.org/x/term"
 )
 
-// printHint prints dim post-command hints only when stdout is a terminal.
+// printHint prints dim post-command hints when stdout is an interactive
+// terminal or when color forcing is enabled (CI logs with FORCE_COLOR).
 func printHint(lines ...string) {
 	fd := int(os.Stdout.Fd())
-	if !term.IsTerminal(fd) {
+	if !term.IsTerminal(fd) && !ColorEnabled() {
 		return
 	}
 	fmt.Println()
 	for _, line := range lines {
-		fmt.Printf("\033[2m%s\033[0m\n", line)
+		fmt.Println(Dim(line))
 	}
 }

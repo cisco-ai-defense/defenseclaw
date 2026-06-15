@@ -83,8 +83,14 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=7d"
-      - "--web.enable-remote-write-receiver"
       - "--web.enable-lifecycle"
+      # Developer-laptop stack, published on loopback only (see ports below).
+      # The admin + remote-write APIs are convenient for local work (purge
+      # stale series after a histogram-bucket change, push test data) and the
+      # 127.0.0.1 bind keeps them off the network. Drop these flags if you
+      # ever publish 9090 to a LAN via HOST_BIND=0.0.0.0.
+      - "--web.enable-admin-api"
+      - "--web.enable-remote-write-receiver"
       - "--enable-feature=exemplar-storage,native-histograms"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -127,16 +133,23 @@ services:
     image: grafana/grafana:11.3.0
     container_name: defenseclaw-grafana
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # This is a developer-laptop stack: every host port is published on
+      # ${HOST_BIND:-127.0.0.1} (loopback), so the dashboard is only
+      # reachable from the same machine. A login prompt on a localhost-only
+      # dashboard is pure friction, so Grafana opens with no login —
+      # anonymous access with the Admin role and the login form disabled.
+      # The loopback bind is the security boundary here. If you expose this
+      # to a LAN (HOST_BIND=0.0.0.0), turn auth back on: set
+      # GF_AUTH_ANONYMOUS_ENABLED=false and GF_SECURITY_ADMIN_PASSWORD=<pw>.
       - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
       - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
       - GF_USERS_DEFAULT_THEME=dark
     volumes:
+      - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-      - grafana-data:/var/lib/grafana
     ports:
       - "${HOST_BIND:-127.0.0.1}:3000:3000"
     networks:

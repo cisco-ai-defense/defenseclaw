@@ -22,7 +22,7 @@ func TestPolicyStableID_Deterministic(t *testing.T) {
 
 func TestAdmissionDecideSpan_EndToEnd(t *testing.T) {
 	ctx := context.Background()
-	ctx, span := StartAdmissionDecideSpan(ctx, "skill", "my-skill", "pol-1")
+	_, span := StartAdmissionDecideSpan(ctx, "skill", "my-skill", "pol-1")
 	if span == nil {
 		t.Fatal("expected span")
 	}

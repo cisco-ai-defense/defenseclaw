@@ -19,21 +19,32 @@
 package notify
 
 import (
-	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 var fallbackWriter io.Writer = os.Stderr
 
-func sendPlatform(title, message string) error {
-	// Use JSON encoding to safely escape all special characters (quotes,
-	// backslashes, newlines) for embedding in the AppleScript string literal.
-	// json.Marshal produces a quoted string with all metacharacters escaped;
-	// we use it directly as an AppleScript string value.
-	safeMsg, _ := json.Marshal(message)
-	safeTitle, _ := json.Marshal(title)
-	script := `display notification ` + string(safeMsg) + ` with title ` + string(safeTitle)
+// appleScriptQuote produces a quoted AppleScript string literal.
+// AppleScript only recognizes \" and \\ inside double-quoted strings;
+// json.Marshal's \u003c / \u003e escapes for angle brackets are not
+// understood by the AppleScript lexer and cause syntax errors when the
+// notification body contains <redacted …> markers.
+func appleScriptQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	return `"` + s + `"`
+}
+
+// sendPlatform delivers the notification via osascript's
+// "display notification" verb.
+func sendPlatform(n Notification) error {
+	script := "display notification " + appleScriptQuote(n.Body) + " with title " + appleScriptQuote(n.Title)
+	if n.Subtitle != "" {
+		script += " subtitle " + appleScriptQuote(n.Subtitle)
+	}
 	return exec.Command("osascript", "-e", script).Run()
 }

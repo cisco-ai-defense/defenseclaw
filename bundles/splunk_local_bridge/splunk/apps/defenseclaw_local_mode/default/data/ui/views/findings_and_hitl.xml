@@ -1,0 +1,149 @@
+<form version="1.1">
+  <label>Findings And HITL</label>
+  <description>Rule findings and human-in-the-loop approval signals for demo workflows in local Splunk.</description>
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="time">
+      <label>Time range</label>
+      <default>
+        <earliest>-24h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="text" token="severity" searchWhenChanged="true">
+      <label>Severity</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+    <input type="text" token="rule_id" searchWhenChanged="true">
+      <label>Rule</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+    <input type="dropdown" token="connector" searchWhenChanged="true">
+      <label>Connector</label>
+      <choice value="*">All</choice>
+      <default>*</default>
+      <initialValue>*</initialValue>
+      <search>
+        <query>`defenseclaw_demo_connector_events` | where connector!="(unknown)" | stats count by connector | sort - count</query>
+        <earliest>$time.earliest$</earliest>
+        <latest>$time.latest$</latest>
+      </search>
+      <fieldForLabel>connector</fieldForLabel>
+      <fieldForValue>connector</fieldForValue>
+    </input>
+  </fieldset>
+  <row>
+    <panel>
+      <title>Findings</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_finding_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$severity$"="*" OR severity="$severity$") AND ("$rule_id$"="*" OR rule_id="$rule_id$") | stats count as findings</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Critical Or High</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_finding_events` | where ("$connector$"="*" OR connector="$connector$") AND (severity="CRITICAL" OR severity="critical" OR severity="HIGH" OR severity="high") | stats count as critical_or_high</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>HITL Requests</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_hitl_events` | where ("$connector$"="*" OR connector="$connector$") AND (like(action, "%requested%") OR decision="confirm") | stats count as hitl_requests</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>HITL Denials</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_hitl_events` | where ("$connector$"="*" OR connector="$connector$") AND (like(action, "%denied%") OR decision="deny") | stats count as hitl_denials</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Findings By Severity</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_finding_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$rule_id$"="*" OR rule_id="$rule_id$") | timechart span=15m count by severity limit=8 useother=t</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>HITL Outcomes</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_hitl_events` | where ("$connector$"="*" OR connector="$connector$") | timechart span=15m count by decision limit=8 useother=t</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Top Rules</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_finding_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$severity$"="*" OR severity="$severity$") AND rule_id!="(none)" | stats count as findings values(severity) as severities values(connector) as connectors values(target) as targets by rule_id | sort - findings | head 20</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent HITL Events</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_hitl_events` | where ("$connector$"="*" OR connector="$connector$") | table timestamp connector action decision severity run_id session_id target message | sort - timestamp | head 25</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">25</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent Findings</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_finding_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$severity$"="*" OR severity="$severity$") AND ("$rule_id$"="*" OR rule_id="$rule_id$") | table timestamp connector rule_id severity run_id session_id target message | sort - timestamp | head 50</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</form>

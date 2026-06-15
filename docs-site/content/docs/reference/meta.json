@@ -1,0 +1,13 @@
+{
+  "title": "Reference",
+  "pages": [
+    "index",
+    "cli",
+    "gateway-api",
+    "configuration",
+    "keys",
+    "redaction",
+    "fail-modes",
+    "env-vars"
+  ]
+}

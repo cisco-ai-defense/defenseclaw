@@ -38,6 +38,23 @@ const (
 )
 
 // FirewallConfig is the top-level firewall configuration.
+//
+// Global by design: the egress firewall is a single host-wide control,
+// not a per-connector one. It compiles from one firewall.yaml into one
+// OS-level packet-filter ruleset (pf on macOS, iptables on Linux) that
+// filters strictly by destination (domain / IP / port). The kernel
+// cannot attribute an outbound connection back to the connector that
+// originated it — every DefenseClaw-managed agent egresses through the
+// same network namespace — so there is deliberately no per-connector
+// firewall surface. Multi-connector installs still serve N hook
+// connectors from one gateway, but they all share this one allowlist.
+//
+// Per-connector network needs are satisfied additively, not by
+// splitting the ruleset: each connector's
+// connector.AllowedHostsProvider.AllowedHosts() is folded into this
+// single allowlist via MergeAllowedHosts (a set union) at sidecar boot.
+// Hook-only connectors never open a proxy listener, so their agent
+// traffic does not traverse the firewall at all.
 type FirewallConfig struct {
 	Version       string          `yaml:"version"`
 	DefaultAction string          `yaml:"default_action"` // allow or deny
@@ -124,7 +141,32 @@ func (c *FirewallConfig) Validate() error {
 }
 
 // DefaultFirewallConfig returns a safe deny-by-default config with common
-// allowlists pre-populated for OpenClaw.
+// allowlists pre-populated for the four built-in connectors.
+//
+// The list folds in domains every connector commonly reaches:
+//
+//   - api.openai.com          (OpenClaw + Codex baseline LLM)
+//   - api.anthropic.com       (Claude Code baseline LLM)
+//   - openrouter.ai           (ZeptoClaw default broker)
+//   - api.together.xyz        (ZeptoClaw alt broker)
+//   - api.github.com / github.com / objects.githubusercontent.com
+//     (Codex update channel + skill/plugin pulls)
+//   - claude.ai / docs.anthropic.com / console.anthropic.com
+//     (Claude Code skill + plugin registry)
+//   - openai.com / platform.openai.com (Codex docs/templates)
+//   - us.api.inspect.aidefense.security.cisco.com (OpenClaw plugin)
+//   - proxy.golang.org / sum.golang.org / registry.npmjs.org / pypi.org
+//     (build-time package downloads when the agent shells out to
+//     go/npm/pip during a tool call)
+//
+// The list is intentionally generous: a Codex / Claude Code /
+// ZeptoClaw user with a deny-by-default firewall would otherwise see
+// "DNS lookup blocked" on first chat, which is unactionable. See
+// S3.3 / F26.
+//
+// Connectors that ship with a more-restrictive contract should
+// implement connector.AllowedHostsProvider; sidecar bootstrap merges
+// those values onto the static baseline before the firewall starts.
 func DefaultFirewallConfig() *FirewallConfig {
 	cfg := &FirewallConfig{
 		Version:       "1.0",
@@ -140,13 +182,28 @@ func DefaultFirewallConfig() *FirewallConfig {
 		},
 		Allowlist: AllowlistConfig{
 			Domains: []string{
+				// LLM endpoints (per built-in connector).
 				"api.anthropic.com",
 				"api.openai.com",
+				"openrouter.ai",
+				"api.together.xyz",
+				// Skill / plugin registries + docs CDNs.
+				"claude.ai",
+				"docs.anthropic.com",
+				"console.anthropic.com",
+				"openai.com",
+				"platform.openai.com",
+				// Code distribution + GitHub release artifacts.
 				"api.github.com",
 				"github.com",
+				"objects.githubusercontent.com",
 				"proxy.golang.org",
 				"sum.golang.org",
 				"registry.npmjs.org",
+				"pypi.org",
+				"files.pythonhosted.org",
+				// Cisco AI Defense inspect endpoint (OpenClaw plugin).
+				"us.api.inspect.aidefense.security.cisco.com",
 			},
 			IPs:   []string{},
 			Ports: []int{443, 80},
@@ -159,6 +216,43 @@ func DefaultFirewallConfig() *FirewallConfig {
 	}
 	applyDefaults(cfg)
 	return cfg
+}
+
+// MergeAllowedHosts adds extra hostnames to the firewall config's
+// allow-list, deduplicating and skipping anything that fails
+// validateDestination. This is the entrypoint for boot-time merging
+// of per-connector contributions (connector.AllowedHostsProvider).
+//
+// The function is a method on *FirewallConfig rather than a free
+// function so callers can chain `firewall.DefaultFirewallConfig().
+// MergeAllowedHosts(extra)` without an intermediate variable, and
+// so future fields (Ports, IPs) can hang off the same surface.
+func (c *FirewallConfig) MergeAllowedHosts(extra []string) *FirewallConfig {
+	if c == nil || len(extra) == 0 {
+		return c
+	}
+	seen := make(map[string]struct{}, len(c.Allowlist.Domains)+len(extra))
+	for _, d := range c.Allowlist.Domains {
+		seen[d] = struct{}{}
+	}
+	for _, host := range extra {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		if _, dup := seen[host]; dup {
+			continue
+		}
+		// validateDestination accepts hostnames, IPs, and CIDRs;
+		// AllowedHostsProvider should only return DNS names but the
+		// validator catches typos cheaply.
+		if err := validateDestination(host); err != nil {
+			continue
+		}
+		seen[host] = struct{}{}
+		c.Allowlist.Domains = append(c.Allowlist.Domains, host)
+	}
+	return c
 }
 
 func applyDefaults(cfg *FirewallConfig) {

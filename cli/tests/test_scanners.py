@@ -16,14 +16,11 @@
 
 """Tests for defenseclaw.scanner — MCP and skill scanner wrappers."""
 
-import json
 import os
-import tempfile
+import sys
 import unittest
-from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
@@ -36,7 +33,7 @@ class TestMCPScannerWrapper(unittest.TestCase):
 
     def test_config_fields_used_directly(self):
         """Common config values are accessible via wrapper."""
-        from defenseclaw.config import MCPScannerConfig, InspectLLMConfig, CiscoAIDefenseConfig
+        from defenseclaw.config import CiscoAIDefenseConfig, InspectLLMConfig, MCPScannerConfig
         from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         llm = InspectLLMConfig(
@@ -93,9 +90,10 @@ class TestMCPScannerWrapper(unittest.TestCase):
         self.assertIn("mcp-scanner/yara", result.findings[0].scanner)
 
     def test_scan_raises_system_exit_on_import_error(self):
+        import builtins
+
         from defenseclaw.config import MCPScannerConfig
         from defenseclaw.scanner.mcp import MCPScannerWrapper
-        import builtins
 
         s = MCPScannerWrapper(MCPScannerConfig())
         real_import = builtins.__import__
@@ -111,10 +109,11 @@ class TestMCPScannerWrapper(unittest.TestCase):
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper._convert")
     @patch("defenseclaw.scanner.mcp.asyncio.run")
     def test_scan_with_mocked_sdk(self, mock_asyncio_run, mock_convert):
-        from defenseclaw.config import MCPScannerConfig
-        from defenseclaw.scanner.mcp import MCPScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
+
+        from defenseclaw.config import MCPScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         mock_tool_result = MagicMock()
         mock_tool_result.tool_name = "test-tool"
@@ -133,7 +132,7 @@ class TestMCPScannerWrapper(unittest.TestCase):
             "mcpscanner": MagicMock(),
             "mcpscanner.core": MagicMock(),
             "mcpscanner.core.models": MagicMock(),
-        }):
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
             scanner = MCPScannerWrapper(MCPScannerConfig())
             result = scanner.scan("http://localhost:3000")
 
@@ -153,11 +152,12 @@ class TestMCPScannerWrapper(unittest.TestCase):
     @patch("defenseclaw.scanner.mcp.asyncio.run")
     def test_invalid_analyzer_names_warn_on_stderr(self, mock_asyncio_run, mock_convert):
         """Typos in analyzer names must produce a warning, not silently drop."""
-        from defenseclaw.config import MCPScannerConfig
-        from defenseclaw.scanner.mcp import MCPScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
         from io import StringIO
+
+        from defenseclaw.config import MCPScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         mock_asyncio_run.return_value = []
         mock_convert.return_value = ScanResult(
@@ -172,7 +172,7 @@ class TestMCPScannerWrapper(unittest.TestCase):
             "mcpscanner": MagicMock(),
             "mcpscanner.core": MagicMock(),
             "mcpscanner.core.models": MagicMock(),
-        }):
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
             cfg = MCPScannerConfig(analyzers="yara,aip")
             scanner = MCPScannerWrapper(cfg)
             with patch("sys.stderr", captured):
@@ -186,11 +186,12 @@ class TestMCPScannerWrapper(unittest.TestCase):
     @patch("defenseclaw.scanner.mcp.asyncio.run")
     def test_all_invalid_analyzers_falls_back_to_none(self, mock_asyncio_run, mock_convert):
         """When every analyzer name is invalid, fall back to all analyzers (None)."""
-        from defenseclaw.config import MCPScannerConfig
-        from defenseclaw.scanner.mcp import MCPScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
         from io import StringIO
+
+        from defenseclaw.config import MCPScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         mock_asyncio_run.return_value = []
         mock_convert.return_value = ScanResult(
@@ -205,7 +206,7 @@ class TestMCPScannerWrapper(unittest.TestCase):
             "mcpscanner": MagicMock(),
             "mcpscanner.core": MagicMock(),
             "mcpscanner.core.models": MagicMock(),
-        }):
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
             cfg = MCPScannerConfig(analyzers="bogus,typo")
             scanner = MCPScannerWrapper(cfg)
             with patch("sys.stderr", captured):
@@ -222,10 +223,11 @@ class TestMCPScannerWrapper(unittest.TestCase):
     @patch("defenseclaw.scanner.mcp.asyncio.run")
     def test_scan_instructions_iterates_over_results(self, mock_asyncio_run, mock_convert):
         """Regression: instruction results must be iterated like tools/prompts/resources."""
-        from defenseclaw.config import MCPScannerConfig
-        from defenseclaw.scanner.mcp import MCPScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
+
+        from defenseclaw.config import MCPScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         finding = MagicMock()
         finding.severity = "HIGH"
@@ -254,7 +256,7 @@ class TestMCPScannerWrapper(unittest.TestCase):
             "mcpscanner": MagicMock(),
             "mcpscanner.core": MagicMock(),
             "mcpscanner.core.models": MagicMock(),
-        }):
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
             cfg = MCPScannerConfig(scan_instructions=True)
             scanner = MCPScannerWrapper(cfg)
             scanner.scan("http://localhost:3000")
@@ -340,7 +342,7 @@ class TestSkillScannerWrapper(unittest.TestCase):
         self.assertEqual(s.name(), "skill-scanner")
 
     def test_inject_env_sets_vars(self):
-        from defenseclaw.config import SkillScannerConfig, InspectLLMConfig
+        from defenseclaw.config import InspectLLMConfig, SkillScannerConfig
         from defenseclaw.scanner.skill import SkillScannerWrapper
 
         llm = InspectLLMConfig(api_key="test-key-value", model="gpt-4")
@@ -361,7 +363,7 @@ class TestSkillScannerWrapper(unittest.TestCase):
             os.environ.update(env_backup)
 
     def test_inject_env_does_not_override_existing(self):
-        from defenseclaw.config import SkillScannerConfig, InspectLLMConfig
+        from defenseclaw.config import InspectLLMConfig, SkillScannerConfig
         from defenseclaw.scanner.skill import SkillScannerWrapper
 
         llm = InspectLLMConfig(api_key="new-key")
@@ -418,9 +420,10 @@ class TestSkillScannerWrapper(unittest.TestCase):
         self.assertIn("injection", result.findings[0].tags)
 
     def test_scan_raises_system_exit_on_import_error(self):
+        import builtins
+
         from defenseclaw.config import SkillScannerConfig
         from defenseclaw.scanner.skill import SkillScannerWrapper
-        import builtins
 
         s = SkillScannerWrapper(SkillScannerConfig())
         real_import = builtins.__import__
@@ -435,10 +438,11 @@ class TestSkillScannerWrapper(unittest.TestCase):
 
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper._convert")
     def test_scan_with_mocked_sdk(self, mock_convert):
-        from defenseclaw.config import SkillScannerConfig
-        from defenseclaw.scanner.skill import SkillScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
+
+        from defenseclaw.config import SkillScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.skill import SkillScannerWrapper
 
         mock_sdk_module = MagicMock()
         mock_scanner_instance = MagicMock()
@@ -464,6 +468,201 @@ class TestSkillScannerWrapper(unittest.TestCase):
         self.assertTrue(result.is_clean())
         self.assertEqual(result.scanner, "skill-scanner")
 
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper._convert")
+    def test_scan_uses_llm_analyzer_for_bedrock(self, mock_convert):
+        """Bedrock (and any non-openai/anthropic provider) must enable
+        the LLM analyzer with a LiteLLM-shaped ``provider/model`` string.
+
+        The upstream skill-scanner SDK auto-detects the provider from
+        the model prefix, so we deliberately do NOT pass
+        ``llm_provider`` (our internal short names like ``bedrock`` do
+        not match the upstream ``LLMProvider`` enum).
+        """
+        from datetime import datetime, timezone
+
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.skill import SkillScannerWrapper
+
+        mock_sdk_module = MagicMock()
+        mock_scanner_instance = MagicMock()
+        mock_sdk_module.SkillScanner.return_value = mock_scanner_instance
+        mock_scanner_instance.scan_skill.return_value = MagicMock(findings=[])
+
+        build_analyzers = MagicMock(return_value=[])
+        mock_convert.return_value = ScanResult(
+            scanner="skill-scanner",
+            target="/tmp/skill",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        cfg = SkillScannerConfig(use_llm=True, use_behavioral=True)
+        llm = LLMConfig(
+            provider="bedrock",
+            model="us.anthropic.claude-haiku",
+            api_key="bedrock-bearer-xyz",
+        )
+        with patch.dict("sys.modules", {
+            "skill_scanner": mock_sdk_module,
+            "skill_scanner.core": MagicMock(),
+            "skill_scanner.core.analyzer_factory": MagicMock(build_analyzers=build_analyzers),
+            "skill_scanner.core.scan_policy": MagicMock(),
+        }):
+            scanner = SkillScannerWrapper(cfg, llm=llm)
+            result = scanner.scan("/tmp/skill")
+
+        self.assertTrue(result.is_clean())
+        kwargs = build_analyzers.call_args.kwargs
+        self.assertTrue(kwargs["use_llm"])
+        self.assertTrue(kwargs["use_behavioral"])
+        # Model must be LiteLLM-shaped so ProviderConfig auto-detects bedrock.
+        self.assertEqual(kwargs["llm_model"], "bedrock/us.anthropic.claude-haiku")
+        self.assertEqual(kwargs["llm_api_key"], "bedrock-bearer-xyz")
+        # Crucially, our short provider name must NOT be forwarded
+        # because upstream's enum expects ``aws-bedrock`` and would
+        # reject ``bedrock`` on the model-less path.
+        self.assertNotIn("llm_provider", kwargs)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper._convert")
+    def test_scan_uses_llm_analyzer_for_gemini(self, mock_convert):
+        """Gemini flows the same way: model carries the provider, no
+        ``llm_provider`` kwarg leaked to upstream."""
+        from datetime import datetime, timezone
+
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.skill import SkillScannerWrapper
+
+        mock_sdk_module = MagicMock()
+        mock_scanner_instance = MagicMock()
+        mock_sdk_module.SkillScanner.return_value = mock_scanner_instance
+        mock_scanner_instance.scan_skill.return_value = MagicMock(findings=[])
+
+        build_analyzers = MagicMock(return_value=[])
+        mock_convert.return_value = ScanResult(
+            scanner="skill-scanner",
+            target="/tmp/skill",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        cfg = SkillScannerConfig(use_llm=True)
+        llm = LLMConfig(
+            provider="gemini",
+            model="gemini-2.5-pro",
+            api_key="g-key",
+        )
+        with patch.dict("sys.modules", {
+            "skill_scanner": mock_sdk_module,
+            "skill_scanner.core": MagicMock(),
+            "skill_scanner.core.analyzer_factory": MagicMock(build_analyzers=build_analyzers),
+            "skill_scanner.core.scan_policy": MagicMock(),
+        }):
+            scanner = SkillScannerWrapper(cfg, llm=llm)
+            scanner.scan("/tmp/skill")
+
+        kwargs = build_analyzers.call_args.kwargs
+        self.assertTrue(kwargs["use_llm"])
+        self.assertEqual(kwargs["llm_model"], "gemini/gemini-2.5-pro")
+        self.assertEqual(kwargs["llm_api_key"], "g-key")
+        self.assertNotIn("llm_provider", kwargs)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper._convert")
+    def test_scan_forwards_explicit_llm_base_url(self, mock_convert):
+        """Operator-set ``llm.base_url`` must reach build_analyzers so
+        custom endpoints (Vertex, Azure, self-hosted vLLM) work."""
+        from datetime import datetime, timezone
+
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.skill import SkillScannerWrapper
+
+        mock_sdk_module = MagicMock()
+        mock_scanner_instance = MagicMock()
+        mock_sdk_module.SkillScanner.return_value = mock_scanner_instance
+        mock_scanner_instance.scan_skill.return_value = MagicMock(findings=[])
+
+        build_analyzers = MagicMock(return_value=[])
+        mock_convert.return_value = ScanResult(
+            scanner="skill-scanner",
+            target="/tmp/skill",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        cfg = SkillScannerConfig(use_llm=True)
+        llm = LLMConfig(
+            provider="vllm",
+            model="meta-llama/Llama-3.1-8B-Instruct",
+            base_url="http://10.0.0.5:8000/v1",
+        )
+        with patch.dict("sys.modules", {
+            "skill_scanner": mock_sdk_module,
+            "skill_scanner.core": MagicMock(),
+            "skill_scanner.core.analyzer_factory": MagicMock(build_analyzers=build_analyzers),
+            "skill_scanner.core.scan_policy": MagicMock(),
+        }):
+            scanner = SkillScannerWrapper(cfg, llm=llm)
+            scanner.scan("/tmp/skill")
+
+        kwargs = build_analyzers.call_args.kwargs
+        self.assertEqual(kwargs["llm_base_url"], "http://10.0.0.5:8000/v1")
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper._convert")
+    def test_scan_skips_llm_when_model_unresolved(self, mock_convert):
+        """When ``cfg.use_llm=True`` but no model is resolvable from
+        ``llm.model`` *or* ``SKILL_SCANNER_LLM_MODEL`` env, the wrapper
+        must NOT pass ``use_llm`` to upstream. Otherwise the upstream
+        factory falls back to a hard-coded Anthropic default
+        (``claude-3-5-sonnet-20241022``) which crashes operators whose
+        unified key isn't an Anthropic key. Skipping the LLM analyzer
+        with a log line is strictly better.
+        """
+        from datetime import datetime, timezone
+
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.skill import SkillScannerWrapper
+
+        mock_sdk_module = MagicMock()
+        mock_scanner_instance = MagicMock()
+        mock_sdk_module.SkillScanner.return_value = mock_scanner_instance
+        mock_scanner_instance.scan_skill.return_value = MagicMock(findings=[])
+
+        build_analyzers = MagicMock(return_value=[])
+        mock_convert.return_value = ScanResult(
+            scanner="skill-scanner",
+            target="/tmp/skill",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        cfg = SkillScannerConfig(use_llm=True, use_behavioral=True)
+        llm = LLMConfig(provider="bedrock", api_key="bedrock-key")  # no model
+
+        # Ensure no leftover env from another test sneaks in.
+        prev_env = os.environ.pop("SKILL_SCANNER_LLM_MODEL", None)
+        try:
+            with patch.dict("sys.modules", {
+                "skill_scanner": mock_sdk_module,
+                "skill_scanner.core": MagicMock(),
+                "skill_scanner.core.analyzer_factory": MagicMock(build_analyzers=build_analyzers),
+                "skill_scanner.core.scan_policy": MagicMock(),
+            }):
+                scanner = SkillScannerWrapper(cfg, llm=llm)
+                scanner.scan("/tmp/skill")
+        finally:
+            if prev_env is not None:
+                os.environ["SKILL_SCANNER_LLM_MODEL"] = prev_env
+
+        kwargs = build_analyzers.call_args.kwargs
+        # Behavioral analyzer must still run — only the LLM analyzer is gated.
+        self.assertTrue(kwargs.get("use_behavioral"))
+        self.assertNotIn("use_llm", kwargs)
+        self.assertNotIn("llm_model", kwargs)
+        self.assertNotIn("llm_provider", kwargs)
+
 
 class TestMCPScannerCommonConfigs(unittest.TestCase):
     """Tests for MCPScannerWrapper using shared InspectLLM and CiscoAIDefense configs."""
@@ -479,7 +678,7 @@ class TestMCPScannerCommonConfigs(unittest.TestCase):
 
     def test_inject_env_sets_provider_key(self):
         """_inject_env sets the provider-specific env var (e.g. OPENAI_API_KEY)."""
-        from defenseclaw.config import MCPScannerConfig, InspectLLMConfig, CiscoAIDefenseConfig
+        from defenseclaw.config import CiscoAIDefenseConfig, InspectLLMConfig, MCPScannerConfig
         from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         llm = InspectLLMConfig(api_key="llm-key-123", provider="openai")
@@ -494,29 +693,92 @@ class TestMCPScannerCommonConfigs(unittest.TestCase):
         finally:
             os.environ.pop("OPENAI_API_KEY", None)
 
-    def test_resolve_llm_base_url_from_provider(self):
-        from defenseclaw.config import MCPScannerConfig, InspectLLMConfig
+    def test_mcp_config_passes_empty_base_url_when_unset(self):
+        """For providers without an operator-set ``llm.base_url``
+        (Bedrock, Gemini, Vertex, Groq, Mistral, …) the wrapper must
+        forward an empty string. The mcp-scanner SDK only adds
+        ``api_base`` to its LiteLLM call when this value is truthy,
+        otherwise LiteLLM's own provider-default discovery routes the
+        request — which is what every non-Azure provider needs.
+        """
+        from defenseclaw.config import LLMConfig, MCPScannerConfig
         from defenseclaw.scanner.mcp import MCPScannerWrapper
 
-        llm = InspectLLMConfig(provider="openai")
-        s = MCPScannerWrapper(MCPScannerConfig(), llm)
-        self.assertEqual(s._resolve_llm_base_url(), "https://api.openai.com")
+        llm = LLMConfig(provider="bedrock", model="us.anthropic.claude-haiku")
+        captured: dict = {}
 
-    def test_resolve_llm_base_url_explicit(self):
-        from defenseclaw.config import MCPScannerConfig, InspectLLMConfig
+        class FakeMCPConfig:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        class FakeScanner:
+            def __init__(self, *_a, **_kw):
+                pass
+
+            async def scan_remote_server_tools(self, *_a, **_kw):
+                return []
+
+        mock_mcpscanner = MagicMock()
+        mock_mcpscanner.Config = FakeMCPConfig
+        mock_mcpscanner.Scanner = FakeScanner
+        mock_models = MagicMock()
+        mock_models.AnalyzerEnum = MagicMock()
+
+        # ``analyzers=""`` short-circuits ``_parse_analyzers`` so we don't
+        # need to mimic the full SDK ``AnalyzerEnum`` shape here — this
+        # test only cares that ``MCPConfig`` was constructed with the
+        # right LLM kwargs.
+        s = MCPScannerWrapper(MCPScannerConfig(analyzers=""), llm=llm)
+        with patch.dict("sys.modules", {
+            "mcpscanner": mock_mcpscanner,
+            "mcpscanner.core": MagicMock(),
+            "mcpscanner.core.models": mock_models,
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
+            s.scan("https://mcp.example.com")
+
+        self.assertEqual(captured["llm_model"], "bedrock/us.anthropic.claude-haiku")
+        self.assertEqual(captured["llm_base_url"], "")
+
+    def test_mcp_config_passes_explicit_base_url(self):
+        """An operator-set ``llm.base_url`` must flow through unchanged
+        — required for Azure OpenAI deployments and for self-hosted
+        OpenAI-compatible endpoints (vLLM, LM Studio, LiteLLM proxy)."""
+        from defenseclaw.config import LLMConfig, MCPScannerConfig
         from defenseclaw.scanner.mcp import MCPScannerWrapper
 
-        llm = InspectLLMConfig(provider="openai", base_url="https://custom.llm.api")
-        s = MCPScannerWrapper(MCPScannerConfig(), llm)
-        self.assertEqual(s._resolve_llm_base_url(), "https://custom.llm.api")
+        llm = LLMConfig(
+            provider="azure",
+            model="azure/my-deployment",
+            base_url="https://my-azure.openai.azure.com",
+        )
+        captured: dict = {}
 
-    def test_resolve_llm_base_url_unknown_provider(self):
-        from defenseclaw.config import MCPScannerConfig, InspectLLMConfig
-        from defenseclaw.scanner.mcp import MCPScannerWrapper
+        class FakeMCPConfig:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
 
-        llm = InspectLLMConfig(provider="bedrock")
-        s = MCPScannerWrapper(MCPScannerConfig(), llm)
-        self.assertEqual(s._resolve_llm_base_url(), "")
+        class FakeScanner:
+            def __init__(self, *_a, **_kw):
+                pass
+
+            async def scan_remote_server_tools(self, *_a, **_kw):
+                return []
+
+        mock_mcpscanner = MagicMock()
+        mock_mcpscanner.Config = FakeMCPConfig
+        mock_mcpscanner.Scanner = FakeScanner
+        mock_models = MagicMock()
+        mock_models.AnalyzerEnum = MagicMock()
+
+        s = MCPScannerWrapper(MCPScannerConfig(analyzers=""), llm=llm)
+        with patch.dict("sys.modules", {
+            "mcpscanner": mock_mcpscanner,
+            "mcpscanner.core": MagicMock(),
+            "mcpscanner.core.models": mock_models,
+        }), patch("defenseclaw.scanner.mcp.resolve_and_pin", return_value=("127.0.0.1", "localhost", 3000)):
+            s.scan("https://mcp.example.com")
+
+        self.assertEqual(captured["llm_base_url"], "https://my-azure.openai.azure.com")
 
 
 class TestSkillScannerCommonConfigs(unittest.TestCase):
@@ -531,7 +793,7 @@ class TestSkillScannerCommonConfigs(unittest.TestCase):
         self.assertEqual(s.cisco_ai_defense.api_key, "")
 
     def test_inject_env_uses_inspect_llm(self):
-        from defenseclaw.config import SkillScannerConfig, InspectLLMConfig, CiscoAIDefenseConfig
+        from defenseclaw.config import CiscoAIDefenseConfig, InspectLLMConfig, SkillScannerConfig
         from defenseclaw.scanner.skill import SkillScannerWrapper
 
         llm = InspectLLMConfig(api_key="shared-llm-key", model="gpt-4o")
@@ -551,7 +813,7 @@ class TestSkillScannerCommonConfigs(unittest.TestCase):
                 os.environ.pop(k, None)
 
     def test_inject_env_cisco_resolved_from_env_var(self):
-        from defenseclaw.config import SkillScannerConfig, CiscoAIDefenseConfig
+        from defenseclaw.config import CiscoAIDefenseConfig, SkillScannerConfig
         from defenseclaw.scanner.skill import SkillScannerWrapper
 
         aid = CiscoAIDefenseConfig(api_key="direct", api_key_env="TEST_CISCO_RESOLVE_XYZ")

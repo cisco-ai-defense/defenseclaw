@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
     target TEXT,
     actor TEXT NOT NULL DEFAULT 'defenseclaw',
     details TEXT,
+    structured_json TEXT,
     severity TEXT,
     run_id TEXT
 );
@@ -190,11 +192,60 @@ def _validate(field: str, value: str) -> None:
 
 class Store:
     def __init__(self, db_path: str) -> None:
+        newly_created = self._db_will_be_created(db_path)
         self.db = sqlite3.connect(
             db_path, detect_types=sqlite3.PARSE_DECLTYPES, timeout=5.0,
         )
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
+        # The audit DB stores audit events, scan results, findings, raw
+        # scanner JSON, target paths, and action decisions, so it must be
+        # private to the operator / service account. sqlite3.connect()
+        # honours the process umask, which can leave a freshly created DB
+        # world- or group-readable (F-0083). Pin the file to owner-only
+        # (0600) and, for a DB we just created, drop world access on the
+        # parent directory so a different local user cannot traverse to it.
+        self._harden_permissions(db_path, newly_created)
+
+    @staticmethod
+    def _is_disk_path(db_path: str) -> bool:
+        """True for an on-disk DB path (not an in-memory database)."""
+        if not db_path or db_path == ":memory:":
+            return False
+        if db_path.startswith("file:") and "mode=memory" in db_path:
+            return False
+        return True
+
+    @classmethod
+    def _db_will_be_created(cls, db_path: str) -> bool:
+        """True when ``sqlite3.connect`` will create a brand-new DB file."""
+        return cls._is_disk_path(db_path) and not os.path.exists(db_path)
+
+    def _harden_permissions(self, db_path: str, newly_created: bool) -> None:
+        if not self._is_disk_path(db_path):
+            return
+        # Always tighten the DB file itself to owner read/write only.
+        # This is functionally safe for pre-existing DBs (the owner keeps
+        # full access) while closing the world/group-readable hole.
+        try:
+            os.chmod(db_path, 0o600)
+        except OSError:
+            pass
+        # Only adjust the parent directory when we just created the DB,
+        # so we never mutate an unrelated directory a caller pointed us
+        # at (e.g. a shared temp root holding a pre-existing file).
+        if not newly_created:
+            return
+        parent = os.path.dirname(os.path.abspath(db_path))
+        if not parent:
+            return
+        try:
+            current = stat.S_IMODE(os.stat(parent).st_mode)
+            hardened = current & ~stat.S_IRWXO
+            if hardened != current:
+                os.chmod(parent, hardened)
+        except OSError:
+            pass
 
     def init(self) -> None:
         self.db.executescript(SCHEMA)
@@ -220,19 +271,26 @@ class Store:
         if not block_exists and not allow_exists:
             return
 
-        if block_exists:
-            self.db.execute(
-                """INSERT OR REPLACE INTO actions
-                   (id, target_type, target_name, source_path, actions_json, reason, updated_at)
-                   SELECT id, target_type, target_name, NULL, '{"install":"block"}', reason, created_at
-                   FROM block_list"""
-            )
+        # BLOCK precedence: ``actions`` has a UNIQUE index on
+        # (target_type, target_name), so when the same target appears in
+        # both legacy tables the INSERT OR REPLACE that runs LAST wins.
+        # We therefore migrate allow rows first and block rows last so a
+        # conflicting blocked target can never be silently downgraded to
+        # an allow entry during migration (F-0082). This matches the
+        # admission ordering where explicit blocks override allows.
         if allow_exists:
             self.db.execute(
                 """INSERT OR REPLACE INTO actions
                    (id, target_type, target_name, source_path, actions_json, reason, updated_at)
                    SELECT id, target_type, target_name, NULL, '{"install":"allow"}', reason, created_at
                    FROM allow_list"""
+            )
+        if block_exists:
+            self.db.execute(
+                """INSERT OR REPLACE INTO actions
+                   (id, target_type, target_name, source_path, actions_json, reason, updated_at)
+                   SELECT id, target_type, target_name, NULL, '{"install":"block"}', reason, created_at
+                   FROM block_list"""
             )
         self.db.execute("DROP TABLE IF EXISTS block_list")
         self.db.execute("DROP TABLE IF EXISTS allow_list")
@@ -247,6 +305,12 @@ class Store:
             if "run_id" in columns:
                 continue
             self.db.execute(f"ALTER TABLE {table} ADD COLUMN run_id TEXT")
+        audit_columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
+        }
+        if "structured_json" not in audit_columns:
+            self.db.execute("ALTER TABLE audit_events ADD COLUMN structured_json TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_scan_run_id ON scan_results(run_id)")
         self.db.commit()
@@ -334,30 +398,33 @@ class Store:
             event.actor = "defenseclaw"
         if not event.run_id:
             event.run_id = _current_run_id()
+        structured_json = json.dumps(event.structured, separators=(",", ":")) if event.structured else None
         self.db.execute(
-            """INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO audit_events (
+                id, timestamp, action, target, actor, details,
+                structured_json, severity, run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (event.id, event.timestamp.isoformat(), event.action,
              event.target or None, event.actor, event.details or None,
-             event.severity or None, event.run_id or None),
+             structured_json, event.severity or None, event.run_id or None),
         )
         self.db.commit()
 
     def list_events(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id
-               FROM audit_events ORDER BY timestamp DESC LIMIT ?""",
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
+               FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (max(limit, 1),),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
 
     def list_alerts(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
                FROM audit_events
                WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
                  AND action NOT LIKE 'dismiss%'
-               ORDER BY timestamp DESC LIMIT ?""",
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (max(limit, 1),),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
@@ -640,6 +707,14 @@ class Store:
 
     @staticmethod
     def _row_to_event(row: tuple[Any, ...]) -> Event:
+        structured: dict[str, Any] = {}
+        if len(row) > 8 and row[8]:
+            try:
+                decoded = json.loads(row[8])
+                if isinstance(decoded, dict):
+                    structured = decoded
+            except (json.JSONDecodeError, TypeError):
+                structured = {}
         return Event(
             id=row[0],
             timestamp=_parse_ts(row[1]),
@@ -649,6 +724,7 @@ class Store:
             details=row[5] or "",
             severity=row[6] or "",
             run_id=row[7] or "",
+            structured=structured,
         )
 
     def get_target_snapshot(
@@ -669,7 +745,7 @@ class Store:
     def list_drift_events(self, limit: int = 50) -> list[Event]:
         rows = self.db.execute(
             "SELECT id, timestamp, action, target, actor,"
-            " details, severity, run_id"
+            " details, severity, run_id, structured_json"
             " FROM audit_events WHERE action = 'drift'"
             " ORDER BY timestamp DESC LIMIT ?",
             (limit,),

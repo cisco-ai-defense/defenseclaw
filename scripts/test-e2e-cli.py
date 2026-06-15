@@ -403,15 +403,22 @@ GUARDRAIL_PORT = 4000
 
 def _derive_master_key() -> str:
     """Derive the proxy master key from the device key, matching the Go/Python derivation."""
-    import hashlib, hmac
+    import hashlib
+
     key_file = os.path.expanduser("~/.defenseclaw/device.key")
     try:
         with open(key_file, "rb") as f:
             data = f.read()
-        digest = hmac.new(b"defenseclaw-proxy-master-key", data, hashlib.sha256).hexdigest()[:32]
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            data,
+            b"defenseclaw-proxy-master-key",
+            100_000,
+            dklen=32,
+        ).hex()
         return f"sk-dc-{digest}"
     except OSError:
-        return "sk-dc-local-dev"
+        return ""
 
 
 def _proxy_chat(master_key: str, content: str, max_tokens: int = 20) -> dict:

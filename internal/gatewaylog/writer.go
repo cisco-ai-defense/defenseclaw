@@ -17,6 +17,7 @@
 package gatewaylog
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -36,7 +38,7 @@ type Writer struct {
 	mu      sync.Mutex
 	jsonl   io.WriteCloser
 	pretty  io.Writer
-	fanout  []func(Event)
+	fanout  []func(context.Context, Event)
 	encoder *json.Encoder
 	closed  bool
 
@@ -127,6 +129,18 @@ func New(cfg Config) (*Writer, error) {
 // buffered channel. The canonical use case is mapping events onto
 // OTel LogRecords.
 func (w *Writer) WithFanout(fn func(Event)) {
+	if fn == nil {
+		return
+	}
+	w.WithFanoutContext(func(_ context.Context, e Event) {
+		fn(e)
+	})
+}
+
+// WithFanoutContext registers an additional per-event callback that receives
+// the caller context. Request-bound emitters should prefer this so downstream
+// OTel log fanout can preserve native trace/span context.
+func (w *Writer) WithFanoutContext(fn func(context.Context, Event)) {
 	if w == nil || fn == nil {
 		return
 	}
@@ -147,8 +161,17 @@ func (w *Writer) WithFanout(fn func(Event)) {
 // via a buffered channel). Under-mutex file/stderr writes keep the
 // JSONL tier strictly append-ordered per-emit.
 func (w *Writer) Emit(e Event) {
+	w.EmitContext(context.Background(), e)
+}
+
+// EmitContext writes a single event to every configured tier while preserving
+// the caller context for downstream fanout targets.
+func (w *Writer) EmitContext(ctx context.Context, e Event) {
 	if w == nil {
 		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -176,6 +199,34 @@ func (w *Writer) Emit(e Event) {
 	if e.SidecarInstanceID == "" {
 		e.SidecarInstanceID = SidecarInstanceID()
 	}
+	// Fill blanks for the two correlation fields that every emit
+	// path ought to carry but that callers outside the gateway
+	// request scope frequently forget (e.g. inventory/AI-discovery
+	// runs in its own goroutine with only a span context). RunID is
+	// process-wide so the writer can always default it; TraceID
+	// comes from the active OTel span when caller didn't pass one.
+	// Caller-supplied non-empty values always win — this never
+	// overwrites a value that gateway.stampEventCorrelation or a
+	// test fixture set explicitly.
+	if e.RunID == "" {
+		e.RunID = ProcessRunID()
+	}
+	if e.TraceID == "" {
+		if sp := trace.SpanFromContext(ctx); sp != nil && sp.SpanContext().IsValid() {
+			e.TraceID = sp.SpanContext().TraceID().String()
+		}
+	}
+	StampAgentWatchContext(&e)
+	// Plan B6 / S0.10: stamp HMAC over the canonical JSON of the
+	// payload using the per-boot device-key-derived HMAC key. No-op
+	// when SetTelemetryHMACSeed has not been called (boot ordering
+	// race / unit tests) — the field stays empty and downstream
+	// auditors skip verification. Computed AFTER provenance stamping
+	// so the canonicalized bytes are stable across reboots that
+	// would otherwise advance Generation.
+	if e.PayloadHMAC == "" {
+		e.StampPayloadHMAC()
+	}
 
 	// Strict schema gate. Runs AFTER provenance/sidecar stamping so
 	// a missing provenance or sidecar_instance_id becomes a normal
@@ -192,7 +243,7 @@ func (w *Writer) Emit(e Event) {
 		}
 	}
 
-	var fanout []func(Event)
+	var fanout []func(context.Context, Event)
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
@@ -219,7 +270,7 @@ func (w *Writer) Emit(e Event) {
 		// Close cannot race with our iteration. The slice header
 		// is copied but the backing array is the same — fanout
 		// callbacks are append-only in WithFanout so this is safe.
-		fanout = make([]func(Event), len(w.fanout))
+		fanout = make([]func(context.Context, Event), len(w.fanout))
 		copy(fanout, w.fanout)
 	}
 	w.mu.Unlock()
@@ -232,7 +283,7 @@ func (w *Writer) Emit(e Event) {
 	// (or stderr) so operators can triage the offending callback.
 	pretty := w.pretty
 	for _, fn := range fanout {
-		safeFanout(fn, e, pretty)
+		safeFanout(ctx, fn, e, pretty)
 	}
 }
 
@@ -308,6 +359,13 @@ func (w *Writer) handleSchemaViolation(src Event, cause error) {
 	// error is attributable to the exact request that produced the
 	// bad emission. event_type=error puts us on the `error`
 	// oneOf branch of the envelope.
+	// Surface the broken event's rule_id + evaluation_id (when
+	// present on the payload) so the schema-violation error
+	// attributes to the same SIEM pivot keys as the dropped event.
+	// Operators dashboards built on `error.rule_id` / `error.
+	// evaluation_id` can correlate the drop back to the upstream
+	// detection without parsing the violation message string.
+	ruleID, evalID := payloadCorrelationIDs(src)
 	viol := Event{
 		Timestamp:         time.Now().UTC(),
 		EventType:         EventError,
@@ -315,15 +373,18 @@ func (w *Writer) handleSchemaViolation(src Event, cause error) {
 		TraceID:           src.TraceID,
 		RunID:             src.RunID,
 		SessionID:         src.SessionID,
+		TurnID:            src.TurnID,
 		RequestID:         src.RequestID,
 		AgentID:           src.AgentID,
 		AgentInstanceID:   src.AgentInstanceID,
 		SidecarInstanceID: src.SidecarInstanceID,
 		Error: &ErrorPayload{
-			Subsystem: string(SubsystemGatewaylog),
-			Code:      string(ErrCodeSchemaViolation),
-			Message:   truncate(fmt.Sprintf("dropped %s event: %s", src.EventType, msg), 1024),
-			Cause:     string(src.EventType),
+			Subsystem:    string(SubsystemGatewaylog),
+			Code:         string(ErrCodeSchemaViolation),
+			Message:      truncate(fmt.Sprintf("dropped %s event: %s", src.EventType, msg), 1024),
+			Cause:        string(src.EventType),
+			RuleID:       ruleID,
+			EvaluationID: evalID,
 		},
 	}
 
@@ -335,6 +396,32 @@ func (w *Writer) handleSchemaViolation(src Event, cause error) {
 	w.emitDepth.Add(1)
 	defer w.emitDepth.Add(-1)
 	w.Emit(viol)
+}
+
+// payloadCorrelationIDs extracts rule_id + evaluation_id from the
+// dropped event's payload so a schema-violation EventError can
+// echo them onto its own ErrorPayload. We pick the first match
+// across the finding-shaped + scan-shaped + verdict-shaped
+// payloads — for any well-formed event at most one of these is
+// populated, and ill-formed events (the case the schema gate
+// triggers on) only get the IDs that did make it through.
+func payloadCorrelationIDs(src Event) (ruleID, evaluationID string) {
+	if src.ScanFinding != nil {
+		ruleID = src.ScanFinding.RuleID
+		evaluationID = src.ScanFinding.EvaluationID
+	}
+	if evaluationID == "" && src.Scan != nil {
+		evaluationID = src.Scan.EvaluationID
+	}
+	if src.Verdict != nil {
+		if evaluationID == "" {
+			evaluationID = src.Verdict.EvaluationID
+		}
+		if ruleID == "" && len(src.Verdict.RuleIDs) > 0 {
+			ruleID = src.Verdict.RuleIDs[0]
+		}
+	}
+	return ruleID, evaluationID
 }
 
 // truncate caps s at n runes and appends an ellipsis if we clipped.
@@ -350,7 +437,7 @@ func truncate(s string, n int) string {
 // safeFanout invokes fn(e) with a recover() guard so a panic in
 // any downstream fanout target cannot unwind into Emit's caller
 // (which is always the guardrail hot path).
-func safeFanout(fn func(Event), e Event, pretty io.Writer) {
+func safeFanout(ctx context.Context, fn func(context.Context, Event), e Event, pretty io.Writer) {
 	defer func() {
 		if r := recover(); r != nil {
 			w := pretty
@@ -360,7 +447,7 @@ func safeFanout(fn func(Event), e Event, pretty io.Writer) {
 			fmt.Fprintf(w, "[gatewaylog] fanout panic: %v\n", r)
 		}
 	}()
-	fn(e)
+	fn(ctx, e)
 }
 
 // Close flushes and releases the underlying file handles. Safe to

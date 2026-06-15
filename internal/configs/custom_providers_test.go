@@ -57,6 +57,7 @@ func TestLoadProviders_OverlayExtendsBuiltins(t *testing.T) {
 	}
 	if gotCustom == nil {
 		t.Fatalf("overlay provider not merged; providers=%+v", cfg.Providers)
+		return
 	}
 	if len(gotCustom.Domains) != 1 || gotCustom.Domains[0] != "llm.internal.example.com" {
 		t.Fatalf("unexpected domains: %v", gotCustom.Domains)
@@ -199,6 +200,7 @@ func TestApplyOverlay_NormalizesDomainCase(t *testing.T) {
 	}
 	if internal == nil {
 		t.Fatalf("InternalLLM not merged into registry")
+		return
 	}
 	for _, d := range internal.Domains {
 		if d != strings.ToLower(d) {

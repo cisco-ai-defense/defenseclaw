@@ -1,0 +1,22 @@
+---
+title: Reference
+description: Lightweight reference index. CLI command index, gateway API surface, configuration files, and environment variables. Authoritative source for CLI flags is `defenseclaw <command> --help`.
+keywords:
+  - DefenseClaw reference
+  - DefenseClaw CLI reference
+  - DefenseClaw gateway API
+  - DefenseClaw configuration
+---
+
+The narrative docs live elsewhere — these pages are the lookup tables you reach for after you understand the system.
+
+<Cards>
+  <Card title="CLI commands" href="/docs/reference/cli" description="Every defenseclaw verb, grouped by what you're trying to do." />
+  <Card title="Command generator" href="/docs/command-generator" description="Interactive builder for a non-interactive defenseclaw setup guardrail invocation. Pick connector, mode, scanner, judge, HITL — copy the command." />
+  <Card title="Gateway API" href="/docs/reference/gateway-api" description="The HTTP surface defenseclaw-gateway exposes. Used by connectors, hooks, and the CLI." />
+  <Card title="Configuration" href="/docs/reference/configuration" description="config.yaml schema, environment variables, and the on-disk layout." />
+</Cards>
+
+<Callout>
+Authoritative source for any CLI flag is always `defenseclaw <command> --help`. The reference pages here are curated for browsing; `--help` is curated for the operator running the command.
+</Callout>

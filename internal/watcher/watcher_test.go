@@ -266,6 +266,7 @@ func TestActionState_IndependentDimensions(t *testing.T) {
 	}
 	if entry == nil {
 		t.Fatal("expected action entry, got nil")
+		return
 	}
 	if entry.Actions.Install != "block" {
 		t.Errorf("expected install=block, got %q", entry.Actions.Install)
@@ -431,6 +432,7 @@ func TestFullQuarantineFlow_SQLiteState(t *testing.T) {
 	}
 	if entry == nil {
 		t.Fatal("expected action entry in SQLite")
+		return
 	}
 	if entry.Actions.Install != "block" {
 		t.Errorf("SQLite: expected install=block, got %q", entry.Actions.Install)
@@ -503,6 +505,7 @@ func TestActionState_InstallOverwrite(t *testing.T) {
 	}
 	if entry == nil {
 		t.Fatal("expected action entry, got nil")
+		return
 	}
 	if entry.Actions.Install != "allow" {
 		t.Errorf("expected install=allow after overwrite, got %q", entry.Actions.Install)

@@ -1,0 +1,22 @@
+---
+title: Stories
+description: Concrete walkthroughs for the things people actually want — block rm -rf on Claude Code, catch a prompt injection on Codex, stop secret exfiltration from Cursor, approve risky tool calls, pin local observability, and switch connectors without losing audit history.
+keywords:
+  - DefenseClaw user stories
+  - DefenseClaw walkthroughs
+  - block rm -rf claude code
+  - prompt injection codex
+  - cursor secret exfiltration
+  - DefenseClaw HITL
+---
+
+Six walkthroughs. Each one starts from a real operator goal, ends with a verifiable outcome, and explains the trade-offs you accepted along the way.
+
+<Cards>
+  <Card title="Stop Claude Code from rm -rf" href="/docs/stories/observe-claude-code" description="Wire Claude Code, switch to action mode, watch a destructive shell command get blocked." />
+  <Card title="Catch a prompt injection on Codex" href="/docs/stories/prompt-injection-codex" description="Local regex packs catch the obvious; the optional LLM judge catches the clever ones." />
+  <Card title="Block secret exfiltration from Cursor" href="/docs/stories/cursor-secret-exfil" description="Cursor's beforeShellExecution hook is the perfect stop point for `cat .env | curl ...`." />
+  <Card title="Approve risky tool calls before they fire" href="/docs/stories/hitl-approvals" description="HITL sits between observe and full enforcement — pause, review, then continue." />
+  <Card title="Pin local observability in 60 seconds" href="/docs/stories/local-observability" description="One command brings up Prom/Loki/Tempo/Grafana wired to the gateway's OTLP endpoint." />
+  <Card title="Switch from OpenClaw to Codex without losing audit history" href="/docs/stories/switch-connectors" description="The audit DB is connector-agnostic. Switching only moves the data path." />
+</Cards>

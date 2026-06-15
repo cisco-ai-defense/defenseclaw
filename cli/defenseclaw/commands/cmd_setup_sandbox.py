@@ -6,10 +6,12 @@ import json as _json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.commands.cmd_init_sandbox import (
     _ensure_sudo_cache,
     _fix_data_dir_ownership,
@@ -36,18 +38,136 @@ def _sudo_read_json(path: str) -> dict | None:
 
 
 def restore_sandbox_ownership_if_needed(cfg) -> None:
-    """Restore sandbox ownership of .openclaw dir if running in standalone mode."""
+    """Restore sandbox ownership of the framework root dir if running in standalone mode.
+
+    Iterates over every framework root reported by
+    :func:`_sandbox_framework_roots` so non-OpenClaw connectors get the
+    same treatment if/when they're added to :data:`SUPPORTED_SANDBOX_CONNECTORS`.
+    """
     if not cfg.openshell.is_standalone():
         return
     sandbox_home = cfg.openshell.effective_sandbox_home()
-    oc_target = os.path.realpath(os.path.join(sandbox_home, ".openclaw"))
-    try:
-        subprocess.run(
-            [*_sudo_prefix(), "chown", "-R", "sandbox:sandbox", oc_target],
-            capture_output=True, check=False,
+    for root in _sandbox_framework_roots(cfg, sandbox_home):
+        target = os.path.realpath(root)
+        try:
+            subprocess.run(
+                [*_sudo_prefix(), "chown", "-R", "sandbox:sandbox", target],
+                capture_output=True, check=False,
+            )
+        except FileNotFoundError:
+            return
+
+
+# ---------------------------------------------------------------------------
+# Connector validation (S4.5)
+# ---------------------------------------------------------------------------
+
+# Connectors whose sandbox lifecycle DefenseClaw can drive end-to-end.
+# Currently only OpenClaw — Codex / Claude Code / ZeptoClaw don't expose a
+# headless server-mode binary that can be supervised by openshell-sandbox,
+# so we fail-fast rather than silently writing OpenClaw paths into their
+# config trees.
+SUPPORTED_SANDBOX_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
+
+
+def _resolve_active_connector(cfg) -> str:
+    """Return the active connector name, normalized to lowercase.
+
+    Mirrors :meth:`Config.active_connector` but tolerates older
+    in-process configs that haven't been migrated yet.
+    """
+    if hasattr(cfg, "active_connector") and callable(cfg.active_connector):
+        try:
+            return (cfg.active_connector() or "openclaw").lower()
+        except Exception:
+            pass
+    if hasattr(cfg, "guardrail") and hasattr(cfg.guardrail, "connector"):
+        return (cfg.guardrail.connector or "openclaw").strip().lower() or "openclaw"
+    return "openclaw"
+
+
+def _pinned_openclaw_home(cfg) -> str:
+    """Return the realpath of the operator-confirmed original OpenClaw home
+    (``cfg.claw.openclaw_home_original``), or "" when nothing is pinned.
+
+    Init records this when it first transfers ownership of the real
+    OpenClaw home to the sandbox user, so it is the trusted anchor for the
+    privileged sandbox chown.
+    """
+    claw = getattr(cfg, "claw", None)
+    pinned = (getattr(claw, "openclaw_home_original", "") or "").strip()
+    if not pinned:
+        return ""
+    return os.path.realpath(os.path.expanduser(pinned))
+
+
+def _assert_oc_target_is_pinned_home(oc_target: str, cfg) -> None:
+    """Fail closed when the resolved ``$SANDBOX_HOME/.openclaw`` target does
+    not match the pinned original OpenClaw home (Avarice F-0161).
+
+    ``oc_target`` is ``os.path.realpath`` of an attacker-writable symlink.
+    If a local user swaps ``.openclaw`` to point elsewhere, a recursive
+    privileged chown would follow it and hand an arbitrary tree to the
+    sandbox user. We require the realpath to equal the operator-confirmed
+    home recorded at init time before any privileged operation runs.
+
+    When nothing is pinned (older configs that predate this field) we skip
+    the check to avoid a hard regression — the symlink is still created and
+    owned by the operator in that flow.
+    """
+    pinned = _pinned_openclaw_home(cfg)
+    if not pinned:
+        return
+    if os.path.realpath(oc_target) != pinned:
+        click.echo(
+            "  ERROR: refusing privileged chown of sandbox OpenClaw home.\n"
+            f"  {os.path.join('$SANDBOX_HOME', '.openclaw')} resolves to "
+            f"{os.path.realpath(oc_target)}\n"
+            f"  but the pinned original OpenClaw home is {pinned}.\n"
+            "  This looks like a symlink swap. Aborting to avoid chowning an "
+            "attacker-controlled path.",
+            err=True,
         )
-    except FileNotFoundError:
-        pass
+        raise SystemExit(1)
+
+
+def _validate_sandbox_connector(cfg) -> None:
+    """Abort sandbox setup when the active connector isn't OpenClaw.
+
+    Raises a ``click.ClickException`` with a clear remediation message so
+    operators don't end up with a half-wired sandbox pointing at
+    ``$SANDBOX_HOME/.openclaw`` when they actually run Codex.
+    """
+    connector = _resolve_active_connector(cfg)
+    if connector in SUPPORTED_SANDBOX_CONNECTORS:
+        return
+    raise click.ClickException(
+        "Sandbox mode currently requires guardrail.connector=openclaw. "
+        f"Active connector is '{connector}'.\n\n"
+        "  Options:\n"
+        "    1. Switch to host mode for this connector: defenseclaw setup\n"
+        "    2. Set guardrail.connector=openclaw in ~/.defenseclaw/config.yaml\n"
+        "       and re-run 'defenseclaw sandbox setup'.\n\n"
+        "  Tracked under S4.5/F23 — Codex, Claude Code, and ZeptoClaw\n"
+        "  sandbox lifecycles will be added in a follow-up PR."
+    )
+
+
+def _sandbox_framework_roots(cfg, sandbox_home: str) -> list[str]:
+    """Return the directories the sandbox setup needs to chown / ACL.
+
+    For OpenClaw this is ``$SANDBOX_HOME/.openclaw``. The return value is
+    a list so future connectors can declare multiple roots
+    (e.g. ``$SANDBOX_HOME/.codex`` plus a shared cache dir) without
+    touching every callsite.
+    """
+    connector = _resolve_active_connector(cfg)
+    if connector == "openclaw":
+        return [os.path.join(sandbox_home, ".openclaw")]
+    # Non-OpenClaw connectors should never reach this code path — see
+    # _validate_sandbox_connector above. Returning [] keeps the
+    # iteration safe if a caller bypasses validation.
+    return []
 
 
 def _find_openclaw_binary() -> str:
@@ -151,6 +271,16 @@ def setup_sandbox(
         app.store = Store(app.cfg.audit_db)
         app.logger = Logger(app.store, app.cfg.splunk)
 
+    connector = (app.cfg.guardrail.connector or "openclaw").lower()
+    if connector != "openclaw" and not disable:
+        click.echo(
+            f"  ERROR: Sandbox setup currently requires the OpenClaw connector.\n"
+            f"  Active connector: {connector}\n"
+            f"  Change with: defenseclaw setup guardrail --connector openclaw",
+            err=True,
+        )
+        raise SystemExit(1)
+
     if disable:
         _ensure_sudo_cache()
         _disable_sandbox(app)
@@ -160,13 +290,23 @@ def setup_sandbox(
         click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
         raise SystemExit(1)
 
+    # S4.5 — sandbox mode is OpenClaw-only today.
+    #
+    # Every helper below this point assumes ``$SANDBOX_HOME/.openclaw`` is the
+    # framework root, runs ``openclaw gateway run`` inside the sandbox, and
+    # patches ``openclaw.json``. Codex / Claude Code / ZeptoClaw don't have
+    # equivalents in their sandbox-friendly form yet, so failing fast here is
+    # safer than silently wiring DefenseClaw to write OpenClaw paths into a
+    # Codex-only host.
+    _validate_sandbox_connector(app.cfg)
+
     _ensure_sudo_cache()
 
     sandbox_home = sandbox_home or app.cfg.openshell.effective_sandbox_home()
     data_dir = app.cfg.data_dir
 
     click.echo()
-    click.echo("  Configuring sandbox mode ...")
+    ux.section("Configuring sandbox mode")
 
     # 1. Validate prerequisites
     _validate_sandbox_prerequisites(sandbox_home)
@@ -192,15 +332,17 @@ def setup_sandbox(
     app.cfg.claw.home_dir = os.path.join(sandbox_home, ".openclaw")
     app.cfg.claw.config_file = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
 
-    click.echo("    openshell.mode:       standalone")
-    click.echo(f"    openshell.sandbox_home: {sandbox_home}")
-    click.echo(f"    openshell.host_networking: {app.cfg.openshell.host_networking}")
-    click.echo(f"    gateway.host:         {sandbox_ip}")
+    click.echo(f"    {ux.bold('openshell.mode:')}       standalone")
+    click.echo(f"    {ux.bold('openshell.sandbox_home:')} {sandbox_home}")
+    click.echo(f"    {ux.bold('openshell.host_networking:')} {app.cfg.openshell.host_networking}")
+    click.echo(f"    {ux.bold('gateway.host:')}         {sandbox_ip}")
     if app.cfg.guardrail.enabled:
-        click.echo(f"    guardrail.host:       {host_ip}")
+        click.echo(f"    {ux.bold('guardrail.host:')}       {host_ip}")
     else:
-        click.echo("    guardrail:            disabled (use 'defenseclaw setup guardrail' to enable)")
-    click.echo(f"    claw.home_dir:        {app.cfg.claw.home_dir}")
+        click.echo(
+            f"    {ux.bold('guardrail:')}            disabled (use 'defenseclaw setup guardrail' to enable)"
+        )
+    click.echo(f"    {ux.bold('claw.home_dir:')}        {app.cfg.claw.home_dir}")
 
     # 3. Read OpenClaw config (token resolution deferred to after pairing — step 9b).
     oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
@@ -208,14 +350,16 @@ def setup_sandbox(
 
     # 4. Install policy template
     _install_policy_template(data_dir, policy)
-    click.echo(f"    policy template:      {policy}")
+    click.echo(f"    {ux.bold('policy template:')}      {policy}")
 
     # 5. Generate DNS resolv.conf (only when host networking is active)
     if app.cfg.openshell.host_networking:
         _generate_resolv_conf(data_dir, dns)
-        click.echo(f"    dns nameservers:      {dns}")
+        click.echo(f"    {ux.bold('dns nameservers:')}      {dns}")
     else:
-        click.echo("    dns:                  managed by openshell-sandbox (host networking disabled)")
+        click.echo(
+            f"    {ux.bold('dns:')}                  managed by openshell-sandbox (host networking disabled)"
+        )
 
     # 6. Patch sandbox-side OpenClaw config (port + bind + guardrail baseUrl)
     if oc_json is not None:
@@ -253,8 +397,9 @@ def setup_sandbox(
     else:
         click.echo("    gateway.token:        not found (sidecar will auto-detect on connect)")
 
-    # 10a. Install CodeGuard skill into the sandbox-owned OpenClaw tree
-    _install_codeguard_to_sandbox(app.cfg, sandbox_home)
+    # 10a. CodeGuard native assets are opt-in and must be installed
+    # explicitly with `defenseclaw codeguard install`.
+    click.echo("    codeguard:           skipped (explicit opt-in required)")
 
     # 10b. Install guardrail plugin into the sandbox-owned OpenClaw extensions
     if app.cfg.guardrail.enabled:
@@ -266,6 +411,12 @@ def setup_sandbox(
     #     read/write them.  Also ensure parent directories (e.g. /root/) have
     #     o+x so the sandbox user can follow the symlink to the real OpenClaw home.
     oc_target = os.path.realpath(os.path.join(sandbox_home, ".openclaw"))
+    # F-0161: $SANDBOX_HOME/.openclaw is attacker-writable (a symlink the
+    # local user controls). A recursive `chown -R sandbox:sandbox` that
+    # follows a swapped symlink would hand an arbitrary directory tree to
+    # the sandbox user. Pin the privileged chown to the operator-confirmed
+    # OpenClaw home recorded at init time; refuse if the realpath diverges.
+    _assert_oc_target_is_pinned_home(oc_target, app.cfg)
     try:
         subprocess.run(
             [*_sudo_prefix(), "chown", "-R", "sandbox:sandbox", oc_target],
@@ -301,16 +452,13 @@ def setup_sandbox(
     #     scripts, config) should be owned by the invoking user.
     _fix_data_dir_ownership(data_dir)
 
-    click.echo()
-    click.echo("  ── Summary ───────────────────────────────────────────")
-    click.echo()
-    click.echo("  Sandbox mode configured successfully.")
-    click.echo()
+    ux.banner("Summary")
+    ux.ok("Sandbox mode configured successfully.")
 
     if installed:
-        click.echo("  ✓ Systemd units installed and daemon reloaded")
+        ux.ok("Systemd units installed and daemon reloaded")
         click.echo()
-        click.echo("  Next steps:")
+        ux.section("Next steps")
         click.echo("    1. Start the sandbox:")
         click.echo("       sudo systemctl start defenseclaw-sandbox.target")
         click.echo()
@@ -325,10 +473,10 @@ def setup_sandbox(
         click.echo(f"       {data_dir}/gateway.log")
         click.echo(f"       {data_dir}/gateway.jsonl  (structured verdicts/judge/lifecycle)")
     elif has_systemd:
-        click.echo("  ⚠ Systemd units were generated but could not be installed automatically.")
-        click.echo(f"    Files are at: {data_dir}/systemd/ and {data_dir}/scripts/")
+        ux.warn("Systemd units were generated but could not be installed automatically.")
+        ux.subhead(f"Files are at: {data_dir}/systemd/ and {data_dir}/scripts/")
         click.echo()
-        click.echo("  Next steps:")
+        ux.section("Next steps")
         click.echo("    1. Install systemd units manually (requires root):")
         click.echo(f"       sudo cp {data_dir}/systemd/*.service /etc/systemd/system/")
         click.echo(f"       sudo cp {data_dir}/systemd/*.target /etc/systemd/system/")
@@ -351,9 +499,9 @@ def setup_sandbox(
         click.echo(f"       {data_dir}/gateway.log")
         click.echo(f"       {data_dir}/gateway.jsonl  (structured verdicts/judge/lifecycle)")
     else:
-        click.echo("  ℹ No systemd detected (container/minimal environment).")
+        ux.subhead("No systemd detected (container/minimal environment).")
         click.echo()
-        click.echo("  Next steps:")
+        ux.section("Next steps")
         click.echo("    1. Start the sandbox manually:")
         click.echo(f"       sudo {data_dir}/scripts/run-sandbox.sh")
         click.echo()
@@ -396,10 +544,69 @@ def _restore_openclaw_ownership(data_dir: str, sandbox_home: str) -> None:
         click.echo("  Ownership:     invalid backup data")
         return
 
+    # the backup file lives under data_dir, which
+    # init/setup later chowns back to SUDO_USER, so a same-user
+    # process can rewrite openclaw_home/original_uid/original_gid
+    # before disable runs and steer the privileged `chown -R` at
+    # an arbitrary host path. Validate the values against the
+    # actively-configured pinned home and reject suspicious uids.
+    try:
+        # Late import to avoid a circular dependency on AppContext at
+        # module load time.
+        from defenseclaw.config import load_config
+        cfg_check = load_config()
+        pinned_oc = (cfg_check.claw.openclaw_home_original or "").strip()
+    except Exception:
+        pinned_oc = ""
+    try:
+        uid_int = int(uid)
+        gid_int = int(gid)
+    except (TypeError, ValueError):
+        click.echo("  Ownership:     refusing restore — non-integer uid/gid in backup")
+        return
+    if uid_int < 0 or gid_int < 0:
+        click.echo("  Ownership:     refusing restore — negative uid/gid in backup")
+        return
+    real_backup_home = os.path.realpath(openclaw_home)
+    if pinned_oc:
+        real_pinned = os.path.realpath(pinned_oc)
+        if real_backup_home != real_pinned:
+            click.echo(
+                f"  Ownership:     refusing restore — backup path {real_backup_home!r} "
+                f"diverges from pinned {real_pinned!r}"
+            )
+            return
+    # Defense-in-depth: never allow the recursive chown to target a
+    # critical system path even if pinned_oc is empty (legacy data dir).
+    # We reject the path itself OR anything that lives directly under
+    # a top-level system directory (e.g. /etc/passwd, /var/log) to
+    # avoid `chown -R` rewriting files we shouldn't touch.
+    forbidden_roots = (
+        "/", "/bin", "/sbin", "/etc", "/usr", "/var", "/lib", "/lib64",
+        "/boot", "/sys", "/proc", "/dev", "/root",
+    )
+    rejected = False
+    if real_backup_home in forbidden_roots:
+        rejected = True
+    else:
+        # Reject paths whose immediate parent is a forbidden root.
+        # e.g. /etc/something or /var/log. Operator data dirs live
+        # under /home/<user> or /Users/<user>, neither of which
+        # appears in forbidden_roots.
+        parent = os.path.dirname(real_backup_home)
+        if parent in forbidden_roots and parent != "/":
+            rejected = True
+    if rejected:
+        click.echo(
+            f"  Ownership:     refusing restore — refusing recursive chown of "
+            f"system path {real_backup_home!r}"
+        )
+        return
+
     # Restore ownership
     try:
         result = subprocess.run(
-            [*_sudo_prefix(), "chown", "-R", f"{uid}:{gid}", openclaw_home],
+            [*_sudo_prefix(), "chown", "-R", f"{uid_int}:{gid_int}", real_backup_home],
             capture_output=True, text=True,
         )
         if result.returncode == 0:
@@ -472,7 +679,7 @@ def _disable_sandbox(app: AppContext) -> None:
 
     # 2. Remove iptables rules
     if app.cfg.openshell.host_networking:
-        _remove_iptables_rules(sandbox_ip, openclaw_port)
+        _remove_iptables_rules(sandbox_ip, openclaw_port, app.cfg.data_dir)
 
     # 3. Restore gateway config in openclaw.json BEFORE removing the symlink
     oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
@@ -517,7 +724,36 @@ def _disable_systemd_units() -> None:
     click.echo("  Systemd:       sandbox units stopped and disabled")
 
 
-def _remove_iptables_rules(sandbox_ip: str, openclaw_port: int) -> None:
+def _restore_route_localnet(data_dir: str) -> None:
+    """Restore ``net.ipv4.conf.all.route_localnet`` to the value the host
+    had before sandbox setup flipped it to 1.
+
+    Avarice F-0166: the disable path used to unconditionally force
+    ``route_localnet=0``, clobbering hosts that legitimately ran with it
+    enabled. The sandbox launcher records the prior value in
+    ``$data_dir/saved.route_localnet`` before changing it; we read and
+    restore that value here. When no trustworthy saved value exists we
+    leave the sysctl untouched rather than clobber unknown host state.
+    """
+    saved_path = os.path.join(data_dir, "saved.route_localnet")
+    try:
+        with open(saved_path, encoding="utf-8") as fh:
+            prior = fh.read().strip()
+    except OSError:
+        prior = ""
+    if prior not in ("0", "1"):
+        return
+    subprocess.run(
+        [*_sudo_prefix(), "sysctl", "-w", f"net.ipv4.conf.all.route_localnet={prior}"],
+        capture_output=True, check=False,
+    )
+    try:
+        os.remove(saved_path)
+    except OSError:
+        pass
+
+
+def _remove_iptables_rules(sandbox_ip: str, openclaw_port: int, data_dir: str) -> None:
     """Remove iptables NAT rules added during sandbox setup."""
     rules = [
         ["-t", "nat", "-D", "OUTPUT", "-d", "127.0.0.1",
@@ -538,10 +774,8 @@ def _remove_iptables_rules(sandbox_ip: str, openclaw_port: int) -> None:
         )
         if result.returncode == 0:
             removed += 1
-    subprocess.run(
-        [*_sudo_prefix(), "sysctl", "-w", "net.ipv4.conf.all.route_localnet=0"],
-        capture_output=True, check=False,
-    )
+    # F-0166: restore the saved prior route_localnet instead of forcing 0.
+    _restore_route_localnet(data_dir)
     if removed > 0:
         click.echo(f"  iptables:      removed {removed} NAT rules")
     else:
@@ -592,7 +826,7 @@ def _add_user_to_sandbox_group() -> None:
     )
     if result.returncode == 0:
         click.echo(f"    group membership:    {sudo_user} added to sandbox group")
-        msg = click.style("(log out and back in for this to take effect)", fg="green")
+        msg = ux.dim("(log out and back in for this to take effect)")
         click.echo(f"                         {msg}")
     else:
         click.echo(f"    group membership:    failed ({result.stderr.strip()})", err=True)
@@ -684,47 +918,10 @@ def _stop_host_openclaw() -> None:
 
 
 def _install_codeguard_to_sandbox(cfg, sandbox_home: str) -> None:
-    """Install CodeGuard skill into the sandbox-owned OpenClaw skills directory.
-
-    Uses sudo because ~/.openclaw/ is owned by sandbox:sandbox at this point.
-    The caller is responsible for chowning the tree afterward.
-    """
-    from defenseclaw.paths import bundled_codeguard_dir
-
-    source_dir = bundled_codeguard_dir()
-    if not source_dir.is_dir() or not (source_dir / "SKILL.md").is_file():
-        click.echo("    codeguard:           skipped (skill source not found)")
-        return
-
-    skill_dirs = cfg.skill_dirs()
-    if not skill_dirs:
-        click.echo("    codeguard:           skipped (no skill directories)")
-        return
-
-    target_dir = os.path.join(skill_dirs[0], "codeguard")
-    subprocess.run(
-        [*_sudo_prefix(), "mkdir", "-p", skill_dirs[0]],
-        capture_output=True, check=False,
-    )
-    subprocess.run(
-        [*_sudo_prefix(), "rm", "-rf", target_dir],
-        capture_output=True, check=False,
-    )
-    subprocess.run(
-        [*_sudo_prefix(), "cp", "-r", str(source_dir), target_dir],
-        capture_output=True, check=False,
-    )
-
-    oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
-    oc_json = _sudo_read_json(oc_config)
-    if oc_json is not None:
-        skills = oc_json.setdefault("skills", {})
-        entries = skills.setdefault("entries", {})
-        entries["codeguard"] = {"enabled": True}
-        content = _json.dumps(oc_json, indent=2, ensure_ascii=False) + "\n"
-        _sudo_write(content, oc_config)
-
-    click.echo(f"    codeguard:           installed to {target_dir}")
+    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
+    _ = cfg
+    _ = sandbox_home
+    click.echo("    codeguard:           skipped (explicit opt-in required)")
 
 
 def _install_guardrail_plugin_to_sandbox(sandbox_home: str) -> None:
@@ -956,13 +1153,47 @@ WantedBy=multi-user.target
         f.write(target_unit)
 
 
+# The exact set of files this command generates and is allowed to install
+# into root-owned system locations. F-0163: globbing ``*.service`` /
+# ``*.target`` / ``*.sh`` let an attacker who can write into
+# ``$data_dir/systemd`` or ``$data_dir/scripts`` smuggle extra units/scripts
+# into ``/etc/systemd/system`` (then run as root). We copy only these known
+# names and validate each source immediately before the privileged copy.
+_KNOWN_SYSTEMD_UNITS = ("openshell-sandbox.service", "defenseclaw-sandbox.target")
+_KNOWN_LAUNCHER_SCRIPTS = (
+    "pre-sandbox.sh",
+    "start-sandbox.sh",
+    "post-sandbox.sh",
+    "cleanup-sandbox.sh",
+)
+
+
+def _install_source_is_trusted(path: str) -> bool:
+    """Return True only when ``path`` is a safe source for a privileged copy.
+
+    Fail closed unless the source is a regular file (not a symlink), owned
+    by root or the invoking (effective) user — i.e. a file this command
+    itself generated, which an unprivileged attacker cannot forge — and not
+    writable by group or other (tamper-resistant). Avarice F-0163.
+    """
+    if os.path.islink(path) or not os.path.isfile(path):
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if st.st_uid not in (0, os.geteuid()):
+        return False
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return False
+    return True
+
+
 def _install_systemd_units(data_dir: str) -> bool:
     """Install generated systemd units and launcher scripts into system paths.
 
     Returns True if all steps succeeded.
     """
-    import glob
-
     systemd_src = os.path.join(data_dir, "systemd")
     scripts_src = os.path.join(data_dir, "scripts")
     systemd_dst = "/etc/systemd/system"
@@ -972,22 +1203,44 @@ def _install_systemd_units(data_dir: str) -> bool:
         click.echo("    systemd install:     skipped (units not generated)")
         return False
 
+    # Resolve the fixed set of known sources that are actually present.
+    unit_sources = [
+        os.path.join(systemd_src, name)
+        for name in _KNOWN_SYSTEMD_UNITS
+        if os.path.lexists(os.path.join(systemd_src, name))
+    ]
+    script_sources = []
+    if os.path.isdir(scripts_src):
+        script_sources = [
+            os.path.join(scripts_src, name)
+            for name in _KNOWN_LAUNCHER_SCRIPTS
+            if os.path.lexists(os.path.join(scripts_src, name))
+        ]
+
+    # Validate every source up front so a single tampered file aborts the
+    # whole install before any privileged copy runs (fail closed).
+    for src in unit_sources + script_sources:
+        if not _install_source_is_trusted(src):
+            click.echo(
+                f"    systemd install:     refused — untrusted/tampered source {src}",
+                err=True,
+            )
+            return False
+
     sudo = _sudo_prefix()
     try:
-        for f in glob.glob(os.path.join(systemd_src, "*.service")) + \
-                 glob.glob(os.path.join(systemd_src, "*.target")):
+        for f in unit_sources:
             subprocess.run([*sudo, "cp", f, systemd_dst],
                            capture_output=True, check=True)
 
         subprocess.run([*sudo, "mkdir", "-p", scripts_dst],
                        capture_output=True, check=True)
-        if os.path.isdir(scripts_src):
-            for f in glob.glob(os.path.join(scripts_src, "*.sh")):
-                subprocess.run([*sudo, "cp", f, scripts_dst],
-                               capture_output=True, check=True)
-                subprocess.run([*sudo, "chmod", "755",
-                                os.path.join(scripts_dst, os.path.basename(f))],
-                               capture_output=True, check=False)
+        for f in script_sources:
+            subprocess.run([*sudo, "cp", f, scripts_dst],
+                           capture_output=True, check=True)
+            subprocess.run([*sudo, "chmod", "755",
+                            os.path.join(scripts_dst, os.path.basename(f))],
+                           capture_output=True, check=False)
 
         subprocess.run(
             [*sudo, "systemctl", "daemon-reload"],
@@ -1031,16 +1284,45 @@ def _generate_launcher_scripts(
     q_sandbox_home = shlex.quote(sandbox_home)
     q_data_dir = shlex.quote(data_dir)
     q_host_ip = shlex.quote(host_ip)
+    # pin OC_REAL to the openclaw home that was
+    # confirmed by the operator at sandbox-init time. Without this
+    # pin, sandbox-controlled code can replace
+    # /home/sandbox/.openclaw with a symlink to any host path
+    # before a service restart, and the next root-run pre-sandbox
+    # repair grants `sandbox` ownership and rwX ACLs on that
+    # target. We fail the unit and exit non-zero if the actual
+    # symlink target diverges from the pinned value.
+    pinned_openclaw_home = (cfg.claw.openclaw_home_original or "").strip()
+    q_pinned_openclaw_home = shlex.quote(pinned_openclaw_home)
 
     pre_sandbox = f"""#!/bin/bash
 set -euo pipefail
 
 SANDBOX_HOME={q_sandbox_home}
 OC_LINK="$SANDBOX_HOME/.openclaw"
+OC_PINNED={q_pinned_openclaw_home}
 
-# Resolve the real OpenClaw home (follows symlink)
+# refuse to follow an attacker-controlled symlink.
+# The sandbox user owns $SANDBOX_HOME, so .openclaw can be replaced
+# with a symlink pointing anywhere on the host. We accept either:
+#   * a regular directory whose realpath equals the pinned home
+#   * a symlink whose readlink equals the pinned home
+# Anything else aborts the privileged repair (chown -R / setfacl -R
+# would otherwise rewrite ownership of attacker-chosen host paths).
 if [ -L "$OC_LINK" ]; then
-    OC_REAL=$(readlink "$OC_LINK")
+    OC_REAL=$(readlink -f "$OC_LINK" || true)
+    if [ -z "$OC_PINNED" ] || [ "$OC_REAL" != "$OC_PINNED" ]; then
+        echo "[pre-sandbox] refusing privileged repair: $OC_LINK -> $OC_REAL " \\
+             "diverges from pinned $OC_PINNED" >&2
+        exit 1
+    fi
+elif [ -d "$OC_LINK" ]; then
+    OC_REAL=$(readlink -f "$OC_LINK" || true)
+    if [ -n "$OC_PINNED" ] && [ "$OC_REAL" != "$OC_PINNED" ]; then
+        echo "[pre-sandbox] refusing privileged repair: $OC_LINK realpath " \\
+             "$OC_REAL diverges from pinned $OC_PINNED" >&2
+        exit 1
+    fi
 else
     OC_REAL="$OC_LINK"
 fi
@@ -1092,13 +1374,32 @@ if command -v setfacl >/dev/null 2>&1; then
     done
 fi
 
-for ns in $(ip netns list 2>/dev/null | grep -E 'sandbox|openshell' | awk '{{print $1}}'); do
-    ip netns delete "$ns" 2>/dev/null && echo "Cleaned orphan namespace: $ns"
-done
+# scoped pre-sandbox cleanup: only delete the previously
+# recorded namespace (if any). Foreign namespaces created by other
+# DefenseClaw/OpenClaw instances on a shared host are left untouched.
+DEFENSECLAW_DIR={q_data_dir}
+SANDBOX_NETNS_FILE="$DEFENSECLAW_DIR/sandbox.netns"
+SAVED_NS=""
+if [ -r "$SANDBOX_NETNS_FILE" ]; then
+    SAVED_NS=$(head -1 "$SANDBOX_NETNS_FILE" 2>/dev/null | tr -d '[:space:]')
+fi
 
-for veth in $(ip link show 2>/dev/null | grep -oP 'veth-h-\\S+(?=@)'); do
-    ip link delete "$veth" 2>/dev/null && echo "Cleaned stale veth: $veth"
-done
+if [ -n "$SAVED_NS" ]; then
+    if ip netns list 2>/dev/null | awk '{{print $1}}' | grep -qx "$SAVED_NS"; then
+        ip netns delete "$SAVED_NS" 2>/dev/null \\
+            && echo "pre-sandbox: cleaned previous namespace: $SAVED_NS"
+    fi
+    rm -f "$SANDBOX_NETNS_FILE" 2>/dev/null || true
+elif [ "${{DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP:-0}}" = "1" ]; then
+    echo "pre-sandbox: WARNING: legacy regex cleanup opted in" >&2
+    for ns in $(ip netns list 2>/dev/null | grep -E 'sandbox|openshell' | awk '{{print $1}}'); do
+        ip netns delete "$ns" 2>/dev/null && echo "Cleaned orphan namespace: $ns"
+    done
+fi
+
+# Skip blanket veth-h-* deletion. Veth pairs created in a deleted
+# namespace are auto-removed by the kernel when the netns dies, and
+# matching by `veth-h-*` would also delete other instances' veths.
 
 find "$SANDBOX_HOME/.openclaw/agents/" -name "*.lock" -delete 2>/dev/null || true
 
@@ -1177,6 +1478,20 @@ $NSENTER iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" \\
 iptables -t nat -C POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || \\
     iptables -t nat -A POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || true
 
+# scoped cleanup: capture the prior route_localnet value once so
+# cleanup-sandbox.sh can restore it instead of forcing 0 (which would
+# disable the sysctl for any other instances on the same host).
+SAVED_ROUTE_LOCALNET="$DEFENSECLAW_DIR/saved.route_localnet"
+if [ ! -e "$SAVED_ROUTE_LOCALNET" ]; then
+    PRIOR=$(sysctl -n net.ipv4.conf.all.route_localnet 2>/dev/null || echo "")
+    case "$PRIOR" in
+        0|1)
+            printf '%s\\n' "$PRIOR" > "$SAVED_ROUTE_LOCALNET" 2>/dev/null || true
+            chmod 0600 "$SAVED_ROUTE_LOCALNET" 2>/dev/null || true
+            ;;
+    esac
+fi
+
 # Allow DNAT from localhost to non-loopback addresses (required for UI forwarding).
 sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || true
 
@@ -1248,6 +1563,18 @@ echo "Injected iptables rules via $NSENTER"
 exit 0
 """
 
+    # S3.HIGH_BUG ("Generated sandbox cleanup can stop unrelated host
+    # services"): scope cleanup to THIS instance.
+    #   1. Restore the prior route_localnet sysctl rather than forcing 0.
+    #      post-sandbox.sh saves the previous value to
+    #      "$DEFENSECLAW_DIR/saved.route_localnet" before flipping it to 1.
+    #   2. Only delete the namespace recorded in
+    #      "$DEFENSECLAW_DIR/sandbox.netns" (written by run-sandbox.sh once
+    #      openshell-sandbox publishes the namespace). Refuse to use the
+    #      legacy regex match by default; sysadmins can opt-in by setting
+    #      DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP=1.
+    #   3. Only delete veths whose peer is in the recorded namespace -- this
+    #      naturally excludes other sandboxes' veth-h-* interfaces.
     cleanup_iptables = ""
     if host_networking:
         cleanup_iptables = f"""
@@ -1260,19 +1587,62 @@ iptables -t nat -D POSTROUTING -d {sandbox_ip} -p tcp --dport {openclaw_port} \\
 # Remove DNS MASQUERADE
 iptables -t nat -D POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || true
 
-# Restore route_localnet
-sysctl -w net.ipv4.conf.all.route_localnet=0 >/dev/null 2>&1 || true
+# Restore route_localnet to its pre-sandbox value (scoped cleanup).
+SAVED_ROUTE_LOCALNET={q_data_dir}/saved.route_localnet
+if [ -r "$SAVED_ROUTE_LOCALNET" ]; then
+    PRIOR_VAL=$(cat "$SAVED_ROUTE_LOCALNET" 2>/dev/null || echo "")
+    case "$PRIOR_VAL" in
+        0|1)
+            sysctl -w "net.ipv4.conf.all.route_localnet=$PRIOR_VAL" >/dev/null 2>&1 || true
+            ;;
+    esac
+    rm -f "$SAVED_ROUTE_LOCALNET" 2>/dev/null || true
+fi
 """
 
     cleanup_sandbox = f"""#!/bin/bash
 {cleanup_iptables}
-for ns in $(ip netns list 2>/dev/null | grep -E 'sandbox|openshell' | awk '{{print $1}}'); do
-    ip netns delete "$ns" 2>/dev/null && echo "Cleaned orphan namespace: $ns"
-done
 
-for veth in $(ip link show 2>/dev/null | grep -oP 'veth-h-\\S+(?=@)'); do
-    ip link delete "$veth" 2>/dev/null && echo "Cleaned stale veth: $veth"
-done
+DEFENSECLAW_DIR={q_data_dir}
+SANDBOX_NETNS_FILE="$DEFENSECLAW_DIR/sandbox.netns"
+SAVED_NS=""
+if [ -r "$SANDBOX_NETNS_FILE" ]; then
+    SAVED_NS=$(head -1 "$SANDBOX_NETNS_FILE" 2>/dev/null | tr -d '[:space:]')
+fi
+
+# Only fall back to broad regex if explicitly opted in. The default
+# is fail-closed: an unknown namespace name means we leave foreign
+# namespaces untouched on shared hosts.
+if [ -z "$SAVED_NS" ] && [ "${{DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP:-0}}" = "1" ]; then
+    echo "WARNING: cleanup-sandbox.sh: no saved namespace; legacy regex match enabled" >&2
+    for ns in $(ip netns list 2>/dev/null | grep -E 'sandbox|openshell' | awk '{{print $1}}'); do
+        ip netns delete "$ns" 2>/dev/null && echo "Cleaned orphan namespace: $ns"
+    done
+elif [ -n "$SAVED_NS" ]; then
+    # Capture peer veth indices BEFORE deleting the namespace; once
+    # the netns is gone its host-side veths become orphaned and we
+    # can no longer correlate them safely.
+    PEER_IDXS=""
+    if ip netns exec "$SAVED_NS" true 2>/dev/null; then
+        PEER_IDXS=$(ip -n "$SAVED_NS" -o link show type veth 2>/dev/null \\
+            | sed -nE 's/^[0-9]+: [^@:]+@if([0-9]+).*$/\\1/p')
+    fi
+
+    ip netns delete "$SAVED_NS" 2>/dev/null && echo "Cleaned scoped namespace: $SAVED_NS"
+    rm -f "$SANDBOX_NETNS_FILE" 2>/dev/null || true
+
+    # Delete only the host-side veths whose ifindex matched our namespace peer.
+    for idx in $PEER_IDXS; do
+        host_if=$(ip -o link show 2>/dev/null \\
+            | sed -nE "s/^${{idx}}: ([^@:]+).*$/\\1/p")
+        if [ -n "$host_if" ]; then
+            ip link delete "$host_if" 2>/dev/null \\
+                && echo "Cleaned scoped veth: $host_if (peer idx $idx)"
+        fi
+    done
+else
+    echo "cleanup-sandbox.sh: no recorded sandbox namespace; nothing to remove (fail-safe)"
+fi
 """
 
     # start-openclaw.sh: conditionally include DNS wait loop
@@ -1391,25 +1761,52 @@ stop_sandbox() {{
         rm -f "$PIDFILE"
     fi
 
-    # 3. Kill any orphaned sandbox-related processes not tracked in the PID file.
-    #    These can accumulate when previous runs used an older stop mechanism
-    #    or when the script was killed without cleanup.
-    _kill_strays() {{
+    # 3. Kill any orphaned sandbox-related processes that are clearly part
+    #    of THIS instance. Orphans are identified by checking that the
+    #    process's cwd or cmdline references our $DATA_DIR — never by a
+    #    bare process name. Cross-instance kills (#    "Generated sandbox cleanup can stop unrelated host services")
+    #    are explicitly disallowed: a process whose cmdline does not
+    #    reference our $DATA_DIR is left alone, even if it shares a
+    #    binary name.
+    _proc_is_ours() {{
+        local pid="$1"
+        # Check command line first (most reliable: data dir is unique).
+        local cmd
+        if cmd=$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null); then
+            case "$cmd" in
+                *"$DATA_DIR"*) return 0 ;;
+            esac
+        fi
+        # Fall back to cwd: if the process is running under our data dir,
+        # it's also ours.
+        local cwd
+        if cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null); then
+            case "$cwd" in
+                "$DATA_DIR"|"$DATA_DIR"/*) return 0 ;;
+            esac
+        fi
+        return 1
+    }}
+
+    _kill_scoped_strays() {{
         local pat="$1"
         local pids
         pids=$(pgrep -f "$pat" 2>/dev/null || true)
         for p in $pids; do
-            # Don't kill ourselves or our parent
             [ "$p" = "$$" ] && continue
             [ "$p" = "$PPID" ] && continue
-            kill "$p" 2>/dev/null && echo "  killed stray $pat (pid $p)"
+            if _proc_is_ours "$p"; then
+                kill "$p" 2>/dev/null \\
+                    && echo "  killed scoped stray $pat (pid $p)"
+            fi
         done
     }}
-    _kill_strays openshell-sandbox
-    _kill_strays defenseclaw-gateway
-    _kill_strays "openclaw$"
-    _kill_strays openclaw-gateway
-    _kill_strays "dmesg --follow"
+
+    _kill_scoped_strays openshell-sandbox
+    _kill_scoped_strays defenseclaw-gateway
+    _kill_scoped_strays "openclaw$"
+    _kill_scoped_strays openclaw-gateway
+    _kill_scoped_strays "dmesg --follow"
 
     # 4. Clean up network namespace and veth pairs
     "$SCRIPTS_DIR/cleanup-sandbox.sh" 2>/dev/null || true
@@ -1447,23 +1844,35 @@ echo "  openshell-sandbox started (pid $SANDBOX_PID)"
 
 # 3. Wait for sandbox namespace to appear
 echo "==> Waiting for sandbox namespace..."
+SANDBOX_NS=""
 for i in $(seq 1 30); do
     if ! kill -0 "$SANDBOX_PID" 2>/dev/null; then
         echo "ERROR: openshell-sandbox exited prematurely" >&2
         wait "$SANDBOX_PID" 2>/dev/null
         exit 1
     fi
-    if ip netns list 2>/dev/null | grep -qE 'sandbox|openshell'; then
+    SANDBOX_NS=$(ip netns list 2>/dev/null \\
+        | grep -E 'sandbox|openshell' \\
+        | awk '{{print $1}}' | head -1)
+    if [ -n "$SANDBOX_NS" ]; then
         break
     fi
     sleep 1
 done
 
-if ! ip netns list 2>/dev/null | grep -qE 'sandbox|openshell'; then
+if [ -z "$SANDBOX_NS" ]; then
     echo "ERROR: sandbox namespace not created after 30s" >&2
     exit 1
 fi
-echo "  namespace ready"
+
+# scoped cleanup: persist this instance's namespace name so
+# pre-sandbox.sh / cleanup-sandbox.sh / run-sandbox.sh stop only touch
+# the namespace WE created. Other DefenseClaw instances on the same
+# host will write their own marker into their own data dir.
+if printf '%s\\n' "$SANDBOX_NS" > "$DATA_DIR/sandbox.netns" 2>/dev/null; then
+    chmod 0600 "$DATA_DIR/sandbox.netns" 2>/dev/null || true
+fi
+echo "  namespace ready: $SANDBOX_NS"
 
 # 4. Inject iptables rules
 echo "==> Injecting iptables rules..."
@@ -1549,13 +1958,74 @@ def _extract_ed25519_pubkey(key_data: bytes) -> bytes | None:
 
 
 def _pre_pair_device(data_dir: str, sandbox_home: str) -> bool:
-    """Pre-inject the sidecar's device key into OpenClaw's devices/paired.json."""
+    """Pre-inject the sidecar's device key into OpenClaw's devices/paired.json.
+
+    The legacy implementation accepted any 32-byte
+    blob written to ``data_dir/device.key`` as a gateway-generated
+    Ed25519 public key and minted an *operator.admin* + *operator.approvals*
+    pairing record from it. A local attacker that could write
+    ``device.key`` (or that simply wrote it before sandbox setup
+    ran) therefore enrolled their own key as an OpenClaw operator
+    device. We now refuse the pairing unless:
+
+      * the file is a regular file (not a symlink, FIFO, etc.),
+      * it is owned by the user running setup (or root),
+      * its mode is at most 0o600, and
+      * a sentinel ``device.key.provenance`` file generated by the
+        gateway is present alongside it (or the operator has
+        explicitly opted into the legacy loose behavior).
+    """
     import base64
     import hashlib
+    import stat
     import time
 
     device_key_file = os.path.join(data_dir, "device.key")
     if not os.path.isfile(device_key_file):
+        return False
+
+    # Reject symlinks, non-regular files, and over-permissive modes.
+    try:
+        st = os.lstat(device_key_file)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        click.echo(
+            f"    device pairing:       refused — {device_key_file} is not a regular file",
+            err=True,
+        )
+        return False
+    if st.st_mode & 0o077:
+        click.echo(
+            f"    device pairing:       refused — {device_key_file} mode {oct(st.st_mode & 0o777)} "
+            f"is too permissive (must be 0o600 or stricter, )",
+            err=True,
+        )
+        return False
+    try:
+        running_uid = os.geteuid()
+    except AttributeError:
+        running_uid = -1
+    if running_uid >= 0 and st.st_uid not in (0, running_uid):
+        click.echo(
+            f"    device pairing:       refused — {device_key_file} is owned by uid={st.st_uid}, "
+            f"expected uid={running_uid} or 0",
+            err=True,
+        )
+        return False
+
+    # Require a provenance sentinel that was created by the gateway
+    # alongside device.key. Operators who explicitly want the legacy
+    # behavior can opt back in with DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1.
+    provenance_path = device_key_file + ".provenance"
+    legacy_opt_in = os.environ.get("DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY", "").strip() == "1"
+    if not os.path.isfile(provenance_path) and not legacy_opt_in:
+        click.echo(
+            f"    device pairing:       refused — no gateway provenance sentinel at "
+            f"{provenance_path}; refusing to mint operator pairing from arbitrary device.key. "
+            f"Set DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1 to opt back into legacy behavior.",
+            err=True,
+        )
         return False
 
     try:

@@ -1,52 +1,348 @@
 name: Release
 
+# Two trigger paths, both converge into the same job:
+#
+# 1. workflow_dispatch — operator clicks "Run workflow" in the Actions UI
+#    and provides a `version` input (X.Y.Z, no v prefix). The workflow
+#    refuses to run when the tag or a release for it already exists, so
+#    you can't accidentally clobber a previous release. The tag is
+#    created atomically alongside the GitHub release at job end via
+#    `gh release create --target $GITHUB_SHA`.
+#
+# 2. push: tags — `git push origin 0.4.0` from a developer machine. Same
+#    job, same artifacts. The pre-existing-release pre-flight still
+#    applies because Immutable Releases would freeze any pre-created
+#    empty release on creation.
+#
+# Both paths use the resolved tag value to stamp Makefile, pyproject.toml,
+# cli/defenseclaw/__init__.py, and extensions/defenseclaw/package.json so
+# every published artifact (gateway tarball, wheel, plugin tarball) is
+# named with the same X.Y.Z that scripts/install.sh and `defenseclaw
+# upgrade` look up at GitHub Releases.
+
 on:
   push:
     tags:
       - "*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (X.Y.Z, no v prefix). Tag must NOT already exist."
+        required: true
+        type: string
 
 permissions:
   contents: write
   id-token: write
   packages: write
 
+# Serialize all releases for the same version regardless of trigger.
+# `github.ref_name` is `0.4.1` for both `refs/tags/0.4.1` (push:tags) and
+# the branch name on workflow_dispatch — combined with `inputs.version`
+# (set only on workflow_dispatch), this produces the same `release-0.4.1`
+# group key whether you cut the release from the Actions UI or by pushing
+# the tag from your machine. Using `github.ref` here would have stamped
+# `release-refs/tags/0.4.1` for tag pushes vs `release-0.4.1` for manual
+# runs, letting two jobs for the same version race each other.
+concurrency:
+  group: release-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    # GitHub Environments protect the production secrets (cosign
+    # OIDC trust, GH release token scope) used by this pipeline.
+    # The `release` environment has the production reviewers list
+    # and the org-level deployment branch policy that pins this
+    # workflow to `main` and the v* release branches; even if a
+    # malicious push reached the workflow file the environment
+    # gate would refuse to release without an authorized approval.
+    environment: release
     steps:
-      - uses: actions/checkout@v4
+      # Action refs are SHA-pinned (with the human tag in a trailing
+      # comment) so a compromise of upstream tag signing cannot
+      # rewrite a v* tag to inject code into the release pipeline,
+      # which holds the contents:write + id-token:write permissions.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      # Single source of truth for the target tag: ${{ steps.tag.outputs.tag }}.
+      # Validates strict X.Y.Z, refuses to overwrite a pre-existing tag or
+      # release, and works for both trigger paths.
+      #
+      # Security: workflow inputs are passed via `env` so they reach the
+      # shell as `$RELEASE_VERSION_INPUT` (a normal env var) rather than
+      # being string-interpolated into the script body before bash parses
+      # it. Direct `${{ inputs.version }}` substitution would let an
+      # operator-supplied quote/newline turn into shell syntax before the
+      # validation regex below could reject it. See:
+      # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable
+      - name: Resolve and validate target tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION_INPUT: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$RELEASE_VERSION_INPUT"
+            if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error title=Invalid version input::version must be X.Y.Z with no v prefix (got: '$TAG')"
+              exit 1
+            fi
+            # Refuse if a tag with this name already exists either locally
+            # in the fetched history or on the remote. Atomicity guarantee:
+            # we never create a duplicate tag, and we never re-tag a
+            # different SHA than the operator expects.
+            if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+              echo "::error title=Tag already exists::Tag '$TAG' already exists at $(git rev-parse "refs/tags/$TAG"). Pick a fresh version (e.g. patch bump) or delete the existing tag."
+              exit 1
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+              echo "::error title=Tag already exists on remote::Tag '$TAG' already exists on origin. Pick a fresh version."
+              exit 1
+            fi
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+            if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error title=Invalid pushed tag::pushed tag must be X.Y.Z (got: '$TAG')"
+              exit 1
+            fi
+          fi
+
+          # Pre-existing-release guard. Immutable Releases freezes a release
+          # on creation, so a release for this tag would block atomic asset
+          # upload — same trap that broke 0.3.1.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error title=Release already exists::A release for '$TAG' already exists at https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG"
+            echo "::error::With Immutable Releases enabled, the workflow cannot attach assets to a pre-existing release."
+            echo "::error::Either delete that release and re-run with a fresh version, or pick a different tag (e.g. patch bump). Do NOT manually create the GitHub release before this workflow runs."
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: $TAG (commit: $GITHUB_SHA)"
+
+      # CRITICAL provenance gate: the released commit MUST be reachable
+      # from origin/main (or an authorized release branch matching
+      # release/*), otherwise an attacker who got a feature branch
+      # merged would be able to push a release tag from that branch
+      # and ship arbitrary code with our signing identity.
+      #
+      # We resolve the commit (`$GITHUB_SHA` for workflow_dispatch
+      # targets HEAD; `refs/tags/$TAG` for push:tags) and verify it
+      # appears in `git rev-list origin/main` OR in `origin/release/*`.
+      # The fetch-depth: 0 above gives us the full ancestry needed
+      # for the merge-base check.
+      - name: Verify release commit is on main / release branch
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            COMMIT="$GITHUB_SHA"
+          else
+            COMMIT=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          fi
+          echo "Release target commit: $COMMIT"
+          git fetch --no-tags origin main "+refs/heads/release/*:refs/remotes/origin/release/*" 2>/dev/null || true
+          if git merge-base --is-ancestor "$COMMIT" origin/main; then
+            echo "OK: $COMMIT is reachable from origin/main"
+            exit 0
+          fi
+          for branch in $(git for-each-ref --format='%(refname)' refs/remotes/origin/release/); do
+            if git merge-base --is-ancestor "$COMMIT" "$branch"; then
+              echo "OK: $COMMIT is reachable from $branch"
+              exit 0
+            fi
+          done
+          echo "::error title=Provenance gate failed::Release commit $COMMIT is NOT an ancestor of origin/main or any origin/release/* branch."
+          echo "::error::Releasing from off-tree commits is forbidden — this would let an attacker ship code that never went through PR review and CI."
+          exit 1
+
+      # workflow_dispatch path only: create a local lightweight tag at HEAD
+      # so GoReleaser sees a real tag pointing at the commit it's releasing.
+      # This is the canonical pattern documented by the GoReleaser author:
+      # https://carlosbecker.com/posts/goreleaser-create-tag-action/
+      #
+      # Why not GORELEASER_CURRENT_TAG: that env var is documented as a
+      # selector when one commit has multiple tags, not a substitute for a
+      # missing tag. It's also been buggy across goreleaser-action versions
+      # (e.g. ignored entirely in v2.4 — goreleaser/goreleaser-action#260),
+      # whereas a real local tag is unambiguous.
+      #
+      # The tag is local-only — it's never pushed to origin in this step.
+      # If anything later in the job fails, the workflow VM is destroyed
+      # and no remote tag is left dangling. The remote tag is created
+      # atomically alongside the GitHub release in the final step via
+      # `gh release create --target $GITHUB_SHA`, so a failed run leaves
+      # neither a remote tag nor an empty release behind.
+      #
+      # Skipped on push:tags because the tag is already in the fetched
+      # history (GITHUB_REF resolves it).
+      - name: Create local tag for GoReleaser (workflow_dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git tag "$RELEASE_TAG"
+          echo "Created local tag $RELEASE_TAG at $(git rev-parse HEAD)"
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
 
-      - uses: anchore/sbom-action/download-syft@v0
+      - uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
         with:
-          version: latest
+          python-version: "3.13"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      # Build the OpenClaw plugin and sync its runtime files into
+      # internal/gateway/connector/openclaw_extension/ so the gateway's
+      # `//go:embed all:openclaw_extension` directive (openclaw.go:40)
+      # resolves at compile time.
+      #
+      # Without this step GoReleaser fails the cross-build with:
+      #   internal/gateway/connector/openclaw.go:40:12:
+      #     pattern all:openclaw_extension: no matching files found
+      # (release run #7 / 25533484548 hit this exactly).
+      #
+      # The embed dir is gitignored (.gitignore:75) and so is
+      # extensions/defenseclaw/{node_modules,dist,src/providers.json}, so
+      # this step does NOT dirty the working tree from git's perspective —
+      # GoReleaser's clean-tree check still passes.
+      #
+      # `make extensions` is `plugin + sync-openclaw-extension`. We use the
+      # full target rather than just `sync-openclaw-extension` (placeholder
+      # mode) so the released gateway binary actually contains the OpenClaw
+      # plugin runtime, not just a "not built" marker — operators get a
+      # working OpenClaw connector out of the curl-to-bash installer.
+      - name: Build OpenClaw plugin and populate embed tree
+        run: make extensions
+
+      # ORDERING NOTE: GoReleaser MUST run before scripts/stamp-version.sh.
+      # GoReleaser refuses to release from a dirty working tree
+      # (https://goreleaser.com/errors/dirty/), and the stamp script edits
+      # tracked files (Makefile, pyproject.toml, cli/__init__.py,
+      # package.json) whenever the tag differs from the in-repo defaults —
+      # the common case for any release after the next planned one. So we
+      # run GoReleaser first against the clean checkout, then stamp, then
+      # build the wheel + plugin tarball (which DO need the stamped
+      # metadata for filenames and embedded __version__).
+      #
+      # GoReleaser picks the version from the local tag (created above on
+      # workflow_dispatch, or already present from push:tags). It never
+      # reads pyproject.toml / package.json / the Makefile, so leaving
+      # those at their in-repo defaults during this step is fine.
+      #
+      # release.disable: true in .goreleaser.yaml means GoReleaser produces
+      # signed, sbom'd artifacts in dist/ but does NOT publish a GitHub
+      # release. We must instead create the release atomically with all
+      # assets at the end of the job, because Immutable Releases rejects
+      # post-create asset uploads.
+      # Privileged release pipeline integrity: the goreleaser-action binary
+      # is SHA-pinned above, but the `version:` parameter previously
+      # selected a mutable semver range ("~> v2"), which lets a
+      # compromised GoReleaser v2.x release execute inside this
+      # job and tamper with signed/SBOM'd artifacts. Pin to an exact
+      # released version. Bump deliberately by editing this string and
+      # verifying the matching GoReleaser release notes — never widen back
+      # to a range.
+      - name: Build artifacts with GoReleaser
+        uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
+        with:
+          version: "v2.15.4"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: astral-sh/setup-uv@v4
-        with:
-          python-version: "3.13"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+      # Stamp AFTER GoReleaser has finished (so the working tree was clean
+      # for it) but BEFORE building the wheel + plugin tarball, since the
+      # wheel filename comes from pyproject.toml and the plugin tarball
+      # filename comes from the Makefile's VERSION. The stamped
+      # __init__.py is what makes `defenseclaw --version` report the
+      # right value on the installed CLI.
+      #
+      # `steps.tag.outputs.tag` is regex-validated to ^[0-9]+\.[0-9]+\.[0-9]+$
+      # in the resolve step above (no shell metacharacters possible), but
+      # we still pass it via env to keep the script-injection-resistant
+      # style consistent across every step that consumes a workflow
+      # expression in shell.
+      - name: Stamp release version
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          scripts/stamp-version.sh "$RELEASE_TAG"
 
       - name: Build CLI wheel and plugin tarball
         run: |
           make dist-cli
           make dist-plugin
 
-      - name: Upload CLI and plugin to release
+      - name: Finalize upgrade manifest and checksums
+        run: |
+          set -euo pipefail
+          make dist-upgrade-manifest
+          rm -f dist/checksums.txt.sig dist/checksums.txt.pem
+          make dist-checksums
+          cosign sign-blob \
+            --yes \
+            --output-certificate=dist/checksums.txt.pem \
+            --output-signature=dist/checksums.txt.sig \
+            dist/checksums.txt
+
+      # Atomic: tag + release + every asset are created in a single API
+      # call. On workflow_dispatch, --target $GITHUB_SHA tells gh to create
+      # the tag at this commit if it doesn't yet exist. On push:tags the
+      # tag already points at the right commit, so --target is a no-op
+      # but harmless to pass.
+      - name: Publish GitHub release with all assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF#refs/tags/}" dist/*.whl dist/defenseclaw-plugin-*.tar.gz
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+
+          shopt -s nullglob
+          assets=(
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sbom.json
+            dist/checksums.txt
+            dist/checksums.txt.sig
+            dist/checksums.txt.pem
+            dist/*.whl
+            dist/upgrade-manifest.json
+          )
+
+          notes_args=()
+          if [ -f dist/CHANGELOG.md ]; then
+            notes_args=(--notes-file dist/CHANGELOG.md)
+          else
+            notes_args=(--generate-notes)
+          fi
+
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            "${notes_args[@]}" \
+            "${assets[@]}"
+
+          echo ""
+          echo "Release $TAG created with ${#assets[@]} assets at $GITHUB_SHA"
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG"

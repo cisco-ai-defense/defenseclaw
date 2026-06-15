@@ -119,5 +119,116 @@ class ResolveGatewayBinaryTests(unittest.TestCase):
             self.assertIsNone(gateway.resolve_gateway_binary())
 
 
+class OrchestratorClientWireFormatTests(unittest.TestCase):
+    """Tests that pin the exact HTTP request the OrchestratorClient
+    sends for the AI-discovery endpoints.
+
+    These tests caught two production bugs (from the
+    dedup-evidence-confidence review):
+
+    * F1 — the validate endpoint posted ``Content-Type: application/x-yaml``
+      which the sidecar's CSRF gate rejects with HTTP 415. Pre-fix
+      this was 100% broken in production but the unit tests stubbed
+      the client entirely.
+    * F3 — ``ai_usage_component_locations`` / ``_history`` interpolated
+      ``ecosystem`` and ``name`` straight into the URL via f-string,
+      so any name with ``/``, ``?``, ``#``, ``%``, or whitespace
+      produced a malformed URL.
+    """
+
+    def _client_with_capturing_session(self):
+        """Build an OrchestratorClient whose Session captures every
+        outbound request. Returns ``(client, requests)`` where
+        ``requests`` is a list of ``SimpleNamespace`` capturing
+        method, url, headers, json body, and form-data body for each
+        call.
+        """
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        captured: list = []
+
+        def fake_request(method, url, **kwargs):
+            captured.append(SimpleNamespace(
+                method=method,
+                url=url,
+                headers={**kwargs.get("headers", {})},
+                json=kwargs.get("json"),
+                data=kwargs.get("data"),
+                params=kwargs.get("params"),
+            ))
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json = MagicMock(return_value={"valid": True, "ok": True})
+            resp.raise_for_status = MagicMock()
+            return resp
+
+        client = gateway.OrchestratorClient(token="t")
+        client._session.get = lambda url, **kw: fake_request("GET", url, **kw)
+        client._session.post = lambda url, **kw: fake_request("POST", url, **kw)
+        return client, captured
+
+    def test_validate_uses_json_envelope_with_yaml_field(self):
+        # The wire format MUST be JSON ({"yaml": "..."}) so the
+        # request passes the sidecar's CSRF gate (Content-Type:
+        # application/json). Any change to a raw-yaml body is a
+        # production regression -- pin both the field name and the
+        # Content-Type via requests' json= keyword (which forces
+        # application/json automatically).
+        client, captured = self._client_with_capturing_session()
+        client.ai_usage_validate_confidence_policy("version: 1\n")
+
+        self.assertEqual(len(captured), 1)
+        req = captured[0]
+        self.assertEqual(req.method, "POST")
+        self.assertTrue(req.url.endswith("/api/v1/ai-usage/confidence/policy/validate"))
+        self.assertEqual(req.json, {"yaml": "version: 1\n"})
+        # The pre-fix bug was data=yaml + Content-Type=application/x-yaml.
+        # If either ever shows up here again, the validate endpoint
+        # will 415 in production.
+        self.assertIsNone(req.data, "must not pass raw body via data=")
+        # requests.Session.post(json=...) sets Content-Type to
+        # application/json automatically; we don't pass headers ourselves.
+        self.assertNotIn("Content-Type", req.headers)
+
+    def test_locations_url_encodes_ecosystem_and_name(self):
+        client, captured = self._client_with_capturing_session()
+        client.ai_usage_component_locations("npm", "@org/foo bar")
+
+        self.assertEqual(len(captured), 1)
+        url = captured[0].url
+        # Spaces, @, /, all must be percent-encoded so the gateway
+        # mux can split on slashes correctly. parseComponentPath
+        # rejects three-segment paths like "@org/foo/bar/locations"
+        # so without encoding this call would 400 in production.
+        self.assertIn("%40org%2Ffoo%20bar", url)
+        self.assertTrue(url.endswith("/locations"))
+        self.assertIn("/api/v1/ai-usage/components/npm/", url)
+
+    def test_history_url_encodes_ecosystem_and_name(self):
+        client, captured = self._client_with_capturing_session()
+        client.ai_usage_component_history("py%pi", "open?ai")
+
+        url = captured[0].url
+        self.assertIn("py%25pi", url)        # % → %25
+        self.assertIn("open%3Fai", url)      # ? → %3F
+        self.assertTrue(url.endswith("/history"))
+
+    def test_validate_413_is_normalized_to_failure_payload(self):
+        # The 413 path bypasses raise_for_status and returns a
+        # synthetic {"valid": false, ...} so callers don't need a
+        # special-case branch for over-cap files.
+        from unittest.mock import MagicMock
+
+        client = gateway.OrchestratorClient(token="t")
+        resp = MagicMock()
+        resp.status_code = 413
+        resp.raise_for_status = MagicMock()
+        client._session.post = lambda *a, **kw: resp
+
+        out = client.ai_usage_validate_confidence_policy("x" * 100)
+        self.assertEqual(out, {"valid": False, "error": "policy file exceeds size limit"})
+
+
 if __name__ == "__main__":
     unittest.main()

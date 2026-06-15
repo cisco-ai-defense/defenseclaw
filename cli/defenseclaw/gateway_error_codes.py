@@ -78,6 +78,14 @@ ERR_LLM_BRIDGE_ERROR: Final[str] = "LLM_BRIDGE_ERROR"
 # Gatewaylog subsystem — runtime schema validator rejected an event
 ERR_SCHEMA_VIOLATION: Final[str] = "SCHEMA_VIOLATION"
 
+# Plugin subsystem (B3 / S0.1) — connector .so plugin loader
+ERR_PLUGIN_MANIFEST_INVALID: Final[str]  = "PLUGIN_MANIFEST_INVALID"
+ERR_PLUGIN_PATH_REJECTED: Final[str]     = "PLUGIN_PATH_REJECTED"
+ERR_PLUGIN_PERMISSION_DENIED: Final[str] = "PLUGIN_PERMISSION_DENIED"
+ERR_PLUGIN_OWNER_MISMATCH: Final[str]    = "PLUGIN_OWNER_MISMATCH"
+ERR_PLUGIN_HASH_MISMATCH: Final[str]     = "PLUGIN_HASH_MISMATCH"
+ERR_PLUGIN_LOAD_FAILED: Final[str]       = "PLUGIN_LOAD_FAILED"
+
 
 ALL_ERROR_CODES: Final[tuple[str, ...]] = (
     ERR_SINK_DELIVERY_FAILED,
@@ -103,6 +111,12 @@ ALL_ERROR_CODES: Final[tuple[str, ...]] = (
     ERR_PANIC_RECOVERED,
     ERR_LLM_BRIDGE_ERROR,
     ERR_SCHEMA_VIOLATION,
+    ERR_PLUGIN_MANIFEST_INVALID,
+    ERR_PLUGIN_PATH_REJECTED,
+    ERR_PLUGIN_PERMISSION_DENIED,
+    ERR_PLUGIN_OWNER_MISMATCH,
+    ERR_PLUGIN_HASH_MISMATCH,
+    ERR_PLUGIN_LOAD_FAILED,
 )
 
 
@@ -130,6 +144,7 @@ SUBSYSTEM_SQLITE: Final[str]          = "sqlite"
 SUBSYSTEM_ADMISSION: Final[str]       = "admission"
 SUBSYSTEM_CONFIG_MUTATION: Final[str] = "config_mutation"
 SUBSYSTEM_GATEWAYLOG: Final[str]      = "gatewaylog"
+SUBSYSTEM_PLUGIN: Final[str]          = "plugin"
 
 
 ALL_SUBSYSTEMS: Final[tuple[str, ...]] = (
@@ -156,4 +171,5 @@ ALL_SUBSYSTEMS: Final[tuple[str, ...]] = (
     SUBSYSTEM_ADMISSION,
     SUBSYSTEM_CONFIG_MUTATION,
     SUBSYSTEM_GATEWAYLOG,
+    SUBSYSTEM_PLUGIN,
 )

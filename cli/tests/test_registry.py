@@ -21,7 +21,6 @@ from __future__ import annotations
 import io
 import os
 import tarfile
-import tempfile
 import unittest
 import zipfile
 from unittest.mock import MagicMock, patch
@@ -45,7 +44,6 @@ from defenseclaw.registry import (
     fetch_npm_package,
     parse_clawhub_uri,
 )
-
 
 # ---------------------------------------------------------------------------
 # detect_source
@@ -122,10 +120,25 @@ def _make_zip(members: dict[str, str]) -> bytes:
     return buf.getvalue()
 
 
+def _public_resolver(host: str) -> list[str]:
+    """Stub DNS resolver returning a public IP so the SSRF guard passes.
+
+    The download helpers route through ``resolve_and_pin`` (F-0347),
+    which performs a real ``getaddrinfo`` by default. Tests inject this
+    resolver so they stay offline/deterministic while still exercising
+    the guard with an address that is neither loopback nor private.
+    """
+    return ["93.184.216.34"]
+
+
 def _mock_response(content: bytes, status_code: int = 200):
     """Build a mock requests.Response with streaming support."""
     resp = MagicMock()
     resp.status_code = status_code
+    # Manual redirect handling in _stream_download checks ``is_redirect``;
+    # a bare MagicMock attribute would be truthy and spuriously trigger
+    # the redirect loop, so pin it false for these non-redirect bodies.
+    resp.is_redirect = False
     resp.raise_for_status = MagicMock()
     if status_code >= 400:
         import requests
@@ -157,7 +170,7 @@ class TestFetchNpmPackage:
 
         dest = str(tmp_path / "work")
         os.makedirs(dest)
-        result = fetch_npm_package("my-plugin", dest)
+        result = fetch_npm_package("my-plugin", dest, resolver=_public_resolver)
 
         assert os.path.isdir(result)
         assert mock_requests.get.call_count == 2
@@ -175,7 +188,7 @@ class TestFetchNpmPackage:
 
         dest = str(tmp_path / "work")
         os.makedirs(dest)
-        fetch_npm_package("@openclasw/voice-call", dest)
+        fetch_npm_package("@openclasw/voice-call", dest, resolver=_public_resolver)
 
         first_url = mock_requests.get.call_args_list[0][0][0]
         assert "%40openclasw%2Fvoice-call" in first_url
@@ -193,7 +206,7 @@ class TestFetchNpmPackage:
         dest = str(tmp_path / "work")
         os.makedirs(dest)
         with pytest.raises(RegistryError, match="npm registry lookup failed"):
-            fetch_npm_package("nonexistent-pkg", dest)
+            fetch_npm_package("nonexistent-pkg", dest, resolver=_public_resolver)
 
     @patch("defenseclaw.registry.requests")
     def test_no_tarball_in_metadata(self, mock_requests, tmp_path):
@@ -205,7 +218,7 @@ class TestFetchNpmPackage:
         dest = str(tmp_path / "work")
         os.makedirs(dest)
         with pytest.raises(RegistryError, match="could not resolve tarball URL"):
-            fetch_npm_package("bad-pkg", dest)
+            fetch_npm_package("bad-pkg", dest, resolver=_public_resolver)
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +236,9 @@ class TestFetchFromUrl:
 
         dest = str(tmp_path / "work")
         os.makedirs(dest)
-        result = fetch_from_url("https://example.com/plugin.tgz", dest)
+        result = fetch_from_url(
+            "https://example.com/plugin.tgz", dest, resolver=_public_resolver
+        )
 
         assert os.path.isdir(result)
         assert "index.js" in os.listdir(result)
@@ -237,7 +252,9 @@ class TestFetchFromUrl:
 
         dest = str(tmp_path / "work")
         os.makedirs(dest)
-        result = fetch_from_url("https://example.com/plugin.zip", dest)
+        result = fetch_from_url(
+            "https://example.com/plugin.zip", dest, resolver=_public_resolver
+        )
 
         assert os.path.isdir(result)
 
@@ -251,7 +268,9 @@ class TestFetchFromUrl:
         dest = str(tmp_path / "work")
         os.makedirs(dest)
         with pytest.raises(RegistryError, match="path-traversal"):
-            fetch_from_url("https://example.com/evil.zip", dest)
+            fetch_from_url(
+                "https://example.com/evil.zip", dest, resolver=_public_resolver
+            )
 
     @patch("defenseclaw.registry.requests")
     def test_unsupported_format(self, mock_requests, tmp_path):
@@ -260,7 +279,9 @@ class TestFetchFromUrl:
         dest = str(tmp_path / "work")
         os.makedirs(dest)
         with pytest.raises(RegistryError, match="unsupported archive format"):
-            fetch_from_url("https://example.com/plugin.exe", dest)
+            fetch_from_url(
+                "https://example.com/plugin.exe", dest, resolver=_public_resolver
+            )
 
     @patch("defenseclaw.registry.requests")
     def test_network_error(self, mock_requests, tmp_path):
@@ -271,7 +292,9 @@ class TestFetchFromUrl:
         dest = str(tmp_path / "work")
         os.makedirs(dest)
         with pytest.raises(RegistryError, match="download failed"):
-            fetch_from_url("https://example.com/plugin.tgz", dest)
+            fetch_from_url(
+                "https://example.com/plugin.tgz", dest, resolver=_public_resolver
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +316,9 @@ class TestFetchFromClawhub:
 
         dest = str(tmp_path / "work")
         os.makedirs(dest)
-        result = fetch_from_clawhub("clawhub://voice-call", dest)
+        result = fetch_from_clawhub(
+            "clawhub://voice-call", dest, resolver=_public_resolver
+        )
 
         assert os.path.isdir(result)
 
@@ -314,37 +339,46 @@ class TestStreamDownloadSizeLimit:
     def test_exceeds_max_download_bytes(self, mock_requests, tmp_path):
         oversized_chunk = b"x" * (MAX_DOWNLOAD_BYTES + 1)
         resp = MagicMock()
+        resp.is_redirect = False
         resp.raise_for_status = MagicMock()
         resp.iter_content.return_value = iter([oversized_chunk])
         mock_requests.get.return_value = resp
 
         dest = str(tmp_path / "download")
         with pytest.raises(RegistryError, match="MB limit"):
-            _stream_download("https://example.com/huge.tgz", dest)
+            _stream_download(
+                "https://example.com/huge.tgz", dest, resolver=_public_resolver
+            )
 
     @patch("defenseclaw.registry.requests")
     def test_multiple_chunks_exceed_limit(self, mock_requests, tmp_path):
         half = MAX_DOWNLOAD_BYTES // 2 + 1
         chunk = b"x" * half
         resp = MagicMock()
+        resp.is_redirect = False
         resp.raise_for_status = MagicMock()
         resp.iter_content.return_value = iter([chunk, chunk])
         mock_requests.get.return_value = resp
 
         dest = str(tmp_path / "download")
         with pytest.raises(RegistryError, match="MB limit"):
-            _stream_download("https://example.com/huge.tgz", dest)
+            _stream_download(
+                "https://example.com/huge.tgz", dest, resolver=_public_resolver
+            )
 
     @patch("defenseclaw.registry.requests")
     def test_within_limit_succeeds(self, mock_requests, tmp_path):
         small_chunk = b"hello"
         resp = MagicMock()
+        resp.is_redirect = False
         resp.raise_for_status = MagicMock()
         resp.iter_content.return_value = iter([small_chunk])
         mock_requests.get.return_value = resp
 
         dest = str(tmp_path / "download")
-        _stream_download("https://example.com/small.tgz", dest)
+        _stream_download(
+            "https://example.com/small.tgz", dest, resolver=_public_resolver
+        )
         assert os.path.isfile(dest)
         with open(dest, "rb") as f:
             assert f.read() == small_chunk
@@ -439,3 +473,67 @@ class TestExtractArchive:
 
         with pytest.raises(RegistryError, match="tar extraction failed"):
             _extract_archive(str(archive), str(dest), prefix="package/plugins/missing/")
+
+    # ----------------------------------------------------------------
+    # fallback path-traversal validation. We force the legacy
+    # fallback by stubbing tarfile.TarFile.extractall to raise
+    # TypeError on the modern `filter="data"` keyword argument, the
+    # exact shape Python <3.12 produces.
+    # ----------------------------------------------------------------
+
+    def test_tar_path_traversal_blocked_in_fallback(self, tmp_path,
+                                                     monkeypatch):
+        """traversal entries must be rejected even when running
+        under the legacy fallback that lacks the `filter="data"` arg."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            data = b"pwned"
+            ti = tarfile.TarInfo(name="../escape.txt")
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+        archive = tmp_path / "evil.tgz"
+        archive.write_bytes(buf.getvalue())
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        # Force the fallback path by making the modern keyword raise.
+        original_extractall = tarfile.TarFile.extractall
+
+        def fake_extractall(self, *args, **kwargs):
+            if "filter" in kwargs:
+                raise TypeError("simulated <3.12 tarfile")
+            return original_extractall(self, *args, **kwargs)
+
+        monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
+
+        with pytest.raises(RegistryError, match=""):
+            _extract_archive(str(archive), str(dest))
+        # Confirm nothing leaked outside the dest dir.
+        assert not (tmp_path / "escape.txt").exists()
+
+    def test_tar_symlink_member_blocked_in_fallback(self, tmp_path,
+                                                     monkeypatch):
+        """symlink members must be rejected (the 3.12+ "data"
+        filter rejects them automatically; the fallback must too)."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            ti = tarfile.TarInfo(name="link-to-secret")
+            ti.type = tarfile.SYMTYPE
+            ti.linkname = "/etc/passwd"
+            tf.addfile(ti)
+        archive = tmp_path / "evil.tgz"
+        archive.write_bytes(buf.getvalue())
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        original_extractall = tarfile.TarFile.extractall
+
+        def fake_extractall(self, *args, **kwargs):
+            if "filter" in kwargs:
+                raise TypeError("simulated <3.12 tarfile")
+            return original_extractall(self, *args, **kwargs)
+
+        monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
+
+        with pytest.raises(RegistryError, match=""):
+            _extract_archive(str(archive), str(dest))

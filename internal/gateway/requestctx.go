@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -302,21 +303,42 @@ func TruncateUserAgent256(ua string) string {
 	return ua[:maxUserAgentLogLength]
 }
 
+// trustedProxyEnvVar names the env var holding a comma-separated list
+// of CIDRs whose immediate-peer X-Forwarded-For headers we trust. When
+// unset (the default), forwarded headers are ignored entirely and the
+// socket peer address is the only authoritative client IP.
+const trustedProxyEnvVar = "DEFENSECLAW_TRUSTED_PROXY_CIDRS"
+
 // ClientIPRedacted returns a privacy-preserving client address for logs
 // (IPv4 /24, IPv6 prefix simplified to first 4 hextets + "::/48" style stub).
+//
+// ("Authentication failure logs trust spoofable
+// X-Forwarded-For"): the legacy implementation always preferred the
+// first “X-Forwarded-For“ value over the socket “RemoteAddr“, and
+// returned the raw header bytes when they failed to parse as an IP.
+// Any unauthenticated caller could therefore choose the
+// “client_ip“ recorded for failed-auth alerting and forensics.
+//
+// We now only honour “X-Forwarded-For“ when the immediate peer
+// (“r.RemoteAddr“) is inside an explicitly configured trusted-proxy
+// CIDR list. The default is empty (no trusted proxies), which is the
+// safest behaviour for sidecars that run on loopback only. Operators
+// fronting the sidecar with a reverse proxy can opt in via the
+// “DEFENSECLAW_TRUSTED_PROXY_CIDRS“ env var.
 func ClientIPRedacted(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
-	ipStr := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if ipStr != "" {
-		ipStr = strings.TrimSpace(strings.Split(ipStr, ",")[0])
-	} else {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ipStr = r.RemoteAddr
-		} else {
-			ipStr = host
+	ipStr := socketClientIP(r)
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		if isTrustedProxyPeer(ipStr) {
+			candidate := strings.TrimSpace(strings.Split(forwarded, ",")[0])
+			if parsed := net.ParseIP(candidate); parsed != nil {
+				ipStr = candidate
+			}
+			// Unparseable forwarded values are dropped on purpose:
+			// the legacy code returned them verbatim, which let an
+			// attacker choose log strings.
 		}
 	}
 	ip := net.ParseIP(ipStr)
@@ -335,22 +357,85 @@ func ClientIPRedacted(r *http.Request) string {
 	return s
 }
 
+func socketClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func isTrustedProxyPeer(ipStr string) bool {
+	cfg := strings.TrimSpace(os.Getenv(trustedProxyEnvVar))
+	if cfg == "" {
+		return false
+	}
+	peer := net.ParseIP(ipStr)
+	if peer == nil {
+		return false
+	}
+	for _, cidr := range strings.Split(cfg, ",") {
+		c := strings.TrimSpace(cidr)
+		if c == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(c)
+		if err != nil {
+			// A bare IP is also acceptable shorthand for /32 or /128.
+			if direct := net.ParseIP(c); direct != nil && direct.Equal(peer) {
+				return true
+			}
+			continue
+		}
+		if network.Contains(peer) {
+			return true
+		}
+	}
+	return false
+}
+
 // otelHTTPServerMiddleware creates a server span for each request and
 // records HTTP semantic attributes. Inner middleware should call
 // enrichHTTPSpanFromContext so defenseclaw.* correlation fields land on
 // the same span.
+//
+// SECURITY (Plan B5): the path-token OTLP endpoint encodes the master gateway
+// bearer token as a URL segment, so the route AND the url.path attribute MUST
+// be sanitized before any backend sees them. Failing to sanitize would leak
+// the master credential into whatever observability sink the gateway exports
+// to. See sanitizeRouteForTelemetry in otel_ingest.go.
 func otelHTTPServerMiddleware(serverName string, next http.Handler) http.Handler {
 	tracer := otel.Tracer("defenseclaw")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		route := r.URL.Path
+		safePath := sanitizeRouteForTelemetry(r.URL.Path)
+		route := safePath
 		if r.Pattern != "" {
 			route = r.Pattern
 		}
 		spanName := r.Method + " " + route
-		ctx, span := tracer.Start(r.Context(), spanName,
+		// Pull the W3C traceparent header from the request so the
+		// hook span links back to the agent's parent span.
+		// extractIncomingTraceContext returns r.Context() unchanged
+		// for routes other than /api/v1/<connector>/hook and
+		// /api/v1/codex/notify; see shouldExtractHookTrace for the
+		// security justification.
+		parentCtx := extractIncomingTraceContext(r.Context(), r)
+		ctx, span := tracer.Start(parentCtx, spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(attribute.String("defenseclaw.http.server", serverName)),
 		)
+		// Deferred span.End so a panic deeper in the handler stack
+		// (e.g. an evaluator that did not yet pick up the
+		// safeEvaluateHook recover) still finalises the server
+		// span. Without this defer, a panic between Start and End
+		// would leak an unfinalised span at the trace backend and
+		// hide the failure from tracing dashboards. Status
+		// attributes that depend on the response (status code,
+		// query) are recorded BEFORE the panic could re-trigger,
+		// so the only thing that may be missing on the panic path
+		// is the response-status attribute set — which is the
+		// correct signal that the request did not complete cleanly.
+		defer span.End()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r.WithContext(ctx))
 		status := sw.status
@@ -374,12 +459,11 @@ func otelHTTPServerMiddleware(serverName string, next http.Handler) http.Handler
 		} else if host != "" {
 			span.SetAttributes(semconv.ServerAddressKey.String(host))
 		}
-		span.SetAttributes(semconv.URLPath(r.URL.Path))
+		span.SetAttributes(semconv.URLPath(safePath))
 		q := r.URL.RawQuery
 		if q != "" {
 			span.SetAttributes(semconv.URLQuery(sanitizeQueryForSpan(q)))
 		}
-		span.End()
 	})
 }
 
@@ -417,6 +501,7 @@ func ScanCorrelationFromContext(ctx context.Context) audit.ScanCorrelation {
 		AgentID:         aid.AgentID,
 		AgentName:       aid.AgentName,
 		AgentInstanceID: aid.AgentInstanceID,
+		Connector:       audit.EnvelopeFromContext(ctx).Connector,
 	}
 }
 
@@ -427,15 +512,21 @@ func enrichHTTPSpanFromContext(ctx context.Context) {
 	if span == nil || !span.IsRecording() {
 		return
 	}
+	if runID := gatewaylog.ProcessRunID(); runID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.run.id", runID))
+	}
 	if id := RequestIDFromContext(ctx); id != "" {
 		span.SetAttributes(attribute.String("defenseclaw.request_id", id))
 	}
 	if sid := SessionIDFromContext(ctx); sid != "" {
-		span.SetAttributes(attribute.String("defenseclaw.session_id", sid))
+		span.SetAttributes(attribute.String("gen_ai.conversation.id", sid))
 	}
 	aid := AgentIdentityFromContext(ctx)
 	if aid.AgentID != "" {
 		span.SetAttributes(attribute.String("defenseclaw.agent_id", aid.AgentID))
+	}
+	if aid.AgentType != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.type", aid.AgentType))
 	}
 	if aid.AgentInstanceID != "" {
 		span.SetAttributes(attribute.String("defenseclaw.agent_instance_id", aid.AgentInstanceID))

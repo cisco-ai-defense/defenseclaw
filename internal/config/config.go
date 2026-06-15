@@ -23,7 +23,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
@@ -34,6 +36,8 @@ import (
 // ReportConfigLoadError is wired by telemetry.NewProvider to emit OTel on Load failures.
 // Nil in binaries/tests that do not install the hook.
 var ReportConfigLoadError func(ctx context.Context, reason string)
+
+var privacyDisableRedactionWarnOnce sync.Once
 
 // DefenseClawLLMKeyEnv is the canonical environment variable holding the
 // unified LLM API key that powers every LLM-using component in DefenseClaw
@@ -59,13 +63,23 @@ type ClawMode string
 
 const (
 	ClawOpenClaw ClawMode = "openclaw"
-	// Future: ClawNemoClaw, ClawOpenCode, ClawClaudeCode
+	// Other recognised connector names (kept in sync with
+	// Connector.Name() in internal/gateway/connector and with the
+	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
+	// "zeptoclaw", "claudecode", "codex", "hermes", "cursor",
+	// "windsurf", "geminicli", "copilot", "openhands". Constants for those modes
+	// are intentionally not introduced here yet — they're used as
+	// raw strings by Config.activeConnector() (see internal/config/
+	// claw.go) which dispatches to per-connector readers. Promoting
+	// them to typed constants is part of S1.2 and tracked in the
+	// claw-agnostic refactor plan.
 )
 
 type ClawConfig struct {
-	Mode       ClawMode `mapstructure:"mode"        yaml:"mode"`
-	HomeDir    string   `mapstructure:"home_dir"    yaml:"home_dir"`
-	ConfigFile string   `mapstructure:"config_file" yaml:"config_file"`
+	Mode         ClawMode `mapstructure:"mode"          yaml:"mode"`
+	HomeDir      string   `mapstructure:"home_dir"      yaml:"home_dir"`
+	ConfigFile   string   `mapstructure:"config_file"   yaml:"config_file"`
+	WorkspaceDir string   `mapstructure:"workspace_dir" yaml:"workspace_dir,omitempty"`
 }
 
 // AgentConfig [v7] pins the logical agent identity for this
@@ -119,7 +133,13 @@ type AgentConfig struct {
 // into the matching LLMConfig slots, then the legacy fields are left
 // alone so hand-edited configs keep round-tripping. `defenseclaw setup
 // migrate-llm` writes the canonical v5 shape back to disk.
-const CurrentConfigVersion = 5
+//
+// v6: introduces the optional `guardrail.connectors:` map for
+// per-connector guardrail overrides (multi-connector support). The
+// legacy singular `guardrail.connector` field stays valid and keeps
+// driving the single-connector path, so the v5→v6 step is a no-op
+// normalization — no field rewrite is required.
+const CurrentConfigVersion = 6
 
 type Config struct {
 	ConfigVersion int `mapstructure:"config_version"        yaml:"config_version"`
@@ -144,32 +164,108 @@ type Config struct {
 	DefaultLLMAPIKeyEnv string `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
 	DefaultLLMModel     string `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
 
-	DataDir        string               `mapstructure:"data_dir"              yaml:"data_dir"`
-	AuditDB        string               `mapstructure:"audit_db"         yaml:"audit_db"`
-	QuarantineDir  string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir      string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir      string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment    string               `mapstructure:"environment"      yaml:"environment"`
-	Claw           ClawConfig           `mapstructure:"claw"             yaml:"claw"`
-	Agent          AgentConfig          `mapstructure:"agent"            yaml:"agent,omitempty"`
-	InspectLLM     InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
-	CiscoAIDefense CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners       ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell      OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
-	Watch          WatchConfig          `mapstructure:"watch"            yaml:"watch"`
-	Firewall       FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail      GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
-	Gateway        GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
-	SkillActions   SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
+	DataDir string `mapstructure:"data_dir"              yaml:"data_dir"`
+	AuditDB string `mapstructure:"audit_db"         yaml:"audit_db"`
+	// JudgeBodiesDB is the standalone SQLite file that holds
+	// retained LLM-judge bodies (judge_responses table). Splitting
+	// it out from audit.db isolates the highest-volume write path
+	// (judge bodies, up to MaxJudgeRawBytes = 64 KiB each) from
+	// the comparatively narrow audit_events / activity_events
+	// writes, so the two write-lock domains do not contend.
+	//
+	// Defaults to ~/.defenseclaw/judge_bodies.db; operators can
+	// point this at a separate disk in high-throughput
+	// deployments. The legacy judge_responses rows in audit.db
+	// remain readable; new rows only ever land here.
+	JudgeBodiesDB   string                     `mapstructure:"judge_bodies_db"  yaml:"judge_bodies_db,omitempty"`
+	QuarantineDir   string                     `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
+	PluginDir       string                     `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
+	PolicyDir       string                     `mapstructure:"policy_dir"       yaml:"policy_dir"`
+	Environment     string                     `mapstructure:"environment"      yaml:"environment"`
+	TenantID        string                     `mapstructure:"tenant_id"        yaml:"tenant_id,omitempty"`
+	WorkspaceID     string                     `mapstructure:"workspace_id"     yaml:"workspace_id,omitempty"`
+	DeploymentMode  string                     `mapstructure:"deployment_mode"  yaml:"deployment_mode,omitempty"`
+	DiscoverySource string                     `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
+	Claw            ClawConfig                 `mapstructure:"claw"             yaml:"claw"`
+	Agent           AgentConfig                `mapstructure:"agent"            yaml:"agent,omitempty"`
+	InspectLLM      InspectLLMConfig           `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
+	CiscoAIDefense  CiscoAIDefenseConfig       `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
+	Scanners        ScannersConfig             `mapstructure:"scanners"         yaml:"scanners"`
+	OpenShell       OpenShellConfig            `mapstructure:"openshell"        yaml:"openshell"`
+	Watch           WatchConfig                `mapstructure:"watch"            yaml:"watch"`
+	Firewall        FirewallConfig             `mapstructure:"firewall"         yaml:"firewall"`
+	Guardrail       GuardrailConfig            `mapstructure:"guardrail"        yaml:"guardrail"`
+	Gateway         GatewayConfig              `mapstructure:"gateway"          yaml:"gateway"`
+	SkillActions    SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
+	MCPActions      MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
+	PluginActions   PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
+	AssetPolicy     AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
+	Registries      RegistriesConfig           `mapstructure:"registries"       yaml:"registries,omitempty"`
+	OTel            OTelConfig                 `mapstructure:"otel"             yaml:"otel"`
+	ClaudeCode      AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
+	Codex           AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
+	ConnectorHooks  map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
 	// AuditSinks is the v4 replacement for the legacy `splunk:` block.
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
 	// detected at Load() and emit a hard migration error.
-	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
-	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
+	AuditSinks    []AuditSink         `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
+	Webhooks      []WebhookConfig     `mapstructure:"webhooks"         yaml:"webhooks"`
+	Privacy       PrivacyConfig       `mapstructure:"privacy"          yaml:"privacy,omitempty"`
+	AIDiscovery   AIDiscoveryConfig   `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
+	Notifications NotificationsConfig `mapstructure:"notifications"    yaml:"notifications,omitempty"`
+}
+
+// PrivacyConfig groups privacy/redaction toggles. Today it carries
+// only the redaction kill-switch; future fields (per-sink redaction
+// scope, custom redactor profiles) land here so operators have a
+// single section to audit.
+//
+// Scope: this is a deliberate, persistent operator decision.
+// Defaults match the existing redacting-by-default behavior so a
+// fresh install or a config without a `privacy:` block keeps the
+// historical contract documented in OBSERVABILITY.md.
+type PrivacyConfig struct {
+	// DisableRedaction, when true, instructs the sidecar to bypass
+	// every ForSink* redaction helper at startup — including
+	// persistent sinks (SQLite audit, OTel log exporters, Splunk
+	// HEC, webhooks). Equivalent to setting
+	// DEFENSECLAW_DISABLE_REDACTION=1 but persisted in config so
+	// the choice survives restarts and TUI invocations without
+	// per-shell env-var ceremony.
+	//
+	// WARNING: this violates the unconditional-redaction contract
+	// documented in OBSERVABILITY.md. Only enable on single-tenant
+	// installs where every downstream sink already lives inside
+	// the same trust boundary (e.g. lab / prompt-engineering use).
+	// The CLI emits a loud warning on flip-on, and config loaders emit
+	// a once-per-process warning when they observe the setting so the
+	// runtime state stays auditable without spamming reload loops.
+	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
+}
+
+// AIDiscoveryConfig controls continuous, sidecar-native visibility for
+// supported connectors and broader "shadow AI" usage signals. Outbound
+// telemetry is sanitized by the inventory service; this config only controls
+// which local metadata sources are inspected.
+type AIDiscoveryConfig struct {
+	Enabled                  bool     `mapstructure:"enabled"                   yaml:"enabled"`
+	Mode                     string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
+	ScanIntervalMin          int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
+	ProcessIntervalSec       int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
+	ScanRoots                []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
+	SignaturePacks           []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
+	AllowWorkspaceSignatures bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
+	DisabledSignatureIDs     []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
+	IncludeShellHistory      bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
+	IncludePackageManifests  bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
+	IncludeEnvVarNames       bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
+	IncludeNetworkDomains    bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	MaxFilesPerScan          int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
+	MaxFileBytes             int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
+	EmitOTel                 bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
+	StoreRawLocalPaths       bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
+	ConfidencePolicyPath     string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -234,6 +330,116 @@ type LLMConfig struct {
 	// MaxRetries bounds upstream retry attempts. 0 picks a sensible
 	// default (defaultLLMMaxRetries).
 	MaxRetries int `mapstructure:"max_retries" yaml:"max_retries,omitempty"`
+	// InstanceName points at a named entry in
+	// ~/.defenseclaw/custom-providers.json. When set, the gateway
+	// resolves base_url / TLS / base_provider_type from the overlay
+	// rather than from this struct. Mirrors the Python-side
+	// LLMConfig.instance_name field.
+	InstanceName string `mapstructure:"instance_name" yaml:"instance_name,omitempty"`
+
+	// ForwardCustomHeaders controls whether the guardrail gateway
+	// forwards inbound HTTP headers (minus an always-denied blocklist of
+	// proxy-hop, auth, hop-by-hop, cookie, and framework-internal headers)
+	// from the agent on to the upstream LLM provider on both the
+	// /v1/chat/completions and passthrough paths (Responses API,
+	// /v1/messages, etc.).
+	//
+	// Pointer-typed so an absent YAML field round-trips as nil, which is
+	// interpreted as the safe default (enabled). Operators opt out
+	// explicitly with `forward_custom_headers: false`. Use
+	// ForwardCustomHeadersEnabled() to read the effective value.
+	ForwardCustomHeaders *bool `mapstructure:"forward_custom_headers" yaml:"forward_custom_headers,omitempty"`
+
+	// Region is a free-form region/location hint surfaced on the role
+	// (e.g. "us-east-1" for Bedrock, "us-central1" for Vertex). The
+	// per-provider sub-blocks (Bedrock.Region, Vertex.Region) take
+	// precedence when both are set. Mirrors Python LLMConfig.region.
+	Region string `mapstructure:"region" yaml:"region,omitempty"`
+
+	// TLS holds optional per-role TLS overrides. Pointer-typed so an
+	// absent block round-trips through YAML unchanged.
+	TLS *TLSConfig `mapstructure:"tls" yaml:"tls,omitempty"`
+
+	// Bedrock holds optional per-role Bedrock posture. Pointer-typed
+	// so omitempty drops the block on marshal. The gateway dispatcher
+	// merges this with the overlay sub-block (role wins, overlay
+	// fills blanks) before populating Bifrost's BedrockKeyConfig.
+	Bedrock *BedrockKeyConfig `mapstructure:"bedrock" yaml:"bedrock,omitempty"`
+
+	// Vertex holds optional per-role Vertex AI posture. Same merge
+	// semantics as Bedrock.
+	Vertex *VertexKeyConfig `mapstructure:"vertex"  yaml:"vertex,omitempty"`
+
+	// Azure holds optional per-role Azure OpenAI posture. Same merge
+	// semantics as Bedrock.
+	Azure *AzureKeyConfig `mapstructure:"azure"   yaml:"azure,omitempty"`
+
+	// ExtraHeaders are additional HTTP headers sent on every request to
+	// this provider (e.g. {"llm-model": "gpt-5-5"} for Circuit routing).
+	// Forwarded to Bifrost's NetworkConfig.ExtraHeaders.
+	ExtraHeaders map[string]string `mapstructure:"extra_headers" yaml:"extra_headers,omitempty"`
+}
+
+// TLSConfig captures per-instance TLS overrides on a role-level
+// LLMConfig (the same shape lives in custom-providers.json under
+// providers[].tls). Operators reach for this when an internal LLM
+// endpoint terminates TLS with a self-signed cert chain.
+type TLSConfig struct {
+	// CACertFile is a path to a PEM-encoded CA bundle on disk. Used
+	// when the role wants to pin trust outside of the overlay.
+	CACertFile string `mapstructure:"ca_cert_file" yaml:"ca_cert_file,omitempty"`
+	// CACertPEM is the inline PEM bundle (typically loaded from the
+	// overlay; the gateway never writes this on a role config).
+	CACertPEM string `mapstructure:"ca_cert_pem" yaml:"ca_cert_pem,omitempty"`
+	// InsecureSkipVerify disables certificate validation. Lab-only.
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify" yaml:"insecure_skip_verify,omitempty"`
+}
+
+// BedrockKeyConfig mirrors the Python LLMConfig.bedrock dataclass and
+// the overlay's providers[].bedrock JSON shape. The dispatcher uses
+// this struct to populate Bifrost's per-key BedrockKeyConfig.
+//
+// AuthMode values:
+//   - "api_key" (default): gateway-injected; Bifrost reads the API key.
+//   - "iam_credentials": access-key / secret-key (+ optional session
+//     token) provided via env vars named below.
+//   - "profile": named AWS shared-config profile; applied process-wide
+//     via AWS_PROFILE before Bifrost loads the default cred chain.
+//   - "instance_role": Bifrost falls through to the default cred chain
+//     (EC2 / ECS / EKS IRSA).
+type BedrockKeyConfig struct {
+	Region            string            `mapstructure:"region"             yaml:"region,omitempty"             json:"region,omitempty"`
+	AuthMode          string            `mapstructure:"auth_mode"          yaml:"auth_mode,omitempty"          json:"auth_mode,omitempty"`
+	AccessKeyEnv      string            `mapstructure:"access_key_env"     yaml:"access_key_env,omitempty"     json:"access_key_env,omitempty"`
+	SecretKeyEnv      string            `mapstructure:"secret_key_env"     yaml:"secret_key_env,omitempty"     json:"secret_key_env,omitempty"`
+	SessionTokenEnv   string            `mapstructure:"session_token_env"  yaml:"session_token_env,omitempty"  json:"session_token_env,omitempty"`
+	ProfileName       string            `mapstructure:"profile_name"       yaml:"profile_name,omitempty"       json:"profile_name,omitempty"`
+	InferenceProfile  string            `mapstructure:"inference_profile"  yaml:"inference_profile,omitempty"  json:"inference_profile,omitempty"`
+	DeploymentAliases map[string]string `mapstructure:"deployment_aliases" yaml:"deployment_aliases,omitempty" json:"deployment_aliases,omitempty"`
+}
+
+// VertexKeyConfig mirrors the Python LLMConfig.vertex dataclass. The
+// dispatcher uses this to populate Bifrost's per-key VertexKeyConfig.
+//
+// AuthMode values: "service_account" (env var holds JSON), "adc"
+// (default cred chain), "workload_identity" (k8s WIF).
+type VertexKeyConfig struct {
+	ProjectID             string `mapstructure:"project_id"               yaml:"project_id,omitempty"               json:"project_id,omitempty"`
+	Region                string `mapstructure:"region"                   yaml:"region,omitempty"                   json:"region,omitempty"`
+	AuthMode              string `mapstructure:"auth_mode"                yaml:"auth_mode,omitempty"                json:"auth_mode,omitempty"`
+	ServiceAccountJSONEnv string `mapstructure:"service_account_json_env" yaml:"service_account_json_env,omitempty" json:"service_account_json_env,omitempty"`
+}
+
+// AzureKeyConfig mirrors the Python LLMConfig.azure dataclass. The
+// dispatcher uses this to populate Bifrost's per-key AzureKeyConfig.
+//
+// AuthMode values: "api_key" (gateway-injected from env),
+// "managed_identity" (AAD on the host).
+type AzureKeyConfig struct {
+	Endpoint          string            `mapstructure:"endpoint"           yaml:"endpoint,omitempty"           json:"endpoint,omitempty"`
+	APIVersion        string            `mapstructure:"api_version"        yaml:"api_version,omitempty"        json:"api_version,omitempty"`
+	AuthMode          string            `mapstructure:"auth_mode"          yaml:"auth_mode,omitempty"          json:"auth_mode,omitempty"`
+	DeploymentAliases map[string]string `mapstructure:"deployment_aliases" yaml:"deployment_aliases,omitempty" json:"deployment_aliases,omitempty"`
 }
 
 // ResolvedAPIKey returns the API key from the env var first, then the
@@ -253,12 +459,18 @@ type LLMConfig struct {
 // these stay in lock-step.
 func (l LLMConfig) ResolvedAPIKey() string {
 	if l.APIKeyEnv != "" {
+		if v, ok := GetKey(l.APIKeyEnv); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
 		if v := strings.TrimSpace(os.Getenv(l.APIKeyEnv)); v != "" {
 			return v
 		}
 	}
 	if l.APIKey != "" {
 		return l.APIKey
+	}
+	if v, ok := GetKey(DefenseClawLLMKeyEnv); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
 	}
 	return strings.TrimSpace(os.Getenv(DefenseClawLLMKeyEnv))
 }
@@ -312,32 +524,53 @@ func (l LLMConfig) IsLocalProvider() bool {
 	return false
 }
 
+// ForwardCustomHeadersEnabled reports whether the gateway forwards
+// inbound HTTP headers from the agent through to the upstream LLM
+// provider. The feature is enabled by default; nil (unset YAML) is
+// treated as true so existing configs keep working. Operators can
+// opt out with `llm.forward_custom_headers: false`.
+func (l LLMConfig) ForwardCustomHeadersEnabled() bool {
+	if l.ForwardCustomHeaders == nil {
+		return true
+	}
+	return *l.ForwardCustomHeaders
+}
+
 // recognizedLLMProviders lists the "provider/" prefixes the gateway and
 // LiteLLM both understand. Unknown prefixes emit a one-shot warning.
+//
+// Keep in lockstep with _RECOGNIZED_LLM_PROVIDERS in
+// cli/defenseclaw/config.py. The "gemini-openai" entry in particular
+// is a Bifrost routing key for Google's OpenAI-compatible Gemini
+// endpoint — the gateway routes it through Bifrost's Gemini handler
+// (see internal/gateway/provider_bifrost.go), while the Python
+// LiteLLM bridge maps it to the same GOOGLE_API_KEY env var via
+// cli/defenseclaw/scanner/_llm_env.py.
 var recognizedLLMProviders = map[string]struct{}{
-	"openai":       {},
-	"anthropic":    {},
-	"azure":        {},
-	"gemini":       {},
-	"vertex_ai":    {},
-	"bedrock":      {},
-	"groq":         {},
-	"mistral":      {},
-	"cohere":       {},
-	"ollama":       {},
-	"vllm":         {},
-	"deepseek":     {},
-	"xai":          {},
-	"fireworks_ai": {},
-	"perplexity":   {},
-	"huggingface":  {},
-	"replicate":    {},
-	"openrouter":   {},
-	"together_ai":  {},
-	"cerebras":     {},
-	"lm_studio":    {},
-	"lmstudio":     {},
-	"local":        {},
+	"openai":        {},
+	"anthropic":     {},
+	"azure":         {},
+	"gemini":        {},
+	"gemini-openai": {},
+	"vertex_ai":     {},
+	"bedrock":       {},
+	"groq":          {},
+	"mistral":       {},
+	"cohere":        {},
+	"ollama":        {},
+	"vllm":          {},
+	"deepseek":      {},
+	"xai":           {},
+	"fireworks_ai":  {},
+	"perplexity":    {},
+	"huggingface":   {},
+	"replicate":     {},
+	"openrouter":    {},
+	"together_ai":   {},
+	"cerebras":      {},
+	"lm_studio":     {},
+	"lmstudio":      {},
+	"local":         {},
 }
 
 // warnedPrefixes keeps one-shot-per-process warning state.
@@ -418,6 +651,16 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 	}
 	if override.BaseURL != "" {
 		out.BaseURL = override.BaseURL
+	}
+	// InstanceName is the ONLY signal that binds a role to a
+	// custom-providers.json overlay entry (NewProviderForLLMConfig
+	// matches the overlay by instance name, never by model prefix).
+	// Dropping it here meant a role-level binding like
+	// guardrail.judge.llm.instance_name silently fell back to the
+	// inferred provider family — live judge content went to the
+	// public provider endpoint instead of the operator's custom one.
+	if override.InstanceName != "" {
+		out.InstanceName = override.InstanceName
 	}
 	if override.Timeout > 0 {
 		out.Timeout = override.Timeout
@@ -591,12 +834,96 @@ func (c *WebhookConfig) ResolvedSecret() string {
 	return ""
 }
 
+// AgentHookConfig is the per-connector hook policy block (e.g.
+// claude_code.fail_mode, codex.fail_mode). It is independent from
+// the gateway-side hook script fail-mode controlled by
+// GuardrailConfig.HookFailMode.
+//
+// IMPORTANT — disambiguation, both fields are named "fail_mode":
+//
+//   - GuardrailConfig.HookFailMode (yaml: guardrail.hook_fail_mode)
+//     is the SHELL-side fail-mode baked into the generated hook
+//     templates (codex-hook.sh, claude-code-hook.sh, inspect-*).
+//     It governs what those scripts do when the gateway returns a
+//     RESPONSE-LAYER failure (4xx, malformed JSON, missing
+//     `action` field). Its default is "open" because silently
+//     bricking the agent on a transient response error is worse
+//     than allowing one tool call. Transport-layer failures
+//     (gateway unreachable / 5xx) are handled separately and
+//     ALWAYS allow unless DEFENSECLAW_STRICT_AVAILABILITY=1.
+//
+//   - AgentHookConfig.FailMode (yaml: <connector>.fail_mode below)
+//     is a per-connector POLICY-LAYER hint that downstream
+//     connector glue can read to pick a policy posture. It is
+//     NOT consumed by the generated hook scripts. The legacy
+//     default "closed" is preserved here for backward
+//     compatibility with installs that wrote it before
+//     hook_fail_mode existed.
+//
+// Operators who want to change the runtime behavior of the
+// generated hooks should edit guardrail.hook_fail_mode (or run
+// `defenseclaw guardrail fail-mode`), NOT this field.
+type AgentHookConfig struct {
+	Enabled                      bool     `mapstructure:"enabled"                         yaml:"enabled"`
+	Mode                         string   `mapstructure:"mode"                            yaml:"mode,omitempty"`
+	FailMode                     string   `mapstructure:"fail_mode"                       yaml:"fail_mode,omitempty"`
+	ScanOnSessionStart           bool     `mapstructure:"scan_on_session_start"           yaml:"scan_on_session_start,omitempty"`
+	ScanOnStop                   bool     `mapstructure:"scan_on_stop"                    yaml:"scan_on_stop,omitempty"`
+	ScanPaths                    []string `mapstructure:"scan_paths"                      yaml:"scan_paths,omitempty"`
+	ComponentScanIntervalMinutes int      `mapstructure:"component_scan_interval_minutes" yaml:"component_scan_interval_minutes,omitempty"`
+}
+
+// EffectiveFailMode returns the per-connector POLICY-LAYER fail
+// mode for AgentHookConfig, defaulting to "closed" for backward
+// compatibility. NOTE: this is NOT what governs the generated
+// hook scripts; see GuardrailConfig.EffectiveHookFailMode for
+// that. Both fields are named "fail_mode" in YAML — the namespace
+// (top-level connector vs guardrail.hook_fail_mode) is what tells
+// them apart.
+func (c AgentHookConfig) EffectiveFailMode() string {
+	if c.FailMode == "open" {
+		return "open"
+	}
+	return "closed"
+}
+
+// ConnectorHookConfig returns the AgentHookConfig for a named connector.
+// It checks ConnectorHooks first, then falls back to the legacy
+// ClaudeCode/Codex top-level fields for backward compatibility.
+func (c *Config) ConnectorHookConfig(name string) AgentHookConfig {
+	if c.ConnectorHooks != nil {
+		if h, ok := c.ConnectorHooks[name]; ok {
+			return h
+		}
+	}
+	switch name {
+	case "claudecode", "claude_code":
+		return c.ClaudeCode
+	case "codex":
+		return c.Codex
+	case "gemini-cli", "gemini_cli", "gemini":
+		if c.ConnectorHooks != nil {
+			if h, ok := c.ConnectorHooks["geminicli"]; ok {
+				return h
+			}
+		}
+	}
+	return AgentHookConfig{}
+}
+
 type WatchConfig struct {
 	DebounceMs          int  `mapstructure:"debounce_ms"            yaml:"debounce_ms"`
 	AutoBlock           bool `mapstructure:"auto_block"             yaml:"auto_block"`
 	AllowListBypassScan bool `mapstructure:"allow_list_bypass_scan" yaml:"allow_list_bypass_scan"`
 	RescanEnabled       bool `mapstructure:"rescan_enabled"         yaml:"rescan_enabled"`
 	RescanIntervalMin   int  `mapstructure:"rescan_interval_min"    yaml:"rescan_interval_min"`
+	// RescanContentGated skips the scanner during a periodic re-scan when a
+	// target's content hash and scanner fingerprint are both unchanged since
+	// the stored baseline. This avoids re-running the (expensive) scanner and
+	// writing a fresh scan_results row every cycle for targets that did not
+	// change. Set to false to restore the legacy "scan every target every
+	// cycle" behavior.
+	RescanContentGated bool `mapstructure:"rescan_content_gated"   yaml:"rescan_content_gated"`
 }
 
 type InspectLLMConfig struct {
@@ -755,16 +1082,54 @@ type CiscoAIDefenseConfig struct {
 	APIKeyEnv    string   `mapstructure:"api_key_env"    yaml:"api_key_env"`
 	TimeoutMs    int      `mapstructure:"timeout_ms"     yaml:"timeout_ms"`
 	EnabledRules []string `mapstructure:"enabled_rules"  yaml:"enabled_rules"`
+
+	// ScanHookSurface controls whether the hook lane (PreToolUse +
+	// PostToolUse + UserPromptSubmit on hook-only connectors like
+	// Codex / Claude Code / Cursor / Windsurf / Hermes / Gemini /
+	// Copilot) forwards payloads to Cisco AI Defense.
+	//
+	// Pre-existing AID integration only fires on the proxy lane
+	// (chat prompts + completions) for OpenClaw / ZeptoClaw, so
+	// without this flag tool calls and tool results on hook-only
+	// connectors never reach AID.
+	//
+	// When the API key is unset this flag is a no-op (the AID lane
+	// is silently skipped). Default is true so an operator who
+	// configures the AID key gets coverage on every surface; flip
+	// to false to scope AID to the proxy lane only (e.g. when
+	// pricing per-call matters and the operator already gets
+	// per-tool coverage from the bundled regex rule pack).
+	ScanHookSurface *bool `mapstructure:"scan_hook_surface" yaml:"scan_hook_surface,omitempty"`
 }
 
-// ResolvedAPIKey returns the API key from the env var (if set) or the direct value.
+// HookSurfaceEnabled reports whether the AID lane should fire on the
+// hook-side surfaces. Defaults to true (opt-out) so an operator who
+// sets `cisco_ai_defense.api_key_env` gets coverage on every surface
+// without having to flip a second flag. Returns false when the
+// pointer is explicitly set to false.
+func (c *CiscoAIDefenseConfig) HookSurfaceEnabled() bool {
+	if c == nil || c.ScanHookSurface == nil {
+		return true
+	}
+	return *c.ScanHookSurface
+}
+
+// ResolvedAPIKey returns the API key from the key store, env var, or inline value.
 func (c *CiscoAIDefenseConfig) ResolvedAPIKey() string {
 	if c.APIKeyEnv != "" {
+		if v, ok := GetKey(c.APIKeyEnv); ok && v != "" {
+			return v
+		}
 		if v := os.Getenv(c.APIKeyEnv); v != "" {
 			return v
 		}
 	}
 	return c.APIKey
+}
+
+type HILTConfig struct {
+	Enabled     bool   `mapstructure:"enabled"      yaml:"enabled"`
+	MinSeverity string `mapstructure:"min_severity" yaml:"min_severity"`
 }
 
 type GuardrailConfig struct {
@@ -773,6 +1138,19 @@ type GuardrailConfig struct {
 	ScannerMode string `mapstructure:"scanner_mode"         yaml:"scanner_mode"`
 	Host        string `mapstructure:"host"                 yaml:"host,omitempty"`
 	Port        int    `mapstructure:"port"                 yaml:"port"`
+
+	// Connector selects the active agent framework adapter. Written by
+	// `defenseclaw setup` and read by the sidecar at boot. When empty,
+	// defaults to "openclaw" for backward compatibility.
+	Connector string `mapstructure:"connector"            yaml:"connector,omitempty"`
+
+	// AllowEmptyProviders bypasses the boot-time ProviderProbe refusal
+	// (plan A4 / S0.12). The default behavior is to fail-closed when the
+	// active connector reports zero usable upstream providers — this
+	// catches half-installed deployments where the gateway would accept
+	// traffic with no LLM to forward to. Test harnesses that intentionally
+	// run with stub upstreams opt in by setting this to true.
+	AllowEmptyProviders bool `mapstructure:"allow_empty_providers" yaml:"allow_empty_providers,omitempty"`
 
 	// LLM overrides the top-level llm: block for the guardrail upstream
 	// (the model that DefenseClaw proxies client traffic to). Prefer
@@ -797,6 +1175,7 @@ type GuardrailConfig struct {
 	StreamBufferBytes int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
 	RulePackDir       string      `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
 	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
+	HILT              HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
 
 	// Detection strategy: "regex_only" (default), "regex_judge", "judge_first".
 	// Per-direction overrides take precedence over the global setting.
@@ -820,6 +1199,27 @@ type GuardrailConfig struct {
 	// local-only decision.
 	RetainJudgeBodies bool `mapstructure:"retain_judge_bodies" yaml:"retain_judge_bodies,omitempty"`
 
+	// JudgePersistQueueDepth caps the buffered channel that
+	// decouples judge persistence from the proxy hot path. Each
+	// slot holds one pending INSERT into judge_responses; the
+	// dedicated worker drains the queue and amortizes fsync cost
+	// by batching up to 32 rows per transaction.
+	//
+	// Tuning notes:
+	//   - 1024 (default) is sized to absorb a ~10-second burst at
+	//     100 RPS of tool-call inspections without dropping rows
+	//     while bounding worst-case memory to ~64 MiB (each row
+	//     is capped at MaxJudgeRawBytes = 64 KiB).
+	//   - Setting this to 0 falls back to the default at boot.
+	//   - DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE env var overrides
+	//     the config value at sidecar boot for emergency tuning
+	//     without a config push.
+	//
+	// Drops show up as defenseclaw.judge.persist.drops with
+	// reason="queue_full"; a sustained non-zero rate is the cue
+	// to bump this knob (or investigate SQLite write throughput).
+	JudgePersistQueueDepth int `mapstructure:"judge_persist_queue_depth" yaml:"judge_persist_queue_depth,omitempty"`
+
 	// AllowUnknownLLMDomains, when true, permits passthrough to hosts
 	// that are NOT listed in providers.json — provided the request
 	// body still classifies as an LLM shape (messages/contents/input/
@@ -827,6 +1227,396 @@ type GuardrailConfig struct {
 	// proxy never fails open. The request is still inspected, audited,
 	// and emitted as an EventEgress with branch="shape".
 	AllowUnknownLLMDomains bool `mapstructure:"allow_unknown_llm_domains" yaml:"allow_unknown_llm_domains,omitempty"`
+
+	// HookFailMode is the operator-chosen response-layer fail mode
+	// for every generated hook script (codex-hook, claude-code-hook,
+	// inspect-*). Two values are supported:
+	//
+	//   - "open" (default, recommended): when the gateway answers
+	//     with a 4xx, malformed JSON, or a missing action field, the
+	//     hook ALLOWS the tool/prompt with a stderr warning and an
+	//     entry in $DEFENSECLAW_HOME/logs/hook-failures.jsonl. The
+	//     rationale: a misbehaving gateway that bricks every agent
+	//     interaction is strictly worse UX than a brief observability
+	//     gap, and the operator can detect the problem from the log.
+	//
+	//   - "closed": the same response-layer failures BLOCK the tool/
+	//     prompt (exit 2). Choose when you'd rather take the agent
+	//     offline than miss a policy decision (e.g., regulated
+	//     workflows where every prompt MUST be inspected).
+	//
+	// This field governs ONLY response-layer failures. Transport-
+	// layer failures (gateway unreachable / 5xx) are handled
+	// separately by each hook's fail_unreachable helper and ALWAYS
+	// allow unless the operator opts into strict availability via
+	// DEFENSECLAW_STRICT_AVAILABILITY=1 — regardless of this field's
+	// value. See internal/gateway/connector/hooks/_hardening.sh for
+	// the rationale.
+	//
+	// `defenseclaw setup guardrail` prompts for this when the install
+	// is fresh or when the operator changes guardrail.mode (observe
+	// ↔ action). It can also be flipped standalone via
+	// `defenseclaw guardrail fail-mode <open|closed>` or via
+	// `defenseclaw init --fail-mode <open|closed>` /
+	// `defenseclaw quickstart --fail-mode <open|closed>`.
+	//
+	// IMPORTANT — disambiguation: this is NOT the same field as
+	// AgentHookConfig.FailMode (e.g. claude_code.fail_mode,
+	// codex.fail_mode). That sibling field is a per-connector
+	// POLICY-LAYER hint defaulting to "closed" for backward
+	// compatibility, and it is NOT consumed by the generated hook
+	// scripts. Operators who want to change runtime hook behavior
+	// must edit THIS field (guardrail.hook_fail_mode), not the
+	// per-connector one. See AgentHookConfig docs for the full
+	// rationale.
+	HookFailMode string `mapstructure:"hook_fail_mode" yaml:"hook_fail_mode,omitempty"`
+
+	// HookSelfHeal enables the connector hook self-heal guard
+	// (internal/gateway/hook_config_guard.go). When true (the default),
+	// the sidecar watches the active connector's agent config file
+	// (e.g. ~/.cursor/hooks.json, ~/.claude/settings.json,
+	// ~/.codex/config.toml) and immediately re-installs the DefenseClaw
+	// hook block if a user deletes or strips it while the gateway is
+	// running. Set to false to allow operators to remove hooks by hand
+	// without the gateway restoring them; enforcement then lapses until
+	// the next setup/restart, which is the pre-self-heal behavior.
+	HookSelfHeal bool `mapstructure:"hook_self_heal" yaml:"hook_self_heal,omitempty"`
+
+	// HookSelfHealDebounceMs coalesces a burst of filesystem events into
+	// a single presence check before deciding whether to re-install.
+	// <= 0 falls back to the built-in default (500ms).
+	HookSelfHealDebounceMs int `mapstructure:"hook_self_heal_debounce_ms" yaml:"hook_self_heal_debounce_ms,omitempty"`
+
+	// Connectors holds per-connector guardrail overrides keyed by
+	// connector name. Scope is HOOK-BASED connectors only (codex,
+	// claudecode, antigravity, ...); the proxy connectors (openclaw,
+	// zeptoclaw) are never listed here. An empty or absent map
+	// preserves the legacy single-connector behavior driven by the
+	// singular Connector field.
+	//
+	// Each entry inherits any unset field from the global
+	// GuardrailConfig — resolution goes through the Effective*(connector)
+	// methods, never by reading map entries directly. This struct does
+	// NOT validate connector identity against the registry (config is a
+	// leaf package); the "must implement HookEndpoint" guard lives in the
+	// gateway boot loop where the registry is available.
+	Connectors map[string]PerConnectorGuardrailConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
+}
+
+// PerConnectorGuardrailConfig carries the subset of guardrail policy
+// that an operator may override on a single hook-based connector. Every
+// field is optional: an unset (zero-value) field inherits the global
+// GuardrailConfig value via the Effective*(connector) resolvers. The
+// HILT block is a pointer so a nil block means "inherit the global HILT"
+// while a present-but-empty block means "explicitly override".
+type PerConnectorGuardrailConfig struct {
+	Mode         string      `mapstructure:"mode"           yaml:"mode,omitempty"`
+	HILT         *HILTConfig `mapstructure:"hilt"           yaml:"hilt,omitempty"`
+	HookFailMode string      `mapstructure:"hook_fail_mode" yaml:"hook_fail_mode,omitempty"`
+	BlockMessage string      `mapstructure:"block_message"  yaml:"block_message,omitempty"`
+	RulePackDir  string      `mapstructure:"rule_pack_dir"  yaml:"rule_pack_dir,omitempty"`
+
+	// Enabled is the per-connector on/off switch toggled by
+	// `defenseclaw guardrail disable --connector X` (and its enable
+	// counterpart). It is a pointer so that an unset (nil) field means
+	// "inherit the default (enabled)" — the overwhelming majority case,
+	// which keeps the connector active exactly as before. A non-nil
+	// false means the operator explicitly disabled this connector: the
+	// boot loop drops it from the active set so the existing
+	// set-difference teardown removes its hooks (parity with the global
+	// `guardrail disable`, scoped to one connector), and the hook gates
+	// short-circuit it to allow-without-scan as defense-in-depth.
+	// Resolved via EffectiveEnabled(connector); never read directly.
+	// Unlike a full `setup remove`, the connector's other policy fields
+	// (mode/hilt/rule_pack_dir) are retained so re-enable restores it
+	// with no re-prompt.
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+}
+
+// normalizeConnectorKey canonicalizes a connector name for
+// guardrail.connectors map lookups: trim, lowercase, and fold the known
+// hyphen/underscore aliases onto their canonical registry name. It is
+// the leaf-package counterpart of the Python connector_paths.normalize
+// alias table and must be kept in sync with it. Unlike that helper this
+// one returns "" for an empty/whitespace input rather than defaulting to
+// "openclaw": callers (connectorOverride / HasConnector) guard the empty
+// case separately so an unset connector falls through to the global
+// value instead of accidentally matching the openclaw override.
+func normalizeConnectorKey(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "open-hands", "open_hands":
+		return "openhands"
+	default:
+		return n
+	}
+}
+
+// connectorOverride returns the per-connector override block for the
+// named connector, if one is configured. It is the single internal
+// lookup point shared by every Effective*(connector) resolver: an empty
+// connector name, a nil receiver, or an empty map all yield (zero,
+// false) so callers uniformly fall through to the global value.
+//
+// Lookup is connector-name-insensitive: an exact key hit is the fast
+// path, otherwise keys are compared after normalizeConnectorKey so that
+// a request for the registry-canonical name (e.g. "openhands") resolves
+// an override written with different case or a hyphen/underscore alias
+// (e.g. "OpenHands", "open-hands"). This matches HasConnector and keeps
+// every Effective*() resolver consistent with the boot loop, which keys
+// connectors by their canonical registry name.
+func (g *GuardrailConfig) connectorOverride(connector string) (PerConnectorGuardrailConfig, bool) {
+	if g == nil || connector == "" || len(g.Connectors) == 0 {
+		return PerConnectorGuardrailConfig{}, false
+	}
+	if pc, ok := g.Connectors[connector]; ok {
+		return pc, true
+	}
+	want := normalizeConnectorKey(connector)
+	if want == "" {
+		return PerConnectorGuardrailConfig{}, false
+	}
+	for name, pc := range g.Connectors {
+		if normalizeConnectorKey(name) == want {
+			return pc, true
+		}
+	}
+	return PerConnectorGuardrailConfig{}, false
+}
+
+// HasConnector reports whether the named connector is a member of the
+// multi-connector guardrail.connectors set (connector-name-insensitive).
+// In a multi-connector install every configured connector is active and
+// therefore opted into hook evaluation, so the gateway treats set
+// membership as a sufficient enablement signal. Returns false for a nil
+// receiver or an empty map, so single-connector installs (which never
+// populate guardrail.connectors) are unaffected. Pure lookup.
+func (g *GuardrailConfig) HasConnector(connector string) bool {
+	_, ok := g.connectorOverride(connector)
+	return ok
+}
+
+// EffectiveMode returns the guardrail mode for the named connector:
+// per-connector override (when non-empty) > global Mode > "observe".
+// Pure lookup — never errors, never mutates, never touches I/O.
+func (g *GuardrailConfig) EffectiveMode(connector string) string {
+	if g == nil {
+		return "observe"
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if m := strings.TrimSpace(pc.Mode); m != "" {
+			return m
+		}
+	}
+	if m := strings.TrimSpace(g.Mode); m != "" {
+		return m
+	}
+	return "observe"
+}
+
+// EffectiveEnabled reports whether the named connector should be brought
+// up and enforced. The default is true: a nil receiver, an empty
+// connector name, no override entry, or an entry with an unset (nil)
+// Enabled pointer all resolve to true, so single-connector installs and
+// every connector that was never explicitly disabled keep running
+// exactly as before. Only an explicit `enabled: false` in the
+// per-connector override returns false — that is the signal the boot
+// loop uses to drop the connector from the active set (triggering the
+// existing set-difference teardown) and the hook gates use to
+// short-circuit it to allow-without-scan. Pure lookup — never errors,
+// never mutates, never touches I/O.
+func (g *GuardrailConfig) EffectiveEnabled(connector string) bool {
+	if g == nil {
+		return true
+	}
+	if pc, ok := g.connectorOverride(connector); ok && pc.Enabled != nil {
+		return *pc.Enabled
+	}
+	return true
+}
+
+// EffectiveHILT returns the HILT config for the named connector. A
+// per-connector hilt block (when present) fully replaces the global
+// block; otherwise the global HILT is returned. Pure lookup.
+func (g *GuardrailConfig) EffectiveHILT(connector string) HILTConfig {
+	if g == nil {
+		return HILTConfig{}
+	}
+	if pc, ok := g.connectorOverride(connector); ok && pc.HILT != nil {
+		return *pc.HILT
+	}
+	return g.HILT
+}
+
+// EffectiveBlockMessage returns the per-connector block message when
+// set, else the global BlockMessage (which may be empty — the gateway
+// substitutes its built-in default downstream). Pure lookup.
+func (g *GuardrailConfig) EffectiveBlockMessage(connector string) string {
+	if g == nil {
+		return ""
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if pc.BlockMessage != "" {
+			return pc.BlockMessage
+		}
+	}
+	return g.BlockMessage
+}
+
+// EffectiveRulePackDir returns the per-connector rule-pack directory
+// when set, else the global RulePackDir. Pure lookup — path existence
+// is validated elsewhere (rule-pack load), not here.
+func (g *GuardrailConfig) EffectiveRulePackDir(connector string) string {
+	if g == nil {
+		return ""
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if strings.TrimSpace(pc.RulePackDir) != "" {
+			return pc.RulePackDir
+		}
+	}
+	return g.RulePackDir
+}
+
+// Validate checks per-connector guardrail VALUE invariants only — the
+// NEW guardrail.connectors map. For each override it inspects enum
+// values (mode, hook_fail_mode, hilt.min_severity) and rejects empty
+// connector names. It deliberately does NOT re-validate the global
+// guardrail fields: those predate multi-connector support and were
+// never gated by Load(), so validating them here could reject configs
+// that load fine today. It never imports the connector registry — the
+// "entries must be hook connectors" guard lives in the gateway boot
+// loop, where the registry is in hand. Wired into Load().
+func (g *GuardrailConfig) Validate() error {
+	if g == nil {
+		return nil
+	}
+	// Per-connector overrides, in sorted order for deterministic errors.
+	names := make([]string, 0, len(g.Connectors))
+	for name := range g.Connectors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	// Reject two distinct keys that canonicalize to the same connector
+	// (e.g. "OpenHands" + "openhands", or "open-hands" + "openhands").
+	// connectorOverride() resolves keys through normalizeConnectorKey, so a
+	// duplicate would make per-connector lookups (mode, fail mode, HILT) and
+	// the active-connector roster depend on Go map iteration order — a
+	// nondeterministic, security-relevant ambiguity in action mode. Fail loud
+	// at config load instead.
+	seen := make(map[string]string, len(names))
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("guardrail.connectors: empty connector name is not allowed")
+		}
+		if norm := normalizeConnectorKey(name); norm != "" {
+			if prev, dup := seen[norm]; dup {
+				return fmt.Errorf("guardrail.connectors: %q and %q refer to the same connector %q; keep only one", prev, name, norm)
+			}
+			seen[norm] = name
+		}
+	}
+	for _, name := range names {
+		pc := g.Connectors[name]
+		if err := validateGuardrailMode(pc.Mode); err != nil {
+			return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
+		}
+		if err := validateGuardrailHookFailMode(pc.HookFailMode); err != nil {
+			return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
+		}
+		if pc.HILT != nil {
+			if err := validateGuardrailMinSeverity(pc.HILT.MinSeverity); err != nil {
+				return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// validateGuardrailMode accepts the empty string (inherit/default) and
+// the canonical guardrail modes. Anything else is a named error.
+func validateGuardrailMode(mode string) error {
+	switch strings.TrimSpace(mode) {
+	case "", "observe", "action":
+		return nil
+	default:
+		return fmt.Errorf("invalid guardrail mode %q (want \"observe\" or \"action\")", mode)
+	}
+}
+
+// validateGuardrailHookFailMode accepts the empty string (inherit/
+// default) plus the two canonical hook fail-mode sentinels.
+func validateGuardrailHookFailMode(mode string) error {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "", "open", "closed":
+		return nil
+	default:
+		return fmt.Errorf("invalid hook_fail_mode %q (want \"open\" or \"closed\")", mode)
+	}
+}
+
+// validateGuardrailMinSeverity accepts the empty string (inherit/
+// default) plus the canonical severity ladder.
+func validateGuardrailMinSeverity(sev string) error {
+	switch strings.TrimSpace(strings.ToUpper(sev)) {
+	case "", "LOW", "MEDIUM", "HIGH", "CRITICAL":
+		return nil
+	default:
+		return fmt.Errorf("invalid hilt.min_severity %q (want LOW, MEDIUM, HIGH, or CRITICAL)", sev)
+	}
+}
+
+// EffectiveHookFailMode returns the operator-chosen hook fail mode,
+// defaulting to "closed" when unset (CodeGuard rule
+// codeguard-0-authorization-access-control: deny by default). The
+// canonical "open" sentinel is the only way to get the legacy
+// fail-open behavior; any other value (typo, blank, malformed
+// migration row) collapses to "closed" so the agent never silently
+// fails open at the response-layer boundary. Centralized here so the
+// sidecar and any future config-edit surfaces never disagree on the
+// default.
+//
+// Backwards compatibility: existing operators on v3 are protected by
+// the _migrate_0_4_0_seed_hook_fail_mode migration in
+// cli/defenseclaw/migrations.py, which writes “hook_fail_mode: open“
+// into config.yaml on first upgrade. New installs and explicit-empty
+// values get the safer default.
+func (g *GuardrailConfig) EffectiveHookFailMode() string {
+	if g == nil {
+		return "closed"
+	}
+	if g.HookFailMode == "open" {
+		return "open"
+	}
+	return "closed"
+}
+
+// EffectiveHookFailModeFor returns the hook fail mode for the named
+// connector: a per-connector override (when set) wins, otherwise it
+// falls back to the global EffectiveHookFailMode(). This is the additive
+// multi-connector sibling — the global EffectiveHookFailMode() keeps its
+// original no-arg signature and behavior so existing single-connector
+// callers (sidecar boot, config-edit surfaces) are untouched; only the
+// per-connector boot loop calls this variant. Pass "" to resolve the
+// global value. Pure lookup — never errors, never mutates.
+func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
+	if g == nil {
+		return "closed"
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if strings.TrimSpace(pc.HookFailMode) != "" {
+			// Mirror the global EffectiveHookFailMode() normalization
+			// (avarice F-0681): the canonical "open" sentinel is the only
+			// way to opt into legacy fail-open; any other per-connector
+			// value (typo, blank, malformed row) collapses to "closed" so
+			// the multi-connector boot path never silently fails open.
+			if strings.EqualFold(strings.TrimSpace(pc.HookFailMode), "open") {
+				return "open"
+			}
+			return "closed"
+		}
+	}
+	return g.EffectiveHookFailMode()
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,
@@ -853,13 +1643,37 @@ func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
 // an LLM to detect prompt injection and PII exfiltration.
 type JudgeConfig struct {
-	Enabled       bool    `mapstructure:"enabled"         yaml:"enabled"`
-	Injection     bool    `mapstructure:"injection"       yaml:"injection"`
-	PII           bool    `mapstructure:"pii"             yaml:"pii"`
-	PIIPrompt     bool    `mapstructure:"pii_prompt"      yaml:"pii_prompt"`
-	PIICompletion bool    `mapstructure:"pii_completion"  yaml:"pii_completion"`
-	ToolInjection bool    `mapstructure:"tool_injection"  yaml:"tool_injection"`
-	Timeout       float64 `mapstructure:"timeout"         yaml:"timeout"`
+	Enabled       bool `mapstructure:"enabled"         yaml:"enabled"`
+	Injection     bool `mapstructure:"injection"       yaml:"injection"`
+	PII           bool `mapstructure:"pii"             yaml:"pii"`
+	PIIPrompt     bool `mapstructure:"pii_prompt"      yaml:"pii_prompt"`
+	PIICompletion bool `mapstructure:"pii_completion"  yaml:"pii_completion"`
+	ToolInjection bool `mapstructure:"tool_injection"  yaml:"tool_injection"`
+	// Exfil enables the data-exfiltration judge that explicitly asks the
+	// LLM whether the prompt is trying to read or exfiltrate sensitive
+	// files, credentials, secrets, or system data. Distinct from the
+	// injection judge (which asks "is this prompt overriding my
+	// instructions?") and the PII judge (which only fires on substring
+	// PII). The exfil judge catches polite-tone /etc/passwd-shaped
+	// prompts where neither category alone would block.
+	Exfil   bool    `mapstructure:"exfil"           yaml:"exfil"`
+	Timeout float64 `mapstructure:"timeout"         yaml:"timeout"`
+
+	// HookConnectors gates the hook-lane judge per connector. Hook-based
+	// connectors (hermes / opencode / claudecode / …) deliver content to
+	// inspectMessageContent, which historically ran regex + Cisco AID
+	// only; connectors listed here additionally forward that content to
+	// the LLM judge — and therefore to a custom provider when
+	// guardrail.judge.llm points at one. Empty list keeps the hook-lane
+	// judge off (the proxy lane is unaffected); the "*" entry enables
+	// every connector.
+	HookConnectors []string `mapstructure:"hook_connectors" yaml:"hook_connectors,omitempty"`
+
+	// HookTimeout caps the hook-lane judge round-trip in seconds.
+	// Distinct from Timeout (proxy lane, default 30s) because hook
+	// scripts abandon the gateway call at curl --max-time 10; the
+	// gateway applies a 5s default when unset.
+	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
 
 	// LLM overrides the top-level llm: block for the LLM judge. Prefer
 	// Config.ResolveLLM("guardrail.judge") over reading LLM / legacy
@@ -875,6 +1689,28 @@ type JudgeConfig struct {
 
 	Fallbacks           []string `mapstructure:"fallbacks"            yaml:"fallbacks,omitempty"`
 	AdjudicationTimeout float64  `mapstructure:"adjudication_timeout" yaml:"adjudication_timeout,omitempty"`
+}
+
+// HookConnectorEnabled reports whether the hook-lane judge is enabled
+// for the named connector. Requires the judge itself to be enabled;
+// matching against HookConnectors is case-insensitive and the "*"
+// entry matches every connector. Empty list (the default) keeps the
+// hook lane off so existing deployments see no behavior change.
+func (c *JudgeConfig) HookConnectorEnabled(name string) bool {
+	if c == nil || !c.Enabled {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, entry := range c.HookConnectors {
+		entry = strings.TrimSpace(entry)
+		if entry == "*" || strings.EqualFold(entry, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolvedJudgeAPIKey returns the judge API key from the env var.
@@ -913,24 +1749,45 @@ func (g *GuardrailConfig) EffectiveHost() string {
 }
 
 type GatewayConfig struct {
-	Host            string               `mapstructure:"host"              yaml:"host"`
-	Port            int                  `mapstructure:"port"              yaml:"port"`
-	Token           string               `mapstructure:"token"             yaml:"token,omitempty"`
-	TokenEnv        string               `mapstructure:"token_env"         yaml:"token_env"`
-	TLS             bool                 `mapstructure:"tls"               yaml:"tls"`
-	TLSSkipVerify   bool                 `mapstructure:"tls_skip_verify"   yaml:"tls_skip_verify"`
-	NoTLS           bool                 `mapstructure:"-"                 yaml:"-"`
-	DeviceKeyFile   string               `mapstructure:"device_key_file"   yaml:"device_key_file"`
-	AutoApprove     bool                 `mapstructure:"auto_approve_safe" yaml:"auto_approve_safe"`
-	ReconnectMs     int                  `mapstructure:"reconnect_ms"      yaml:"reconnect_ms"`
-	MaxReconnectMs  int                  `mapstructure:"max_reconnect_ms"  yaml:"max_reconnect_ms"`
-	ApprovalTimeout int                  `mapstructure:"approval_timeout_s" yaml:"approval_timeout_s"`
-	APIPort         int                  `mapstructure:"api_port"           yaml:"api_port"`
-	APIBind         string               `mapstructure:"api_bind"           yaml:"api_bind"`
-	Watcher         GatewayWatcherConfig `mapstructure:"watcher"            yaml:"watcher"`
-	Watchdog        WatchdogConfig       `mapstructure:"watchdog"           yaml:"watchdog"`
-	SandboxHome     string               `mapstructure:"-"                  yaml:"-"`
-	ClawHome        string               `mapstructure:"-"                  yaml:"-"`
+	Host            string `mapstructure:"host"              yaml:"host"`
+	Port            int    `mapstructure:"port"              yaml:"port"`
+	Token           string `mapstructure:"token"             yaml:"token,omitempty"`
+	TokenEnv        string `mapstructure:"token_env"         yaml:"token_env"`
+	TLS             bool   `mapstructure:"tls"               yaml:"tls"`
+	TLSSkipVerify   bool   `mapstructure:"tls_skip_verify"   yaml:"tls_skip_verify"`
+	NoTLS           bool   `mapstructure:"-"                 yaml:"-"`
+	DeviceKeyFile   string `mapstructure:"device_key_file"   yaml:"device_key_file"`
+	AutoApprove     bool   `mapstructure:"auto_approve_safe" yaml:"auto_approve_safe"`
+	ReconnectMs     int    `mapstructure:"reconnect_ms"      yaml:"reconnect_ms"`
+	MaxReconnectMs  int    `mapstructure:"max_reconnect_ms"  yaml:"max_reconnect_ms"`
+	ApprovalTimeout int    `mapstructure:"approval_timeout_s" yaml:"approval_timeout_s"`
+	APIPort         int    `mapstructure:"api_port"           yaml:"api_port"`
+	APIBind         string `mapstructure:"api_bind"           yaml:"api_bind"`
+	// FleetMode forces or disables the OpenClaw upstream WebSocket
+	// dial loop, overriding the connector + host derivation in
+	// gatewayShouldConnectForConfiguredConnector. Three values:
+	//
+	//   "" / "auto"   — derive from connector + host. openclaw/zeptoclaw
+	//                   always dial; codex/claudecode dial only if
+	//                   gateway.host is non-loopback.
+	//   "enabled"     — always dial regardless of connector/host. Use
+	//                   when running a local OpenClaw daemon on
+	//                   127.0.0.1 alongside a codex/claudecode connector
+	//                   (the only case the auto heuristic gets wrong).
+	//   "disabled"    — never dial regardless of connector/host. Lets
+	//                   operators run an OpenClaw connector in a
+	//                   pure-local mode, or silence the loop while
+	//                   debugging.
+	//
+	// Default is "" (treated as "auto"). Validated case-insensitively
+	// in gatewayShouldConnectForConfiguredConnector — unknown values
+	// fall through to "auto" so a typo doesn't accidentally disable
+	// fleet integration on production.
+	FleetMode   string               `mapstructure:"fleet_mode"        yaml:"fleet_mode,omitempty"`
+	Watcher     GatewayWatcherConfig `mapstructure:"watcher"            yaml:"watcher"`
+	Watchdog    WatchdogConfig       `mapstructure:"watchdog"           yaml:"watchdog"`
+	SandboxHome string               `mapstructure:"-"                  yaml:"-"`
+	ClawHome    string               `mapstructure:"-"                  yaml:"-"`
 }
 
 // WatchdogConfig controls the health watchdog that notifies users when the
@@ -941,18 +1798,50 @@ type WatchdogConfig struct {
 	Debounce int  `mapstructure:"debounce" yaml:"debounce"` // consecutive failures before alert, default 2
 }
 
-// defaultOpenClawGatewayTokenEnv matches gateway.auth.token when copied to ~/.defenseclaw/.env.
-const defaultOpenClawGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
+// defaultGatewayTokenEnv is the canonical env var for the gateway auth token.
+const defaultGatewayTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
 
-// ResolvedToken returns the gateway token from the env var (if set) or the direct value.
-// When token_env is empty (legacy configs), OPENCLAW_GATEWAY_TOKEN is still consulted so
-// secrets loaded from ~/.defenseclaw/.env by the sidecar are visible.
+// legacyGatewayTokenEnv is the old env var name, still consulted for
+// backward compatibility with existing .env files.
+const legacyGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
+
+// ResolvedToken returns the gateway token, walking the precedence
+// ladder. The order mirrors GatewayConfig.resolved_token in
+// cli/defenseclaw/config.py so the Python CLI and the Go gateway
+// can never disagree on which token is "live".
+//
+// Resolution:
+//
+//  1. g.TokenEnv (operator-supplied override) — if set AND the
+//     named env var is populated, return it.
+//  2. defaultGatewayTokenEnv (DEFENSECLAW_GATEWAY_TOKEN) — the
+//     canonical name EnsureGatewayToken writes on first boot.
+//  3. legacyGatewayTokenEnv (OPENCLAW_GATEWAY_TOKEN) — back-compat
+//     shim for installs that bootstrapped before the rename.
+//  4. g.Token literal — last resort because plaintext secrets in
+//     config.yaml are discouraged.
+//
+// Why fall through past g.TokenEnv when it's set-but-empty:
+// pre-fix this function had `if/else` semantics — when TokenEnv
+// was set the canonical+legacy checks were SKIPPED entirely.
+// That broke the symmetric Python flow: with the pre-defenseclaw
+// default token_env=OPENCLAW_GATEWAY_TOKEN in config.yaml AND
+// only DEFENSECLAW_GATEWAY_TOKEN in the dotenv (the post-firstboot
+// state), Python found the token via fall-through while Go
+// silently returned g.Token (empty) for every non-sidecar-boot
+// caller (judge LLM init, etc.). The sidecar boot path masked
+// the bug via EnsureGatewayToken's own fallback, so it only
+// surfaced in obscure code paths until investigation.
 func (g *GatewayConfig) ResolvedToken() string {
 	if g.TokenEnv != "" {
 		if v := os.Getenv(g.TokenEnv); v != "" {
 			return v
 		}
-	} else if v := os.Getenv(defaultOpenClawGatewayTokenEnv); v != "" {
+	}
+	if v := os.Getenv(defaultGatewayTokenEnv); v != "" {
+		return v
+	}
+	if v := os.Getenv(legacyGatewayTokenEnv); v != "" {
 		return v
 	}
 	return g.Token
@@ -1104,6 +1993,9 @@ func Load() (*Config, error) {
 			})
 		}
 	}
+	if !viper.IsSet("guardrail.hilt") && viper.IsSet("guardrail.hitl") {
+		viper.Set("guardrail.hilt", viper.Get("guardrail.hitl"))
+	}
 
 	// v3 → v4 hard migration: the `splunk:` block was removed in favor
 	// of audit_sinks. Detect any populated legacy keys and refuse to
@@ -1134,6 +2026,22 @@ func Load() (*Config, error) {
 	}
 
 	migrateConfig(&cfg)
+	warnDisableRedactionConfig(&cfg)
+	cfg.DeploymentMode = normalizeDeploymentMode(cfg.DeploymentMode)
+
+	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
+		}
+		return nil, err
+	}
+
+	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
+		}
+		return nil, err
+	}
 
 	for i := range cfg.AuditSinks {
 		if err := cfg.AuditSinks[i].Validate(); err != nil {
@@ -1162,6 +2070,46 @@ func Load() (*Config, error) {
 		}
 		return nil, err
 	}
+
+	if err := cfg.Guardrail.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "guardrail_invalid")
+		}
+		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+
+	// Validate registry source kind/content shapes. The Python CLI
+	// is the authoritative writer for ``registries.sources`` (it
+	// drives ``defenseclaw registry add/edit``), but any operator
+	// hand-edit of config.yaml lands in the Go gateway too and a
+	// typo'd ``kind: htttp_yaml`` should fail loud at startup
+	// rather than be silently accepted and bypass admission. We
+	// keep the check additive: empty kind/content is tolerated for
+	// upgrade-in-place from older configs.
+	for i := range cfg.Registries.Sources {
+		src := &cfg.Registries.Sources[i]
+		if src.Kind != "" && !IsKnownRegistryKind(src.Kind) {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "registry_kind_invalid")
+			}
+			return nil, fmt.Errorf(
+				"config: registries.sources[%d] (id=%q): unknown kind %q "+
+					"(want one of %v)",
+				i, src.ID, src.Kind, KnownRegistryKinds,
+			)
+		}
+		if src.Content != "" && !IsKnownRegistryContent(src.Content) {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "registry_content_invalid")
+			}
+			return nil, fmt.Errorf(
+				"config: registries.sources[%d] (id=%q): unknown content %q "+
+					"(want one of %v)",
+				i, src.ID, src.Content, KnownRegistryContentTypes,
+			)
+		}
+	}
+
 	if cfg.OpenShell.IsStandalone() {
 		cfg.Gateway.SandboxHome = cfg.OpenShell.EffectiveSandboxHome()
 	}
@@ -1185,6 +2133,20 @@ func Load() (*Config, error) {
 	seedProvenanceOnLoad(configFile, &cfg)
 
 	return &cfg, nil
+}
+
+func warnDisableRedactionConfig(cfg *Config) {
+	if cfg == nil || !cfg.Privacy.DisableRedaction {
+		return
+	}
+	privacyDisableRedactionWarnOnce.Do(func() {
+		fmt.Fprintln(os.Stderr,
+			"warning: privacy.disable_redaction=true — ALL sinks (audit DB, "+
+				"OTel logs, webhooks, Splunk HEC) will receive UNREDACTED "+
+				"prompts, judge bodies, and verdict reasons. Disable in "+
+				"shared/multi-tenant deployments via "+
+				"`defenseclaw setup redaction on`.")
+	})
 }
 
 // seedProvenanceOnLoad stamps the process-wide content hash from the
@@ -1408,9 +2370,7 @@ func migrateConfig(cfg *Config) {
 	// is detected in Load() before unmarshal and produces a hard error,
 	// so reaching this branch with v<4 simply means the file was created
 	// without a splunk block at all — safe to bump the version stamp.
-	if cfg.ConfigVersion < 4 {
-		// no-op: hard migration is enforced at file-load time.
-	}
+	// No in-process field changes are required here.
 
 	// v4 → v5: copy legacy LLM fields into the unified LLMConfig blocks
 	// so ResolveLLM(...) returns the same answers as the pre-v5
@@ -1425,8 +2385,25 @@ func migrateConfig(cfg *Config) {
 		migrateLLMConfigFields(cfg)
 	}
 
+	// v5 → v6: multi-connector support adds the optional
+	// `guardrail.connectors:` map. The legacy singular
+	// `guardrail.connector` field is still valid and keeps driving the
+	// single-connector path, so there is nothing to rewrite in-process —
+	// this is a pure version-stamp normalization. The opt-in rewrite to
+	// the plural shape is performed explicitly by `setup migrate-connectors`.
+	if cfg.ConfigVersion < 6 {
+		// no-op: singular connector config remains valid as-is.
+	}
+
 	cfg.ConfigVersion = CurrentConfigVersion
-	log.Printf("[config] migrated config from version %d to %d", oldVersion, CurrentConfigVersion)
+	// Intentionally silent: migrateConfig() runs on every Load() because
+	// we don't rewrite the YAML file (that would be a surprising
+	// write-on-read side effect). Logging on every load was just noise
+	// — every CLI invocation, every TUI launch, every sidecar restart.
+	// The migration is idempotent; suppressing the line keeps the TUI's
+	// initial render clean and stops `defenseclaw-gateway status` from
+	// printing a banner above the actual status output.
+	_ = oldVersion
 }
 
 // migrateLLMConfigFields performs the v4→v5 migration: legacy fields
@@ -1553,6 +2530,32 @@ func warnPlaintextSecrets(cfg *Config) {
 	}
 }
 
+func validateDeploymentMode(mode string) error {
+	mode = normalizeDeploymentMode(mode)
+	if mode == "" {
+		return nil
+	}
+	if _, ok := validDeploymentModes[mode]; ok {
+		return nil
+	}
+	return fmt.Errorf("config: deployment_mode=%q is invalid (allowed: managed_enterprise, unmanaged_byod, ci_cd, sandboxed, server, saas)", mode)
+}
+
+func normalizeDeploymentMode(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case "managed":
+		return string(DeploymentModeManagedEnterprise)
+	case "standalone":
+		return string(DeploymentModeUnmanagedBYOD)
+	case "ci":
+		return string(DeploymentModeCICD)
+	case "edge":
+		return string(DeploymentModeServer)
+	default:
+		return strings.TrimSpace(mode)
+	}
+}
+
 func (c *Config) Save() error {
 	configFile := filepath.Join(c.DataDir, DefaultConfigName)
 
@@ -1585,10 +2588,15 @@ func (c *Config) Save() error {
 func setDefaults(dataDir string) {
 	viper.SetDefault("data_dir", dataDir)
 	viper.SetDefault("audit_db", filepath.Join(dataDir, DefaultAuditDBName))
+	viper.SetDefault("judge_bodies_db", filepath.Join(dataDir, DefaultJudgeBodiesDBName))
 	viper.SetDefault("quarantine_dir", filepath.Join(dataDir, "quarantine"))
 	viper.SetDefault("plugin_dir", filepath.Join(dataDir, "plugins"))
 	viper.SetDefault("policy_dir", filepath.Join(dataDir, "policies"))
 	viper.SetDefault("environment", string(DetectEnvironment()))
+	viper.SetDefault("tenant_id", "")
+	viper.SetDefault("workspace_id", "")
+	viper.SetDefault("deployment_mode", "")
+	viper.SetDefault("discovery_source", "")
 	viper.SetDefault("claw.mode", string(ClawOpenClaw))
 	viper.SetDefault("claw.home_dir", "~/.openclaw")
 	viper.SetDefault("claw.config_file", "~/.openclaw/openclaw.json")
@@ -1651,6 +2659,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("watch.allow_list_bypass_scan", true)
 	viper.SetDefault("watch.rescan_enabled", true)
 	viper.SetDefault("watch.rescan_interval_min", 60)
+	viper.SetDefault("watch.rescan_content_gated", true)
 
 	viper.SetDefault("audit_sinks", []AuditSink{})
 
@@ -1702,20 +2711,78 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("plugin_actions.info.runtime", string(RuntimeEnable))
 	viper.SetDefault("plugin_actions.info.install", string(InstallNone))
 
+	viper.SetDefault("asset_policy.enabled", false)
+	viper.SetDefault("asset_policy.mode", AssetPolicyModeObserve)
+	for _, target := range []string{"mcp", "skill", "plugin"} {
+		viper.SetDefault("asset_policy."+target+".default", "allow")
+		viper.SetDefault("asset_policy."+target+".registry_required", false)
+		viper.SetDefault("asset_policy."+target+".registry", []AssetPolicyRule{})
+		viper.SetDefault("asset_policy."+target+".allowed", []AssetPolicyRule{})
+		viper.SetDefault("asset_policy."+target+".denied", []AssetPolicyRule{})
+	}
+	viper.SetDefault("asset_policy.mcp.runtime_detection.enabled", true)
+	viper.SetDefault("asset_policy.mcp.runtime_detection.terminal_commands", true)
+	viper.SetDefault("asset_policy.mcp.runtime_detection.unknown_terminal_mcp", AssetPolicyModeObserve)
+
+	viper.SetDefault("ai_discovery.enabled", false)
+	viper.SetDefault("ai_discovery.mode", "enhanced")
+	viper.SetDefault("ai_discovery.scan_interval_min", 5)
+	viper.SetDefault("ai_discovery.process_interval_s", 60)
+	viper.SetDefault("ai_discovery.scan_roots", []string{"~"})
+	viper.SetDefault("ai_discovery.signature_packs", []string{})
+	viper.SetDefault("ai_discovery.allow_workspace_signatures", false)
+	viper.SetDefault("ai_discovery.disabled_signature_ids", []string{})
+	viper.SetDefault("ai_discovery.include_shell_history", true)
+	viper.SetDefault("ai_discovery.include_package_manifests", true)
+	viper.SetDefault("ai_discovery.include_env_var_names", true)
+	viper.SetDefault("ai_discovery.include_network_domains", true)
+	viper.SetDefault("ai_discovery.max_files_per_scan", 1000)
+	viper.SetDefault("ai_discovery.max_file_bytes", 512*1024)
+	viper.SetDefault("ai_discovery.emit_otel", true)
+	viper.SetDefault("ai_discovery.store_raw_local_paths", false)
+	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
+
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
+	// "closed" is the safer default — response-layer failures (4xx,
+	// malformed JSON, missing action) BLOCK the tool/prompt rather
+	// than silently allowing it. Pre-existing operators are protected
+	// by _migrate_0_4_0_seed_hook_fail_mode (migrations.py) which
+	// writes ``hook_fail_mode: open`` to existing config.yaml so prior
+	// behavior is preserved on upgrade. Operators who explicitly want
+	// fail-open run `defenseclaw guardrail fail-mode open` (or set
+	// guardrail.hook_fail_mode: open in YAML).
+	viper.SetDefault("guardrail.hook_fail_mode", "closed")
+	// Self-heal connector hook configs by default: if a user deletes
+	// the DefenseClaw hook block while the gateway is running, the
+	// hook config guard re-installs it. Operators can opt out with
+	// `guardrail.hook_self_heal: false`.
+	viper.SetDefault("guardrail.hook_self_heal", true)
+	viper.SetDefault("guardrail.hook_self_heal_debounce_ms", 500)
 	viper.SetDefault("guardrail.scanner_mode", "both")
+	viper.SetDefault("guardrail.connector", "")
+	viper.SetDefault("guardrail.connectors", map[string]any{})
 	viper.SetDefault("guardrail.host", "")
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
 	viper.SetDefault("guardrail.block_message", "")
 	viper.SetDefault("guardrail.rule_pack_dir", filepath.Join(dataDir, "policies", "guardrail", "default"))
+	viper.SetDefault("guardrail.hilt.enabled", false)
+	viper.SetDefault("guardrail.hilt.min_severity", "HIGH")
 	viper.SetDefault("guardrail.judge.enabled", false)
 	viper.SetDefault("guardrail.judge.injection", true)
 	viper.SetDefault("guardrail.judge.pii", true)
 	viper.SetDefault("guardrail.judge.pii_prompt", true)
 	viper.SetDefault("guardrail.judge.pii_completion", true)
 	viper.SetDefault("guardrail.judge.tool_injection", true)
+	// guardrail.judge.exfil registers the data-exfiltration judge default
+	// here so existing config.yaml files without an `exfil:` key still get
+	// the judge wired on next reload. Mirrors the Go-side JudgeConfig.Exfil
+	// default in defaults.go and the Python JudgeConfig.exfil default in
+	// cli/defenseclaw/config.py — three sources of truth must agree, so
+	// any of them being missed surfaces as kind=exfil rows never appearing
+	// in the audit JSONL during live tests.
+	viper.SetDefault("guardrail.judge.exfil", true)
 	viper.SetDefault("guardrail.judge.timeout", 30.0)
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
@@ -1740,10 +2807,20 @@ func setDefaults(dataDir string) {
 	// with strict storage or privacy constraints can still opt out with
 	// `guardrail.retain_judge_bodies: false` or DEFENSECLAW_PERSIST_JUDGE=0.
 	viper.SetDefault("guardrail.retain_judge_bodies", true)
+	// Buffered async persistence queue: 1024 entries is the sweet
+	// spot between memory ceiling and BUSY absorption under burst
+	// load. See GuardrailConfig.JudgePersistQueueDepth for the
+	// tuning rationale.
+	viper.SetDefault("guardrail.judge_persist_queue_depth", 1024)
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)
-	viper.SetDefault("gateway.token_env", "OPENCLAW_GATEWAY_TOKEN")
+	viper.SetDefault("gateway.token_env", "DEFENSECLAW_GATEWAY_TOKEN")
+	// fleet_mode defaults to "auto" so existing installs (which never
+	// set this field) keep getting the connector + host derivation
+	// in gatewayShouldConnectForConfiguredConnector. See the field
+	// doc on GatewayConfig.FleetMode for the override semantics.
+	viper.SetDefault("gateway.fleet_mode", "auto")
 	viper.SetDefault("gateway.device_key_file", filepath.Join(dataDir, "device.key"))
 	viper.SetDefault("gateway.auto_approve_safe", false)
 	viper.SetDefault("gateway.reconnect_ms", 800)
@@ -1762,6 +2839,25 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.watchdog.enabled", true)
 	viper.SetDefault("gateway.watchdog.interval", 30)
 	viper.SetDefault("gateway.watchdog.debounce", 2)
+
+	// User-session OS notifications. Master switch defaults to true
+	// on darwin and false elsewhere — see DefaultNotificationsEnabled
+	// in notifications.go for the rationale. block_enforced and
+	// hitl_approval default ON so the user sees real blocks and
+	// real chat-side asks; block_would_block defaults OFF so the
+	// observe-mode "would have blocked / would have asked" toasts
+	// stay quiet by default and are an explicit opt-in for operators
+	// tuning policy. Keep this in lockstep with
+	// DefaultNotificationsConfig() and cli/defenseclaw/config.py.
+	viper.SetDefault("notifications.enabled", DefaultNotificationsEnabled)
+	viper.SetDefault("notifications.block_enforced", true)
+	viper.SetDefault("notifications.block_would_block", false)
+	viper.SetDefault("notifications.hitl_approval", true)
+	viper.SetDefault("notifications.sources.hook", true)
+	viper.SetDefault("notifications.sources.guardrail", true)
+	viper.SetDefault("notifications.sources.asset_policy", true)
+	viper.SetDefault("notifications.dedup_window", NotificationsDefaultDedupWindow)
+	viper.SetDefault("notifications.max_per_minute", NotificationsDefaultMaxPerMinute)
 
 	viper.SetDefault("otel.enabled", false)
 	viper.SetDefault("otel.protocol", "")

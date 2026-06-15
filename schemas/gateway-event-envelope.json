@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.io/schemas/gateway-event-envelope.json",
   "title": "DefenseClaw Gateway Event Envelope (v7)",
-  "description": "One JSONL line emitted by the DefenseClaw gateway sidecar to gateway.jsonl / stderr / HTTP sinks. The envelope carries correlation + provenance; exactly one of the type-specific payload sub-objects (`verdict`, `judge`, `lifecycle`, `error`, `diagnostic`, `scan`, `scan_finding`, `activity`) is populated and selected by `event_type`.",
+  "description": "One JSONL line emitted by the DefenseClaw gateway sidecar to gateway.jsonl / stderr / HTTP sinks. The envelope carries correlation + provenance; exactly one of the type-specific payload sub-objects is populated and selected by `event_type`.",
   "type": "object",
   "required": ["ts", "event_type", "severity", "schema_version"],
   "properties": {
     "ts":         { "type": "string", "format": "date-time" },
     "event_type": {
       "type": "string",
-      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress"]
+      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation", "ai_discovery"]
     },
     "severity":   { "type": "string", "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"] },
 
@@ -21,6 +21,7 @@
     "run_id":     { "type": ["string", "null"] },
     "request_id": { "type": ["string", "null"] },
     "session_id": { "type": ["string", "null"] },
+    "turn_id":    { "type": ["string", "null"] },
     "trace_id":   { "type": ["string", "null"] },
 
     "provider":  { "type": ["string", "null"] },
@@ -29,29 +30,42 @@
 
     "agent_id":            { "type": ["string", "null"] },
     "agent_name":          { "type": ["string", "null"] },
+    "agent_type":          { "type": ["string", "null"] },
     "agent_instance_id":   { "type": ["string", "null"] },
     "sidecar_instance_id": { "type": ["string", "null"] },
+    "user_id":             { "type": ["string", "null"] },
+    "user_name":           { "type": ["string", "null"] },
 
     "policy_id":       { "type": ["string", "null"] },
     "destination_app": { "type": ["string", "null"] },
     "tool_name":       { "type": ["string", "null"] },
     "tool_id":         { "type": ["string", "null"] },
 
-    "tenant_id":        { "type": ["string", "null"], "description": "RESERVED (v7): logical tenancy boundary for hosted/SaaS deployments. Unpopulated until a matching producer ships." },
-    "workspace_id":     { "type": ["string", "null"], "description": "RESERVED (v7): sub-tenant workspace/organization/team scope. Unpopulated until a matching producer ships." },
-    "environment":      { "type": ["string", "null"], "description": "RESERVED (v7): deployment environment (dev|staging|prod|sandbox). Unpopulated until a matching producer ships." },
-    "deployment_mode":  { "type": ["string", "null"], "description": "RESERVED (v7): sidecar deployment mode (standalone|managed|edge|ci). Unpopulated until a matching producer ships." },
-    "discovery_source": { "type": ["string", "null"], "description": "RESERVED (v7): how the monitored agent/tool was discovered (registry|manual|scan|import). Unpopulated until a matching producer ships." },
+    "tenant_id":        { "type": ["string", "null"], "description": "Logical tenancy boundary for hosted/SaaS deployments. Populated from config tenant_id when set." },
+    "workspace_id":     { "type": ["string", "null"], "description": "Sub-tenant workspace, organization, or team scope. Populated from config workspace_id when set." },
+    "environment":      { "type": ["string", "null"], "description": "Deployment environment. Populated from config environment when set." },
+    "deployment_mode":  {
+      "anyOf": [
+        { "type": "string", "enum": ["managed_enterprise", "unmanaged_byod", "ci_cd", "sandboxed", "server", "saas"] },
+        { "type": "null" }
+      ],
+      "description": "Sidecar deployment mode. Populated from config deployment_mode when set."
+    },
+    "discovery_source": { "type": ["string", "null"], "description": "How the monitored agent or tool was discovered. Populated from config discovery_source when set." },
 
-    "verdict":      { "$ref": "#/$defs/VerdictPayload" },
-    "judge":        { "$ref": "#/$defs/JudgePayload" },
-    "lifecycle":    { "$ref": "#/$defs/LifecyclePayload" },
-    "error":        { "$ref": "#/$defs/ErrorPayload" },
-    "diagnostic":   { "$ref": "#/$defs/DiagnosticPayload" },
-    "scan":         { "$ref": "https://defenseclaw.io/schemas/scan-event.json#/$defs/ScanPayload" },
-    "scan_finding": { "$ref": "https://defenseclaw.io/schemas/scan-finding-event.json#/$defs/ScanFindingPayload" },
-    "activity":     { "$ref": "https://defenseclaw.io/schemas/activity-event.json#/$defs/ActivityPayload" },
-    "egress":       { "$ref": "#/$defs/EgressPayload" }
+    "verdict":         { "$ref": "#/$defs/VerdictPayload" },
+    "judge":           { "$ref": "#/$defs/JudgePayload" },
+    "lifecycle":       { "$ref": "#/$defs/LifecyclePayload" },
+    "error":           { "$ref": "#/$defs/ErrorPayload" },
+    "diagnostic":      { "$ref": "#/$defs/DiagnosticPayload" },
+    "scan":            { "$ref": "https://defenseclaw.io/schemas/scan-event.json#/$defs/ScanPayload" },
+    "scan_finding":    { "$ref": "https://defenseclaw.io/schemas/scan-finding-event.json#/$defs/ScanFindingPayload" },
+    "activity":        { "$ref": "https://defenseclaw.io/schemas/activity-event.json#/$defs/ActivityPayload" },
+    "egress":          { "$ref": "#/$defs/EgressPayload" },
+    "llm_prompt":      { "$ref": "#/$defs/LLMPromptPayload" },
+    "llm_response":    { "$ref": "#/$defs/LLMResponsePayload" },
+    "tool_invocation": { "$ref": "#/$defs/ToolPayload" },
+    "ai_discovery":    { "$ref": "#/$defs/AIDiscoveryPayload" }
   },
   "oneOf": [
     { "required": ["verdict"] },
@@ -62,7 +76,11 @@
     { "required": ["scan"] },
     { "required": ["scan_finding"] },
     { "required": ["activity"] },
-    { "required": ["egress"] }
+    { "required": ["egress"] },
+    { "required": ["llm_prompt"] },
+    { "required": ["llm_response"] },
+    { "required": ["tool_invocation"] },
+    { "required": ["ai_discovery"] }
   ],
   "$defs": {
     "VerdictPayload": {
@@ -70,10 +88,12 @@
       "required": ["stage", "action"],
       "properties": {
         "stage":      { "type": "string", "enum": ["regex", "judge", "cisco_ai_defense", "opa", "final", "session_message", "multi_turn", "block_list", "approval"] },
-        "action":     { "type": "string", "enum": ["allow", "warn", "block"] },
+        "action":     { "type": "string", "enum": ["allow", "warn", "alert", "confirm", "block"] },
         "reason":     { "type": ["string", "null"] },
         "categories": { "type": ["array", "null"], "items": { "type": "string" } },
-        "latency_ms": { "type": ["integer", "null"] }
+        "latency_ms": { "type": ["integer", "null"] },
+        "evaluation_id": { "type": ["string", "null"], "description": "Optional join key linking this verdict to its per-finding scan_findings rows / EventScanFinding fan-out." },
+        "rule_ids":   { "type": ["array", "null"], "items": { "type": "string" }, "description": "Top detection rule identifiers that drove this verdict (capped at 8). Quick SIEM-pivot key." }
       }
     },
     "JudgePayload": {
@@ -104,10 +124,12 @@
       "type": "object",
       "required": ["subsystem", "message"],
       "properties": {
-        "subsystem": { "type": "string" },
-        "code":      { "type": ["string", "null"] },
-        "message":   { "type": "string" },
-        "cause":     { "type": ["string", "null"] }
+        "subsystem":     { "type": "string" },
+        "code":          { "type": ["string", "null"] },
+        "message":       { "type": "string" },
+        "cause":         { "type": ["string", "null"] },
+        "rule_id":       { "type": ["string", "null"], "description": "Optional rule identifier this error is attributable to (schema-gate violations on finding events, verdict-failure errors)." },
+        "evaluation_id": { "type": ["string", "null"], "description": "Optional join key linking this error to the evaluation that produced the broken event (matches ScanPayload.evaluation_id / VerdictPayload.evaluation_id)." }
       }
     },
     "DiagnosticPayload": {
@@ -131,6 +153,142 @@
         "decision":       { "type": "string", "enum": ["allow", "block"] },
         "reason":         { "type": ["string", "null"] },
         "source":         { "type": "string", "enum": ["go", "ts"] }
+      }
+    },
+    "LLMPromptPayload": {
+      "type": "object",
+      "required": ["prompt_id"],
+      "properties": {
+        "prompt_id":        { "type": "string" },
+        "turn_id":          { "type": ["string", "null"] },
+        "role":             { "type": ["string", "null"] },
+        "prompt":           { "type": ["string", "null"] },
+        "raw_request_body": { "type": ["string", "null"] },
+        "source":           { "type": ["string", "null"] }
+      }
+    },
+    "LLMResponsePayload": {
+      "type": "object",
+      "required": ["response_id"],
+      "properties": {
+        "response_id":         { "type": "string" },
+        "reply_to_prompt_id":  { "type": ["string", "null"] },
+        "turn_id":             { "type": ["string", "null"] },
+        "response":            { "type": ["string", "null"] },
+        "raw_response_body":   { "type": ["string", "null"] },
+        "finish_reasons":      { "type": ["array", "null"], "items": { "type": "string" } },
+        "source":              { "type": ["string", "null"] }
+      }
+    },
+    "ToolPayload": {
+      "type": "object",
+      "required": ["phase", "tool"],
+      "properties": {
+        "tool_call_id":       { "type": ["string", "null"] },
+        "phase":              { "type": "string", "enum": ["call", "result"] },
+        "turn_id":            { "type": ["string", "null"] },
+        "tool":               { "type": "string" },
+        "tool_input":         { "type": ["string", "null"] },
+        "tool_output":        { "type": ["string", "null"] },
+        "exit_code":          { "type": ["integer", "null"] },
+        "reply_to_prompt_id": { "type": ["string", "null"] },
+        "source":             { "type": ["string", "null"] }
+      }
+    },
+    "AIDiscoveryPayload": {
+      "type": "object",
+      "required": ["scan_id", "signal_id", "category", "state"],
+      "properties": {
+        "scan_id":        { "type": "string", "maxLength": 128 },
+        "signal_id":      { "type": "string", "maxLength": 128 },
+        "category":       { "type": "string", "enum": ["supported_connector", "ai_cli", "active_process", "editor_extension", "mcp_server", "skill", "rule", "plugin", "package_dependency", "env_var_name", "shell_history_match", "provider_domain", "workspace_artifact", "desktop_app", "local_ai_endpoint"] },
+        "vendor":         { "type": ["string", "null"], "maxLength": 128 },
+        "product":        { "type": ["string", "null"], "maxLength": 128 },
+        "confidence":     { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "state":          { "type": "string", "enum": ["new", "changed", "gone"] },
+        "evidence_types": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 64 }, "maxItems": 16 },
+        "path_hashes":    { "type": ["array", "null"], "items": { "type": "string", "pattern": "^(sha256|hmac-sha256):[0-9a-f]{64}$" }, "maxItems": 16 },
+        "basenames":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+$" }, "maxItems": 16 },
+        "workspace_hash": { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
+        "last_seen":      { "type": ["string", "null"], "format": "date-time" },
+        "detector":       { "type": ["string", "null"], "maxLength": 64,
+          "description": "populated only when privacy.disable_redaction=true" },
+        "component":      { "type": ["object", "null"],
+          "description": "populated only when privacy.disable_redaction=true",
+          "properties": {
+            "ecosystem": { "type": ["string", "null"], "maxLength": 64 },
+            "name":      { "type": ["string", "null"], "maxLength": 256 },
+            "version":   { "type": ["string", "null"], "maxLength": 64 },
+            "framework": { "type": ["string", "null"], "maxLength": 256 }
+          }
+        },
+        "runtime":        { "type": ["object", "null"],
+          "description": "populated only when privacy.disable_redaction=true",
+          "properties": {
+            "pid":        { "type": ["integer", "null"], "minimum": 0 },
+            "ppid":       { "type": ["integer", "null"], "minimum": 0 },
+            "started_at": { "type": ["string", "null"], "format": "date-time" },
+            "uptime_sec": { "type": ["integer", "null"] },
+            "user":       { "type": ["string", "null"], "maxLength": 64 },
+            "comm":       { "type": ["string", "null"], "maxLength": 256 }
+          }
+        },
+        "last_active_at": { "type": ["string", "null"], "format": "date-time",
+          "description": "populated only when privacy.disable_redaction=true" },
+        "identity_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1,
+          "description": "populated only when privacy.disable_redaction=true" },
+        "identity_band":  { "type": ["string", "null"], "enum": [null, "very_high", "high", "medium", "low", "very_low"],
+          "description": "populated only when privacy.disable_redaction=true" },
+        "presence_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1,
+          "description": "populated only when privacy.disable_redaction=true" },
+        "presence_band":  { "type": ["string", "null"], "enum": [null, "very_high", "high", "medium", "low", "very_low"],
+          "description": "populated only when privacy.disable_redaction=true" },
+        "identity_factors": { "type": ["array", "null"],
+          "description": "populated only when privacy.disable_redaction=true",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/AIDiscoveryFactor" }
+        },
+        "presence_factors": { "type": ["array", "null"],
+          "description": "populated only when privacy.disable_redaction=true",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/AIDiscoveryFactor" }
+        },
+        "detectors":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 64 }, "maxItems": 16,
+          "description": "populated only when privacy.disable_redaction=true" },
+        "evidence":       { "type": ["array", "null"], "maxItems": 32,
+          "description": "populated only when privacy.disable_redaction=true",
+          "items": { "$ref": "#/$defs/AIDiscoveryEvidence" }
+        },
+        "raw_paths":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 4096 }, "maxItems": 32,
+          "description": "populated only when privacy.disable_redaction=true AND ai_discovery.store_raw_local_paths=true" }
+      }
+    },
+    "AIDiscoveryFactor": {
+      "type": "object",
+      "required": ["detector", "logit_delta"],
+      "properties": {
+        "detector":   { "type": "string", "maxLength": 64 },
+        "evidence_id": { "type": ["string", "null"], "maxLength": 256 },
+        "match_kind": { "type": ["string", "null"], "enum": [null, "exact", "substring", "heuristic"] },
+        "quality":    { "type": ["number", "null"] },
+        "specificity": { "type": ["number", "null"] },
+        "lr":         { "type": ["number", "null"] },
+        "logit_delta": { "type": "number" }
+      }
+    },
+    "AIDiscoveryEvidence": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type":          { "type": "string", "maxLength": 64 },
+        "basename":      { "type": ["string", "null"], "maxLength": 128, "pattern": "^[^/\\\\]*$" },
+        "path_hash":     { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
+        "value_hash":    { "type": ["string", "null"], "maxLength": 256 },
+        "workspace_hash": { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
+        "raw_path":      { "type": ["string", "null"], "maxLength": 4096,
+          "description": "populated only when privacy.disable_redaction=true AND ai_discovery.store_raw_local_paths=true" },
+        "quality":       { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "match_kind":    { "type": ["string", "null"], "enum": [null, "exact", "substring", "heuristic"] }
       }
     }
   }

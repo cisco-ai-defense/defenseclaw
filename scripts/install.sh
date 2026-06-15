@@ -27,10 +27,17 @@
 #   # From local dist/ directory (for testing):
 #   ./scripts/install.sh --local ./dist
 #
+#   # Pick a specific agent connector at install time:
+#   curl ... | bash -s -- --connector codex          # Codex (no OpenClaw install)
+#   curl ... | bash -s -- --connector openclaw       # OpenClaw + plugin/runtime
+#   curl ... | bash -s -- --no-openclaw              # Skip OpenClaw entirely
+#
 # Options:
-#   --local <dir>  Install from a local dist directory instead of downloading
-#   --yes, -y      Skip confirmation prompts (for CI/automation)
-#   --help, -h     Show help
+#   --connector <name>  Pick agent connector (openclaw|codex|claudecode|zeptoclaw|none)
+#   --no-openclaw       Skip OpenClaw install (alias for --connector none when used alone)
+#   --local <dir>       Install from a local dist directory instead of downloading
+#   --yes, -y           Skip confirmation prompts (for CI/automation)
+#   --help, -h          Show help
 #
 set -euo pipefail
 
@@ -45,6 +52,11 @@ readonly DEFENSECLAW_VENV="${DEFENSECLAW_HOME}/.venv"
 readonly INSTALL_DIR="${HOME}/.local/bin"
 readonly REPO="cisco-ai-defense/defenseclaw"
 readonly OPENCLAW_VERSION="2026.3.24"
+
+# Supported connectors. Keep in sync with internal/gateway/connector/registry.go
+# DefaultRegistry. The "none" pseudo-value means "lay binaries only — pick a
+# connector later with `defenseclaw init --connector ...`".
+readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw none)
 
 # ── Terminal Formatting ───────────────────────────────────────────────────────
 
@@ -113,6 +125,74 @@ detect_shell_rc() {
         */bash) echo "${HOME}/.bashrc" ;;
         *)      echo "${HOME}/.profile" ;;
     esac
+}
+
+# is_valid_connector NAME — returns 0 if NAME is in CONNECTOR_CHOICES.
+is_valid_connector() {
+    local n="$1" v
+    for v in "${CONNECTOR_CHOICES[@]}"; do
+        [[ "$v" == "$n" ]] && return 0
+    done
+    return 1
+}
+
+# pick_connector_interactive — prompt the user to pick a connector when
+# none was passed on the command line and we are not in --yes mode.
+# Sets global CONNECTOR. Non-interactive installs intentionally choose
+# "none" unless --connector is explicit: --yes should lay down binaries
+# and hand the operator to `defenseclaw init`, not assume OpenClaw.
+pick_connector_interactive() {
+    if [[ -n "${CONNECTOR}" ]]; then
+        return
+    fi
+    if [[ "${YES_MODE}" == true ]]; then
+        CONNECTOR="none"
+        return
+    fi
+
+    step "Pick agent connector"
+    info "DefenseClaw can guard several agent frameworks. Pick one to integrate now;"
+    info "you can switch later with 'defenseclaw init --connector <name>'."
+    echo ""
+    local i=1
+    for v in "${CONNECTOR_CHOICES[@]}"; do
+        case "$v" in
+            codex)      printf "    ${BOLD}%d)${NC} codex      — patch ~/.codex/config.toml + hooks (no OpenClaw)\n" "$i" ;;
+            claudecode) printf "    ${BOLD}%d)${NC} claudecode — patch ~/.claude/settings.json hooks (no OpenClaw)\n" "$i" ;;
+            zeptoclaw)  printf "    ${BOLD}%d)${NC} zeptoclaw  — patch ~/.zeptoclaw/config.json (no OpenClaw)\n" "$i" ;;
+            openclaw)   printf "    ${BOLD}%d)${NC} openclaw   — install OpenClaw runtime + DefenseClaw plugin\n" "$i" ;;
+            none)       printf "    ${BOLD}%d)${NC} none       — install gateway/CLI only; pick later\n" "$i" ;;
+        esac
+        i=$((i + 1))
+    done
+    echo ""
+
+    local default_idx=1   # codex
+    local choice
+    printf "  Choice [1-%d, default %d=codex]: " "${#CONNECTOR_CHOICES[@]}" "${default_idx}" >&2
+    read -r choice < /dev/tty 2>/dev/null || choice=""
+    choice="${choice:-${default_idx}}"
+    if ! [[ "${choice}" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#CONNECTOR_CHOICES[@]} )); then
+        warn "Invalid choice '${choice}', defaulting to codex"
+        CONNECTOR="codex"
+    else
+        CONNECTOR="${CONNECTOR_CHOICES[$((choice - 1))]}"
+    fi
+    ok "Picked connector: ${CONNECTOR}"
+}
+
+# record_picked_connector — write the picked connector name to
+# <DEFENSECLAW_HOME>/picked_connector so the CLI's `defenseclaw setup`
+# can default to it without re-prompting. The file is informational
+# only — the gateway's authoritative connector state lives in
+# active_connector.json after a successful Setup. We write it as text
+# (no JSON) to keep the file shell-readable for diagnostics.
+record_picked_connector() {
+    if [[ -z "${CONNECTOR}" ]] || [[ "${CONNECTOR}" == "none" ]]; then
+        return
+    fi
+    mkdir -p "${DEFENSECLAW_HOME}"
+    printf "%s\n" "${CONNECTOR}" > "${DEFENSECLAW_HOME}/picked_connector"
 }
 
 # ── Interrupt handler ─────────────────────────────────────────────────────────
@@ -502,10 +582,14 @@ run_quickstart() {
     fi
 
     local args=(quickstart --non-interactive --yes)
-    case "${QUICKSTART_MODE}" in
-        action)  args+=(--mode action) ;;
-        observe) args+=(--mode observe) ;;
-    esac
+    if [[ "${CONNECTOR}" == "none" || -z "${CONNECTOR}" ]]; then
+        warn "Quickstart skipped because no connector was selected — run 'defenseclaw init' when ready"
+        return
+    fi
+    args+=(--connector "${CONNECTOR}")
+    if [[ -n "${QUICKSTART_MODE}" ]]; then
+        args+=(--mode "${QUICKSTART_MODE}")
+    fi
 
     if "${dc_bin}" "${args[@]}"; then
         ok "Quickstart completed"
@@ -550,13 +634,38 @@ print_success() {
     printf "${BOLD}${GREEN}║        DefenseClaw installed successfully!               ║${NC}\n"
     printf "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════╝${NC}\n"
     echo ""
-    if [[ "${INSTALL_SANDBOX}" == true ]] && [[ "${OS}" == "linux" ]]; then
-        printf "  Get started:\n\n"
-        printf "    ${CYAN}defenseclaw init --sandbox${NC}\n"
-    else
-        printf "  Get started:\n\n"
-        printf "    ${CYAN}defenseclaw init --enable-guardrail${NC}\n"
-    fi
+
+    # Connector-specific next-step guidance. The picked connector
+    # determines which `defenseclaw` command to run next; surfacing
+    # this here means the operator does not have to read docs after
+    # `curl | bash` to find the right verb.
+    case "${CONNECTOR}" in
+        openclaw)
+            if [[ "${INSTALL_SANDBOX}" == true ]] && [[ "${OS}" == "linux" ]]; then
+                printf "  Get started:\n\n"
+                printf "    ${CYAN}defenseclaw init --connector openclaw --sandbox${NC}\n"
+            else
+                printf "  Get started:\n\n"
+                printf "    ${CYAN}defenseclaw init --connector openclaw --profile observe${NC}\n"
+            fi
+            ;;
+        codex)
+            printf "  Get started (Codex):\n\n"
+            printf "    ${CYAN}defenseclaw init --connector codex${NC}\n"
+            ;;
+        claudecode)
+            printf "  Get started (Claude Code):\n\n"
+            printf "    ${CYAN}defenseclaw init --connector claudecode${NC}\n"
+            ;;
+        zeptoclaw)
+            printf "  Get started (ZeptoClaw):\n\n"
+            printf "    ${CYAN}defenseclaw init --connector zeptoclaw${NC}\n"
+            ;;
+        none|"")
+            printf "  Get started (pick a connector later):\n\n"
+            printf "    ${CYAN}defenseclaw init${NC}\n"
+            ;;
+    esac
     echo ""
 }
 
@@ -570,7 +679,9 @@ YES_MODE=false
 LOCAL_DIR=""
 INSTALL_SANDBOX=false
 RUN_QUICKSTART=false
-QUICKSTART_MODE="observe"
+QUICKSTART_MODE=""
+CONNECTOR=""
+NO_OPENCLAW=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -581,6 +692,14 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --yes|-y) YES_MODE=true; shift ;;
+        --connector)
+            [[ $# -lt 2 ]] && die "--connector requires a value (openclaw|codex|claudecode|zeptoclaw|none)"
+            CONNECTOR="$2"
+            is_valid_connector "${CONNECTOR}" \
+                || die "Invalid --connector '${CONNECTOR}'. Choices: ${CONNECTOR_CHOICES[*]}"
+            shift 2
+            ;;
+        --no-openclaw) NO_OPENCLAW=true; shift ;;
         # Run ``defenseclaw quickstart --non-interactive`` after the
         # binaries land. This gives a single-command install→bootstrap
         # path: everything a user needs to go from ``curl | bash`` to a
@@ -606,6 +725,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --sandbox             Also install openshell-sandbox (Linux only)"
             echo "  --local <dir>         Install from a local dist directory"
             echo "  --yes, -y             Skip all confirmation prompts"
+            echo "  --connector <name>    Pick agent connector (openclaw|codex|claudecode|zeptoclaw|none)"
+            echo "  --no-openclaw         Skip OpenClaw runtime+plugin install (alias for --connector none)"
             echo "  --quickstart          Run 'defenseclaw quickstart --non-interactive' post-install"
             echo "  --quickstart-mode M   Pass --mode M to quickstart (observe|action; implies --quickstart)"
             echo "  --help, -h            Show this help"
@@ -625,6 +746,18 @@ while [[ $# -gt 0 ]]; do
 done
 export YES_MODE
 
+# Reconcile --no-openclaw and --connector. The two flags can be combined
+# coherently (e.g. --no-openclaw --connector codex), but conflicting use
+# (--no-openclaw --connector openclaw) is rejected to avoid silently
+# ignoring the operator's intent.
+if [[ "${NO_OPENCLAW}" == true ]]; then
+    if [[ -z "${CONNECTOR}" ]]; then
+        CONNECTOR="none"
+    elif [[ "${CONNECTOR}" == "openclaw" ]]; then
+        die "--no-openclaw is incompatible with --connector openclaw"
+    fi
+fi
+
 if [[ -n "${LOCAL_DIR}" ]]; then
     info "Installing from local directory: ${LOCAL_DIR}"
 fi
@@ -633,10 +766,29 @@ detect_platform
 ensure_uv
 ensure_python
 resolve_version
+pick_connector_interactive
 install_gateway
 install_python_cli
-install_plugin
-handle_openclaw
+
+# Only install the OpenClaw plugin and the OpenClaw runtime when the user
+# actually picked OpenClaw. Other connectors (Codex / Claude Code /
+# ZeptoClaw) integrate via config-file patching and need neither npm nor
+# the plugin tarball. For "none" we skip everything connector-specific
+# and let the user run `defenseclaw init` later.
+case "${CONNECTOR}" in
+    openclaw)
+        install_plugin
+        handle_openclaw
+        ;;
+    codex|claudecode|zeptoclaw)
+        info "Skipping OpenClaw plugin/runtime install (connector: ${CONNECTOR})"
+        ;;
+    none|"")
+        info "Skipping connector setup — run 'defenseclaw init' when ready"
+        ;;
+esac
+
+record_picked_connector
 
 if [[ "${INSTALL_SANDBOX}" == true ]]; then
     if [[ "${OS}" != "linux" ]]; then

@@ -18,19 +18,17 @@
 
 import json
 import os
-import tempfile
+import sys
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.models import Event
-from tests.helpers import make_app_context, cleanup_app
 
+from tests.helpers import cleanup_app, make_app_context
 
 # ---------------------------------------------------------------------------
 # Status command
@@ -57,7 +55,12 @@ class TestStatusCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("DefenseClaw Status", result.output)
         self.assertIn("Environment:", result.output)
-        self.assertIn("Scanners:", result.output)
+        # Section headers in `status` switched from a colon-suffix
+        # ("Scanners:") to an underline-divider style ("Scanners\n  ────────")
+        # to match the rest of the CLI wizard pattern. We assert on
+        # the underlined heading (without colon) so this lock-in
+        # survives a future ANSI-coloring tweak.
+        self.assertIn("Scanners", result.output)
         self.assertIn("Sidecar:", result.output)
         self.assertIn("not running", result.output)
 
@@ -185,6 +188,88 @@ class TestAlertsCommand(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
 
     # ------------------------------------------------------------------
+    # --connector N: per-connector attribution filter
+    # ------------------------------------------------------------------
+
+    def _seed_two_connectors(self):
+        self.app.store.log_event(Event(action="connector-hook", target="/a",
+                                       severity="HIGH",
+                                       details="connector=codex marker_codexonly"))
+        self.app.store.log_event(Event(action="connector-hook", target="/b",
+                                       severity="HIGH",
+                                       details="connector=claudecode marker_cconly"))
+
+    def test_alerts_connector_filter_keeps_only_matching(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+        self._seed_two_connectors()
+
+        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "codex"],
+                                    obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        # The scope is reflected in the title and only codex rows survive.
+        # (Assert on the connector= value, which renders before the Details
+        # column truncates, rather than the trailing free-text marker.)
+        self.assertIn("connector=codex", result.output)
+        self.assertNotIn("claudec", result.output)
+
+    def test_alerts_connector_filter_is_case_insensitive_substring(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+        self._seed_two_connectors()
+
+        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "CODEX"],
+                                    obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertNotIn("claudec", result.output)
+
+    def test_alerts_connector_filter_no_match_message(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+        self._seed_two_connectors()
+
+        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "nope"],
+                                    obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No alerts from connector 'nope'", result.output)
+
+    def test_alerts_connector_filter_show_indexes_filtered_set(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+        self._seed_two_connectors()
+
+        # --show 1 should resolve against the filtered list, i.e. the codex row.
+        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "codex", "--show", "1"],
+                                    obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Alert #1", result.output)
+        self.assertIn("connector=codex", result.output)
+
+    def test_alerts_no_connector_flag_is_unchanged(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+        self._seed_two_connectors()
+
+        # Without --connector, both connectors' rows render (no-op parity).
+        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertIn("claudec", result.output)
+
+    def test_filter_by_connector_helper(self):
+        from defenseclaw.commands.cmd_alerts import _event_connector, _filter_by_connector
+
+        a = Event(action="connector-hook", target="/a", severity="HIGH",
+                  details="connector=codex x=1")
+        b = Event(action="connector-hook", target="/b", severity="HIGH",
+                  details="connector=claudecode y=2")
+        c = Event(action="sink-failure", target="/c", severity="HIGH",
+                  details="sink_kind=splunk_hec")  # no connector attribution
+
+        self.assertEqual(_event_connector(a), "codex")
+        self.assertEqual(_event_connector(c), "")
+        # Substring + case-insensitive, and a no-op for empty needle.
+        self.assertEqual(_filter_by_connector([a, b, c], "codex"), [a])
+        self.assertEqual(_filter_by_connector([a, b, c], "CLAUDE"), [b])
+        self.assertEqual(_filter_by_connector([a, b, c], ""), [a, b, c])
+
+    # ------------------------------------------------------------------
     # Helper functions
     # ------------------------------------------------------------------
 
@@ -258,7 +343,6 @@ class TestAlertsCommand(unittest.TestCase):
     def _insert_scan_with_findings(self, target, scanner, findings):
         """Helper: insert a scan_result and its findings into the store."""
         import uuid
-        from datetime import timedelta
         scan_id = str(uuid.uuid4())
         max_sev = findings[0]["severity"] if findings else "INFO"
         self.app.store.insert_scan_result(
@@ -376,6 +460,89 @@ class TestAIBOMCommand(unittest.TestCase):
         result = self.runner.invoke(aibom, ["scan"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         mock_build.assert_called_once()
+
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_defaults_to_all_connectors(self, mock_build, mock_to_scan, mock_enrich):
+        # A bare `aibom scan` is a complete BOM: it inventories EVERY active
+        # connector with no flag required (the --all-connectors flag was
+        # removed as redundant).
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        mock_build.return_value = self._make_inventory()
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.runner.invoke(
+            aibom, ["scan"], obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        fanned = {c.kwargs.get("connector") for c in mock_build.call_args_list}
+        self.assertEqual(fanned, {"claudecode", "codex"})
+
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_connector_flag_targets_one(self, mock_build, mock_to_scan, mock_enrich):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        mock_build.return_value = self._make_inventory()
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.runner.invoke(
+            aibom, ["scan", "--connector", "codex"], obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_build.assert_called_once()
+        self.assertEqual(mock_build.call_args.kwargs.get("connector"), "codex")
+
+    def test_scan_all_connectors_flag_removed(self):
+        # --all-connectors was removed (a bare scan already covers all), so
+        # passing it must be rejected as an unknown option rather than
+        # silently accepted.
+        from defenseclaw.commands.cmd_aibom import aibom
+
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        result = self.runner.invoke(
+            aibom, ["scan", "--all-connectors"],
+            obj=self.app, catch_exceptions=False,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_json_is_list_for_multiple_connectors(self, mock_build, mock_to_scan, mock_enrich):
+        # JSON contract: a single connector emits a bare object (unchanged);
+        # several connectors emit a list so automation can attribute each blob.
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        mock_build.return_value = self._make_inventory()
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.runner.invoke(
+            aibom, ["scan", "--json"], obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        json_start = result.output.index("[")
+        data = json.loads(result.output[json_start:])
+        self.assertIsInstance(data, list)
+        self.assertEqual(len(data), 2)
 
     @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
     @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
@@ -711,9 +878,22 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         result = self.runner.invoke(setup, ["splunk", "--help"], obj=self.app)
         self.assertEqual(result.exit_code, 0)
+        self.assertIn("dashboards", result.output)
         self.assertIn("--o11y", result.output)
         self.assertIn("--logs", result.output)
+        self.assertIn("--enterprise", result.output)
+        self.assertIn("--hec-endpoint", result.output)
+        self.assertIn("--skip-test", result.output)
         self.assertIn("--accept-splunk-license", result.output)
+
+    def test_setup_splunk_dashboards_help(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(setup, ["splunk", "dashboards", "apply", "--help"], obj=self.app)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("--api-url", result.output)
+        self.assertIn("--o11y-api-token", result.output)
+        self.assertIn("--with-detectors", result.output)
 
     def test_setup_splunk_o11y_non_interactive(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -767,6 +947,143 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertNotEqual(result.exit_code, 0)
 
+    @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge")
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker")
+    @patch("defenseclaw.commands.cmd_setup._ensure_splunk_license_acceptance")
+    def test_setup_splunk_enterprise_non_interactive(
+        self, mock_license, mock_preflight, mock_bootstrap,
+    ):
+        from defenseclaw.commands.cmd_setup import setup
+
+        endpoint = "https://splunk.example.com:8088/services/collector/event"
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability.probe_splunk_hec",
+            return_value=(True, "HEC responded 200 OK"),
+        ) as mock_probe:
+            result = self.runner.invoke(
+                setup,
+                [
+                    "splunk",
+                    "--enterprise",
+                    "--hec-endpoint", endpoint,
+                    "--hec-token", "hec-token",
+                    "--index", "defenseclaw",
+                    "--non-interactive",
+                ],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Splunk Enterprise configured (HEC)", result.output)
+        self.assertIn("Live HEC probe:", result.output)
+        self.assertIn("HEC responded 200 OK", result.output)
+        mock_probe.assert_called_once_with(
+            self.tmp_dir,
+            "splunk-enterprise-splunk-example-com",
+            timeout=10.0,
+        )
+        mock_license.assert_not_called()
+        mock_preflight.assert_not_called()
+        mock_bootstrap.assert_not_called()
+
+        self.assertTrue(self.app.cfg.splunk.enabled)
+        self.assertEqual(self.app.cfg.splunk.hec_endpoint, endpoint)
+        self.assertEqual(self.app.cfg.splunk.hec_token_env, "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+
+        with open(os.path.join(self.tmp_dir, ".env")) as f:
+            dotenv = f.read()
+        self.assertIn("DEFENSECLAW_SPLUNK_HEC_TOKEN=hec-token", dotenv)
+
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            cfg = f.read()
+        self.assertIn("name: splunk-enterprise-splunk-example-com", cfg)
+        self.assertIn("kind: splunk_hec", cfg)
+        self.assertIn("token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN", cfg)
+        # production preset relies on the Go sink's secure
+        # default (TLS verification ON) and must not emit any
+        # insecure_skip_verify opt-out. The legacy verify_tls flag is
+        # likewise silent — operators with a real cert do not need
+        # any per-sink override.
+        self.assertNotIn("insecure_skip_verify", cfg)
+        self.assertNotIn("verify_tls", cfg)
+
+    def test_setup_splunk_enterprise_skip_test(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        endpoint = "https://splunk.example.com:8088/services/collector/event"
+        with patch("defenseclaw.commands.cmd_setup_observability.probe_splunk_hec") as mock_probe:
+            result = self.runner.invoke(
+                setup,
+                [
+                    "splunk",
+                    "--enterprise",
+                    "--hec-endpoint", endpoint,
+                    "--hec-token", "hec-token",
+                    "--skip-test",
+                    "--non-interactive",
+                ],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Live HEC probe skipped.", result.output)
+        mock_probe.assert_not_called()
+
+    def test_setup_splunk_enterprise_probe_warning_is_best_effort(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        endpoint = "https://splunk.example.com:8088/services/collector/event"
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability.probe_splunk_hec",
+            return_value=(False, "HTTP 401 Unauthorized check token/index permissions"),
+        ):
+            result = self.runner.invoke(
+                setup,
+                [
+                    "splunk",
+                    "--enterprise",
+                    "--hec-endpoint", endpoint,
+                    "--hec-token", "hec-token",
+                    "--non-interactive",
+                ],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(
+            "warning: HTTP 401 Unauthorized check token/index permissions",
+            result.output,
+        )
+
+    def test_setup_splunk_enterprise_requires_endpoint(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--enterprise", "--hec-token", "hec-token", "--non-interactive"],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--hec-endpoint is required", result.output)
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_setup_splunk_enterprise_requires_token(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        os.environ.pop("DEFENSECLAW_SPLUNK_HEC_TOKEN", None)
+        result = self.runner.invoke(
+            setup,
+            [
+                "splunk",
+                "--enterprise",
+                "--hec-endpoint", "https://splunk.example.com:8088/services/collector/event",
+                "--non-interactive",
+            ],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--hec-token required", result.output)
+
     def test_setup_splunk_logs_non_interactive_requires_license_flag(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -779,7 +1096,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("--accept-splunk-license", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._apply_logs_config")
-    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     def test_setup_splunk_logs_non_interactive_with_license_flag(
         self, _mock_preflight, mock_apply_logs_config,
     ):
@@ -795,7 +1112,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Local Splunk configured (Free mode from day 1)", result.output)
         mock_apply_logs_config.assert_called_once()
 
-    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
     @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
     def test_setup_splunk_logs_bootstrap_bridge_free_mode(
@@ -839,8 +1156,163 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Local Splunk configured (Free mode from day 1)", result.output)
         self.assertIn("Log in with admin", result.output)
 
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_setup_splunk_logs_bootstrap_bridge_s3_export_env(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "splunk",
+                "--logs",
+                "--s3-export",
+                "--s3-bucket",
+                "agentwatch-demo",
+                "--s3-prefix",
+                "agentwatch/defenseclaw",
+                "--aws-region",
+                "us-west-2",
+                "--non-interactive",
+                "--accept-splunk-license",
+            ],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        env = next(
+            call.kwargs["env"]
+            for call in mock_run.call_args_list
+            if call.kwargs.get("env", {}).get("S3_EXPORT_ENABLED") == "true"
+        )
+        self.assertEqual(env["S3_EXPORT_ENABLED"], "true")
+        self.assertEqual(env["S3_BUCKET"], "agentwatch-demo")
+        self.assertEqual(env["S3_PREFIX"], "agentwatch/defenseclaw")
+        self.assertEqual(env["AWS_REGION"], "us-west-2")
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_setup_splunk_s3_export_implies_logs(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "splunk",
+                "--s3-export",
+                "--s3-bucket",
+                "agentwatch-demo",
+                "--non-interactive",
+                "--accept-splunk-license",
+            ],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        env = next(
+            call.kwargs["env"]
+            for call in mock_run.call_args_list
+            if call.kwargs.get("env", {}).get("S3_EXPORT_ENABLED") == "true"
+        )
+        self.assertEqual(env["S3_EXPORT_ENABLED"], "true")
+        self.assertEqual(env["S3_BUCKET"], "agentwatch-demo")
+
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_bootstrap_bridge_s3_export_uses_single_run_kwargs(
+        self, _mock_bridge_bin, mock_run,
+    ):
+        from defenseclaw.commands.cmd_setup import _bootstrap_bridge
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+
+        # refresh_bundle=False so the test isolates the env-var
+        # passthrough on the `up` invocation. The refresh + restart
+        # cycle is exercised separately in
+        # ``test_setup_refresh_bundle_wiring.py``.
+        contract = _bootstrap_bridge(
+            self.tmp_dir,
+            s3_export=True,
+            s3_bucket="agentwatch-demo",
+            s3_prefix="agentwatch/defenseclaw",
+            aws_region="us-west-2",
+            refresh_bundle=False,
+        )
+
+        self.assertEqual(contract["hec_token"], "bootstrap-token")
+        mock_run.assert_called_once()
+        self.assertEqual(
+            mock_run.call_args.args[0],
+            ["/tmp/fake-splunk-claw-bridge", "up", "--output", "json"],
+        )
+        kwargs = mock_run.call_args.kwargs
+        self.assertEqual(kwargs["capture_output"], True)
+        self.assertEqual(kwargs["text"], True)
+        self.assertEqual(kwargs["timeout"], 300)
+        self.assertEqual(kwargs["env"]["S3_EXPORT_ENABLED"], "true")
+        self.assertEqual(kwargs["env"]["S3_BUCKET"], "agentwatch-demo")
+        self.assertEqual(kwargs["env"]["S3_PREFIX"], "agentwatch/defenseclaw")
+        self.assertEqual(kwargs["env"]["AWS_REGION"], "us-west-2")
+
     @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge", return_value=None)
-    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     def test_setup_splunk_logs_non_interactive_fails_when_bridge_bootstrap_fails(
         self, _mock_preflight, _mock_bootstrap_bridge,
     ):
@@ -855,6 +1327,143 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertFalse(self.app.cfg.splunk.enabled)
         self.assertNotIn("Local Splunk configured (Free mode from day 1)", result.output)
 
+    @patch(
+        "defenseclaw.commands.cmd_setup._preflight_docker",
+        return_value=(False, "port_8000_in_use"),
+    )
+    def test_setup_splunk_logs_non_interactive_port_conflict_message(
+        self, _mock_preflight,
+    ):
+        """Regression: when pre-flight fails on a busy port the
+        non-interactive error must name the port, not lie about Docker.
+        """
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertNotIn("Docker is required for --logs", result.output)
+        self.assertIn("port 8000 is already in use", result.output)
+
+    @patch(
+        "defenseclaw.commands.cmd_setup._preflight_docker",
+        return_value=(False, "docker_daemon_not_running"),
+    )
+    def test_setup_splunk_logs_non_interactive_docker_daemon_message(
+        self, _mock_preflight,
+    ):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Docker daemon is not running", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch(
+        "defenseclaw.commands.cmd_setup.splunk_bridge_bin",
+        return_value="/tmp/fake-splunk-claw-bridge",
+    )
+    def test_bootstrap_bridge_empty_stdout_emits_diagnostic(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        """Regression: when the bridge exits 0 but writes nothing to
+        stdout (or writes non-JSON), the operator must see a
+        self-explanatory error plus a tail of the bridge's stderr
+        rather than the raw ``json`` module exception.
+        """
+        from defenseclaw.commands.cmd_setup import _bootstrap_bridge
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="",
+            stderr="docker compose: failed to package app\nsee log above\n",
+        )
+
+        contract = _bootstrap_bridge(self.tmp_dir, refresh_bundle=False)
+
+        self.assertIsNone(contract)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch(
+        "defenseclaw.commands.cmd_setup.splunk_bridge_bin",
+        return_value="/tmp/fake-splunk-claw-bridge",
+    )
+    def test_bootstrap_bridge_malformed_json_surfaces_stderr_tail(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        from click.testing import CliRunner
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="not-json-at-all",
+            stderr="line1\nline2\nfatal: ansible bootstrap failed\n",
+        )
+
+        result = CliRunner().invoke(
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("malformed JSON contract", result.output)
+        self.assertIn("Last bridge stderr:", result.output)
+        self.assertIn("fatal: ansible bootstrap failed", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch(
+        "defenseclaw.commands.cmd_setup.splunk_bridge_bin",
+        return_value="/tmp/fake-splunk-claw-bridge",
+    )
+    def test_setup_splunk_s3_export_emits_implies_logs_notice(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "splunk",
+                "--s3-export",
+                "--s3-bucket",
+                "agentwatch-demo",
+                "--non-interactive",
+                "--accept-splunk-license",
+            ],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("--s3-export implies --logs", result.output)
+
     @patch("defenseclaw.commands.cmd_setup._preflight_docker")
     def test_setup_splunk_logs_interactive_decline_license(self, mock_preflight):
         from defenseclaw.commands.cmd_setup import setup
@@ -863,6 +1472,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
             "n",           # Enable O11y?
             "y",           # Enable local logs?
             "n",           # Accept Splunk license?
+            "n",           # Enable Enterprise?
         ]) + "\n"
 
         result = self.runner.invoke(
@@ -873,6 +1483,26 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Local Splunk enablement cancelled.", result.output)
         self.assertFalse(self.app.cfg.splunk.enabled)
         mock_preflight.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(False, "docker_not_installed"))
+    def test_setup_splunk_logs_interactive_preflight_failure_stops_logs(self, mock_preflight):
+        from defenseclaw.commands.cmd_setup import setup
+
+        user_input = "\n".join([
+            "n",           # Enable O11y?
+            "y",           # Enable local logs?
+            "y",           # Accept Splunk license?
+            "n",           # Enable Enterprise?
+        ]) + "\n"
+
+        result = self.runner.invoke(
+            setup, ["splunk"], obj=self.app,
+            input=user_input, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(self.app.cfg.splunk.enabled)
+        self.assertNotIn("Local Splunk configured", result.output)
+        mock_preflight.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_setup._preflight_docker")
     def test_setup_splunk_o11y_and_logs_interactive_decline_logs_preserves_o11y(
@@ -944,7 +1574,8 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertFalse(self.app.cfg.otel.enabled)
         self.assertFalse(self.app.cfg.splunk.enabled)
 
-    def test_setup_splunk_interactive_o11y(self):
+    @patch("defenseclaw.commands.cmd_setup.apply_dashboards")
+    def test_setup_splunk_interactive_o11y(self, mock_apply_dashboards):
         from defenseclaw.commands.cmd_setup import setup
 
         user_input = "\n".join([
@@ -955,7 +1586,9 @@ class TestSetupSplunkCommand(unittest.TestCase):
             "y",           # Traces?
             "y",           # Metrics?
             "n",           # Logs?
+            "n",           # Install dashboards?
             "n",           # Enable local?
+            "n",           # Enable Enterprise?
         ]) + "\n"
 
         result = self.runner.invoke(
@@ -966,6 +1599,37 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertTrue(self.app.cfg.otel.enabled)
         self.assertEqual(self.app.cfg.otel.traces.endpoint, "ingest.us1.observability.splunkcloud.com")
         self.assertFalse(self.app.cfg.otel.logs.enabled)
+        mock_apply_dashboards.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_setup.apply_dashboards")
+    def test_setup_splunk_interactive_o11y_installs_dashboards(self, mock_apply_dashboards):
+        from defenseclaw.commands.cmd_setup import setup
+
+        user_input = "\n".join([
+            "y",           # Enable O11y?
+            "us1",         # Realm
+            "my-secret",   # Access token
+            "test-svc",    # Service name
+            "y",           # Traces?
+            "y",           # Metrics?
+            "n",           # Logs?
+            "y",           # Install dashboards?
+            "o11y-api-token",  # O11y API token
+            "n",           # Enable local?
+            "n",           # Enable Enterprise?
+        ]) + "\n"
+
+        result = self.runner.invoke(
+            setup, ["splunk"], obj=self.app,
+            input=user_input, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_apply_dashboards.assert_called_once()
+        call_args = mock_apply_dashboards.call_args.args
+        call_kwargs = mock_apply_dashboards.call_args.kwargs
+        self.assertIs(call_args[0], self.app)
+        self.assertEqual(call_kwargs["o11y_api_token"], "o11y-api-token")
+        self.assertTrue(call_kwargs["yes"])
 
     def test_setup_splunk_show_credentials_no_env_file(self):
         from defenseclaw.commands.cmd_setup import setup

@@ -99,13 +99,18 @@ def load_litellm_config() -> dict[str, Any]:
 
 
 def derive_master_key() -> str:
-    """Derive proxy Bearer token from device.key (matches Go proxy + guardrail.py)."""
-    import hmac
+    """Derive proxy bearer token from device.key, matching the Go proxy."""
 
     key_file = DC_DIR / "device.key"
     try:
         data = key_file.read_bytes()
-        digest = hmac.new(b"defenseclaw-proxy-master-key", data, hashlib.sha256).hexdigest()[:32]
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            data,
+            b"defenseclaw-proxy-master-key",
+            100_000,
+            dklen=32,
+        ).hex()
         return f"sk-dc-{digest}"
     except OSError:
         return ""

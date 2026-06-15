@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // sanitizeEvent rewrites free-form, PII-bearing fields on a copy of the
@@ -51,6 +52,63 @@ import (
 func sanitizeEvent(e Event) Event {
 	e.Details = redaction.ForSinkReason(e.Details)
 	return e
+}
+
+func cloneStructuredPayload(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	buf, err := json.Marshal(in)
+	if err == nil {
+		var out map[string]any
+		if err := json.Unmarshal(buf, &out); err == nil {
+			return out
+		}
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// stampAuditEventEnvelope fills the envelope fields that must be identical
+// across SQLite, audit sinks, OTel, and the structured gateway bridge.
+// Store.LogEvent also stamps these fields before INSERT, but it receives
+// events by value; stamping here keeps the fan-out copy in lockstep with the
+// persisted row.
+func stampAuditEventEnvelope(e *Event) {
+	if e == nil {
+		return
+	}
+	if e.ID == "" {
+		e.ID = uuid.New().String()
+	}
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now().UTC()
+	}
+	if e.Actor == "" {
+		e.Actor = "defenseclaw"
+	}
+	if e.RunID == "" {
+		e.RunID = currentRunID()
+	}
+	if e.SidecarInstanceID == "" {
+		e.SidecarInstanceID = ProcessAgentInstanceID()
+	}
+	prov := version.Current()
+	if e.SchemaVersion == 0 {
+		e.SchemaVersion = prov.SchemaVersion
+	}
+	if e.ContentHash == "" {
+		e.ContentHash = prov.ContentHash
+	}
+	if e.Generation == 0 {
+		e.Generation = prov.Generation
+	}
+	if e.BinaryVersion == "" {
+		e.BinaryVersion = prov.BinaryVersion
+	}
 }
 
 // StructuredEmitter receives every audit Event that flows through the
@@ -100,6 +158,8 @@ type Logger struct {
 	gwWriter *gatewaylog.Writer
 }
 
+const gatewaySplunkHECEventsKey = "_splunk_hec_events"
+
 func NewLogger(store *Store) *Logger {
 	return &Logger{store: store}
 }
@@ -140,6 +200,17 @@ func (l *Logger) SetGatewayLogWriter(w *gatewaylog.Writer) {
 	l.mu.Unlock()
 }
 
+// GatewayLogWriter returns the installed gateway JSONL writer (may
+// be nil when none is wired). Callers outside the audit package
+// use this to fan EventScan / EventScanFinding events from
+// runtime finding emitters (hook handlers, /api/v1/inspect/*,
+// proxy guardrail, mid-stream, tool-call-inspect) through the
+// same choke point as scanner.EmitScanResult, so gateway.jsonl
+// stays the single source of truth.
+func (l *Logger) GatewayLogWriter() *gatewaylog.Writer {
+	return l.gatewayWriterSnapshot()
+}
+
 func (l *Logger) gatewayWriterSnapshot() *gatewaylog.Writer {
 	l.mu.RLock()
 	w := l.gwWriter
@@ -175,6 +246,133 @@ func (l *Logger) emitGatewaySnapshot(emitter StructuredEmitter, ev gatewaylog.Ev
 		return
 	}
 	emitter.EmitGatewayEvent(ev)
+}
+
+// gatewayLogSinkActionNamespace prefixes the sink-only action key for
+// mirrored gatewaylog events ("gatewaylog.<event-type>"). This is a
+// sink-telemetry namespace, not an audit.Action registry member: the
+// concrete suffix is the dynamic gatewaylog event type, so it cannot be
+// a single curated enum value. Kept as a named constant so the call
+// site carries no raw audit-action string literal.
+const gatewayLogSinkActionNamespace = "gatewaylog."
+
+// ForwardGatewayEventToSinks mirrors native gatewaylog events that are
+// semantically useful to SIEM consumers into the audit sink fan-out. The
+// gatewaylog writer is the source of truth for these events; this method only
+// packages the already-redacted event as a first-class HEC row so the Splunk
+// local bridge exports canonical `defenseclaw:json` records with top-level
+// `event_type` values.
+func (l *Logger) ForwardGatewayEventToSinks(ctx context.Context, ev gatewaylog.Event) {
+	if l == nil || !gatewayEventForwardedToSinks(ev.EventType) {
+		return
+	}
+	sinksMgr, _, _ := l.snapshot()
+	if sinksMgr == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ev.Timestamp.IsZero() {
+		ev.Timestamp = time.Now().UTC()
+	}
+	if ev.Severity == "" {
+		ev.Severity = gatewaylog.SeverityInfo
+	}
+	stampGatewayEnvelope(&ev)
+	ev = sanitizeGatewayLogEvent(ev)
+
+	event, err := gatewayLogEventMap(ev)
+	if err != nil {
+		return
+	}
+
+	sinkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	l.forwardSinkEventCtx(sinkCtx, sinksMgr, sinks.Event{
+		ID:                uuid.NewString(),
+		Timestamp:         ev.Timestamp,
+		Action:            gatewayLogSinkActionNamespace + string(ev.EventType),
+		Target:            "gatewaylog",
+		Actor:             "defenseclaw",
+		Details:           fmt.Sprintf("event_type=%s", ev.EventType),
+		Severity:          string(ev.Severity),
+		RunID:             ev.RunID,
+		TraceID:           ev.TraceID,
+		RequestID:         ev.RequestID,
+		SessionID:         ev.SessionID,
+		TurnID:            ev.TurnID,
+		AgentName:         ev.AgentName,
+		AgentID:           ev.AgentID,
+		AgentInstanceID:   ev.AgentInstanceID,
+		SidecarInstanceID: ev.SidecarInstanceID,
+		PolicyID:          ev.PolicyID,
+		DestinationApp:    ev.DestinationApp,
+		ToolName:          ev.ToolName,
+		ToolID:            ev.ToolID,
+		Connector:         ev.Connector,
+		Structured: map[string]any{
+			gatewaySplunkHECEventsKey: []map[string]any{
+				{
+					"time":       float64(ev.Timestamp.Unix()) + float64(ev.Timestamp.Nanosecond())/1e9,
+					"source":     "defenseclaw",
+					"sourcetype": "defenseclaw:json",
+					"event":      event,
+				},
+			},
+		},
+	})
+}
+
+func gatewayEventForwardedToSinks(eventType gatewaylog.EventType) bool {
+	switch eventType {
+	case gatewaylog.EventVerdict,
+		gatewaylog.EventLLMPrompt,
+		gatewaylog.EventLLMResponse,
+		gatewaylog.EventToolInvocation:
+		return true
+	default:
+		return false
+	}
+}
+
+func sanitizeGatewayLogEvent(ev gatewaylog.Event) gatewaylog.Event {
+	if v := ev.Verdict; v != nil {
+		cp := *v
+		cp.Reason = redaction.ForSinkReason(cp.Reason)
+		ev.Verdict = &cp
+	}
+	if p := ev.LLMPrompt; p != nil {
+		cp := *p
+		cp.Prompt = redaction.ForSinkMessageContent(cp.Prompt)
+		cp.RawRequestBody = redaction.ForSinkMessageContent(cp.RawRequestBody)
+		ev.LLMPrompt = &cp
+	}
+	if r := ev.LLMResponse; r != nil {
+		cp := *r
+		cp.Response = redaction.ForSinkMessageContent(cp.Response)
+		cp.RawResponseBody = redaction.ForSinkMessageContent(cp.RawResponseBody)
+		ev.LLMResponse = &cp
+	}
+	if t := ev.Tool; t != nil {
+		cp := *t
+		cp.ToolInput = redaction.ForSinkMessageContent(cp.ToolInput)
+		cp.ToolOutput = redaction.ForSinkMessageContent(cp.ToolOutput)
+		ev.Tool = &cp
+	}
+	return ev
+}
+
+func gatewayLogEventMap(ev gatewaylog.Event) (map[string]any, error) {
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		return nil, err
+	}
+	var event map[string]any
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return nil, err
+	}
+	return event, nil
 }
 
 // stampGatewayEnvelope fills the v7 correlation + identity envelope
@@ -231,6 +429,11 @@ type ScanCorrelation struct {
 	AgentID         string
 	AgentName       string
 	AgentInstanceID string
+
+	// Connector attributes the scan to its originating connector so
+	// EmitScanResult can record per-connector scan-finding metrics. Empty
+	// for connector-agnostic scans (CLI file scans, background rescans).
+	Connector string
 }
 
 // LogScan persists a scan result to SQLite, forwards to Splunk HEC,
@@ -289,6 +492,7 @@ func (l *Logger) LogScanWithCorrelation(
 		RequestID:         corr.RequestID,
 		SessionID:         corr.SessionID,
 		TraceID:           corr.TraceID,
+		Connector:         corr.Connector,
 	}
 	scanID, err := scanner.EmitScanResult(ctx, l.gatewayWriterSnapshot(), l.store, tel, result, agent)
 	if err != nil {
@@ -301,7 +505,7 @@ func (l *Logger) LogScanWithCorrelation(
 	event := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
-		Action:    "scan",
+		Action:    string(ActionScan),
 		Target:    result.Target,
 		Actor:     "defenseclaw",
 		Details: fmt.Sprintf("scanner=%s findings=%d max_severity=%s duration=%s",
@@ -316,6 +520,7 @@ func (l *Logger) LogScanWithCorrelation(
 		AgentInstanceID:   corr.AgentInstanceID,
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	})
+	stampAuditEventEnvelope(&event)
 
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
@@ -324,14 +529,14 @@ func (l *Logger) LogScanWithCorrelation(
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
 
 	if otel != nil {
 		targetType := inferTargetType(result.Scanner)
-		otel.EmitScanResult(result, scanID, targetType, verdict)
+		otel.EmitScanResult(result, scanID, targetType, verdict, agent.Connector)
 	}
 
 	return nil
@@ -382,12 +587,50 @@ func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requ
 	}, action, target, details)
 }
 
+// LogActionWithCorrelationConnector is LogActionWithCorrelation plus a
+// connector attribution stamp. The proxy guardrail-verdict path knows
+// which connector produced the decision (p.connectorName()); threading
+// it here lets the verdict row carry the dedicated connector column on
+// SQLite and the top-level connector field on every sink, instead of
+// forcing SIEM consumers to scrape a `connector=` token out of details.
+// An empty connector behaves exactly like LogActionWithCorrelation.
+func (l *Logger) LogActionWithCorrelationConnector(action, target, details, traceID, requestID, connector string) error {
+	return l.logActionWithEnvelope(CorrelationEnvelope{
+		TraceID:   traceID,
+		RequestID: requestID,
+		Connector: connector,
+	}, action, target, details)
+}
+
+// LogActionSeverityConnector persists an action event with an explicit
+// severity and connector attribution. Most lifecycle rows are fine at the
+// INFO default LogAction applies, but security-relevant call sites — like
+// the hook self-heal guard, where a runtime enforcement-hook tamper/repair
+// is the event — must land at the right severity on every surface AND carry
+// the dedicated connector column so SIEM consumers can filter by connector
+// without scraping a token out of details. An empty severity falls back to
+// INFO; an empty connector behaves exactly like LogAction.
+func (l *Logger) LogActionSeverityConnector(action, target, details, severity, connector string) error {
+	return l.logActionWithEnvelopeSeverity(CorrelationEnvelope{Connector: connector}, action, target, details, severity)
+}
+
 // logActionWithEnvelope is the shared implementation for every LogAction*
 // variant. Centralizing here guarantees that LogAction, LogActionCtx, and
 // LogActionWithCorrelation all thread the same audit-event shape onto
 // SQLite, sinks, and OTel — a regression in one surface can no longer
 // diverge from the others.
 func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, details string) error {
+	return l.logActionWithEnvelopeSeverity(env, action, target, details, "INFO")
+}
+
+// logActionWithEnvelopeSeverity is logActionWithEnvelope with a caller-chosen
+// severity. logActionWithEnvelope delegates here with "INFO" so the default
+// path is unchanged; only call sites that explicitly need a non-INFO row
+// (via LogActionSeverityConnector) reach this with a different value.
+func (l *Logger) logActionWithEnvelopeSeverity(env CorrelationEnvelope, action, target, details, severity string) error {
+	if severity == "" {
+		severity = "INFO"
+	}
 	sinksMgr, otel, structured := l.snapshot()
 	event := Event{
 		ID:        uuid.New().String(),
@@ -396,13 +639,14 @@ func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, 
 		Target:    target,
 		Actor:     "defenseclaw",
 		Details:   details,
-		Severity:  "INFO",
+		Severity:  severity,
 		RunID:     currentRunID(),
 		// Process-scoped identifier — never collapses onto
 		// agent_instance_id (per-session) per the three-tier contract.
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
 	applyEnvelope(&event, env)
+	stampAuditEventEnvelope(&event)
 	event = sanitizeEvent(event)
 	storeErr := l.store.LogEvent(event)
 	if storeErr != nil {
@@ -432,7 +676,7 @@ func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, 
 		return storeErr
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -469,7 +713,7 @@ func mustPersistAction(action string) bool {
 // "install", "file", "runtime", "source_path".
 func (l *Logger) LogActionWithEnforcement(action, target, details string, enforcement map[string]string) error {
 	sinksMgr, otel, structured := l.snapshot()
-	event := sanitizeEvent(Event{
+	event := Event{
 		ID:                uuid.New().String(),
 		Timestamp:         time.Now().UTC(),
 		Action:            action,
@@ -479,7 +723,9 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		Severity:          "INFO",
 		RunID:             currentRunID(),
 		SidecarInstanceID: ProcessAgentInstanceID(),
-	})
+	}
+	stampAuditEventEnvelope(&event)
+	event = sanitizeEvent(event)
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
 			otel.RecordAuditDBError(context.Background(), "insert_event")
@@ -487,7 +733,7 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -523,15 +769,6 @@ func (l *Logger) LogEventCtx(ctx context.Context, event Event) error {
 // control severity or other fields that LogAction hardcodes.
 func (l *Logger) LogEvent(event Event) error {
 	sinksMgr, otel, structured := l.snapshot()
-	if event.ID == "" {
-		event.ID = uuid.New().String()
-	}
-	if event.Timestamp.IsZero() {
-		event.Timestamp = time.Now().UTC()
-	}
-	if event.RunID == "" {
-		event.RunID = currentRunID()
-	}
 	// v7 clean break: AgentInstanceID is per-SESSION. Callers that
 	// carry a session context (the router, proxy session resolver)
 	// stamp it explicitly. Absence is meaningful — "no session
@@ -539,9 +776,7 @@ func (l *Logger) LogEvent(event Event) error {
 	// The process-scoped identifier lives on SidecarInstanceID;
 	// we auto-fill that one so every row has a stable sidecar
 	// identity without burdening callers.
-	if event.SidecarInstanceID == "" {
-		event.SidecarInstanceID = ProcessAgentInstanceID()
-	}
+	stampAuditEventEnvelope(&event)
 	event = sanitizeEvent(event)
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
@@ -550,7 +785,7 @@ func (l *Logger) LogEvent(event Event) error {
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -585,6 +820,7 @@ func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
 		TraceID:           e.TraceID,
 		RequestID:         e.RequestID,
 		SessionID:         e.SessionID,
+		TurnID:            e.TurnID,
 		AgentName:         e.AgentName,
 		AgentID:           e.AgentID,
 		AgentInstanceID:   e.AgentInstanceID,
@@ -593,16 +829,13 @@ func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
 		DestinationApp:    e.DestinationApp,
 		ToolName:          e.ToolName,
 		ToolID:            e.ToolID,
+		Connector:         e.Connector,
+		SchemaVersion:     e.SchemaVersion,
+		ContentHash:       e.ContentHash,
+		Generation:        e.Generation,
+		BinaryVersion:     e.BinaryVersion,
+		Structured:        cloneStructuredPayload(e.Structured),
 	})
-}
-
-func (l *Logger) forwardSinkEvent(mgr *sinks.Manager, se sinks.Event) {
-	if mgr == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	l.forwardSinkEventCtx(ctx, mgr, se)
 }
 
 func (l *Logger) forwardSinkEventCtx(ctx context.Context, mgr *sinks.Manager, se sinks.Event) {
@@ -713,7 +946,9 @@ func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity,
 
 	_, otel, emitter := l.snapshot()
 	if otel != nil {
-		otel.RecordAlert(context.Background(), "runtime", severity, source)
+		// Runtime alerts are process-global (not tied to a single
+		// connector); pass "" so the metric records connector="unknown".
+		otel.RecordAlert(context.Background(), "runtime", severity, source, "")
 	}
 	gwEv := gatewaylog.Event{
 		Timestamp: time.Now().UTC(),
@@ -731,6 +966,7 @@ func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity,
 		TraceID:         env.TraceID,
 		RequestID:       env.RequestID,
 		SessionID:       env.SessionID,
+		TurnID:          env.TurnID,
 		AgentID:         env.AgentID,
 		AgentName:       env.AgentName,
 		AgentInstanceID: env.AgentInstanceID,

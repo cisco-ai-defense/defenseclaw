@@ -26,6 +26,7 @@ from pathlib import Path
 import click
 import yaml
 
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_policies_dir, bundled_rego_dir
 
@@ -226,8 +227,8 @@ def create(
 
     _save_policy(dest, data)
 
-    click.secho(f"Policy '{name}' created at {dest}", fg="green")
-    click.echo(f"  Activate with: defenseclaw policy activate {name}")
+    ux.ok(f"Policy '{name}' created at {dest}")
+    click.echo(f"  {ux.dim('Activate with:')} defenseclaw policy activate {name}")
 
     if app.logger:
         app.logger.log_action("policy-create", name, f"path={dest}")
@@ -244,12 +245,12 @@ def list_policies(app: AppContext) -> None:
     files = _list_policy_files(app)
 
     if not files:
-        click.echo("No policies found.")
+        ux.warn("No policies found.")
         return
 
     active = _get_active_policy_name(app)
 
-    click.echo("Available policies:")
+    click.echo(f"{ux.bold('Available policies:')}")
     click.echo()
     for path in files:
         data = _load_policy(path)
@@ -259,20 +260,20 @@ def list_policies(app: AppContext) -> None:
         is_active = pname == active
 
         prefix = "  * " if is_active else "    "
-        label = click.style(pname, bold=True)
+        label = ux.bold(pname)
         tag = ""
         if is_builtin:
-            tag = click.style(" [built-in]", dim=True)
+            tag += ux.dim(" [built-in]")
         if is_active:
-            tag += click.style(" [active]", fg="green")
+            tag += ux._style(" [active]", fg="green")
 
         click.echo(f"{prefix}{label}{tag}")
         if desc:
-            click.echo(f"      {desc}")
+            click.echo(f"      {ux.dim(desc)}")
 
     click.echo()
-    click.echo("  Activate a policy: defenseclaw policy activate <name>")
-    click.echo("  Show details:      defenseclaw policy show <name>")
+    click.echo(f"  {ux.dim('Activate a policy:')} defenseclaw policy activate <name>")
+    click.echo(f"  {ux.dim('Show details:')}      defenseclaw policy show <name>")
 
 
 # ---------------------------------------------------------------------------
@@ -292,19 +293,25 @@ def show(app: AppContext, name: str) -> None:
     data = _load_policy(path)
     pname = data.get("name", name)
     desc = data.get("description", "")
-
-    click.secho(f"Policy: {pname}", bold=True)
-    if desc:
-        click.echo(f"  {desc}")
-    click.echo()
-
     admission = data.get("admission", {})
-    click.echo("Admission:")
-    click.echo(f"  scan_on_install:        {admission.get('scan_on_install', True)}")
-    click.echo(f"  allow_list_bypass_scan: {admission.get('allow_list_bypass_scan', True)}")
+
+    click.echo(ux.bold(f"Policy: {pname}"))
+    if desc:
+        ux.subhead(desc, indent="  ")
     click.echo()
 
-    click.echo("Severity Actions:")
+    click.echo(ux.bold("Admission:"))
+    click.echo(
+        f"  {ux._style('scan_on_install:', fg='bright_black', bold=True)}"
+        f"        {admission.get('scan_on_install', True)}"
+    )
+    click.echo(
+        f"  {ux._style('allow_list_bypass_scan:', fg='bright_black', bold=True)} "
+        f"{admission.get('allow_list_bypass_scan', True)}"
+    )
+    click.echo()
+
+    click.echo(ux.bold("Severity Actions:"))
     actions = data.get("skill_actions", {})
     for sev in SEVERITIES:
         action = actions.get(sev, {})
@@ -321,8 +328,13 @@ def show(app: AppContext, name: str) -> None:
         else:
             color = "green"
 
-        click.echo(f"  {sev.upper():10s}  ", nl=False)
-        click.secho(f"install={install_a:5s}  file={file_a:10s}  runtime={runtime_a}", fg=color)
+        click.echo(
+            f"  {ux.bold(sev.upper().ljust(10))}  "
+            + ux._style(
+                f"install={install_a:5s}  file={file_a:10s}  runtime={runtime_a}",
+                fg=color,
+            )
+        )
 
     overrides = data.get("scanner_overrides", {})
     if overrides:
@@ -344,8 +356,13 @@ def show(app: AppContext, name: str) -> None:
     if guardrail:
         click.echo()
         click.echo("Guardrail:")
-        click.echo(f"  block_threshold:    {guardrail.get('block_threshold', 3)} (severity rank)")
+        click.echo(f"  block_threshold:    {guardrail.get('block_threshold', 4)} (severity rank)")
         click.echo(f"  alert_threshold:    {guardrail.get('alert_threshold', 2)} (severity rank)")
+        hilt = guardrail.get("hilt", {}) or {}
+        click.echo(
+            f"  hilt:               enabled={bool(hilt.get('enabled', False))} "
+            f"min={hilt.get('min_severity', 'HIGH')}"
+        )
         click.echo(f"  cisco_trust_level:  {guardrail.get('cisco_trust_level', 'full')}")
         patterns = guardrail.get("patterns", {})
         if patterns:
@@ -424,12 +441,63 @@ def activate(app: AppContext, name: str) -> None:
         app.cfg.watch.rescan_enabled = bool(watch_raw["rescan_enabled"])
     if "rescan_interval_min" in watch_raw:
         app.cfg.watch.rescan_interval_min = int(watch_raw["rescan_interval_min"])
+
+    # Apply Cisco AI Defense settings into config.yaml. The gateway reads
+    # the AID lane from Config.CiscoAIDefense, not from data.json, so we
+    # have to mutate ``app.cfg.cisco_ai_defense`` here. We deliberately
+    # only touch the fields the policy YAML carries — if a field is
+    # absent we keep whatever the operator set via ``defenseclaw setup``.
+    aid_raw = data.get("cisco_ai_defense", {})
+    if isinstance(aid_raw, dict) and aid_raw:
+        if "endpoint" in aid_raw and isinstance(aid_raw["endpoint"], str):
+            app.cfg.cisco_ai_defense.endpoint = aid_raw["endpoint"]
+        if "api_key_env" in aid_raw and isinstance(aid_raw["api_key_env"], str):
+            # We never accept a literal `api_key` from a policy YAML —
+            # that would mean someone pasted a secret into a file the
+            # docs site emits; force the operator through `api_key_env`.
+            app.cfg.cisco_ai_defense.api_key_env = aid_raw["api_key_env"]
+
+    # Apply webhook destinations into config.yaml. Webhooks are gateway
+    # config (sink destinations), not policy data, but the playground
+    # carries them through the policy YAML so the wizard's output is a
+    # single self-describing artifact. We replace the list wholesale on
+    # activate so the policy can drop a webhook the operator no longer
+    # wants. If the policy YAML omits the key entirely we leave the
+    # config alone — that's the "don't touch what you don't own" case.
+    if "webhooks" in data:
+        wh_raw = data.get("webhooks")
+        if isinstance(wh_raw, list):
+            from defenseclaw.config import WebhookConfig
+
+            new_webhooks: list[WebhookConfig] = []
+            for entry in wh_raw:
+                if not isinstance(entry, dict):
+                    continue
+                # Construct via known fields only — anything else gets
+                # dropped rather than silently passed through, which is
+                # the right call for a structure that maps to a Go
+                # struct on the gateway side.
+                kwargs: dict = {}
+                for fld in ("name", "url", "secret_env", "enabled"):
+                    if fld in entry:
+                        kwargs[fld] = entry[fld]
+                try:
+                    new_webhooks.append(WebhookConfig(**kwargs))
+                except TypeError:
+                    # If WebhookConfig grew new required fields and the
+                    # YAML doesn't carry them, fall back to per-attribute
+                    # set so the policy still activates.
+                    wh = WebhookConfig()
+                    for k, v in kwargs.items():
+                        setattr(wh, k, v)
+                    new_webhooks.append(wh)
+            app.cfg.webhooks = new_webhooks
     app.cfg.save()
     click.echo(f"Config updated with policy '{name}'.")
 
     _sync_opa_data(app, data)
 
-    click.secho(f"Policy '{name}' activated.", fg="green")
+    ux.ok(f"Policy '{name}' activated.")
     if app.logger:
         app.logger.log_action("policy-activate", name, f"source={path}")
 
@@ -467,7 +535,7 @@ def delete(app: AppContext, name: str) -> None:
         raise SystemExit(1)
 
     os.remove(real_path)
-    click.echo(f"Policy '{name}' deleted.")
+    ux.ok(f"Policy '{name}' deleted.")
     if app.logger:
         app.logger.log_action("policy-delete", name, "")
 
@@ -493,14 +561,14 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
     # 1. Validate data.json
     data_json_path = os.path.join(rd, "data.json")
     if not os.path.isfile(data_json_path):
-        click.secho(f"FAIL: data.json not found at {data_json_path}", fg="red")
+        ux.err(f"FAIL: data.json not found at {data_json_path}")
         raise SystemExit(1)
 
     try:
         with open(data_json_path) as f:
             data = json.load(f)
     except json.JSONDecodeError as exc:
-        click.secho(f"FAIL: data.json is not valid JSON: {exc}", fg="red")
+        ux.err(f"FAIL: data.json is not valid JSON: {exc}")
         raise SystemExit(1)
 
     required_keys = ["config", "actions", "severity_ranking"]
@@ -541,11 +609,11 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
                 errors.append(f"scanner_overrides.{scanner_type}.{sev}.install: invalid '{action['install']}'")
 
     if errors:
-        click.secho("data.json validation errors:", fg="red")
+        ux.err("data.json validation errors:")
         for e in errors:
             click.echo(f"  - {e}")
     else:
-        click.secho("data.json: OK", fg="green")
+        ux.ok("data.json: OK")
 
     # 2. Try to compile Rego
     rego_compiled = _try_rego_compile(rd)
@@ -553,7 +621,7 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
     if errors or not rego_compiled:
         raise SystemExit(1)
 
-    click.secho("All validations passed.", fg="green")
+    ux.ok("All validations passed.")
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +640,7 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
     rd = rego_dir or _rego_dir()
 
     if not os.path.isdir(rd):
-        click.secho(f"error: rego directory not found: {rd}", fg="red", err=True)
+        ux.err(f"error: rego directory not found: {rd}")
         raise SystemExit(1)
 
     cmd = ["opa", "test", rd]
@@ -582,12 +650,15 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except FileNotFoundError:
-        click.secho("error: 'opa' binary not found on PATH", fg="red", err=True)
-        click.echo("  Install OPA: https://www.openpolicyagent.org/docs/latest/#running-opa", err=True)
-        click.echo("  Or: brew install opa", err=True)
+        ux.err("error: 'opa' binary not found on PATH")
+        ux.subhead(
+            "Install OPA: https://www.openpolicyagent.org/docs/latest/#running-opa",
+            indent="  ",
+        )
+        ux.subhead("Or: brew install opa", indent="  ")
         raise SystemExit(1)
     except subprocess.TimeoutExpired:
-        click.secho("error: opa test timed out after 60s", fg="red", err=True)
+        ux.err("error: opa test timed out after 60s")
         raise SystemExit(1)
 
     if result.stdout:
@@ -596,10 +667,10 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
         click.echo(result.stderr.rstrip(), err=True)
 
     if result.returncode != 0:
-        click.secho("Tests FAILED.", fg="red")
+        ux.err("Tests FAILED.")
         raise SystemExit(result.returncode)
 
-    click.secho("All Rego tests passed.", fg="green")
+    ux.ok("All Rego tests passed.")
 
 
 # ---------------------------------------------------------------------------
@@ -644,7 +715,7 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
 
     _save_policy(path, data)
     _sync_opa_data(app, data)
-    click.secho(f"Updated {severity.upper()}: {', '.join(changed)}", fg="green")
+    ux.ok(f"Updated {severity.upper()}: {', '.join(changed)}")
 
 
 @edit.command("scanner")
@@ -674,7 +745,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
                 del overrides[scanner_type]
             _save_policy(path, data)
             _sync_opa_data(app, data)
-            click.secho(f"Removed {scanner_type}/{severity.upper()} override.", fg="green")
+            ux.ok(f"Removed {scanner_type}/{severity.upper()} override.")
         else:
             click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
         return
@@ -699,7 +770,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
 
     _save_policy(path, data)
     _sync_opa_data(app, data)
-    click.secho(f"Updated scanner override {scanner_type}/{severity.upper()}: {', '.join(changed)}", fg="green")
+    ux.ok(f"Updated scanner override {scanner_type}/{severity.upper()}: {', '.join(changed)}")
 
 
 @edit.command("guardrail")
@@ -763,7 +834,7 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
 
     _save_policy(path, data)
     _sync_opa_data(app, data)
-    click.secho(f"Guardrail updated: {', '.join(changed)}", fg="green")
+    ux.ok(f"Guardrail updated: {', '.join(changed)}")
 
 
 @edit.command("firewall")
@@ -825,7 +896,7 @@ def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple
 
     _save_policy(path, data)
     _sync_opa_data(app, data)
-    click.secho(f"Firewall updated: {', '.join(changed)}", fg="green")
+    ux.ok(f"Firewall updated: {', '.join(changed)}")
 
 
 # ---------------------------------------------------------------------------
@@ -849,8 +920,12 @@ def _default_policy_data() -> dict:
         },
         "scanner_overrides": {},
         "guardrail": {
-            "block_threshold": 3,
+            "block_threshold": 4,
             "alert_threshold": 2,
+            "hilt": {
+                "enabled": False,
+                "min_severity": "HIGH",
+            },
             "cisco_trust_level": "full",
             "patterns": {},
             "severity_mappings": {},
@@ -923,6 +998,22 @@ def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[
     return path, _load_policy(path)
 
 
+def _opa_runtime_action(runtime: str) -> str:
+    """Map a policy ``runtime`` value to the OPA ``data.json`` vocabulary.
+
+    Policy YAML may use either the enforcement vocabulary
+    (``enable``/``disable``) or the OPA vocabulary (``allow``/``block``).
+    Both ``disable`` and ``block`` mean "do not allow runtime execution"
+    and must map to ``block``; ``enable``/``allow`` (and anything
+    unrecognised) map to ``allow``. The previous
+    ``"block" if runtime == "disable" else "allow"`` silently rewrote an
+    existing ``runtime: block`` override to ``allow`` (F-0241), so a
+    bundled override meant to block runtime execution was synced as an
+    allow.
+    """
+    return "block" if str(runtime).strip().lower() in ("disable", "block") else "allow"
+
+
 def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     """Sync OPA data.json with the activated policy settings.
 
@@ -930,7 +1021,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     - config (admission settings, enforcement)
     - actions (with install field)
     - scanner_overrides
-    - guardrail (thresholds, patterns, severity_mappings)
+    - guardrail (thresholds, HILT, patterns, severity_mappings)
     - firewall (domains, ports, blocked destinations)
     - audit (retention, logging flags)
 
@@ -954,8 +1045,22 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     try:
         with open(data_json_path) as f:
             opa_data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return
+    except OSError as exc:
+        # silently returning on read failures hid
+        # malformed/stale data.json from `policy activate`. The
+        # caller has already updated config to the new policy
+        # selection, so leaving sync skipped left the gateway
+        # running with stale OPA data that would not match the
+        # advertised activation. Surface the failure and let
+        # activate exit non-zero.
+        raise click.ClickException(
+            f"failed to read OPA data file at {data_json_path}: {exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(
+            f"OPA data file at {data_json_path} is not valid JSON: {exc}; "
+            f"run `defenseclaw policy validate` and repair before activating"
+        ) from exc
 
     # --- config section ---
     opa_data.setdefault("config", {})
@@ -979,7 +1084,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
         runtime = raw.get("runtime", "enable")
         file_action = raw.get("file", "none")
         install_action = raw.get("install", "none")
-        opa_runtime = "block" if runtime == "disable" else "allow"
+        opa_runtime = _opa_runtime_action(runtime)
         opa_install = install_action if install_action in ("block", "allow", "none") else "none"
         opa_actions[sev.upper()] = {
             "runtime": opa_runtime,
@@ -999,7 +1104,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
             if not isinstance(action, dict):
                 continue
             runtime = action.get("runtime", "enable")
-            opa_runtime = "block" if runtime == "disable" else "allow"
+            opa_runtime = _opa_runtime_action(runtime)
             opa_scanner[sev.upper()] = {
                 "runtime": opa_runtime,
                 "file": action.get("file", "none"),
@@ -1014,7 +1119,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     if guardrail:
         opa_data.setdefault("guardrail", {})
         for key in ("block_threshold", "alert_threshold", "cisco_trust_level",
-                     "patterns", "severity_mappings"):
+                     "patterns", "severity_mappings", "hilt"):
             if key in guardrail:
                 opa_data["guardrail"][key] = guardrail[key]
 
@@ -1058,7 +1163,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
         json.dump(opa_data, f, indent=2)
         f.write("\n")
 
-    click.echo(f"OPA data.json synced at {data_json_path}")
+    click.echo(ux.dim(f"OPA data.json synced at {data_json_path}"))
 
 
 def _try_rego_compile(rego_dir: str) -> bool:
@@ -1070,25 +1175,41 @@ def _try_rego_compile(rego_dir: str) -> bool:
             if f.endswith(".rego") and not f.endswith("_test.rego")
         ]
         if not rego_files:
-            click.secho("FAIL: no .rego files found", fg="red")
+            ux.err("FAIL: no .rego files found")
             return False
 
         cmd = ["opa", "check", "--strict"] + rego_files
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
-            click.secho(f"Rego compilation: OK ({len(rego_files)} modules)", fg="green")
+            ux.ok(f"Rego compilation: OK ({len(rego_files)} modules)")
             return True
         else:
-            click.secho("Rego compilation errors:", fg="red")
+            ux.err("Rego compilation errors:")
             if result.stderr:
                 click.echo(result.stderr.rstrip())
             if result.stdout:
                 click.echo(result.stdout.rstrip())
             return False
     except FileNotFoundError:
-        click.echo("  'opa' binary not found — skipping Rego compilation check.")
+        # returning True here turned a missing `opa`
+        # binary into a clean "Rego compilation: OK" verdict, so a
+        # malformed bundle could pass `defenseclaw policy validate`
+        # in any environment where OPA was not installed. Operators
+        # can opt out of strict mode (and accept that no compilation
+        # actually happened) with DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1,
+        # but the default is to fail closed because the bundle is
+        # being validated for activation.
+        if os.environ.get("DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA", "").strip() == "1":
+            click.echo("  'opa' binary not found — skipping Rego compilation (opt-in).")
+            click.echo("  Install OPA for full validation: brew install opa")
+            return True
+        ux.err("FAIL: 'opa' binary not found — install OPA to validate Rego bundles.")
         click.echo("  Install OPA for full validation: brew install opa")
-        return True
+        click.echo(
+            "  Set DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1 to bypass "
+            "(NOT recommended for production)."
+        )
+        return False
     except subprocess.TimeoutExpired:
-        click.secho("FAIL: opa check timed out", fg="red")
+        ux.err("FAIL: opa check timed out")
         return False

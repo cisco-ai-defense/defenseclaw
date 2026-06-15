@@ -18,6 +18,7 @@ package gatewaylog
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -112,6 +113,28 @@ func TestWriter_FanoutInvoked(t *testing.T) {
 
 	if len(seen) != 1 || seen[0].EventType != EventLifecycle {
 		t.Fatalf("fanout not invoked correctly: %+v", seen)
+	}
+}
+
+func TestWriter_FanoutContextInvoked(t *testing.T) {
+	w, err := New(Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	type ctxKey string
+	ctx := context.WithValue(context.Background(), ctxKey("request"), "req-ctx")
+	var got string
+	w.WithFanoutContext(func(ctx context.Context, _ Event) {
+		if v, _ := ctx.Value(ctxKey("request")).(string); v != "" {
+			got = v
+		}
+	})
+
+	w.EmitContext(ctx, Event{EventType: EventLifecycle, Lifecycle: &LifecyclePayload{Subsystem: "gateway", Transition: "start"}})
+
+	if got != "req-ctx" {
+		t.Fatalf("fanout context lost: got %q want req-ctx", got)
 	}
 }
 

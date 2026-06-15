@@ -222,7 +222,7 @@ func TestEmitScanResult_RedactsFindingDescriptionAndLocation(t *testing.T) {
 		},
 	}
 
-	p.EmitScanResult(result, "scan-test", "repo", "blocked")
+	p.EmitScanResult(result, "scan-test", "repo", "blocked", "codex")
 
 	recs := exp.snapshot()
 	if len(recs) < 2 {
@@ -238,6 +238,7 @@ func TestEmitScanResult_RedactsFindingDescriptionAndLocation(t *testing.T) {
 	}
 	if findingRec == nil {
 		t.Fatalf("scan.finding record not emitted")
+		return
 	}
 
 	loc := attrValue(*findingRec, "defenseclaw.finding.location")

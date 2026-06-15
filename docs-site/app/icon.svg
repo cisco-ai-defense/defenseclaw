@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Cisco">
+  <title>Cisco</title>
+  <rect width="64" height="64" rx="12" fill="#049fd9"/>
+  <!--
+    Cisco "bridge" mark, simplified for favicon use.
+    10 vertical bars in two mirrored rays of 5, heights forming the
+    bridge silhouette. Tuned so the shortest bars stay visible at
+    16x16 — anything thinner than 1.5px disappears at that size.
+  -->
+  <g fill="#ffffff" shape-rendering="crispEdges">
+    <rect x="8"  y="34" width="3" height="10" rx="1.2"/>
+    <rect x="13" y="28" width="3" height="16" rx="1.2"/>
+    <rect x="18" y="22" width="3" height="22" rx="1.2"/>
+    <rect x="23" y="28" width="3" height="16" rx="1.2"/>
+    <rect x="28" y="34" width="3" height="10" rx="1.2"/>
+    <rect x="33" y="34" width="3" height="10" rx="1.2"/>
+    <rect x="38" y="28" width="3" height="16" rx="1.2"/>
+    <rect x="43" y="22" width="3" height="22" rx="1.2"/>
+    <rect x="48" y="28" width="3" height="16" rx="1.2"/>
+    <rect x="53" y="34" width="3" height="10" rx="1.2"/>
+  </g>
+</svg>

@@ -26,6 +26,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
+func stringSliceContains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func TestGatewayConfigResolvedToken(t *testing.T) {
 	t.Run("explicit token env", func(t *testing.T) {
 		t.Setenv("MY_GATEWAY_TOKEN", "from-custom-env")
@@ -49,12 +58,77 @@ func TestGatewayConfigResolvedToken(t *testing.T) {
 			t.Errorf("got %q, want plain", got)
 		}
 	})
-	t.Run("custom token env empty does not use openclaw env", func(t *testing.T) {
+	t.Run("custom token env empty falls through to canonical", func(t *testing.T) {
+		// Behavior change: pre-fix, an empty TokenEnv hard-blocked
+		// the canonical/legacy checks, which diverged from Python's
+		// resolved_token() and broke the very common config state
+		// "TokenEnv=OPENCLAW_GATEWAY_TOKEN (stale default) + only
+		// DEFENSECLAW_ populated in dotenv". Post-fix the canonical
+		// → legacy → inline ladder ALWAYS runs after the named env
+		// var miss, so Go and Python can never disagree on which
+		// token is live. See ResolvedToken doc comment.
 		t.Setenv("MY_GATEWAY_TOKEN", "")
-		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "wrong")
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "from-canonical")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "from-legacy")
+		g := GatewayConfig{TokenEnv: "MY_GATEWAY_TOKEN", Token: "inline"}
+		if got := g.ResolvedToken(); got != "from-canonical" {
+			t.Errorf("got %q, want from-canonical (canonical wins after named miss)", got)
+		}
+	})
+	t.Run("custom token env empty falls through to inline when no env set", func(t *testing.T) {
+		// With NO canonical / legacy populated, the chain bottoms
+		// out at the inline g.Token — preserves the "honest
+		// failure" path so an operator with a fully-empty
+		// environment still gets a working literal value.
+		t.Setenv("MY_GATEWAY_TOKEN", "")
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 		g := GatewayConfig{TokenEnv: "MY_GATEWAY_TOKEN", Token: "fallback"}
 		if got := g.ResolvedToken(); got != "fallback" {
 			t.Errorf("got %q, want fallback", got)
+		}
+	})
+	t.Run("defenseclaw env takes priority over openclaw env", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "new-style")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "old-style")
+		g := GatewayConfig{TokenEnv: "", Token: ""}
+		if got := g.ResolvedToken(); got != "new-style" {
+			t.Errorf("got %q, want new-style", got)
+		}
+	})
+	t.Run("empty defenseclaw env falls back to openclaw env", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "legacy-token")
+		g := GatewayConfig{TokenEnv: "", Token: ""}
+		if got := g.ResolvedToken(); got != "legacy-token" {
+			t.Errorf("got %q, want legacy-token", got)
+		}
+	})
+	t.Run("stale OPENCLAW_ TokenEnv falls through to DEFENSECLAW_ canonical", func(t *testing.T) {
+		// The exact user-reported scenario: bootstrap from a prior
+		// 0.5.x install left token_env=OPENCLAW_GATEWAY_TOKEN in
+		// config.yaml, but the rewritten dotenv only carries
+		// DEFENSECLAW_GATEWAY_TOKEN. Pre-fix, Go's ResolvedToken
+		// returned g.Token (empty) here while Python found the
+		// canonical token via fall-through — every Go caller of
+		// ResolvedToken outside the EnsureGatewayToken safety net
+		// silently failed. Post-fix, Go matches Python.
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "real-live-token")
+		g := GatewayConfig{TokenEnv: "OPENCLAW_GATEWAY_TOKEN", Token: ""}
+		if got := g.ResolvedToken(); got != "real-live-token" {
+			t.Errorf("got %q, want real-live-token (canonical fall-through)", got)
+		}
+	})
+	t.Run("explicit token env wins over canonical fall-through", func(t *testing.T) {
+		// Operator intent preserved: when the named env var IS
+		// populated, it wins outright. The fall-through only
+		// engages when the named var is empty.
+		t.Setenv("MY_GATEWAY_TOKEN", "operator-pinned")
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "should-not-use")
+		g := GatewayConfig{TokenEnv: "MY_GATEWAY_TOKEN", Token: "inline"}
+		if got := g.ResolvedToken(); got != "operator-pinned" {
+			t.Errorf("got %q, want operator-pinned", got)
 		}
 	})
 }
@@ -91,6 +165,10 @@ func TestDetectEnvironment(t *testing.T) {
 		if env != EnvMacOS {
 			t.Errorf("expected macos on darwin, got %s", env)
 		}
+	case "windows":
+		if env != EnvWindows {
+			t.Errorf("expected windows on windows, got %s", env)
+		}
 	case "linux":
 		if env != EnvLinux && env != EnvDGXSpark {
 			t.Errorf("expected linux or dgx-spark on linux, got %s", env)
@@ -102,10 +180,14 @@ func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg == nil {
 		t.Fatal("DefaultConfig() returned nil")
+		return
 	}
 
 	if cfg.DataDir == "" {
 		t.Error("DataDir is empty")
+	}
+	if got, want := cfg.AIDiscovery.ConfidencePolicyPath, filepath.Join(cfg.DataDir, "confidence.yaml"); got != want {
+		t.Errorf("ai_discovery.confidence_policy_path = %q, want %q", got, want)
 	}
 	if cfg.Claw.Mode != ClawOpenClaw {
 		t.Errorf("expected mode %q, got %q", ClawOpenClaw, cfg.Claw.Mode)
@@ -139,6 +221,9 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Watch.RescanIntervalMin != 60 {
 		t.Errorf("expected rescan interval 60 min, got %d", cfg.Watch.RescanIntervalMin)
+	}
+	if !cfg.Watch.RescanContentGated {
+		t.Error("expected rescan content-gated enabled by default")
 	}
 	if cfg.Scanners.PluginScanner != "defenseclaw" {
 		t.Errorf("expected plugin scanner binary %q, got %q", "defenseclaw", cfg.Scanners.PluginScanner)
@@ -174,8 +259,20 @@ func TestDefaultConfigGuardrail(t *testing.T) {
 	if cfg.Guardrail.ScannerMode != "both" {
 		t.Errorf("expected guardrail scanner_mode %q, got %q", "both", cfg.Guardrail.ScannerMode)
 	}
+	if !cfg.Guardrail.HookSelfHeal {
+		t.Error("expected guardrail.hook_self_heal enabled by default")
+	}
+	if cfg.Guardrail.HookSelfHealDebounceMs != 500 {
+		t.Errorf("expected guardrail.hook_self_heal_debounce_ms 500, got %d", cfg.Guardrail.HookSelfHealDebounceMs)
+	}
 	if cfg.Guardrail.BlockMessage != "" {
 		t.Errorf("expected empty block_message by default, got %q", cfg.Guardrail.BlockMessage)
+	}
+	if cfg.Guardrail.HILT.Enabled {
+		t.Error("guardrail.hilt.enabled should default false")
+	}
+	if cfg.Guardrail.HILT.MinSeverity != "HIGH" {
+		t.Errorf("guardrail.hilt.min_severity = %q, want HIGH", cfg.Guardrail.HILT.MinSeverity)
 	}
 	if cfg.Guardrail.Host != "" {
 		t.Errorf("expected default guardrail host empty (Viper default), got %q", cfg.Guardrail.Host)
@@ -297,6 +394,39 @@ func TestValidate_InvalidInstall(t *testing.T) {
 	sa.Medium.Install = "reject"
 	if err := sa.Validate(); err == nil {
 		t.Error("expected Validate() to return error for invalid install action")
+	}
+}
+
+func TestValidateDeploymentMode_EmptyAllowed(t *testing.T) {
+	if err := validateDeploymentMode(""); err != nil {
+		t.Fatalf("validateDeploymentMode(empty) returned unexpected error: %v", err)
+	}
+}
+
+func TestValidateDeploymentMode_Valid(t *testing.T) {
+	for _, mode := range []string{
+		string(DeploymentModeManagedEnterprise),
+		string(DeploymentModeUnmanagedBYOD),
+		string(DeploymentModeCICD),
+		string(DeploymentModeSandboxed),
+		string(DeploymentModeServer),
+		string(DeploymentModeSaaS),
+		"managed",
+		"standalone",
+		"ci",
+		"edge",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			if err := validateDeploymentMode(mode); err != nil {
+				t.Fatalf("validateDeploymentMode(%q) returned unexpected error: %v", mode, err)
+			}
+		})
+	}
+}
+
+func TestValidateDeploymentMode_Invalid(t *testing.T) {
+	if err := validateDeploymentMode("freeform"); err == nil {
+		t.Fatal("expected validateDeploymentMode to reject free-form value")
 	}
 }
 
@@ -462,8 +592,8 @@ func TestParseMCPServersJSON_Empty(t *testing.T) {
 	}
 }
 
-func TestSkillDirsForMode_NoOpenclawJSON(t *testing.T) {
-	dirs := SkillDirsForMode(ClawOpenClaw, "/tmp/nonexistent-home")
+func TestSkillDirsForOpenClaw_NoOpenclawJSON(t *testing.T) {
+	dirs := SkillDirsForOpenClaw("/tmp/nonexistent-home")
 	if len(dirs) < 2 {
 		t.Fatalf("expected workspace and global skill dirs, got %v", dirs)
 	}
@@ -475,7 +605,7 @@ func TestSkillDirsForMode_NoOpenclawJSON(t *testing.T) {
 	}
 }
 
-func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
+func TestSkillDirsForOpenClaw_WithOpenclawJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	workspaceDir := filepath.Join(tmpDir, "project-workspace")
 
@@ -498,7 +628,7 @@ func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
 		t.Fatalf("write openclaw.json: %v", err)
 	}
 
-	dirs := SkillDirsForMode(ClawOpenClaw, tmpDir)
+	dirs := SkillDirsForOpenClaw(tmpDir)
 
 	found := false
 	for _, d := range dirs {
@@ -556,6 +686,40 @@ func TestConfig_InstalledSkillCandidates(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConfig_WorkspaceScopedOpenHandsPathsUsePinnedWorkspace(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	workspace := filepath.Join(root, "repo")
+	cfg := &Config{
+		Claw: ClawConfig{
+			Mode:         ClawMode("openhands"),
+			WorkspaceDir: workspace,
+		},
+	}
+
+	if got, want := cfg.ConnectorWorkspaceDir(), workspace; got != want {
+		t.Fatalf("ConnectorWorkspaceDir() = %q, want %q", got, want)
+	}
+	if got, want := cfg.ConnectorHomeDir("openhands"), filepath.Join(workspace, ".openhands"); got != want {
+		t.Fatalf("ConnectorHomeDir(openhands) = %q, want %q", got, want)
+	}
+
+	dirs := cfg.SkillDirsForConnector("openhands")
+	if !stringSliceContains(dirs, filepath.Join(workspace, ".agents", "skills")) {
+		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace .agents/skills", dirs)
+	}
+	if !stringSliceContains(dirs, filepath.Join(workspace, ".openhands", "skills")) {
+		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace .openhands/skills", dirs)
+	}
+	if !stringSliceContains(dirs, filepath.Join(workspace, ".openhands", "microagents")) {
+		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace .openhands/microagents", dirs)
+	}
+	if !stringSliceContains(dirs, filepath.Join(home, ".openhands", "cache", "skills", "public-skills", "skills")) {
+		t.Fatalf("OpenHands skill dirs = %v, want user public skills cache", dirs)
 	}
 }
 
@@ -1216,7 +1380,10 @@ func TestConfig_Save_BumpsProvenance(t *testing.T) {
 	// Mutate the config and save again; both hash and generation
 	// must advance. Pinning this guards the "ContentHash stable
 	// across identical saves, fresh per mutation" invariant.
-	cfg.Claw.Mode = "nemoclaw"
+	// "zeptoclaw" matches Connector.Name() for the ZeptoClaw connector.
+	// Keep it aligned with schemas/otel/resource.schema.json so this test
+	// doesn't bake a stale legacy mode string.
+	cfg.Claw.Mode = "zeptoclaw"
 	if err := cfg.Save(); err != nil {
 		t.Fatalf("Save() (2) returned error: %v", err)
 	}
@@ -1292,6 +1459,36 @@ func TestResolveLLM(t *testing.T) {
 		}
 	})
 
+	t.Run("instance_name override carries through", func(t *testing.T) {
+		// instance_name is the ONLY signal that binds a role to a
+		// custom-providers.json overlay entry. Dropping it from the
+		// merge silently rerouted role-level custom-provider bindings
+		// (e.g. guardrail.judge.llm.instance_name) to the inferred
+		// public provider endpoint.
+		c := &Config{
+			LLM: LLMConfig{Model: "ollama/llama3.1"},
+		}
+		c.Guardrail.Judge.LLM = LLMConfig{Model: "internal-gpt/mock-judge", InstanceName: "internal-gpt"}
+		got := c.ResolveLLM("guardrail.judge")
+		if got.InstanceName != "internal-gpt" {
+			t.Errorf("instance_name: got %q, want internal-gpt (override)", got.InstanceName)
+		}
+		if got.Model != "internal-gpt/mock-judge" {
+			t.Errorf("model: got %q, want internal-gpt/mock-judge (override)", got.Model)
+		}
+	})
+
+	t.Run("instance_name inherits from top-level when override empty", func(t *testing.T) {
+		c := &Config{
+			LLM: LLMConfig{Model: "internal-gpt/base", InstanceName: "internal-gpt"},
+		}
+		c.Guardrail.Judge.LLM = LLMConfig{Model: "internal-gpt/judge-model"}
+		got := c.ResolveLLM("guardrail.judge")
+		if got.InstanceName != "internal-gpt" {
+			t.Errorf("instance_name: got %q, want internal-gpt (inherited)", got.InstanceName)
+		}
+	})
+
 	t.Run("env fallback fills empty model", func(t *testing.T) {
 		t.Setenv(DefenseClawLLMModelEnv, "openai/gpt-4o-from-env")
 		c := &Config{}
@@ -1349,11 +1546,41 @@ func TestViperDefaultGuardrailHostIsEmpty(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg == nil {
 		t.Fatal("DefaultConfig() returned nil")
+		return
 	}
 	if cfg.Guardrail.Host != "" {
 		t.Fatalf("Guardrail.Host = %q, want empty string (not localhost); non-empty default breaks EffectiveHost IPv4 fallback", cfg.Guardrail.Host)
 	}
 	if got := cfg.Guardrail.EffectiveHost(); got != "127.0.0.1" {
 		t.Fatalf("EffectiveHost() = %q, want 127.0.0.1", got)
+	}
+}
+
+// TestRecognizedLLMProvidersLockstep guards against drift between the
+// Go-side recognizedLLMProviders set and the Python-side
+// _RECOGNIZED_LLM_PROVIDERS in cli/defenseclaw/config.py. A missing
+// entry on either side surfaces as a one-shot "unknown provider"
+// warning even when the prefix is wired through Bifrost — exactly the
+// regression we hit when "gemini-openai" was added to the gateway and
+// the wizards but never to either recognized-providers map.
+//
+// The Bifrost gateway (internal/gateway/provider.go,
+// internal/gateway/provider_bifrost.go) and both wizards
+// (cli/defenseclaw/commands/cmd_setup.py, internal/tui/setup.go)
+// already accept these prefixes; the recognized-providers maps must
+// follow.
+func TestRecognizedLLMProvidersLockstep(t *testing.T) {
+	mustHave := []string{
+		"openai", "anthropic", "azure", "gemini", "gemini-openai",
+		"vertex_ai", "bedrock", "groq", "mistral", "cohere",
+		"ollama", "vllm", "deepseek", "xai",
+		"fireworks_ai", "perplexity", "huggingface", "replicate",
+		"openrouter", "together_ai", "cerebras",
+		"lm_studio", "lmstudio", "local",
+	}
+	for _, p := range mustHave {
+		if _, ok := recognizedLLMProviders[p]; !ok {
+			t.Errorf("recognizedLLMProviders missing %q — keep this set in lockstep with cli/defenseclaw/config.py:_RECOGNIZED_LLM_PROVIDERS", p)
+		}
 	}
 }

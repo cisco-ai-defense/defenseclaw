@@ -38,10 +38,12 @@ unparseable config.
 
 from __future__ import annotations
 
+import contextlib
 import json as _json
 import os
 import socket
 import ssl
+import tempfile
 import urllib.error
 import urllib.request
 from typing import Any
@@ -49,6 +51,9 @@ from urllib.parse import urlparse
 
 import click
 
+from defenseclaw import ux
+from defenseclaw.audit_actions import ACTION_SETUP_OBSERVABILITY
+from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.observability import (
     PRESETS,
@@ -84,7 +89,8 @@ def observability() -> None:
     separate ``webhooks[]`` list and not an audit-sink.
     Splunk configuration authored with ``defenseclaw setup splunk``
     remains fully back-compatible (those flags are aliases for
-    ``observability add splunk-o11y`` / ``splunk-hec``).
+    ``observability add splunk-o11y`` / ``splunk-hec`` /
+    ``splunk-enterprise``).
     """
 
 
@@ -152,7 +158,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
           --non-interactive --site us5 --token "$DD_API_KEY"
     \b
       # Interactive (default)
-      defenseclaw setup observability add splunk-hec
+      defenseclaw setup observability add splunk-enterprise
     """
     preset = resolve_preset(preset_id.lower())
 
@@ -200,10 +206,12 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         raise SystemExit(2) from exc
 
     _print_write_result(result, dry_run=dry_run)
+    print_redaction_status_hint(app.cfg)
+    click.echo()
 
     if app.logger and not dry_run:
         app.logger.log_action(
-            "setup-observability",
+            ACTION_SETUP_OBSERVABILITY,
             "config",
             f"action=add preset={preset.id} name={result.name} target={result.target}",
         )
@@ -224,19 +232,20 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         click.echo(_json.dumps([_dest_to_dict(d) for d in dests], indent=2))
         return
     if not dests:
-        click.echo("  No destinations configured.")
-        click.echo("  Add one with: defenseclaw setup observability add <preset>")
+        ux.subhead("No destinations configured.")
+        ux.subhead("Add one with: defenseclaw setup observability add <preset>")
         return
     click.echo()
-    click.echo(f"  {'NAME':<40} {'KIND':<12} {'ENABLED':<8} {'PRESET':<14} ENDPOINT")
-    click.echo(f"  {'-' * 40} {'-' * 12} {'-' * 8} {'-' * 14} {'-' * 40}")
+    ux.section("Observability destinations")
+    click.echo(f"  {'NAME':<40} {'KIND':<12} {'ENABLED':<8} {'PRESET':<18} ENDPOINT")
+    click.echo(f"  {'-' * 40} {'-' * 12} {'-' * 8} {'-' * 18} {'-' * 40}")
     for d in dests:
         endpoint = d.endpoint or "(none)"
         if len(endpoint) > 60:
             endpoint = endpoint[:57] + "..."
         click.echo(
-            f"  {d.name:<40} {d.kind:<12} {('yes' if d.enabled else 'no'):<8} "
-            f"{(d.preset_id or '-'):<14} {endpoint}",
+            f"  {ux.bold(f'{d.name:<40}')} {d.kind:<12} {('yes' if d.enabled else 'no'):<8} "
+            f"{(d.preset_id or '-'):<18} {endpoint}",
         )
     click.echo()
 
@@ -318,10 +327,14 @@ def test_cmd(app: AppContext, name: str, timeout: float) -> None:
             click.echo(f"    - {k}", err=True)
         raise SystemExit(2)
     if not d.enabled:
-        click.echo(f"  Warning: destination {name!r} is currently disabled.")
+        ux.warn(f"destination {name!r} is currently disabled.")
 
     click.echo()
-    click.echo(f"  Testing {name} [{d.kind}]: {d.endpoint or '(no endpoint)'}")
+    label = "Splunk Enterprise (HEC)" if d.preset_id == "splunk-enterprise" else d.kind
+    click.echo(
+        f"  {ux.bold('Testing')} {ux.bold(name)} "
+        f"{ux.dim('[' + label + ']')}: {d.endpoint or '(no endpoint)'}"
+    )
     if d.target == "otel":
         _test_otel(app.cfg.data_dir, timeout=timeout)
     elif d.kind == "splunk_hec":
@@ -374,18 +387,33 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
             host = parsed.hostname
 
     name = f"splunk-hec-{_slug(host)}"
+    # a legacy ``splunk:`` block whose ``verify_tls`` field is
+    # absent or false used to silently downgrade certificate validation
+    # under the new ``audit_sinks`` shape. Migrate to the explicit
+    # ``insecure_skip_verify`` opt-out so the migrated sink is now
+    # secure by default. We only carry the insecure mode forward when
+    # the operator EXPLICITLY set ``verify_tls=false``; absence implies
+    # the new secure default.
+    legacy_verify_present = "verify_tls" in legacy
+    legacy_verify_explicit_false = legacy_verify_present and not bool(legacy.get("verify_tls"))
+    new_block: dict[str, Any] = {
+        "endpoint": endpoint,
+        "token_env": str(legacy.get("hec_token_env", "") or "DEFENSECLAW_SPLUNK_HEC_TOKEN"),
+        "index": str(legacy.get("index", "") or "defenseclaw"),
+        "source": str(legacy.get("source", "") or "defenseclaw"),
+        "sourcetype": str(legacy.get("sourcetype", "") or "_json"),
+    }
+    if legacy_verify_explicit_false:
+        new_block["insecure_skip_verify"] = True
+        click.echo(
+            "  ⚠ migrated legacy verify_tls=false → insecure_skip_verify=true; "
+            "remove this opt-out for production",
+        )
     new_entry: dict[str, Any] = {
         "name": name,
         "kind": "splunk_hec",
         "enabled": bool(legacy.get("enabled", False)),
-        "splunk_hec": {
-            "endpoint": endpoint,
-            "token_env": str(legacy.get("hec_token_env", "") or "DEFENSECLAW_SPLUNK_HEC_TOKEN"),
-            "index": str(legacy.get("index", "") or "defenseclaw"),
-            "source": str(legacy.get("source", "") or "defenseclaw"),
-            "sourcetype": str(legacy.get("sourcetype", "") or "_json"),
-            "verify_tls": bool(legacy.get("verify_tls", False)),
-        },
+        "splunk_hec": new_block,
     }
 
     sinks = raw.get("audit_sinks")
@@ -405,14 +433,14 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
             return
 
     click.echo()
-    click.echo("  Migration preview:")
-    click.echo("    audit_sinks += ")
+    ux.section("Migration preview")
+    click.echo(f"    {ux.dim('audit_sinks +=')} ")
     click.echo("      " + yaml.safe_dump(new_entry, sort_keys=False).replace("\n", "\n      ").rstrip())
-    click.echo("    splunk: (removed)")
+    click.echo(f"    {ux.dim('splunk: (removed)')}")
     click.echo()
 
     if not do_apply:
-        click.echo("  Dry-run — re-run with --apply to write.")
+        ux.subhead("Dry-run — re-run with --apply to write.")
         return
 
     sinks.append(new_entry)
@@ -422,7 +450,7 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
     click.echo(f"  Migrated splunk: block to audit_sinks[{name}].")
     if app.logger:
         app.logger.log_action(
-            "setup-observability", "config",
+            ACTION_SETUP_OBSERVABILITY, "config",
             f"action=migrate-splunk name={name}",
         )
 
@@ -435,10 +463,8 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
 def _prompt_missing(
     preset, raw_inputs: dict[str, str | None],
 ) -> dict[str, str | None]:
-    click.echo()
-    click.echo(f"  {preset.display_name} Setup")
-    click.echo(f"  {'─' * (len(preset.display_name) + 6)}")
-    click.echo(f"  {preset.description}")
+    ux.section(f"{preset.display_name} Setup")
+    ux.subhead(preset.description)
     click.echo()
 
     resolved = dict(raw_inputs)
@@ -528,6 +554,33 @@ def _test_otel(data_dir: str, *, timeout: float) -> None:
 
 
 def _test_splunk_hec(data_dir: str, name: str, *, timeout: float) -> None:
+    ok, message = probe_splunk_hec(data_dir, name, timeout=timeout)
+    click.echo(f"  {'✓' if ok else '✗'} {message}")
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse 3xx redirects on the token-bearing HEC probe.
+
+    ``urllib.request.urlopen`` follows redirects by default and replays
+    request headers — including ``Authorization: Splunk <token>`` — to the
+    redirect target. A malicious/misconfigured HEC endpoint could 302 the
+    probe to an attacker host and harvest the token. Raising on any 30x
+    keeps the credential pinned to the validated origin (F-0184).
+    """
+
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(
+            req.full_url, code, "redirects disabled (token would be forwarded)",
+            headers, fp,
+        )
+
+    http_error_302 = http_error_301
+    http_error_303 = http_error_301
+    http_error_307 = http_error_301
+    http_error_308 = http_error_301
+
+
+def probe_splunk_hec(data_dir: str, name: str, *, timeout: float = 10.0) -> tuple[bool, str]:
     import yaml
 
     cfg_path = os.path.join(data_dir, "config.yaml")
@@ -539,8 +592,7 @@ def _test_splunk_hec(data_dir: str, name: str, *, timeout: float) -> None:
         None,
     )
     if sink is None:
-        click.echo(f"  ✗ sink {name!r} vanished between list and probe")
-        return
+        return False, f"sink {name!r} vanished between list and probe"
     hec = sink.get("splunk_hec") or {}
     endpoint = str(hec.get("endpoint", "") or "")
     token_env = str(hec.get("token_env", "") or "")
@@ -548,9 +600,15 @@ def _test_splunk_hec(data_dir: str, name: str, *, timeout: float) -> None:
     if not token:
         token = _peek_dotenv(data_dir, token_env)
     if not token:
-        click.echo(f"  ✗ token not set (env={token_env})")
-        return
-    verify_tls = bool(hec.get("verify_tls", False))
+        return False, f"token not set (env={token_env})"
+    # TLS verification is ON by default. ``insecure_skip_verify``
+    # is the explicit opt-out for dev environments with self-signed
+    # HEC. The legacy ``verify_tls`` flag is honoured only when
+    # explicitly true (no-op against the new secure default); explicit
+    # false is silently IGNORED so probing this sink can never silently
+    # leak the HEC token to a MITM peer.
+    insecure_skip_verify = bool(hec.get("insecure_skip_verify", False))
+    verify_tls = not insecure_skip_verify
     body = _json.dumps({
         "event": "defenseclaw observability test",
         "sourcetype": hec.get("sourcetype", "_json"),
@@ -568,20 +626,25 @@ def _test_splunk_hec(data_dir: str, name: str, *, timeout: float) -> None:
     )
     parsed = urlparse(endpoint)
     if parsed.scheme not in ("http", "https"):
-        click.echo(f"  ✗ endpoint must be http(s):// (got {endpoint!r})")
-        return
+        return False, f"endpoint must be http(s):// (got {endpoint!r})"
     ctx = ssl.create_default_context()
     if not verify_tls:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+    # Use a dedicated opener that refuses redirects so the ``Authorization:
+    # Splunk <token>`` header is never replayed to a redirect target (F-0184).
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ctx),
+        _NoRedirectHandler(),
+    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
-            click.echo(f"  ✓ HEC responded {resp.status} {resp.reason}")
+        with opener.open(req, timeout=timeout) as resp:  # noqa: S310
+            return True, f"HEC responded {resp.status} {resp.reason}"
     except urllib.error.HTTPError as exc:
         hint = "check token/index permissions" if exc.code in (401, 403) else ""
-        click.echo(f"  ✗ HTTP {exc.code} {exc.reason} {hint}")
+        return False, f"HTTP {exc.code} {exc.reason} {hint}".strip()
     except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
-        click.echo(f"  ✗ {exc}")
+        return False, str(exc)
 
 
 def _test_otlp_logs(data_dir: str, name: str, *, timeout: float) -> None:
@@ -638,11 +701,15 @@ def _test_http_jsonl(data_dir: str, name: str, *, timeout: float) -> None:
             click.echo(f"  ⚠ bearer env {bearer_env!r} not set — sending unauthenticated probe")
     body = (_json.dumps({"probe": "defenseclaw.observability.test"}) + "\n").encode()
     req = urllib.request.Request(url, data=body, method=method, headers=headers)  # noqa: S310
-    verify_tls = bool(block.get("verify_tls", True))
+    # parity: TLS verification is ON by default for the HTTP
+    # JSONL probe; only ``insecure_skip_verify=true`` disables it.
+    insecure_skip_verify = bool(block.get("insecure_skip_verify", False))
+    verify_tls = not insecure_skip_verify
     ctx = ssl.create_default_context()
     if not verify_tls:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+        click.echo("  ⚠ TLS certificate verification DISABLED (insecure_skip_verify=true)")
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
             click.echo(f"  ✓ webhook responded {resp.status} {resp.reason}")
@@ -690,16 +757,20 @@ def _tcp_probe(endpoint: str, protocol: str, *, timeout: float) -> tuple[bool, s
 
 def _print_write_result(result: WriteResult, *, dry_run: bool) -> None:
     click.echo()
-    prefix = "  [dry-run]" if dry_run else "  "
-    click.echo(f"{prefix}{result.target}:{result.name} (preset={result.preset_id})")
+    mode_tag = f"{ux.dim('[dry-run]')} " if dry_run else ""
+    click.echo(
+        f"  {mode_tag}{ux.bold(result.target)}:{ux.bold(result.name)} "
+        f"(preset={result.preset_id})"
+    )
+    line_indent = "      " if dry_run else "    "
     for line in result.yaml_changes:
-        click.echo(f"{prefix}  yaml: {line}")
+        click.echo(f"{line_indent}{ux.dim('yaml:')} {line}")
     for line in result.dotenv_changes:
-        click.echo(f"{prefix}  env:  {line}")
+        click.echo(f"{line_indent}{ux.dim('env:')}  {line}")
     for line in result.warnings:
-        click.echo(f"{prefix}  ⚠ {line}")
+        ux.warn(line, indent=line_indent)
     if not dry_run:
-        click.echo("  Next: defenseclaw-gateway restart (to reload config)")
+        ux.subhead("Next: defenseclaw-gateway restart (to reload config)")
     click.echo()
 
 
@@ -724,11 +795,22 @@ def _slug(value: str) -> str:
 def _write_atomically(cfg_path: str, raw: dict[str, Any]) -> None:
     import yaml
 
-    tmp = cfg_path + ".tmp"
-    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-    with open(tmp, "w") as f:
-        yaml.safe_dump(raw, f, default_flow_style=False, sort_keys=False)
-    os.replace(tmp, cfg_path)
+    # Create the staging file with ``tempfile.mkstemp`` (``O_EXCL``, 0600)
+    # in the target dir instead of a predictable ``<cfg>.tmp`` name: a
+    # predictable temp path is symlink/pre-create-able by a local attacker
+    # and this config can carry HEC/OTLP tokens (F-0186).
+    directory = os.path.dirname(cfg_path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(raw, f, default_flow_style=False, sort_keys=False)
+        os.replace(tmp, cfg_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 # ---------------------------------------------------------------------------

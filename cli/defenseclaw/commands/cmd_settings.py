@@ -10,6 +10,7 @@ import os
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
 from defenseclaw.context import AppContext, pass_ctx
 
@@ -62,4 +63,4 @@ def settings_save(app: AppContext) -> None:
             after=after,
             diff=diff,
         )
-    click.echo(f"  ✓ Saved configuration to {cfg_path}")
+    ux.ok(f"Saved configuration to {cfg_path}")

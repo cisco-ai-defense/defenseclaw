@@ -296,7 +296,14 @@ if [ -f /root/.defenseclaw/device.key ]; then
     MASTER_KEY=$(python3 -c "
 import hashlib; from pathlib import Path
 data = (Path.home()/'.defenseclaw/device.key').read_bytes()
-print(f'sk-dc-{hashlib.sha256(data).hexdigest()[:16]}')
+digest = hashlib.pbkdf2_hmac(
+    'sha256',
+    data,
+    b'defenseclaw-proxy-master-key',
+    100_000,
+    dklen=32,
+).hex()
+print(f'sk-dc-{digest}')
 " 2>/dev/null)
 fi
 
@@ -500,8 +507,23 @@ bold "14. In-Process Sandbox Probe"
 _PROBE_SCRIPT="/home/sandbox/sandbox-probe.sh"
 _TOKEN=$(grep OPENCLAW_GATEWAY_TOKEN /root/.defenseclaw/.env 2>/dev/null | cut -d= -f2)
 
-# Write the probe if it doesn't exist
-if true; then
+# a sandbox-owned process can pre-create
+# /home/sandbox/sandbox-probe.sh as a symlink to a privileged target
+# (e.g. /etc/cron.d/foo). The subsequent `cat > $_PROBE_SCRIPT`,
+# `chmod +x`, and `chown sandbox:sandbox` then follow the symlink and
+# transfer ownership/mode of the privileged target. We always
+# unlink the probe path before writing and refuse to follow any
+# pre-existing symlink even if the unlink races.
+_F1905_OK="yes"
+if [ -L "$_PROBE_SCRIPT" ]; then
+    rm -f -- "$_PROBE_SCRIPT" || _F1905_OK="rm-failed"
+elif [ -e "$_PROBE_SCRIPT" ] && [ ! -f "$_PROBE_SCRIPT" ]; then
+    _F1905_OK="not-regular-file"
+fi
+rm -f -- "$_PROBE_SCRIPT" 2>/dev/null || true
+if [ "$_F1905_OK" != "yes" ]; then
+    fail "refusing to write probe — pre-existing $_PROBE_SCRIPT was unsafe ($_F1905_OK)"
+elif true; then
     cat > "$_PROBE_SCRIPT" << 'PROBE_EOF'
 #!/bin/bash
 echo "PROBE_START"

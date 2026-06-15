@@ -255,7 +255,7 @@ def _merge_policy(
         result.policy_version = override["policy_version"]
     if override.get("profile") in ("strict", "default"):
         result.profile = override["profile"]
-    if isinstance(override.get("min_confidence"), (int, float)):
+    if isinstance(override.get("min_confidence"), int | float):
         result.min_confidence = float(override["min_confidence"])
     if isinstance(override.get("max_findings_per_rule"), int):
         result.max_findings_per_rule = override["max_findings_per_rule"]

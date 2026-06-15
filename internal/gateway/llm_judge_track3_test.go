@@ -42,6 +42,11 @@ const allFalseToolJSON = `{
   "Destructive Commands": {"reasoning": "ok", "label": false}
 }`
 
+const allFalseExfilJSON = `{
+  "Sensitive File Access": {"reasoning": "ok", "label": false},
+  "Exfiltration Channel": {"reasoning": "ok", "label": false}
+}`
+
 func TestJudgeKinds_TableEmitShape(t *testing.T) {
 	capture := withCapturedEvents(t)
 
@@ -71,6 +76,13 @@ func TestJudgeKinds_TableEmitShape(t *testing.T) {
 			},
 			wantKind: "tool_injection",
 		},
+		{
+			name: "exfil",
+			run: func(t *testing.T, j *LLMJudge, ctx context.Context) {
+				_ = j.runExfilJudge(ctx, strings.Repeat("e", 25)+" benign text here")
+			},
+			wantKind: "exfil",
+		},
 	}
 
 	for _, tc := range cases {
@@ -93,6 +105,7 @@ func TestJudgeKinds_TableEmitShape(t *testing.T) {
 					PII:           tc.name == "pii",
 					PIICompletion: tc.name == "pii",
 					ToolInjection: tc.name == "tool_injection",
+					Exfil:         tc.name == "exfil",
 				},
 				model:    "test-model",
 				provider: mock,
@@ -134,6 +147,8 @@ func responseBodyForKind(kind string) string {
 		return allCleanPIIJSON
 	case "tool_injection":
 		return allFalseToolJSON
+	case "exfil":
+		return allFalseExfilJSON
 	default:
 		return "{}"
 	}

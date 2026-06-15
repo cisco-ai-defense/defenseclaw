@@ -1,0 +1,147 @@
+name: Docs site (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs-site/**'
+      - '.github/workflows/docs-site.yml'
+  pull_request:
+    paths:
+      - 'docs-site/**'
+      - '.github/workflows/docs-site.yml'
+  workflow_dispatch:
+
+# Least-privilege workflow permissions: pull-request docs builds must
+# not inherit Pages and OIDC write permissions. Workflow-scope
+# permissions are otherwise inherited by the
+# build job, which runs PR-controlled `npm ci` + `npm run build`
+# (including arbitrary lifecycle scripts). Granting `pages: write` /
+# `id-token: write` at workflow scope let a malicious PR exfiltrate the
+# Pages OIDC token via ACTIONS_ID_TOKEN_REQUEST_URL or push Pages content
+# outside the deploy job's push/workflow_dispatch guard.
+#
+# Workflow scope is now read-only. The deploy job (which never runs PR
+# code -- guarded by the `push || workflow_dispatch` `if`) elevates to
+# pages: write + id-token: write at job scope.
+permissions:
+  contents: read
+
+# Single-flight: never let two Pages deploys race; cancel pending runs
+# but never cancel an in-progress deploy half-way through.
+concurrency:
+  group: docs-site-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build static export
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs-site
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # Shallow clone is enough; we don't compute git history in the
+          # build path. Keeps CI minutes low.
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: docs-site/package-lock.json
+
+      - name: Setup OPA
+        # build-policy-assets.ts runs `opa build` to compile each Rego
+        # domain to WASM under docs-site/public/opa/. Without `opa` on
+        # PATH the script logs a warning and skips, which silently
+        # ships a Pages deploy where the Live Test pane shows
+        # "WASM modules aren't available" and the wizard cannot
+        # evaluate policies in-browser. Pin the action version so
+        # supply-chain drift on the third-party action is explicit.
+        uses: open-policy-agent/setup-opa@v2
+        with:
+          version: latest
+
+      - name: Install dependencies
+        # CI_REQUIRE_OPA promotes the missing-opa warning in
+        # build-policy-assets.ts from a soft skip to a hard error, so
+        # a future change that drops the setup-opa step above (or that
+        # bumps OPA past a breaking CLI change) fails the build
+        # instead of silently shipping a broken Live Test pane.
+        env:
+          CI_REQUIRE_OPA: '1'
+        run: npm ci --no-audit --no-fund
+
+      - name: Unit tests (policy creator)
+        # Gate the deploy on the share/highlighter/cmdk-filter tests so
+        # silent regressions in the policy creator can't ship to Pages.
+        run: npm run test:policy-creator
+
+      - name: Build static export
+        env:
+          # Project-pages subpath. Override in repo Settings → Pages
+          # if you map a custom apex domain (e.g., docs.defenseclaw.dev).
+          BASE_PATH: /defenseclaw
+          SITE_URL: https://cisco-ai-defense.github.io/defenseclaw
+          # Avoid leaking spurious telemetry from the build host into
+          # someone else's dashboards.
+          NEXT_TELEMETRY_DISABLED: '1'
+        run: npm run build
+
+      - name: Verify basePath in output
+        run: |
+          if ! grep -q "/defenseclaw/_next/" out/index.html; then
+            echo "::error::Built index.html does not reference /defenseclaw/_next/ — basePath may be misapplied."
+            exit 1
+          fi
+
+      - name: Verify OPA assets in output
+        # Pages ships everything under out/ verbatim. Missing WASM
+        # files manifest as a "WASM modules aren't available" warning
+        # in the wizard's Live Test pane — the symptom users actually
+        # report. Fail the deploy at build time instead.
+        run: |
+          missing=0
+          for f in manifest.json admission.wasm guardrail.wasm firewall.wasm audit.wasm skill_actions.wasm; do
+            if [ ! -f "out/opa/$f" ]; then
+              echo "::error::out/opa/$f is missing — policy creator Live Test pane will 404."
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
+
+      - name: Add .nojekyll
+        # GitHub Pages defaults to running Jekyll, which strips files
+        # whose names begin with `_` (Next.js emits `_next/`). The
+        # marker file disables Jekyll for this site.
+        run: touch out/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: docs-site/out
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    # Job-scoped privileged permissions: only the deploy job ever uses
+    # them, and it never runs PR code (guarded by the `if` above).
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

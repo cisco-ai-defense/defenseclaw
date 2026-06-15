@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.dev/schemas/otel/connector-telemetry-event.schema.json",
+  "title": "DefenseClaw Connector Telemetry Event",
+  "description": "OTEL LogRecord emitted for connector hook invocations, connector-native OTLP ingest batches, and Codex notify bridge events. Metrics for the same surfaces are defined in metrics.schema.json.",
+  "type": "object",
+  "required": [
+    "timeUnixNano",
+    "severityText",
+    "severityNumber",
+    "body",
+    "attributes"
+  ],
+  "properties": {
+    "timeUnixNano": { "type": "string" },
+    "observedTimeUnixNano": { "type": "string" },
+    "severityText": {
+      "type": "string",
+      "enum": ["INFO", "WARN"]
+    },
+    "severityNumber": {
+      "type": "integer",
+      "enum": [9, 13]
+    },
+    "body": {
+      "type": "object",
+      "properties": {
+        "stringValue": {
+          "type": "string",
+          "enum": [
+            "connector telemetry ingest",
+            "connector hook invocation",
+            "codex notify"
+          ]
+        }
+      },
+      "required": ["stringValue"]
+    },
+    "attributes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/attribute" }
+    }
+  },
+  "$defs": {
+    "attribute": {
+      "type": "object",
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "type": "object" }
+      }
+    },
+    "attributeDefinitions": {
+      "type": "object",
+      "description": "Semantic definition of connector telemetry log attributes.",
+      "properties": {
+        "event.name": {
+          "type": "string",
+          "enum": [
+            "defenseclaw.otel.ingest",
+            "defenseclaw.hook.invocation",
+            "defenseclaw.codex.notify"
+          ]
+        },
+        "event.domain": {
+          "type": "string",
+          "const": "defenseclaw.connector"
+        },
+        "defenseclaw.connector.source": {
+          "type": "string",
+          "enum": [
+            "openclaw",
+            "zeptoclaw",
+            "claudecode",
+            "codex",
+            "hermes",
+            "cursor",
+            "windsurf",
+            "geminicli",
+            "copilot",
+            "openhands",
+            "antigravity",
+            "unknown"
+          ],
+          "description": "Connector that produced the event. `unknown` is used when an older client omits the source header."
+        },
+        "defenseclaw.connector.signal": {
+          "type": "string",
+          "enum": ["logs", "metrics", "traces", "hook", "notify"]
+        },
+        "defenseclaw.connector.result": {
+          "type": "string",
+          "enum": ["ok", "malformed", "rejected"]
+        },
+        "defenseclaw.otel.ingest.signal": {
+          "type": "string",
+          "enum": ["logs", "metrics", "traces", "hook"]
+        },
+        "defenseclaw.otel.ingest.source": {
+          "type": "string",
+          "description": "Legacy alias for defenseclaw.connector.source."
+        },
+        "defenseclaw.otel.ingest.result": {
+          "type": "string",
+          "enum": ["ok", "malformed", "rejected"]
+        },
+        "defenseclaw.otel.ingest.records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "defenseclaw.otel.ingest.bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "defenseclaw.otel.ingest.summary": {
+          "type": "string"
+        },
+        "defenseclaw.codex.notify.type": {
+          "type": "string",
+          "description": "Sanitized Codex notify payload type, e.g. agent-turn-complete, malformed, or empty for parsed payloads without a type."
+        },
+        "defenseclaw.codex.notify.status": {
+          "type": "string"
+        },
+        "defenseclaw.codex.notify.result": {
+          "type": "string",
+          "enum": ["ok", "malformed"]
+        },
+        "defenseclaw.codex.notify.turn_id": {
+          "type": "string"
+        },
+        "defenseclaw.codex.notify.model": {
+          "type": "string"
+        },
+        "defenseclaw.connector.step_idx": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-indexed per-turn counter within a session. Mirrors audit_events.step_idx and the hook audit envelope step_idx."
+        },
+        "defenseclaw.connector.enforced": {
+          "type": "boolean",
+          "description": "True when the hook decision was an enforced block. Mirrors audit_events.enforced."
+        },
+        "defenseclaw.connector.rule_pack_dir": {
+          "type": "string",
+          "description": "Effective rule-pack directory the verdict used. Mirrors audit_events.rule_pack_dir."
+        }
+      }
+    }
+  }
+}

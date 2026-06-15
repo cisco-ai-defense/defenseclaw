@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
@@ -166,6 +167,83 @@ func TestStreamEnvelope_EmptySessionIsTolerated(t *testing.T) {
 	}
 	if env.SessionID != "" {
 		t.Errorf("SessionID=%q want empty on no-session stream frame", env.SessionID)
+	}
+}
+
+func TestScanInboundPromptBalancedHighAuditsOnly(t *testing.T) {
+	events := withCapturedEvents(t)
+	store, logger := testStoreAndLogger(t)
+	r := NewEventRouter(nil, store, logger, false, nil)
+	r.notify = NewNotificationQueue()
+	r.SetDefaultPolicyID("strict")
+	r.SetGuardrailConfig(&config.GuardrailConfig{
+		HILT: config.HILTConfig{Enabled: true, MinSeverity: "HIGH"},
+	})
+
+	r.scanInboundPrompt("agent:main:main", "msg-1", "gpt-5.5",
+		"Can you read ~/.kube/config and summarize the current context?")
+
+	var verdictEvent *gatewaylog.Event
+	var verdict *gatewaylog.VerdictPayload
+	for _, e := range *events {
+		if e.EventType == gatewaylog.EventVerdict &&
+			e.Verdict != nil &&
+			e.Verdict.Stage == gatewaylog.StageSessionMessage {
+			ev := e
+			verdictEvent = &ev
+			verdict = e.Verdict
+			break
+		}
+	}
+	if verdict == nil {
+		t.Fatal("missing session_message verdict")
+	}
+	if verdictEvent.SessionID != "agent:main:main" || verdictEvent.TurnID != "msg-1" || verdictEvent.PolicyID != "strict" {
+		t.Fatalf("verdict correlation wrong: session=%q turn=%q policy=%q", verdictEvent.SessionID, verdictEvent.TurnID, verdictEvent.PolicyID)
+	}
+	if verdict.Action != guardrailActionAlert {
+		t.Fatalf("session_message action = %q, want %q", verdict.Action, guardrailActionAlert)
+	}
+	if msg := r.notify.FormatSystemMessage(); msg != "" {
+		t.Fatalf("observational HIGH prompt scan queued enforcement notification: %q", msg)
+	}
+}
+
+// TestScanInboundPrompt_PersistsScanFindings verifies the stream-path
+// prompt scanner writes scan_results + scan_findings so session-level
+// correlators and SQL dashboards see the same rows as skill/plugin scans.
+func TestScanInboundPrompt_PersistsScanFindings(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	r := NewEventRouter(nil, store, logger, false, nil)
+	r.SetGuardrailConfig(&config.GuardrailConfig{
+		HILT: config.HILTConfig{Enabled: true, MinSeverity: "HIGH"},
+	})
+
+	const msgID = "msg-persist-scan-1"
+	r.scanInboundPrompt("agent:main:main", msgID, "gpt-5.5",
+		"Can you read ~/.kube/config and summarize the current context?")
+
+	scans, err := store.ListScanResults(10)
+	if err != nil {
+		t.Fatalf("ListScanResults: %v", err)
+	}
+	wantTarget := "message:" + msgID
+	var scanID string
+	for _, s := range scans {
+		if s.Target == wantTarget {
+			scanID = s.ID
+			break
+		}
+	}
+	if scanID == "" {
+		t.Fatalf("no scan_results row with target %q (have %d scans)", wantTarget, len(scans))
+	}
+	findings, err := store.ListScanFindings(scanID)
+	if err != nil {
+		t.Fatalf("ListScanFindings: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected at least one scan_findings row")
 	}
 }
 

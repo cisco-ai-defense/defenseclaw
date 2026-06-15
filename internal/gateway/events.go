@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -25,6 +27,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -156,14 +159,18 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 	if ev == nil || ctx == nil {
 		return
 	}
+	env := audit.EnvelopeFromContext(ctx)
 	if ev.RequestID == "" {
-		ev.RequestID = RequestIDFromContext(ctx)
+		ev.RequestID = firstNonEmpty(RequestIDFromContext(ctx), env.RequestID)
 	}
 	if ev.SessionID == "" {
-		ev.SessionID = SessionIDFromContext(ctx)
+		ev.SessionID = firstNonEmpty(SessionIDFromContext(ctx), env.SessionID)
+	}
+	if ev.TurnID == "" {
+		ev.TurnID = env.TurnID
 	}
 	if ev.TraceID == "" {
-		ev.TraceID = TraceIDFromContext(ctx)
+		ev.TraceID = firstNonEmpty(TraceIDFromContext(ctx), env.TraceID)
 		if ev.TraceID == "" {
 			if sp := trace.SpanFromContext(ctx); sp != nil && sp.SpanContext().IsValid() {
 				ev.TraceID = sp.SpanContext().TraceID().String()
@@ -171,20 +178,38 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 		}
 	}
 	if ev.RunID == "" {
-		ev.RunID = gatewaylog.ProcessRunID()
+		ev.RunID = firstNonEmpty(env.RunID, gatewaylog.ProcessRunID())
 	}
 	id := AgentIdentityFromContext(ctx)
 	if ev.AgentID == "" {
-		ev.AgentID = id.AgentID
+		ev.AgentID = firstNonEmpty(id.AgentID, env.AgentID)
 	}
 	if ev.AgentName == "" {
-		ev.AgentName = id.AgentName
+		ev.AgentName = firstNonEmpty(id.AgentName, env.AgentName)
+	}
+	if ev.AgentType == "" {
+		ev.AgentType = id.AgentType
 	}
 	if ev.AgentInstanceID == "" {
-		ev.AgentInstanceID = id.AgentInstanceID
+		ev.AgentInstanceID = firstNonEmpty(id.AgentInstanceID, env.AgentInstanceID)
 	}
 	if ev.SidecarInstanceID == "" {
-		ev.SidecarInstanceID = id.SidecarInstanceID
+		ev.SidecarInstanceID = firstNonEmpty(id.SidecarInstanceID, env.SidecarInstanceID)
+	}
+	if ev.PolicyID == "" {
+		ev.PolicyID = env.PolicyID
+	}
+	if ev.DestinationApp == "" {
+		ev.DestinationApp = env.DestinationApp
+	}
+	if ev.ToolName == "" {
+		ev.ToolName = env.ToolName
+	}
+	if ev.ToolID == "" {
+		ev.ToolID = env.ToolID
+	}
+	if ev.Connector == "" {
+		ev.Connector = env.Connector
 	}
 }
 
@@ -216,13 +241,58 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		cp.Cause = redaction.ForSinkString(cp.Cause)
 		e.Error = &cp
 	}
-	w.Emit(e)
+	if p := e.LLMPrompt; p != nil {
+		cp := *p
+		if cp.Prompt != "" {
+			cp.Prompt = redaction.ForSinkMessageContent(cp.Prompt)
+		}
+		if cp.RawRequestBody != "" {
+			cp.RawRequestBody = redaction.ForSinkMessageContent(cp.RawRequestBody)
+		}
+		e.LLMPrompt = &cp
+	}
+	if r := e.LLMResponse; r != nil {
+		cp := *r
+		if cp.Response != "" {
+			cp.Response = redaction.ForSinkMessageContent(cp.Response)
+		}
+		if cp.RawResponseBody != "" {
+			cp.RawResponseBody = redaction.ForSinkMessageContent(cp.RawResponseBody)
+		}
+		e.LLMResponse = &cp
+	}
+	if t := e.Tool; t != nil {
+		cp := *t
+		if cp.ToolInput != "" {
+			cp.ToolInput = redaction.ForSinkMessageContent(cp.ToolInput)
+		}
+		if cp.ToolOutput != "" {
+			cp.ToolOutput = redaction.ForSinkMessageContent(cp.ToolOutput)
+		}
+		e.Tool = &cp
+	}
+	w.EmitContext(ctx, e)
+}
+
+// emitVerdictExtras carries optional verdict-event fields that
+// runtime finding emitters (guardrail Inspect, mid-stream,
+// tool-call inspect) stamp so SIEM can join the verdict to its
+// per-finding scan_findings rows. Pure additive — emitVerdict
+// callers that pass no extras get exactly the same wire shape as
+// before.
+type emitVerdictExtras struct {
+	EvaluationID string
+	RuleIDs      []string
 }
 
 // emitVerdict records a single guardrail-pipeline stage decision.
 // ctx carries the request correlation + agent identity that Gets
 // stamped onto the envelope. Pass context.Background() when emitting
 // outside a request (boot fall-backs, background self-tests).
+//
+// The variadic extras slot lets new call sites stamp evaluation_id
+// + rule_ids without forcing every existing caller (multi-turn,
+// block-list, approval-denied, etc.) to update.
 func emitVerdict(
 	ctx context.Context,
 	stage gatewaylog.Stage,
@@ -232,18 +302,32 @@ func emitVerdict(
 	severity gatewaylog.Severity,
 	categories []string,
 	latencyMs int64,
+	extras ...emitVerdictExtras,
 ) {
+	var ext emitVerdictExtras
+	if len(extras) > 0 {
+		ext = extras[0]
+	}
+	// Plan B6 / S0.10: VerdictPayload.Reason is documented as
+	// "short, redacted" but the redactor pipeline DOES legitimately
+	// receive raw-secret strings on the way in (the redaction layer
+	// strips them in-place before the wire emit). Scrub assertion
+	// would fight that path; the canary lives only on the egress
+	// shape where no caller has any legitimate reason to pass a
+	// credential prefix. See emitEgress in this file.
 	emitEvent(ctx, gatewaylog.Event{
 		EventType: gatewaylog.EventVerdict,
 		Severity:  severity,
 		Direction: direction,
 		Model:     model,
 		Verdict: &gatewaylog.VerdictPayload{
-			Stage:      stage,
-			Action:     action,
-			Reason:     reason,
-			Categories: categories,
-			LatencyMs:  latencyMs,
+			Stage:        stage,
+			Action:       action,
+			Reason:       reason,
+			Categories:   categories,
+			LatencyMs:    latencyMs,
+			EvaluationID: ext.EvaluationID,
+			RuleIDs:      ext.RuleIDs,
 		},
 	})
 }
@@ -255,6 +339,16 @@ type JudgeEmitOpts struct {
 	ToolID         string
 	PolicyID       string
 	DestinationApp string
+	// InputContent, when non-empty, is the inspected judge input
+	// (the prompt/request text the judge was asked to evaluate).
+	// emitJudge computes its sha256 digest and stores the result in
+	// JudgePayload.InputHash so the audit row carries an InputHash
+	// that actually represents the *input*. ("Judge
+	// input_hash is computed from the response body") closure: the
+	// previous implementation hashed the response, which corrupted
+	// dedup/pivot semantics. emitJudge intentionally does not log
+	// or persist InputContent itself — only the digest.
+	InputContent string
 }
 
 // emitJudge records a single LLM-judge invocation. raw may be empty
@@ -286,6 +380,17 @@ func emitJudge(
 		ParseError:  parseError,
 		RawResponse: raw,
 		Findings:    opts.Findings,
+	}
+	// ("Judge input_hash is computed from the
+	// response body") closure: when callers supply the inspected
+	// judge input via opts.InputContent, derive the canonical
+	// "sha256:<hex>" digest of that content here. Persistence
+	// (judge_store.go) propagates payload.InputHash verbatim and
+	// no longer falls back to hashing the response body, so the
+	// audit row's InputHash truly represents the input.
+	if opts.InputContent != "" {
+		sum := sha256.Sum256([]byte(opts.InputContent))
+		payload.InputHash = "sha256:" + hex.EncodeToString(sum[:])
 	}
 
 	// SQLite persistence runs first because emitEvent mutates its own
@@ -332,14 +437,22 @@ func emitLifecycle(ctx context.Context, subsystem, transition string, details ma
 			details["transition_raw"] = transition
 		}
 	}
-	emitEvent(ctx, gatewaylog.Event{
+	ev := gatewaylog.Event{
 		EventType: gatewaylog.EventLifecycle,
 		Lifecycle: &gatewaylog.LifecyclePayload{
 			Subsystem:  subsystem,
 			Transition: normalized,
 			Details:    details,
 		},
-	})
+	}
+	// Promote a connector detail to the first-class envelope field so
+	// gateway.jsonl consumers (Splunk local bridge, AgentWatch) can
+	// filter/group by connector without parsing the details bag — the
+	// same contract the audit-event connector column provides.
+	if c := details["connector"]; c != "" {
+		ev.Connector = c
+	}
+	emitEvent(ctx, ev)
 }
 
 // normalizeLifecycleTransition maps caller-supplied transition
@@ -371,6 +484,14 @@ func normalizeLifecycleTransition(t string) string {
 // in /health or alerting — stderr-only diagnostics stay in the
 // legacy writer. ctx supplies the correlation triplet when available.
 func emitError(ctx context.Context, subsystem, code, message string, cause error) {
+	emitErrorConnector(ctx, subsystem, code, "", message, cause)
+}
+
+// emitErrorConnector is emitError with first-class connector attribution.
+// Connector-scoped failures (e.g. hook self-heal re-install failures) pass
+// the originating connector so gateway.jsonl error events carry the same
+// connector dimension as every other surface; "" behaves like emitError.
+func emitErrorConnector(ctx context.Context, subsystem, code, connector, message string, cause error) {
 	payload := &gatewaylog.ErrorPayload{
 		Subsystem: subsystem,
 		Code:      code,
@@ -382,6 +503,7 @@ func emitError(ctx context.Context, subsystem, code, message string, cause error
 	emitEvent(ctx, gatewaylog.Event{
 		EventType: gatewaylog.EventError,
 		Severity:  gatewaylog.SeverityHigh,
+		Connector: connector,
 		Error:     payload,
 	})
 }
@@ -467,6 +589,14 @@ func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
 	if len(p.Reason) > 512 {
 		p.Reason = p.Reason[:512]
 	}
+	// Plan B6 / S0.10: defense-in-depth scrub guard. The egress
+	// schema is structurally key-free (no APIKey field) but a
+	// future refactor that accidentally lands a credential in
+	// TargetHost / TargetPath / Reason should crash CI before
+	// shipping a leak. In production we log and continue — the
+	// canary fires once, the operator reads the warning, and the
+	// follow-up fix lands without an outage.
+	redaction.MustAssertNoCredentials(p.TargetHost, p.TargetPath, p.Reason)
 	// BodyShape is a known enum — reject anything else so a
 	// malformed TS client cannot inject arbitrary strings into the
 	// downstream contract. validEgressBranch / validEgressDecision

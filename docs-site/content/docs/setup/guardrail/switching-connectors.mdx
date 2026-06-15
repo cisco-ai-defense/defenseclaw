@@ -1,0 +1,68 @@
+---
+title: Switching connectors
+description: defenseclaw setup mode <connector> — switch the primary connector / replace the connector wiring with smart guardrail inheritance. Audit history is preserved; only the connector wiring moves. To run two connectors at once, Add instead of Replace.
+keywords:
+  - defenseclaw setup mode
+  - switch DefenseClaw connector
+  - replace DefenseClaw connector
+  - DefenseClaw connector inheritance
+---
+
+`defenseclaw setup mode <connector>` **switches the primary connector** — it *replaces* the active connector wiring with another. It picks up the destination connector's defaults, preserves your existing guardrail config where it makes sense, and bounces the gateway so the change takes effect.
+
+<Callout type="info">
+This page is the **replace** path: one connector wired at a time. If instead you want to keep the current connector *and* protect a second one from the same gateway, you want the **add** path — see [Multi-connector](/docs/setup/guardrail/multi-connector). The Add/Replace choice surfaces interactively whenever you run a hook setup while another connector is already wired.
+</Callout>
+
+## Inheritance rules
+
+The switch behaviour is intentionally asymmetric — operators want "switch fast, don't surprise me":
+
+| From → To | Behaviour |
+| --- | --- |
+| `openclaw` ↔ `zeptoclaw` | Inherit the current `guardrail.*` config verbatim. Both connectors run the same proxy-mode pipeline, so `mode`, `scanner_mode`, `judge`, `port`, `block_message` all stay set. Only `claw.mode` and `guardrail.connector` change. |
+| `{openclaw\|zeptoclaw}` → `{codex\|claudecode\|cursor\|...}` | Switch to observability-only. Proxy stops binding; hook scripts + native OTel exporter wire in. The matching `*_enforcement_enabled` flag is forced to `false`. Existing `mode` / `scanner` / `judge` settings stay on disk so flipping back later restores the previous posture. |
+| `{codex\|claudecode\|cursor\|...}` → `{openclaw\|zeptoclaw}` | Treat as a "guardrail-supporting but don't auto-block" switch: enable guardrail in observe mode so the proxy binds and we collect telemetry, but never turn enforcement on without an explicit `defenseclaw setup guardrail` run. |
+| `{codex\|claudecode\|cursor\|...}` ↔ `{codex\|claudecode\|cursor\|...}` | Apply the destination's observability-only template so the right enforcement flag is cleared and the `connector` field is realigned. |
+
+## Run it
+
+```bash
+defenseclaw setup mode codex
+defenseclaw setup mode openclaw --no-restart
+defenseclaw setup mode cursor
+```
+
+<Callout type="info">
+The audit DB is connector-agnostic. Switching connectors does not delete any history; the audit tail simply starts attributing new events to the new connector.
+</Callout>
+
+## What changes on disk
+
+<Files>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <File name="config.yaml (guardrail.connector + claw.mode rewritten)" />
+    <File name="picked_connector (overwritten with new value)" />
+  </Folder>
+  <Folder name="~/.codex" defaultOpen>
+    <File name="config.toml (DefenseClaw hook + OTel block re-applied)" />
+  </Folder>
+  <Folder name="~/.claude (previous connector)">
+    <File name="settings.json (DefenseClaw entries removed by teardown)" />
+  </Folder>
+</Files>
+
+The previous connector's `Teardown()` runs first, restoring agent-owned files from the byte-for-byte backup taken at setup time. Then the new connector's `Setup()` runs and writes its own integration. Drift in the previous file is detected and surgically removed instead of restored.
+
+## Verify
+
+```bash
+defenseclaw doctor
+defenseclaw status
+```
+
+`doctor` will tell you if the previous connector left residual hooks; `status` shows the full active-connector roster (one per-connector block each), so after a replace you'll see just the new connector and after an add you'll see all of them.
+
+## Switch vs add
+
+Replacing is the right move when you're moving a single host from one agent to another. If you actually run multiple agents and want guardrail policy on each, don't keep replacing — **add** the second connector so the gateway enforces both at once, each with its own `guardrail.connectors.<name>` policy. See [Multi-connector](/docs/setup/guardrail/multi-connector) for the add flow and the per-connector CLI (`defenseclaw guardrail ... --connector X`).

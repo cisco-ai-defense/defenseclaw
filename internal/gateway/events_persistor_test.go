@@ -70,6 +70,7 @@ func TestEmitJudge_PersistsUnredactedRawBeforeFanoutScrub(t *testing.T) {
 	jp := (*capture)[0].Judge
 	if jp == nil {
 		t.Fatal("judge payload missing from captured event")
+		return
 	}
 	if jp.RawResponse == raw {
 		t.Fatalf("fanout saw un-redacted raw — redaction layer bypassed")

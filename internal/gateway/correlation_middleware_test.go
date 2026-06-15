@@ -39,13 +39,14 @@ func TestContextHelpers_RoundTrip(t *testing.T) {
 // TestContextHelpers_NilSafe guards panic paths for tests that pass
 // nil contexts (we explicitly document nil is tolerated).
 func TestContextHelpers_NilSafe(t *testing.T) {
-	if got := SessionIDFromContext(nil); got != "" {
+	var nilCtx context.Context
+	if got := SessionIDFromContext(nilCtx); got != "" {
 		t.Errorf("nil ctx SessionID = %q", got)
 	}
-	if got := TraceIDFromContext(nil); got != "" {
+	if got := TraceIDFromContext(nilCtx); got != "" {
 		t.Errorf("nil ctx TraceID = %q", got)
 	}
-	if got := AgentIdentityFromContext(nil); got != (AgentIdentity{}) {
+	if got := AgentIdentityFromContext(nilCtx); got != (AgentIdentity{}) {
 		t.Errorf("nil ctx AgentIdentity = %+v", got)
 	}
 }
@@ -126,7 +127,13 @@ func TestSessionIDFromHeaders_Bounded(t *testing.T) {
 
 // TestCorrelationMiddleware_PopulatesContext wires the middleware to
 // an end-to-end HTTP test and asserts session/trace/agent identity
-// land in the downstream context.
+// land in the downstream context. Uses a registered hook route +
+// loopback RemoteAddr so the audit-envelope trace adoption gate
+// (loopback-only) admits the inbound traceparent. This gate is
+// intentionally broader than shouldExtractHookTrace (hook + notify
+// only) because the audit envelope's trace_id is a single per-row
+// field with no propagation, so loopback alone is a sufficient
+// trust boundary — see the comment in correlation_middleware.go.
 func TestCorrelationMiddleware_PopulatesContext(t *testing.T) {
 	reg := NewAgentRegistry("agent-ci", "CI Agent")
 	mw := CorrelationMiddleware(reg)
@@ -136,13 +143,20 @@ func TestCorrelationMiddleware_PopulatesContext(t *testing.T) {
 		gotIdentity          AgentIdentity
 	)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotSession = SessionIDFromContext(r.Context())
-		gotTrace = TraceIDFromContext(r.Context())
-		gotIdentity = AgentIdentityFromContext(r.Context())
+		// CorrelationMiddleware only peeks the agent identity so an
+		// unauthenticated flood cannot mint unbounded session entries.
+		// Stand in for an authenticated handler and promote, exactly as
+		// the proxy / api success paths do, to mint the session-scoped
+		// agent_instance_id.
+		ctx := PromoteSessionIfAuthenticated(r.Context())
+		gotSession = SessionIDFromContext(ctx)
+		gotTrace = TraceIDFromContext(ctx)
+		gotIdentity = AgentIdentityFromContext(ctx)
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set(SessionIDHeader, "sess-abc")
 	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 	rr := httptest.NewRecorder()
@@ -180,11 +194,16 @@ func TestCorrelationMiddleware_StampsAuditEnvelope(t *testing.T) {
 
 	var env audit.CorrelationEnvelope
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		env = audit.EnvelopeFromContext(r.Context())
+		// Promote (as an authenticated handler would) so the envelope
+		// picks up the minted agent_instance_id; the middleware alone
+		// only peeks to avoid minting on unauthenticated requests.
+		ctx := PromoteSessionIfAuthenticated(r.Context())
+		env = audit.EnvelopeFromContext(ctx)
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set(SessionIDHeader, "sess-env")
 	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 	handler.ServeHTTP(httptest.NewRecorder(), req)
@@ -259,6 +278,94 @@ func TestCorrelationMiddleware_BoundsPolicyAndDestination(t *testing.T) {
 		t.Errorf("dest not bounded: len=%d cap=%d", len(got), maxDestinationAppLength)
 	} else if strings.ContainsAny(got, "\x00\n\r") {
 		t.Errorf("control bytes leaked into dest: %q", got)
+	}
+}
+
+// TestCorrelationMiddleware_DropsInboundTraceparentOnNonLoopback is
+// the regression test for the audit-envelope trust gate. The OTel
+// HTTP middleware wraps OUTSIDE tokenAuth, so an unauthenticated,
+// non-loopback caller reaches CorrelationMiddleware before the
+// auth check runs. Mirroring the inbound traceparent into the audit
+// envelope for any caller would let such an attacker stamp an
+// arbitrary trace id onto downstream audit rows for the rest of
+// the request, poisoning SIEM correlation joins.
+//
+// The trust gate is loopback-only: hook scripts and the LLM
+// forward-proxy hop always POST from 127.0.0.1, so loopback is the
+// production trust boundary. Cross-network callers have no
+// legitimate reason to declare an inbound trace id, regardless of
+// path.
+func TestCorrelationMiddleware_DropsInboundTraceparentOnNonLoopback(t *testing.T) {
+	mw := CorrelationMiddleware(nil)
+
+	cases := []struct {
+		path   string
+		remote string
+		why    string
+	}{
+		{"/health", "203.0.113.5:443", "non-hook path, non-loopback"},
+		{"/api/v1/codex/hook", "203.0.113.5:443", "hook path but non-loopback"},
+		{"/api/v1/codex/notify", "203.0.113.5:443", "notify-bridge but non-loopback"},
+		{"/v1/guardrail/evaluate", "198.51.100.5:65000", "proxy path, non-loopback"},
+		{"/", "203.0.113.99:1", "root probe, non-loopback"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.why+"|"+tc.path, func(t *testing.T) {
+			var got string
+			handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = TraceIDFromContext(r.Context())
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+			req.RemoteAddr = tc.remote
+			req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			if got == "4bf92f3577b34da6a3ce929d0e0e4736" {
+				t.Errorf("non-loopback caller %s on %q accepted attacker traceparent into audit envelope (security regression)", tc.remote, tc.path)
+			}
+		})
+	}
+}
+
+// TestCorrelationMiddleware_AdoptsInboundTraceparentOnLoopback pins
+// the legitimate side of the trust gate: a loopback caller (hook
+// script, LLM forward-proxy hop in dev, internal sidecar probe) MAY
+// declare a trace id and have it land on the audit envelope. Without
+// this admission, audit rows would have a different trace_id from
+// the parent agent's distributed trace, breaking cross-system
+// correlation in SOC dashboards.
+//
+// The path set below is intentionally broader than the hook/notify
+// allow-list enforced by shouldExtractHookTrace (which gates the
+// OTel server span's parent extraction). The audit envelope mirror
+// is per-row data with no propagation, so loopback alone is the
+// appropriate trust boundary — see the long comment in
+// correlation_middleware.go for the rationale.
+func TestCorrelationMiddleware_AdoptsInboundTraceparentOnLoopback(t *testing.T) {
+	mw := CorrelationMiddleware(nil)
+
+	for _, path := range []string{
+		"/api/v1/codex/hook",
+		"/api/v1/codex/notify",
+		"/v1/guardrail/evaluate",
+		"/",
+	} {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			var got string
+			handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = TraceIDFromContext(r.Context())
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+			req.RemoteAddr = "127.0.0.1:54321"
+			req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			if got != "4bf92f3577b34da6a3ce929d0e0e4736" {
+				t.Errorf("loopback caller on %q dropped traceparent (got %q); audit rows lose distributed-trace correlation", path, got)
+			}
+		})
 	}
 }
 

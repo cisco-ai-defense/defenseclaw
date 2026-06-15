@@ -32,8 +32,22 @@ check() {
 # Derive master key the same way the sidecar does
 MASTER_KEY=""
 if [ -f /root/.defenseclaw/device.key ]; then
-    HASH=$(sha256sum /root/.defenseclaw/device.key | cut -c1-16)
-    MASTER_KEY="sk-dc-${HASH}"
+    MASTER_KEY=$(python3 - <<'PY'
+import hashlib
+
+with open("/root/.defenseclaw/device.key", "rb") as f:
+    data = f.read()
+
+digest = hashlib.pbkdf2_hmac(
+    "sha256",
+    data,
+    b"defenseclaw-proxy-master-key",
+    100_000,
+    dklen=32,
+).hex()
+print(f"sk-dc-{digest}")
+PY
+)
 fi
 
 bold "═══════════════════════════════════════════════════"

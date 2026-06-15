@@ -44,6 +44,7 @@ from typing import Any
 
 import yaml
 
+from defenseclaw.config import locked_config_yaml, write_config_yaml_secure
 from defenseclaw.observability.presets import Preset, Signal, resolve_preset
 
 # ---------------------------------------------------------------------------
@@ -184,37 +185,38 @@ def apply_preset(
         )
 
     cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
-    raw = _load_yaml(cfg_path)
-    before = copy.deepcopy(raw)
+    with locked_config_yaml(cfg_path):
+        raw = _load_yaml(cfg_path)
+        before = copy.deepcopy(raw)
 
-    warnings: list[str] = []
-    if effective_target == "otel":
-        _apply_otel_preset(
-            raw,
-            preset,
-            resolved_inputs,
-            enabled=enabled,
-            signals=signals or preset.default_signals,
-            dest_name=dest_name,
-            warnings=warnings,
+        warnings: list[str] = []
+        if effective_target == "otel":
+            _apply_otel_preset(
+                raw,
+                preset,
+                resolved_inputs,
+                enabled=enabled,
+                signals=signals or preset.default_signals,
+                dest_name=dest_name,
+                warnings=warnings,
+            )
+        else:
+            _apply_audit_sink_preset(
+                raw,
+                preset,
+                resolved_inputs,
+                name=dest_name,
+                enabled=enabled,
+                warnings=warnings,
+            )
+
+        yaml_changes = _summarize_diff(before, raw, effective_target, dest_name)
+        dotenv_changes = _apply_secret(
+            data_dir, preset, secret_value, dry_run=dry_run,
         )
-    else:
-        _apply_audit_sink_preset(
-            raw,
-            preset,
-            resolved_inputs,
-            name=dest_name,
-            enabled=enabled,
-            warnings=warnings,
-        )
 
-    yaml_changes = _summarize_diff(before, raw, effective_target, dest_name)
-    dotenv_changes = _apply_secret(
-        data_dir, preset, secret_value, dry_run=dry_run,
-    )
-
-    if not dry_run:
-        _write_yaml(cfg_path, raw)
+        if not dry_run:
+            _write_yaml(cfg_path, raw)
 
     return WriteResult(
         name=dest_name,
@@ -294,22 +296,23 @@ def set_destination_enabled(
     name must match an existing ``audit_sinks[].name``.
     """
     cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
-    raw = _load_yaml(cfg_path)
-    changes: list[str] = []
-    target = "otel" if name == "otel" else "audit_sinks"
+    with locked_config_yaml(cfg_path):
+        raw = _load_yaml(cfg_path)
+        changes: list[str] = []
+        target = "otel" if name == "otel" else "audit_sinks"
 
-    if target == "otel":
-        otel = raw.setdefault("otel", {})
-        otel["enabled"] = bool(enabled)
-        changes.append(f"otel.enabled = {bool(enabled)}")
-    else:
-        sink = _find_sink(raw, name)
-        if sink is None:
-            raise ValueError(f"no audit sink named {name!r}")
-        sink["enabled"] = bool(enabled)
-        changes.append(f"audit_sinks[{name}].enabled = {bool(enabled)}")
+        if target == "otel":
+            otel = raw.setdefault("otel", {})
+            otel["enabled"] = bool(enabled)
+            changes.append(f"otel.enabled = {bool(enabled)}")
+        else:
+            sink = _find_sink(raw, name)
+            if sink is None:
+                raise ValueError(f"no audit sink named {name!r}")
+            sink["enabled"] = bool(enabled)
+            changes.append(f"audit_sinks[{name}].enabled = {bool(enabled)}")
 
-    _write_yaml(cfg_path, raw)
+        _write_yaml(cfg_path, raw)
     return WriteResult(
         name=name,
         target=target,
@@ -330,35 +333,36 @@ def remove_destination(name: str, data_dir: str) -> WriteResult:
     ``disable otel`` explicitly to keep the config stable.
     """
     cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
-    raw = _load_yaml(cfg_path)
-    changes: list[str] = []
+    with locked_config_yaml(cfg_path):
+        raw = _load_yaml(cfg_path)
+        changes: list[str] = []
 
-    if name == "otel":
-        otel = raw.get("otel")
-        if isinstance(otel, dict):
-            otel["enabled"] = False
-            changes.append("otel.enabled = False (use `remove` only to disable)")
+        if name == "otel":
+            otel = raw.get("otel")
+            if isinstance(otel, dict):
+                otel["enabled"] = False
+                changes.append("otel.enabled = False (use `remove` only to disable)")
+            else:
+                changes.append("otel block absent — nothing to do")
+            _write_yaml(cfg_path, raw)
+            return WriteResult(
+                name=name, target="otel", preset_id="",
+                yaml_changes=changes, dotenv_changes=[], warnings=[], dry_run=False,
+            )
+
+        sinks = raw.get("audit_sinks")
+        if not isinstance(sinks, list):
+            raise ValueError(f"no audit sink named {name!r}")
+        new = [s for s in sinks if isinstance(s, dict) and s.get("name") != name]
+        if len(new) == len(sinks):
+            raise ValueError(f"no audit sink named {name!r}")
+        if new:
+            raw["audit_sinks"] = new
         else:
-            changes.append("otel block absent — nothing to do")
+            raw.pop("audit_sinks", None)
+        changes.append(f"audit_sinks[{name}] removed")
+
         _write_yaml(cfg_path, raw)
-        return WriteResult(
-            name=name, target="otel", preset_id="",
-            yaml_changes=changes, dotenv_changes=[], warnings=[], dry_run=False,
-        )
-
-    sinks = raw.get("audit_sinks")
-    if not isinstance(sinks, list):
-        raise ValueError(f"no audit sink named {name!r}")
-    new = [s for s in sinks if isinstance(s, dict) and s.get("name") != name]
-    if len(new) == len(sinks):
-        raise ValueError(f"no audit sink named {name!r}")
-    if new:
-        raw["audit_sinks"] = new
-    else:
-        raw.pop("audit_sinks", None)
-    changes.append(f"audit_sinks[{name}] removed")
-
-    _write_yaml(cfg_path, raw)
     return WriteResult(
         name=name, target="audit_sinks", preset_id="",
         yaml_changes=changes, dotenv_changes=[], warnings=[], dry_run=False,
@@ -384,14 +388,7 @@ def _load_yaml(path: str) -> dict[str, Any]:
 
 
 def _write_yaml(path: str, data: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    # Write to a temp file and rename so a crash mid-write cannot leave
-    # a half-written config.yaml (which would brick the Go gateway on
-    # next reload).
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-    os.replace(tmp, path)
+    write_config_yaml_secure(path, data)
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +436,13 @@ def _apply_otel_preset(
         existing_headers["x-honeycomb-dataset"] = inputs["dataset"]
     if existing_headers:
         otel["headers"] = existing_headers
+    if preset.otel_tls_insecure:
+        tls = otel.setdefault("tls", {})
+        if not isinstance(tls, dict):
+            warnings.append("otel.tls: replaced non-mapping value")
+            tls = {}
+            otel["tls"] = tls
+        tls["insecure"] = True
 
     signals_set = set(signals)
     for sig in ("traces", "metrics", "logs"):
@@ -519,6 +523,16 @@ def _build_sink_entry(
     enabled: bool,
 ) -> dict[str, Any]:
     kind = preset.sink_kind or ""
+    # The generic ``otlp`` preset declares target=otel and sink_kind=None
+    # because its primary mode is the gateway exporter. When a caller
+    # supplies ``target_override="audit_sinks"``, ``_resolve_target``
+    # routes us here without setting sink_kind on the (frozen) preset.
+    # Coerce to ``otlp_logs`` — the only valid sink shape for this
+    # preset — so the rest of the builder picks the right block. See
+    # ``_resolve_target``'s "coerce to otlp_logs" comment for the
+    # contract this completes.
+    if not kind and preset.id == "otlp":
+        kind = _SINK_KIND_OTLP_LOGS
     base: dict[str, Any] = {
         "name": name,
         "kind": kind,
@@ -537,14 +551,38 @@ def _build_sink_entry(
             host = inputs.get("host", "localhost")
             port = inputs.get("port", "8088")
             endpoint = f"https://{host}:{port}/services/collector/event"
-        base["splunk_hec"] = {
+        if not endpoint.lower().startswith(("http://", "https://")):
+            raise ValueError(
+                f"splunk HEC endpoint must start with http:// or https:// (got {endpoint!r})",
+            )
+        # / TLS verification is now ON by default on the
+        # Go sink. Presets that historically pointed at a self-signed
+        # local HEC (the docker-compose ``splunk-hec`` flavour) opt
+        # OUT explicitly via ``insecure_skip_verify=true``. Production
+        # presets (``splunk-enterprise``) omit the flag entirely so the
+        # secure default wins.
+        insecure_default = preset.id != "splunk-enterprise"
+        if "verify_tls" in inputs:
+            # Legacy callers that still pass verify_tls=true|false
+            # are mapped onto the new insecure_skip_verify field.
+            insecure = not _parse_bool(inputs.get("verify_tls", "true"))
+        else:
+            insecure = _parse_bool(inputs.get(
+                "insecure_skip_verify",
+                "true" if insecure_default else "false",
+            ))
+        block: dict[str, Any] = {
             "endpoint": endpoint,
             "token_env": preset.token_env,
             "index": inputs.get("index", "defenseclaw"),
             "source": inputs.get("source", "defenseclaw"),
             "sourcetype": inputs.get("sourcetype", "_json"),
-            "verify_tls": _parse_bool(inputs.get("verify_tls", "false")),
         }
+        # Only emit the field when it diverges from the secure default
+        # so production sinks don't carry a redundant negative knob.
+        if insecure:
+            block["insecure_skip_verify"] = True
+        base["splunk_hec"] = block
     elif kind == _SINK_KIND_OTLP_LOGS:
         endpoint = inputs.get("endpoint", "").strip()
         protocol = (inputs.get("protocol") or preset.otel_protocol or "grpc").strip()
@@ -559,6 +597,8 @@ def _build_sink_entry(
         headers = dict(preset.otel_headers)
         if headers:
             block["headers"] = headers
+        if inputs.get("insecure"):
+            block["insecure"] = _parse_bool(inputs.get("insecure", "false"))
         # Allow an explicit url_path input to override per-signal paths
         # (logs-only case for HTTP protocol).
         if inputs.get("url_path"):
@@ -650,9 +690,17 @@ def _destination_name(
         return override
     # Deterministic default names — short, human-readable, and unique
     # enough per-host that a user can pick them out of a list.
-    if preset.id == "splunk-hec":
+    if preset.id in ("splunk-hec", "splunk-enterprise"):
         host = inputs.get("host", "localhost")
-        return f"splunk-hec-{_slug(host)}"
+        if preset.id == "splunk-enterprise":
+            endpoint = inputs.get("endpoint", "")
+            if "://" in endpoint:
+                from urllib.parse import urlparse
+
+                host = urlparse(endpoint).hostname or host
+            elif endpoint:
+                host = endpoint.split("/", 1)[0].split(":", 1)[0] or host
+        return f"{preset.id}-{_slug(host)}"
     if preset.id == "webhook":
         url = inputs.get("url", "")
         host = url.split("/")[2] if "://" in url else "webhook"
@@ -800,6 +848,10 @@ def _sink_preset_id(sink: dict[str, Any]) -> str:
     """
     kind = sink.get("kind", "")
     if kind == _SINK_KIND_SPLUNK_HEC:
+        name = str(sink.get("name", "") or "")
+        endpoint = str((sink.get("splunk_hec") or {}).get("endpoint", "") or "")
+        if name.startswith("splunk-enterprise-") or _is_remote_splunk_endpoint(endpoint):
+            return "splunk-enterprise"
         return "splunk-hec"
     if kind == _SINK_KIND_HTTP_JSONL:
         return "webhook"
@@ -818,6 +870,16 @@ def _sink_preset_id(sink: dict[str, Any]) -> str:
             return "splunk-o11y"
         return "otlp"
     return ""
+
+
+def _is_remote_splunk_endpoint(endpoint: str) -> bool:
+    if not endpoint:
+        return False
+    from urllib.parse import urlparse
+
+    parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
+    host = (parsed.hostname or "").lower()
+    return host not in ("", "localhost", "127.0.0.1", "::1")
 
 
 # ---------------------------------------------------------------------------
@@ -848,6 +910,22 @@ def _load_dotenv(path: str) -> dict[str, str]:
 def _write_dotenv(path: str, entries: dict[str, str]) -> None:
     lines = [f"{k}={v}\n" for k, v in sorted(entries.items())]
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_NOFOLLOW (where available) refuses to open through a symlink so a
+    # pre-planted symlink cannot redirect the secret write elsewhere.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w") as f:
+        # The 0o600 mode argument to os.open only applies when the file is
+        # newly CREATED — POSIX preserves the existing mode on O_TRUNC. A
+        # pre-existing group/world-readable dotenv would otherwise keep
+        # its loose perms and expose the freshly written observability
+        # token (F-0442), so explicitly tighten the descriptor to 0o600.
+        try:
+            os.fchmod(f.fileno(), 0o600)
+        except (AttributeError, OSError):
+            # os.fchmod is POSIX-only; fall back to a path-based chmod.
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
         f.writelines(lines)

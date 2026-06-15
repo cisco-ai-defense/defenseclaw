@@ -30,22 +30,79 @@ import (
 	"time"
 )
 
+// circuitState represents the three states of the HEC circuit breaker.
+type circuitState int
+
+const (
+	// circuitClosed is the normal operating state — sends are attempted.
+	circuitClosed circuitState = iota
+	// circuitOpen means consecutive failures have exceeded the threshold.
+	// All sends are skipped until the cooldown period elapses.
+	circuitOpen
+	// circuitHalfOpen means the cooldown has elapsed and a single probe
+	// send is allowed through to test recovery. Success closes the circuit;
+	// failure re-opens it and resets the cooldown timer.
+	circuitHalfOpen
+)
+
+func (c circuitState) String() string {
+	switch c {
+	case circuitClosed:
+		return "closed"
+	case circuitOpen:
+		return "open"
+	case circuitHalfOpen:
+		return "half-open"
+	default:
+		return "unknown"
+	}
+}
+
 // SplunkHECConfig holds Splunk HTTP Event Collector wiring for one sink.
 // All fields are operator-supplied; nothing is sourced from environment
 // hardcoding (token comes from cfg.Token via env-resolution at the
 // config layer).
 type SplunkHECConfig struct {
-	Name           string
-	Endpoint       string
-	Token          string
-	Index          string
-	Source         string
-	SourceType     string
-	VerifyTLS      bool
-	BatchSize      int
-	FlushIntervalS int
-	TimeoutS       int
-	Filter         SinkFilter
+	Name       string
+	Endpoint   string
+	Token      string
+	Index      string
+	Source     string
+	SourceType string
+	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-the
+	// transport defaulted to InsecureSkipVerify and operators had to set
+	// verify_tls=true to enable certificate validation. The field is
+	// retained for backward compatibility — when present and true it is
+	// honoured (no-op against the new secure default); when present and
+	// false it is IGNORED (the secure default wins) and the user is
+	// directed to InsecureSkipVerify.
+	VerifyTLS bool
+	// InsecureSkipVerify is the fix: TLS verification is ON by
+	// default and operators must explicitly set this true to disable it
+	// (e.g. dev environments with self-signed HEC). Closes the silent
+	// downgrade where omitting verify_tls leaked the HEC token to any
+	// MITM peer.
+	InsecureSkipVerify bool
+	BatchSize          int
+	FlushIntervalS     int
+	TimeoutS           int
+	Filter             SinkFilter
+
+	// Retry configuration. MaxRetries is the number of additional
+	// attempts after the first failure (0 = no retries, matches
+	// previous behaviour). RetryBaseDelayS is the initial backoff
+	// delay in seconds; each retry doubles it (exponential backoff).
+	// Defaults: MaxRetries=3, RetryBaseDelayS=1.
+	MaxRetries      int
+	RetryBaseDelayS int
+
+	// Circuit breaker configuration. CircuitBreakerThreshold is the
+	// number of consecutive send failures before the circuit opens.
+	// CircuitBreakerCooldownS is how long (in seconds) the circuit
+	// stays open before moving to half-open for a probe attempt.
+	// Defaults: CircuitBreakerThreshold=5, CircuitBreakerCooldownS=60.
+	CircuitBreakerThreshold int
+	CircuitBreakerCooldownS int
 
 	// SourceTypeOverrides maps a canonical audit action (e.g.
 	// "llm-judge-response") to a dedicated Splunk sourcetype
@@ -72,11 +129,15 @@ func DefaultSourceTypeOverrides() map[string]string {
 		// Judge events go to their own sourcetype so the Splunk
 		// dashboards can pivot on model + verdict + confidence
 		// without colliding with regular audit lines.
+		// Key mirrors audit.ActionLLMJudgeResponse; this package
+		// cannot import internal/audit without creating a cycle.
 		"llm-judge-response": "defenseclaw:judge",
 		// Guardrail verdicts are the single highest-value audit
 		// signal for SOC teams; giving them a dedicated
 		// sourcetype lets search-head admins pin retention
 		// independently of the generic audit stream.
+		// Key mirrors audit.ActionGuardrailVerdict; this package
+		// cannot import internal/audit without creating a cycle.
 		"guardrail-verdict": "defenseclaw:verdict",
 	}
 }
@@ -84,14 +145,26 @@ func DefaultSourceTypeOverrides() map[string]string {
 // SplunkHECSink is the refactored Splunk HEC client extracted from the
 // legacy internal/audit/splunk.go. Behaviour is intentionally identical
 // (HEC event format, batching, sync flush) so existing Splunk dashboards
-// keep working — the only change is config plumbing.
+// keep working — the only change is config plumbing and the addition of
+// exponential-backoff retries and a circuit breaker.
 type SplunkHECSink struct {
 	cfg    SplunkHECConfig
 	client *http.Client
-	mu     sync.Mutex
-	batch  []splunkEvent
+
+	// batch state
+	mu    sync.Mutex
+	batch []splunkEvent
+
+	// flush loop
 	ticker *time.Ticker
 	done   chan struct{}
+
+	// circuit breaker state — protected by cbMu so it never
+	// contends with the batch mutex on the hot path.
+	cbMu       sync.Mutex
+	cbState    circuitState
+	cbFailures int       // consecutive failures since last success
+	cbOpenedAt time.Time // when the circuit last opened
 }
 
 type splunkEvent struct {
@@ -102,6 +175,8 @@ type splunkEvent struct {
 	Index      string  `json:"index,omitempty"`
 	Event      any     `json:"event"`
 }
+
+const structuredSplunkHECEventsKey = "_splunk_hec_events"
 
 // splunkAuditEvent is the inner payload Splunk indexes. Mirrors the
 // pre-migration shape so search queries (`source=defenseclaw action=…`)
@@ -123,6 +198,7 @@ type splunkAuditEvent struct {
 	// macros.conf, Cisco SIEM AgentWatch) can key on them without
 	// reparsing `details`. Matches the contract in sinks.Event.
 	SessionID string `json:"session_id,omitempty"`
+	TurnID    string `json:"turn_id,omitempty"`
 	AgentName string `json:"agent_name,omitempty"`
 	// AgentID (configured logical id) and SidecarInstanceID
 	// (per-process UUID) are both part of the v7 three-tier identity
@@ -131,14 +207,23 @@ type splunkAuditEvent struct {
 	// an earlier revision of this struct, which the I1 integration
 	// test (TestCorrelation_RequestEnvelopeLandsOnAuditAndSink) now
 	// pins in place.
-	AgentID           string         `json:"agent_id,omitempty"`
-	AgentInstanceID   string         `json:"agent_instance_id,omitempty"`
-	SidecarInstanceID string         `json:"sidecar_instance_id,omitempty"`
-	PolicyID          string         `json:"policy_id,omitempty"`
-	DestinationApp    string         `json:"destination_app,omitempty"`
-	ToolName          string         `json:"tool_name,omitempty"`
-	ToolID            string         `json:"tool_id,omitempty"`
-	Structured        map[string]any `json:"structured,omitempty"`
+	AgentID           string `json:"agent_id,omitempty"`
+	AgentInstanceID   string `json:"agent_instance_id,omitempty"`
+	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
+	PolicyID          string `json:"policy_id,omitempty"`
+	DestinationApp    string `json:"destination_app,omitempty"`
+	ToolName          string `json:"tool_name,omitempty"`
+	ToolID            string `json:"tool_id,omitempty"`
+	// Connector is the hook connector identity (codex/claudecode/…) on
+	// multi-connector installs, surfaced top-level so Splunk searches and
+	// dashboards can `... connector="codex"` without coalescing from the
+	// structured payload. Empty for non-connector rows.
+	Connector     string         `json:"connector,omitempty"`
+	SchemaVersion int            `json:"schema_version,omitempty"`
+	ContentHash   string         `json:"content_hash,omitempty"`
+	Generation    uint64         `json:"generation,omitempty"`
+	BinaryVersion string         `json:"binary_version,omitempty"`
+	Structured    map[string]any `json:"structured,omitempty"`
 }
 
 // NewSplunkHECSink validates config and returns a ready-to-use sink. The
@@ -166,6 +251,26 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 		cfg.SourceType = "_json"
 	}
 
+	// Retry defaults: 3 retries with 1 s base delay gives a worst-case
+	// per-flush delay of 1+2+4 = 7 s before giving up and re-queuing,
+	// which fits comfortably inside a 10 s HTTP timeout.
+	if cfg.MaxRetries <= 0 {
+		cfg.MaxRetries = 3
+	}
+	if cfg.RetryBaseDelayS <= 0 {
+		cfg.RetryBaseDelayS = 1
+	}
+
+	// Circuit breaker defaults: open after 5 consecutive failures,
+	// probe again after 60 s. This prevents hammering a down HEC
+	// endpoint on every flush tick.
+	if cfg.CircuitBreakerThreshold <= 0 {
+		cfg.CircuitBreakerThreshold = 5
+	}
+	if cfg.CircuitBreakerCooldownS <= 0 {
+		cfg.CircuitBreakerCooldownS = 60
+	}
+
 	// Phase 3: every sink gets the canonical per-event
 	// sourcetype split unless the operator has already supplied
 	// their own map (which wins so customer Splunk naming
@@ -181,14 +286,14 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 		cfg.SourceTypeOverrides = merged
 	}
 
+	// TLS certificate verification is ON by default. Operators
+	// must opt INTO insecurity via InsecureSkipVerify. The legacy
+	// VerifyTLS field is honoured only when explicitly true (a no-op
+	// since the new default is secure); explicit false is ignored.
+	insecure := cfg.InsecureSkipVerify
 	transport := &http.Transport{
-		// Splunk HEC commonly runs with a self-signed cert in dev; keep
-		// the same behaviour as the legacy forwarder. Operators must
-		// explicitly opt in to TLS verification via verify_tls=true. This
-		// is acceptable because most production deployments terminate
-		// HEC behind a load balancer with a real cert.
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: !cfg.VerifyTLS,
+			InsecureSkipVerify: insecure,
 			MinVersion:         tls.VersionTLS12,
 		},
 	}
@@ -199,7 +304,8 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 			Transport: transport,
 			Timeout:   time.Duration(cfg.TimeoutS) * time.Second,
 		},
-		done: make(chan struct{}),
+		done:    make(chan struct{}),
+		cbState: circuitClosed,
 	}
 
 	if cfg.FlushIntervalS > 0 {
@@ -207,16 +313,13 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 		go s.flushLoop()
 	}
 
-	// Production HEC endpoints sit behind a real certificate. Warn
-	// when verify_tls is off while the endpoint scheme is https —
-	// the dev-self-signed default is kept but operators should see
-	// it in the boot logs so silent downgrades don't slip through
-	// review. URL schemes are case-insensitive per RFC 3986 §3.1,
-	// so we normalize the prefix before comparing to avoid silent
-	// misses on e.g. "Https://" or "HTTPS://".
-	if !cfg.VerifyTLS && strings.HasPrefix(strings.ToLower(cfg.Endpoint), "https://") {
+	// Production HEC endpoints sit behind a real certificate. // loud warning when verification is explicitly disabled and the
+	// endpoint is HTTPS — operators must see this in boot logs so
+	// silent downgrades don't slip through review. URL schemes are
+	// case-insensitive per RFC 3986 §3.1, so we normalize the prefix.
+	if insecure && strings.HasPrefix(strings.ToLower(cfg.Endpoint), "https://") {
 		fmt.Fprintf(os.Stderr,
-			"warning: audit sink %q (splunk_hec): TLS certificate verification disabled for %s — set verify_tls=true for production\n",
+			"warning: audit sink %q (splunk_hec): TLS certificate verification DISABLED for %s — remove insecure_skip_verify=true for production\n",
 			cfg.Name, cfg.Endpoint)
 	}
 
@@ -225,6 +328,69 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 
 func (s *SplunkHECSink) Name() string { return s.cfg.Name }
 func (s *SplunkHECSink) Kind() string { return "splunk_hec" }
+
+// CircuitState returns the current circuit breaker state. Exposed for
+// use by defenseclaw doctor and status reporting — callers must not
+// rely on the value remaining stable after the call returns.
+func (s *SplunkHECSink) CircuitState() string {
+	s.cbMu.Lock()
+	defer s.cbMu.Unlock()
+	return s.cbState.String()
+}
+
+// cbAllow checks the circuit breaker and returns true if the caller
+// should attempt a send. It transitions open→half-open when the
+// cooldown has elapsed. Must be called with cbMu held.
+func (s *SplunkHECSink) cbAllow() bool {
+	switch s.cbState {
+	case circuitClosed:
+		return true
+	case circuitHalfOpen:
+		// Only one probe is allowed at a time; the caller that gets
+		// true is responsible for calling cbRecord with the outcome.
+		return true
+	case circuitOpen:
+		cooldown := time.Duration(s.cfg.CircuitBreakerCooldownS) * time.Second
+		if time.Since(s.cbOpenedAt) >= cooldown {
+			s.cbState = circuitHalfOpen
+			fmt.Fprintf(os.Stderr,
+				"info: audit sink %q (splunk_hec): circuit half-open — probing HEC after cooldown\n",
+				s.cfg.Name)
+			return true
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+// cbRecord updates circuit breaker state after a send attempt.
+// success=true closes or keeps-closed the circuit; success=false
+// increments the failure counter and may open the circuit.
+// Must be called with cbMu held.
+func (s *SplunkHECSink) cbRecord(success bool) {
+	if success {
+		if s.cbState != circuitClosed {
+			fmt.Fprintf(os.Stderr,
+				"info: audit sink %q (splunk_hec): circuit closed — HEC recovered\n",
+				s.cfg.Name)
+		}
+		s.cbState = circuitClosed
+		s.cbFailures = 0
+		return
+	}
+
+	s.cbFailures++
+	if s.cbState == circuitHalfOpen || s.cbFailures >= s.cfg.CircuitBreakerThreshold {
+		if s.cbState != circuitOpen {
+			fmt.Fprintf(os.Stderr,
+				"warning: audit sink %q (splunk_hec): circuit opened after %d consecutive failures — suppressing sends for %ds\n",
+				s.cfg.Name, s.cbFailures, s.cfg.CircuitBreakerCooldownS)
+		}
+		s.cbState = circuitOpen
+		s.cbOpenedAt = time.Now()
+	}
+}
 
 // sourceTypeFor picks the wire sourcetype for an event. Per-action
 // overrides win over the sink-wide default so operators can keep a
@@ -252,6 +418,7 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 	if !s.cfg.Filter.Matches(e) {
 		return nil
 	}
+	structured, extraEvents := splitStructuredSplunkHECEvents(e.Structured)
 	se := splunkEvent{
 		Time:       float64(e.Timestamp.Unix()) + float64(e.Timestamp.Nanosecond())/1e9,
 		Source:     s.cfg.Source,
@@ -270,6 +437,7 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			TraceID:           e.TraceID,
 			RequestID:         e.RequestID,
 			SessionID:         e.SessionID,
+			TurnID:            e.TurnID,
 			AgentName:         e.AgentName,
 			AgentID:           e.AgentID,
 			AgentInstanceID:   e.AgentInstanceID,
@@ -278,12 +446,25 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			DestinationApp:    e.DestinationApp,
 			ToolName:          e.ToolName,
 			ToolID:            e.ToolID,
-			Structured:        e.Structured,
+			Connector:         e.Connector,
+			SchemaVersion:     e.SchemaVersion,
+			ContentHash:       e.ContentHash,
+			Generation:        e.Generation,
+			BinaryVersion:     e.BinaryVersion,
+			Structured:        structured,
 		},
 	}
+	events := make([]splunkEvent, 0, 1+len(extraEvents))
+	events = append(events, se)
+	for i := range extraEvents {
+		if extraEvents[i].Index == "" {
+			extraEvents[i].Index = s.cfg.Index
+		}
+	}
+	events = append(events, extraEvents...)
 
 	s.mu.Lock()
-	s.batch = append(s.batch, se)
+	s.batch = append(s.batch, events...)
 	needsFlush := len(s.batch) >= s.cfg.BatchSize
 	s.mu.Unlock()
 
@@ -291,6 +472,81 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 		return s.Flush(ctx)
 	}
 	return nil
+}
+
+func splitStructuredSplunkHECEvents(structured map[string]any) (map[string]any, []splunkEvent) {
+	if len(structured) == 0 {
+		return structured, nil
+	}
+	raw, ok := structured[structuredSplunkHECEventsKey]
+	if !ok {
+		return structured, nil
+	}
+	cleaned := make(map[string]any, len(structured)-1)
+	for k, v := range structured {
+		if k != structuredSplunkHECEventsKey {
+			cleaned[k] = v
+		}
+	}
+	if len(cleaned) == 0 {
+		cleaned = nil
+	}
+
+	items := structuredSplunkHECEventItems(raw)
+	if len(items) == 0 {
+		return cleaned, nil
+	}
+	events := make([]splunkEvent, 0, len(items))
+	for _, item := range items {
+		event, ok := item["event"].(map[string]any)
+		if !ok || len(event) == 0 {
+			continue
+		}
+		events = append(events, splunkEvent{
+			Time:       splunkFloat(item["time"]),
+			Host:       splunkString(item["host"]),
+			Source:     splunkString(item["source"]),
+			SourceType: splunkString(item["sourcetype"]),
+			Index:      splunkString(item["index"]),
+			Event:      event,
+		})
+	}
+	return cleaned, events
+}
+
+func structuredSplunkHECEventItems(raw any) []map[string]any {
+	switch items := raw.(type) {
+	case []map[string]any:
+		return items
+	case []any:
+		out := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			if m, ok := item.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func splunkString(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+func splunkFloat(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case int64:
+		return float64(x)
+	case int:
+		return float64(x)
+	default:
+		return 0
+	}
 }
 
 func (s *SplunkHECSink) flushLoop() {
@@ -323,11 +579,11 @@ func (s *SplunkHECSink) Flush(ctx context.Context) error {
 		}
 	}
 
-	if err := s.sendHEC(ctx, buf.Bytes()); err != nil {
-		// Bounded retry. Re-queue the failed batch so the next
-		// flush retries delivery, but cap the queue so an offline
-		// HEC collector cannot grow unbounded RSS. Without this
-		// cap a weekend outage ends in OOM-kill.
+	if err := s.sendWithRetry(ctx, buf.Bytes()); err != nil {
+		// Re-queue the failed batch so the next flush retries
+		// delivery, but cap the queue so an offline HEC collector
+		// cannot grow unbounded RSS. Without this cap a weekend
+		// outage ends in OOM-kill.
 		s.mu.Lock()
 		maxQueue := maxHECQueue(s.cfg.BatchSize)
 		combined := append(pending, s.batch...)
@@ -345,6 +601,63 @@ func (s *SplunkHECSink) Flush(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// sendWithRetry wraps sendHEC with exponential backoff and circuit
+// breaker logic. It will attempt up to 1+MaxRetries sends, doubling
+// the delay between each attempt starting at RetryBaseDelayS seconds.
+//
+// Circuit breaker: if the circuit is open (too many consecutive
+// failures) the payload is not sent and an error is returned
+// immediately so the batch is re-queued for the next flush. The
+// circuit moves to half-open after CircuitBreakerCooldownS seconds
+// and allows a single probe through to test recovery.
+func (s *SplunkHECSink) sendWithRetry(ctx context.Context, payload []byte) error {
+	s.cbMu.Lock()
+	allowed := s.cbAllow()
+	s.cbMu.Unlock()
+
+	if !allowed {
+		return fmt.Errorf("splunk_hec: circuit open — skipping send, HEC endpoint unreachable")
+	}
+
+	var lastErr error
+	delay := time.Duration(s.cfg.RetryBaseDelayS) * time.Second
+
+	for attempt := 0; attempt <= s.cfg.MaxRetries; attempt++ {
+		if attempt > 0 {
+			// Respect context cancellation during backoff sleep.
+			select {
+			case <-ctx.Done():
+				s.cbMu.Lock()
+				s.cbRecord(false)
+				s.cbMu.Unlock()
+				return fmt.Errorf("splunk_hec: context cancelled during retry backoff: %w", ctx.Err())
+			case <-time.After(delay):
+			}
+			delay *= 2
+		}
+
+		lastErr = s.sendHEC(ctx, payload)
+		if lastErr == nil {
+			s.cbMu.Lock()
+			s.cbRecord(true)
+			s.cbMu.Unlock()
+			return nil
+		}
+
+		fmt.Fprintf(os.Stderr,
+			"warning: audit sink %q (splunk_hec): send attempt %d/%d failed: %v\n",
+			s.cfg.Name, attempt+1, s.cfg.MaxRetries+1, lastErr)
+	}
+
+	// All attempts exhausted — record the failure with the circuit breaker.
+	s.cbMu.Lock()
+	s.cbRecord(false)
+	s.cbMu.Unlock()
+
+	return fmt.Errorf("splunk_hec: all %d send attempts failed, last error: %w",
+		s.cfg.MaxRetries+1, lastErr)
 }
 
 // maxHECQueue returns the upper bound on the in-memory retry

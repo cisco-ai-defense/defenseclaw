@@ -203,6 +203,7 @@ func TestCorrelation_RequestIDSharedAcrossJSONLSQLiteAndSplunk(t *testing.T) {
 		}
 		if match == nil {
 			t.Fatal("no llm-judge-response row in audit_events")
+			return
 		}
 		if match.RequestID != wantRequestID {
 			t.Fatalf("sqlite request_id=%q want %q", match.RequestID, wantRequestID)
@@ -509,7 +510,18 @@ func TestCorrelation_RequestEnvelopeLandsOnAuditAndSink(t *testing.T) {
 		// delegates envelope propagation to the logger. A
 		// regression that reverts this to LogAction (context-free)
 		// would fail the sqlite/sink assertions below.
-		if err := logger.LogActionCtx(r.Context(),
+		//
+		// ("CorrelationMiddleware mints
+		// unauthenticated agent sessions") closure: this handler
+		// stands in for the gateway's authenticated paths. After
+		// the (mocked) auth check succeeds, it must call
+		// PromoteSessionIfAuthenticated so the previously peeked
+		// agent identity is upgraded to a stable session-scoped
+		// uuid before any audit row is written. Production code
+		// in proxy.go / api.go does exactly this on the success
+		// branch of authenticateRequest.
+		ctx := PromoteSessionIfAuthenticated(r.Context())
+		if err := logger.LogActionCtx(ctx,
 			"guardrail-inspection", "mcp://example/tool",
 			"integration probe"); err != nil {
 			t.Errorf("LogActionCtx: %v", err)
@@ -521,6 +533,14 @@ func TestCorrelation_RequestEnvelopeLandsOnAuditAndSink(t *testing.T) {
 	handler := requestIDMiddleware(CorrelationMiddleware(reg)(inner))
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", nil)
+	// Loopback RemoteAddr matches the trust gate the
+	// CorrelationMiddleware uses to admit inbound traceparent into
+	// the audit envelope (H1 hardening): only loopback callers may
+	// declare a trace id, every other caller falls through to the
+	// local OTel span. Hook scripts and the LLM forward-proxy hop
+	// always run from 127.0.0.1, so this matches the production
+	// trust boundary for trace splice.
+	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set(SessionIDHeader, "sess-i1")
 	req.Header.Set(RequestIDHeader, "req-i1-envelope-0001")
 	req.Header.Set("traceparent",
@@ -560,6 +580,7 @@ func TestCorrelation_RequestEnvelopeLandsOnAuditAndSink(t *testing.T) {
 	}
 	if match == nil {
 		t.Fatal("no guardrail-inspection row in audit_events")
+		return
 	}
 	// The middleware pulls RunID from DEFENSECLAW_RUN_ID, SessionID
 	// from the header, TraceID from traceparent, and agent identity

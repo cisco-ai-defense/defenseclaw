@@ -12,13 +12,22 @@ from pathlib import Path
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE, is_known_action
 from defenseclaw.context import AppContext, pass_context
 
 
 @click.group("audit")
 def audit() -> None:
-    """Audit trail helpers (activity logging)."""
+    """Audit trail helpers (activity logging).
+
+    \b
+    Exporting the audit log (incl. per-connector filtering) lives on the
+    gateway binary, not here:
+        defenseclaw-gateway audit export [--connector X]
+    This 'defenseclaw audit' group only records operator/config activity
+    (see 'log-activity').
+    """
 
 
 @audit.command("log-activity")
@@ -64,4 +73,4 @@ def audit_log_activity(app: AppContext, payload_file: Path) -> None:
         version_to=str(data.get("version_to") or ""),
         severity=str(data.get("severity") or "INFO"),
     )
-    click.echo("activity logged", file=sys.stderr)
+    click.echo(ux._style("activity logged", fg="green"), file=sys.stderr)

@@ -34,11 +34,21 @@ type ListEntry struct {
 }
 
 // ScanResultInput is the scan result subset needed by OPA.
+//
+// hardening (S2.scanners): ExitCode and ScanError are
+// surfaced into the policy input so admission decisions cannot
+// silently treat a failed scan as clean. Callers building this
+// input from a ScanResult MUST copy ScanResult.ExitCode and
+// ScanResult.ScanError into these fields. The fallback evaluator
+// rejects any input with ScanError set or ExitCode != 0; Rego
+// policies SHOULD do the same with `input.scan_result.exit_code != 0`.
 type ScanResultInput struct {
 	MaxSeverity   string         `json:"max_severity"`
 	TotalFindings int            `json:"total_findings"`
 	ScannerName   string         `json:"scanner_name,omitempty"`
 	Findings      []FindingInput `json:"findings,omitempty"`
+	ExitCode      int            `json:"exit_code,omitempty"`
+	ScanError     string         `json:"scan_error,omitempty"`
 }
 
 // FindingInput is a single finding passed to OPA for fine-grained policy decisions.
@@ -75,6 +85,21 @@ type GuardrailInput struct {
 	LocalResult   *GuardrailScanResult `json:"local_result"`
 	CiscoResult   *GuardrailScanResult `json:"cisco_result"`
 	ContentLength int                  `json:"content_length"`
+	// HILT carries the live human-in-the-loop configuration from
+	// config.yaml so the Rego policy can decide `confirm` vs `alert`
+	// without needing data.json to be kept in sync. When non-nil the
+	// Rego policy reads `input.hilt`; when nil it falls back to
+	// `data.guardrail.hilt` for backward compatibility with callers
+	// that still drive policies through `opa eval` against data.json.
+	HILT *GuardrailHILTInput `json:"hilt,omitempty"`
+}
+
+// GuardrailHILTInput is the gateway-provided HILT view passed to the
+// guardrail policy. Mirrors `config.HILTConfig` but kept in `internal/policy`
+// to avoid an import cycle between policy and config.
+type GuardrailHILTInput struct {
+	Enabled     bool   `json:"enabled"`
+	MinSeverity string `json:"min_severity"`
 }
 
 // GuardrailOutput is the OPA-determined verdict returned to the Python guardrail.

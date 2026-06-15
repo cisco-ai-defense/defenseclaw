@@ -53,6 +53,7 @@ func TestWebhookCircuitBreakerOpensAndRecovers(t *testing.T) {
 	})
 	if d == nil {
 		t.Fatal("dispatcher nil")
+		return
 	}
 	d.BindObservability(otelProv)
 	d.retryBackoff = time.Millisecond

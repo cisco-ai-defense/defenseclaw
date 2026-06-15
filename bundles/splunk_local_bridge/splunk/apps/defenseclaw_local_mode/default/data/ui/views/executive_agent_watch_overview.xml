@@ -1,0 +1,266 @@
+<form version="1.1" theme="dark">
+  <label>Executive Agent Watch Overview</label>
+  <description>High-impact Splunk-local landing view for Agent Watch demos: discovery, activity, policy outcomes, findings, and session-level risk.</description>
+
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="time">
+      <label>Executive time window</label>
+      <default>
+        <earliest>-24h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="text" token="connector" searchWhenChanged="true">
+      <label>Connector</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+  </fieldset>
+
+  <row>
+    <panel>
+      <html>
+        <style>
+          .dashboard-body {
+            background: radial-gradient(circle at top left, #17345c 0%, #111827 38%, #060b14 100%) !important;
+          }
+          .agentwatch-hero {
+            border-radius: 18px;
+            padding: 26px 30px;
+            background: linear-gradient(135deg, rgba(0,112,192,0.95), rgba(74,22,128,0.88) 55%, rgba(14,116,144,0.78));
+            color: #ffffff;
+            box-shadow: 0 18px 45px rgba(0,0,0,0.35);
+            border: 1px solid rgba(255,255,255,0.18);
+          }
+          .agentwatch-hero h1 {
+            margin: 0;
+            font-size: 32px;
+            line-height: 1.1;
+            letter-spacing: 0;
+            font-weight: 800;
+          }
+          .agentwatch-hero p {
+            margin: 10px 0 0 0;
+            font-size: 15px;
+            max-width: 1120px;
+            color: #e7eefc;
+          }
+          .agentwatch-chip-row {
+            margin-top: 16px;
+          }
+          .agentwatch-chip {
+            display: inline-block;
+            margin-right: 8px;
+            margin-bottom: 8px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.13);
+            border: 1px solid rgba(255,255,255,0.20);
+            font-size: 12px;
+            color: #ffffff;
+          }
+          .agentwatch-callout {
+            padding: 12px 14px;
+            border-radius: 14px;
+            background: rgba(255,255,255,0.08);
+            color: #ecfeff;
+            border: 1px solid rgba(125,211,252,0.25);
+          }
+          .agentwatch-note {
+            color: #cbd5e1;
+            font-size: 12px;
+          }
+        </style>
+        <div class="agentwatch-hero">
+          <h1>Agent Watch - Executive Mission Control</h1>
+          <p>
+            Splunk-local executive overview for agentic security demos. This page compresses discovery,
+            connector behavior, policy decisions, findings, HITL approvals, and session-level risk into one
+            polished landing view before drilling into the detailed dashboards.
+          </p>
+          <div class="agentwatch-chip-row">
+            <span class="agentwatch-chip">AI discovery</span>
+            <span class="agentwatch-chip">Connector activity</span>
+            <span class="agentwatch-chip">Policy outcomes</span>
+            <span class="agentwatch-chip">Findings + HITL</span>
+            <span class="agentwatch-chip">Session / run correlation</span>
+          </div>
+        </div>
+      </html>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Observed Agent Sessions</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_exec_kpis` | fields observed_sessions</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x4C6EF5","0x00A3A3","0x7C3AED","0xD9480F"]</option>
+        <option name="rangeValues">[1,5,10]</option>
+        <option name="underLabel">sessions with runtime evidence</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Active Connectors</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_exec_kpis` | fields active_connectors</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x4C6EF5","0x00A3A3","0x7C3AED","0xD9480F"]</option>
+        <option name="rangeValues">[1,3,6]</option>
+        <option name="underLabel">Codex / Claude / OpenClaw / others</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Discovery Signals</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_exec_kpis` | fields discovered_signals</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x4C6EF5","0x00A3A3","0x7C3AED","0xD9480F"]</option>
+        <option name="rangeValues">[1,10,25]</option>
+        <option name="underLabel">shadow / managed agent evidence</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Blocks / Denies</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_exec_kpis` | fields blocked_or_denied</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x4C6EF5","0x00A3A3","0xE0A400","0xB02A37"]</option>
+        <option name="rangeValues">[1,3,10]</option>
+        <option name="underLabel">policy outcomes needing attention</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Human Review</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_exec_kpis` | fields human_review_events</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x4C6EF5","0x00A3A3","0xE0A400","0xD9480F"]</option>
+        <option name="rangeValues">[1,3,10]</option>
+        <option name="underLabel">confirm / approval signals</option>
+      </single>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Agent Activity And Decisions Over Time</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_connector_events` | where "$connector$"="*" OR connector="$connector$" | timechart span=10m count by decision limit=8 useother=t</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Connector Mix</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_connector_events` | where connector!="(unknown)" AND ("$connector$"="*" OR connector="$connector$") | stats count as events by connector | sort - events | head 8</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.legend.placement">none</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Highest Attention Sessions</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_exec_session_rollup` | table risk_state run_id session_id trace_id agents agent_types connectors targets decisions severities events blocks confirms high_or_critical first_seen last_seen | head 12</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">12</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Policy + Finding Heatmap</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_policy_events` | stats count by severity decision | sort - count</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Top Blocked Targets</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_policy_events` | where decision="block" OR decision="deny" OR like(action, "%block%") OR like(action, "%deny%") | stats count as events values(policy_id) as policies values(rule_id) as rules values(connector) as connectors values(severity) as severities by target | sort - events | head 10</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">10</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Executive Narrative</title>
+      <html>
+        <div class="agentwatch-callout">
+          <b>Demo story:</b> Splunk is the visible evidence plane for Agent Watch.
+          Start here to show discovered agents and connectors, then drill into the four detailed demo dashboards
+          for discovery inventory, connector activity, policy decisions, and findings / human approval.
+        </div>
+        <div class="agentwatch-note" style="margin-top:10px;">
+          This dashboard is demo-oriented and tolerant of sparse local telemetry. It is not intended to be a billing,
+          compliance, or production security-authoritative view.
+        </div>
+      </html>
+    </panel>
+  </row>
+</form>

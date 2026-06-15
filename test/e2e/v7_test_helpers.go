@@ -417,10 +417,23 @@ func assertCorrelationTriplet(t *testing.T, ev gatewaylog.Event) {
 func assertThreeTierIdentity(t *testing.T, ev gatewaylog.Event) {
 	t.Helper()
 	// Plan §"Three-tier agent identity":
-	//   agent_id           → logical agent (e.g. "openclaw"): always present
-	//   agent_instance_id  → per-SESSION UUID: present on session-anchored events
-	//   sidecar_instance_id → per-PROCESS UUID: present on any event stamped
-	//                         by the running sidecar
+	//   agent_id           → logical agent: always present. Built-in
+	//                        connector values: "openclaw" | "zeptoclaw" |
+	//                        "claudecode" | "codex". Custom (plugin)
+	//                        connectors emit their registered name. The
+	//                        OTel attribute mirror is gen_ai.agent.name
+	//                        and the destination_app metric label is the
+	//                        same string lowercased — verified per
+	//                        connector by Plan E1/E3 parity tests.
+	//   agent_instance_id  → per-SESSION UUID: present on session-anchored
+	//                        events. The same agent_id can appear with
+	//                        many distinct agent_instance_id values across
+	//                        a sidecar's lifetime.
+	//   sidecar_instance_id → per-PROCESS UUID: present on any event
+	//                         stamped by the running sidecar. Equal across
+	//                         every connector in a single boot (one
+	//                         sidecar serves all four), so it discriminates
+	//                         processes — not agent identity.
 	// The v6 behavior (agent_instance_id == process UUID) is specifically
 	// disallowed; if this assertion fails it means a call site regressed
 	// back to the old semantics.
@@ -593,6 +606,33 @@ var updateGolden bool
 func goldenPath(t *testing.T, name string) string {
 	t.Helper()
 	return filepath.Join(moduleRoot(t), "test", "e2e", "testdata", "v7", "golden", name)
+}
+
+// goldenPathForConnector returns the per-connector golden path
+// introduced by Plan E3.4. The directories under
+// test/e2e/testdata/v7/golden/{openclaw,zeptoclaw,claudecode,codex}/
+// hold connector-tagged envelope fixtures; today they are
+// bit-for-bit copies of the connector-agnostic baseline because
+// `TestGoldenEvents` does not seed a connector-specific agent_id.
+//
+// When a future test wraps the golden suite in a connector matrix
+// (i.e. a `t.Run(connector, ...)` over `connectorMatrix(t)` from
+// `connectormatrix.go`), the matrix cell calls this helper instead
+// of `goldenPath` and the per-connector subdirectory is
+// authoritative for that cell. The baseline (top-level `name`
+// path) remains unchanged for the existing connector-agnostic test
+// suite — see the README under testdata/v7/golden/ for the full
+// layout contract.
+//
+// Empty connector falls through to the baseline so callers that
+// don't care about per-connector divergence keep working
+// unchanged.
+func goldenPathForConnector(t *testing.T, connector, name string) string {
+	t.Helper()
+	if connector == "" {
+		return goldenPath(t, name)
+	}
+	return filepath.Join(moduleRoot(t), "test", "e2e", "testdata", "v7", "golden", connector, name)
 }
 
 func compareGolden(t *testing.T, name string, got []byte) {

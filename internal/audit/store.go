@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -56,6 +57,11 @@ type Event struct {
 	// so downstream consumers can fold tool-call, approval,
 	// and verdict events into one row per session.
 	SessionID string `json:"session_id,omitempty"`
+
+	// TurnID identifies a single agent turn inside a session. It is
+	// currently sink-only for audit events; gatewaylog events persist it
+	// directly in the canonical JSON envelope.
+	TurnID string `json:"turn_id,omitempty"`
 
 	// AgentName is the logical name of the agent producing the
 	// event (e.g. "openclaw", "nemoclaw", or a caller-supplied
@@ -99,6 +105,31 @@ type Event struct {
 	BinaryVersion     string `json:"binary_version,omitempty"`
 	AgentID           string `json:"agent_id,omitempty"`
 	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
+
+	// Multi-connector identity + per-turn / enforcement fields
+	// (SQLite columns from migration 16). All optional and additive —
+	// older rows leave the columns NULL, and non-hook events (admin
+	// mutations, scanner results) simply don't populate them.
+	//
+	//   - Connector: the hook connector that produced this event
+	//     (codex, claudecode, antigravity, ...), recovered from the
+	//     request context. Empty for proxy / non-connector events.
+	//   - StepIdx: 1-indexed turn counter within a session_id. All hook
+	//     events emitted during the same agent turn share one StepIdx;
+	//     a new turn increments it. Zero means "not turn-anchored".
+	//   - Enforced: true when the guardrail decision was actually
+	//     enforced (blocked), as opposed to observe-mode would-block.
+	//   - RulePackDir: the effective rule-pack directory the verdict was
+	//     evaluated against (per-connector override or global).
+	Connector   string `json:"connector,omitempty"`
+	StepIdx     int    `json:"step_idx,omitempty"`
+	Enforced    bool   `json:"enforced,omitempty"`
+	RulePackDir string `json:"rule_pack_dir,omitempty"`
+
+	// Structured carries sanitized machine-readable data for sink fanout.
+	// It is intentionally not persisted in SQLite audit_events; callers that
+	// need durable structured records should use their native table/log path.
+	Structured map[string]any `json:"structured,omitempty"`
 }
 
 // ActionState tracks enforcement state across three independent dimensions.
@@ -147,59 +178,192 @@ type Store struct {
 	db *sql.DB
 }
 
-func NewStore(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite", dbPath)
+// auditPragmas is the pragma set applied to every connection in the
+// audit store's pool via the DSN query string. Putting them in the
+// DSN (as opposed to db.Exec at startup) is critical: PRAGMA
+// statements run via db.Exec only mutate the *connection* that
+// happened to serve them, but Go's database/sql pool can open new
+// connections at any time. With the DSN form, modernc.org/sqlite
+// replays the pragmas on every fresh connection so busy_timeout and
+// synchronous stay consistent across the pool.
+//
+// Settings explained:
+//   - journal_mode=WAL          enables write-ahead logging so readers
+//     and writers do not block each other.
+//   - busy_timeout=5000         SQLite waits up to 5 seconds before
+//     returning SQLITE_BUSY, absorbing the
+//     vast majority of write contention.
+//   - synchronous=NORMAL        the sweet spot for WAL: durable
+//     across crashes (loses only the last
+//     transaction on power loss) while ~3x
+//     faster than the FULL default.
+//   - cache_size=-20000         negative => kilobytes; ~20 MB of
+//     in-memory page cache per connection.
+//   - temp_store=MEMORY         spill temp tables to RAM instead of
+//     disk; eliminates a common contention
+//     source on writes that allocate temp.
+//   - mmap_size=268435456       map up to 256 MB of the DB into the
+//     process address space for read-heavy
+//     queries (audit views, exports).
+//   - foreign_keys=ON           defenseclaw relies on the FK between
+//     findings and scan_results; turning
+//     this off at the DSN level would be a
+//     silent correctness regression.
+const auditPragmas = "?_pragma=journal_mode(WAL)" +
+	"&_pragma=busy_timeout(5000)" +
+	"&_pragma=synchronous(NORMAL)" +
+	"&_pragma=cache_size(-20000)" +
+	"&_pragma=temp_store(MEMORY)" +
+	"&_pragma=mmap_size(268435456)" +
+	"&_pragma=foreign_keys(ON)"
+
+// openSQLite opens a SQLite connection with the audit-tier hardening
+// applied (DSN pragmas + a single-connection pool). Sharing this
+// helper between NewStore and the upcoming judge_body_store keeps
+// the contention guarantees in lockstep.
+//
+// Pool sizing: SQLite serializes writers internally, so opening
+// multiple connections for the same DB just races them for the same
+// write lock and surfaces as SQLITE_BUSY. We cap MaxOpenConns at 1
+// and let Go's database/sql mutex serialize callers — this is the
+// canonical pattern recommended by modernc.org/sqlite. Reads share
+// the same connection, which is fine in practice because every
+// audit write completes in microseconds; if read latency ever
+// becomes a problem, we can introduce a separate read-only pool
+// without touching this hot path.
+func openSQLite(dbPath string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dbPath+auditPragmas)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open db %s: %w", dbPath, err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	return db, nil
+}
 
-	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("audit: %s: %w", pragma, err)
-		}
+func NewStore(dbPath string) (*Store, error) {
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		return nil, err
 	}
-
 	st := &Store{db: db}
 	telemetry.RegisterAuditDB(db)
 	return st, nil
 }
 
+// sqliteCoded is the structural interface implemented by the
+// modernc.org/sqlite *Error type (Code() int returns the underlying
+// SQLite result code). We match on it via errors.As so the
+// detection survives error-wrapping (fmt.Errorf("...: %w", err))
+// and stays decoupled from the concrete driver type.
+type sqliteCoded interface {
+	Code() int
+}
+
+// SQLite result codes we treat as "transient contention; safe to
+// retry". Values mirror modernc.org/sqlite/lib (SQLITE_BUSY = 5,
+// SQLITE_LOCKED = 6). Hard-coded here to avoid pulling the driver
+// into a typed import that the rest of the package doesn't need.
+const (
+	sqliteCodeBusy   = 5
+	sqliteCodeLocked = 6
+)
+
+// isSQLiteBusy reports whether err signals transient SQLite write
+// contention. We check the driver's result code first (the
+// authoritative source) and fall back to a substring match so the
+// detection stays robust against driver versions that surface BUSY
+// only in the rendered message (older modernc releases, or third-
+// party drivers that wrap errors before returning them).
 func isSQLiteBusy(err error) bool {
 	if err == nil {
 		return false
 	}
+	var coded sqliteCoded
+	if errors.As(err, &coded) {
+		switch coded.Code() {
+		case sqliteCodeBusy, sqliteCodeLocked:
+			return true
+		}
+	}
 	s := err.Error()
-	return strings.Contains(s, "database is locked") || strings.Contains(s, "SQLITE_BUSY")
+	return strings.Contains(s, "database is locked") ||
+		strings.Contains(s, "SQLITE_BUSY") ||
+		strings.Contains(s, "SQLITE_LOCKED")
 }
 
-func (s *Store) execDB(ctx context.Context, op string, query string, args ...any) (sql.Result, error) {
-	res, err := s.db.ExecContext(ctx, query, args...)
-	if isSQLiteBusy(err) {
-		telemetry.RecordSQLiteBusy(ctx, op)
-	}
-	return res, err
-}
+// SQLite BUSY retry policy. Even with busy_timeout=5000 some bursts
+// outpace SQLite's internal waiter — we layer an application-level
+// retry with exponential backoff on top so transient contention
+// never bubbles up as a dropped write. The schedule
+// (10ms, 20ms, 40ms, 80ms, 160ms; ~310ms worst case) is short
+// enough not to push end-to-end latency past the proxy SLO and long
+// enough to outlast a single fsync window.
+const (
+	sqliteRetryAttempts = 5
+	sqliteRetryBaseMs   = 10
+)
 
-func (s *Store) queryDB(ctx context.Context, op string, query string, args ...any) (*sql.Rows, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if isSQLiteBusy(err) {
+// retryBusy runs fn up to sqliteRetryAttempts times, backing off
+// exponentially on BUSY errors. Each retry records a telemetry event
+// so operators can correlate contention spikes; the final error
+// (whether BUSY-related or not) is returned verbatim. ctx
+// cancellation aborts the loop immediately, preserving cancellation
+// semantics for request-scoped writes.
+func retryBusy(ctx context.Context, op string, fn func() error) error {
+	delay := time.Duration(sqliteRetryBaseMs) * time.Millisecond
+	var err error
+	for attempt := 0; attempt < sqliteRetryAttempts; attempt++ {
+		err = fn()
+		if !isSQLiteBusy(err) {
+			return err
+		}
 		telemetry.RecordSQLiteBusy(ctx, op)
-	}
-	return rows, err
-}
-
-func (s *Store) scanRow(ctx context.Context, op string, row *sql.Row, dest ...any) error {
-	err := row.Scan(dest...)
-	if isSQLiteBusy(err) {
-		telemetry.RecordSQLiteBusy(ctx, op)
+		if attempt == sqliteRetryAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
 	}
 	return err
 }
 
+func (s *Store) execDB(ctx context.Context, op string, query string, args ...any) (sql.Result, error) {
+	var res sql.Result
+	err := retryBusy(ctx, op, func() error {
+		var execErr error
+		res, execErr = s.db.ExecContext(ctx, query, args...)
+		return execErr
+	})
+	return res, err
+}
+
+func (s *Store) queryDB(ctx context.Context, op string, query string, args ...any) (*sql.Rows, error) {
+	var rows *sql.Rows
+	err := retryBusy(ctx, op, func() error {
+		var qErr error
+		rows, qErr = s.db.QueryContext(ctx, query, args...)
+		return qErr
+	})
+	return rows, err
+}
+
+func (s *Store) scanRow(ctx context.Context, op string, row *sql.Row, dest ...any) error {
+	return retryBusy(ctx, op, func() error {
+		return row.Scan(dest...)
+	})
+}
+
+// txExec is the in-transaction equivalent. We deliberately do NOT
+// retry transactions here — once a tx has been opened the BUSY error
+// usually means the whole tx must be rolled back and reattempted by
+// the caller (otherwise we'd corrupt invariants halfway through). We
+// still record the metric so contention shows up in dashboards.
 func txExec(tx *sql.Tx, op string, query string, args ...any) (sql.Result, error) {
 	res, err := tx.Exec(query, args...)
 	if isSQLiteBusy(err) {
@@ -241,6 +405,7 @@ var migrations = []migration{
 				target TEXT,
 				actor TEXT NOT NULL DEFAULT 'defenseclaw',
 				details TEXT,
+				structured_json TEXT,
 				severity TEXT,
 				run_id TEXT
 			);
@@ -838,6 +1003,227 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// Sliding-window correlator enrichment: six columns on
+		// scan_findings so the correlator can intersect lethal-
+		// trifecta axes across a session's recent findings without
+		// reaching back into the cleartext content.
+		//
+		//   data_axis               — CSV of ingress_untrusted /
+		//                             sensitive_access / egress_external
+		//   tool_capability_class   — read_fs / write_fs / exec_shell /
+		//                             network_fetch / send_message
+		//   content_fingerprint     — sha256(redacted_value)[:8]
+		//   external_endpoint       — host or URL for network findings
+		//   turn_id                 — monotonic per-session counter
+		//   decision_path           — JSON audit trail of severity
+		//                             derivation (regex match, judge
+		//                             category, sensitive-context boost,
+		//                             rubric reconciliation)
+		description: "correlator: enrich scan_findings with axis/capability/fingerprint/endpoint/turn/path",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "scan_findings")
+			if err != nil {
+				return err
+			}
+			if !present {
+				return nil
+			}
+			for _, spec := range []struct {
+				table, column, stmt string
+			}{
+				{"scan_findings", "data_axis", `ALTER TABLE scan_findings ADD COLUMN data_axis TEXT`},
+				{"scan_findings", "tool_capability_class", `ALTER TABLE scan_findings ADD COLUMN tool_capability_class TEXT`},
+				{"scan_findings", "content_fingerprint", `ALTER TABLE scan_findings ADD COLUMN content_fingerprint TEXT`},
+				{"scan_findings", "external_endpoint", `ALTER TABLE scan_findings ADD COLUMN external_endpoint TEXT`},
+				{"scan_findings", "turn_id", `ALTER TABLE scan_findings ADD COLUMN turn_id INTEGER`},
+				{"scan_findings", "decision_path", `ALTER TABLE scan_findings ADD COLUMN decision_path TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, spec.table, spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+					}
+				}
+			}
+			if _, err := ex.Exec(
+				`CREATE INDEX IF NOT EXISTS idx_scan_findings_session_turn ` +
+					`ON scan_findings(session_id, agent_instance_id, turn_id)`,
+			); err != nil {
+				return fmt.Errorf("create idx_scan_findings_session_turn: %w", err)
+			}
+			return nil
+		},
+	},
+	{
+		// First-class structured audit payloads. Hook outcomes used
+		// to expose their JSON envelope only as an escaped
+		// details_json= token inside the legacy details string. The
+		// details column remains for backwards compatibility, but
+		// structured_json is now the machine-readable contract for
+		// audit sinks and export.
+		description: "audit: add structured_json payload column",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "audit_events")
+			if err != nil {
+				return err
+			}
+			if !present {
+				return nil
+			}
+			exists, err := hasColumnDB(ex, "audit_events", "structured_json")
+			if err != nil {
+				return err
+			}
+			if !exists {
+				if _, err := ex.Exec(`ALTER TABLE audit_events ADD COLUMN structured_json TEXT`); err != nil {
+					return fmt.Errorf("alter audit_events.structured_json: %w", err)
+				}
+			}
+			return nil
+		},
+	},
+	{
+		// Unified runtime finding pipeline: scan_findings.confidence
+		// captures the regex / judge / AID detector self-reported
+		// score (0..1) so SIEM can rank by certainty alongside
+		// severity. evaluation_id on both scan_results and
+		// scan_findings joins each row to the upstream runtime
+		// evaluation (hook, /api/v1/inspect/*, proxy guardrail,
+		// mid-stream, tool-call-inspect, watcher rescan) that
+		// produced it. Classic scanner-invocation paths leave
+		// evaluation_id NULL.
+		description: "runtime findings: add confidence + evaluation_id to scan_results/scan_findings",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "scan_findings")
+			if err != nil {
+				return err
+			}
+			if present {
+				for _, spec := range []struct {
+					table, column, stmt string
+				}{
+					{"scan_findings", "confidence", `ALTER TABLE scan_findings ADD COLUMN confidence REAL`},
+					{"scan_findings", "evaluation_id", `ALTER TABLE scan_findings ADD COLUMN evaluation_id TEXT`},
+				} {
+					exists, err := hasColumnDB(ex, spec.table, spec.column)
+					if err != nil {
+						return err
+					}
+					if !exists {
+						if _, err := ex.Exec(spec.stmt); err != nil {
+							return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+						}
+					}
+				}
+				if _, err := ex.Exec(
+					`CREATE INDEX IF NOT EXISTS idx_scan_findings_evaluation_id ` +
+						`ON scan_findings(evaluation_id)`,
+				); err != nil {
+					return fmt.Errorf("create idx_scan_findings_evaluation_id: %w", err)
+				}
+			}
+			summaryPresent, err := tableExists(ex, "scan_results")
+			if err != nil {
+				return err
+			}
+			if summaryPresent {
+				exists, err := hasColumnDB(ex, "scan_results", "evaluation_id")
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(
+						`ALTER TABLE scan_results ADD COLUMN evaluation_id TEXT`,
+					); err != nil {
+						return fmt.Errorf("alter scan_results.evaluation_id: %w", err)
+					}
+				}
+				if _, err := ex.Exec(
+					`CREATE INDEX IF NOT EXISTS idx_scan_results_evaluation_id ` +
+						`ON scan_results(evaluation_id)`,
+				); err != nil {
+					return fmt.Errorf("create idx_scan_results_evaluation_id: %w", err)
+				}
+			}
+			return nil
+		},
+	},
+	{
+		// The watcher's periodic re-scan stores a baseline content hash
+		// per target. Adding the scanner_fingerprint lets the watcher
+		// invalidate that baseline when the scanner binary, ruleset, or
+		// scan-affecting config changes — so an upgraded scanner re-runs
+		// even on byte-identical content, while unchanged content + an
+		// unchanged scanner is skipped entirely.
+		description: "watcher: add scanner_fingerprint to target_snapshots for drift-gated rescans",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "target_snapshots")
+			if err != nil {
+				return err
+			}
+			if !present {
+				return nil
+			}
+			exists, err := hasColumnDB(ex, "target_snapshots", "scanner_fingerprint")
+			if err != nil {
+				return err
+			}
+			if !exists {
+				if _, err := ex.Exec(
+					`ALTER TABLE target_snapshots ADD COLUMN scanner_fingerprint TEXT NOT NULL DEFAULT ''`,
+				); err != nil {
+					return fmt.Errorf("alter target_snapshots.scanner_fingerprint: %w", err)
+				}
+			}
+			return nil
+		},
+	},
+	{
+		// Multi-connector support: per-connector identity + per-turn
+		// counter + enforcement + rule-pack provenance on every audit
+		// row. All columns are additive and optional — the ADD COLUMNs
+		// are guarded by hasColumnDB so re-running Init on an
+		// already-migrated DB is a no-op, and legacy rows keep their
+		// existing values with the new columns left NULL. This
+		// migration does NOT touch version.SchemaVersion (the v7
+		// provenance envelope constant); these are optional fields, not
+		// a breaking envelope change.
+		description: "multi-connector: add connector + step_idx + enforced + rule_pack_dir columns",
+		apply: func(ex dbExecer) error {
+			for _, spec := range []struct {
+				table, column, stmt string
+			}{
+				{"audit_events", "connector", `ALTER TABLE audit_events ADD COLUMN connector TEXT`},
+				{"audit_events", "step_idx", `ALTER TABLE audit_events ADD COLUMN step_idx INTEGER`},
+				{"audit_events", "enforced", `ALTER TABLE audit_events ADD COLUMN enforced INTEGER`},
+				{"audit_events", "rule_pack_dir", `ALTER TABLE audit_events ADD COLUMN rule_pack_dir TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, spec.table, spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+					}
+				}
+			}
+			// Connector is the primary new query dimension (per-connector
+			// dashboards, TUI filter chips); index it. step_idx is
+			// usually filtered alongside connector or session_id, so no
+			// standalone index is warranted yet.
+			if _, err := ex.Exec(
+				`CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)`,
+			); err != nil {
+				return fmt.Errorf("create idx_audit_connector: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1028,19 +1414,27 @@ func (s *Store) LogEvent(e Event) error {
 		e.SidecarInstanceID = ProcessAgentInstanceID()
 	}
 
+	structuredJSON, err := encodeStructuredPayload(e.Structured)
+	if err != nil {
+		return fmt.Errorf("audit: marshal structured payload: %w", err)
+	}
+
 	ts := e.Timestamp.Format(time.RFC3339Nano)
-	_, err := s.execDB(context.Background(), "audit",
-		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity,
+	_, err = s.execDB(context.Background(), "audit",
+		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, structured_json, severity,
 			run_id, trace_id, request_id,
 			session_id, agent_name, agent_instance_id, policy_id, destination_app, tool_name, tool_id,
-			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, e.Severity,
+			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
+			connector, step_idx, enforced, rule_pack_dir)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, structuredJSON, e.Severity,
 		nullStr(e.RunID), nullStr(e.TraceID), nullStr(e.RequestID),
 		nullStr(e.SessionID), nullStr(e.AgentName), nullStr(e.AgentInstanceID),
 		nullStr(e.PolicyID), nullStr(e.DestinationApp), nullStr(e.ToolName), nullStr(e.ToolID),
 		nullInt(e.SchemaVersion), nullStr(e.ContentHash), nullUint64(e.Generation),
 		nullStr(e.BinaryVersion), nullStr(e.AgentID), nullStr(e.SidecarInstanceID),
+		nullStr(e.Connector), nullInt(e.StepIdx), nullBool(e.Enforced),
+		nullStr(e.RulePackDir),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: log event: %w", err)
@@ -1150,8 +1544,8 @@ func (s *Store) InsertSinkHealth(h SinkHealthInput) error {
 		h.SinkName, h.SinkKind, h.Outcome,
 		status, h.LatencyMs, h.BatchSize, anyString(h.Error),
 		nullInt(h.QueueDepth), nullInt(h.DroppedCount),
-		nullInt(h.SchemaVersion), nullStr(h.ContentHash).String, nullUint64(h.Generation),
-		nullStr(h.BinaryVersion).String, nullStr(h.SidecarInstanceID).String,
+		nullInt(h.SchemaVersion), nullStr(h.ContentHash), nullUint64(h.Generation),
+		nullStr(h.BinaryVersion), nullStr(h.SidecarInstanceID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert sink health: %w", err)
@@ -1260,6 +1654,149 @@ type JudgeResponse struct {
 // detection trace intact while preventing pathological blowup.
 const MaxJudgeRawBytes = 64 * 1024
 
+// JudgeBatch is the *sql.Tx-backed batch handle returned from
+// Store.BeginJudgeBatch. Exported so the gateway worker can declare
+// its dependency on the concrete type without an internal-only
+// import path. We deliberately do NOT expose the *sql.Tx itself —
+// the interface stays tight (Insert / Commit / Rollback) so future
+// callers cannot accidentally mix in random queries that defeat
+// the per-batch fsync-amortization guarantee.
+type JudgeBatch struct {
+	tx        *sql.Tx
+	committed bool
+}
+
+// InsertJudgeResponse writes one row inside the transaction. The
+// statement is identical to the single-row path above so any future
+// column additions only need updating in one place. We keep this
+// method intentionally close to InsertJudgeResponse so reviewers can
+// see the parity at a glance.
+func (b *JudgeBatch) InsertJudgeResponse(e JudgeResponse) error {
+	if b == nil || b.tx == nil {
+		return fmt.Errorf("audit: judge batch handle is nil")
+	}
+	if e.Raw == "" {
+		return nil
+	}
+	if e.ID == "" {
+		e.ID = uuid.New().String()
+	}
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now().UTC()
+	}
+	if e.RunID == "" {
+		e.RunID = currentRunID()
+	}
+	raw := truncateJudgeRaw(e.Raw, MaxJudgeRawBytes)
+	failClosed := 0
+	if e.FailClosedApplied {
+		failClosed = 1
+	}
+	if _, err := txExec(b.tx, "audit_batch_insert",
+		`INSERT INTO judge_responses
+			(id, timestamp, kind, direction, model, action, severity, latency_ms,
+			 parse_error, raw_response, request_id, trace_id, run_id, session_id, input_hash,
+			 confidence, fail_closed_applied, inspected_model, prompt_template_id,
+			 schema_version, content_hash, generation, binary_version,
+			 agent_id, agent_instance_id, sidecar_instance_id,
+			 policy_id, destination_app, tool_name, tool_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID,
+		e.Timestamp.Format(time.RFC3339Nano),
+		e.Kind,
+		nullStr(e.Direction),
+		nullStr(e.Model),
+		nullStr(e.Action),
+		nullStr(e.Severity),
+		e.LatencyMs,
+		nullStr(e.ParseError),
+		raw,
+		nullStr(e.RequestID),
+		nullStr(e.TraceID),
+		nullStr(e.RunID),
+		nullStr(e.SessionID),
+		nullStr(e.InputHash),
+		e.Confidence,
+		failClosed,
+		nullStr(e.InspectedModel),
+		nullStr(e.PromptTemplateID),
+		nullInt(e.SchemaVersion),
+		nullStr(e.ContentHash),
+		int64(e.Generation),
+		nullStr(e.BinaryVersion),
+		nullStr(e.AgentID),
+		nullStr(e.AgentInstanceID),
+		nullStr(e.SidecarInstanceID),
+		nullStr(e.PolicyID),
+		nullStr(e.DestinationApp),
+		nullStr(e.ToolName),
+		nullStr(e.ToolID),
+	); err != nil {
+		return fmt.Errorf("audit: judge batch insert: %w", err)
+	}
+	return nil
+}
+
+// Commit closes the transaction. We only flip b.committed=true on
+// SUCCESS; a failed Commit leaves the handle in a state where the
+// caller's Rollback() will still drive tx.Rollback() to release the
+// connection. Without that order the connection can stay pinned in
+// "transaction-in-progress" mode until the *sql.DB pool closes the
+// underlying connection, blocking subsequent writes.
+//
+// After a successful Commit, every subsequent Commit/Rollback call
+// on this handle is a no-op so a buggy caller cannot accidentally
+// double-commit.
+func (b *JudgeBatch) Commit() error {
+	if b == nil || b.tx == nil {
+		return fmt.Errorf("audit: judge batch handle is nil")
+	}
+	if b.committed {
+		return nil
+	}
+	if err := b.tx.Commit(); err != nil {
+		return err
+	}
+	b.committed = true
+	return nil
+}
+
+// Rollback is the cleanup path on commit failure or per-row error.
+// Idempotent so the worker can call it without tracking whether
+// Commit already ran successfully (in which case Rollback is a
+// no-op). When Commit FAILED, b.committed stays false and we
+// genuinely drive tx.Rollback() — which is the bug-fix that keeps
+// the SQLite connection from being pinned mid-tx.
+func (b *JudgeBatch) Rollback() error {
+	if b == nil || b.tx == nil {
+		return nil
+	}
+	if b.committed {
+		return nil
+	}
+	// Mark committed BEFORE calling tx.Rollback so a concurrent
+	// retry (or a buggy double-call) doesn't fire two rollbacks
+	// on the same handle, which would surface as
+	// "sql: transaction has already been committed or rolled back".
+	b.committed = true
+	return b.tx.Rollback()
+}
+
+// BeginJudgeBatch opens a transaction dedicated to a single batch of
+// judge_responses inserts. The gateway's async writer goroutine uses
+// this to amortize SQLite's per-tx fsync over up to 32 rows.
+//
+// We return a typed handle so the worker can keep its loop tight:
+// InsertJudgeResponse + Commit/Rollback are the only operations
+// needed.
+func (s *Store) BeginJudgeBatch(ctx context.Context) (*JudgeBatch, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("audit: begin judge batch: %w", err)
+	}
+	return &JudgeBatch{tx: tx}, nil
+}
+
 // InsertJudgeResponse persists a single judge body. The caller is
 // expected to supply a non-empty Raw; an empty body is treated as a
 // no-op so the "retain off" path does not waste a row per request.
@@ -1317,7 +1854,7 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 		nullStr(e.PromptTemplateID),
 		nullInt(e.SchemaVersion),
 		nullStr(e.ContentHash),
-		int64(e.Generation),
+		nullUint64(e.Generation),
 		nullStr(e.BinaryVersion),
 		nullStr(e.AgentID),
 		nullStr(e.AgentInstanceID),
@@ -1484,12 +2021,13 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	}
 
 	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, severity,
+		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
 		        run_id, trace_id, request_id,
 		        session_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,
 		        schema_version, content_hash, generation, binary_version,
-		        agent_id, sidecar_instance_id
+		        agent_id, sidecar_instance_id,
+		        connector, step_idx, enforced, rule_pack_dir
 		 FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -1516,7 +2054,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 func scanAuditEventRow(rows rowScanner) (Event, error) {
 	var e Event
 	var (
-		target, details, severity                       sql.NullString
+		target, details, structuredJSON, severity       sql.NullString
 		runID, traceID, requestID                       sql.NullString
 		sessionID, agentName, agentInstanceID, policyID sql.NullString
 		destinationApp, toolName, toolID                sql.NullString
@@ -1524,19 +2062,27 @@ func scanAuditEventRow(rows rowScanner) (Event, error) {
 		contentHashStr, binaryVerStr                    sql.NullString
 		generation                                      sql.NullInt64
 		agentID, sidecarInst                            sql.NullString
+		connector, rulePackDir                          sql.NullString
+		stepIdx, enforced                               sql.NullInt64
 	)
 	if err := rows.Scan(
-		&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity,
+		&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON, &severity,
 		&runID, &traceID, &requestID,
 		&sessionID, &agentName, &agentInstanceID, &policyID,
 		&destinationApp, &toolName, &toolID,
 		&schemaVerI, &contentHashStr, &generation, &binaryVerStr,
 		&agentID, &sidecarInst,
+		&connector, &stepIdx, &enforced, &rulePackDir,
 	); err != nil {
 		return Event{}, fmt.Errorf("audit: scan row: %w", err)
 	}
 	e.Target = target.String
 	e.Details = details.String
+	structured, err := decodeStructuredPayload(structuredJSON)
+	if err != nil {
+		return Event{}, err
+	}
+	e.Structured = structured
 	e.Severity = severity.String
 	e.RunID = runID.String
 	e.TraceID = traceID.String
@@ -1565,6 +2111,18 @@ func scanAuditEventRow(rows rowScanner) (Event, error) {
 	}
 	if sidecarInst.Valid {
 		e.SidecarInstanceID = sidecarInst.String
+	}
+	if connector.Valid {
+		e.Connector = connector.String
+	}
+	if stepIdx.Valid {
+		e.StepIdx = int(stepIdx.Int64)
+	}
+	if enforced.Valid {
+		e.Enforced = enforced.Int64 == 1
+	}
+	if rulePackDir.Valid {
+		e.RulePackDir = rulePackDir.String
 	}
 	return e, nil
 }
@@ -1790,6 +2348,28 @@ func nullStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: true}
 }
 
+func encodeStructuredPayload(payload map[string]any) (sql.NullString, error) {
+	if len(payload) == 0 {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+func decodeStructuredPayload(raw sql.NullString) (map[string]any, error) {
+	if !raw.Valid || strings.TrimSpace(raw.String) == "" {
+		return nil, nil
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw.String), &payload); err != nil {
+		return nil, fmt.Errorf("audit: decode structured payload: %w", err)
+	}
+	return payload, nil
+}
+
 func nullInt(v int) sql.NullInt64 {
 	if v == 0 {
 		return sql.NullInt64{}
@@ -1802,6 +2382,17 @@ func nullUint64(v uint64) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: int64(v), Valid: true}
+}
+
+// nullBool persists a bool as a nullable INTEGER: true -> 1, false ->
+// NULL. NULL (rather than 0) for the false case keeps `WHERE enforced=1`
+// queries clean and lets legacy rows (which predate the column) and
+// non-enforcement events share the same "absent" representation.
+func nullBool(b bool) sql.NullInt64 {
+	if !b {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: 1, Valid: true}
 }
 
 func anyString(s string) any {
@@ -1867,7 +2458,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 		limit = 100
 	}
 	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id
+		`SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id, trace_id, request_id
 		 FROM audit_events
 		 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
 		   AND action NOT LIKE 'dismiss%'
@@ -1881,12 +2472,17 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, severity, runID, traceID, requestID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID, &traceID, &requestID); err != nil {
+		var target, details, structuredJSON, severity, runID, traceID, requestID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON, &severity, &runID, &traceID, &requestID); err != nil {
 			return nil, fmt.Errorf("audit: scan alert row: %w", err)
 		}
 		e.Target = target.String
 		e.Details = details.String
+		structured, err := decodeStructuredPayload(structuredJSON)
+		if err != nil {
+			return nil, err
+		}
+		e.Structured = structured
 		e.Severity = severity.String
 		e.RunID = runID.String
 		e.TraceID = traceID.String
@@ -1916,7 +2512,7 @@ func (s *Store) AcknowledgeAlerts(severityFilter string) (int64, error) {
 	n, _ := res.RowsAffected()
 
 	_ = s.LogEvent(Event{
-		Action:   "acknowledge-alerts",
+		Action:   string(ActionAckAlerts),
 		Target:   severityFilter,
 		Details:  fmt.Sprintf("acknowledged %d alerts", n),
 		Severity: "ACK",
@@ -1946,7 +2542,7 @@ func (s *Store) AcknowledgeByIDs(ids []string) (int64, error) {
 	n, _ := res.RowsAffected()
 
 	_ = s.LogEvent(Event{
-		Action:   "acknowledge-alerts",
+		Action:   string(ActionAckAlerts),
 		Details:  fmt.Sprintf("acknowledged %d selected alerts", n),
 		Severity: "ACK",
 	})
@@ -1960,12 +2556,13 @@ func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
 		limit = 20
 	}
 	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, severity,
+		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
 		        run_id, trace_id, request_id,
 		        session_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,
 		        schema_version, content_hash, generation, binary_version,
-		        agent_id, sidecar_instance_id
+		        agent_id, sidecar_instance_id,
+		        connector, step_idx, enforced, rule_pack_dir
 		 FROM audit_events
 		 WHERE target = ?
 		 ORDER BY timestamp DESC LIMIT ?`, target, limit,
@@ -2262,23 +2859,29 @@ type SnapshotRow struct {
 	NetworkEndpoints string    `json:"network_endpoints"`
 	ScanID           string    `json:"scan_id"`
 	CapturedAt       time.Time `json:"captured_at"`
+	// ScannerFingerprint identifies the scanner binary + ruleset +
+	// scan-affecting config that produced ScanID. The watcher
+	// re-scans when it no longer matches the current fingerprint so
+	// an upgraded scanner re-evaluates byte-identical content.
+	ScannerFingerprint string `json:"scanner_fingerprint"`
 }
 
 // SetTargetSnapshot upserts a snapshot baseline for drift comparison.
-func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID string) error {
+func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID, scannerFingerprint string) error {
 	id := uuid.New().String()
 	now := time.Now().UTC()
 	_, err := s.execDB(context.Background(), "audit",
-		`INSERT INTO target_snapshots (id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO target_snapshots (id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at, scanner_fingerprint)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(target_type, target_path) DO UPDATE SET
 		 	content_hash = excluded.content_hash,
 		 	dependency_hashes = excluded.dependency_hashes,
 		 	config_hashes = excluded.config_hashes,
 		 	network_endpoints = excluded.network_endpoints,
 		 	scan_id = excluded.scan_id,
-		 	captured_at = excluded.captured_at`,
-		id, targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID, now,
+		 	captured_at = excluded.captured_at,
+		 	scanner_fingerprint = excluded.scanner_fingerprint`,
+		id, targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID, now, scannerFingerprint,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: set target snapshot: %w", err)
@@ -2357,10 +2960,10 @@ func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, 
 	var ts string
 	err := s.scanRow(context.Background(), "get_target_snapshot",
 		s.db.QueryRowContext(context.Background(),
-			`SELECT id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at
+			`SELECT id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at, scanner_fingerprint
 		 FROM target_snapshots WHERE target_type = ? AND target_path = ?`,
 			targetType, targetPath,
-		), &r.ID, &r.TargetType, &r.TargetPath, &r.ContentHash, &r.DependencyHashes, &r.ConfigHashes, &r.NetworkEndpoints, &r.ScanID, &ts)
+		), &r.ID, &r.TargetType, &r.TargetPath, &r.ContentHash, &r.DependencyHashes, &r.ConfigHashes, &r.NetworkEndpoints, &r.ScanID, &ts, &r.ScannerFingerprint)
 	if err != nil {
 		return nil, fmt.Errorf("audit: get target snapshot: %w", err)
 	}

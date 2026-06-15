@@ -21,8 +21,14 @@ import type { ScanResult } from "../types.js";
 
 // --- Hoisted mocks (available before module-level vi.mock factories) ---
 
-const { mockEnforcer, mockRunSkillScan, mockRunPluginScan, mockRunCodeScan, mockScanMCPServer } =
+const { mockDaemonClient, mockEnforcer, mockRunSkillScan, mockRunPluginScan, mockRunCodeScan, mockScanMCPServer } =
   vi.hoisted(() => ({
+    mockDaemonClient: {
+      buildOutboundHeaders: vi.fn(async () => ({})),
+      applyStickyFromHttpResponse: vi.fn(),
+      getStickyAgentInstanceId: vi.fn(() => undefined),
+      getEchoedSidecarInstanceId: vi.fn(() => undefined),
+    },
     mockEnforcer: {
       syncFromDaemon: vi.fn(),
       evaluateSkill: vi.fn(),
@@ -41,7 +47,7 @@ vi.mock("@openclaw/plugin-sdk", () => ({
 }));
 
 vi.mock("../client.js", () => ({
-  DaemonClient: vi.fn(() => ({})),
+  DaemonClient: vi.fn(() => mockDaemonClient),
 }));
 
 vi.mock("../policy/enforcer.js", () => ({
@@ -57,7 +63,7 @@ vi.mock("../scanners/mcp-scanner.js", () => ({
 
 // --- Helpers ---
 
-type EventHandler = (...args: unknown[]) => Promise<void>;
+type EventHandler = (...args: unknown[]) => Promise<unknown> | unknown;
 
 function createMockContext() {
   const listeners: Record<string, EventHandler> = {};
@@ -115,6 +121,10 @@ describe("DefenseClaw OpenClaw Plugin", () => {
     mockEnforcer.syncFromDaemon.mockResolvedValue(undefined);
     mockEnforcer.block.mockResolvedValue(undefined);
     mockEnforcer.allow.mockResolvedValue(undefined);
+    mockDaemonClient.buildOutboundHeaders.mockResolvedValue({});
+    mockDaemonClient.applyStickyFromHttpResponse.mockReturnValue(undefined);
+    mockDaemonClient.getStickyAgentInstanceId.mockReturnValue(undefined);
+    mockDaemonClient.getEchoedSidecarInstanceId.mockReturnValue(undefined);
 
     const mock = createMockContext();
     listeners = mock.listeners;
@@ -133,6 +143,68 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       expect(commands["scan"]).toBeDefined();
       expect(commands["block"]).toBeDefined();
       expect(commands["allow"]).toBeDefined();
+    });
+  });
+
+  describe("before_tool_call approvals", () => {
+    it("returns native OpenClaw approval request when sidecar returns confirm", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            action: "confirm",
+            raw_action: "confirm",
+            severity: "HIGH",
+            reason: "matched: CMD-ENV-DUMP:Environment variable dump",
+            mode: "action",
+            approval_timeout_ms: 30000,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+      globalThis.fetch = fetchMock;
+
+      const result = await listeners.before_tool_call(
+        { toolName: "exec", params: { command: "printenv" } },
+        { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+      );
+
+      expect(result).toMatchObject({
+        requireApproval: {
+          title: "DefenseClaw approval required",
+          severity: "warning",
+          timeoutMs: 30000,
+          timeoutBehavior: "deny",
+        },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+      expect(body).toMatchObject({
+        tool: "exec",
+        session_id: "agent:main:main",
+        approval_surface: "native",
+      });
+    });
+
+    it("does not request approval in observe mode", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            action: "allow",
+            raw_action: "confirm",
+            severity: "HIGH",
+            reason: "matched: CMD-ENV-DUMP:Environment variable dump",
+            mode: "observe",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+
+      const result = await listeners.before_tool_call(
+        { toolName: "exec", params: { command: "printenv" } },
+        { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+      );
+
+      expect(result).toBeUndefined();
     });
   });
 

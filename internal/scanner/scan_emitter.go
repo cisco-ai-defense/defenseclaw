@@ -6,14 +6,42 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// redactedScanResultJSON serializes a copy of “result“ whose finding
+// description / location / remediation fields have been passed through
+// redaction.ForSinkString. ("Raw scan JSON stores
+// unredacted secret-bearing findings"): callers persist this JSON into
+// scan_results.raw_json, which is read back through GetScanRawJSON and
+// LatestScansByScanner -- both surfaces had previously leaked the raw
+// matched source line.
+func redactedScanResultJSON(r *ScanResult) ([]byte, error) {
+	if r == nil {
+		return []byte(`{}`), nil
+	}
+	clone := *r
+	if len(r.Findings) > 0 {
+		safe := make([]Finding, len(r.Findings))
+		for i, f := range r.Findings {
+			cf := f
+			cf.Description = redaction.ForSinkString(cf.Description)
+			cf.Location = redaction.ForSinkString(cf.Location)
+			cf.Remediation = redaction.ForSinkString(cf.Remediation)
+			safe[i] = cf
+		}
+		clone.Findings = safe
+	}
+	return json.MarshalIndent(clone, "", "  ")
+}
 
 // ScanPersistence persists scan summary + per-finding rows. Implemented by
 // *audit.Store (see audit/scan_persist.go).
@@ -24,8 +52,53 @@ type ScanPersistence interface {
 
 // ScanTelemetry records per-finding metrics. Implemented by *telemetry.Provider.
 type ScanTelemetry interface {
-	RecordScanFindingByRule(ctx context.Context, scannerName, ruleID, severity string)
+	RecordScanFindingByRule(ctx context.Context, scannerName, ruleID, severity, connector string)
 }
+
+// Correlator runs after findings are persisted to detect multi-step
+// attack flows (lethal trifecta, escalation chains, destructive
+// flows) by reading a session's recent findings and matching them
+// against declared patterns. Nil means "don't run correlation".
+type Correlator interface {
+	RunForSession(ctx context.Context, sessionID, agentInstanceID string, pers ScanPersistence, target string, meta ScanFindingMeta) error
+}
+
+// defaultCorrelator holds the package-level correlator installed at
+// sidecar boot. Accessed only via SetCorrelator / the read in
+// EmitScanResult, so a plain pointer with a mutex is plenty — this
+// is not a hot path.
+var defaultCorrelator Correlator
+
+// SetCorrelator installs the correlator that EmitScanResult will run
+// after every successful InsertScanFindings. Pass nil to disable.
+// Intended to be called once at sidecar boot from the gateway wiring
+// layer so the scanner package stays free of guardrail imports.
+func SetCorrelator(c Correlator) { defaultCorrelator = c }
+
+// findingEnricher is the hook that maps a finding's rule_id + tags
+// to the lethal-trifecta data axes. Nil when the sidecar hasn't
+// wired up guardrail.AxesForRuleID yet — see cli/correlator_wire.go.
+var findingEnricher func(*Finding) []string
+
+// SetFindingEnricher installs the axis-labeling hook that runs on
+// every finding emitted through EmitScanResult. The hook is called
+// only when Finding.DataAxis is empty, so scanner-specific code that
+// already sets axes (e.g. clawshield tagging by content hash) wins.
+func SetFindingEnricher(f func(*Finding) []string) { findingEnricher = f }
+
+// capabilityEnricher maps a finding's rule_id to its
+// tool_capability_class (read_fs / write_fs / exec_shell /
+// network_fetch / send_message). Nil until the guardrail wiring layer
+// installs guardrail.CapabilityForRuleID — see cli/correlator_wire.go.
+// Returning "" means "no capability", leaving the field untouched.
+var capabilityEnricher func(*Finding) string
+
+// SetCapabilityEnricher installs the capability-labeling hook that
+// runs on every finding emitted through EmitScanResult. Like the axis
+// enricher it only runs when Finding.ToolCapabilityClass is empty, so
+// surfaces that already classified the capability from a real tool
+// name (e.g. proxy tool-call inspection via ClassifyToolName) win.
+func SetCapabilityEnricher(f func(*Finding) string) { capabilityEnricher = f }
 
 // ScanSummaryParams is the v7 scan_results row payload.
 type ScanSummaryParams struct {
@@ -52,6 +125,11 @@ type ScanSummaryParams struct {
 	SessionID         string
 	RequestID         string
 	TraceID           string
+	// EvaluationID joins this scan to the upstream runtime
+	// evaluation (hook handler, /api/v1/inspect/*, proxy guardrail,
+	// mid-stream, tool-call-inspect). Empty for classic scanner
+	// invocations.
+	EvaluationID string
 }
 
 // ScanFindingMeta stamps correlation + provenance on scan_findings rows.
@@ -69,6 +147,10 @@ type ScanFindingMeta struct {
 	ContentHash       string
 	Generation        uint64
 	BinaryVersion     string
+	// EvaluationID matches ScanSummaryParams.EvaluationID; copied
+	// onto every scan_findings row so SIEM queries can pivot on it
+	// without joining to scan_results.
+	EvaluationID string
 }
 
 // EmitScanResult fans out one EventScan + N EventScanFinding events (when w
@@ -90,6 +172,27 @@ func EmitScanResult(
 
 	for i := range result.Findings {
 		result.Findings[i].RuleID = EnsureRuleID(&result.Findings[i], result.Scanner)
+		// Auto-populate DataAxis labels when the finding creator left
+		// them blank. The enricher (installed by the guardrail wiring
+		// layer at boot) maps the finding's RuleID, Tags, and Category
+		// to one or more of the three lethal-trifecta axes. Keeping
+		// this at the emission boundary avoids touching every regex
+		// rule site; the enricher is a one-import hook.
+		if len(result.Findings[i].DataAxis) == 0 && findingEnricher != nil {
+			if axes := findingEnricher(&result.Findings[i]); len(axes) > 0 {
+				result.Findings[i].DataAxis = axes
+			}
+		}
+		// Auto-populate ToolCapabilityClass the same way: derive it
+		// from the rule_id for content-matched findings that didn't
+		// already get a class from a real tool name upstream. Without
+		// this the DESTRUCTIVE-FLOW correlator pattern (which keys on
+		// exec_shell) can never fire on regex/plugin detections.
+		if result.Findings[i].ToolCapabilityClass == "" && capabilityEnricher != nil {
+			if cap := capabilityEnricher(&result.Findings[i]); cap != "" {
+				result.Findings[i].ToolCapabilityClass = cap
+			}
+		}
 	}
 
 	targetType := result.EffectiveTargetType()
@@ -122,10 +225,23 @@ func EmitScanResult(
 		ContentHash:       prov.ContentHash,
 		Generation:        prov.Generation,
 		BinaryVersion:     prov.BinaryVersion,
+		EvaluationID:      agent.EvaluationID,
 	}
 
 	if pers != nil {
-		raw, jerr := result.JSON()
+		// ("Raw scan JSON stores unredacted
+		// secret-bearing findings"): the per-finding rows pass
+		// description / location / remediation through
+		// redaction.ForSinkString, but the legacy emitter
+		// serialised the same Finding values via result.JSON() and
+		// stored them in scan_results.raw_json without redaction.
+		// CodeGuard finding descriptions contain the raw matched
+		// source line, so a hardcoded secret matched by CG-CRED-001
+		// would persist verbatim in the SQLite audit DB and be
+		// fetchable via GetScanRawJSON. Redact a copy of the
+		// findings before serialising so raw_json reflects the
+		// same sanitised view as the per-finding rows.
+		raw, jerr := redactedScanResultJSON(result)
 		if jerr != nil {
 			raw = []byte(`{}`)
 		}
@@ -153,12 +269,22 @@ func EmitScanResult(
 			AgentName:         agent.AgentName,
 			AgentInstanceID:   agent.AgentInstanceID,
 			SidecarInstanceID: agent.SidecarInstanceID,
+			EvaluationID:      agent.EvaluationID,
 		}
 		if err := pers.InsertScanSummary(sum); err != nil {
 			return scanID, err
 		}
 		if err := pers.InsertScanFindings(scanID, result.Target, result.Findings, meta); err != nil {
 			return scanID, err
+		}
+
+		// Correlator runs once per scan, after findings are persisted.
+		// Match failures are non-fatal — a correlator hiccup shouldn't
+		// drop the scan itself. Only runs when session correlation
+		// IDs are present; out-of-session scans (CLI audits, batch
+		// jobs) skip correlation entirely.
+		if c := defaultCorrelator; c != nil && meta.SessionID != "" && meta.AgentInstanceID != "" {
+			_ = c.RunForSession(ctx, meta.SessionID, meta.AgentInstanceID, pers, result.Target, meta)
 		}
 	}
 
@@ -176,17 +302,18 @@ func EmitScanResult(
 			AgentInstanceID:   agent.AgentInstanceID,
 			SidecarInstanceID: agent.SidecarInstanceID,
 			Scan: &gatewaylog.ScanPayload{
-				ScanID:      scanID,
-				Scanner:     scannerEnum,
-				Target:      result.Target,
-				TargetType:  targetTypeEnum,
-				Verdict:     verdictEnum,
-				DurationMs:  result.Duration.Milliseconds(),
-				SeverityMax: maxSev,
-				Counts:      counts,
-				TotalCount:  len(result.Findings),
-				ExitCode:    result.ExitCode,
-				Error:       result.ScanError,
+				ScanID:       scanID,
+				Scanner:      scannerEnum,
+				Target:       result.Target,
+				TargetType:   targetTypeEnum,
+				Verdict:      verdictEnum,
+				DurationMs:   result.Duration.Milliseconds(),
+				SeverityMax:  maxSev,
+				Counts:       counts,
+				TotalCount:   len(result.Findings),
+				ExitCode:     result.ExitCode,
+				Error:        result.ScanError,
+				EvaluationID: agent.EvaluationID,
 			},
 		})
 		for i := range result.Findings {
@@ -208,19 +335,21 @@ func EmitScanResult(
 				AgentInstanceID:   agent.AgentInstanceID,
 				SidecarInstanceID: agent.SidecarInstanceID,
 				ScanFinding: &gatewaylog.ScanFindingPayload{
-					ScanID:      scanID,
-					Scanner:     scannerEnum,
-					Target:      result.Target,
-					FindingID:   f.ID,
-					RuleID:      f.RuleID,
-					Category:    f.Category,
-					Title:       f.Title,
-					Description: f.Description,
-					Severity:    toGatewaySeverity(f.Severity),
-					Location:    f.Location,
-					LineNumber:  ln,
-					Remediation: f.Remediation,
-					Tags:        f.Tags,
+					ScanID:       scanID,
+					Scanner:      scannerEnum,
+					Target:       result.Target,
+					FindingID:    f.ID,
+					RuleID:       f.RuleID,
+					Category:     f.Category,
+					Title:        f.Title,
+					Description:  f.Description,
+					Severity:     toGatewaySeverity(f.Severity),
+					Location:     f.Location,
+					LineNumber:   ln,
+					Remediation:  f.Remediation,
+					Tags:         f.Tags,
+					Confidence:   f.Confidence,
+					EvaluationID: agent.EvaluationID,
 				},
 			})
 		}
@@ -229,7 +358,7 @@ func EmitScanResult(
 	if tel != nil {
 		for i := range result.Findings {
 			f := &result.Findings[i]
-			tel.RecordScanFindingByRule(ctx, result.Scanner, f.RuleID, string(f.Severity))
+			tel.RecordScanFindingByRule(ctx, result.Scanner, f.RuleID, string(f.Severity), agent.Connector)
 		}
 	}
 

@@ -1,0 +1,12 @@
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "dc-e2e-codex",
+  "turn_id": "dc-e2e-turn",
+  "agent_id": "codex-e2e",
+  "agent_name": "codex e2e agent",
+  "agent_type": "codex-cli",
+  "tool_name": "shell",
+  "tool_input": {
+    "command": "cat /etc/shadow"
+  }
+}

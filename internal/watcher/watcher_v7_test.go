@@ -38,7 +38,7 @@ func TestAdmissionSpan_GoldenTree(t *testing.T) {
 	ctx := context.Background()
 	ctx, parent := otel.Tracer("defenseclaw").Start(ctx, "http/server")
 
-	ctx, child := enforce.StartAdmissionDecideSpan(ctx, "skill", "x", "pid")
+	_, child := enforce.StartAdmissionDecideSpan(ctx, "skill", "x", "pid")
 	enforce.EndAdmissionDecideSpan(child, "allowed", "ok", "pid", nil)
 
 	parent.End()

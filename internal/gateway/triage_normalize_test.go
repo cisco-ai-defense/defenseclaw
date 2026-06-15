@@ -231,6 +231,7 @@ func TestScanLocalPatterns_WhitespaceEvasion_FlagsViaNormalization(t *testing.T)
 	v := scanLocalPatterns("prompt", prompt)
 	if v == nil {
 		t.Fatal("expected non-nil verdict")
+		return
 	}
 	// Either block or alert is acceptable; what we care about is that
 	// we did NOT silently allow. allowVerdict().Action is "allow".
@@ -418,6 +419,7 @@ func TestScanLocalPatterns_CreditCard_ZeroWidthEvasion(t *testing.T) {
 	v := scanLocalPatterns("prompt", prompt)
 	if v == nil {
 		t.Fatal("expected non-nil verdict")
+		return
 	}
 	if v.Action == "allow" {
 		t.Fatalf("expected zero-width credit card to be flagged, got allow verdict: %+v", v)

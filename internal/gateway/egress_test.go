@@ -22,6 +22,8 @@ func TestHandleEgressEvent_RejectsUnauth(t *testing.T) {
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
 	proxy.gatewayToken = "test-token"
+	// Specifically exercising the auth path — flip off the test bypass.
+	proxy.skipAuthForTest = false
 
 	body := []byte(`{"target_host":"api.openai.com","branch":"known","decision":"allow"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/events/egress", bytes.NewReader(body))

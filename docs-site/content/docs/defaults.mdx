@@ -1,0 +1,248 @@
+---
+title: Defaults
+description: What every fresh DefenseClaw install ships with — three OPA policies (permissive / default / strict), three matching guardrail rule packs, the operator-config defaults, and how to pick the combination that fits your team's risk tolerance.
+keywords:
+  - DefenseClaw defaults
+  - rule pack default
+  - rule pack strict
+  - rule pack permissive
+  - policy activate
+  - hilt min_severity
+  - block_threshold
+  - DefenseClaw risk tolerance
+---
+
+DefenseClaw ships with opinionated defaults that are immediately useful without tuning, and stay out of your way until you opt into stricter behaviour. This page documents what *actually ships* — grounded in the policy YAMLs in `policies/`, the schema in `internal/config/config.go`, and what `defenseclaw setup guardrail` actually writes.
+
+## The two layers you can swap
+
+DefenseClaw separates *admission policy* from *runtime guardrail rules*. They ship as matching triples but are independent knobs.
+
+<Cards>
+  <Card title="Admission policy (OPA)" description="What happens when a skill / MCP / plugin gets installed or executed. Lives in policies/<name>.yaml, activated by defenseclaw policy activate <name>." />
+  <Card title="Guardrail rule pack" description="The regex patterns, LLM-judge prompts, and suppressions that gate prompts and completions in flight. Lives in policies/guardrail/<name>/, pointed at by guardrail.rule_pack_dir." />
+</Cards>
+
+Both layers ship in three named profiles — `default`, `strict`, `permissive` — and you flip them independently:
+
+```bash
+defenseclaw policy activate default                                # OPA layer
+defenseclaw setup guardrail --rule-pack default                    # Guardrail layer
+```
+
+<Callout type="warn">
+`defenseclaw policy activate strict` does **not** change `guardrail.rule_pack_dir`, and vice versa. If you want strict everywhere, flip both. See [`docs/GUARDRAIL_RULE_PACKS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/GUARDRAIL_RULE_PACKS.md) for the rationale.
+</Callout>
+
+## OPA admission policy — what each profile ships
+
+The OPA policy file (`policies/<name>.yaml`) drives admission decisions: what happens to a finding by severity, whether the allow-list lets first-party assets bypass scanning, and what threshold a [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) verdict has to clear before it blocks.
+
+| Knob | `permissive` | `default` | `strict` |
+| --- | --- | --- | --- |
+| `admission.allow_list_bypass_scan` | `true` | `true` | `false` |
+| `skill_actions.critical` | quarantine + disable + block | quarantine + disable + block | quarantine + disable + block |
+| `skill_actions.high` | none + enable + none | quarantine + disable + block | quarantine + disable + block |
+| `skill_actions.medium` | none + enable + none | none + enable + none | quarantine + disable + block |
+| `scanner_overrides` | empty | empty | per-scanner medium-severity blocks for `mcp` and `plugin` |
+| `guardrail.block_threshold` | `4` (CRITICAL) | `4` (CRITICAL) | `2` (MEDIUM) |
+| `guardrail.alert_threshold` | `3` (HIGH) | `2` (MEDIUM) | `1` (LOW) |
+| `guardrail.cisco_trust_level` | `advisory` | `full` | `full` |
+| `guardrail.hilt.enabled` | `false` | `false` | `true` |
+| `guardrail.hilt.min_severity` | `HIGH` | `HIGH` | `HIGH` |
+
+Severity ranks are the rego convention from `policies/rego/guardrail.rego`: `1 = LOW`, `2 = MEDIUM`, `3 = HIGH`, `4 = CRITICAL`. `cisco_trust_level: advisory` means even Cisco AI Defense's own verdicts are surfaced but never escalated to a block.
+
+The columns are deliberately conservative. We'd rather you opt *into* stricter behaviour than have an upgrade silently start blocking your traffic.
+
+## Guardrail rule pack — what each profile ships
+
+The rule pack directory (`policies/guardrail/<name>/`) holds the regex YAMLs, judge prompts, sensitive-tool definitions, and suppressions the in-flight scanner consumes.
+
+| Pack | `rules/` files | `judge/` prompts | `suppressions.yaml` | `sensitive-tools.yaml` |
+| --- | --- | --- | --- | --- |
+| `permissive` | injection, secrets, c2, commands, cognitive, trust-exploit, sensitive-paths, local-patterns, enterprise-data | injection, pii, exfil, tool-injection (less aggressive thresholds) | broad — `git status`, doc reads suppressed | minimal |
+| `default` | same nine families as permissive | injection, pii, exfil, tool-injection (medium thresholds) | moderate | balanced |
+| `strict` | same nine + tighter regex | injection, pii, exfil, tool-injection (low thresholds) | none | aggressive |
+
+All three packs share the same [severity rubric](/docs/policies#shared-severity-rubric) and the same `signal_strength` output schema — only the per-category thresholds and suppression scope differ between packs. Switching the rule pack does *not* enable the LLM judge — that's a separate `guardrail.judge.enabled` toggle in your operator config (default: `false`). Flipping the rule pack only changes which prompt YAMLs the judge will run *if* you've enabled it.
+
+## What `setup guardrail` actually writes
+
+A vanilla `defenseclaw init && defenseclaw setup guardrail --connector openclaw --rule-pack default` produces a config that looks like this — schema validated against `internal/config/config.go`:
+
+```yaml title="~/.defenseclaw/config.yaml (after init + setup guardrail --rule-pack default)"
+mode: action
+
+guardrail:
+  enabled: true
+  mode: action
+  rule_pack_dir: /Users/<you>/.defenseclaw/policies/guardrail/default
+  hook_fail_mode: open
+  judge:
+    enabled: false                    # opt in via --judge-model
+  hilt:
+    enabled: false                    # opt in via --human-approval
+    min_severity: HIGH
+
+privacy:
+  disable_redaction: false
+
+audit_sinks: []                        # JSONL fallback at ~/.defenseclaw/gateway.jsonl always writes
+webhooks: []                           # add via `defenseclaw setup webhook add ...`
+
+claude_code:
+  enabled: false                       # toggled when you pick claude-code in setup guardrail
+codex:
+  enabled: false
+```
+
+Three things to notice that contradict folklore:
+
+- **The LLM judge is OFF by default.** It only flips on if you pass `--judge-model` to `setup guardrail` or answer "yes" to the interactive judge prompt. The viper default is `guardrail.judge.enabled = false` ([`internal/config/config.go:2162`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go)). Keeping it off keeps cost predictable; flip it on once you have a `DEFENSECLAW_LLM_KEY` configured.
+- **HILT is OFF by default.** The shipped severity floor is `HIGH`, but `enabled: false` means it never prompts. `--human-approval` flips it on; `--hilt-min-severity` adjusts the floor.
+- **Only the JSONL fallback writes.** `audit_sinks: []` means no Splunk, no OTLP — the gateway still tails everything to `~/.defenseclaw/gateway.jsonl` for `defenseclaw alerts` and the TUI. Wire external sinks via [`setup splunk`](/docs/observability/splunk) or [`setup local-observability`](/docs/observability/local-observability).
+
+## Tuning by risk tolerance
+
+You usually don't need a custom policy or rule pack — just a few knob changes.
+
+### "I'm in pilot, just observe"
+
+```bash
+defenseclaw policy activate permissive
+defenseclaw setup guardrail --rule-pack permissive
+```
+
+Nothing blocks (block threshold = CRITICAL, Cisco trust = advisory). Everything still flows to the audit log and JSONL so you can review what *would* have happened. Recommended first week of any rollout.
+
+### "Move fast, stop only the obvious harm"
+
+```bash
+defenseclaw policy activate default
+defenseclaw setup guardrail --rule-pack default
+defenseclaw setup guardrail --human-approval --hilt-min-severity high
+```
+
+Default rules; HILT prompts only on HIGH+. Most engineering teams in the early/middle phase land here.
+
+### "Regulated workload, lock it down"
+
+```bash
+defenseclaw policy activate strict
+defenseclaw setup guardrail --rule-pack strict
+defenseclaw setup guardrail --human-approval --hilt-min-severity low \
+  --judge-model openai/gpt-4o-mini
+```
+
+Strict policy (block ≥ MEDIUM, no allow-list bypass), strict rule pack (tightest regex + suppressions empty), HILT on every LOW+ event, LLM judge enabled. Combine with the bundled OpenShell sandbox profile and an MCP allow-list (in `policies/strict.yaml`'s `first_party_allow_list`).
+
+### "I trust the scanner, raise its bar specifically"
+
+The asset-class behavior is independent of the rule pack. Edit the active policy YAML directly:
+
+```yaml title="policies/default.yaml override (apply with `defenseclaw policy activate default`)"
+scanner_overrides:
+  mcp:
+    medium:                            # was none/enable/none
+      file: quarantine
+      runtime: disable
+      install: block
+```
+
+Then re-activate so OPA picks up the change:
+
+```bash
+defenseclaw policy activate default
+```
+
+## What `defenseclaw init` doesn't change
+
+A few defaults are intentionally fixed unless you edit `~/.defenseclaw/config.yaml` directly:
+
+| Knob | Default | Why fixed |
+| --- | --- | --- |
+| `~/.defenseclaw/gateway.jsonl` (JSONL fallback path) | always written | Reliability fallback — the gateway must always have a writable place to log when external sinks fail |
+| `guardrail.hook_fail_mode` | `open` | Conservative — a malformed hook response shouldn't take the agent down |
+| `guardrail.judge.timeout` | `30s` | Hot-path latency budget for the judge |
+| `guardrail.judge.adjudication_timeout` | `5s` | Per-prompt adjudication budget |
+| `guardrail.detection_strategy` | `regex_judge` | Tested baseline — regex first, judge for medium+ findings |
+| Bifrost retry policy | `3 attempts, exp backoff` | Tested LLM-routing baseline |
+
+If you need to change any of these, edit `~/.defenseclaw/config.yaml` directly and `defenseclaw config validate` confirms the schema.
+
+## Per-connector overrides (`guardrail.connectors`)
+
+When you run more than one hook connector from a single gateway, override guardrail policy per connector under `guardrail.connectors.<name>` in `~/.defenseclaw/config.yaml`. Every field is optional and **inherits the global `guardrail.*` value when unset**, so a connector block only carries what differs:
+
+```yaml
+guardrail:
+  mode: action                   # global default
+  hook_fail_mode: open
+
+  connectors:
+    claudecode:
+      mode: action               # enforce for Claude Code
+    codex:
+      mode: observe              # softer for Codex than for Claude Code
+      hook_fail_mode: closed
+```
+
+`claw.mode` flips to `multi` automatically once more than one connector is active. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/setup/guardrail/multi-connector) and [Reference → Configuration](/docs/reference/configuration). The OPA admission policy is still global — there's no per-connector policy override surface yet.
+
+<Callout type="warn" title="Legacy top-level connector blocks are deprecated">
+Older installs used top-level `claude_code:` / `codex:` blocks (the `AgentHookConfig` fields) for per-connector overrides:
+
+```yaml
+claude_code:
+  enabled: true
+  mode: action
+  fail_mode: open                # LEGACY hint, NOT consumed by hooks; see Reference → Fail modes
+```
+
+These are still parsed for backward compatibility, but `fail_mode` here does **nothing** at runtime (see [Reference → Fail modes](/docs/reference/fail-modes#foot-gun-claude_codefail_mode-and-codexfail_mode-legacy-not-consumed-by-hook-scripts)). Prefer `guardrail.connectors.<name>` for new configuration — it's the surface the per-connector CLI writes and the gateway resolves at request time.
+</Callout>
+
+## Inspect the active defaults
+
+```bash
+defenseclaw config show                  # rendered ~/.defenseclaw/config.yaml (secrets masked)
+defenseclaw policy list                  # all policies on disk + which is active
+defenseclaw policy show <name>           # full content of one policy
+```
+
+`config show` always renders the *resolved* configuration — base + env-var overlay — so you can see the effective values without spelunking. Use `--reveal` to also show resolved secret values (still masked in the output for safety).
+
+`policy show <name>` prints the policy YAML for the named file (`default`, `strict`, `permissive`, or any custom `policies/<name>.yaml` you've added). There's no built-in "dump a single rule by id" — for that, grep the rule pack directly:
+
+```bash
+grep -rn "rule_id_you_care_about" "$(awk '/rule_pack_dir/ {print $2}' ~/.defenseclaw/config.yaml)"
+```
+
+## Reset to defaults
+
+There's no `--reset` flag. Two real paths exist:
+
+**Soft reset (most common)** — just re-run setup with the defaults you want. `setup guardrail` overwrites the relevant `guardrail.*` keys idempotently:
+
+```bash
+defenseclaw setup guardrail --rule-pack default --no-human-approval
+defenseclaw policy activate default
+```
+
+**Hard reset (start from zero)** — `defenseclaw uninstall` archives `~/.defenseclaw/` to a timestamped backup, so you can roll back:
+
+```bash
+defenseclaw uninstall
+defenseclaw init
+defenseclaw setup guardrail
+```
+
+## See also
+
+- [Policies](/docs/policies) — the layered architecture (regex → judge → suppressions → OPA admission)
+- [Setup Guardrail](/docs/setup/guardrail) — the CLI that consumes these defaults
+- [HITL](/docs/hitl) — what `guardrail.hilt.enabled` and `min_severity` actually change for the operator
+- [Reference → Fail modes](/docs/reference/fail-modes) — the three "fail open vs closed" knobs disambiguated
+- [Reference → Configuration](/docs/reference/configuration) — every key surfaced here, with type and default
+- [`docs/GUARDRAIL_RULE_PACKS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/GUARDRAIL_RULE_PACKS.md) — the canonical engineering doc on the OPA-vs-rule-pack split
