@@ -1644,6 +1644,28 @@ class Config:
             return connector_paths.normalize(self.claw.mode)
         return "openclaw"
 
+    def has_connector_configured(self) -> bool:
+        """Return True when the operator has explicitly configured a connector.
+
+        Distinguishes a genuinely unconfigured install — every connector
+        marker empty, e.g. after ``setup remove`` clears the last one
+        (which persists ``claw.mode: ''``) — from a real single-connector
+        openclaw install, which pins ``claw.mode``/``guardrail.connector``
+        to ``openclaw`` (see ``cmd_setup``). :meth:`active_connectors` and
+        the shared list/scan resolver use this to avoid fabricating a
+        phantom ``openclaw`` when nothing is set up.
+
+        NOTE: a *missing* config file still loads ``claw.mode`` as the
+        ``"openclaw"`` default (``config.load``), so this reports True
+        there — the unconfigured signal is the explicit empty marker
+        written on removal, not file absence.
+        """
+        return bool(
+            self.guardrail.connectors
+            or self.guardrail.connector.strip()
+            or self.claw.mode.strip()
+        )
+
     def active_connectors(self) -> list[str]:
         """Return the full resolved set of connector names, sorted.
 
@@ -1654,6 +1676,15 @@ class Config:
         value, so the legacy single-connector behavior is preserved. The
         multi-connector boot loop iterates this list while existing
         single-connector callers keep using :meth:`active_connector`.
+
+        When nothing is configured (:meth:`has_connector_configured` is
+        False) this returns an empty list rather than flooring to
+        ``["openclaw"]`` — callers that fan out over connectors (``status``,
+        ``aibom``, the shared list/scan resolver) then render an explicit
+        "no connector configured" empty state instead of a phantom
+        openclaw. :meth:`active_connector` keeps its singular ``"openclaw"``
+        default untouched, so path resolution and other single-connector
+        callers are unaffected.
         """
         if self.guardrail.connectors:
             # Dedupe after normalization so two alias keys (e.g. "claude-code"
@@ -1669,6 +1700,8 @@ class Config:
             )
             if names:
                 return names
+        if not self.has_connector_configured():
+            return []
         return [self.active_connector()]
 
     def skill_dirs(self, connector: str | None = None) -> list[str]:
