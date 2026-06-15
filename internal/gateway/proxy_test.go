@@ -1887,13 +1887,11 @@ func TestHandlePassthrough_NonStreamingForward(t *testing.T) {
 	}
 }
 
-// TestHandlePassthroughGet_ForwardsOllamaDiscovery is the regression test for
-// the #258 full-live break: once the fetch interceptor began patching
-// http.get (F-1586), a local Ollama discovery probe
-// (GET 127.0.0.1:11434/api/tags) is routed through this proxy. The legacy
-// GET branch returned a bare 200 with no body, so the client could not parse
-// the model list and surfaced an opaque error ("no usable response"). The GET
-// passthrough must forward to the real upstream and copy the body back.
+// TestHandlePassthroughGet_ForwardsOllamaDiscovery verifies that an
+// intercepted GET (e.g. an Ollama discovery probe to /api/tags) is forwarded
+// to the real upstream and its body is copied back, that a missing
+// X-DC-Target-URL yields a bare 200, and that an unknown host is never
+// forwarded.
 func TestHandlePassthroughGet_ForwardsOllamaDiscovery(t *testing.T) {
 	var hits int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

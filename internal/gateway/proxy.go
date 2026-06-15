@@ -691,26 +691,16 @@ func (p *GuardrailProxy) requestLogger(next http.Handler) http.Handler {
 	})
 }
 
-// handlePassthroughGet forwards an intercepted GET request to the real
-// upstream identified by X-DC-Target-URL and copies the response back.
-//
-// Why this exists: the plugin's fetch interceptor patches http.request /
-// http.get (F-1586), so a local client's discovery probe — e.g. an Ollama
-// `GET http://127.0.0.1:11434/api/tags` — is now routed through this proxy
-// instead of going straight to the upstream. Returning a bare 200 with an
-// empty body (the legacy behavior) leaves the client unable to parse the
-// expected JSON (Ollama's `{"models":[...]}`), which surfaces as an opaque
-// client-side error and a "no usable response" agent failure.
-//
-// We only forward to known-provider / Ollama-loopback targets (after the
-// same SSRF / scheme / userinfo guards the POST path applies), so the GET
-// passthrough can never act as an open proxy to arbitrary hosts. When no
-// upstream is supplied (genuine health probe / unknown local path) the
-// legacy bare-200 behavior is preserved.
+// handlePassthroughGet forwards an intercepted GET request (e.g. a provider
+// discovery probe like Ollama's GET /api/tags) to the real upstream named by
+// X-DC-Target-URL and copies the response back. Forwarding is restricted to
+// known-provider / Ollama-loopback targets, after the same SSRF / scheme /
+// userinfo guards the POST path applies, so the GET path can never act as an
+// open proxy. When no upstream is supplied (health probe / unknown local
+// path) it returns a bare 200.
 func (p *GuardrailProxy) handlePassthroughGet(w http.ResponseWriter, r *http.Request) {
 	targetOrigin := r.Header.Get("X-DC-Target-URL")
 	if targetOrigin == "" {
-		// No upstream to forward to — genuine health probe / unknown path.
 		w.WriteHeader(http.StatusOK)
 		return
 	}
