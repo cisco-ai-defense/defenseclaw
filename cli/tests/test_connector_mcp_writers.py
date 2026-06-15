@@ -20,7 +20,7 @@ Pins three contracts:
 
 1. The dispatch matrix — OpenClaw delegates to its CLI shim,
    Claude Code patches ~/.claude/settings.json, Codex patches
-   ./.mcp.json, ZeptoClaw refuses with a clear error.
+   ~/.codex/config.toml by default, ZeptoClaw refuses with a clear error.
 2. Atomicity + 0o600 perms on the JSON-rewriting branches.
 3. Round-trip — what we set is what we read back via mcp_servers().
 """
@@ -30,18 +30,17 @@ from __future__ import annotations
 import json
 import os
 import stat
-from pathlib import Path
 
 import pytest
-
 from defenseclaw import connector_paths
 from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
     MCPWriteUnsupportedError,
+    lookup_managed_mcp_backup,
+    restore_managed_mcp_backup,
     set_mcp_server,
     unset_mcp_server,
 )
-
 
 # ---------------------------------------------------------------------------
 # OpenClaw — delegation to injected setter/unsetter
@@ -175,37 +174,91 @@ class TestClaudeCodeWrites:
 
 
 # ---------------------------------------------------------------------------
-# Codex — patches ./.mcp.json
+# Codex — patches ~/.codex/config.toml by default
 # ---------------------------------------------------------------------------
 
 class TestCodexWrites:
-    def test_set_creates_mcp_json(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+    def test_set_creates_global_config_toml(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
         set_mcp_server("codex", "demo", {"command": "uvx", "args": ["d"]})
 
-        path = tmp_path / ".mcp.json"
+        path = tmp_path / ".codex" / "config.toml"
         assert path.is_file()
-        data = json.loads(path.read_text())
-        assert data["mcpServers"]["demo"]["command"] == "uvx"
+        entries = connector_paths.mcp_servers("codex")
+        assert [e.name for e in entries] == ["demo"]
+        assert entries[0].command == "uvx"
+        assert entries[0].args == ["d"]
 
     def test_set_uses_0o600(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
         set_mcp_server("codex", "demo", {"command": "uvx"})
-        path = tmp_path / ".mcp.json"
+        path = tmp_path / ".codex" / "config.toml"
         mode = stat.S_IMODE(path.stat().st_mode)
         assert mode == 0o600
 
     def test_unset_removes_key(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        path = tmp_path / ".mcp.json"
-        path.write_text(json.dumps({"mcpServers": {
-            "demo": {"command": "x"},
-            "keep": {"command": "y"},
-        }}))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        path = tmp_path / ".codex" / "config.toml"
+        path.parent.mkdir()
+        path.write_text(
+            '[mcp_servers.demo]\ncommand = "x"\n\n'
+            '[mcp_servers.keep]\ncommand = "y"\n'
+        )
         unset_mcp_server("codex", "demo")
+        entries = connector_paths.mcp_servers("codex")
+        assert [e.name for e in entries] == ["keep"]
+        assert entries[0].command == "y"
+
+    def test_set_captures_restorable_backup(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        path = tmp_path / ".codex" / "config.toml"
+        path.parent.mkdir()
+        path.write_text('[mcp_servers.old]\ncommand = "old"\n')
+
+        set_mcp_server("codex", "demo", {"command": "uvx"})
+        assert (tmp_path / ".codex" / ".defenseclaw-config.toml.bak").is_file()
+        assert restore_managed_mcp_backup(str(path))
+
+        entries = connector_paths.mcp_servers("codex")
+        assert [e.name for e in entries] == ["old"]
+        assert entries[0].command == "old"
+
+    def test_set_records_absolute_target_in_registry(self, tmp_path, monkeypatch):
+        """C-2: workspace MCP backup must persist the absolute target path.
+
+        Without this, ``restore_managed_mcp_backup`` could not be
+        called from a different cwd (Copilot, Codex, Cursor all use
+        workspace-scoped paths), and a ``cd`` between setup and
+        teardown would silently lose the original config.
+        """
+        # DEFENSECLAW_HOME isolates the registry for this test run.
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "dchome"))
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        path = workspace / ".mcp.json"
+        path.write_text(json.dumps({"mcpServers": {"old": {"command": "old"}}}))
+
+        set_mcp_server("codex", "demo", {"command": "uvx"}, workspace_dir=str(workspace))
+
+        recorded = lookup_managed_mcp_backup(str(path))
+        assert recorded is not None
+        assert os.path.isabs(recorded), recorded
+        # The registry directory itself must be 0o700 because it
+        # leaks every config path DefenseClaw has ever touched.
+        registry_dir = tmp_path / "dchome" / "connector_backups" / "mcp"
+        assert registry_dir.is_dir()
+        mode = stat.S_IMODE(registry_dir.stat().st_mode)
+        assert mode == 0o700, f"registry dir mode {oct(mode)} != 0o700"
+
+        # Restore from a totally different cwd — proves the fix.
+        far_away = tmp_path / "elsewhere"
+        far_away.mkdir()
+        monkeypatch.chdir(far_away)
+        assert restore_managed_mcp_backup(str(path)) is True
         data = json.loads(path.read_text())
         assert "demo" not in data["mcpServers"]
-        assert "keep" in data["mcpServers"]
+        assert data["mcpServers"]["old"]["command"] == "old"
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +267,14 @@ class TestCodexWrites:
 
 class TestRoundTrip:
     def test_codex_set_then_read_then_unset(self, tmp_path, monkeypatch):
+        # Isolate HOME so the real user's ``~/.codex/config.toml``
+        # (which may register global MCP servers like ``playwright``)
+        # doesn't bleed into ``mcp_servers("codex")`` — the codex
+        # reader merges the global TOML table with the project-local
+        # ``./.mcp.json`` we're about to write, and without HOME
+        # pinned to ``tmp_path`` this assertion is non-deterministic
+        # across dev machines.
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.chdir(tmp_path)
 
         set_mcp_server(
@@ -248,11 +309,10 @@ class TestRoundTrip:
 
 class TestAtomicity:
     def test_set_recovers_from_corrupt_json(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
         path = tmp_path / ".mcp.json"
         path.write_text("{ this is not valid json")
 
-        set_mcp_server("codex", "demo", {"command": "uvx"})
+        set_mcp_server("codex", "demo", {"command": "uvx"}, workspace_dir=str(tmp_path))
 
         data = json.loads(path.read_text())
         assert data["mcpServers"]["demo"]["command"] == "uvx"
@@ -260,11 +320,12 @@ class TestAtomicity:
     def test_set_does_not_leave_tempfile_on_success(
         self, tmp_path, monkeypatch,
     ):
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
         set_mcp_server("codex", "demo", {"command": "uvx"})
         # No leftover .dc-mcp- temp files
+        codex_dir = tmp_path / ".codex"
         leftovers = [
-            p for p in os.listdir(tmp_path) if p.startswith(".dc-mcp-")
+            p for p in os.listdir(codex_dir) if p.startswith(".dc-mcp-")
         ]
         assert leftovers == []
 
@@ -276,7 +337,7 @@ class TestAtomicity:
 class TestCoverage:
     def test_every_known_connector_has_explicit_set_behavior(self, tmp_path):
         """Loop over KNOWN_CONNECTORS and assert each branch is reached.
-        Catches the "added a fifth connector but forgot to teach the
+        Catches the "added a connector but forgot to teach the
         writer" bug class.
         """
         for name in KNOWN_CONNECTORS:
@@ -287,8 +348,25 @@ class TestCoverage:
             elif name == "zeptoclaw":
                 with pytest.raises(MCPWriteUnsupportedError):
                     set_mcp_server(name, "x", {"command": "y"})
+            elif name == "windsurf":
+                with pytest.MonkeyPatch.context() as m:
+                    m.setenv("HOME", str(tmp_path / "isolated-home"))
+                    with pytest.raises(MCPWriteUnsupportedError):
+                        set_mcp_server(name, "x", {"command": "y"})
+            elif name == "antigravity":
+                # agy v1.0.0 does not document an MCP install surface;
+                # both set/unset paths must raise rather than silently
+                # writing to a guessed location.
+                with pytest.raises(MCPWriteUnsupportedError):
+                    set_mcp_server(name, "x", {"command": "y"})
+            elif name == "opencode":
+                # opencode MCP lives in opencode.json, which DefenseClaw
+                # does not manage in v1; the connector governs tool
+                # execution via its bridge plugin only.
+                with pytest.raises(MCPWriteUnsupportedError):
+                    set_mcp_server(name, "x", {"command": "y"})
             else:
-                # claudecode / codex — write succeeds without raising.
+                # All other connectors have a documented MCP write path.
                 # Use chdir + isolated HOME so the test doesn't trash
                 # the developer's real config files.
                 with pytest.MonkeyPatch.context() as m:

@@ -17,10 +17,11 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,10 +31,17 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
+
+// runGitListMaxBytes caps the bytes we will read from a `git`
+// invocation. A monorepo with O(100k) tracked files comfortably fits
+// inside 8 MiB; anything larger almost certainly indicates a runaway
+// repo or hostile state and would otherwise balloon the gateway's
+// resident memory because cmd.Output() reads all of stdout into RAM.
+const runGitListMaxBytes = 8 * 1024 * 1024
 
 type codexHookRequest struct {
 	HookEventName        string                 `json:"hook_event_name"`
@@ -67,96 +75,28 @@ type codexHookResponse struct {
 	WouldBlock        bool                   `json:"would_block"`
 	AdditionalContext string                 `json:"additional_context,omitempty"`
 	CodexOutput       map[string]interface{} `json:"codex_output,omitempty"`
+	// EvaluationID + RuleIDs join this hook response to the
+	// matching scan_findings rows / audit row. Additive — older
+	// connector hook scripts ignore the fields.
+	EvaluationID string   `json:"evaluation_id,omitempty"`
+	RuleIDs      []string `json:"rule_ids,omitempty"`
 }
 
-func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "method", 0)
-		}
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(r.Body))
-	if err != nil {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "invalid_json", 0)
-		}
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	var req codexHookRequest
-	if err := json.Unmarshal(b, &req); err != nil {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "invalid_payload", 0)
-		}
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Codex hook payload"})
-		return
-	}
-	req.Payload = payload
-	if req.HookEventName == "" {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "missing_event", 0)
-		}
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook_event_name is required"})
-		return
-	}
-	req.CWD = sanitizeHookCWD(req.CWD)
-	ctx := enrichCodexHookContext(r.Context(), req)
-	rawEventIDs := a.rememberCodexRawHookEvents(req)
-	a.emitCodexHookLLMEvent(ctx, req, rawEventIDs, b)
-
-	t0 := time.Now()
-	resp := a.evaluateCodexHook(ctx, req)
-	elapsed := time.Since(t0)
-
-	if a.health != nil {
-		a.health.RecordConnectorRequest()
-		if resp.Action == "block" {
-			a.health.RecordToolBlock()
-		}
-		if isToolInspectionEvent(req.HookEventName) {
-			a.health.RecordToolInspection()
-		}
-	}
-
-	if a.otel != nil {
-		reason := resp.Action
-		if resp.WouldBlock {
-			reason = "would_block"
-		}
-		a.otel.RecordConnectorHookInvocation(ctx, "codex", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
-		a.otel.RecordInspectEvaluation(ctx, "codex:"+req.HookEventName, resp.Action, resp.Severity)
-		a.otel.RecordInspectLatency(ctx, "codex:"+req.HookEventName, float64(elapsed.Milliseconds()))
-	}
-
-	if a.logger != nil {
-		details := fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-			resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
-		details = appendRawTelemetryDetails(details, "raw_payload", b)
-		details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
-		_ = a.logger.LogActionCtx(ctx, "codex-hook", req.HookEventName, details)
-	}
-
-	a.writeJSON(w, http.StatusOK, resp)
-}
-
-func enrichCodexHookContext(ctx context.Context, req codexHookRequest) context.Context {
-	ctx = ContextWithSessionID(ctx, req.SessionID)
-	agentName := strings.TrimSpace(req.AgentType)
-	if agentName == "" {
-		agentName = "codex"
-	}
-	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{
-		AgentID:   strings.TrimSpace(req.AgentID),
-		AgentName: agentName,
-		AgentType: agentName,
-	})
-	enrichHTTPSpanFromContext(ctx)
-	enrichCodexHookSpan(ctx, req)
-	return ctx
-}
+// handleCodexHook + enrichCodexHookContext were deleted in the
+// unified hook collector refactor. Codex hook traffic now flows
+// through the unified pipeline at handleAgentHook("codex"); the
+// typed evaluator (evaluateCodexHook, kept below) is invoked through
+// the HookProfile runtime registry. Codex-specific span enrichment
+// (turn_id, gen_ai.tool.call.id, model) is preserved by the runtime
+// callback immediately before evaluateCodexHook runs.
+//
+// The unified pipeline owns shared concerns (audit envelope refresh,
+// dispatch metric, dedup, trace propagation, OTel emissions) in
+// exactly one place now. See agent_hook.go and hook_profile_runtime.go
+// for the registry and shared-pipeline rationale. The evaluator
+// stamps the unified-pipeline correlation keys (resp.EvaluationID /
+// resp.RuleIDs) on its return value so downstream tooling and the
+// audit envelope receive them.
 
 func enrichCodexHookSpan(ctx context.Context, req codexHookRequest) {
 	span := trace.SpanFromContext(ctx)
@@ -200,10 +140,10 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	if a.scannerCfg != nil && !a.codexEnabled() {
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
 	}
+	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
-	assetDecision := config.AssetPolicyDecision{}
-	assetMatched := false
+	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
 		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
@@ -218,25 +158,38 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			}
 		}
 	case "UserPromptSubmit":
-		verdict = a.inspectMessageContent(&ToolInspectRequest{
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:      "message",
 			Content:   req.Prompt,
 			Direction: "prompt",
+			Connector: "codex",
 		})
 	case "PreToolUse", "PermissionRequest":
 		verdict = a.inspectToolPolicy(&ToolInspectRequest{
 			Tool:      codexToolName(req),
 			Args:      codexToolArgs(req),
 			Direction: "tool_call",
+			Connector: "codex",
 		})
-		assetDecision, assetMatched = a.codexMCPAssetDecision(ctx, req)
+		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		}
+		if decision, matched := a.codexSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
 	case "PostToolUse":
-		verdict = a.inspectMessageContent(&ToolInspectRequest{
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:      "message",
 			Content:   codexToolResponseString(req.ToolResponse),
 			Direction: "tool_result",
+			Connector: "codex",
 		})
-		assetDecision, assetMatched = a.codexMCPAssetDecision(ctx, req)
+		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		}
+		if decision, matched := a.codexSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
 	case "Stop":
 		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnStop {
 			verdict = a.scanCodexChangedFiles(ctx, req)
@@ -244,6 +197,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	}
 
 	rawAction := normalizeCodexAction(verdict.Action)
+	rawActionBeforeAssets := rawAction
 	action := rawAction
 	wouldBlock := rawAction == "block" && mode != "action"
 	if mode != "action" && rawAction == "block" {
@@ -255,18 +209,81 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	if mode == "action" && rawAction == "confirm" {
 		action = "alert"
 	}
-	mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
-		assetDecision, assetMatched, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
-	)
-	action = mergedAction
-	rawAction = mergedRawAction
-	verdict.Severity = mergedSeverity
-	verdict.Reason = mergedReason
-	verdict.Findings = mergedFindings
-	if assetWouldBlock {
-		wouldBlock = true
+	for _, asset := range assetDecisions {
+		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
+			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
+		)
+		action = mergedAction
+		rawAction = mergedRawAction
+		verdict.Severity = mergedSeverity
+		verdict.Reason = mergedReason
+		verdict.Findings = mergedFindings
+		if assetWouldBlock {
+			wouldBlock = true
+		}
 	}
-	return codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	// Emit per-rule findings FIRST so the notification + audit
+	// rows produced below can carry the resulting evaluation_id
+	// and top rule_ids — keeping the SIEM pivot key identical
+	// across audit log, gateway.jsonl, OS notification, and the
+	// HTTP response body.
+	evalCtx := a.emitHookRuleFindings(ctx, "codex", req.HookEventName, verdict,
+		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
+	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
+		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx)
+	}
+	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	resp.EvaluationID = evalCtx.EvaluationID
+	resp.RuleIDs = evalCtx.RuleIDs
+	return resp
+}
+
+// dispatchCodexHookNotification mirrors the Claude Code path —
+// see dispatchClaudeCodeHookNotification for the routing contract,
+// including the redaction.ForSinkReason scrub on the reason string.
+// dispatchCodexHookNotification follows the same routing contract
+// documented on dispatchAgentHookNotification. See that comment for
+// the rationale behind WouldAsk routing through OnWouldBlock.
+func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext) {
+	if a == nil || a.notifier == nil {
+		return
+	}
+	target := strings.TrimSpace(req.ToolName)
+	if target == "" {
+		target = req.HookEventName
+	}
+	safeReason := string(redaction.ForSinkReason(reason))
+	base := notifier.BlockEvent{
+		Source:       notifier.SourceHook,
+		Target:       target,
+		Reason:       safeReason,
+		Severity:     severity,
+		Connector:    "codex",
+		Event:        req.HookEventName,
+		EvaluationID: evalCtx.EvaluationID,
+		RuleIDs:      evalCtx.RuleIDs,
+	}
+	switch {
+	case action == "block":
+		a.notifier.OnBlock(base)
+	case rawAction == "block" && (wouldBlock || action != "block"):
+		a.notifier.OnWouldBlock(base)
+	case action == "confirm":
+		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
+			Subject:      fmt.Sprintf("%s (%s)", target, req.HookEventName),
+			Reason:       safeReason,
+			Severity:     severity,
+			Source:       notifier.SourceHook,
+			Connector:    "codex",
+			Event:        req.HookEventName,
+			EvaluationID: evalCtx.EvaluationID,
+			RuleIDs:      evalCtx.RuleIDs,
+		})
+	case rawAction == "confirm":
+		evt := base
+		evt.WouldAsk = true
+		a.notifier.OnWouldBlock(evt)
+	}
 }
 
 // codexEnabled mirrors claudeCodeEnabled: selecting the codex connector
@@ -278,7 +295,24 @@ func (a *APIServer) codexEnabled() bool {
 	if a.scannerCfg == nil {
 		return false
 	}
+	// Per-connector explicit disable wins over every enable signal below:
+	// an operator who ran `guardrail disable --connector codex` gets
+	// allow-without-scan even though codex is still a member of
+	// guardrail.connectors (its policy is retained for re-enable).
+	// Defense-in-depth — the boot loop already tears codex's hooks down,
+	// so this only matters in the window before a restart or if a hook
+	// still calls in. EffectiveEnabled defaults to true, so this is a
+	// no-op for single-connector installs and any connector never
+	// explicitly disabled.
+	if !a.scannerCfg.Guardrail.EffectiveEnabled("codex") {
+		return false
+	}
 	if a.scannerCfg.ConnectorHookConfig("codex").Enabled {
+		return true
+	}
+	// Multi-connector: membership in guardrail.connectors opts codex in
+	// even when it is not the singular primary (no-op for single).
+	if a.scannerCfg.Guardrail.HasConnector("codex") {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "codex")
@@ -289,13 +323,11 @@ func (a *APIServer) codexMode() string {
 	if a.scannerCfg != nil {
 		mode = strings.TrimSpace(a.scannerCfg.ConnectorHookConfig("codex").Mode)
 		if mode == "" || mode == "inherit" {
-			mode = strings.TrimSpace(a.scannerCfg.Guardrail.Mode)
+			// Per-connector guardrail override wins over global mode.
+			mode = strings.TrimSpace(a.scannerCfg.Guardrail.EffectiveMode("codex"))
 		}
 	}
-	if mode != "action" {
-		return "observe"
-	}
-	return mode
+	return normalizeAgentHookMode(mode)
 }
 
 func codexResponseFor(event, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool) codexHookResponse {
@@ -602,23 +634,98 @@ func validateGitCwd(cwd string) (string, error) {
 // safeGitEnv returns environment variables that prevent git from executing
 // attacker-controlled config hooks (core.fsmonitor, core.hooksPath, etc.)
 // by disabling system/global config and pointing HOME to a safe empty dir.
+//
+// Avarice F-3347: the legacy implementation only disabled system and
+// global config. Repository-local `.git/config` remained active, so a
+// hostile workspace could set `core.fsmonitor`, `core.hooksPath`,
+// `protocol.<x>.allow=user`, etc. and have git execute attacker
+// commands during routine `git diff` / `git ls-files` calls. We use
+// GIT_CONFIG_COUNT/KEY/VALUE to provide a *replacement* config layer
+// that overrides anything set in the repository, and unset
+// GIT_CONFIG_PARAMETERS so a poisoned parent env can't add more.
 func safeGitEnv() []string {
-	return append(os.Environ(),
+	// (key, value) pairs that neutralise the most dangerous repo-
+	// local config knobs. Note: we cannot fully prevent git from
+	// reading `.git/config`, but per `gitconfig(5)`,
+	// GIT_CONFIG_KEY_<n>/VALUE_<n> entries override repo-local
+	// values so any malicious setting becomes a no-op for the
+	// hooks/diff helpers we run.
+	overrides := []string{
+		"core.fsmonitor", "false",
+		"core.fsmonitorhookversion", "1",
+		"core.hooksPath", "/dev/null",
+		"core.sshCommand", "false",
+		"core.gitProxy", "false",
+		"core.editor", "/bin/false",
+		"core.pager", "cat",
+		"diff.external", "false",
+		"diff.tool", "false",
+		"protocol.allow", "never",
+		"protocol.file.allow", "never",
+		"protocol.ext.allow", "never",
+		"uploadpack.allowFilter", "false",
+		"uploadpack.allowAnySHA1InWant", "false",
+		"safe.directory", "*",
+	}
+	env := append(os.Environ(),
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"HOME="+os.TempDir(),
+		// Disable any pre-existing GIT_CONFIG_PARAMETERS override
+		// inherited from a parent process.
+		"GIT_CONFIG_PARAMETERS=",
 	)
+	pairs := 0
+	for i := 0; i+1 < len(overrides); i += 2 {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", pairs, overrides[i]),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", pairs, overrides[i+1]),
+		)
+		pairs++
+	}
+	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", pairs))
+	return env
 }
 
 func runGitList(ctx context.Context, cwd string, args ...string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = cwd
 	cmd.Env = safeGitEnv()
-	out, err := cmd.Output()
+
+	// Bound stdout via io.LimitReader so a monorepo with many
+	// millions of tracked files (or a hostile worktree manufactured
+	// to exhaust gateway memory) cannot OOM the sidecar. We read up
+	// to runGitListMaxBytes+1 — the extra byte tells us when the cap
+	// was breached so we can fail loudly instead of returning a
+	// silently-truncated file list (which would mis-report changed
+	// files and miss legitimate guardrail signals).
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("git %v in %s: %w", args, cwd, err)
+		return nil, fmt.Errorf("git %v in %s: stdout pipe: %w", args, cwd, err)
 	}
-	lines := strings.Split(string(out), "\n")
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("git %v in %s: start: %w", args, cwd, err)
+	}
+	var buf bytes.Buffer
+	if _, copyErr := io.CopyN(&buf, stdout, int64(runGitListMaxBytes)+1); copyErr != nil && copyErr != io.EOF {
+		// Drain remaining stdout / wait so the child does not get
+		// SIGPIPE before we report the underlying error. We
+		// intentionally ignore the wait error here because the read
+		// failure is the actionable signal.
+		_, _ = io.Copy(io.Discard, stdout)
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("git %v in %s: read stdout: %w", args, cwd, copyErr)
+	}
+	if buf.Len() > runGitListMaxBytes {
+		_, _ = io.Copy(io.Discard, stdout)
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("git %v in %s: stdout exceeded %d bytes", args, cwd, runGitListMaxBytes)
+	}
+	if waitErr := cmd.Wait(); waitErr != nil {
+		return nil, fmt.Errorf("git %v in %s: %w", args, cwd, waitErr)
+	}
+
+	lines := strings.Split(buf.String(), "\n")
 	ret := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if strings.TrimSpace(line) != "" {

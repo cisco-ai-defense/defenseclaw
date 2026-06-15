@@ -27,16 +27,50 @@ import type {
 
 const SCANNER_NAME = "defenseclaw-mcp-scanner";
 
+// Avarice F-3392: keep this list in lockstep with the cross-runtime
+// AI provider credential set (cli/defenseclaw/scanner/_llm_env.py and
+// internal/configs/providers.json). Pre-fix the scanner only flagged
+// OpenAI/Anthropic/AWS keys, so a malicious MCP config could inline
+// a Google/Gemini/Azure/Mistral provider token and still admit cleanly.
 const DANGEROUS_ENV_KEYS = new Set([
+  // AWS
   "AWS_SECRET_ACCESS_KEY",
   "AWS_SESSION_TOKEN",
+  "AWS_ACCESS_KEY_ID",
+  // AI provider credentials (must mirror Python+Go provider tables)
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
+  "GOOGLE_API_KEY",
+  "GEMINI_API_KEY",
+  "GOOGLE_GENERATIVE_AI_API_KEY",
+  "AZURE_OPENAI_API_KEY",
+  "AZURE_API_KEY",
+  "MISTRAL_API_KEY",
+  "COHERE_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "TOGETHER_API_KEY",
+  "GROQ_API_KEY",
+  "PERPLEXITY_API_KEY",
+  "VOYAGE_API_KEY",
+  "FIREWORKS_API_KEY",
+  "HUGGINGFACE_TOKEN",
+  "HF_TOKEN",
+  "REPLICATE_API_TOKEN",
+  // Source control / repo tokens
   "GITHUB_TOKEN",
+  "GITHUB_PAT",
+  "GITLAB_TOKEN",
+  // Generic credential-bearing keys
   "DATABASE_URL",
   "DB_PASSWORD",
   "SECRET_KEY",
   "PRIVATE_KEY",
+  "API_KEY",
+  "API_TOKEN",
+  "ACCESS_TOKEN",
+  "AUTH_TOKEN",
+  "BEARER_TOKEN",
+  "CLIENT_SECRET",
 ]);
 
 const DANGEROUS_COMMANDS = new Set([
@@ -64,9 +98,35 @@ export async function scanMCPServer(
   const target = resolve(configPathOrDir);
   const findings: Finding[] = [];
 
-  const configs = await loadMCPConfigs(target);
+  // Avarice F-1645: distinguish "no servers found in a well-formed
+  // config" from "every parse failed and the config is malformed".
+  // Pre-fix every JSON/YAML/read failure was swallowed and the
+  // scanner returned an INFO-only result, which the local enforcer
+  // then classified as `clean`. Now parse failures emit CRITICAL
+  // findings so admission falls into the warn/block branch instead
+  // of letting a corrupted MCP config skip every server check.
+  const loaded = await loadMCPConfigs(target);
+  for (const err of loaded.errors) {
+    findings.push(
+      makeFinding(
+        findings.length + 1,
+        "CRITICAL",
+        "Malformed MCP config rejected by scanner",
+        {
+          description:
+            `MCP config at "${err.path}" failed to parse (${err.reason}). ` +
+            "A scanner that cannot read its inputs cannot admit them — " +
+            "this finding fails the admission verdict closed.",
+          location: err.path,
+          remediation:
+            "Repair or remove the malformed config file; do not let " +
+            "an unreadable MCP source pass admission.",
+        },
+      ),
+    );
+  }
 
-  if (configs.length === 0) {
+  if (loaded.configs.length === 0 && loaded.errors.length === 0) {
     findings.push(
       makeFinding(1, "INFO", "No MCP server configurations found", {
         description: `No MCP server configs found at "${target}".`,
@@ -76,41 +136,68 @@ export async function scanMCPServer(
     return buildResult(target, findings, start);
   }
 
-  for (const config of configs) {
+  for (const config of loaded.configs) {
     checkMCPConfig(config, findings, target);
   }
 
   return buildResult(target, findings, start);
 }
 
-async function loadMCPConfigs(target: string): Promise<MCPServerConfig[]> {
-  const configs: MCPServerConfig[] = [];
-
-  try {
-    const info = await stat(target);
-
-    if (info.isFile()) {
-      const parsed = await parseConfigFile(target);
-      configs.push(...parsed);
-    } else if (info.isDirectory()) {
-      const entries = await readdir(target);
-      for (const entry of entries) {
-        if (!entry.endsWith(".json") && !entry.endsWith(".yaml") && !entry.endsWith(".yml"))
-          continue;
-
-        const fullPath = join(target, entry);
-        const parsed = await parseConfigFile(fullPath);
-        configs.push(...parsed);
-      }
-    }
-  } catch {
-    return configs;
-  }
-
-  return configs;
+interface LoadFailure {
+  path: string;
+  reason: string;
 }
 
-async function parseConfigFile(filePath: string): Promise<MCPServerConfig[]> {
+interface LoadResult {
+  configs: MCPServerConfig[];
+  errors: LoadFailure[];
+}
+
+async function loadMCPConfigs(target: string): Promise<LoadResult> {
+  const configs: MCPServerConfig[] = [];
+  const errors: LoadFailure[] = [];
+
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(target);
+  } catch (e) {
+    // F-1645: surface the read failure so admission doesn't see an
+    // empty config list and silently treat the target as clean.
+    errors.push({ path: target, reason: describeError(e) });
+    return { configs, errors };
+  }
+
+  if (info.isFile()) {
+    const parsed = await parseConfigFile(target);
+    if (parsed.error) errors.push({ path: target, reason: parsed.error });
+    configs.push(...parsed.servers);
+  } else if (info.isDirectory()) {
+    let entries: string[];
+    try {
+      entries = await readdir(target);
+    } catch (e) {
+      errors.push({ path: target, reason: describeError(e) });
+      return { configs, errors };
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(".json") && !entry.endsWith(".yaml") && !entry.endsWith(".yml"))
+        continue;
+      const fullPath = join(target, entry);
+      const parsed = await parseConfigFile(fullPath);
+      if (parsed.error) errors.push({ path: fullPath, reason: parsed.error });
+      configs.push(...parsed.servers);
+    }
+  }
+
+  return { configs, errors };
+}
+
+interface ParseResult {
+  servers: MCPServerConfig[];
+  error?: string;
+}
+
+async function parseConfigFile(filePath: string): Promise<ParseResult> {
   try {
     const raw = await readFile(filePath, "utf-8");
     let parsed: Record<string, unknown>;
@@ -124,10 +211,15 @@ async function parseConfigFile(filePath: string): Promise<MCPServerConfig[]> {
     } else {
       parsed = JSON.parse(raw) as Record<string, unknown>;
     }
-    return extractMCPServers(parsed, filePath);
-  } catch {
-    return [];
+    return { servers: extractMCPServers(parsed, filePath) };
+  } catch (e) {
+    return { servers: [], error: describeError(e) };
   }
+}
+
+function describeError(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  return String(e);
 }
 
 function extractMCPServers(
@@ -265,18 +357,31 @@ function checkEnvVars(
           ),
         );
       } else {
+        // Avarice F-1688: pre-fix this branch emitted INFO, which the
+        // enforcer's severity threshold (default warnOnSeverity=MEDIUM)
+        // collapsed to a `clean` verdict. A malicious MCP config could
+        // then ask for OPENAI_API_KEY / GITHUB_TOKEN / AWS_SECRET_ACCESS_KEY
+        // by reference and still pass admission while receiving the
+        // host credential at runtime. Bump to HIGH so admission falls
+        // into the warn/block branch — operators that explicitly trust
+        // an MCP server with a credential can still allow it via the
+        // approval flow.
         findings.push(
           makeFinding(
             findings.length + 1,
-            "INFO",
-            `MCP server passes sensitive env var: ${key}`,
+            "HIGH",
+            `MCP server requests sensitive env var by reference: ${key}`,
             {
               description:
-                `MCP server "${config.name}" passes sensitive environment variable "${key}". ` +
-                "Ensure this follows the principle of least privilege.",
+                `MCP server "${config.name}" requests sensitive environment variable "${key}" ` +
+                "by reference (e.g. \"${...}\"). Even when the value is not inline in the " +
+                "config, exposing this credential to a third-party MCP server may leak it " +
+                "to the runtime; admission must require explicit operator approval.",
               location: `${target} → mcp:${config.name} → env.${key}`,
               remediation:
-                "Verify the MCP server requires this credential and that it is scoped minimally.",
+                "Remove the sensitive env reference, or explicitly approve the MCP server " +
+                "via `defenseclaw mcp approve` after verifying the credential is required " +
+                "and scoped minimally.",
             },
           ),
         );

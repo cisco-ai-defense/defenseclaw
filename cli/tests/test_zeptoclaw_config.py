@@ -25,11 +25,11 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import connector_paths
+
 from tests.connector_fixtures import make_zeptoclaw_config
 
 
@@ -187,9 +187,16 @@ class ZeptoClawSkillAndPluginDirsTests(unittest.TestCase):
     ``PluginDirsForConnector('zeptoclaw')`` contract from S1.2.
     """
 
-    def test_skill_dirs_includes_home_and_cwd(self):
+    def test_skill_dirs_default_to_home(self):
         with _IsolatedHome() as home:
             dirs = connector_paths.skill_dirs("zeptoclaw")
+            self.assertIn(os.path.join(home, ".zeptoclaw", "skills"), dirs)
+            cwd_skills = os.path.join(os.getcwd(), ".zeptoclaw", "skills")
+            self.assertNotIn(cwd_skills, dirs)
+
+    def test_skill_dirs_include_workspace_when_explicit(self):
+        with _IsolatedHome() as home:
+            dirs = connector_paths.skill_dirs("zeptoclaw", workspace_dir=os.getcwd())
             self.assertIn(os.path.join(home, ".zeptoclaw", "skills"), dirs)
             cwd_skills = os.path.join(os.getcwd(), ".zeptoclaw", "skills")
             self.assertIn(cwd_skills, dirs)

@@ -58,8 +58,8 @@ Set once at sidecar startup. Attached to every exported log, span, and metric.
 | `host.name` | string | `dgx-spark-01` | `os.Hostname()` |
 | `host.arch` | string | `arm64` | `runtime.GOARCH` |
 | `os.type` | string | `darwin` | `runtime.GOOS` |
-| `defenseclaw.claw.mode` | string | `openclaw` \| `zeptoclaw` \| `claudecode` \| `codex` (or `""` before `defenseclaw setup connector`) | `config.Claw.Mode` |
-| `defenseclaw.claw.home_dir` | string | `/home/user/.openclaw`, `/home/user/.zeptoclaw`, `/home/user/.claude`, `/home/user/.codex` | resolved at startup |
+| `defenseclaw.claw.mode` | string | Registered connector name, such as `openclaw`, `zeptoclaw`, `claudecode`, `codex`, `hermes`, `cursor`, `windsurf`, `geminicli`, or `copilot` (or `""` before connector setup; or `multi` when one gateway process serves more than one connector — read the per-event `connector` label / `defenseclaw.connector.source` for the true connector) | `config.ActiveConnector()` / `config.ActiveConnectors()` |
+| `defenseclaw.claw.home_dir` | string | Connector home/config root when the connector has one, such as `/home/user/.openclaw`, `/home/user/.zeptoclaw`, `/home/user/.claude`, `/home/user/.codex`, `/home/user/.hermes`, `/home/user/.cursor`, `/home/user/.codeium/windsurf`, `/home/user/.gemini`, or `/home/user/.copilot` | resolved at startup |
 | `defenseclaw.device.id` | string | `a1b2c3...` | DefenseClaw Ed25519 public-key fingerprint |
 | `defenseclaw.gateway.host` | string | `127.0.0.1` | `config.Gateway.Host` |
 | `defenseclaw.gateway.port` | int | `18789` | `config.Gateway.Port` |
@@ -804,6 +804,7 @@ schemas/otel/
   runtime-llm-span.schema.json
   runtime-approval-span.schema.json
   runtime-alert-event.schema.json
+  connector-telemetry-event.schema.json
   metrics.schema.json
 ```
 

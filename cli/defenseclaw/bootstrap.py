@@ -66,10 +66,10 @@ class BootstrapReport:
     audit_db: str = ""
     is_new_config: bool = False
     dirs_created: list[str] = field(default_factory=list)
-    rego_seeded: str = ""       # destination path, "" if bundle missing
+    rego_seeded: str = ""  # destination path, "" if bundle missing
     guardrail_profiles_seeded: list[str] = field(default_factory=list)
     guardrail_profiles_preserved: list[str] = field(default_factory=list)
-    splunk_bridge_dest: str = ""      # "" if bundle missing, otherwise dest path
+    splunk_bridge_dest: str = ""  # "" if bundle missing, otherwise dest path
     splunk_bridge_preserved: bool = False
     openclaw_token_detected: bool = False
     device_key_file: str = ""
@@ -297,11 +297,13 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
     try:
         cfg.save()
-        setup.append(StepResult(
-            "Config",
-            "pass",
-            "created defaults" if new_config else "preserved existing config",
-        ))
+        setup.append(
+            StepResult(
+                "Config",
+                "pass",
+                "created defaults" if new_config else "preserved existing config",
+            )
+        )
     except OSError as exc:
         setup.append(StepResult("Config", "fail", str(exc), "defenseclaw config validate"))
 
@@ -337,12 +339,14 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
 
     if options.sandbox:
-        setup.append(StepResult(
-            "Sandbox",
-            "warn",
-            "sandbox bootstrap remains Linux-only; run the dedicated sandbox setup",
-            "defenseclaw sandbox setup",
-        ))
+        setup.append(
+            StepResult(
+                "Sandbox",
+                "warn",
+                "sandbox bootstrap remains Linux-only; run the dedicated sandbox setup",
+                "defenseclaw sandbox setup",
+            )
+        )
 
     if options.start_gateway:
         setup.append(_start_gateway_structured(cfg))
@@ -354,9 +358,11 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     except OSError as exc:
         setup.append(StepResult("Config Save", "fail", str(exc), "defenseclaw config validate"))
 
-    readiness = targeted_readiness(cfg, options) if options.verify else [
-        StepResult("Readiness", "skip", "--no-verify", "defenseclaw doctor")
-    ]
+    readiness = (
+        targeted_readiness(cfg, options)
+        if options.verify
+        else [StepResult("Readiness", "skip", "--no-verify", "defenseclaw doctor")]
+    )
 
     try:
         logger.close()
@@ -381,25 +387,31 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
     """Run scoped readiness checks for the choices made during first run."""
     steps: list[StepResult] = []
     cfg_path = os.path.join(cfg.data_dir, "config.yaml")
-    steps.append(StepResult(
-        "Config file",
-        "pass" if os.path.isfile(cfg_path) else "fail",
-        cfg_path if os.path.isfile(cfg_path) else "missing",
-        "defenseclaw init" if not os.path.isfile(cfg_path) else "",
-    ))
-    steps.append(StepResult(
-        "Audit database",
-        "pass" if os.path.isfile(cfg.audit_db) else "fail",
-        cfg.audit_db,
-        "defenseclaw doctor --fix" if not os.path.isfile(cfg.audit_db) else "",
-    ))
+    steps.append(
+        StepResult(
+            "Config file",
+            "pass" if os.path.isfile(cfg_path) else "fail",
+            cfg_path if os.path.isfile(cfg_path) else "missing",
+            "defenseclaw init" if not os.path.isfile(cfg_path) else "",
+        )
+    )
+    steps.append(
+        StepResult(
+            "Audit database",
+            "pass" if os.path.isfile(cfg.audit_db) else "fail",
+            cfg.audit_db,
+            "defenseclaw doctor --fix" if not os.path.isfile(cfg.audit_db) else "",
+        )
+    )
     device_key = cfg.gateway.device_key_file
-    steps.append(StepResult(
-        "Device key",
-        "pass" if device_key and os.path.isfile(device_key) else "fail",
-        device_key or "(unset)",
-        "defenseclaw doctor --fix" if not (device_key and os.path.isfile(device_key)) else "",
-    ))
+    steps.append(
+        StepResult(
+            "Device key",
+            "pass" if device_key and os.path.isfile(device_key) else "fail",
+            device_key or "(unset)",
+            "defenseclaw doctor --fix" if not (device_key and os.path.isfile(device_key)) else "",
+        )
+    )
 
     for s in _scanner_availability(cfg):
         if s.status == "warn":
@@ -412,12 +424,14 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
     if options.start_gateway:
         pid_file = os.path.join(cfg.data_dir, "gateway.pid")
         running = _pid_file_running(pid_file)
-        steps.append(StepResult(
-            "Sidecar",
-            "pass" if running else "warn",
-            "running" if running else "not confirmed after start",
-            "defenseclaw-gateway status" if not running else "",
-        ))
+        steps.append(
+            StepResult(
+                "Sidecar",
+                "pass" if running else "warn",
+                "running" if running else "not confirmed after start",
+                "defenseclaw-gateway status" if not running else "",
+            )
+        )
 
     llm = cfg.resolve_llm("guardrail")
     if cfg.guardrail.enabled and llm.is_local_provider():
@@ -436,12 +450,14 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
         steps.append(StepResult("Cisco AI Defense", "skip", "scanner_mode is local"))
 
     if shutil.which("defenseclaw-gateway") is None:
-        steps.append(StepResult(
-            "Gateway binary",
-            "warn",
-            "defenseclaw-gateway not on PATH",
-            "make gateway-install",
-        ))
+        steps.append(
+            StepResult(
+                "Gateway binary",
+                "warn",
+                "defenseclaw-gateway not on PATH",
+                "make gateway-install",
+            )
+        )
     else:
         steps.append(StepResult("Gateway binary", "pass", "found on PATH"))
 
@@ -484,16 +500,13 @@ def _apply_first_run_choices(
     scanner_mode: str,
 ) -> None:
     cfg.claw.mode = connector
+    cfg.claw.workspace_dir = ""
     cfg.guardrail.connector = connector
     cfg.guardrail.scanner_mode = scanner_mode
     cfg.guardrail.mode = "action" if profile == "action" else "observe"
     cfg.guardrail.enabled = True
     cfg.guardrail.judge.enabled = bool(options.with_judge)
     cfg.guardrail.detection_strategy = cfg.guardrail.detection_strategy or "regex_judge"
-    if connector == "codex":
-        cfg.guardrail.codex_enforcement_enabled = profile == "action"
-    if connector == "claudecode":
-        cfg.guardrail.claudecode_enforcement_enabled = profile == "action"
 
     # Honor an explicit operator choice supplied via flag/prompt.
     # Empty string means "leave whatever was loaded alone" — usually
@@ -521,9 +534,7 @@ def _apply_first_run_choices(
     # severities trigger an approval prompt.
     severity = (options.hilt_min_severity or "").strip().upper()
     if severity:
-        cfg.guardrail.hilt.min_severity = (
-            severity if severity in HILT_MIN_SEVERITIES else "HIGH"
-        )
+        cfg.guardrail.hilt.min_severity = severity if severity in HILT_MIN_SEVERITIES else "HIGH"
 
     # Defensive: if we just enabled HITL but the existing
     # min_severity is empty (default_config seeds "HIGH" but
@@ -712,28 +723,35 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
         if running is not None and running != desired:
             try:
                 result = subprocess.run(
-                    [gw, "restart"], capture_output=True, text=True, timeout=30,
+                    [gw, "restart"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
                 )
             except subprocess.TimeoutExpired:
                 return StepResult(
-                    "Sidecar", "warn",
+                    "Sidecar",
+                    "warn",
                     f"connector drift detected ({running} → {desired}) but restart timed out",
                     "defenseclaw-gateway restart",
                 )
             except OSError as exc:
                 return StepResult(
-                    "Sidecar", "warn",
+                    "Sidecar",
+                    "warn",
                     f"connector drift detected ({running} → {desired}): {exc}",
                     "defenseclaw-gateway restart",
                 )
             if result.returncode == 0:
                 return StepResult(
-                    "Sidecar", "pass",
+                    "Sidecar",
+                    "pass",
                     f"restarted (was {running}, now {desired})",
                 )
             detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
             return StepResult(
-                "Sidecar", "warn",
+                "Sidecar",
+                "warn",
                 f"connector drift detected ({running} → {desired}) but restart failed: "
                 f"{detail[0] if detail else 'restart failed'}",
                 "defenseclaw-gateway restart",
@@ -752,20 +770,53 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
 
 
 def _pid_file_running(pid_file: str) -> bool:
-    try:
-        with open(pid_file, encoding="utf-8") as fh:
-            raw = fh.read().strip()
-        try:
-            pid = int(raw)
-        except ValueError:
-            pid = int(json.loads(raw)["pid"])
-    except (FileNotFoundError, ValueError, KeyError, OSError, TypeError):
+    """Return True only when pid_file points at a live process whose
+    identity looks like the DefenseClaw gateway.
+
+    Liveness is delegated to :func:`defenseclaw.process_liveness.pid_alive`
+    so the probe is correct cross-platform. A bare ``os.kill(pid, 0)`` is
+    wrong on Windows — signal 0 is routed to a console-control event rather
+    than an existence probe, so a running gateway reads as stopped and
+    ``init``/``--restart`` decisions break.
+
+    On top of liveness we verify process identity. The legacy implementation
+    accepted any PID that passed the liveness probe, so a local process that
+    planted or staled gateway.pid could make ``quickstart``/``init`` skip
+    starting the sidecar — generated hooks then forwarded uninspected traffic
+    because the default fail mode for the inspect hook is "open" until the
+    gateway is up. We additionally require the PID's argv0 to match a known
+    gateway binary name (POSIX, via /proc or ``ps``). Windows has no equally
+    cheap argv0 probe and the Go daemon's ``processExists``
+    (internal/daemon/proc_windows.go) is liveness-only too, so there a live
+    PID is accepted.
+    """
+    from defenseclaw.process_liveness import pid_alive, read_pid_file
+
+    pid = read_pid_file(pid_file)
+    if pid is None or pid <= 1:
         return False
-    try:
-        os.kill(pid, 0)
+    if not pid_alive(pid):
+        return False
+    if os.name == "nt":
         return True
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
+    return _pid_looks_like_gateway(pid)
+
+
+def _pid_looks_like_gateway(pid: int) -> bool:
+    """Verify that /proc/<pid>/cmdline (Linux) or `ps -o command=`
+    (macOS) advertises the DefenseClaw gateway binary name *exactly*.
+
+    Delegates to the shared, fail-closed identity check in
+    ``process_liveness`` so the setup, bootstrap and init paths all agree
+    on what "is the gateway" means. Avarice F-0101: the previous check
+    accepted any argv0 basename starting with the generic ``defenseclaw``
+    prefix, so a planted process named e.g. ``defenseclaw-not-gateway``
+    was treated as the live gateway. We now require an exact match against
+    the known gateway binary names.
+    """
+    from defenseclaw.process_liveness import process_is_gateway
+
+    return process_is_gateway(pid)
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:
@@ -794,6 +845,78 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "ZeptoClaw config found")
         return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup mode zeptoclaw")
+    if connector == "hermes":
+        path = os.path.expanduser("~/.hermes/config.yaml")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "Hermes config found")
+        return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup mode hermes")
+    if connector == "cursor":
+        path = os.path.expanduser("~/.cursor/hooks.json")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "Cursor hooks found")
+        return StepResult("Connector", "warn", "Cursor hooks not found yet", "defenseclaw setup mode cursor")
+    if connector == "windsurf":
+        path = os.path.expanduser("~/.codeium/windsurf/hooks.json")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "Windsurf hooks found")
+        return StepResult("Connector", "warn", "Windsurf hooks not found yet", "defenseclaw setup mode windsurf")
+    if connector == "geminicli":
+        path = os.path.expanduser("~/.gemini/settings.json")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "Gemini CLI settings found")
+        return StepResult("Connector", "warn", "Gemini CLI settings not found yet", "defenseclaw setup mode geminicli")
+    if connector == "copilot":
+        claw_cfg = getattr(cfg, "claw", None)
+        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
+        if workspace:
+            path = os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
+        else:
+            path = os.path.expanduser("~/.copilot/hooks/defenseclaw.json")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "Copilot hooks found")
+        return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup mode copilot")
+    if connector == "openhands":
+        claw_cfg = getattr(cfg, "claw", None)
+        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
+        candidates = [
+            os.path.expanduser("~/.openhands/hooks.json"),
+        ]
+        if workspace:
+            candidates.insert(0, os.path.join(workspace, ".openhands", "hooks.json"))
+        if any(os.path.isfile(path) for path in candidates):
+            return StepResult("Connector", "pass", "OpenHands hooks found")
+        return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup mode openhands")
+    if connector == "antigravity":
+        # Antigravity is global-only by design — agy merges discovered
+        # hooks files, so DefenseClaw never writes to a workspace copy.
+        # The canonical path is ~/.gemini/config/hooks.json (the path
+        # agy v1.0.x actually evaluates). The legacy
+        # ~/.gemini/antigravity-cli/hooks.json is also accepted as a
+        # pass signal so operators recovering from a pre-v0.5.0
+        # install don't see a confusing "missing hooks" error before
+        # doctor's migration warning has had a chance to surface.
+        canonical = os.path.expanduser("~/.gemini/config/hooks.json")
+        legacy = os.path.expanduser("~/.gemini/antigravity-cli/hooks.json")
+        if os.path.isfile(canonical) or os.path.isfile(legacy):
+            return StepResult("Connector", "pass", "Antigravity hooks found")
+        return StepResult(
+            "Connector",
+            "warn",
+            "Antigravity hooks not found yet",
+            "defenseclaw setup mode antigravity",
+        )
+    if connector == "opencode":
+        # opencode is governed by a bridge plugin DefenseClaw writes into
+        # opencode's auto-load plugin directory (no hooks.json to patch).
+        path = os.path.expanduser("~/.config/opencode/plugins/defenseclaw.js")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "OpenCode bridge plugin found")
+        return StepResult(
+            "Connector",
+            "warn",
+            "OpenCode bridge plugin not found yet",
+            "defenseclaw setup mode opencode",
+        )
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 
 
@@ -875,6 +998,7 @@ def _next_commands(
 # ---------------------------------------------------------------------------
 # Step helpers
 # ---------------------------------------------------------------------------
+
 
 def _seed_rego(policy_dir: str, report: BootstrapReport) -> None:
     from defenseclaw.paths import bundled_rego_dir
@@ -960,11 +1084,25 @@ def _seed_splunk_bridge(data_dir: str, report: BootstrapReport) -> None:
 
 
 def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
-    """Sync gateway host/port/token from ``openclaw.json``.
+    """Sync gateway host/port/token from ``openclaw.json`` and dotenv.
 
-    Returns True when an OPENCLAW_GATEWAY_TOKEN was detected and
-    written to ``~/.defenseclaw/.env``. Mirrors the production logic
-    in ``cmd_init._setup_gateway_defaults`` without the UI chatter.
+    Returns True when a gateway token was detected (either from
+    OpenClaw's config or from ``~/.defenseclaw/.env``). Mirrors the
+    production logic in ``cmd_init._setup_gateway_defaults`` without
+    the UI chatter.
+
+    Token-env naming policy:
+
+    * If we copy a token OUT of ``openclaw.json``, we persist it as
+      ``OPENCLAW_GATEWAY_TOKEN`` because that's its origin — keeps
+      ``defenseclaw setup`` UX honest about where the secret came
+      from and avoids confusing operators who have both stacks.
+    * Otherwise (the common case: standalone defenseclaw install with
+      no OpenClaw node nearby), default ``token_env`` to the canonical
+      ``DEFENSECLAW_GATEWAY_TOKEN``. This is what the Go gateway
+      auto-generates on first boot, so the Python and Go halves now
+      agree out of the box instead of needing Phase 4's migration to
+      reconcile them.
     """
     from defenseclaw.commands.cmd_init import (
         _ensure_device_key,
@@ -985,7 +1123,12 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
         cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
         token_configured = True
     else:
-        cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
+        # Standalone defenseclaw install — point at the env var the
+        # Go gateway writes on first boot. resolved_token() will still
+        # auto-detect either DEFENSECLAW_ or legacy OPENCLAW_, so an
+        # upgrader whose dotenv only has OPENCLAW_ keeps working
+        # without any operator action.
+        cfg.gateway.token_env = "DEFENSECLAW_GATEWAY_TOKEN"
         token_configured = bool(cfg.gateway.resolved_token())
 
     if not cfg.gateway.device_key_file:

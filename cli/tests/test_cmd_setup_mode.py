@@ -17,16 +17,25 @@ behavior when switching connectors. The four invariants under test:
 
 1. **openclaw ↔ zeptoclaw inherits the entire guardrail block**.
    Mode != action mode, scanner_mode != local, judge enabled, custom
-   port — all must survive the switch unchanged.
+   port — all must survive the switch unchanged. Both connectors
+   share the same proxy enforcement surface.
 
-2. **Switching INTO codex/claudecode forces observability-only**.
-   ``*_enforcement_enabled`` becomes False even if it was True;
-   ``gc.enabled`` stays True (so the Go gateway wires hooks + OTel)
-   but ``gc.mode`` is pinned to ``observe``.
+2. **Switching INTO a hook-enforced connector preserves
+   ``guardrail.mode``**. Codex / Claude Code / Hermes / Cursor /
+   Windsurf / GeminiCLI / Copilot all enforce via the agent's
+   native hook bus (PreToolUse deny verdict). An operator on
+   ``action`` keeps action mode — the destination connector wires
+   the deny verdict instead of the proxy. ``gc.enabled`` stays
+   True so the gateway provisions hooks + native OTel; only the
+   proxy listener stops binding.
 
-3. **Switching OUT of codex/claudecode into openclaw/zeptoclaw lands
-   in observe mode**. We never auto-promote to enforcing — that
-   requires a separate ``defenseclaw setup guardrail`` run.
+3. **Switching OUT of a hook-enforced connector into
+   openclaw/zeptoclaw lands in observe mode**. We never auto-
+   promote to proxy enforcement — flipping that on requires a
+   separate ``defenseclaw setup guardrail`` run. The asymmetry is
+   deliberate: re-binding the proxy listener can break the
+   operator's existing upstream wiring, so we keep the
+   destination passive until they confirm.
 
 4. **No-op when target equals current**. The command must succeed
    without rewriting config or restarting the gateway when the user
@@ -43,8 +52,8 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_setup import setup as setup_group
+
 from tests.helpers import cleanup_app, make_app_context
 
 
@@ -92,6 +101,9 @@ class _ModeBase(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_setup._write_picked_connector_hint",
             return_value=None,
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
         ):
             return _invoke(["mode", target, *extra], self.app)
 
@@ -138,16 +150,25 @@ class TestSetupMode_OpenClawZeptoClawInheritance(_ModeBase):
         self.assertTrue(gc.judge.enabled, "judge config must inherit")
 
 
-class TestSetupMode_IntoObservabilityOnly(_ModeBase):
-    """Switching → codex / claudecode forces observability-only."""
+class TestSetupMode_IntoHookEnforcedConnector(_ModeBase):
+    """Switching → hook-enforced connectors preserves ``guardrail.mode``.
 
-    def test_openclaw_to_codex_disables_codex_enforcement(self):
+    The destination's native hook bus (PreToolUse deny verdict)
+    becomes the enforcement surface in place of the proxy. The
+    operator's posture carries over verbatim; switching connectors
+    is a topology change, not a policy change.
+    """
+
+    def test_openclaw_action_to_codex_preserves_action(self):
+        """Proxy → codex must NOT silently downgrade to observe.
+
+        An operator running action mode through OpenClaw expects
+        action to keep firing after the switch — only the surface
+        changes (proxy ⇒ Codex PreToolUse deny verdict).
+        """
         gc = self.app.cfg.guardrail
         self.app.cfg.claw.mode = "openclaw"
         gc.connector = "openclaw"
-        # Pre-seed the codex enforcement flag to True so we can prove
-        # the alias zeroes it.
-        gc.codex_enforcement_enabled = True
         gc.mode = "action"
 
         result = self._run("codex")
@@ -155,40 +176,67 @@ class TestSetupMode_IntoObservabilityOnly(_ModeBase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.claw.mode, "codex")
         self.assertEqual(gc.connector, "codex")
-        self.assertFalse(
-            gc.codex_enforcement_enabled,
-            "codex_enforcement_enabled must come back False",
-        )
-        # Observability-only forces ``observe`` mode.
-        self.assertEqual(gc.mode, "observe")
-        # gc.enabled stays True so Go gateway wires hooks + OTel.
+        # The deliberate contract: action mode persists; Codex's
+        # PreToolUse hook is now the deny surface.
+        self.assertEqual(gc.mode, "action")
+        # gc.enabled stays True so the gateway wires hooks + OTel.
         self.assertTrue(gc.enabled)
 
-    def test_zeptoclaw_to_claudecode_disables_claudecode_enforcement(self):
+    def test_zeptoclaw_default_observe_to_claudecode_stays_observe(self):
+        """No starting mode set → observe (defensive fallback)."""
         gc = self.app.cfg.guardrail
         self.app.cfg.claw.mode = "zeptoclaw"
         gc.connector = "zeptoclaw"
-        gc.claudecode_enforcement_enabled = True
+        # gc.mode left at its dataclass default; the switch should
+        # downgrade to "observe" rather than carrying an empty value
+        # through to the destination YAML.
 
-        result = self._run("claude-code" if False else "claudecode")
-        # ^ Click choice list normalizes case-insensitively but the
-        # canonical literal is ``claudecode`` (no hyphen). The
-        # ``setup claude-code`` ALIAS exists separately.
+        result = self._run("claudecode")
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.claw.mode, "claudecode")
-        self.assertFalse(gc.claudecode_enforcement_enabled)
+        self.assertEqual(gc.mode, "observe")
+        self.assertTrue(gc.enabled)
+
+    def test_openclaw_action_to_cursor_preserves_action(self):
+        """Same contract for the other hook-enforced connectors."""
+        gc = self.app.cfg.guardrail
+        self.app.cfg.claw.mode = "openclaw"
+        gc.connector = "openclaw"
+        gc.mode = "action"
+
+        result = self._run("cursor")
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.claw.mode, "cursor")
+        self.assertEqual(gc.connector, "cursor")
+        # Cursor honors action via its hook bus on the destination.
+        self.assertEqual(gc.mode, "action")
+        self.assertTrue(gc.enabled)
+
+    def test_openclaw_observe_to_codex_stays_observe(self):
+        """Observe → observe (the obvious case, asserted explicitly)."""
+        gc = self.app.cfg.guardrail
+        self.app.cfg.claw.mode = "openclaw"
+        gc.connector = "openclaw"
+        gc.mode = "observe"
+
+        result = self._run("codex")
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.claw.mode, "codex")
+        self.assertEqual(gc.mode, "observe")
+        self.assertTrue(gc.enabled)
 
 
 class TestSetupMode_OutOfObservabilityOnly(_ModeBase):
-    """codex / claudecode → openclaw / zeptoclaw lands in observe mode."""
+    """hook/observability connectors → openclaw / zeptoclaw lands in observe mode."""
 
     def test_codex_to_openclaw_pins_observe_mode(self):
         gc = self.app.cfg.guardrail
         # Coming from codex observability-only setup.
         self.app.cfg.claw.mode = "codex"
         gc.connector = "codex"
-        gc.codex_enforcement_enabled = False
         gc.enabled = True
         gc.mode = "observe"   # what _apply_connector_observability_only
                               # would have written
@@ -225,6 +273,21 @@ class TestSetupMode_OutOfObservabilityOnly(_ModeBase):
         # must run `setup guardrail` to enforce.
         self.assertEqual(gc.mode, "observe")
 
+    def test_geminicli_to_openclaw_pins_observe_mode(self):
+        gc = self.app.cfg.guardrail
+        self.app.cfg.claw.mode = "geminicli"
+        gc.connector = "geminicli"
+        gc.enabled = True
+        gc.mode = "action"
+        gc.port = 0
+
+        result = self._run("openclaw")
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(gc.connector, "openclaw")
+        self.assertEqual(gc.mode, "observe")
+        self.assertEqual(gc.port, 4000)
+
 
 class TestSetupMode_NoOp(_ModeBase):
     """Switching to the current mode is a clean no-op."""
@@ -245,6 +308,21 @@ class TestSetupMode_NoOp(_ModeBase):
         self.assertEqual(gc.mode, "action")
         # Friendly no-op message visible in stdout.
         self.assertIn("Already on OpenClaw", result.output)
+
+    def test_already_on_hook_connector_refreshes_workspace_hooks(self):
+        gc = self.app.cfg.guardrail
+        self.app.cfg.claw.mode = "openhands"
+        gc.connector = "openhands"
+        gc.mode = "action"
+
+        result = self._run("openhands", "--no-restart")
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.save_calls, 1)
+        self.assertEqual(self.app.cfg.claw.workspace_dir, "")
+        self.assertEqual(self.app.cfg.claw.mode, "openhands")
+        self.assertEqual(gc.mode, "action")
+        self.assertIn("refreshing hook wiring", result.output)
 
 
 class TestSetupMode_InvalidArguments(_ModeBase):

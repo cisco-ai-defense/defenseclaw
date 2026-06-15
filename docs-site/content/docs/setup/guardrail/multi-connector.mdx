@@ -1,0 +1,141 @@
+---
+title: Multi-connector
+description: One DefenseClaw gateway enforces guardrail policy for N hook connectors at once — each with its own mode, fail mode, HILT, block message, and rule pack — under guardrail.connectors. Add a connector with setup <connector> → "Add", and claw.mode flips to multi.
+keywords:
+  - DefenseClaw multi-connector
+  - guardrail.connectors
+  - claw.mode multi
+  - DefenseClaw per-connector policy
+  - defenseclaw guardrail --connector
+---
+
+A single DefenseClaw gateway can enforce guardrail policy for **several hook connectors at once** — Codex, Claude Code, Antigravity, and the other hook-based agents — each with its own independent posture. This is the multi-connector model. It replaces the older "one active connector at a time" mental model: you no longer have to switch wiring to protect a second agent.
+
+<Video
+  src="multi-connector"
+  caption="One gateway governing Claude Code and Antigravity at once. The same three actions run against each agent: a benign `echo` flows through (action=allow / severity=NONE); a `chmod 777` HIGH-severity hit triggers a human-in-the-loop approval prompt via each connector's native ask surface; and reading a credential file matches a CRITICAL rule → decision=deny. Every verdict is attributed per connector in the Splunk pane. The demo closes by deleting each agent's hook config and watching DefenseClaw's self-heal detect the tamper and reinstall the hooks automatically (connector-hook-tampered → connector-hook-repaired)."
+/>
+
+<Callout type="info">
+Multi-connector is a **hook-connector** feature. The proxy-backed connectors (OpenClaw, ZeptoClaw) **cannot** be multi peers — they bind a proxy listener and own the agent traffic plane, so only one runs at a time. Hook connectors post structured events to the gateway and never contend for a listener, which is what lets the gateway fan out to N of them.
+</Callout>
+
+## How one gateway enforces N connectors
+
+Each connector you add gets an entry under `guardrail.connectors.<name>` in `~/.defenseclaw/config.yaml`. The gateway resolves policy **per connector**: when a hook event arrives tagged with its connector source, the gateway looks up that connector's override block and falls back to the global `guardrail.*` values for anything the block leaves unset.
+
+```yaml title="~/.defenseclaw/config.yaml (two connectors)"
+claw:
+  mode: multi                  # set automatically once >1 connector is active
+
+guardrail:
+  enabled: true
+  mode: action                 # global default — inherited by any connector that doesn't override
+  hook_fail_mode: open
+  rule_pack_dir: ~/.defenseclaw/policies/guardrail/default
+
+  connectors:
+    codex:
+      mode: action             # Codex enforces
+      hook_fail_mode: closed
+    claudecode:
+      mode: observe            # Claude Code only logs
+      hilt:
+        enabled: true
+        min_severity: HIGH
+```
+
+Every field under a connector is optional. An unset field **inherits the global value**, so a connector block only needs to carry what differs.
+
+## `claw.mode` becomes `multi`
+
+`claw.mode` records which connector is "active" on a single-connector install. The moment a second connector is active, DefenseClaw sets `claw.mode: multi`. This sentinel also surfaces in telemetry: the OTel resource attribute `defenseclaw.claw.mode` reports `multi` so dashboards and SIEM rules can tell a fan-out gateway apart from a single-connector one. See [Configuration → guardrail.connectors](/docs/reference/configuration) for the full schema.
+
+## Adding a connector (Add vs Replace)
+
+Run the hook setup for the connector you want to add:
+
+```bash
+defenseclaw setup codex
+```
+
+If a different connector is already wired, the wizard asks whether to **Add** or **Replace**:
+
+<Cards>
+  <Card title="Add" description="Keep the existing connector(s) wired and layer the new one in. The gateway now enforces both; claw.mode flips to multi. This is the multi-connector path." />
+  <Card title="Replace" description="Tear down the previous connector's wiring and make the new one the single active connector. This is the classic single-connector switch — see Switching connectors." />
+</Cards>
+
+Choose **Add** to build a multi-connector install. Each added connector starts from the global guardrail defaults; tune it afterward with the per-connector CLI (below).
+
+### Stand up several at once with `defenseclaw init`
+
+The Add/Replace flow above is the **incremental** path — layer in one connector at a time. To stand up a multi-connector install in a single pass, use [`defenseclaw init`](/docs/get-started/quickstart): it auto-detects every installed hook connector, configures them **all in `observe`**, and asks you to name the action-mode subset in one question. Everything you have lands under `guardrail.connectors.<name>` in one go; tune individual connectors afterward with the per-connector CLI below.
+
+For scripted or non-interactive setups, the same fan-out is available through two init-only flags — `--observe-all` (every detected hook connector in observe) and `--action-connectors codex,claudecode` (the named subset in action, composable with `--observe-all`):
+
+```bash
+defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
+```
+
+<Callout type="info">
+`init` only fans out to **hook** connectors. Proxy connectors (OpenClaw, ZeptoClaw) are detected but excluded from the observe-all set — they can't be multi peers — and `init` points you at `defenseclaw setup <proxy>` to configure them on their own.
+</Callout>
+
+## Per-connector overrides
+
+The five fields you can override per connector mirror the global guardrail knobs:
+
+| Field | Meaning | Inherits when unset |
+| --- | --- | --- |
+| `enabled` | Per-connector on/off switch (`guardrail disable --connector X`). Drops it from the active set and removes its hooks; re-enable restores it with no re-prompt. | enabled |
+| `mode` | `observe` (log only) or `action` (enforce). | global `guardrail.mode` |
+| `hook_fail_mode` | `open` / `closed` — what to do on a malformed/4xx hook response for this connector. | global `guardrail.hook_fail_mode` |
+| `hilt` | `{ enabled, min_severity }` — per-connector human-in-the-loop policy. | global `guardrail.hilt` |
+| `block_message` | Custom block text shown to this connector's agent. | global `guardrail.block_message` |
+| `rule_pack_dir` | Path to the rule pack this connector scans against. | global `guardrail.rule_pack_dir` |
+
+Set any of these with the per-connector CLI:
+
+```bash
+defenseclaw guardrail fail-mode closed --connector codex
+defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
+defenseclaw guardrail block-message "Codex policy blocked this" --connector codex
+defenseclaw guardrail disable --connector codex      # scoped kill switch
+defenseclaw guardrail enable  --connector codex      # restore it
+```
+
+Omit `--connector` and the same verbs operate on the **global default** that every connector inherits. `--connector` is rejected on a single-connector install — there is only one posture to set.
+
+To **read** the resolved posture, run bare `defenseclaw guardrail status` — it prints one per-connector block for **every** active connector (there is no `--connector` flag on `status`):
+
+```bash
+defenseclaw guardrail status     # per-connector blocks for ALL active connectors
+```
+
+See [Reference → CLI](/docs/reference/cli#guardrail) for the full command group.
+
+## CLI contract: read vs write
+
+Once a gateway protects more than one connector, the CLI splits cleanly into commands that **read across the whole roster** and commands that **write to one connector at a time**:
+
+| Commands | Scope | How to narrow |
+| --- | --- | --- |
+| `defenseclaw status`, `defenseclaw doctor`, `defenseclaw guardrail status`, bare `guardrail fail-mode` / `hilt` / `block-message`, `skill list`, `mcp list`, `plugin list` | **Read — fans out to every active connector.** Identical layout whether one or N are wired. | n/a — these always show the full roster. |
+| `guardrail enable` / `disable` / `fail-mode` / `hilt` / `block-message` (with an argument) | **Write — one connector.** Defaults to the active connector. | `--connector X` to target a specific connector; omit to set the global default. |
+| `skill scan` / `mcp scan` / `aibom scan` | **Scan — all active connectors by default.** | Positional target (or `--connector` where supported) to scope to one. |
+
+<Callout type="info">
+`defenseclaw doctor` and `defenseclaw status` both render a **per-connector block** for each active connector when more than one is wired — the same fan-out the rest of the read commands use. There is no single "active connector" summary to misread.
+</Callout>
+
+## The firewall stays global
+
+Per-connector policy is a *guardrail* concept. The egress firewall is **not** per-connector — it is one host-wide OS packet filter (pf/iptables) compiled from a single `firewall.yaml`, filtering by destination only. Each connector's allowed hosts are merged into that one allowlist at boot; the kernel can't attribute a connection to a connector. See [`docs/ARCHITECTURE.md` → Firewall scope](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/ARCHITECTURE.md) for the rationale.
+
+## See also
+
+- [Switching connectors](/docs/setup/guardrail/switching-connectors) — replace the primary connector instead of adding one
+- [Setup Guardrail](/docs/setup/guardrail) — the central setup command and the Add/Replace prompt
+- [Reference → Configuration](/docs/reference/configuration) — the `guardrail.connectors` schema
+- [Observability](/docs/observability) — filtering telemetry by the `connector` dimension

@@ -22,10 +22,23 @@ import contextlib
 import json
 import os
 import tempfile
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 from unittest.mock import patch
 
-CONNECTORS = ("openclaw", "zeptoclaw", "claudecode", "codex")
+CONNECTORS = (
+    "openclaw",
+    "zeptoclaw",
+    "claudecode",
+    "codex",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+    "openhands",
+    "antigravity",
+)
 
 
 def make_zeptoclaw_config(
@@ -131,9 +144,7 @@ def with_connector(connector: str) -> Iterator[tuple[str, Any]]:
     pointed at *connector*.
     """
     if connector not in CONNECTORS:
-        raise ValueError(
-            f"unknown connector {connector!r}; expected one of {CONNECTORS}"
-        )
+        raise ValueError(f"unknown connector {connector!r}; expected one of {CONNECTORS}")
 
     with tempfile.TemporaryDirectory(prefix=f"dc-fixture-{connector}-") as tmp:
         dc_home = os.path.join(tmp, ".defenseclaw")

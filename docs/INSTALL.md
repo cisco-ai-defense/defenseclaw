@@ -36,6 +36,20 @@ On **macOS**, OpenShell is not available. DefenseClaw still works for scanning, 
 
 **For sandbox setup on Linux**, see [SANDBOX.md](SANDBOX.md) for full architecture, configuration, and troubleshooting.
 
+### Windows support
+
+On **Windows**, DefenseClaw is **hook-only**. The hook-based connectors —
+Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, and
+OpenHands — are fully supported. Their hook decisions run **natively in the
+`defenseclaw` binary** (the agent invokes `defenseclaw hook --connector <name>
+--event <event>`), so Windows needs **no Git Bash, no `jq`, and no shell
+shims** — there are zero external prerequisites beyond the binary itself.
+
+The proxy connectors **OpenClaw** and **ZeptoClaw** are **not supported on
+Windows**: they require the local guardrail proxy, which DefenseClaw does not
+host there. They are hidden from the TUI/CLI connector pickers and rejected by
+setup on Windows with a clear error. Use them on macOS or Linux instead.
+
 ## Splunk Terms And Scope For The Local Preset
 
 If you enable the bundled local Splunk workflow through `DefenseClaw`, you are
@@ -265,11 +279,33 @@ Test the release artifacts locally using the install script:
 This installs the gateway binary, Python CLI wheel (into
 `~/.defenseclaw/.venv`), and plugin without downloading anything.
 
-### Upload to GitHub Release
+### Cut a GitHub Release
+
+The `Release` GitHub Actions workflow is the only supported way to cut a
+release. It validates the tag, builds and signs all artifacts, and
+creates the GitHub release atomically so Immutable Releases can't strand
+half-built assets.
+
+Preferred — from the Actions UI:
+
+```
+Actions -> Release -> Run workflow -> version: 0.4.0
+```
+
+Or from the CLI by pushing the tag (workflow runs automatically):
 
 ```bash
-gh release create v0.2.0 dist/*
+git tag 0.4.0 && git push origin 0.4.0
 ```
+
+> The tag MUST be bare `X.Y.Z` with no `v` prefix. `scripts/install.sh`,
+> `scripts/upgrade.sh`, and `defenseclaw upgrade` all build URLs of the
+> form `releases/download/X.Y.Z/...`, and the workflow rejects any tag
+> that doesn't match `^[0-9]+\.[0-9]+\.[0-9]+$`.
+
+Do NOT manually `gh release create` — it would create an empty Immutable
+Release that the workflow can't attach assets to (this is what broke the
+0.3.1 release).
 
 ### Clean Dist
 
@@ -337,9 +373,9 @@ support `--non-interactive` for scripted use and `--verify` /
 ### `defenseclaw init`
 
 One-time initialization. Creates `~/.defenseclaw/`, installs scanner
-dependencies, seeds config and audit database, copies Rego policies
-and the CodeGuard skill, and starts the sidecar if the gateway binary
-is on PATH.
+dependencies, seeds config and audit database, copies Rego policies,
+and starts the sidecar if the gateway binary is on PATH. CodeGuard
+native skill/rule installation is explicit and opt-in.
 
 ```bash
 defenseclaw init
@@ -362,7 +398,7 @@ What init does, step by step:
 7. Reads gateway defaults from OpenClaw config + generates device key
 8. If `--enable-guardrail`: runs the full guardrail setup flow
    (guardrail proxy + OpenClaw plugin)
-9. Installs the CodeGuard skill to `~/.openclaw/skills/codeguard/`
+9. Skips native CodeGuard skill/rule installation unless requested separately
 10. Starts `defenseclaw-gateway` if the binary exists on PATH
 
 ```bash
@@ -817,7 +853,7 @@ DefenseClaw supports multiple agent frameworks. Set the active mode in `~/.defen
 
 ```yaml
 claw:
-  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex
+  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex | hermes | cursor | windsurf | geminicli | copilot
   home_dir: ""          # auto-detected; override to use a custom path
 ```
 

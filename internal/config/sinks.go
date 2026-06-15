@@ -105,7 +105,20 @@ type SplunkHECSinkConfig struct {
 	Index      string `mapstructure:"index"       yaml:"index,omitempty"`
 	Source     string `mapstructure:"source"      yaml:"source,omitempty"`
 	SourceType string `mapstructure:"sourcetype"  yaml:"sourcetype,omitempty"`
-	VerifyTLS  bool   `mapstructure:"verify_tls"  yaml:"verify_tls,omitempty"`
+	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-the
+	// transport defaulted to InsecureSkipVerify and operators had to
+	// set verify_tls=true to enable certificate validation. The field
+	// is retained for backward compatibility — if explicitly true it
+	// is honoured (no-op against the new secure default); explicit
+	// false is silently IGNORED. Operators who want the old insecure
+	// behaviour must set insecure_skip_verify=true.
+	VerifyTLS bool `mapstructure:"verify_tls"  yaml:"verify_tls,omitempty"`
+	// InsecureSkipVerify is the fix. When true, the sink does
+	// NOT validate the HEC server's certificate — required only for
+	// dev environments with self-signed HEC. Defaults to false (TLS
+	// verification enabled) so omitting the field never silently
+	// downgrades audit-token transport.
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify" yaml:"insecure_skip_verify,omitempty"`
 
 	// SourceTypeOverrides lets operators map a canonical audit
 	// action onto a dedicated Splunk sourcetype, e.g.:
@@ -187,7 +200,16 @@ type HTTPJSONLSinkConfig struct {
 	Headers     map[string]string `mapstructure:"headers"      yaml:"headers,omitempty"`
 	BearerEnv   string            `mapstructure:"bearer_env"   yaml:"bearer_env,omitempty"`
 	BearerToken string            `mapstructure:"bearer_token" yaml:"bearer_token,omitempty"`
-	VerifyTLS   bool              `mapstructure:"verify_tls"   yaml:"verify_tls,omitempty"`
+	// VerifyTLS is the LEGACY opt-in-to-security flag (see
+	// SplunkHECSinkConfig.VerifyTLS for the history). Retained
+	// for backward compatibility; operators who want the old insecure
+	// behaviour must set insecure_skip_verify=true.
+	VerifyTLS bool `mapstructure:"verify_tls"   yaml:"verify_tls,omitempty"`
+	// InsecureSkipVerify is the fix. When true, the sink does
+	// NOT validate the HTTPS endpoint's certificate. Defaults to false
+	// so audit payloads (and any bearer token) cannot be silently
+	// captured by an on-path attacker.
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify" yaml:"insecure_skip_verify,omitempty"`
 }
 
 // ResolvedBearer returns the env-resolved bearer token, falling back to

@@ -1,0 +1,236 @@
+{
+  "_source": "Hand-curated from internal/gateway/connector hook profiles plus cli/defenseclaw/inventory/hook_contracts.json. Re-extract on every connector or hook-contract change.",
+  "_lastVerified": "2026-05-19",
+  "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/meta.json).",
+  "connectors": [
+    {
+      "id": "claudecode",
+      "label": "Claude Code",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "sandbox",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["PreToolUse"],
+        "blockEvents": ["PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "PermissionRequest"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "Claude Code supports native PreToolUse ask prompts. CRITICAL findings still block; HIGH findings can pause for approval.",
+      "notes": "Hook-only connector — no proxy data path. Observability and PreToolUse deny decisions both flow through the hook bus."
+    },
+    {
+      "id": "codex",
+      "label": "Codex",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "sandbox",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "SessionStart"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "Codex has no native ask surface here; confirm verdicts are downgraded with raw_action preserved. HITL routes through TUI / OpenClaw plugin.",
+      "notes": "Three telemetry channels at boot: hooks, native OTel, and the notify bridge for agent-turn-complete events. Hook-only connector — no proxy data path."
+    },
+    {
+      "id": "openclaw",
+      "label": "OpenClaw",
+      "family": "proxy",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "sandbox",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["before_tool_call"],
+        "blockEvents": ["before_tool_call", "fetch_request", "fetch_response"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "OpenClaw supports DefenseClaw approval prompts for tool actions. Approvals reach chat-origin sessions via the bundled plugin.",
+      "notes": "Reference proxy connector — full data-path interception, sandbox enforcement, plugin-mediated HITL."
+    },
+    {
+      "id": "cursor",
+      "label": "Cursor",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["beforeShellExecution", "beforeMCPExecution"],
+        "blockEvents": [
+          "preToolUse",
+          "beforeShellExecution",
+          "beforeMCPExecution",
+          "beforeReadFile",
+          "beforeTabFileRead",
+          "beforeSubmitPrompt",
+          "stop"
+        ],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "Cursor supports native ask only on documented ask-capable hook events (beforeShellExecution, beforeMCPExecution).",
+      "notes": "hooks.json under ~/.cursor; user-global MCP / skills / rules discovery by default, with workspace overlays only when pinned."
+    },
+    {
+      "id": "hermes",
+      "label": "Hermes",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["pre_tool_call"],
+        "supportsFailClosed": false,
+        "scope": "user"
+      },
+      "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
+      "notes": "Hooks live in ~/.hermes/config.yaml (hermes-hooks-v1; generic decoder lifts content from the per-event extra envelope). Full shell-hook lifecycle: pre_tool_call blocks, pre_llm_call injects context, post_tool_call/post_llm_call/on_session_start/on_session_end/subagent_stop observe. Setup sets hooks_auto_accept so events register on non-TTY/gateway runs. Discovery surfaces for MCP, skills, plugins."
+    },
+    {
+      "id": "opencode",
+      "label": "OpenCode",
+      "family": "hooks",
+      "toolInspection": "pre-execution",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["tool.execute.before"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "No native human-approval surface; blocks by throwing in the bridge plugin's tool.execute.before. confirm verdicts fall back to allow.",
+      "notes": "Governed by a DefenseClaw JS bridge plugin auto-loaded from ~/.config/opencode/plugins/defenseclaw.js (no opencode.json edit). tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) to abort the tool on a block decision; tool.execute.after is observe-only. Fail-closed is genuine — the bridge throws when the gateway is unreachable and FAIL_MODE=closed."
+    },
+    {
+      "id": "geminicli",
+      "label": "Gemini CLI",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["BeforeAgent", "BeforeModel", "BeforeTool", "AfterTool", "AfterAgent"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
+      "notes": "settings.json hooks; native OTLP exporter wires directly to the gateway."
+    },
+    {
+      "id": "copilot",
+      "label": "GitHub Copilot CLI",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["preToolUse", "PreToolUse"],
+        "blockEvents": [
+          "preToolUse",
+          "PreToolUse",
+          "permissionRequest",
+          "PermissionRequest",
+          "agentStop",
+          "Stop",
+          "subagentStop",
+          "SubagentStop",
+          "postToolUseFailure",
+          "PostToolUseFailure"
+        ],
+        "supportsFailClosed": false,
+        "scope": "user,workspace"
+      },
+      "hilt": "Copilot CLI supports native ask on documented preToolUse hooks.",
+      "notes": "Global hooks under ~/.copilot/hooks by default; optional workspace hooks under <workspace>/.github/hooks."
+    },
+    {
+      "id": "openhands",
+      "label": "OpenHands",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["pre_tool_use", "user_prompt_submit", "stop"],
+        "supportsFailClosed": true,
+        "scope": "user,workspace"
+      },
+      "hilt": "OpenHands has no native ask surface in the documented hook contract; confirm verdicts are downgraded with raw_action preserved and optional additionalContext returned to the agent.",
+      "notes": "Global ~/.openhands/hooks.json native hook schema by default; optional repo-local .openhands/hooks.json with --workspace; MCP lives in ~/.openhands/mcp.json; skills include user installs and ~/.openhands/cache/skills/public-skills/skills."
+    },
+    {
+      "id": "antigravity",
+      "label": "Antigravity",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["PreInvocation", "PreToolUse"],
+        "blockEvents": ["PreInvocation", "PreToolUse", "Stop"],
+        "supportsFailClosed": false,
+        "scope": "user"
+      },
+      "hilt": "Antigravity is the only DefenseClaw connector with an unbypassable native ask: returning decision=ask from a PreInvocation or PreToolUse hook overrides agy's --dangerously-skip-permissions flag. The literal force_ask string is not recognized by agy v1.0.0 and is preserved internally as raw_action only.",
+      "notes": "Hooks v2 covers the full Antigravity 2.0 lifecycle (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) registered as separate DefenseClaw-owned keys in ~/.gemini/config/hooks.json (the path agy v1.0.x actually evaluates; the marketing-facing ~/.gemini/antigravity-cli/hooks.json is silently ignored at runtime). PreToolUse is empirically verified on agy v1.0.1; the other four events are spec-conformant and gated on upstream agy parity. agy merges all discovered hooks files; multi-file writes cause duplicate firings. MCP / skills / rules / plugins are unsupported until agy publishes contracts."
+    },
+    {
+      "id": "windsurf",
+      "label": "Windsurf",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": [
+          "pre_user_prompt",
+          "pre_read_code",
+          "pre_write_code",
+          "pre_run_command",
+          "pre_mcp_tool_use"
+        ],
+        "supportsFailClosed": false,
+        "scope": "user"
+      },
+      "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
+      "notes": "Cascade hooks under ~/.codeium/windsurf/hooks.json. Existing MCP/rules discovered, never auto-created."
+    },
+    {
+      "id": "zeptoclaw",
+      "label": "ZeptoClaw",
+      "family": "proxy",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "sandbox",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["fetch_request", "fetch_response", "tool_call"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "ZeptoClaw has no native ask surface; confirm verdicts are downgraded with raw_action preserved so operators can review in TUI/audit.",
+      "notes": "api_base redirect into the DefenseClaw proxy plus response-scan."
+    }
+  ]
+}

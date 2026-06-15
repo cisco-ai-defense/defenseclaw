@@ -25,7 +25,9 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -60,10 +62,13 @@ const openClawPlaceholderName = ".placeholder"
 // failing loudly when someone tries to switch to OpenClaw without
 // having built the plugin.
 func openClawExtensionAvailable() bool {
-	if _, err := openClawExtensionFS.ReadFile(filepath.Join(openClawPluginRoot, "package.json")); err == nil {
+	// embed.FS always uses forward-slash paths; filepath.Join would emit
+	// backslashes on Windows and never match the embedded entries, so use
+	// path.Join here.
+	if _, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, "package.json")); err == nil {
 		return true
 	}
-	if _, err := openClawExtensionFS.ReadFile(filepath.Join(openClawPluginRoot, openClawPlaceholderName)); err == nil {
+	if _, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, openClawPlaceholderName)); err == nil {
 		return false
 	}
 	return false
@@ -84,7 +89,7 @@ func openClawHome() string {
 	if OpenClawHomeOverride != "" {
 		return OpenClawHomeOverride
 	}
-	return filepath.Join(os.Getenv("HOME"), ".openclaw")
+	return filepath.Join(userHomeDir(), ".openclaw")
 }
 
 // OpenClawConnector handles LLM traffic routing and tool inspection for OpenClaw.
@@ -124,6 +129,13 @@ func (c *OpenClawConnector) AllowedHosts() []string {
 }
 
 func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	// Proxy connectors require the local guardrail proxy, which DefenseClaw
+	// does not host on Windows (hook-only there). Fail clearly instead of
+	// planting a half-configured proxy connector.
+	if !ConnectorSupportedOnHostOS(c.Name()) {
+		return errConnectorUnsupportedOnOS(c.Name(), runtime.GOOS)
+	}
+
 	// The Makefile keeps the gateway buildable on machines without the
 	// TS plugin built (typical for non-OpenClaw operators) by embedding
 	// a placeholder. If the operator now actually wants OpenClaw, refuse
@@ -154,7 +166,7 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 	// Surface 3: Hook script for tool inspection
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScript(hookDir, opts.APIAddr); err != nil {
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("openclaw hook script: %w", err)
 	}
 
@@ -184,6 +196,13 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
 	}
+	// OpenClaw does not implement HookScriptOwner: it owns only the
+	// shared inspect-*.sh family written by every connector's
+	// hookwriter, and those are intentionally left in place across
+	// connector switches (they're shared infrastructure). Tombstoning
+	// is unnecessary because OpenClaw drives tool inspection via the
+	// embedded extension, not via a long-lived cached *-hook.sh path
+	// in a host agent process.
 
 	if len(errs) > 0 {
 		return fmt.Errorf("openclaw teardown errors: %s", strings.Join(errs, "; "))
@@ -556,15 +575,10 @@ func (c *OpenClawConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 // under <DataDir>/hooks/ are written for proxy-side tool inspection.
 func (c *OpenClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	ocHome := openClawHome()
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	hooks := make([]string, 0, len(HookScripts()))
-	for _, name := range HookScripts() {
-		hooks = append(hooks, filepath.Join(hookDir, name))
-	}
 	return AgentPaths{
 		PatchedFiles: []string{filepath.Join(ocHome, "openclaw.json")},
 		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")},
-		HookScripts:  hooks,
+		HookScripts:  hookScriptPathsForConnector(opts, c),
 		CreatedDirs: []string{
 			filepath.Join(ocHome, "extensions", "defenseclaw"),
 			filepath.Join(opts.DataDir, "shims"),
@@ -597,7 +611,7 @@ func (c *OpenClawConnector) RequiredEnv() []EnvRequirement {
 func (c *OpenClawConnector) SupportsComponentScanning() bool { return true }
 
 func (c *OpenClawConnector) ComponentTargets(cwd string) map[string][]string {
-	home := os.Getenv("HOME")
+	home := userHomeDir()
 	openclawHome := filepath.Join(home, ".openclaw")
 	workspace := filepath.Join(openclawHome, "workspace")
 

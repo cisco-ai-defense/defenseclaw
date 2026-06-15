@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -198,6 +199,23 @@ func (w *Writer) EmitContext(ctx context.Context, e Event) {
 	if e.SidecarInstanceID == "" {
 		e.SidecarInstanceID = SidecarInstanceID()
 	}
+	// Fill blanks for the two correlation fields that every emit
+	// path ought to carry but that callers outside the gateway
+	// request scope frequently forget (e.g. inventory/AI-discovery
+	// runs in its own goroutine with only a span context). RunID is
+	// process-wide so the writer can always default it; TraceID
+	// comes from the active OTel span when caller didn't pass one.
+	// Caller-supplied non-empty values always win — this never
+	// overwrites a value that gateway.stampEventCorrelation or a
+	// test fixture set explicitly.
+	if e.RunID == "" {
+		e.RunID = ProcessRunID()
+	}
+	if e.TraceID == "" {
+		if sp := trace.SpanFromContext(ctx); sp != nil && sp.SpanContext().IsValid() {
+			e.TraceID = sp.SpanContext().TraceID().String()
+		}
+	}
 	StampAgentWatchContext(&e)
 	// Plan B6 / S0.10: stamp HMAC over the canonical JSON of the
 	// payload using the per-boot device-key-derived HMAC key. No-op
@@ -341,6 +359,13 @@ func (w *Writer) handleSchemaViolation(src Event, cause error) {
 	// error is attributable to the exact request that produced the
 	// bad emission. event_type=error puts us on the `error`
 	// oneOf branch of the envelope.
+	// Surface the broken event's rule_id + evaluation_id (when
+	// present on the payload) so the schema-violation error
+	// attributes to the same SIEM pivot keys as the dropped event.
+	// Operators dashboards built on `error.rule_id` / `error.
+	// evaluation_id` can correlate the drop back to the upstream
+	// detection without parsing the violation message string.
+	ruleID, evalID := payloadCorrelationIDs(src)
 	viol := Event{
 		Timestamp:         time.Now().UTC(),
 		EventType:         EventError,
@@ -348,15 +373,18 @@ func (w *Writer) handleSchemaViolation(src Event, cause error) {
 		TraceID:           src.TraceID,
 		RunID:             src.RunID,
 		SessionID:         src.SessionID,
+		TurnID:            src.TurnID,
 		RequestID:         src.RequestID,
 		AgentID:           src.AgentID,
 		AgentInstanceID:   src.AgentInstanceID,
 		SidecarInstanceID: src.SidecarInstanceID,
 		Error: &ErrorPayload{
-			Subsystem: string(SubsystemGatewaylog),
-			Code:      string(ErrCodeSchemaViolation),
-			Message:   truncate(fmt.Sprintf("dropped %s event: %s", src.EventType, msg), 1024),
-			Cause:     string(src.EventType),
+			Subsystem:    string(SubsystemGatewaylog),
+			Code:         string(ErrCodeSchemaViolation),
+			Message:      truncate(fmt.Sprintf("dropped %s event: %s", src.EventType, msg), 1024),
+			Cause:        string(src.EventType),
+			RuleID:       ruleID,
+			EvaluationID: evalID,
 		},
 	}
 
@@ -368,6 +396,32 @@ func (w *Writer) handleSchemaViolation(src Event, cause error) {
 	w.emitDepth.Add(1)
 	defer w.emitDepth.Add(-1)
 	w.Emit(viol)
+}
+
+// payloadCorrelationIDs extracts rule_id + evaluation_id from the
+// dropped event's payload so a schema-violation EventError can
+// echo them onto its own ErrorPayload. We pick the first match
+// across the finding-shaped + scan-shaped + verdict-shaped
+// payloads — for any well-formed event at most one of these is
+// populated, and ill-formed events (the case the schema gate
+// triggers on) only get the IDs that did make it through.
+func payloadCorrelationIDs(src Event) (ruleID, evaluationID string) {
+	if src.ScanFinding != nil {
+		ruleID = src.ScanFinding.RuleID
+		evaluationID = src.ScanFinding.EvaluationID
+	}
+	if evaluationID == "" && src.Scan != nil {
+		evaluationID = src.Scan.EvaluationID
+	}
+	if src.Verdict != nil {
+		if evaluationID == "" {
+			evaluationID = src.Verdict.EvaluationID
+		}
+		if ruleID == "" && len(src.Verdict.RuleIDs) > 0 {
+			ruleID = src.Verdict.RuleIDs[0]
+		}
+	}
+	return ruleID, evaluationID
 }
 
 // truncate caps s at n runes and appends an ellipsis if we clipped.

@@ -54,8 +54,9 @@ type scanBodyFinding struct {
 }
 
 // EmitScanResult emits an OTel LogRecord for a completed scan and optionally
-// individual finding logs. Also records scan metrics.
-func (p *Provider) EmitScanResult(result *scanner.ScanResult, scanID, targetType, verdict string) {
+// individual finding logs. Also records scan metrics. connector attributes the
+// scan-findings total to its originating connector ("" => "unknown").
+func (p *Provider) EmitScanResult(result *scanner.ScanResult, scanID, targetType, verdict, connector string) {
 	if !p.Enabled() {
 		return
 	}
@@ -70,7 +71,7 @@ func (p *Provider) EmitScanResult(result *scanner.ScanResult, scanID, targetType
 	}
 
 	p.RecordScannerLatency(ctx, result.Scanner, durationMs)
-	p.RecordScan(ctx, result.Scanner, targetType, verdict, durationMs, findingCounts)
+	p.RecordScan(ctx, result.Scanner, targetType, verdict, durationMs, findingCounts, connector)
 
 	if !p.LogsEnabled() {
 		return

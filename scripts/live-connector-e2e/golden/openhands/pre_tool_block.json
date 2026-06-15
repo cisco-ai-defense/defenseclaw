@@ -1,0 +1,12 @@
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "dc-e2e-openhands",
+  "turn_id": "dc-e2e-turn",
+  "agent_id": "openhands-e2e",
+  "agent_name": "openhands e2e agent",
+  "agent_type": "openhands-cli",
+  "tool_name": "terminal",
+  "tool_input": {
+    "command": "cat /etc/shadow"
+  }
+}

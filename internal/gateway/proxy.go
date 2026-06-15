@@ -34,6 +34,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/maximhq/bifrost/core/schemas"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/time/rate"
@@ -42,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -102,6 +104,7 @@ type GuardrailProxy struct {
 	notify       *NotificationQueue
 	webhooks     *WebhookDispatcher
 	hilt         *HILTApprovalManager
+	notifier     *notifier.Dispatcher
 
 	// resolveProviderFn selects the upstream LLMProvider for a request.
 	// Defaults to resolveProviderFromHeaders (uses X-DC-Target-URL).
@@ -123,6 +126,13 @@ type GuardrailProxy struct {
 	// "connector" key appears in guardrail_runtime.json.
 	registry  *connector.Registry
 	setupOpts connector.SetupOpts
+
+	// hookGuard auto-heals the active connector's agent config file when
+	// a user manually deletes the DefenseClaw hook block while the
+	// gateway is running. nil when guardrail.hook_self_heal is disabled.
+	// Repointed on runtime connector switch so it follows the active
+	// connector.
+	hookGuard *HookConfigGuard
 
 	// Observability defaults set at bootstrap. defaultAgentName
 	// falls back to cfg.Claw.Mode ("openclaw") when the request
@@ -161,6 +171,15 @@ func (p *GuardrailProxy) SetDefaultPolicyID(id string) {
 // confirm verdicts.
 func (p *GuardrailProxy) SetHILTApprovalManager(m *HILTApprovalManager) {
 	p.hilt = m
+}
+
+// SetNotifier wires the user-session OS notifier dispatcher used by
+// the proxy to surface block / would-block events alongside the
+// existing webhooks/audit fan-out. Safe to call with nil — the
+// dispatcher's methods short-circuit on nil so the per-call site
+// stays clean.
+func (p *GuardrailProxy) SetNotifier(n *notifier.Dispatcher) {
+	p.notifier = n
 }
 
 // agentNameForRequest picks the most specific agent name available.
@@ -240,7 +259,8 @@ func (p *GuardrailProxy) resolveConfirm(ctx context.Context, r *http.Request, ve
 		return
 	}
 
-	approved, status, err := p.hilt.Request(ctx, hiltSessionID(ctx, r), subject, verdict.Severity, verdict.Reason, 0)
+	approved, status, err := p.hilt.Request(ctx, hiltSessionID(ctx, r), subject, verdict.Severity, verdict.Reason, 0,
+		HILTApprovalContext{EvaluationID: verdict.EvaluationID, RuleIDs: verdict.RuleIDs})
 	if approved {
 		verdict.Action = guardrailActionAllow
 		verdict.Reason = appendVerdictReason(verdict.Reason, "human approved once")
@@ -329,7 +349,8 @@ func NewGuardrailProxy(
 		}
 	}
 
-	judge := NewLLMJudge(&cfg.Judge, judgeLLM, dotenvPath, rp)
+	providers, _, _ := providerRegistrySnapshot()
+	judge := NewLLMJudge(&cfg.Judge, judgeLLM, dotenvPath, rp, providers)
 
 	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
 	inspector.SetDetectionStrategy(
@@ -349,6 +370,11 @@ func NewGuardrailProxy(
 	// over `data.guardrail.hilt` (the data path is preserved as a fallback
 	// for non-gateway callers like direct `opa eval` runs).
 	inspector.SetHILTConfig(cfg.HILT.Enabled, cfg.HILT.MinSeverity)
+	if otel != nil {
+		inspector.SetPanicRecorderFunc(func(ctx context.Context) {
+			otel.RecordPanic(ctx, gatewaylog.SubsystemGuardrail)
+		})
+	}
 	// Wire OTel span emission when telemetry is enabled. The
 	// inspector only sees a closure, so the telemetry dep stays
 	// localized to the proxy wiring layer.
@@ -414,6 +440,45 @@ func NewGuardrailProxy(
 func (p *GuardrailProxy) SetConnectorSwitchState(reg *connector.Registry, opts connector.SetupOpts) {
 	p.registry = reg
 	p.setupOpts = opts
+}
+
+// StartHookConfigGuard launches the connector hook self-heal guard bound to
+// ctx. It must be called after the connector's initial Setup so the watched
+// config files already exist. The guard is owned by the proxy and repointed on
+// runtime connector switch. The guard goroutine stops when ctx is cancelled.
+//
+// Started for both proxy-bound and observability-only connectors: hook-native
+// connectors (codex, claudecode, cursor, ...) never reach proxy.Run, so the
+// caller (runGuardrail) is responsible for invoking this before the
+// observability short-circuit.
+func (p *GuardrailProxy) StartHookConfigGuard(ctx context.Context, conn connector.Connector, opts connector.SetupOpts) {
+	if p == nil {
+		return
+	}
+	debounce := time.Duration(p.cfg.HookSelfHealDebounceMs) * time.Millisecond
+	guard := NewHookConfigGuard(p.logger, p.otel, debounce)
+	guard.SetHealNotifier(p.notifyHookHealed)
+	p.hookGuard = guard
+	guard.Start(ctx, conn, opts)
+}
+
+// notifyHookHealed fans a successful hook re-install out to the configured
+// webhook endpoints, mirroring the watchdog health-event path. The durable
+// audit row and OTel metric are emitted by the guard itself; this adds the
+// outbound notifier channel so operators learn that a connector hook was
+// tampered with and restored.
+func (p *GuardrailProxy) notifyHookHealed(connectorName string, paths []string) {
+	if p == nil || p.webhooks == nil {
+		return
+	}
+	p.webhooks.Dispatch(audit.Event{
+		Timestamp: time.Now().UTC(),
+		Action:    string(audit.ActionConnectorHookRepaired),
+		Target:    connectorName,
+		Actor:     "defenseclaw-hook-guard",
+		Details:   fmt.Sprintf("re-installed connector hook config after manual removal: %s", strings.Join(paths, ", ")),
+		Severity:  "HIGH",
+	})
 }
 
 // SetWebhookDispatcher attaches a webhook dispatcher for guardrail block notifications.
@@ -486,7 +551,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	})
 	fmt.Fprintf(os.Stderr, "[guardrail] starting proxy (addr=%s mode=%s model=%s)\n",
 		addr, p.mode, p.cfg.ModelName)
-	_ = p.logger.LogAction("guardrail-start", "",
+	_ = p.logger.LogAction(string(audit.ActionGuardrailStart), "",
 		fmt.Sprintf("port=%d mode=%s model=%s", p.cfg.Port, p.mode, p.cfg.ModelName))
 	emitLifecycle(ctx, "guardrail", "start", map[string]string{
 		"port":  fmt.Sprintf("%d", p.cfg.Port),
@@ -512,7 +577,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 			"addr": addr,
 		})
 		fmt.Fprintf(os.Stderr, "[guardrail] proxy ready on %s\n", addr)
-		_ = p.logger.LogAction("guardrail-healthy", "", fmt.Sprintf("port=%d", p.cfg.Port))
+		_ = p.logger.LogAction(string(audit.ActionGuardrailHealthy), "", fmt.Sprintf("port=%d", p.cfg.Port))
 		emitLifecycle(ctx, "guardrail", "ready", map[string]string{
 			"port": fmt.Sprintf("%d", p.cfg.Port),
 		})
@@ -672,15 +737,51 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// X-DC-Target-URL. Ask the active connector to resolve the
 	// upstream from its provider snapshot before bailing.
 	connForwardKey := ""
+	connExtraHeaders := map[string]string{}
 	if targetOrigin == "" {
-		if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
-			targetOrigin = connUpstream
-			connForwardKey = connKey
+		if cs := hydrateConnectorSignalsFull(p.connector, r, body); cs != nil {
+			if cs.RawUpstream != "" {
+				targetOrigin = cs.RawUpstream
+				connForwardKey = cs.RawAPIKey
+			}
+			if cs.ExtraHeaders != nil {
+				connExtraHeaders = cs.ExtraHeaders
+			}
+		}
+	}
+	// Direct-provider fallback: when neither the fetch interceptor nor a
+	// connector supplied an upstream (e.g. ZeptoClaw configured with only
+	// api_base and no api_key, or any agent pointed straight at the
+	// guardrail proxy as a custom OpenAI-compatible endpoint), hydrate
+	// from the gateway's own config — the same fallback that
+	// resolveConfiguredProvider applies on the chat/completions path —
+	// so the Responses API (/v1/responses) and other provider-native
+	// passthrough paths reach the configured custom provider instead of
+	// being rejected with 400.
+	if targetOrigin == "" {
+		if base := strings.TrimSpace(p.cfg.LLM.BaseURL); base != "" {
+			cfgModel := p.cfg.Model
+			if cfgModel == "" {
+				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: llm.base_url set but no llm.model configured — cannot hydrate upstream auth\n")
+			} else if !localKeyResolutionDisabled || tokenResolver != nil {
+				resolvedKey, err := p.resolveDirectProviderUpstreamKey(r.Context(), cfgModel, "")
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: token resolver error for configured model %q: %v\n", cfgModel, err)
+				} else if resolvedKey != "" {
+					targetOrigin = base
+					connForwardKey = resolvedKey
+					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: direct-provider hydration model=%q base=%s\n",
+						cfgModel, scrubURLSecrets(base))
+				} else {
+					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: no API key available for configured model %q\n", cfgModel)
+				}
+			}
 		}
 	}
 	if targetOrigin == "" {
-		// No target URL from fetch interceptor or connector snapshot; reject.
-		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header")
+		// No target URL from fetch interceptor, connector snapshot, or
+		// gateway-configured custom provider; reject.
+		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header and no llm.base_url configured")
 		return
 	}
 	if connForwardKey != "" && r.Header.Get("X-AI-Auth") == "" {
@@ -885,15 +986,29 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		passthroughReqForTelemetry.Model = label
 	}
 	inspectionText := promptInspectionText(userText)
+	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
+	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
+	// or session-startup-shaped suffix inside the user-controlled OpenClaw
+	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
+	// payload from these allowlists while the original prompt still flows
+	// upstream.
 	if userText != "" &&
-		!isHeartbeatMessage(inspectionText, partial.Messages) &&
-		!isSessionStartupMessage(inspectionText) {
+		!isHeartbeatMessage(userText, partial.Messages) &&
+		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
 		passthroughPromptID = emitLLMPromptEvent(r.Context(), meta, userText, body)
 
 		t0 := time.Now()
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, partial.Messages, label, mode)
+		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
+		// any client can forge, so we additionally inspect the RAW user text
+		// when the strip actually changed the content. Either path can
+		// trigger a block; we keep the stricter verdict.
+		if inspectionText != userText {
+			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, label, mode)
+			verdict = mergePromptVerdicts(verdict, rawVerdict)
+		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
@@ -941,7 +1056,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		fmt.Fprintf(os.Stderr, "[guardrail] laundered %d DefenseClaw block turn(s) from passthrough history (path=%s)\n", stripped, r.URL.Path)
 		body = []byte(launderedBody)
 		if p.logger != nil {
-			_ = p.logger.LogActionCtx(r.Context(), "guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from request history", stripped))
+			_ = p.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailLaunder), r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from request history", stripped))
 		}
 	}
 
@@ -962,7 +1077,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into passthrough request (site=%s path=%s)\n", site, r.URL.Path)
 				body = []byte(patched)
 				if p.logger != nil {
-					_ = p.logger.LogActionCtx(r.Context(), "guardrail-notify-inject", site, "injected security notification into passthrough LLM request")
+					_ = p.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailNotifyInject), site, "injected security notification into passthrough LLM request")
 				}
 			} else {
 				// Not a failure: some provider surfaces (Anthropic,
@@ -996,6 +1111,24 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			upstreamAuth = auth
 		}
 	}
+	// Fallback: when the caller supplied X-DC-Target-URL but no credential
+	// headers (the "third_party_injected" mode used by ZeptoClaw/PulseClaw),
+	// consult the enterprise token resolver (secrets-sidecar hydrated key)
+	// so the proxy injects the upstream LLM credential on behalf of the
+	// caller. This mirrors the resolveConfiguredProvider path that
+	// handleChatCompletion already uses for direct-provider hydration.
+	if upstreamAuth == "" && tokenResolver != nil {
+		providerPrefix := provider
+		if providerPrefix == "" {
+			providerPrefix = inferProvider(partial.Model, "")
+		}
+		resolvedKey, err := tokenResolver(r.Context(), providerPrefix)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: token resolver error: %v\n", err)
+		} else if resolvedKey != "" {
+			upstreamAuth = "Bearer " + resolvedKey
+		}
+	}
 
 	// Apply a timeout so the proxy doesn't hang indefinitely if the upstream
 	// provider stalls. Streaming responses may take longer, so use 5 minutes;
@@ -1019,38 +1152,51 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// (notably Anthropic) reject the request with 400 "unexpected EOF".
 	upstreamReq.ContentLength = int64(len(body))
 
-	// Copy all original headers except proxy-hop, auth, and internal
-	// DefenseClaw correlation headers.
+	// Forward inbound headers to the upstream provider, minus a
+	// hardened blocklist (proxy-hop, auth, framework-internal,
+	// hop-by-hop, cookies, W3C trace context). See
+	// internal/gateway/forward_headers.go for the policy.
 	//
-	//   - Auth headers (Authorization, x-api-key, api-key) are stripped to
-	//     avoid duplicates — the resolved upstreamAuth is set as the single
-	//     canonical Authorization header below.
-	//   - Content-Length is stripped because notification injection can
-	//     change the body size; upstreamReq.ContentLength is the
-	//     authoritative value (set above) and the Go http client writes
-	//     the correct header automatically.
-	//   - Internal DefenseClaw correlation headers (x-dc-*, x-defenseclaw-*)
-	//     MUST NOT leak to third-party LLM providers — they carry session,
-	//     agent, policy, and destination identifiers that are internal
-	//     metadata, and echoing them in provider logs creates a privacy
-	//     and operational-security regression.
-	//   - W3C trace context (traceparent/tracestate) is also internal and
-	//     not meaningful to upstream providers; strip to avoid cross-tenant
-	//     trace correlation leakage.
-	for k, vs := range r.Header {
-		lk := strings.ToLower(k)
-		switch lk {
-		case "x-dc-target-url", "x-ai-auth", "x-dc-auth", "host",
-			"authorization", "x-api-key", "api-key", "content-length",
-			"traceparent", "tracestate":
-			continue
+	// Toggled by llm.forward_custom_headers (default on). When
+	// disabled, the upstream request gets only the canonical
+	// Authorization re-set below — useful for operators who want zero
+	// header leakage from the agent to the provider.
+	forwardedHeaderCount := 0
+	if p.cfg != nil && p.cfg.LLM.ForwardCustomHeadersEnabled() {
+		n, herr := CopyForwardableHeaders(upstreamReq.Header, r.Header)
+		if herr != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: header forwarding rejected: %v\n", herr)
+			p.otel.RecordForwardedHeaders(r.Context(), "passthrough", resultForHeaderError(herr), 1)
+			writeOpenAIError(w, httpStatusForHeaderError(herr), "invalid forwarded headers: "+herr.Error())
+			return
 		}
-		if strings.HasPrefix(lk, "x-dc-") || strings.HasPrefix(lk, "x-defenseclaw-") {
-			continue
+		forwardedHeaderCount += n
+		// Merge connector-supplied headers (currently unused by built-in
+		// connectors, but ZeptoClaw/Codex/etc. may declare per-provider
+		// headers via ConnectorSignals.ExtraHeaders). Connector-supplied
+		// values overwrite same-named inbound values; same blocklist
+		// applies. Failure here is a misconfigured connector — return
+		// the same error so the operator notices.
+		if len(connExtraHeaders) > 0 {
+			m, merr := MergeConnectorExtraHeaders(upstreamReq.Header, connExtraHeaders)
+			if merr != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: connector-extra header rejected: %v\n", merr)
+				p.otel.RecordForwardedHeaders(r.Context(), "passthrough", resultForHeaderError(merr), 1)
+				writeOpenAIError(w, httpStatusForHeaderError(merr), "invalid connector-extra headers: "+merr.Error())
+				return
+			}
+			forwardedHeaderCount += m
 		}
-		for _, v := range vs {
-			upstreamReq.Header.Add(k, v)
+	}
+	if forwardedHeaderCount > 0 {
+		// Per-request count is debug-only by default. The OTel counter
+		// (defenseclaw.gateway.forwarded_headers) carries the steady-state
+		// signal; this stderr line is opt-in for local triage via
+		// DEFENSECLAW_DEBUG=1. Header names and values are never logged.
+		if os.Getenv("DEFENSECLAW_DEBUG") == "1" {
+			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: forwarded_header_count=%d\n", forwardedHeaderCount)
 		}
+		p.otel.RecordForwardedHeaders(r.Context(), "passthrough", "ok", int64(forwardedHeaderCount))
 	}
 	// Set the single resolved auth header for the upstream provider.
 	if upstreamAuth != "" {
@@ -1107,6 +1253,23 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			if verdict.Action == "block" && mode == "action" {
 				msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
 				p.enqueueBlockNotification(verdict, "completion", partial.Model)
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
+				return
+			}
+		}
+
+		// Avarice F-1188: scan provider-native tool calls (Anthropic
+		// tool_use, Gemini functionCall, Bedrock toolUse, OpenAI
+		// Responses function_call, OpenAI Chat Completions tool_calls).
+		// Pre-fix only the OpenAI chat-completion JSON path scanned tool
+		// calls; Anthropic / Gemini / Bedrock tool-call payloads were
+		// forwarded unchecked and the agent could execute them without
+		// the configured tool-call rules ever running.
+		if toolCallsRaw := extractPassthroughToolCalls(respBody, provider); toolCallsRaw != nil {
+			if verdict := p.inspectToolCalls(r.Context(), toolCallsRaw); verdict != nil &&
+				verdict.Action == "block" && mode == "action" {
+				msg := blockMessage(customBlockMsg, "tool_call", verdict.Reason)
+				p.enqueueBlockNotification(verdict, "tool_call", partial.Model)
 				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
 				return
 			}
@@ -1273,8 +1436,16 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 }
 
 // extractPassthroughResponseContent extracts assistant text from a non-streaming
-// provider-native response body. Supports Anthropic Messages API, Gemini, and
-// OpenAI Responses API formats.
+// provider-native response body. Supports Anthropic Messages API, Gemini,
+// OpenAI Responses API, OpenAI Chat Completions, Ollama native chat/generate,
+// and Bedrock Converse.
+//
+// Avarice F-1186: pre-fix Ollama and Bedrock envelopes were ignored, so
+// completion inspection silently skipped any prompt-injection that triggered
+// `block` because `content` came back empty and the proxy short-circuited
+// the inspector call. The new branches keep parity with the providers that
+// `inferProviderFromURL` recognises so action-mode passthrough enforcement
+// is uniform across the supported provider surface.
 func extractPassthroughResponseContent(body []byte, provider string) string {
 	switch provider {
 	case "anthropic":
@@ -1316,6 +1487,48 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 			return sb.String()
 		}
 
+	case "ollama":
+		// F-1186: Ollama native chat: {"message": {"content": "..."}}
+		// Ollama native generate: {"response": "..."}
+		var chatResp struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Response string `json:"response"`
+		}
+		if json.Unmarshal(body, &chatResp) == nil {
+			if chatResp.Message.Content != "" {
+				return chatResp.Message.Content
+			}
+			if chatResp.Response != "" {
+				return chatResp.Response
+			}
+		}
+
+	case "bedrock":
+		// F-1186: Bedrock Converse: {"output": {"message": {"content": [{"text": "..."}]}}}
+		// Bedrock InvokeModel responses are model-shaped and re-routed through
+		// the matching provider extractor (anthropic / cohere / etc.) by the
+		// caller, so this branch only handles the Converse envelope.
+		var bedrockResp struct {
+			Output struct {
+				Message struct {
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"message"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &bedrockResp) == nil {
+			var sb strings.Builder
+			for _, c := range bedrockResp.Output.Message.Content {
+				sb.WriteString(c.Text)
+			}
+			if sb.Len() > 0 {
+				return sb.String()
+			}
+		}
+
 	default:
 		// OpenAI Responses API: {"output": [{"content": [{"text": "..."}]}]}
 		var respAPI struct {
@@ -1352,8 +1565,192 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 	return ""
 }
 
+// extractPassthroughToolCalls returns provider-native tool-call payloads
+// found in a non-streaming response body, normalised into the OpenAI Chat
+// Completions tool_calls shape — a JSON array of
+// {"type":"function","function":{"name","arguments"}} objects. That nested
+// shape is the exact contract inspectToolCalls parses: emitting the flat
+// {"name","arguments"} shape here would make the inspector decode every
+// Function.Name / Function.Arguments as the empty string, so Anthropic
+// `tool_use`, Gemini `functionCall`, Bedrock `toolUse`, and OpenAI Responses
+// `function_call` outputs would forward uninspected. Returns nil when the
+// body contains no recognised tool-call shape so the caller can short-circuit
+// inspection.
+func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
+	type out struct {
+		Name      string
+		Arguments string
+	}
+	var calls []out
+	addCall := func(name string, args interface{}) {
+		if name == "" {
+			return
+		}
+		argStr := ""
+		switch a := args.(type) {
+		case string:
+			argStr = a
+		case json.RawMessage:
+			if len(a) > 0 {
+				// OpenAI Responses encodes `arguments` as a JSON string
+				// (a quoted string whose contents are themselves JSON).
+				// Unwrap that single layer so the inspector sees the same
+				// Go-string shape Chat Completions produces natively
+				// (`{"cmd":"..."}` rather than `"{\"cmd\":\"...\"}"`).
+				// Object-shaped arguments (Anthropic / Gemini / Bedrock
+				// tool inputs) pass through verbatim.
+				if a[0] == '"' {
+					var s string
+					if json.Unmarshal(a, &s) == nil {
+						argStr = s
+						break
+					}
+				}
+				argStr = string(a)
+			}
+		case nil:
+			argStr = ""
+		default:
+			b, err := json.Marshal(a)
+			if err == nil {
+				argStr = string(b)
+			}
+		}
+		calls = append(calls, out{Name: name, Arguments: argStr})
+	}
+
+	switch provider {
+	case "anthropic":
+		var resp struct {
+			Content []struct {
+				Type  string          `json:"type"`
+				Name  string          `json:"name"`
+				Input json.RawMessage `json:"input"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Content {
+				if c.Type == "tool_use" {
+					addCall(c.Name, c.Input)
+				}
+			}
+		}
+	case "gemini":
+		var resp struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						FunctionCall struct {
+							Name string          `json:"name"`
+							Args json.RawMessage `json:"args"`
+						} `json:"functionCall"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Candidates {
+				for _, p := range c.Content.Parts {
+					addCall(p.FunctionCall.Name, p.FunctionCall.Args)
+				}
+			}
+		}
+	case "bedrock":
+		var resp struct {
+			Output struct {
+				Message struct {
+					Content []struct {
+						ToolUse struct {
+							Name  string          `json:"name"`
+							Input json.RawMessage `json:"input"`
+						} `json:"toolUse"`
+					} `json:"content"`
+				} `json:"message"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Output.Message.Content {
+				addCall(c.ToolUse.Name, c.ToolUse.Input)
+			}
+		}
+	default:
+		// OpenAI Responses API: {"output": [{"type":"function_call","name":"...","arguments":"..."}]}
+		var respAPI struct {
+			Output []struct {
+				Type      string          `json:"type"`
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &respAPI) == nil {
+			for _, o := range respAPI.Output {
+				if o.Type == "function_call" {
+					addCall(o.Name, o.Arguments)
+				}
+			}
+		}
+		// OpenAI Chat Completions tool calls: {"choices":[{"message":{"tool_calls":[{"function":{"name":"...","arguments":"..."}}]}}]}
+		var respCC struct {
+			Choices []struct {
+				Message struct {
+					ToolCalls []struct {
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(body, &respCC) == nil {
+			for _, c := range respCC.Choices {
+				for _, tc := range c.Message.ToolCalls {
+					addCall(tc.Function.Name, tc.Function.Arguments)
+				}
+			}
+		}
+	}
+	if len(calls) == 0 {
+		return nil
+	}
+	// Emit the nested OpenAI Chat Completions tool_calls shape so the payload
+	// round-trips through inspectToolCalls' parse contract (function.name /
+	// function.arguments). See the function doc for why the flat shape breaks
+	// inspection.
+	type fnPart struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	type nestedCall struct {
+		Type     string `json:"type"`
+		Function fnPart `json:"function"`
+	}
+	out2 := make([]nestedCall, len(calls))
+	for i, c := range calls {
+		out2[i] = nestedCall{
+			Type:     "function",
+			Function: fnPart{Name: c.Name, Arguments: c.Arguments},
+		}
+	}
+	encoded, err := json.Marshal(out2)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
 // extractSSEChunkText extracts the assistant text delta from a single SSE
 // data JSON object in a streaming provider-native response.
+//
+// Avarice F-1187: pre-fix the default branch only parsed OpenAI Chat
+// Completions `choices[].delta.content`, so OpenAI Responses streams
+// (`response.output_text.delta`), Bedrock Converse streams
+// (`contentBlockDelta`), and Ollama native streams (`message.content`)
+// returned an empty string for every chunk. Empty deltas skipped both
+// the initial-buffer flush and the final completion scan, and the
+// stream was delivered to the client unchanged. The new branches
+// keep the streaming inspector in lockstep with the non-streaming
+// extractor.
 func extractSSEChunkText(data string, provider string) string {
 	switch provider {
 	case "anthropic":
@@ -1387,7 +1784,52 @@ func extractSSEChunkText(data string, provider string) string {
 			return sb.String()
 		}
 
+	case "bedrock":
+		// F-1187: Bedrock Converse streaming uses contentBlockDelta frames
+		// shaped {"contentBlockDelta":{"delta":{"text":"..."}}}.
+		var chunk struct {
+			ContentBlockDelta struct {
+				Delta struct {
+					Text string `json:"text"`
+				} `json:"delta"`
+			} `json:"contentBlockDelta"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil {
+			return chunk.ContentBlockDelta.Delta.Text
+		}
+
+	case "ollama":
+		// F-1187: Ollama native streaming chat: {"message":{"content":"..."}}
+		// generate: {"response":"..."}
+		var chunk struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Response string `json:"response"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil {
+			if chunk.Message.Content != "" {
+				return chunk.Message.Content
+			}
+			return chunk.Response
+		}
+
 	default:
+		// F-1187: OpenAI Responses API streaming uses event-shaped frames
+		// keyed by `type`, e.g.:
+		//   {"type":"response.output_text.delta","delta":"..."}
+		// Pre-fix the default branch only parsed Chat Completions, so
+		// every Responses chunk yielded an empty string. Detect the
+		// Responses shape first, then fall back to Chat Completions.
+		var rspChunk struct {
+			Type  string `json:"type"`
+			Delta string `json:"delta"`
+		}
+		if json.Unmarshal([]byte(data), &rspChunk) == nil &&
+			strings.HasPrefix(rspChunk.Type, "response.") &&
+			strings.Contains(rspChunk.Type, ".delta") {
+			return rspChunk.Delta
+		}
 		// OpenAI Chat Completions streaming: {"choices":[{"delta":{"content":"..."}}]}
 		var chunk struct {
 			Choices []struct {
@@ -1492,6 +1934,69 @@ func ReloadProviderRegistry() error {
 	return nil
 }
 
+// SeedCustomProvidersFromLLMBaseURL writes a custom-providers.json overlay
+// that registers the domain from llmBaseURL as a known provider. This allows
+// custom deployments to route traffic through an LLM gateway whose domain is
+// not in the built-in providers list.
+//
+// The file is written to the path returned by configs.CustomProvidersPath().
+// After writing, ReloadProviderRegistry() is called so the domain is
+// immediately recognized by isKnownProviderDomain().
+//
+// No-op when llmBaseURL is empty or cannot be parsed.
+func SeedCustomProvidersFromLLMBaseURL(llmBaseURL string) error {
+	llmBaseURL = strings.TrimSpace(llmBaseURL)
+	if llmBaseURL == "" {
+		return nil
+	}
+	u, err := url.Parse(llmBaseURL)
+	if err != nil {
+		return nil // unparseable URL — skip silently
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" || host == "127.0.0.1" || host == "localhost" {
+		return nil // loopback addresses are handled by Ollama / local logic
+	}
+
+	// Check if the domain is already known — avoid writing a redundant overlay.
+	providerRegistryMu.RLock()
+	for _, pd := range providerDomains {
+		if strings.EqualFold(pd.domain, host) {
+			providerRegistryMu.RUnlock()
+			return nil
+		}
+	}
+	providerRegistryMu.RUnlock()
+
+	overlayPath := configs.CustomProvidersPath()
+	if overlayPath == "" {
+		return fmt.Errorf("custom-providers path is empty (no HOME set)")
+	}
+
+	overlay := configs.ProvidersConfig{
+		Providers: []configs.Provider{{
+			Name:    "custom-gateway",
+			Domains: []string{host},
+			EnvKeys: []string{"LLM_GATEWAY"},
+		}},
+	}
+	data, err := json.MarshalIndent(overlay, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(overlayPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(overlayPath, data, 0o600); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "[sidecar] custom-providers overlay seeded for domain %q\n", host)
+	return ReloadProviderRegistry()
+}
+
 // providerRegistrySnapshot returns the currently-loaded provider list
 // under the read lock. The returned slice is safe to iterate but not to
 // mutate.
@@ -1529,6 +2034,10 @@ func inferProviderFromURL(targetURL string) string {
 // model and API key. This handles the direct-provider case where the agent is
 // configured with "defenseclaw" as a custom provider and sends requests straight
 // to the guardrail proxy without the fetch interceptor setting X-DC-Target-URL.
+//
+// When “cfg.llm.instance_name“ is set, the resolution honors the overlay
+// entry in “~/.defenseclaw/custom-providers.json“ for base_url, base
+// provider type, and TLS — see :func:`NewProviderForLLMConfig`.
 func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider {
 	cfgModel := p.cfg.Model
 	if cfgModel == "" {
@@ -1536,27 +2045,78 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 		return nil
 	}
 
-	apiKey := ""
-	if req.TargetAPIKey != "" {
-		apiKey = req.TargetAPIKey
-	} else if p.cfg.APIKeyEnv != "" {
-		dotenvPath := filepath.Join(p.dataDir, ".env")
-		apiKey = ResolveAPIKey(p.cfg.APIKeyEnv, dotenvPath)
+	apiKey, err := p.resolveDirectProviderUpstreamKey(context.Background(), cfgModel, req.TargetAPIKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] external token resolver error for configured model %q: %v\n", cfgModel, err)
+		return nil
 	}
-
 	if apiKey == "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] no API key available for configured model %q\n", cfgModel)
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: using configured model %q\n", cfgModel)
+	instanceName := strings.TrimSpace(p.cfg.LLM.InstanceName)
+	baseURL := strings.TrimSpace(p.cfg.LLM.BaseURL)
+	if instanceName != "" {
+		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: model=%q instance=%q\n", cfgModel, instanceName)
+	} else {
+		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: using configured model %q\n", cfgModel)
+	}
 
-	provider, err := NewProvider(cfgModel, apiKey)
+	registry, _, _ := providerRegistrySnapshot()
+	// Build an effective LLMConfig from the proxy config, with the
+	// already-resolved API key pinned inline so the dispatcher does
+	// not re-resolve (which would lose the connector token resolver
+	// / dotenv fallback applied above).
+	effLLM := p.cfg.LLM
+	effLLM.Model = cfgModel
+	effLLM.APIKey = apiKey
+	effLLM.APIKeyEnv = ""
+	effLLM.BaseURL = baseURL
+	effLLM.InstanceName = instanceName
+	provider, err := NewProviderForLLMConfig(&effLLM, registry)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] failed to create provider for %q: %v\n", cfgModel, err)
 		return nil
 	}
 	return provider
+}
+
+// resolveDirectProviderUpstreamKey returns the upstream API key to use
+// when the proxy is operating in direct-provider mode (no
+// X-DC-Target-URL header, no connector-supplied key). Used by both the
+// chat/completions resolver (resolveConfiguredProvider) and the
+// passthrough handler, which need the same precedence so the Responses
+// API and chat completions behave identically against a custom
+// provider:
+//
+//  1. tokenResolver (the enterprise secrets-sidecar hook registered via
+//     SetTokenResolver). When set, this is the only source — failure
+//     short-circuits to an error so we don't accidentally fall back to
+//     a stale dotenv value when the sidecar is unreachable.
+//  2. inboundKey (typically req.TargetAPIKey from X-AI-Auth, only set
+//     on the chat/completions path). Empty on the passthrough path.
+//  3. p.cfg.APIKeyEnv + ~/.defenseclaw/.env dotenv lookup.
+//
+// Returns ("", nil) when none of the sources produced a key. Returns a
+// non-nil error only for tokenResolver failures (caller should fail
+// the request rather than fall back).
+func (p *GuardrailProxy) resolveDirectProviderUpstreamKey(ctx context.Context, cfgModel, inboundKey string) (string, error) {
+	if tokenResolver != nil {
+		providerPrefix, modelID := splitModel(cfgModel)
+		if providerPrefix == "" {
+			providerPrefix = inferProvider(modelID, "")
+		}
+		return tokenResolver(ctx, providerPrefix)
+	}
+	if inboundKey != "" {
+		return inboundKey, nil
+	}
+	if p.cfg != nil && p.cfg.APIKeyEnv != "" {
+		dotenvPath := filepath.Join(p.dataDir, ".env")
+		return ResolveAPIKey(p.cfg.APIKeyEnv, dotenvPath), nil
+	}
+	return "", nil
 }
 
 // hydrateConnectorSignals lets a connector whose agent has no fetch
@@ -1565,14 +2125,26 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 // Returning ("", "") means "no opinion" — the caller must leave req.TargetURL
 // / req.TargetAPIKey alone so fetch-interceptor paths still work.
 func hydrateConnectorSignals(conn connector.Connector, r *http.Request, body []byte) (string, string) {
-	if conn == nil {
-		return "", ""
-	}
-	cs, err := conn.Route(r, body)
-	if err != nil || cs == nil {
+	cs := hydrateConnectorSignalsFull(conn, r, body)
+	if cs == nil {
 		return "", ""
 	}
 	return cs.RawUpstream, cs.RawAPIKey
+}
+
+// hydrateConnectorSignalsFull is the variant used by call sites that
+// also need ExtraHeaders (e.g. the header-forwarding path on both
+// chat/completions and passthrough). Returns nil when there is no
+// active connector or it returned an error.
+func hydrateConnectorSignalsFull(conn connector.Connector, r *http.Request, body []byte) *connector.ConnectorSignals {
+	if conn == nil {
+		return nil
+	}
+	cs, err := conn.Route(r, body)
+	if err != nil {
+		return nil
+	}
+	return cs
 }
 
 // resolveProviderFromHeaders selects the upstream LLMProvider for the given
@@ -1592,6 +2164,17 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 		return nil
 	}
 
+	// If an external token resolver is registered, use it to obtain the API key
+	// instead of relying on X-AI-Auth or local env resolution.
+	if tokenResolver != nil {
+		resolvedKey, err := tokenResolver(context.Background(), prefix)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] external token resolver error for %q: %v\n", prefix, err)
+			return nil
+		}
+		req.TargetAPIKey = resolvedKey
+	}
+
 	// Azure requires the specific resource endpoint as baseURL.
 	// Bedrock (ZeptoClaw / OpenClaw) uses regional bedrock-runtime URLs with
 	// ABSK bearer keys — Bifrost handles that path; pin BaseURL to the snapshot
@@ -1605,12 +2188,127 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 	}
 
 	modelArg := compositeModelForUpstream(prefix, req.Model)
+
+	// When the operator has configured an instance_name, route through the
+	// overlay so per-instance TLS / base_url / sub-block posture apply. This
+	// keeps fetch-interceptor traffic and native-binary connector traffic
+	// (ZeptoClaw / Codex) flowing through custom-provider config without
+	// requiring the agent to send a new header.
+	//
+	// The family guard below only fires when the URL resolved to a *different*
+	// provider than the pinned overlay entry. Two cases skip the guard and
+	// apply the overlay anyway:
+	//
+	//   1. The overlay declares no base_provider_type — there is nothing to
+	//      contradict the inferred family.
+	//   2. The inferred prefix matches the overlay's own Name. That only
+	//      happens when inferProviderFromURL hit a domain listed under this
+	//      exact overlay entry, which is the strongest possible "this is the
+	//      right overlay" signal. Without this carve-out, a corporate proxy
+	//      whose hostname is registered against an overlay with
+	//      base_provider_type="bedrock" silently bypasses the overlay because
+	//      the inferred prefix is the overlay name, not "bedrock".
+	instanceName := strings.TrimSpace(p.cfg.LLM.InstanceName)
+	if instanceName != "" {
+		registry, _, _ := providerRegistrySnapshot()
+		if registry != nil {
+			for _, prov := range registry.Providers {
+				if !strings.EqualFold(prov.Name, instanceName) {
+					continue
+				}
+				if prov.BaseProviderType != "" &&
+					prov.BaseProviderType != prefix &&
+					!strings.EqualFold(prov.Name, prefix) {
+					fmt.Fprintf(os.Stderr,
+						"[guardrail] instance %q has base_provider_type=%q but URL inferred to %q; skipping overlay\n",
+						instanceName, prov.BaseProviderType, prefix)
+					break
+				}
+				provider, err := NewProviderForInstance(instanceName, modelArg, req.TargetAPIKey, registry)
+				if err == nil {
+					return provider
+				}
+				fmt.Fprintf(os.Stderr, "[guardrail] instance %q lookup failed, falling back: %v\n", instanceName, err)
+				break
+			}
+		}
+	}
+
 	provider, err := NewProviderWithBase(modelArg, req.TargetAPIKey, baseURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] provider error: %v\n", err)
 		return nil
 	}
 	return provider
+}
+
+// guardUpstreamTargetURL applies the userinfo / scheme / private-host SSRF
+// guards to the resolved upstream target URL before the request is forwarded
+// to the provider (Bifrost performs the actual dial). The URL may come from
+// the X-DC-Target-URL header (fetch-interceptor connectors) or be hydrated
+// from the active connector's captured config snapshot (native-binary
+// connectors such as Codex / ZeptoClaw, which have no fetch interceptor).
+//
+// It must run AFTER connector hydration so a connector-resolved
+// private / IMDS / CGNAT / IPv6-ULA / userinfo / non-http upstream is rejected
+// with the same structured 400/403 + labeled egress block event as the header
+// path, instead of slipping past the guard and only failing opaquely at dial
+// time in ssrfSafeDialContext.
+//
+// Returns true when the request was rejected and the caller must stop
+// processing. An empty targetURL is a no-op (no upstream override in play).
+func guardUpstreamTargetURL(w http.ResponseWriter, r *http.Request, targetURL string) bool {
+	if targetURL == "" {
+		return false
+	}
+	u, perr := url.Parse(targetURL)
+	if perr != nil {
+		return false
+	}
+	if u.User != nil {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   u.Hostname(),
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "userinfo-in-target-url",
+			Source:       "go",
+		})
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: userinfo in upstream target URL\n")
+		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must not contain userinfo")
+		return true
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   u.Hostname(),
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "non-http-scheme",
+			Source:       "go",
+		})
+		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must use http or https")
+		return true
+	}
+	if host := u.Hostname(); host != "" && isPrivateHost(host) &&
+		!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
+		!passthroughAllowPrivateForTest {
+		emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetHost:   host,
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "chat",
+			Decision:     "block",
+			Reason:       "private-ip",
+			Source:       "go",
+		})
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+		writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+		return true
+	}
+	return false
 }
 
 func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
@@ -1666,20 +2364,80 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// X-AI-Auth carries the real provider API key, normalized to
 	// "Bearer <key>" by the fetch interceptor regardless of which header
 	// the provider SDK originally used (Authorization, x-api-key, api-key).
-	if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
-		req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
+	// Skip extraction when local key resolution is disabled (enterprise mode).
+	if !localKeyResolutionDisabled {
+		if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
+			req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
+		}
 	}
 
 	// Native-binary connectors (zeptoclaw) have no fetch interceptor, so the
 	// request arrives without X-DC-Target-URL / X-AI-Auth. Ask the active
 	// connector to resolve them from its captured config snapshot. Existing
 	// header values win — fetch-interceptor paths are unchanged.
-	if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
-		if req.TargetURL == "" {
-			req.TargetURL = connUpstream
+	chatConnExtraHeaders := map[string]string{}
+	if !localKeyResolutionDisabled {
+		if cs := hydrateConnectorSignalsFull(p.connector, r, body); cs != nil {
+			if cs.RawUpstream != "" {
+				if req.TargetURL == "" {
+					req.TargetURL = cs.RawUpstream
+				}
+				if req.TargetAPIKey == "" {
+					req.TargetAPIKey = cs.RawAPIKey
+				}
+			}
+			if cs.ExtraHeaders != nil {
+				chatConnExtraHeaders = cs.ExtraHeaders
+			}
 		}
-		if req.TargetAPIKey == "" {
-			req.TargetAPIKey = connKey
+	}
+
+	// SSRF / userinfo / scheme guards run here — AFTER connector hydration —
+	// so they see the *final* upstream, whether it came from the
+	// X-DC-Target-URL header (fetch-interceptor connectors) or was resolved by
+	// a native-binary connector's config snapshot (Codex / ZeptoClaw). Running
+	// before hydration would leave the connector-resolved upstream unguarded
+	// (it would only fail opaquely at dial time in ssrfSafeDialContext, with no
+	// structured 400/403 + labeled egress block event).
+	if guardUpstreamTargetURL(w, r, req.TargetURL) {
+		return
+	}
+
+	// Forward inbound HTTP headers to the upstream provider via
+	// Bifrost's per-request schemas.BifrostContextKeyExtraHeaders
+	// context value (honored by every Bifrost provider through
+	// providers/utils/utils.go:SetExtraHeaders). Same blocklist /
+	// validation / caps as the passthrough path. Toggled by
+	// llm.forward_custom_headers (default on).
+	if p.cfg != nil && p.cfg.LLM.ForwardCustomHeadersEnabled() {
+		fwd := http.Header{}
+		n, herr := CopyForwardableHeaders(fwd, r.Header)
+		if herr != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] chat: header forwarding rejected: %v\n", herr)
+			p.otel.RecordForwardedHeaders(r.Context(), "chat-completions", resultForHeaderError(herr), 1)
+			writeOpenAIError(w, httpStatusForHeaderError(herr), "invalid forwarded headers: "+herr.Error())
+			return
+		}
+		if len(chatConnExtraHeaders) > 0 {
+			m, merr := MergeConnectorExtraHeaders(fwd, chatConnExtraHeaders)
+			if merr != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] chat: connector-extra header rejected: %v\n", merr)
+				p.otel.RecordForwardedHeaders(r.Context(), "chat-completions", resultForHeaderError(merr), 1)
+				writeOpenAIError(w, httpStatusForHeaderError(merr), "invalid connector-extra headers: "+merr.Error())
+				return
+			}
+			n += m
+		}
+		if len(fwd) > 0 {
+			r = r.WithContext(context.WithValue(r.Context(),
+				schemas.BifrostContextKeyExtraHeaders,
+				map[string][]string(fwd)))
+			// Debug-only per-request count; opt in with DEFENSECLAW_DEBUG=1.
+			// OTel counter carries the steady-state signal.
+			if os.Getenv("DEFENSECLAW_DEBUG") == "1" {
+				fmt.Fprintf(os.Stderr, "[guardrail] chat: forwarded_header_count=%d\n", n)
+			}
+			p.otel.RecordForwardedHeaders(r.Context(), "chat-completions", "ok", int64(n))
 		}
 	}
 
@@ -1728,7 +2486,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				req.Messages = rebuilt.Messages
 			}
 			if p.logger != nil {
-				_ = p.logger.LogActionCtx(r.Context(), "guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from chat-completions request", stripped))
+				_ = p.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailLaunder), r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from chat-completions request", stripped))
 			}
 		}
 	}
@@ -1751,7 +2509,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				req.Messages = append([]ChatMessage{notification}, req.Messages...)
 			}
 			if p.logger != nil {
-				_ = p.logger.LogActionCtx(r.Context(), "guardrail-notify-inject", "", "injected security notification into LLM request")
+				_ = p.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailNotifyInject), "", "injected security notification into LLM request")
 			}
 		}
 	}
@@ -1779,9 +2537,15 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	_, promptProviderName := p.llmSystemAndProvider(req.Model)
 	promptID := ""
 	inspectionText := promptInspectionText(userText)
+	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
+	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
+	// or session-startup-shaped suffix inside the user-controlled OpenClaw
+	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
+	// payload from these allowlists while the original prompt still flows
+	// upstream.
 	if userText != "" &&
-		!isHeartbeatMessage(inspectionText, req.Messages) &&
-		!isSessionStartupMessage(inspectionText) {
+		!isHeartbeatMessage(userText, req.Messages) &&
+		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, req.Model)
 		promptID = emitLLMPromptEvent(r.Context(), meta, userText, req.RawBody)
@@ -1798,6 +2562,14 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, req.Messages, req.Model, mode)
+		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
+		// any client can forge, so we additionally inspect the RAW user text
+		// when the strip actually changed the content. Either path can
+		// trigger a block; we keep the stricter verdict.
+		if inspectionText != userText {
+			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", userText, req.Messages, req.Model, mode)
+			verdict = mergePromptVerdicts(verdict, rawVerdict)
+		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		elapsed := time.Since(t0)
 
@@ -1900,7 +2672,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
+			p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 		}
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
 		return
@@ -1984,7 +2756,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 					promptTok = int(resp.Usage.PromptTokens)
 					completionTok = int(resp.Usage.CompletionTokens)
 				}
-				p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, "blocked", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
+				p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, "blocked", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 			}
 			msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "completion", aliasModel)
@@ -2005,7 +2777,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 						promptTok = int(resp.Usage.PromptTokens)
 						completionTok = int(resp.Usage.CompletionTokens)
 					}
-					p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, "local", "blocked", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
+					p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, "local", "blocked", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 				}
 				msg := blockMessage(customBlockMsg, "completion",
 					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
@@ -2033,7 +2805,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			promptTok = int(resp.Usage.PromptTokens)
 			completionTok = int(resp.Usage.CompletionTokens)
 		}
-		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
+		p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2235,7 +3007,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			fmt.Sprintf("upstream stream error: %v", err), err)
 		fmt.Fprintf(os.Stderr, "[guardrail] stream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
+			p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 			llmSpan = nil
 		}
 	}
@@ -2250,7 +3022,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		blockedMeta.ResponseID = stableLLMEventID("response", blockedMeta.Source, blockedMeta.SessionID, blockedMeta.RequestID, req.Model, "blocked")
 		emitLLMResponseEvent(r.Context(), blockedMeta, accumulated.String(), accumulated.String(), append(streamFinishReasons, "blocked"))
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, append(streamFinishReasons, "blocked"), 0, "local", "block", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
+			p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, 0, 0, append(streamFinishReasons, "blocked"), 0, "local", "block", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 		}
 		msg := blockMessage(customBlockMsg, "completion", "content blocked mid-stream by guardrail")
 		blockChunk := StreamChunk{
@@ -2357,7 +3129,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		}
 		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.response.content", accumulated.String())
 		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.tool_calls", string(assembledTC))
-		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
+		p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 	}
 
 	// Flush buffered tool-call chunks only when inspection passed.
@@ -2396,7 +3168,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 // site. No-op when notify is nil or verdict is nil so callers don't
 // need a guard at each site.
 func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, direction, model string) {
-	if p.notify == nil || verdict == nil {
+	if verdict == nil {
 		return
 	}
 	// SubjectType drives the "Skill"/"Plugin"/"MCP"/"Tool" label in
@@ -2412,21 +3184,61 @@ func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, directio
 	if verdict.Findings != nil {
 		findings = len(verdict.Findings)
 	}
-	p.notify.Push(SecurityNotification{
-		SubjectType: subject,
-		// SkillName is rendered verbatim in the enforcement notice.
-		// Use the model name so operators and the LLM both see which
-		// target the block applied to; not sensitive and always
-		// present at block time.
-		SkillName: model,
-		Severity:  verdict.Severity,
-		Findings:  findings,
-		Actions:   []string{"block"},
-		// verdict.Reason is minted from user content in the regex
-		// path and can carry literal secrets/PII. Always scrub
-		// before the text lands in a system message that gets
-		// shipped off-box to the LLM provider.
-		Reason: redaction.ForSinkReason(verdict.Reason),
+	if p.notify != nil {
+		p.notify.Push(SecurityNotification{
+			SubjectType: subject,
+			// SkillName is rendered verbatim in the enforcement notice.
+			// Use the model name so operators and the LLM both see which
+			// target the block applied to; not sensitive and always
+			// present at block time.
+			SkillName: model,
+			Severity:  verdict.Severity,
+			Findings:  findings,
+			Actions:   []string{"block"},
+			// verdict.Reason is minted from user content in the regex
+			// path and can carry literal secrets/PII. Always scrub
+			// before the text lands in a system message that gets
+			// shipped off-box to the LLM provider.
+			Reason: redaction.ForSinkReason(verdict.Reason),
+		})
+	}
+	// Also fire a user-session OS notification so the operator sees
+	// the enforcement event without polling the audit log. The
+	// dispatcher applies its own per-category gate, dedup window,
+	// and rate limit before delivery.
+	p.notifier.OnBlock(notifier.BlockEvent{
+		Source:       notifier.SourceGuardrail,
+		Target:       model,
+		Reason:       string(redaction.ForSinkReason(verdict.Reason)),
+		Severity:     verdict.Severity,
+		Connector:    p.connectorName(),
+		Event:        direction,
+		EvaluationID: verdict.EvaluationID,
+		RuleIDs:      verdict.RuleIDs,
+	})
+}
+
+// enqueueWouldBlockNotification fires only the OS notifier toast for
+// observe-mode verdicts that would have blocked under enforcement.
+// It deliberately does NOT push to the LLM-facing NotificationQueue
+// (that channel is reserved for *enforced* blocks; the LLM gets a
+// "your last request was blocked" system message there) and it does
+// NOT dispatch a webhook (the existing webhooks.Dispatch site is
+// gated on verdict.Action == "block" and already covers the would-
+// block-but-not-enforced case via the same branch).
+func (p *GuardrailProxy) enqueueWouldBlockNotification(verdict *ScanVerdict, direction, model string) {
+	if verdict == nil {
+		return
+	}
+	p.notifier.OnWouldBlock(notifier.BlockEvent{
+		Source:       notifier.SourceGuardrail,
+		Target:       model,
+		Reason:       string(redaction.ForSinkReason(verdict.Reason)),
+		Severity:     verdict.Severity,
+		Connector:    p.connectorName(),
+		Event:        direction,
+		EvaluationID: verdict.EvaluationID,
+		RuleIDs:      verdict.RuleIDs,
 	})
 }
 
@@ -3134,6 +3946,13 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 
 	newConn.SetCredentials(p.gatewayToken, p.masterKey)
 
+	// Pause self-heal across the swap. Teardown below strips the outgoing
+	// connector's hook entries, which must NOT be auto-restored; without
+	// this the guard (still pointed at oldConn until Repoint) could race the
+	// teardown and re-install hooks for a connector we just deactivated.
+	// Repoint at the end re-targets the guard at newConn.
+	p.hookGuard.SuppressHealing(hookGuardSwitchSuppressWindow)
+
 	if oldConn != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: tearing down %s\n", oldConn.Name())
 		if err := oldConn.Teardown(ctx, p.setupOpts); err != nil {
@@ -3159,6 +3978,10 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	if err := connector.SaveActiveConnector(p.setupOpts.DataDir, newName); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 	}
+
+	// Follow the active connector so self-heal watches the new
+	// connector's config file rather than the torn-down one's.
+	p.hookGuard.Repoint(newConn, p.setupOpts)
 
 	if p.health != nil {
 		p.health.SetConnector(newConn.Name(), newConn.ToolInspectionMode(), newConn.SubprocessPolicy())
@@ -3371,13 +4194,32 @@ func isKnownProviderDomain(targetURL string) bool {
 }
 
 // matchProviderDomain performs safe domain matching:
-//   - Domains ending in "." are hostname prefixes (e.g. "bedrock-runtime.")
-//   - Domains containing "/" match hostname+path prefix
-//   - All others require exact hostname or subdomain match
+//   - Domains containing "*" wildcard a single DNS label
+//     (e.g. "bedrock-runtime.*.amazonaws.com" matches
+//     "bedrock-runtime.us-east-1.amazonaws.com" but rejects
+//     "bedrock-runtime.attacker.example").
+//   - Domains containing "/" match hostname+path prefix.
+//   - All others require exact hostname or subdomain match.
+//
+// Avarice F-1185: pre-fix the "ends-with-dot" form was treated as a
+// raw hostname prefix, so "bedrock-runtime." matched any host that
+// began with that string — e.g. "bedrock-runtime.attacker.example".
+// An attacker-chosen X-DC-Target-URL could be admitted as a known
+// provider, bypass the unknown-domain / private-host checks, and
+// receive the upstream Authorization header. The new wildcard form
+// pins the trailing TLD, which is what the original Bedrock entry
+// always meant.
 func matchProviderDomain(host, urlPath, domain string) bool {
 	d := strings.ToLower(domain)
-	if strings.HasSuffix(d, ".") {
-		return strings.HasPrefix(host, d)
+	// Reject the legacy bare-prefix form ("bedrock-runtime.") so an
+	// older operator-supplied providers.json that still uses it
+	// can never be silently honoured: callers must migrate to the
+	// wildcard form ("bedrock-runtime.*.amazonaws.com").
+	if strings.HasSuffix(d, ".") && !strings.Contains(d, "*") {
+		return false
+	}
+	if strings.Contains(d, "*") {
+		return matchWildcardDomain(host, d)
 	}
 	if strings.Contains(d, "/") {
 		parts := strings.SplitN(d, "/", 2)
@@ -3388,6 +4230,31 @@ func matchProviderDomain(host, urlPath, domain string) bool {
 		return strings.HasPrefix(urlPath, pathPart)
 	}
 	return host == d || strings.HasSuffix(host, "."+d)
+}
+
+// matchWildcardDomain compares a hostname against a domain containing
+// one or more "*" wildcards. Each "*" matches exactly one DNS label
+// (no embedded dot, non-empty). Pattern and host are dot-split and
+// compared label-for-label so a wildcard cannot smuggle a malicious
+// suffix into the trailing components.
+func matchWildcardDomain(host, pattern string) bool {
+	hostLabels := strings.Split(host, ".")
+	patternLabels := strings.Split(pattern, ".")
+	if len(hostLabels) != len(patternLabels) {
+		return false
+	}
+	for i := range patternLabels {
+		if patternLabels[i] == "*" {
+			if hostLabels[i] == "" {
+				return false
+			}
+			continue
+		}
+		if hostLabels[i] != patternLabels[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // patchRawResponseModel overwrites only the "model" field in raw JSON bytes,
@@ -3439,6 +4306,42 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		}
 		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
 	}
+
+	// Fan the verdict's findings through the unified scanner
+	// emission pipeline so per-rule detections from the guardrail
+	// proxy land on every observability surface (scan_findings DB
+	// rows, EventScan + EventScanFinding JSONL lines,
+	// defenseclaw_scan_findings_by_rule_total, sliding-window
+	// correlator). The resulting evaluation_id + top rule_ids are
+	// stamped onto the verdict so downstream notifier / webhook /
+	// block-notification paths can carry them too. The emission is
+	// skipped when an upstream caller (inspectToolCalls) already
+	// produced the IDs — that prevents double-emit of the same
+	// rule findings.
+	if verdict.EvaluationID == "" {
+		eval := p.emitGuardrailScanVerdictFindings(
+			ctx,
+			recordTelemetryScannerEnum(direction, verdict, elapsed),
+			recordTelemetryTarget(direction, model),
+			recordTelemetryTargetType(direction),
+			verdict,
+			elapsed,
+			"emit_proxy_findings",
+		)
+		if eval.EvaluationID != "" {
+			verdict.EvaluationID = eval.EvaluationID
+		}
+		if len(eval.RuleIDs) > 0 {
+			verdict.RuleIDs = eval.RuleIDs
+		}
+	}
+	if verdict.EvaluationID != "" {
+		details += fmt.Sprintf(" evaluation_id=%s", verdict.EvaluationID)
+	}
+	if len(verdict.RuleIDs) > 0 {
+		details += fmt.Sprintf(" rule_ids=%s", strings.Join(verdict.RuleIDs, ","))
+	}
+
 	if requestID != "" {
 		// Append the correlation key so the human-readable gateway.log
 		// line (which skips structured sinks) is still searchable by
@@ -3446,6 +4349,20 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		details += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	details = appendRawTelemetryFields(details, rawFields...)
+
+	// Stamp the proxy's connector onto the request envelope so every
+	// ctx-aware audit write below (the LogActionCtx verdict row and the
+	// ApplyEnvelope store twin) carries connector attribution. MergeEnvelope
+	// preserves all the dimensions the CorrelationMiddleware already
+	// stamped and only fills in the connector. Without this the
+	// LogActionCtx verdict row reached SQLite/sinks with an empty
+	// connector in a multi-connector install.
+	if name := p.connectorName(); name != "" {
+		ctx = audit.ContextWithEnvelope(ctx, audit.MergeEnvelope(
+			audit.CorrelationEnvelope{Connector: name},
+			audit.EnvelopeFromContext(ctx),
+		))
+	}
 
 	if p.logger != nil {
 		// v7: route the verdict audit row through the context-aware
@@ -3457,7 +4374,7 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		// used to be silently dropped on the SQLite row even when
 		// the matching gateway.jsonl row had them. See review
 		// finding C1 for the coverage-gap writeup.
-		_ = p.logger.LogActionCtx(ctx, "guardrail-verdict", model, details)
+		_ = p.logger.LogActionCtx(ctx, string(audit.ActionGuardrailVerdict), model, details)
 	}
 	if p.store != nil {
 		// guardrail-inspection is the SQLite-only twin row the
@@ -3480,27 +4397,29 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		// unredacted form to whichever forwarder reads from
 		// audit.Store.
 		evt := audit.Event{
-			Action:    "guardrail-inspection",
+			Action:    string(audit.ActionGuardrailInspection),
 			Target:    model,
 			Severity:  verdict.Severity,
 			Details:   redaction.ForSinkReason(details),
 			Timestamp: time.Now().UTC(),
 			RequestID: requestID,
+			Connector: p.connectorName(),
 		}
 		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(ctx))
 		_ = p.store.LogEvent(evt)
 	}
 
 	if p.logger != nil {
-		_ = p.logger.LogActionWithCorrelation("guardrail-verdict", model, details, "", requestID)
+		_ = p.logger.LogActionWithCorrelationConnector(string(audit.ActionGuardrailVerdict), model, details, "", requestID, p.connectorName())
 	}
 	_ = persistAuditEvent(p.logger, p.store, audit.Event{
-		Action:    "guardrail-inspection",
+		Action:    string(audit.ActionGuardrailInspection),
 		Target:    model,
 		Severity:  verdict.Severity,
 		Details:   details,
 		Timestamp: time.Now().UTC(),
 		RequestID: requestID,
+		Connector: p.connectorName(),
 	})
 
 	if p.otel != nil {
@@ -3517,7 +4436,7 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 			p.otel.RecordGuardrailEvaluation(ctx, "cisco-ai-defense", verdict.Action)
 		}
 		if tokIn != nil || tokOut != nil {
-			p.otel.RecordLLMTokens(ctx, "apply_guardrail", "defenseclaw", model, p.connectorName(), p.agentIDForRequest(), ptrOr(tokIn, 0), ptrOr(tokOut, 0))
+			p.otel.RecordLLMTokens(ctx, "apply_guardrail", "defenseclaw", model, p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(ctx), ptrOr(tokIn, 0), ptrOr(tokOut, 0))
 		}
 	}
 
@@ -3525,11 +4444,12 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		event := audit.Event{
 			ID:        uuid.New().String(),
 			Timestamp: time.Now().UTC(),
-			Action:    "guardrail-block",
+			Action:    string(audit.ActionGuardrailBlock),
 			Target:    model,
 			Actor:     "defenseclaw-guardrail",
 			Details:   details,
 			Severity:  verdict.Severity,
+			Connector: p.connectorName(),
 		}
 		// v7: webhook payloads are one of the five external-facing
 		// surfaces; Splunk/PagerDuty/Slack consumers pivot on the same
@@ -3537,6 +4457,21 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		// webhook body in lockstep with the matching logger/store rows.
 		audit.ApplyEnvelope(&event, audit.EnvelopeFromContext(ctx))
 		p.webhooks.Dispatch(event)
+	}
+
+	// Surface observe-mode would-blocks to the operator via the OS
+	// notifier. Enforced blocks are reported by the matching
+	// enqueueBlockNotification call at the request handler's
+	// "if verdict.Action == block && mode == action" branch — the
+	// dispatcher's per-category gating keeps these two channels
+	// from double-firing for the same event.
+	if verdict.Action == "block" && p.notifier != nil {
+		p.rtMu.RLock()
+		curMode := p.mode
+		p.rtMu.RUnlock()
+		if curMode != "action" {
+			p.enqueueWouldBlockNotification(verdict, direction, model)
+		}
 	}
 }
 
@@ -3873,7 +4808,7 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	if err := json.Unmarshal(toolCallsJSON, &toolCalls); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] TOOL-CALL-INSPECT parse error (blocking): %v\n", err)
 		if p.logger != nil {
-			_ = p.logger.LogActionCtx(ctx, "guardrail-tool-call-parse-error", "", err.Error())
+			_ = p.logger.LogActionCtx(ctx, string(audit.ActionGuardrailToolCallParseError), "", err.Error())
 		}
 		return &ScanVerdict{
 			Action:         "block",
@@ -3889,6 +4824,19 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		args := tc.Function.Arguments
 
 		findings := ScanAllRules(args, toolName)
+		// Stamp the tool's capability class (read_fs / exec_shell /
+		// network_fetch / …) onto each finding from this call so the
+		// sliding-window correlator can reason about capability
+		// sequences (DESTRUCTIVE-FLOW). Content-only
+		// matches with an unknown tool fall back to the rule-id based
+		// capability in the emission pipeline.
+		if cap := guardrail.ClassifyToolName(toolName); cap != guardrail.CapUnknown {
+			for i := range findings {
+				if findings[i].ToolCapabilityClass == "" {
+					findings[i].ToolCapabilityClass = string(cap)
+				}
+			}
+		}
 		allFindings = append(allFindings, findings...)
 	}
 
@@ -3918,10 +4866,26 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	fmt.Fprintf(os.Stderr, "[guardrail] TOOL-CALL-INSPECT action=%s severity=%s findings=%d reason=%s\n",
 		action, severity, len(allFindings), strings.Join(top, ", "))
 
+	// Fan the structured per-rule findings through the unified
+	// scan_findings pipeline before stamping the audit row, so the
+	// `evaluation_id=` + `rule_ids=` correlation suffix can join
+	// the audit row to the EventScanFinding rows it produced.
+	// inspectToolCalls already has the full []RuleFinding (severity
+	// + confidence + evidence + tags per match) so we adapt them
+	// directly rather than re-deriving from NormalizeScanVerdict.
+	eval := p.emitToolCallInspectFindings(ctx, allFindings, action)
+	auditDetails := fmt.Sprintf("action=%s severity=%s confidence=%.2f", action, severity, confidence)
+	auditDetails = appendHookEvaluationDetails(auditDetails, eval)
+
 	if p.logger != nil {
 		for _, tc := range toolCalls {
-			_ = p.logger.LogActionCtx(ctx, "guardrail-tool-call-inspect", tc.Function.Name,
-				fmt.Sprintf("action=%s severity=%s confidence=%.2f", action, severity, confidence))
+			// Use the typed audit.ActionGuardrailToolCallInspect
+			// constant (rather than the string literal) for the
+			// row's action column, AND carry the evaluation_id +
+			// rule_ids in the details string so the unified-pipeline
+			// join key reaches SIEM without breaking the column-
+			// indexed action enum.
+			_ = p.logger.LogActionCtx(ctx, string(audit.ActionGuardrailToolCallInspect), tc.Function.Name, auditDetails)
 		}
 	}
 
@@ -3935,6 +4899,8 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		Reason:         strings.Join(top, ", "),
 		Findings:       FindingStrings(allFindings),
 		ScannerSources: []string{"tool-call-inspect"},
+		EvaluationID:   eval.EvaluationID,
+		RuleIDs:        eval.RuleIDs,
 	}
 }
 

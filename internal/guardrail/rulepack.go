@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 
@@ -41,6 +42,39 @@ type RulePack struct {
 	JudgeConfigs   map[string]*JudgeYAML
 	SensitiveTools *SensitiveToolsConfig
 	RuleFiles      []*RulesFileYAML
+	// LocalPatterns is the operator-tunable pattern list parsed from
+	// rules/local-patterns.yaml. The bundled defaults mirror the
+	// hardcoded gateway baseline 1:1; if an operator drops a custom
+	// file at <dir>/rules/local-patterns.yaml the gateway will swap
+	// the matching globals on load (see gateway.ApplyLocalPatternsOverride).
+	// Nil when no YAML is found, which signals "keep the compiled-in
+	// defaults" — explicitly different from an empty struct, which
+	// would override every field to empty.
+	LocalPatterns *LocalPatterns
+}
+
+// LocalPatterns mirrors `rules/local-patterns.yaml`. Each field corresponds
+// to a package-level variable in internal/gateway/guardrail.go; the gateway
+// snapshots these into its scanner state at load time.
+//
+// Semantics for each field:
+//   - nil slice  → "field absent in YAML, retain compiled-in default"
+//   - []string{} → "field explicitly emptied by operator, override to nothing"
+//   - non-empty  → "operator override, replace compiled-in default wholesale"
+//
+// This three-state representation (nil vs empty vs populated) matters
+// because the bundled YAML deliberately omits fields the operator did
+// not intend to customize — e.g. a permissive profile that wants to
+// loosen only `pii_requests` shouldn't accidentally drop the secrets
+// or exfiltration baselines just because their keys are missing.
+type LocalPatterns struct {
+	Version          int      `yaml:"version"`
+	Injection        []string `yaml:"injection,omitempty"`
+	InjectionRegexes []string `yaml:"injection_regexes,omitempty"`
+	PIIRequests      []string `yaml:"pii_requests,omitempty"`
+	PIIDataRegexes   []string `yaml:"pii_data_regexes,omitempty"`
+	Secrets          []string `yaml:"secrets,omitempty"`
+	Exfiltration     []string `yaml:"exfiltration,omitempty"`
 }
 
 // SuppressionsConfig maps to suppressions.yaml.
@@ -82,6 +116,14 @@ type JudgeYAML struct {
 	Categories           map[string]JudgeCategory `yaml:"categories"`
 	MinCategoriesForHigh int                      `yaml:"min_categories_for_high,omitempty"`
 	SingleCategoryMaxSev string                   `yaml:"single_category_max_severity,omitempty"`
+	// MinCategoriesForCritical is the threshold at which a judge verdict
+	// escalates to CRITICAL. Previously hardcoded as `len(findings) >= 3`
+	// in the injection judge and `len(findings) >= 2` in the exfil judge;
+	// moving to YAML lets operators tune per profile and lets the two
+	// judges share a common verdict-derivation code path. Value of 0
+	// means "never escalate to CRITICAL from this judge alone" (the
+	// correlator still can, via cross-finding patterns).
+	MinCategoriesForCritical int `yaml:"min_categories_for_critical,omitempty"`
 }
 
 type JudgeCategory struct {
@@ -156,7 +198,41 @@ func LoadRulePack(dir string) *RulePack {
 
 	rp.RuleFiles = loadRuleFiles(dir)
 
+	// local-patterns.yaml lives inside rules/ but is parsed separately
+	// because its shape is a top-level pattern dictionary rather than
+	// the {category, rules: [...]} shape that loadRuleFiles expects.
+	// Before this loader was added the file was silently misparsed
+	// into an empty RulesFileYAML, which meant operator edits to it
+	// did nothing — see git history for the drift this resolved.
+	rp.LocalPatterns = loadLocalPatterns(dir)
+
 	return rp
+}
+
+// loadLocalPatterns reads rules/local-patterns.yaml. Returns nil if the
+// file is absent or malformed so the caller falls back to compiled-in
+// defaults. A nil return is semantically "no override"; an empty struct
+// would override every field to empty (rarely useful) and is reserved
+// for explicit operator intent.
+func loadLocalPatterns(dir string) *LocalPatterns {
+	if dir == "" {
+		return nil
+	}
+	path := filepath.Join(dir, "rules", "local-patterns.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var lp LocalPatterns
+	if err := yaml.Unmarshal(data, &lp); err != nil {
+		log.Printf("guardrail: parse %s: %v", path, err)
+		return nil
+	}
+	if lp.Version != 1 {
+		log.Printf("guardrail: %s version %d unsupported, expected 1", path, lp.Version)
+		return nil
+	}
+	return &lp
 }
 
 // loadRuleFiles reads all rules/*.yaml files from the rule-pack directory.
@@ -173,6 +249,14 @@ func loadRuleFiles(dir string) []*RulesFileYAML {
 	var files []*RulesFileYAML
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
+			continue
+		}
+		// local-patterns.yaml is loaded separately via loadLocalPatterns
+		// because its top-level shape doesn't match RulesFileYAML.
+		// Skipping it here avoids producing a phantom rule file entry
+		// (the previous loader silently misparsed it into an empty
+		// RulesFileYAML, polluting the rule file slice).
+		if e.Name() == "local-patterns.yaml" {
 			continue
 		}
 		full := filepath.Join(rulesDir, e.Name())
@@ -213,7 +297,16 @@ func loadYAML[T any](dir, relPath string) *T {
 		}
 	}
 
-	embeddedPath := filepath.Join("defaults", relPath)
+	// ("Embedded rule-pack fallback uses
+	// OS-specific paths"): embed.FS paths are always slash-
+	// separated regardless of GOOS. The previous filepath.Join
+	// produced `defaults\sensitive-tools.yaml` on Windows, so
+	// fs.ReadFile could not locate the embedded default and
+	// LoadRulePack silently returned a RulePack with nil
+	// SensitiveTools / Suppressions. We use path.Join (which is
+	// always slash-separated) for the embed.FS lookup while
+	// keeping filepath.Join above for the real-filesystem path.
+	embeddedPath := path.Join("defaults", filepath.ToSlash(relPath))
 	data, err := fs.ReadFile(defaultsFS, embeddedPath)
 	if err != nil {
 		return nil

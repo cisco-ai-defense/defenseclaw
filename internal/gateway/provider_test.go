@@ -18,6 +18,9 @@ package gateway
 
 import (
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 )
 
 func TestSplitModelKnownPrefixes(t *testing.T) {
@@ -144,5 +147,157 @@ func TestNewProviderWithBase_BifrostType(t *testing.T) {
 	}
 	if bp.baseURL != "http://localhost:8080/v1" {
 		t.Errorf("baseURL = %q", bp.baseURL)
+	}
+}
+
+// TestNewProviderForLLMConfig_InstanceName routes a config that pins
+// an instance_name through NewProviderForInstance and asserts the
+// overlay's base_url + TLS bundle end up on the bifrostProvider.
+func TestNewProviderForLLMConfig_InstanceName(t *testing.T) {
+	registry := &configs.ProvidersConfig{
+		Providers: []configs.Provider{
+			{
+				Name:             "acme-internal",
+				BaseProviderType: "openai",
+				BaseURL:          "https://llm.internal:8443",
+				EnvKeys:          []string{"ACME_KEY"},
+				TLS: &configs.ProviderTLS{
+					CACertPEM:          "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n",
+					InsecureSkipVerify: true,
+				},
+			},
+		},
+	}
+	p, err := NewProviderForLLMConfig(
+		&config.LLMConfig{
+			Model:        "acme-internal/some-model",
+			APIKey:       "key-1",
+			InstanceName: "acme-internal",
+		},
+		registry,
+	)
+	if err != nil {
+		t.Fatalf("NewProviderForLLMConfig: %v", err)
+	}
+	bp, ok := p.(*bifrostProvider)
+	if !ok {
+		t.Fatalf("expected *bifrostProvider, got %T", p)
+	}
+	if bp.baseURL != "https://llm.internal:8443" {
+		t.Errorf("baseURL = %q; want overlay value", bp.baseURL)
+	}
+	if !bp.tls.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify did not propagate from overlay")
+	}
+}
+
+// TestNewProviderForLLMConfig_FallbackOnMiss verifies a typo'd
+// instance_name silently falls back to BaseURL / NewProvider rather
+// than failing the call — the gateway should surface the misconfig
+// via `defenseclaw doctor` rather than going offline.
+func TestNewProviderForLLMConfig_FallbackOnMiss(t *testing.T) {
+	registry := &configs.ProvidersConfig{
+		Providers: []configs.Provider{
+			{Name: "acme-internal", BaseProviderType: "openai", BaseURL: "https://llm.internal"},
+		},
+	}
+	p, err := NewProviderForLLMConfig(
+		&config.LLMConfig{
+			Model:        "openai/gpt-4",
+			APIKey:       "test-key",
+			BaseURL:      "http://fallback:8080",
+			InstanceName: "typo-instance",
+		},
+		registry,
+	)
+	if err != nil {
+		t.Fatalf("NewProviderForLLMConfig: %v", err)
+	}
+	bp, ok := p.(*bifrostProvider)
+	if !ok {
+		t.Fatalf("expected *bifrostProvider, got %T", p)
+	}
+	if bp.baseURL != "http://fallback:8080" {
+		t.Errorf("expected fallback to BaseURL on miss; got %q", bp.baseURL)
+	}
+}
+
+// TestNewProviderForLLMConfig_OverlayBedrock verifies an overlay's
+// bedrock sub-block fills the role-level blanks and lands on the
+// bifrostProvider's sub-block + the Bifrost Key's BedrockKeyConfig.
+func TestNewProviderForLLMConfig_OverlayBedrock(t *testing.T) {
+	t.Setenv("ACME_AKID", "AKIDEMO")
+	t.Setenv("ACME_SECRET", "secretdemo")
+	registry := &configs.ProvidersConfig{
+		Providers: []configs.Provider{
+			{
+				Name:             "acme-bedrock",
+				BaseProviderType: "bedrock",
+				Bedrock: &configs.ProviderBedrock{
+					Region:       "us-east-2",
+					AuthMode:     "iam_credentials",
+					AccessKeyEnv: "ACME_AKID",
+					SecretKeyEnv: "ACME_SECRET",
+					DeploymentAliases: map[string]string{
+						"fast": "anthropic.claude-3-haiku-20240307-v1:0",
+					},
+				},
+			},
+		},
+	}
+	p, err := NewProviderForLLMConfig(
+		&config.LLMConfig{
+			Model:        "bedrock/anthropic.claude-3-opus-20240229-v1:0",
+			InstanceName: "acme-bedrock",
+		},
+		registry,
+	)
+	if err != nil {
+		t.Fatalf("NewProviderForLLMConfig: %v", err)
+	}
+	bp := p.(*bifrostProvider)
+	if bp.bedrock == nil {
+		t.Fatal("bedrock sub-block did not propagate to bifrostProvider")
+	}
+	if bp.bedrock.Region != "us-east-2" {
+		t.Errorf("bedrock.Region = %q; want us-east-2", bp.bedrock.Region)
+	}
+	if bp.bedrock.DeploymentAliases["fast"] != "anthropic.claude-3-haiku-20240307-v1:0" {
+		t.Errorf("deployment alias not propagated: %v", bp.bedrock.DeploymentAliases)
+	}
+}
+
+// TestNewProviderForLLMConfig_RoleWinsOverlay asserts that when both
+// the role and the overlay declare a Bedrock sub-block, the role's
+// field values win and the overlay only fills blanks the role omitted.
+func TestNewProviderForLLMConfig_RoleWinsOverlay(t *testing.T) {
+	registry := &configs.ProvidersConfig{
+		Providers: []configs.Provider{
+			{
+				Name:             "acme-bedrock",
+				BaseProviderType: "bedrock",
+				Bedrock: &configs.ProviderBedrock{
+					Region:   "us-east-2",
+					AuthMode: "iam_credentials",
+				},
+			},
+		},
+	}
+	p, err := NewProviderForLLMConfig(
+		&config.LLMConfig{
+			Model:        "bedrock/anthropic.claude-3-opus-20240229-v1:0",
+			InstanceName: "acme-bedrock",
+			Bedrock: &config.BedrockKeyConfig{
+				Region: "us-west-2",
+			},
+		},
+		registry,
+	)
+	if err != nil {
+		t.Fatalf("NewProviderForLLMConfig: %v", err)
+	}
+	bp := p.(*bifrostProvider)
+	if bp.bedrock == nil || bp.bedrock.Region != "us-west-2" {
+		t.Errorf("expected role region us-west-2 to win; got %+v", bp.bedrock)
 	}
 }

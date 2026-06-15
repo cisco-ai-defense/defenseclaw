@@ -70,6 +70,20 @@ func (p *Provider) setSpanResourceContext(span trace.Span) {
 	}
 }
 
+// SetSpanResourceContext mirrors the deployment / device join keys
+// from the process resource onto a span. Public wrapper around
+// setSpanResourceContext so callers outside this package (notably
+// internal/inventory/ai_discovery, which spans its own scan but does
+// not go through StartGuardrail*Span) can keep parity with guardrail
+// span attributes. Nil receiver / nil span are safe no-ops so call
+// sites do not need to guard each invocation.
+func (p *Provider) SetSpanResourceContext(span trace.Span) {
+	if p == nil {
+		return
+	}
+	p.setSpanResourceContext(span)
+}
+
 // EmitStartupSpan creates a short-lived span to verify the trace export pipeline
 // is working. Called once at sidecar startup.
 func (p *Provider) EmitStartupSpan(ctx context.Context) {
@@ -592,6 +606,7 @@ func (p *Provider) StartLLMSpan(
 // Metrics are always recorded when OTel is enabled, even if the span is nil
 // (traces disabled).
 func (p *Provider) EndLLMSpan(
+	ctx context.Context,
 	span trace.Span,
 	responseModel string,
 	promptTokens, completionTokens int,
@@ -603,15 +618,15 @@ func (p *Provider) EndLLMSpan(
 	agentName string,
 	agentType string,
 	agentID string,
+	sessionID string,
 ) {
 	// Use the span's context so the SDK attaches exemplars (trace ID + span ID)
 	// to the histogram data points, linking metrics to traces.
-	ctx := context.Background()
 	if span != nil {
 		ctx = trace.ContextWithSpan(ctx, span)
 	}
 	durationSec := time.Since(startTime).Seconds()
-	p.RecordLLMTokens(ctx, "chat", providerName, responseModel, agentName, agentID, int64(promptTokens), int64(completionTokens))
+	p.RecordLLMTokens(ctx, "chat", providerName, responseModel, agentName, agentID, sessionID, int64(promptTokens), int64(completionTokens))
 	p.RecordLLMDuration(ctx, "chat", providerName, responseModel, agentName, agentID, durationSec)
 
 	if span == nil {
@@ -650,7 +665,7 @@ func (p *Provider) EndLLMSpan(
 	span.End()
 }
 
-// StartJudgeSpan starts a span for one LLM judge ChatCompletion (Track 3).
+// StartJudgeSpan starts a span for one LLM judge ChatCompletion.
 // Name: defenseclaw.guardrail.judge
 func (p *Provider) StartJudgeSpan(
 	ctx context.Context,

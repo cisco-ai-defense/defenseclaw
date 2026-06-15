@@ -1,0 +1,12 @@
+{
+  "hook_event_name": "pre_tool_call",
+  "session_id": "dc-e2e-hermes",
+  "turn_id": "dc-e2e-turn",
+  "agent_id": "hermes-e2e",
+  "agent_name": "hermes e2e agent",
+  "agent_type": "hermes-cli",
+  "tool_name": "execute_command",
+  "tool_input": {
+    "command": "echo dc-contract-allow"
+  }
+}

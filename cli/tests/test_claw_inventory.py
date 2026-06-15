@@ -22,39 +22,36 @@ failure, timeout, human output modes, and CLI integration.
 
 from __future__ import annotations
 
-import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
-import shutil
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
-
 from defenseclaw.config import (
     ClawConfig,
     Config,
     MCPActionsConfig,
     PluginActionsConfig,
-    SkillActionsConfig,
     SeverityAction,
+    SkillActionsConfig,
 )
-from defenseclaw.models import ActionEntry, ActionState
 from defenseclaw.inventory.claw_inventory import (
     ALL_CATEGORIES,
-    _CmdResult,
     _admission_verdict,
     _build_actions_map_for_type,
     _build_scan_map_for_type,
     _build_summary,
+    _CmdResult,
     _fetch_all,
     _format_scan,
     _format_verdict,
-    _parse_skills,
-    _parse_plugins,
     _parse_mcp,
+    _parse_plugins,
+    _parse_skills,
     _parse_tools,
     _policy_detail_suffix,
     _resolve_categories,
@@ -65,7 +62,7 @@ from defenseclaw.inventory.claw_inventory import (
     enrich_with_policy,
     format_claw_aibom_human,
 )
-
+from defenseclaw.models import ActionEntry
 
 # ---------------------------------------------------------------------------
 # Fixtures — canonical JSON payloads returned by ``openclaw … --json``
@@ -1451,7 +1448,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
 
     def _seed_store(self):
         import uuid
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timezone
         pe = self._pe()
         now = datetime.now(timezone.utc)
 
@@ -1594,7 +1591,16 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
                 policy_dir=cfg.policy_dir, cfg=cfg,
             )
 
-            self.assertEqual(inv["skills"][0]["policy_verdict"], "allowed")
+            # F-0742: the codeguard row is ``source: user`` (operator-supplied
+            # provenance). It must NOT be blessed by the first-party allow
+            # list just because its resolved path lands under
+            # ``.openclaw/skills`` — that bypass is reserved for genuinely
+            # bundled first-party assets. The user-sourced row stays
+            # unscanned (its only scan target, /tmp/downloads/codeguard,
+            # does not match the resolved on-disk path — F-0423).
+            self.assertEqual(inv["skills"][0]["policy_verdict"], "unscanned")
+            # The defenseclaw plugin has no untrusted source marker, so the
+            # first-party allow still applies on its resolved provenance.
             self.assertEqual(inv["plugins"][0]["policy_verdict"], "allowed")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1810,6 +1816,7 @@ class TestCLIIntegrationWithPolicy(unittest.TestCase):
         """
         import uuid
         from datetime import datetime, timezone
+
         from defenseclaw.enforce import PolicyEngine
         pe = PolicyEngine(self.app.store)
         now = datetime.now(timezone.utc)
@@ -2107,6 +2114,52 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(inv["plugins"][0]["id"], "ext1")
         self.assertEqual(inv["plugins"][0]["manifest"], ".codex-plugin/plugin.json")
 
+    def test_codex_inventory_carries_connector_paths(self):
+        """G3: non-OpenClaw inventories carry connector_home /
+        connector_config_files / connector_skill_dirs / connector_plugin_dirs
+        / connector_mcp_files alongside the legacy claw_home /
+        openclaw_config keys, so the TUI renderer can show the right
+        location to operators running against Codex / Claude Code etc.
+        instead of a misleading "~/.openclaw" fallback.
+        """
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        skill_root = os.path.join(self.tmp, ".codex", "skills")
+        plugin_root = os.path.join(self.tmp, ".codex", "extensions")
+        with self._patch_skill_dirs([skill_root]), \
+             self._patch_plugin_dirs([plugin_root]), \
+             self._patch_mcp([]), \
+             patch("defenseclaw.inventory.claw_inventory.subprocess.run"):
+            inv = build_claw_aibom(cfg, live=True)
+        self.assertEqual(inv["connector"], "codex")
+        self.assertTrue(inv["connector_home"].endswith(".codex"))
+        self.assertTrue(any(
+            p.endswith("config.toml") for p in inv["connector_config_files"]
+        ))
+        self.assertEqual(inv["connector_skill_dirs"], [skill_root])
+        self.assertEqual(inv["connector_plugin_dirs"], [plugin_root])
+        # Back-compat: legacy keys still present for older readers.
+        self.assertIn("openclaw_config", inv)
+        self.assertIn("claw_home", inv)
+
+    def test_connector_inventory_mode_follows_scanned_connector(self):
+        """The AIBOM ``Mode:`` line (inv['claw_mode']) must report the
+        *scanned* connector, not the global cfg.claw.mode. In a
+        multi-connector install cfg.claw.mode is a stale pointer to whichever
+        connector was last activated, so a ``--connector codex`` scan would
+        otherwise mislabel itself with e.g. ``antigravity``.
+        """
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        # Simulate the multi-connector reality: the global mode points at a
+        # different (last-activated) connector than the one being scanned.
+        cfg.claw.mode = "antigravity"
+        skill_root = os.path.join(self.tmp, ".codex", "skills")
+        with self._patch_skill_dirs([skill_root]), \
+             self._patch_plugin_dirs([]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+        self.assertEqual(inv["connector"], "codex")
+        self.assertEqual(inv["claw_mode"], "codex")
+
     def test_claudecode_walks_disk(self):
         cfg = _make_cfg_for_connector(self.tmp, "claudecode")
         skill_root = os.path.join(self.tmp, ".claude", "skills")
@@ -2164,6 +2217,20 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertTrue(by_id["marked"]["eligible"])
         self.assertFalse(by_id["empty"]["eligible"])
 
+    def test_openhands_installed_container_is_not_a_skill(self):
+        cfg = _make_cfg_for_connector(self.tmp, "openhands")
+        openhands_skills = os.path.join(self.tmp, ".openhands", "skills")
+        installed = os.path.join(openhands_skills, "installed")
+        os.makedirs(installed, exist_ok=True)
+        _seed_skill(installed, "real-installed")
+
+        with self._patch_skill_dirs([openhands_skills, installed]), \
+             self._patch_plugin_dirs([]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+
+        self.assertEqual([s["id"] for s in inv["skills"]], ["real-installed"])
+
     def test_skill_description_extracted_from_skill_md(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
         skill_root = os.path.join(self.tmp, "skills")
@@ -2178,6 +2245,21 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
              self._patch_mcp([]):
             inv = build_claw_aibom(cfg, live=True)
         self.assertEqual(inv["skills"][0]["description"], "Skill Title")
+
+    def test_skill_description_prefers_frontmatter(self):
+        cfg = _make_cfg_for_connector(self.tmp, "openhands")
+        skill_root = os.path.join(self.tmp, "skills")
+        os.makedirs(skill_root, exist_ok=True)
+        _seed_skill(
+            skill_root,
+            "frontmatter",
+            body="---\nname: frontmatter\ndescription: Frontmatter description\n---\n\n# Fallback\n",
+        )
+        with self._patch_skill_dirs([skill_root]), \
+             self._patch_plugin_dirs([]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+        self.assertEqual(inv["skills"][0]["description"], "Frontmatter description")
 
     def test_plugin_status_no_manifest(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")

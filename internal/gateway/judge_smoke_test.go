@@ -39,7 +39,7 @@ func TestJudgeSmokeManual(t *testing.T) {
 	// The old os.UserHomeDir() path quietly diverged from what
 	// Config.Load() actually read when the env var was set.
 	dotenv := filepath.Join(cfg.DataDir, ".env")
-	judge := NewLLMJudge(&cfg.Guardrail.Judge, resolved, dotenv, nil)
+	judge := NewLLMJudge(&cfg.Guardrail.Judge, resolved, dotenv, nil, nil)
 	if judge == nil {
 		t.Fatal("NewLLMJudge returned nil; see [llm-judge] init log for reason")
 	}

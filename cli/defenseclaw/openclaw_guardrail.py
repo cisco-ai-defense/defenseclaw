@@ -48,7 +48,10 @@ import contextlib
 import json
 import os
 import shutil
+import stat
 import subprocess
+import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -128,8 +131,6 @@ def patch_openclaw_config(
         with open(path, "w") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
             f.write("\n")
-
-    _install_codeguard_skill_deferred(openclaw_config_file)
 
     return prev_model or original_model
 
@@ -440,14 +441,25 @@ def _read_backup_index(data_dir: str) -> dict:
 
 
 def _write_backup_index(data_dir: str, doc: dict) -> None:
-    """Atomically persist the backup index, creating *data_dir* as needed."""
+    """Atomically persist the backup index, creating *data_dir* as needed.
+
+    The staging file is created with :func:`tempfile.mkstemp` (``O_EXCL``,
+    0600) inside *data_dir* rather than a predictable ``<path>.tmp`` name.
+    A predictable temp path lets a local attacker pre-create or symlink it
+    and so hijack/clobber the write or read its contents (F-0403).
+    """
     os.makedirs(data_dir, exist_ok=True)
     path = _backup_index_path(data_dir)
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, indent=2, sort_keys=True)
-        fh.write("\n")
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=".backup_index.", suffix=".tmp", dir=data_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def record_pristine_backup(openclaw_config_file: str, data_dir: str) -> str | None:
@@ -461,6 +473,12 @@ def record_pristine_backup(openclaw_config_file: str, data_dir: str) -> str | No
     """
     src = _expand(openclaw_config_file)
     if not os.path.isfile(src):
+        return None
+    if os.path.islink(src):
+        # Refuse to snapshot through a symlink. ``shutil.copy2`` follows
+        # the link, so a config path planted as a symlink to a private
+        # file would copy that target's contents into the backup dir and
+        # later "restore" them over the real config (F-0402).
         return None
     if not data_dir:
         return None
@@ -514,39 +532,48 @@ def pristine_backup_path(openclaw_config_file: str, data_dir: str) -> str | None
 
 
 def _backup(path: str) -> None:
-    """Create a numbered backup of a file."""
+    """Create a numbered backup of a file.
+
+    The destination slot is chosen with :func:`os.path.lexists` (not
+    ``os.path.exists``) so a *broken* symlink planted at ``<path>.bak``
+    is detected and skipped instead of appearing absent, and the backup
+    is created with ``O_CREAT | O_EXCL | O_NOFOLLOW`` so we never write
+    through a symlink an attacker pre-positioned at the backup path
+    (which would otherwise clobber/redirect the write to its target —
+    F-0404).
+    """
     if not os.path.isfile(path):
         return
     bak = path + ".bak"
-    if os.path.exists(bak):
+    if os.path.lexists(bak):
         found = False
         for i in range(1, 100):
             candidate = f"{path}.bak.{i}"
-            if not os.path.exists(candidate):
+            if not os.path.lexists(candidate):
                 bak = candidate
                 found = True
                 break
         if not found:
-            import time
             bak = f"{path}.bak.{int(time.time() * 1000)}.{os.getpid()}"
     st = os.stat(path)
-    shutil.copy2(path, bak)
+    with open(path, "rb") as src_fh:
+        contents = src_fh.read()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(bak, flags, stat.S_IMODE(st.st_mode))
+    except FileExistsError:
+        # Lost a race for the chosen name; fall back to a unique sibling
+        # so we still never write through a pre-existing symlink.
+        parent = os.path.dirname(path) or "."
+        fd, bak = tempfile.mkstemp(prefix=os.path.basename(path) + ".bak.", dir=parent)
+    with os.fdopen(fd, "wb") as dst_fh:
+        dst_fh.write(contents)
+    with contextlib.suppress(OSError):
+        shutil.copystat(path, bak)
     with contextlib.suppress(OSError):
         os.chown(bak, st.st_uid, st.st_gid)
 
 
 def _install_codeguard_skill_deferred(openclaw_config_file: str) -> None:
-    """Install the CodeGuard skill when guardrail connects to OpenClaw.
-
-    This handles the case where the user ran ``defenseclaw init``
-    before OpenClaw was installed, then later runs ``defenseclaw
-    guardrail enable``.
-    """
-    try:
-        from defenseclaw.codeguard_skill import ensure_codeguard_skill
-        from defenseclaw.config import load
-
-        cfg = load()
-        ensure_codeguard_skill(cfg.claw_home_dir(), openclaw_config_file)
-    except Exception:
-        pass
+    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
+    _ = openclaw_config_file

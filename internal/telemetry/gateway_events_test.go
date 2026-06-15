@@ -379,7 +379,7 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 		TenantID:          "tenant-contract",
 		WorkspaceID:       "workspace-contract",
 		Environment:       "prod",
-		DeploymentMode:    "managed",
+		DeploymentMode:    "managed_enterprise",
 		DiscoverySource:   "registry",
 		SchemaVersion:     7,
 		ContentHash:       "hash-contract",
@@ -415,7 +415,7 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 	assertAttrString(t, rec, "tenant.id", "tenant-contract")
 	assertAttrString(t, rec, "workspace.id", "workspace-contract")
 	assertAttrString(t, rec, "deployment.environment", "prod")
-	assertAttrString(t, rec, "deployment.mode", "managed")
+	assertAttrString(t, rec, "deployment.mode", "managed_enterprise")
 	assertAttrString(t, rec, "discovery.source", "registry")
 	assertAttrString(t, rec, "defenseclaw.content_hash", "hash-contract")
 	assertAttrString(t, rec, "defenseclaw.binary_version", "bin-contract")
@@ -452,6 +452,34 @@ func TestEmitGatewayEvent_NilPayloadDoesNotPanic(t *testing.T) {
 	if got := len(exp.snapshot()); got != 1 {
 		t.Fatalf("records=%d want 1 (envelope still emits on nil payload)", got)
 	}
+}
+
+func TestEmitGatewayEvent_VerdictCorrelationAttributes(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+	p.EmitGatewayEvent(gatewaylog.Event{
+		EventType:      gatewaylog.EventVerdict,
+		Severity:       gatewaylog.SeverityHigh,
+		SessionID:      "sess-1",
+		TurnID:         "turn-1",
+		PolicyID:       "policy-1",
+		DestinationApp: "builtin",
+		ToolName:       "Bash",
+		ToolID:         "call-1",
+		Verdict: &gatewaylog.VerdictPayload{
+			Stage:  gatewaylog.StageFinal,
+			Action: "block",
+			Reason: "matched policy",
+		},
+	})
+
+	rec := exp.snapshot()[0]
+	assertAttrString(t, rec, "defenseclaw.gateway.event_type", "verdict")
+	assertAttrString(t, rec, "gen_ai.conversation.id", "sess-1")
+	assertAttrString(t, rec, "defenseclaw.turn_id", "turn-1")
+	assertAttrString(t, rec, "defenseclaw.policy_id", "policy-1")
+	assertAttrString(t, rec, "defenseclaw.destination_app", "builtin")
+	assertAttrString(t, rec, "defenseclaw.tool_name", "Bash")
+	assertAttrString(t, rec, "gen_ai.tool.call.id", "call-1")
 }
 
 func TestEmitGatewayEvent_LLMEventAttributes(t *testing.T) {

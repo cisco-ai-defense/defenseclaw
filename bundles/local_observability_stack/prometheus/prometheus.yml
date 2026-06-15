@@ -24,3 +24,14 @@ scrape_configs:
       - targets: ["otel-collector:8889"]
         labels:
           service: defenseclaw-prometheus-export
+
+  # Loki self-metrics. Exposes loki_distributor_lines_received_total
+  # and loki_discarded_samples_total{reason=...} which the
+  # `defenseclaw.observability_pipeline` alert group uses to detect
+  # silent log drops (e.g. line_too_long, structured_metadata_too_big)
+  # before they hide audit events from operators.
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+        labels:
+          service: loki

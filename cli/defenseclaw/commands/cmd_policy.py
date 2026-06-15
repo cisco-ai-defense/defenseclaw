@@ -441,6 +441,57 @@ def activate(app: AppContext, name: str) -> None:
         app.cfg.watch.rescan_enabled = bool(watch_raw["rescan_enabled"])
     if "rescan_interval_min" in watch_raw:
         app.cfg.watch.rescan_interval_min = int(watch_raw["rescan_interval_min"])
+
+    # Apply Cisco AI Defense settings into config.yaml. The gateway reads
+    # the AID lane from Config.CiscoAIDefense, not from data.json, so we
+    # have to mutate ``app.cfg.cisco_ai_defense`` here. We deliberately
+    # only touch the fields the policy YAML carries — if a field is
+    # absent we keep whatever the operator set via ``defenseclaw setup``.
+    aid_raw = data.get("cisco_ai_defense", {})
+    if isinstance(aid_raw, dict) and aid_raw:
+        if "endpoint" in aid_raw and isinstance(aid_raw["endpoint"], str):
+            app.cfg.cisco_ai_defense.endpoint = aid_raw["endpoint"]
+        if "api_key_env" in aid_raw and isinstance(aid_raw["api_key_env"], str):
+            # We never accept a literal `api_key` from a policy YAML —
+            # that would mean someone pasted a secret into a file the
+            # docs site emits; force the operator through `api_key_env`.
+            app.cfg.cisco_ai_defense.api_key_env = aid_raw["api_key_env"]
+
+    # Apply webhook destinations into config.yaml. Webhooks are gateway
+    # config (sink destinations), not policy data, but the playground
+    # carries them through the policy YAML so the wizard's output is a
+    # single self-describing artifact. We replace the list wholesale on
+    # activate so the policy can drop a webhook the operator no longer
+    # wants. If the policy YAML omits the key entirely we leave the
+    # config alone — that's the "don't touch what you don't own" case.
+    if "webhooks" in data:
+        wh_raw = data.get("webhooks")
+        if isinstance(wh_raw, list):
+            from defenseclaw.config import WebhookConfig
+
+            new_webhooks: list[WebhookConfig] = []
+            for entry in wh_raw:
+                if not isinstance(entry, dict):
+                    continue
+                # Construct via known fields only — anything else gets
+                # dropped rather than silently passed through, which is
+                # the right call for a structure that maps to a Go
+                # struct on the gateway side.
+                kwargs: dict = {}
+                for fld in ("name", "url", "secret_env", "enabled"):
+                    if fld in entry:
+                        kwargs[fld] = entry[fld]
+                try:
+                    new_webhooks.append(WebhookConfig(**kwargs))
+                except TypeError:
+                    # If WebhookConfig grew new required fields and the
+                    # YAML doesn't carry them, fall back to per-attribute
+                    # set so the policy still activates.
+                    wh = WebhookConfig()
+                    for k, v in kwargs.items():
+                        setattr(wh, k, v)
+                    new_webhooks.append(wh)
+            app.cfg.webhooks = new_webhooks
     app.cfg.save()
     click.echo(f"Config updated with policy '{name}'.")
 
@@ -947,6 +998,22 @@ def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[
     return path, _load_policy(path)
 
 
+def _opa_runtime_action(runtime: str) -> str:
+    """Map a policy ``runtime`` value to the OPA ``data.json`` vocabulary.
+
+    Policy YAML may use either the enforcement vocabulary
+    (``enable``/``disable``) or the OPA vocabulary (``allow``/``block``).
+    Both ``disable`` and ``block`` mean "do not allow runtime execution"
+    and must map to ``block``; ``enable``/``allow`` (and anything
+    unrecognised) map to ``allow``. The previous
+    ``"block" if runtime == "disable" else "allow"`` silently rewrote an
+    existing ``runtime: block`` override to ``allow`` (F-0241), so a
+    bundled override meant to block runtime execution was synced as an
+    allow.
+    """
+    return "block" if str(runtime).strip().lower() in ("disable", "block") else "allow"
+
+
 def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     """Sync OPA data.json with the activated policy settings.
 
@@ -978,8 +1045,22 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     try:
         with open(data_json_path) as f:
             opa_data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return
+    except OSError as exc:
+        # silently returning on read failures hid
+        # malformed/stale data.json from `policy activate`. The
+        # caller has already updated config to the new policy
+        # selection, so leaving sync skipped left the gateway
+        # running with stale OPA data that would not match the
+        # advertised activation. Surface the failure and let
+        # activate exit non-zero.
+        raise click.ClickException(
+            f"failed to read OPA data file at {data_json_path}: {exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(
+            f"OPA data file at {data_json_path} is not valid JSON: {exc}; "
+            f"run `defenseclaw policy validate` and repair before activating"
+        ) from exc
 
     # --- config section ---
     opa_data.setdefault("config", {})
@@ -1003,7 +1084,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
         runtime = raw.get("runtime", "enable")
         file_action = raw.get("file", "none")
         install_action = raw.get("install", "none")
-        opa_runtime = "block" if runtime == "disable" else "allow"
+        opa_runtime = _opa_runtime_action(runtime)
         opa_install = install_action if install_action in ("block", "allow", "none") else "none"
         opa_actions[sev.upper()] = {
             "runtime": opa_runtime,
@@ -1023,7 +1104,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
             if not isinstance(action, dict):
                 continue
             runtime = action.get("runtime", "enable")
-            opa_runtime = "block" if runtime == "disable" else "allow"
+            opa_runtime = _opa_runtime_action(runtime)
             opa_scanner[sev.upper()] = {
                 "runtime": opa_runtime,
                 "file": action.get("file", "none"),
@@ -1110,9 +1191,25 @@ def _try_rego_compile(rego_dir: str) -> bool:
                 click.echo(result.stdout.rstrip())
             return False
     except FileNotFoundError:
-        click.echo("  'opa' binary not found — skipping Rego compilation check.")
+        # returning True here turned a missing `opa`
+        # binary into a clean "Rego compilation: OK" verdict, so a
+        # malformed bundle could pass `defenseclaw policy validate`
+        # in any environment where OPA was not installed. Operators
+        # can opt out of strict mode (and accept that no compilation
+        # actually happened) with DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1,
+        # but the default is to fail closed because the bundle is
+        # being validated for activation.
+        if os.environ.get("DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA", "").strip() == "1":
+            click.echo("  'opa' binary not found — skipping Rego compilation (opt-in).")
+            click.echo("  Install OPA for full validation: brew install opa")
+            return True
+        ux.err("FAIL: 'opa' binary not found — install OPA to validate Rego bundles.")
         click.echo("  Install OPA for full validation: brew install opa")
-        return True
+        click.echo(
+            "  Set DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1 to bypass "
+            "(NOT recommended for production)."
+        )
+        return False
     except subprocess.TimeoutExpired:
         ux.err("FAIL: opa check timed out")
         return False

@@ -4,6 +4,742 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Hook collector unification
+
+This rollup unifies the agent hook collector across all 8 hook-first
+connectors (codex, claudecode, hermes, cursor, windsurf, geminicli,
+copilot, openhands) onto a single declarative `HookProfile`-driven pipeline.
+There are **no new environment variables** — the unification is the
+default and only path; the V1 OTLP builders and the per-phase
+feature flags that existed in early review iterations have been
+deleted.
+
+### Behaviour changes (no flag)
+
+- **W3C trace propagation is enabled for trusted hook routes**
+  (`/api/v1/<connector>/hook`, `/api/v1/codex/notify`) when the
+  caller is loopback and the connector route is registered. The
+  gateway consumes `traceparent` / `tracestate` so hook spans root
+  on the agent's parent trace; `_hardening.sh` v6 emits the headers
+  from every hook script. Extraction is route-scoped via
+  `shouldExtractHookTrace`; all other routes (health, REST, OTLP
+  ingest) continue to mint a fresh root span regardless of what
+  the caller sent.
+- **Native OTLP for codex / claudecode / geminicli is spec-driven**
+  through the shared `connector.NativeOTLPSpec` renderer
+  (`TOMLBlock` / `EnvBlock` / `JSONBlock`). The V1 builders are
+  gone; shape tests in
+  `internal/gateway/connector/native_otlp_golden_test.go` lock the
+  wire format codex/claudecode/gemini consume.
+- **Audit `details` column always carries both forms**: the
+  structured `HookAuditEnvelope` JSON (under the `details_json=`
+  key) and the legacy `connector=… action=… raw_action=…` tail.
+  Existing operator log greps keep matching; jq pipelines can
+  parse the JSON inline. No env-var toggle.
+- **Codex `/api/v1/codex/notify` synthesizes a Stop event** through
+  `handleAgentHookSynthetic`. The canonical
+  `codex.notify.<sanitized-type>` audit row is preserved one-per-
+  inbound; the synthetic envelope is persisted under
+  `audit.ActionConnectorHookSynthetic` so SIEM rules pinned on
+  `codex.notify%` keep their row counts and new dashboards can
+  reason about the synthesized Stop separately.
+- **codex / claudecode flow through the unified `handleAgentHook`
+  pipeline (full handler fold)**. Pre-PR-#284, `handleCodexHook` and
+  `handleClaudeCodeHook` each re-implemented the entire pipeline
+  (parse → enrich context → remember raw events → emit LLM event →
+  evaluate → metrics → audit envelope → render). Adding a new
+  cross-cutting concern (audit envelope refresh, dispatch metric,
+  dedup, trace propagation) meant touching three handlers, and the
+  F2 audit-correlation regression bit live Splunk verification when
+  `handleClaudeCodeHook` skipped the envelope refresh. The bespoke
+  handlers (`handleClaudeCodeHook`, `handleCodexHook`,
+  `enrichClaudeCodeHookContext`, `enrichCodexHookContext`) are
+  **deleted**; every connector hook route now flows through
+  `handleAgentHook(name)`. The connector-specific evaluator,
+  LLM-event emitter, and raw-event deduper (which probe fields like
+  `req.ToolUseID`, `req.LastAssistantMessage`, `req.MCPServerName`
+  that the generic `agentHookRequest` doesn't model) are kept and
+  invoked via the `hookProfileRuntime` dispatch in
+  `internal/gateway/hook_profile_runtime.go`. The wire JSON field
+  name (`claude_code_output` / `codex_output` / `hook_output`) is
+  selected by `hookOutputFieldName(connectorName)` so the agent CLIs
+  keep their connector-specific response shape. Net delta: one place
+  where shared concerns live. New tests
+  (`TestUnifiedHookDispatch_SingleEntryPoint`,
+  `TestUnifiedDispatch_PreservesConnectorWireShape`,
+  `TestEnrichAgentHookContext_ClaudeCodeRefreshesEnvelope`,
+  `TestEnrichAgentHookContext_CodexRefreshesEnvelope`) pin the
+  contract so a future "let's reintroduce a bespoke handler for X"
+  change immediately fails CI.
+
+### Observability parity
+
+- `defenseclaw.connector.hook.outcome` and
+  `defenseclaw.connector.hook.tokens` counters added to
+  `internal/telemetry/metrics.go`; emitted by every hook handler
+  including the synthetic path. Dashboards can compute block rate
+  and cost per connector via PromQL without joining the native
+  OTLP channel.
+- `defenseclaw.connector.hook.unified_dispatch` added so
+  operators can confirm traffic is flowing through the unified
+  pipeline (vs. an out-of-tree handler registration that bypasses
+  audit/metrics).
+- New audit action `connector-hook-synthetic` (Go +
+  `cli/defenseclaw/audit_actions.py` + `OBSERVABILITY-CONTRACT.md`)
+  for the synthetic Stop visibility row.
+
+### F6 audit-action parity
+
+- Registered the production audit actions discovered across sidecar,
+  watcher, gateway router, guardrail, inspect, setup, doctor, API,
+  sink, and operator command paths. Go, Python, the public schema, and
+  the embedded gateway schema now agree on the expanded enum.
+- Added `scripts/discover_unregistered_audit_actions.py` plus the
+  review artifact `scripts/discovered_unregistered_audit_actions.txt`
+  so future broad-parity work can reproduce the exact discovered set.
+- Added `scripts/check_audit_no_raw_literals.py` to `make check-v7`
+  and a Go completeness test for the discovered actions. New raw
+  `audit.Event{Action: "..."}` literals now fail the parity gate.
+
+### Connector profile surface
+
+- **OpenHands is now a first-class hook connector.** `defenseclaw setup
+  openhands` writes the documented repo-local `.openhands/hooks.json`
+  native schema, registers `/api/v1/openhands/hook`, maps blocking to
+  OpenHands' `decision=deny` / exit-code-2 contract, discovers
+  `~/.openhands/mcp.json`, and installs current skills into
+  `.agents/skills` while treating `.openhands/skills` and
+  `.openhands/microagents` as deprecated discovery paths. The hook
+  contract is documented against `OpenHands CLI 1.16.0` while staying
+  unbounded until upstream publishes a hook-version floor.
+- New `connector.HookProfile.Decode`, `MapVerdict`, and `Respond`
+  function fields let codex / claudecode declare their per-event
+  wire shape declaratively.
+- `connector.AcceptLoopbackWithWarning` centralizes the loopback
+  authentication carve-out (currently used by
+  `CodexConnector.Authenticate`). The helper now panics on
+  `warned == nil` so a future caller cannot silently disable the
+  `[SECURITY] loopback bypass` log via a typo; operators continue
+  to see one warning per process when a gateway token is configured
+  but loopback is exercised.
+
+### Security fixes folded in
+
+- **Trace propagation route scope (H1).**
+  `extractIncomingTraceContext` is now path-aware
+  (`shouldExtractHookTrace`) so only hook + notify routes consume
+  inbound `traceparent` into the OTel server span tree. Closes the
+  regression where any caller hitting `/health` could splice a
+  trace ID into the gateway's trace tree.
+
+  Trust gates for inbound `traceparent` are intentionally layered:
+
+  | Surface                       | Allowed when                                 | Defended by                          |
+  |-------------------------------|----------------------------------------------|--------------------------------------|
+  | OTel server span parent       | Loopback **and** hook/notify route           | `shouldExtractHookTrace`             |
+  | Audit envelope `trace_id`     | Loopback (any route)                         | `connector.IsLoopback` in middleware |
+
+  The audit envelope's gate is intentionally broader than the OTel
+  span gate. The OTel server span propagates into every child span
+  the request makes, so splicing the span tree is an amplification
+  primitive; the audit envelope `trace_id` is a single per-row data
+  field with no propagation, so loopback alone is a sufficient
+  trust boundary. This admits the legitimate
+  `agent → loopback proxy → /v1/guardrail/evaluate` hop where the
+  agent's distributed trace_id needs to flow onto audit rows to
+  preserve cross-system correlation in SOC dashboards.
+  `correlation_middleware.go` and `correlation_middleware_test.go`
+  carry the long-form rationale; the
+  `TestCorrelationMiddleware_DropsInboundTraceparentOnNonLoopback`
+  and `TestCorrelationMiddleware_AdoptsInboundTraceparentOnLoopback`
+  tests pin the boundary.
+- **Synthetic audit visibility (M1).** The synthetic codex notify
+  path now persists a `HookAuditEnvelope` under
+  `ActionConnectorHookSynthetic` instead of suppressing the row;
+  SIEM dashboards no longer regress when codex notify fires.
+- **Loopback bypass footgun (M2).** `AcceptLoopbackWithWarning`
+  panics on `nil` `warned` argument so a misuse cannot silently
+  re-enable silent trust of loopback callers.
+
+### Follow-ups from live E2E testing (F1, F2, F3, F4, F5)
+
+- **Codex `[otel]` block no longer carries `service_name` /
+  `resource_attributes` (F1).** Earlier review iterations of this PR
+  set both fields on `CodexConnector.HookProfile().NativeOTLPSpec` —
+  but codex's documented `[otel]` schema (see codex
+  config-reference) doesn't define those keys, and the published
+  schema is strict
+  ([openai/codex#17012](https://github.com/openai/codex/issues/17012)).
+  Writing them risks codex rejecting the operator's config at
+  startup.
+
+  Codex also already emits richer intrinsic identity tags
+  (`originator`, `model`, `auth_mode`, `app.version`,
+  `session_source`) and uses different `service.name` values for
+  its sub-processes (`codex-app-server`, `codex_exec`); forcing
+  `service.name=codex` from outside would have *collapsed* the
+  natural distinction. M3 (consistent resource attributes across
+  connectors) therefore applies only to env-block-style connectors
+  (claudecode); TOML/path-token connectors that self-identify
+  (codex, geminicli) keep their upstream tags.
+
+  `TestNativeOTLPShape_Codex` now asserts the *absence* of
+  `service_name` / `resource_attributes` so a future contributor
+  can't silently re-introduce the regression.
+- **Hook audit rows now carry `session_id` and `agent_id` (F2).**
+  `CorrelationMiddleware` snapshots the audit envelope from the
+  inbound HTTP headers — but no DefenseClaw-managed hook shell
+  script sets `X-DefenseClaw-Session-Id`, the session id always
+  arrives in the JSON payload. Result before F2: every audit row
+  written by `logConnectorHookAuditEnvelope` (`connector-hook` AND
+  `connector-hook-synthetic`) landed with `session_id=NULL` and
+  `agent_id=NULL`, defeating SIEM correlation between hook
+  decisions and the matching LLM events.
+
+  `enrichAgentHookContext` now refreshes the audit envelope with
+  `req.SessionID` and the resolved agent identity, so both regular
+  and synthetic hook rows correlate. Header-supplied identity is
+  preserved when the payload doesn't override (see
+  `TestRefreshAuditEnvelopeFromHook_*`).
+
+  Operators upgrading from a prior build will see
+  `session_id`/`agent_id` populate immediately on the next hook
+  event; pre-existing audit rows are not back-filled.
+- **`defenseclaw audit export` no longer rewrites valid actions to
+  `"action"` with `legacy_action=…` (F3).** The exporter kept a
+  hand-maintained copy of the audit action enum in
+  `internal/cli/audit_export.go`; every action added to
+  `internal/audit/actions.go` since v7 (the entire `otel.ingest.*`
+  family, `connector-hook`, `connector-hook-synthetic`,
+  `asset-policy`, `codex.notify` plus the dynamic
+  `codex.notify.<sanitized-type>` family) was silently downgraded
+  on export, so Splunk dashboards that keyed on the *real* action
+  saw nothing.
+
+  `audit_export.go` now delegates to
+  `audit.IsKnownAction` + `audit.IsKnownActionPrefix`, so future
+  registry additions flow through automatically with no second list
+  to maintain. New test coverage in
+  `internal/cli/audit_export_test.go` walks `audit.AllActions()` so a
+  regression that re-introduces a local map fails CI.
+- **Gemini CLI loopback OTLP exports no longer 401 after `setup
+  geminicli` (F4).** The sidecar populated its in-memory
+  `otlpPathTokens` map only at boot; an operator who started the
+  gateway before running `defenseclaw setup geminicli` would mint a
+  fresh on-disk token (written into `~/.gemini/settings.json`) that
+  the running gateway never observed, so every loopback OTLP request
+  returned 401 until the next restart.
+
+  `APIServer.lookupOTLPPathToken` now performs a lazy disk reload on
+  cache miss for KNOWN scopes (closed allow-list via the new
+  exported `connector.IsValidOTLPScope`), bounded by a 500 ms
+  per-scope rate limit so a hostile or noisy caller probing
+  `/otlp/geminicli/<random>/v1/*` cannot turn the auth path into a
+  disk-stampede primitive. The reload is gated on
+  `scannerCfg.DataDir` being set, so tests and out-of-tree wiring
+  remain panic-safe.   Five tests in
+  `internal/gateway/otlp_path_token_test.go` cover the happy reload,
+  unknown-scope rejection, per-scope refractory window, post-window
+  retry (operator rotate flow), and empty-DataDir guard.
+- **`Config.save()` no longer silently strips operator-configured
+  `audit_sinks` / `otel.resource.attributes` (F5).** Surfaced while
+  driving live Splunk verification for F2: switching the active
+  connector with `defenseclaw setup codex` after a prior
+  `defenseclaw setup splunk --logs` made the operator's HEC
+  forwarding disappear without any warning, taking Splunk dashboards
+  dark on every connector switch.
+
+  Root cause: `Config.save()` was `yaml.dump(dataclasses.asdict(self))`,
+  which only emits the fields the Python `Config` dataclass declares.
+  `audit_sinks:` (written by the observability writer) and the nested
+  `otel.resource.attributes:` map are intentionally unmodelled in the
+  Python dataclass, so every `cfg.save()` call site —
+  `execute_guardrail_setup`, `setup codex`, `setup claude-code`,
+  `setup geminicli`, the migration helpers, ~14 sites in total —
+  silently overwrote the file. The team had already detected this on
+  the `setup splunk` path itself and worked around it with two
+  "don't call cfg.save() here" comments in `cmd_setup.py:4870` and
+  `cmd_setup.py:4946`; every other code path was still vulnerable.
+
+  `Config.save()` now reads the existing `config.yaml`, deep-merges
+  the dataclass output over it (dataclass-owned top-level keys win;
+  unmodelled keys are rescued from the file; nested dicts recurse so
+  `otel.resource.attributes` survives even though `otel` itself is
+  modelled), and replaces the file atomically with a lock, 0600
+  temp files, `O_NOFOLLOW`, `fsync`, and directory sync. The
+  observability writer uses the same secure write helper. The dataclass still
+  owns its keys — including the v4-migration drop of the legacy
+  `splunk:` block and the byte-stability strips of empty
+  `notifications` / `privacy` / `asset_policy` blocks — so
+  programmatic resets through the dataclass still update the file.
+  Corrupt-YAML input logs a warning, writes a 0600 `.bak`, and then
+  falls back to dataclass-only write so the operator can recover via
+  the next setup wizard.
+
+  Regression tests in `cli/tests/test_config_save_roundtrip.py`
+  cover: single-/multi-sink preservation, nested
+  `otel.resource.attributes` preservation, legacy `splunk:` drop,
+  default-`notifications:` strip honouring an operator reset,
+  modeled-field overrides, first-save with no existing file,
+  corrupt-YAML backup/fallback, non-mapping-YAML fallback,
+  atomic-write inode change, merge helper unit tests, concurrent
+  authoritative OTel dict preservation, and the end-to-end
+  `setup splunk → setup codex` operator workflow. The two existing
+  "no cfg.save() here" comments in `cmd_setup.py` are kept as
+  single-writer hygiene (no longer correctness) and updated to
+  reflect the new contract.
+
+### Review hardening (H1-H2, M1-M6, L1-L6)
+
+A full code review of the unification PR identified two high-priority
+issues, six medium-priority issues, and six low-priority issues. All
+are addressed in this rollup.
+
+- **H1 — gofmt drift in `internal/gateway/api.go`** (CI gate). The
+  reformatted file is in.
+- **H2 — Panic recovery around the unified hook hot path
+  (`internal/gateway/agent_hook.go`).** Pre-fold, each connector
+  owned its own bespoke HTTP handler so a panic blast-radius was one
+  connector. Post-fold (this PR), `handleAgentHook` is the SOLE hot
+  path for every connector; an unrecovered panic in any
+  raw-event deduper, LLM-event emitter, evaluator branch
+  (asset-policy probe, scanner invocation, codex notify-bridge
+  fan-out, …), or final audit/metrics section would take the whole
+  agent estate down at once. `handleAgentHook` now has a top-level
+  deferred `recover`, while `safeEvaluateHook` /
+  `safeEvaluateSyntheticHook` keep the evaluator-specific contract:
+
+  - increments `defenseclaw.panics.total{subsystem="gateway"}` so
+    existing SRE alerts fire without a new metric,
+  - logs the recovered value + stack to stderr (the structured
+    logger may itself be the panic source, so stderr is the
+    safest sink),
+  - returns a fail-OPEN `agentHookResponse{action: "allow",
+    would_block: true, severity: "WARN", reason: "defenseclaw
+    internal evaluator error"}`. We deliberately fail-open rather
+    than fail-closed because a transient evaluator bug should not
+    block every agent's every tool call; `would_block=true`
+    preserves the guardrail intent and the `result="panic"` label
+    on `RecordConnectorHookInvocation` gives operators an alertable
+    signal.
+
+  Audit envelopes for panic-path rows carry `extra.panic=true` and
+  `result=panic` so SIEM queries can separate them from policy
+  decisions. `TestSafeEvaluateHook_RecoversAndReturnsFailOpen` +
+  `TestHandleAgentHook_PanicReturnsSafeResponse` +
+  `TestHandleAgentHook_EmitPanicReturnsSafeResponse` +
+  `TestHandleAgentHook_FullChain_PanicFailsOpen` cover the unit
+  helper, the HTTP-level integration, pre-evaluator emit failures,
+  and the per-connector contract.
+
+- **M1 — OTLP token cache misses rotation.** F4's lazy reload
+  closed the boot-vs-setup race but left an open gap: an operator
+  who rotates `~/.defenseclaw/hooks/.otlp-geminicli.token` while
+  the gateway runs (security-incident response, post-compromise
+  rotation policy) would see every subsequent loopback OTLP
+  request 401 until restart, because the in-memory cache had no
+  way to notice the on-disk change.
+
+  `lookupOTLPPathToken` now keeps an `otlpPathTokenEntry{token,
+  mtime}` per scope and runs a throttled `os.Stat` (1s
+  per-scope) on the hot path; mtime drift triggers a reload, file
+  disappearance evicts the cache so the next request 401s rather
+  than authenticating a removed token. Stat I/O is throttled
+  independently from full reloads so a flood of misses cannot
+  weaponise rotation detection into a per-request disk syscall.
+
+  Tests: `TestLookupOTLPPathToken_DetectsRotation`,
+  `TestLookupOTLPPathToken_DropsCacheOnFileRemoval`, and
+  `TestLookupOTLPPathToken_ConcurrentRotation` (race-detector
+  smoke; 24 readers + 8 rotations).
+
+- **M2 — Pre-redact free-form envelope fields.** The audit choke
+  point (`internal/audit/logger.go` →
+  `redaction.ForSinkReason`) tokenises on raw `", "` / `"; "` byte
+  sequences and per-chunk redacts. The hook envelope places JSON
+  next to free-form `Reason` text in a single `details` blob;
+  without pre-redaction, a `Reason` containing a comma created a
+  split point inside the `strconv.Quote`'d JSON value and the
+  downstream pass corrupted the JSON envelope every audit sink
+  writes — breaking jq/SIEM parsers.
+
+  `renderHookAuditEnvelope` now runs free-form fields through
+  `redaction.ForSinkReason` BEFORE they are folded into the JSON.
+  ForSinkReason is idempotent (`isAlreadyRedacted` fast-path
+  skips placeholders), so the downstream pass is a no-op for
+  already-redacted material and the envelope JSON we emit is
+  bit-identical to what the audit row contains. Test:
+  `TestRenderHookAuditEnvelope_PreRedactsReason`.
+
+- **M3 — Unbounded `RawPayload` on `redaction.DisableAll()`.** When
+  an operator explicitly turns off all redaction, the unified
+  handler previously copied the full HTTP body into the audit
+  envelope's `RawPayload` field — a 10 MiB hostile POST therefore
+  amplified through `json.Marshal` → `strconv.Quote` → SQLite
+  insert → every audit sink (Splunk HEC, S3, file). The new
+  `attachRawPayload` helper caps `RawPayload` at 64 KiB, sets
+  `extra.raw_payload_truncated=true`, records the full byte count,
+  and emits a SHA-256 short digest so SIEM rules can deduplicate
+  replays without ingesting the full body. Tests:
+  `TestAttachRawPayload_TruncatesAndAnnotates` +
+  `TestAttachRawPayload_NoOpWhenRedactionEnabled`.
+
+- **M4 — Bound `model` metric label cardinality.** The new
+  `telemetry.NormalizeModelLabel` projects arbitrary
+  caller-supplied model strings onto a closed allow-list of model
+  families (`gpt-5`, `gpt-4o`, `gpt-4`, `gpt-3.5`, `o1`, `o3`,
+  `claude-4`, `claude-opus`, …). Unknown identifiers collapse to
+  `"other"`; identifiers longer than 64 chars collapse to
+  `"other"` regardless of family. The fully-qualified model name
+  remains on the `gen_ai.request.model` span attribute (no
+  cardinality limit at the trace backend); only the metric label
+  is bounded. The OTLP ingest path also bounds promoted
+  `gen_ai.provider.name` and `gen_ai.operation.name` labels before
+  recording GenAI histograms. Total cardinality budget asserted at
+  ≤ 30 distinct values across all callers. Test:
+  `TestNormalizeModelLabel_BoundsCardinality` (input-shape table
+  plus budget assertion).
+
+- **M5 — Server span leak on panic paths.** `otelHTTPServerMiddleware`
+  called `span.End()` un-deferred, so any panic between
+  `tracer.Start` and `End` would orphan the span at the trace
+  backend and hide the failure from tracing dashboards.
+  `defer span.End()` lands immediately after `Start`. The H2
+  panic recovery normally catches the panic earlier, but this
+  defense-in-depth catches the (theoretical) case where the
+  recover itself faults or a panic originates in middleware below
+  the evaluator.
+
+- **M6 — End-to-end integration coverage per connector.** The new
+  `agent_hook_e2e_test.go` drives an HTTP request through
+  `handleAgentHook` for every registered connector
+  (claudecode, codex, hermes, cursor, windsurf, geminicli, copilot, openhands)
+  and asserts:
+
+  - HTTP 200 with valid JSON,
+  - canonical `action` / `severity` / `mode` fields,
+  - per-connector top-level wire-shape key
+    (`claude_code_output` / `codex_output` / `hook_output`),
+  - benign requests resolve `action="allow"`,
+  - `gen_ai.conversation.id` and `defenseclaw.connector` span
+    attributes recorded.
+
+  A registry-completeness gate at the end of the test enumerates
+  `connectorHookHandlerByName` and fails if any registered
+  connector lacks a test row. A second test
+  (`TestConnectorRegistry_ScopeAndHookHandlerInSync`) asserts that
+  every OTLP scope corresponds to a registered hook handler so the
+  two registries cannot silently drift apart.
+
+- **L1 — `shouldExtractHookTrace` was broader than its docstring
+  claimed.** The check accepted any `/api/v1/<anything>/hook` URL
+  shape, so an attacker hitting an unregistered route could splice
+  a `traceparent` even though the mux would 404 the request. The
+  function now consults `connectorHookHandlerByName` directly:
+  trace extraction only happens for connectors with a registered
+  handler.
+
+- **L2 — `reason` metric label cardinality (folded into H2
+  changes).** `RecordConnectorHookInvocation` previously took
+  `reason = resp.Action` verbatim. Today `resp.Action` is a small
+  enum, but nothing in the type system enforces that at the
+  metric boundary. The new `normalizeHookReasonLabel` allow-lists
+  `allow|block|alert|confirm|would_block|panic|other|none`;
+  anything else collapses to `"other"`. Test:
+  `TestNormalizeHookReasonLabel_BoundsCardinality`.
+
+- **L3 — `renderHookAuditLegacyDetails` Extra-map iteration was
+  nondeterministic.** Go's map iteration is intentionally
+  randomized, so two consecutive calls to the legacy formatter
+  emitted different orderings of `env.Extra` — breaking snapshot
+  tests and confusing operator log greps. Keys are now sorted
+  ascending. Test:
+  `TestRenderHookAuditLegacyDetails_ExtraKeysSortedDeterministically`.
+
+- **L4 — `AuditActionOverride` godoc was stale** and referred to
+  `env.Action` rather than `env.AuditActionOverride`. Doc fixed.
+
+- **L5 — `hook_register.go` comment drift.** The comment block
+  still described the pre-full-fold "wrapper delegates to bespoke
+  handler" design. Rewritten to match the current
+  declarative hook-profile runtime model.
+
+- **L6 — `subtle.ConstantTimeCompare` length-leak hardening.** All
+  three gateway auth comparisons (master gateway token,
+  per-source OTLP path token, guardrail-config token) now go
+  through the new `constantTimeStringMatch` helper which hashes
+  both inputs with SHA-256 first and compares the 32-byte
+  digests in constant time. The hashing removes length
+  observability entirely (the original direct compare leaked
+  the expected-token length whenever inputs differed in size)
+  and adds ≈microseconds to the auth path, dominated by socket
+  I/O. Plain-token comparison is gone from `internal/gateway/api.go`.
+
+### New tests folded in this rollup
+
+- `agent_hook_panic_test.go` — safeEvaluateHook recover; reason
+  + model + RawPayload label normalisation.
+- `agent_hook_e2e_test.go` — full-chain per-connector integration
+  + synthetic-path + panic-path coverage + registry sync.
+- `otlp_path_token_test.go` (extended) — rotation, file removal,
+  concurrent rotation race.
+- `connector/otlp_token_test.go` — `IsValidOTLPScope` negative
+  cases (path traversal, control chars, Unicode homoglyphs, …).
+- `telemetry/model_label_normalize_test.go` — cardinality budget
+  + family-collapse parity.
+- `hook_audit_envelope_test.go` (extended) — Reason
+  pre-redaction; deterministic Extra ordering.
+
+## [Previous-Unreleased] — Codex / Claude Code hook-only enforcement (no proxy data path)
+
+This rollup removes the LLM-proxy data path for the Codex and Claude
+Code connectors and unifies them on the agent's native hook bus for
+both observation and enforcement. The `PreToolUse` hook returns a
+`permissionDecision: "deny"` verdict on policy hits and the agent
+blocks the tool call inside its own permission flow. Codex and
+Claude Code now talk directly to their native upstreams in both
+`observe` and `action` mode.
+
+### Breaking changes
+
+- **`guardrail.codex_enforcement_enabled` removed** from
+  `~/.defenseclaw/config.yaml`. The field was the on/off switch for
+  the now-deleted proxy-driven enforcement path. Enforcement is now
+  selected by the existing `guardrail.mode` field (`action` returns
+  a PreToolUse deny verdict on policy hits; `observe` records only).
+  The upgrade migration strips the field automatically — see
+  "Migrations" below.
+- **`guardrail.claudecode_enforcement_enabled` removed** from
+  `~/.defenseclaw/config.yaml`. Same shape and rationale as the
+  Codex flag above. The upgrade migration strips the field
+  automatically.
+- **`SetupOpts.CodexEnforcement` and `SetupOpts.ClaudeCodeEnforcement`
+  removed** from the Go connector `Setup()` contract. Out-of-tree
+  connector implementations that read these fields must drop the
+  references; they were always observable booleans without their own
+  feature surface, and `Mode` is the canonical knob now.
+- **Codex / Claude Code proxy listener no longer binds** at gateway
+  start when the active connector is `codex` or `claudecode`, even
+  if `guardrail.mode=action`. Port 4000 stays closed — the
+  enforcement path is the hook bus, not the proxy. Operators who
+  relied on the proxy URL (`http://localhost:4000/...`) appearing in
+  the agent config need to remove those overrides; the connectors
+  patch the agent's native upstream back to its vendor default at
+  upgrade time.
+
+### Enforcement
+
+- **`defenseclaw setup codex --mode action`** and
+  **`defenseclaw setup claude-code --mode action`** newly provision
+  hook-driven enforcement: the PreToolUse hook returns a deny
+  verdict on policy hits and the agent blocks the tool call inside
+  its own permission flow. `--mode observe` (the default) keeps the
+  previous record-only behavior.
+- The shared connector-alias factory used by the other hook-
+  enforced connectors (`hermes`, `cursor`, `windsurf`, `geminicli`,
+  `copilot`, `openhands`) gains the same `--mode {observe,action}`
+  knob.
+- The interactive wizard (`defenseclaw setup guardrail`) drops the
+  Codex/Claude Code "observability-only vs. proxy" fork; the
+  standard observe/action mode prompt now drives both connectors.
+- The TUI overview's Enforcement row reflects the effective mode
+  per connector: `<Agent> hook enforcement (action)` when
+  `guardrail.mode=action`, otherwise `<Agent> hook observability
+  (observe)`. `defenseclaw doctor` likewise reports `hook-enforced
+  for codex (mode=action via PreToolUse deny) — proxy port
+  intentionally closed` in its `Guardrail proxy` check.
+
+### CLI plumbing
+
+- The `_OBSERVABILITY_ONLY_CONNECTORS` set in `cli/defenseclaw/
+  commands/cmd_setup.py` was split into `_PROXY_BACKED_CONNECTORS`
+  (`openclaw`, `zeptoclaw`) and `_HOOK_ENFORCED_CONNECTORS`
+  (everything else). The old name remains as a backstop alias so
+  out-of-tree imports keep resolving. New call sites must use the
+  named sets.
+- `_apply_connector_observability_only` was renamed to
+  `_apply_hook_connector_setup` and now takes a `mode` argument
+  (defaulting to `observe`). The legacy name remains as a thin
+  shim that forces `observe` for any out-of-tree callers.
+- Inert helpers `_set_connector_enforcement`,
+  `_connector_enforcement_flag`, and `_connector_enforcement_enabled`
+  were deleted along with their last call sites.
+
+### Migrations
+
+- New 0.5.0 sub-step
+  **`_migrate_0_5_0_strip_codex_enforcement_keys`** rewrites
+  `~/.defenseclaw/config.yaml` to remove
+  `guardrail.codex_enforcement_enabled` and
+  `guardrail.claudecode_enforcement_enabled` if present. The strip
+  is byte-level (no YAML round-trip) so operator comments, blank
+  lines, and surrounding key order under `guardrail:` are preserved
+  exactly. `guardrail.mode` is left untouched — the operator's
+  existing enforcement posture carries through to the hook surface.
+- Migration is idempotent and runs automatically on
+  `defenseclaw upgrade`. Failures are logged via `defenseclaw
+  doctor --fix` and never block the upgrade.
+- **`defenseclaw setup codex` now heals pre-PR-#265 installs in place.**
+  The legacy setup rewrote `~/.codex/config.toml`'s top-level
+  `openai_base_url` to `http://127.0.0.1:<port>/c/codex`. PR #265
+  deleted the matching proxy mount but left the operator's
+  `config.toml` carrying a now-broken value, so every Codex turn
+  failed with `stream disconnected before completion` against the
+  closed loopback port. `patchCodexConfig` now strips any
+  `openai_base_url` whose URL shape matches the loopback `/c/codex`
+  pattern DefenseClaw itself wrote (scheme `http(s)`, host
+  `127.0.0.1` / `localhost` / `::1`, path beginning `/c/codex`). An
+  operator's enterprise gateway URL is preserved unchanged —
+  `TestCodex_Setup_DefaultObservability_NoProxyRewrite` continues
+  to gate that contract, and `TestIsDefenseClawCodexProxyRedirect`
+  pins the strip detector's full accept/reject surface.
+- **Known follow-up:** `Teardown` does not yet apply the same heal,
+  so `defenseclaw teardown codex` against a pre-PR-#265 install can
+  restore the stale `openai_base_url` from the managed-file backup
+  snapshot captured at the original Setup. Operators uninstalling
+  DefenseClaw should re-run `setup codex` once before `teardown`,
+  or hand-strip the line. Tracked as the immediate next PR.
+
+### Tests
+
+- Go test suite updated:
+  - `TestSetupOpts_HookFailMode_RespectsOperatorChoice` no longer
+    references `CodexEnforcement` / `ClaudeCodeEnforcement`.
+  - `TestProxyShouldBindForConnector` /
+    `TestAPIStatusEmitsConnectorMode` /
+    `TestShouldRunProviderProbeForConnector` assert the proxy stays
+    unbound for codex/claudecode regardless of `Guardrail.Mode`.
+  - `TestConnector_AllowedHostsProvider_ProxyBuiltinsImplement`
+    (renamed from `_AllBuiltinsImplement`) only covers
+    proxy-backed connectors.
+  - `TestCodex_Teardown_RemovesLegacyEnvFiles` and the analogous
+    Claude Code env-file tests were removed alongside the helpers
+    they covered.
+  - `TestModePickerModal_PreviewMatchesSetupAliases` updated for
+    the new "proxy-backed connector setup" / "hook-driven
+    connector setup" preview strings.
+- Python CLI test suite updated:
+  - `test_cmd_init.py` and `test_cmd_doctor.py` no longer assert
+    on `codex_enforcement_enabled`.
+  - `test_cmd_setup_mode.py`,
+    `test_cmd_setup_observability.py`,
+    `test_cmd_setup_codex_claudecode_alias.py`, and
+    `test_guardrail.py` were rewritten to cover the hook-driven
+    mode contract end-to-end.
+
+## [Pre-PR-265] — PR #194 single-rollup (security floor + connector polymorphism + test parity)
+## [Unreleased] — DeepSec audit closure (75 findings → 0)
+
+This rollup closes every actionable finding from the DeepSec security
+audit (`.deepsec/data/defenseclaw/reports/report.md`): 1 CRITICAL,
+26 HIGH, 24 MEDIUM, 9 HIGH_BUG, and 15 BUG. The two findings tagged
+"FP" by reviewers are also remediated because their underlying code
+paths required changes anyway. No protections were removed; the audit
+strictly tightens existing guards.
+
+### ⚠️ Operator-visible behaviour changes (read this before upgrading)
+
+**Newly-blocked outbound dial address ranges.** The gateway's SSRF
+defenses (`internal/gateway/provider.go::isUnsafeIP`,
+`internal/netguard/netguard.go::IsPrivateOrReserved`, and the webhook
+dispatcher's `validateWebhookURL` predicate) now refuse to dial:
+
+- `100.64.0.0/10` — RFC 6598 carrier-grade NAT (Tailscale mesh,
+  T-Mobile/Comcast carrier NAT, AWS Cloud WAN private overlay)
+- `169.254.170.2/32` — ECS task metadata endpoint (was previously
+  redundantly covered by `IsLinkLocalUnicast`; now an explicit entry)
+- `fd00::/8` — IPv6 Unique Local Addresses (broader than the
+  `fc00::/7` subset Go's `IsPrivate()` already reported)
+
+**If you were running a local LLM (e.g. Ollama on a NAS at
+`100.64.0.5:11434`) or a webhook receiver over a Tailscale tunnel,
+upgrades will start returning `HTTP 403 target host resolves to a
+private address` from the chat-completion / passthrough proxy and
+`hostname resolves to private IP …` from `defenseclaw config webhook
+test` against those targets.**
+
+To opt back into CGNAT dialing, set `DEFENSECLAW_ALLOW_CGNAT=1` in the
+sidecar environment and restart. This drops 100.64.0.0/10 from the
+deny-list and prints a one-line `[gateway] DEFENSECLAW_ALLOW_CGNAT=1
+…` notice to stderr at boot so the change is auditable from the boot
+log. Loopback, RFC 1918, link-local, IMDS (`169.254.169.254`), ECS
+task metadata (`169.254.170.2`), and IPv6 ULA stay blocked
+unconditionally — the hatch widens CGNAT only.
+
+**No equivalent escape hatch is offered for IMDS or ECS metadata.**
+Those endpoints carry IAM credentials by design; the SSRF block is
+the entire point.
+
+The webhook dispatcher's config-time validator
+(`webhook.go::isPrivateIP`) was previously a separate predicate that
+did NOT cover these new ranges, so a webhook URL pointing at a
+Tailscale receiver would pass config validation and then fail at
+dispatch time with an opaque error. The two predicates are now
+unified through `isUnsafeIP`, so misconfigurations surface at
+`defenseclaw config webhook add` / `update` time instead of at first
+delivery. Existing valid webhook URLs (public hosts) are unaffected.
+
+### Security — DeepSec hardening (selected highlights)
+
+- **CRITICAL S0** Codex git-scan hardening: hostile repository config,
+  external diff, and `core.fsmonitor` injection paths are sanitized
+  through `internal/gitsafe`; safe-flag set audited against
+  `git --help`.
+- **HIGH S2** Workflow integrity: `.github/workflows/{ci,docs-site,e2e,release}.yml`
+  pin every third-party action by SHA, drop unused `permissions`
+  scopes, and quote / sanitize all input expansions.
+- **HIGH S2** Gateway HTTP egress: `internal/gateway/proxy.go` enforces
+  SSRF refusal across known/unknown branches with `ResolveAndPin`,
+  exact provider matching, IP/CIDR pinned dialer, userinfo / control-
+  byte rejection, and structured URL scrubbing on every log/metric
+  surface.
+- **HIGH S2** Connector subprocess + plugin loader: token-aware hook
+  templates, plugin loader TOCTOU closed (open-then-stat pinned to the
+  same fd), embedded plugin canonical token derivation.
+- **HIGH S2** Gateway scanners (mcp / plugin / skill) now fail-closed
+  on non-zero subprocess exit; `policy.ScanResultInput` extended so the
+  policy engine sees the full scanner verdict shape.
+- **HIGH S2** Watcher routes rescan + baseline through admission and
+  installs recursive watches on every admitted directory; skipping a
+  policy file no longer suppresses unrelated change activity.
+- **HIGH S3 BUG** Sandbox cleanup is scoped to per-request directories;
+  the surgical 0.3 migration replaced the destructive prior path; the
+  `http_jsonl` sink retries synchronously on transient failures;
+  watchdog uses flock + binary fingerprint to recognise stale
+  processes; `RepairPairing` is fail-closed and atomic.
+- **MEDIUM S4** Webhook URLs are hashed (`scrubURLSecrets`,
+  `hashWebhookTargetURL`) on every log path; AI-discovery path
+  fingerprints are HMAC-keyed; MCP scan target URLs are validated as
+  loopback / private / metadata; endpoint ignore-list switched from
+  prefix matching to exact hostname / loopback IP literal matching.
+- **MEDIUM S4** `CorrelationMiddleware` no longer mints unauthenticated
+  agent sessions: it calls `AgentRegistry.ResolvePeek`, then handlers
+  call `PromoteSessionIfAuthenticated` after `tokenAuth` succeeds.
+  Combined with the LRU cap on `AgentRegistry`, unauthenticated
+  callers can no longer amplify in-memory state by flooding distinct
+  `X-DefenseClaw-Session-Id` headers.
+- **BUG S5** `cli/defenseclaw/commands/cmd_init.py` no longer runs
+  notifications onboarding twice; `cli/defenseclaw/provenance.py` now
+  hashes nested policy bundle files; `internal/cli/connector_cmd.go`
+  discovers plugin connectors before lifecycle commands run;
+  `internal/cli/{policy,status}.go` attach the gateway bearer / token
+  header on outbound API calls; `internal/cli/policy_diff.go` +
+  `internal/sandbox/network_policy.go` make endpoint coverage
+  port-aware; `internal/cli/tui_cmd.go` treats EOF + empty input as
+  decline; `internal/gateway/api_ratelimit.go` resolves a `time.Time`
+  data race with `atomic.Int64`; `internal/gateway/connector/otlp_token.go`
+  is now `flock`-synchronized for cross-process token minting;
+  `internal/gateway/judge_store.go` + `internal/gatewaylog/events.go`
+  fix `JudgeResponse.input_hash` to hash the *input* (not the response
+  body), with `JudgeEmitOpts.InputContent` automatically populating
+  the digest; `internal/gateway/llm_event_emit.go` + `api.go` add a
+  bounded LRU cache for hook prompt correlation maps;
+  `internal/gateway/provider_bifrost.go` adds a bounded LRU cache for
+  per-tenant Bifrost clients with proper `Shutdown()` on eviction;
+  `internal/guardrail/rulepack.go` uses slash-separated paths for
+  `embed.FS` lookups; `internal/watcher/policy_files_watch.go` records
+  per-file unreadable errors instead of suppressing the whole poll.
+
 ## [Unreleased] — PR #194 single-rollup (security floor + connector polymorphism + test parity)
 
 This rollup closes the audit gaps identified in the v3 connector

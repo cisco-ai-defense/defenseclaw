@@ -101,13 +101,34 @@ endpoint_allowed(policy, network) if {
 	endpoint.ports[_] == network.port
 }
 
-# Endpoint matching: hostless with allowed_ips — match any host on port.
+# Endpoint matching: hostless with allowed_ips — the connection's host or
+# resolved IP MUST be a member of allowed_ips. (F-0544: the previous branch
+# matched on port alone, so a hostless endpoint with allowed_ips silently
+# permitted ANY host/IP on that port.)
 endpoint_allowed(policy, network) if {
 	some endpoint
 	endpoint := policy.endpoints[_]
 	object.get(endpoint, "host", "") == ""
 	count(object.get(endpoint, "allowed_ips", [])) > 0
 	endpoint.ports[_] == network.port
+	allowed := object.get(endpoint, "allowed_ips", [])
+	_host_in_allowed_ips(allowed, network.host)
+}
+
+endpoint_allowed(policy, network) if {
+	some endpoint
+	endpoint := policy.endpoints[_]
+	object.get(endpoint, "host", "") == ""
+	count(object.get(endpoint, "allowed_ips", [])) > 0
+	endpoint.ports[_] == network.port
+	allowed := object.get(endpoint, "allowed_ips", [])
+	_host_in_allowed_ips(allowed, network.ip)
+}
+
+# True when a non-empty connection value is an exact member of allowed_ips.
+_host_in_allowed_ips(allowed, value) if {
+	value != ""
+	allowed[_] == value
 }
 
 # Binary matching: exact path.
@@ -240,6 +261,16 @@ endpoint_matches_request(ep, network) if {
 	object.get(ep, "host", "") == ""
 	count(object.get(ep, "allowed_ips", [])) > 0
 	ep.ports[_] == network.port
+	allowed := object.get(ep, "allowed_ips", [])
+	_host_in_allowed_ips(allowed, network.host)
+}
+
+endpoint_matches_request(ep, network) if {
+	object.get(ep, "host", "") == ""
+	count(object.get(ep, "allowed_ips", [])) > 0
+	ep.ports[_] == network.port
+	allowed := object.get(ep, "allowed_ips", [])
+	_host_in_allowed_ips(allowed, network.ip)
 }
 
 endpoint_has_extended_config(ep) if {

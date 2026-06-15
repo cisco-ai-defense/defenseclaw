@@ -11,9 +11,9 @@ splunk:
     - file:///opt/splunk-claw-bridge/splunk/build/defenseclaw_local_mode.tgz
   hec:
     enable: true
-    ssl: false
+    ssl: true
     port: 8088
-    token: 00000000-0000-0000-0000-000000000001
+    token: "{{ lookup('env', 'SPLUNK_HEC_TOKEN') }}"
   app_paths:
     httpinput: /opt/splunk/etc/apps/splunk_httpinput
   conf:

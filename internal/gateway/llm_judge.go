@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -110,7 +111,7 @@ type LLMJudge struct {
 // vLLM / LM Studio endpoint without fabricating a credential. The
 // optional RulePack supplies externalized judge prompts, suppressions,
 // and severity overrides.
-func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath string, rp *guardrail.RulePack) *LLMJudge {
+func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath string, rp *guardrail.RulePack, providers *configs.ProvidersConfig) *LLMJudge {
 	if cfg == nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: config is nil\n")
 		return nil
@@ -149,12 +150,25 @@ func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath strin
 		return nil
 	}
 
-	provider, err := NewProviderWithBase(model, apiKey, llm.BaseURL)
+	// Build an effective LLMConfig with the resolved API key pinned
+	// inline so the dispatcher does not re-resolve (which would lose
+	// the dotenv fallback applied above). Carries the role-level
+	// sub-blocks (Bedrock/Vertex/Azure/TLS) through unchanged so the
+	// dispatcher can merge them with the overlay (role wins).
+	effLLM := llm
+	effLLM.Model = model
+	effLLM.APIKey = apiKey
+	effLLM.APIKeyEnv = ""
+	provider, err := NewProviderForLLMConfig(&effLLM, providers)
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: failed to create provider: %v\n", err)
 		return nil
 	}
-	fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s)\n", model)
+	if strings.TrimSpace(llm.InstanceName) != "" {
+		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s, instance=%s)\n", model, llm.InstanceName)
+	} else {
+		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s)\n", model)
+	}
 	return &LLMJudge{cfg: cfg, model: model, provider: provider, rp: rp}
 }
 
@@ -507,7 +521,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{})
+			err.Error(), "", JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-injection")
 	}
 
@@ -515,7 +529,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{})
+			"empty-response", "", JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-injection")
 	}
 
@@ -543,7 +557,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		recordJudgeMetrics(nil, true)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-injection")
 	}
 
@@ -559,7 +573,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		verdict.Action, verdict.Severity, verdict.Findings)
 	emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
-		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict)})
+		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), InputContent: content})
 	if c := judgeVerdictCache(); c != nil {
 		c.Put(kind, j.model, "prompt", content, verdictSnapshotFrom(verdict))
 	}
@@ -602,7 +616,7 @@ func SetRetainJudgeBodies(v bool) {
 	retainJudgeBodies.Store(v)
 }
 
-// judgeTel optionally wires OTel for judge spans + histograms (Track 3).
+// judgeTel optionally wires OTel for judge spans + histograms.
 var judgeTel atomic.Pointer[telemetry.Provider]
 
 // SetJudgeTelemetryProvider installs the shared OTel provider for judge
@@ -618,7 +632,7 @@ func judgeTelemetry() *telemetry.Provider {
 // verdictCache is an optional process-local TTL cache for judge results.
 var verdictCache atomic.Pointer[guardrail.VerdictCache]
 
-// SetJudgeVerdictCache wires the verdict cache (Track 3). Nil disables.
+// SetJudgeVerdictCache wires the verdict cache. Nil disables caching.
 func SetJudgeVerdictCache(c *guardrail.VerdictCache) {
 	verdictCache.Store(c)
 }
@@ -740,6 +754,13 @@ func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveC
 
 	var findings []string
 	var reasons []string
+	var signalStrengths []string
+
+	// weakFindings are categories the LLM flagged (label=true) but rated
+	// weak_signal — too ambiguous to count toward severity on their own.
+	// They're preserved for audit, but excluded from the count-based
+	// escalation so weakly-corroborated findings don't stack to CRITICAL.
+	var weakFindings []string
 
 	for cat, findingID := range injectionCategories {
 		entry, ok := data[cat]
@@ -751,29 +772,73 @@ func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveC
 			continue
 		}
 		label, _ := m["label"].(bool)
-		if label {
-			findings = append(findings, findingID)
-			if r, ok := m["reasoning"].(string); ok && r != "" {
-				reasons = append(reasons, cat+": "+r)
-			}
+		if !label {
+			continue
 		}
+
+		strength := ""
+		if s, ok := m["signal_strength"].(string); ok {
+			strength = strings.ToLower(strings.TrimSpace(s))
+		}
+		if strength != "" {
+			signalStrengths = append(signalStrengths, cat+"="+strength)
+		}
+
+		if r, ok := m["reasoning"].(string); ok && r != "" {
+			reasons = append(reasons, cat+": "+r)
+		}
+
+		// A label=true with weak_signal means "this is ambiguous, I'd
+		// expect corroboration before acting." Track it for audit but
+		// don't count it toward the count-based severity escalation.
+		if strength == "weak_signal" {
+			weakFindings = append(weakFindings, findingID)
+			continue
+		}
+		findings = append(findings, findingID)
 	}
 
+	// No strong findings. If we have weak findings alone, emit MEDIUM
+	// (alert-only) so operators see the signal but traffic isn't blocked.
+	// Zero findings of any kind → clean allow.
 	if len(findings) == 0 {
+		if len(weakFindings) > 0 && !sensitiveContext {
+			sort.Strings(weakFindings)
+			sort.Strings(reasons)
+			sort.Strings(signalStrengths)
+			reason := "judge-injection: " + strings.Join(reasons, "; ")
+			if len(signalStrengths) > 0 {
+				reason += " [signal_strength: " + strings.Join(signalStrengths, ", ") + "]"
+			}
+			return &ScanVerdict{
+				Action:   "alert",
+				Severity: "MEDIUM",
+				Reason:   reason,
+				Findings: weakFindings,
+				Scanner:  "llm-judge-injection",
+			}
+		}
 		return allowVerdict("llm-judge-injection")
 	}
 
 	sort.Strings(findings)
 	sort.Strings(reasons)
+	sort.Strings(signalStrengths)
 
 	// Confidence gating: when the rule pack specifies thresholds, a single
 	// category detection is capped at the configured max severity (typically
-	// MEDIUM) instead of immediately escalating to HIGH/block.
+	// MEDIUM) instead of immediately escalating to HIGH/block. The
+	// MinCategoriesForCritical knob controls the CRITICAL escalation
+	// threshold (previously hardcoded at 3); see rulepack.go for rationale.
 	minForHigh := 1
+	minForCritical := 3 // legacy default if YAML omits the knob
 	singleCatMaxSev := ""
 	if jc := j.rp.InjectionJudge(); jc != nil {
 		if jc.MinCategoriesForHigh > 0 {
 			minForHigh = jc.MinCategoriesForHigh
+		}
+		if jc.MinCategoriesForCritical > 0 {
+			minForCritical = jc.MinCategoriesForCritical
 		}
 		singleCatMaxSev = jc.SingleCategoryMaxSev
 	}
@@ -781,7 +846,7 @@ func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveC
 	severity := "HIGH"
 	if len(findings) < minForHigh && singleCatMaxSev != "" && !sensitiveContext {
 		severity = singleCatMaxSev
-	} else if len(findings) >= 3 {
+	} else if minForCritical > 0 && len(findings) >= minForCritical {
 		severity = "CRITICAL"
 	}
 
@@ -791,6 +856,9 @@ func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveC
 	}
 
 	reason := "judge-injection: " + strings.Join(reasons, "; ")
+	if len(signalStrengths) > 0 {
+		reason += " [signal_strength: " + strings.Join(signalStrengths, ", ") + "]"
+	}
 	if sensitiveContext && len(findings) < minForHigh && singleCatMaxSev != "" {
 		// Annotate the verdict so audit logs make the un-cap visible.
 		// Without this, an operator inspecting the verdict cannot tell
@@ -922,7 +990,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{ToolName: toolName})
+			err.Error(), "", JudgeEmitOpts{ToolName: toolName, InputContent: content})
 		return errorVerdict("llm-judge-pii")
 	}
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: provider returned (dir=%s, choices=%d)\n", direction, len(resp.Choices))
@@ -931,7 +999,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{ToolName: toolName})
+			"empty-response", "", JudgeEmitOpts{ToolName: toolName, InputContent: content})
 		return errorVerdict("llm-judge-pii")
 	}
 
@@ -959,7 +1027,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		recordJudgeMetrics(nil, true)
 		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName, InputContent: content})
 		return errorVerdict("llm-judge-pii")
 	}
 
@@ -985,7 +1053,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		direction, verdict.Action, verdict.Severity, verdict.Findings)
 	emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
-		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName})
+		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName, InputContent: content})
 	if c := judgeVerdictCache(); c != nil {
 		c.Put(kind, j.model, dir, content, verdictSnapshotFrom(verdict))
 	}
@@ -1409,7 +1477,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{})
+			err.Error(), "", JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-exfil")
 	}
 
@@ -1417,7 +1485,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{})
+			"empty-response", "", JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-exfil")
 	}
 
@@ -1441,7 +1509,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 		recordJudgeMetrics(nil, true)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-exfil")
 	}
 
@@ -1451,7 +1519,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 		verdict.Action, verdict.Severity, verdict.Findings)
 	emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
-		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict)})
+		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), InputContent: content})
 	if c := judgeVerdictCache(); c != nil {
 		c.Put(kind, j.model, "prompt", content, verdictSnapshotFrom(verdict))
 	}
@@ -1474,6 +1542,7 @@ func (j *LLMJudge) exfilToVerdict(data map[string]interface{}) *ScanVerdict {
 	maxSev := "NONE"
 	var findings []string
 	var reasons []string
+	var signalStrengths []string
 
 	for cat, defaultID := range categories {
 		entry, ok := data[cat]
@@ -1507,6 +1576,9 @@ func (j *LLMJudge) exfilToVerdict(data map[string]interface{}) *ScanVerdict {
 		if r, ok := m["reasoning"].(string); ok && r != "" {
 			reasons = append(reasons, cat+": "+r)
 		}
+		if s, ok := m["signal_strength"].(string); ok && s != "" {
+			signalStrengths = append(signalStrengths, cat+"="+s)
+		}
 	}
 
 	if len(findings) == 0 {
@@ -1515,6 +1587,7 @@ func (j *LLMJudge) exfilToVerdict(data map[string]interface{}) *ScanVerdict {
 
 	sort.Strings(findings)
 	sort.Strings(reasons)
+	sort.Strings(signalStrengths)
 
 	severity := maxSev
 	// Single-category exfil findings stay HIGH — see comment above.
@@ -1542,10 +1615,14 @@ func (j *LLMJudge) exfilToVerdict(data map[string]interface{}) *ScanVerdict {
 		action = "alert"
 	}
 
+	reason := "judge-exfil: " + strings.Join(reasons, "; ")
+	if len(signalStrengths) > 0 {
+		reason += " [signal_strength: " + strings.Join(signalStrengths, ", ") + "]"
+	}
 	return &ScanVerdict{
 		Action:   action,
 		Severity: severity,
-		Reason:   "judge-exfil: " + strings.Join(reasons, "; "),
+		Reason:   reason,
 		Findings: findings,
 		Scanner:  "llm-judge-exfil",
 	}
@@ -1697,7 +1774,7 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, dir,
 			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{ToolName: toolName})
+			err.Error(), "", JudgeEmitOpts{ToolName: toolName, InputContent: args})
 		return errorVerdict("llm-judge-tool")
 	}
 
@@ -1709,7 +1786,7 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, dir,
 			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{ToolName: toolName})
+			"empty-response", "", JudgeEmitOpts{ToolName: toolName, InputContent: args})
 		return errorVerdict("llm-judge-tool")
 	}
 
@@ -1721,7 +1798,7 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 		recordJudgeMetrics(nil, true)
 		emitJudge(ctx, kind, j.model, dir,
 			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName, InputContent: args})
 		return errorVerdict("llm-judge-tool")
 	}
 
@@ -1729,7 +1806,7 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 	recordJudgeMetrics(verdict, false)
 	emitJudge(ctx, kind, j.model, dir,
 		len(args), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
-		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName})
+		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName, InputContent: args})
 	if c := judgeVerdictCache(); c != nil {
 		c.Put(kind, j.model, "tool_call", cacheBody, verdictSnapshotFrom(verdict))
 	}
@@ -1759,6 +1836,7 @@ func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 
 	var findings []string
 	var reasons []string
+	var signalStrengths []string
 
 	for cat, findingID := range toolInjectionCategories {
 		entry, ok := data[cat]
@@ -1775,6 +1853,9 @@ func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 			if r, ok := m["reasoning"].(string); ok && r != "" {
 				reasons = append(reasons, cat+": "+r)
 			}
+			if s, ok := m["signal_strength"].(string); ok && s != "" {
+				signalStrengths = append(signalStrengths, cat+"="+s)
+			}
 		}
 	}
 
@@ -1784,24 +1865,46 @@ func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 
 	sort.Strings(findings)
 	sort.Strings(reasons)
+	sort.Strings(signalStrengths)
 
-	// Structural attack signals (exfiltration, destructive commands) block on
-	// a single flag — these have no benign interpretation in tool arguments.
-	// Softer signals (obfuscation, instruction/context manipulation) require
-	// corroboration before blocking; a single soft flag is MEDIUM/alert.
-	hasHighConfidence := false
+	// Soft signals (obfuscation, instruction/context manipulation) require
+	// corroboration: single flag → MEDIUM/alert, two or more → HIGH/block,
+	// three or more → CRITICAL/block.
+	//
+	// Structural signals (exfiltration, destructive commands) are always at
+	// least HIGH on a single flag (no benign tool-arg interpretation). They
+	// escalate to CRITICAL when the LLM rates the signal as strong_signal —
+	// meaning the malicious intent is unambiguous and the impact is high.
+	hasHighConfidenceCategory := false
 	for _, f := range findings {
 		if highConfidenceToolFindings[f] {
-			hasHighConfidence = true
+			hasHighConfidenceCategory = true
+			break
+		}
+	}
+
+	// Collect per-category signal strengths for structural findings.
+	structuralStrongSignal := false
+	for _, ss := range signalStrengths {
+		// Format: "Category Name=strong_signal"
+		parts := strings.SplitN(ss, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		catName := strings.TrimSpace(parts[0])
+		strength := strings.ToLower(strings.TrimSpace(parts[1]))
+		findingID := toolInjectionCategories[catName]
+		if highConfidenceToolFindings[findingID] && strength == "strong_signal" {
+			structuralStrongSignal = true
 			break
 		}
 	}
 
 	severity := "MEDIUM"
-	if hasHighConfidence || len(findings) >= 2 {
+	if len(findings) >= 2 || hasHighConfidenceCategory {
 		severity = "HIGH"
 	}
-	if len(findings) >= 3 {
+	if structuralStrongSignal || len(findings) >= 3 {
 		severity = "CRITICAL"
 	}
 
@@ -1810,10 +1913,14 @@ func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 		action = "block"
 	}
 
+	reason := "judge-tool-injection: " + strings.Join(reasons, "; ")
+	if len(signalStrengths) > 0 {
+		reason += " [signal_strength: " + strings.Join(signalStrengths, ", ") + "]"
+	}
 	return &ScanVerdict{
 		Action:   action,
 		Severity: severity,
-		Reason:   "judge-tool-injection: " + strings.Join(reasons, "; "),
+		Reason:   reason,
 		Findings: findings,
 		Scanner:  "llm-judge-tool",
 	}

@@ -1,0 +1,33 @@
+# Example DefenseClaw registry manifest — skills only.
+#
+# Publish this file at a stable HTTPS URL and register it with:
+#
+#   defenseclaw registry add corp-skills \
+#     --kind http_yaml \
+#     --url https://catalog.example.com/skills.yaml \
+#     --content skill --non-interactive
+#   defenseclaw registry sync corp-skills
+#
+# Schema: schemas/registry-manifest.schema.json (validated at sync time).
+schema_version: 1
+generated_at: "2026-05-07T00:00:00Z"
+publisher: example-corp
+default_connector: openclaw
+entries:
+  - name: github-summarizer
+    type: skill
+    source_url: clawhub://github-summarizer
+    license: Apache-2.0
+    publisher: example-corp
+    description: Summarise pull requests from any GitHub repository.
+    homepage: https://github.com/example/openclaw-skills
+    tags: [productivity, github]
+  - name: corp-runbook
+    type: skill
+    source_url: https://artifacts.example.com/skills/corp-runbook-1.4.0.tar.gz
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    version: "1.4.0"
+    license: Internal
+    publisher: example-corp
+    description: Read-only access to the corporate runbook collection.
+    tags: [internal, ops]

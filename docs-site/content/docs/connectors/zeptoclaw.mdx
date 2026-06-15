@@ -1,0 +1,152 @@
+---
+title: ZeptoClaw
+description: ZeptoClaw routes through DefenseClaw via api_base redirect plus response-scan. Full guardrail pipeline runs on every request.
+keywords:
+  - DefenseClaw ZeptoClaw connector
+  - ZeptoClaw guardrail
+---
+
+ZeptoClaw is the second proxy connector. DefenseClaw rewrites `~/.zeptoclaw/config.json` providers to point at the local guardrail proxy; every request is inspected on its way out and every response on its way back.
+
+## Setup
+
+```bash
+defenseclaw setup zeptoclaw --mode observe --restart
+defenseclaw setup zeptoclaw --mode action --rule-pack default --restart
+```
+
+`setup zeptoclaw` is an alias around [`defenseclaw setup guardrail --connector zeptoclaw`](/docs/setup/guardrail) and inherits every guardrail flag. Like OpenClaw the proxy is **always** in the data path: there is no observability-only branch, only `--mode observe` (log without blocking) vs `--mode action` (enforce).
+
+#### What this command sets vs. leaves at defaults
+
+The flags above explicitly set: connector, mode, and (optionally) rule pack. Every other knob falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+
+| Knob | Value when omitted | Flag to override |
+| --- | --- | --- |
+| Scanner backend | `local` (bundled regex packs, zero key) | `--scanner-mode local\|remote\|both` |
+| Rule pack | unset → built-in baseline (no overlay) | `--rule-pack default\|strict\|permissive` |
+| LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
+| Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
+| HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
+| HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
+| Hook fail-mode | `open` (allow on guardrail-side failure) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
+| Proxy port | `4000` | `--port <int>` |
+| Block message | empty (uses built-in copy) | `--block-message "<text>"` |
+| Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
+| Verify after setup | on | `--no-verify` |
+
+See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
+
+#### Common variations — pick the recipe that fits your phase
+
+<Tabs items={['Pilot (observe)', 'Action + HITL', 'Action + judge', 'Strict / regulated']}>
+
+<Tab value="Pilot (observe)">
+
+```bash
+defenseclaw setup zeptoclaw \
+  --mode observe \
+  --rule-pack permissive \
+  --restart
+```
+
+The proxy is in the data path but nothing blocks. Every prompt and response lands in `~/.defenseclaw/gateway.jsonl`. Run this for at least a week before promoting — see [Defaults → tuning by risk tolerance](/docs/defaults#tuning-by-risk-tolerance).
+
+</Tab>
+
+<Tab value="Action + HITL">
+
+```bash
+defenseclaw setup zeptoclaw \
+  --mode action \
+  --human-approval \
+  --hilt-min-severity high \
+  --restart
+```
+
+HIGH findings pause for operator approval; CRITICAL still blocks unconditionally. ZeptoClaw has **no native ask surface**, so HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI / audit log — make sure operators are reachable there. See the [HITL page](/docs/hitl) for the per-connector matrix.
+
+</Tab>
+
+<Tab value="Action + judge">
+
+```bash
+export DEFENSECLAW_LLM_KEY=<your-key>
+
+defenseclaw setup zeptoclaw \
+  --mode action \
+  --human-approval \
+  --hilt-min-severity high \
+  --detection-strategy regex_judge \
+  --judge-model anthropic/claude-sonnet-4-20250514 \
+  --judge-api-key-env DEFENSECLAW_LLM_KEY \
+  --restart
+```
+
+Adds the LLM judge as a second pass on regex-flagged prompts. Costs a few cents per turn; cuts false positives meaningfully on semantic jailbreaks regex misses.
+
+</Tab>
+
+<Tab value="Strict / regulated">
+
+```bash
+defenseclaw policy activate strict
+defenseclaw setup zeptoclaw \
+  --mode action \
+  --human-approval \
+  --hilt-min-severity low \
+  --rule-pack strict \
+  --restart
+```
+
+Block ≥ MEDIUM, no allow-list bypass, HITL on every LOW+ event. Pair with the OpenShell sandbox profile and an MCP allow-list for full lockdown.
+
+</Tab>
+
+</Tabs>
+
+#### Decision aids — should I turn this on?
+
+<Cards>
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="When --human-approval is worth it. ZeptoClaw downgrades to confirm verdicts since it has no native ask — operators see them in the TUI / audit log." />
+  <Card href="/docs/setup/guardrail#tabs-by-mode-non-interactive-recipes" title="Mode + judge recipes" description="Side-by-side bash for observe / action / action+HITL / action+judge — copy-paste ready." />
+  <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
+  <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
+</Cards>
+
+<Callout>
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt--flag-mapping) table gives you the CI-shaped command for the same configuration.
+</Callout>
+
+## Files DefenseClaw will modify
+
+<Files>
+  <Folder name="~/.zeptoclaw" defaultOpen>
+    <File name="config.json (providers.*.api_base, safety.allow_private_endpoints)" />
+  </Folder>
+  <Folder name="~/.defenseclaw">
+    <Folder name="hooks">
+      <File name="(generic hook scripts)" />
+    </Folder>
+  </Folder>
+</Files>
+
+`safety.allow_private_endpoints` is set to `true` so the rewritten api_base (a 127.0.0.1 URL) is accepted.
+
+## Hook capabilities
+
+<HookEventsList connector="zeptoclaw" />
+
+<Callout>
+ZeptoClaw has no native ask surface. Confirm verdicts are downgraded with `raw_action` preserved so operators can review the original request in the TUI / audit log.
+</Callout>
+
+## Subprocess policy
+
+`sandbox` — same openshell-sandbox path as OpenClaw.
+
+## Disable
+
+```bash
+defenseclaw setup guardrail --disable
+```

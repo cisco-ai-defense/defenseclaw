@@ -61,7 +61,11 @@ func (p *Provider) EmitRuntimeAlert(
 
 	ctx := context.Background()
 
-	p.RecordAlert(ctx, alertType, severity, source)
+	// Attribute the alert to the connector when the guardrail scanner encodes
+	// it as "<connector>:<role>" (e.g. "codex:guardrail-proxy"); global
+	// alerts with no connectorful scanner record "unknown".
+	alertConnector := guardrailConnectorFromScanner(guardrail["scanner"])
+	p.RecordAlert(ctx, alertType, severity, source, alertConnector)
 
 	if guardrailScanner, ok := guardrail["scanner"]; ok {
 		actionTaken := guardrail["action_taken"]

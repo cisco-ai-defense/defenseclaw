@@ -11,6 +11,7 @@
 package audit
 
 import (
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -337,5 +338,108 @@ func TestLogEvent_PersistsCorrelationIDs(t *testing.T) {
 	}
 	if got.RunID != in.RunID {
 		t.Fatalf("run_id=%q want %q", got.RunID, in.RunID)
+	}
+}
+
+// TestInsertJudgeResponse_NullableProvenanceColumns guards the
+// nullable contract on the v7 provenance columns. The store helpers
+// (nullStr / nullUint64) convert empty/zero inputs to SQL NULL so
+// downstream SIEMs can distinguish "field not set" from "field set
+// to empty string / zero". A previous regression bypassed the helper
+// for the generation column and passed int64(0) directly, which
+// silently stored 0 instead of NULL and broke `WHERE generation IS
+// NULL` operator filters.
+func TestInsertJudgeResponse_NullableProvenanceColumns(t *testing.T) {
+	s := newStoreForTest(t)
+
+	if err := s.InsertJudgeResponse(JudgeResponse{
+		Kind: "injection",
+		Raw:  `{"verdict":"allow"}`,
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	var (
+		schemaVer     sql.NullInt64
+		contentHash   sql.NullString
+		generation    sql.NullInt64
+		binaryVersion sql.NullString
+	)
+	row := s.db.QueryRow(`SELECT schema_version, content_hash, generation, binary_version
+		FROM judge_responses LIMIT 1`)
+	if err := row.Scan(&schemaVer, &contentHash, &generation, &binaryVersion); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if schemaVer.Valid {
+		t.Errorf("schema_version stored as %d, want NULL", schemaVer.Int64)
+	}
+	if contentHash.Valid {
+		t.Errorf("content_hash stored as %q, want NULL", contentHash.String)
+	}
+	if generation.Valid {
+		t.Errorf("generation stored as %d, want NULL", generation.Int64)
+	}
+	if binaryVersion.Valid {
+		t.Errorf("binary_version stored as %q, want NULL", binaryVersion.String)
+	}
+}
+
+// TestInsertSinkHealth_NullableProvenanceColumns guards the same
+// nullable contract on sink_health rows. A previous regression
+// dereferenced sql.NullString.String on an invalid (empty) helper
+// result, which silently stored the empty string "" instead of SQL
+// NULL for content_hash / binary_version / sidecar_instance_id —
+// breaking sink-health rollup queries that filtered on `IS NULL`.
+func TestInsertSinkHealth_NullableProvenanceColumns(t *testing.T) {
+	s := newStoreForTest(t)
+
+	if err := s.InsertSinkHealth(SinkHealthInput{
+		SinkName: "splunk_hec",
+		SinkKind: "splunk_hec",
+		Outcome:  "delivered",
+	}); err != nil {
+		t.Fatalf("insert sink health: %v", err)
+	}
+
+	var (
+		schemaVer       sql.NullInt64
+		contentHash     sql.NullString
+		generation      sql.NullInt64
+		binaryVersion   sql.NullString
+		sidecarInstance sql.NullString
+		queueDepth      sql.NullInt64
+		droppedCount    sql.NullInt64
+		errStr          sql.NullString
+	)
+	row := s.db.QueryRow(`SELECT schema_version, content_hash, generation,
+		binary_version, sidecar_instance_id, queue_depth, dropped_count, error
+		FROM sink_health LIMIT 1`)
+	if err := row.Scan(&schemaVer, &contentHash, &generation, &binaryVersion,
+		&sidecarInstance, &queueDepth, &droppedCount, &errStr); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if schemaVer.Valid {
+		t.Errorf("schema_version stored as %d, want NULL", schemaVer.Int64)
+	}
+	if contentHash.Valid {
+		t.Errorf("content_hash stored as %q, want NULL", contentHash.String)
+	}
+	if generation.Valid {
+		t.Errorf("generation stored as %d, want NULL", generation.Int64)
+	}
+	if binaryVersion.Valid {
+		t.Errorf("binary_version stored as %q, want NULL", binaryVersion.String)
+	}
+	if sidecarInstance.Valid {
+		t.Errorf("sidecar_instance_id stored as %q, want NULL", sidecarInstance.String)
+	}
+	if queueDepth.Valid {
+		t.Errorf("queue_depth stored as %d, want NULL", queueDepth.Int64)
+	}
+	if droppedCount.Valid {
+		t.Errorf("dropped_count stored as %d, want NULL", droppedCount.Int64)
+	}
+	if errStr.Valid {
+		t.Errorf("error stored as %q, want NULL", errStr.String)
 	}
 }

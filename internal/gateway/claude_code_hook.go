@@ -20,13 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -49,8 +48,10 @@ type claudeCodeHookRequest struct {
 	ToolResponse         interface{}            `json:"tool_response,omitempty"`
 	ToolCalls            interface{}            `json:"tool_calls,omitempty"`
 	Prompt               string                 `json:"prompt,omitempty"`
+	ExpansionType        string                 `json:"expansion_type,omitempty"`
 	CommandName          string                 `json:"command_name,omitempty"`
 	CommandArgs          string                 `json:"command_args,omitempty"`
+	CommandSource        string                 `json:"command_source,omitempty"`
 	StopHookActive       bool                   `json:"stop_hook_active,omitempty"`
 	LastAssistantMessage string                 `json:"last_assistant_message,omitempty"`
 	Error                string                 `json:"error,omitempty"`
@@ -78,100 +79,35 @@ type claudeCodeHookResponse struct {
 	WouldBlock        bool                   `json:"would_block"`
 	AdditionalContext string                 `json:"additional_context,omitempty"`
 	ClaudeCodeOutput  map[string]interface{} `json:"claude_code_output,omitempty"`
+	// EvaluationID joins this hook response to the matching audit
+	// row + per-finding scan_findings rows. Additive — older
+	// connector hook scripts ignore the field.
+	EvaluationID string `json:"evaluation_id,omitempty"`
+	// RuleIDs are the top detection rule_ids that drove this
+	// verdict (capped at 8). Lets operators correlate a block
+	// without joining against scan_findings. Additive.
+	RuleIDs []string `json:"rule_ids,omitempty"`
 }
 
-func (a *APIServer) handleClaudeCodeHook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "claudecode", "unknown", "rejected", "method", 0)
-		}
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var payload map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "claudecode", "unknown", "rejected", "invalid_json", 0)
-		}
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	b, _ := json.Marshal(payload)
-	var req claudeCodeHookRequest
-	if err := json.Unmarshal(b, &req); err != nil {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "claudecode", "unknown", "rejected", "invalid_payload", 0)
-		}
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Claude Code hook payload"})
-		return
-	}
-	req.Payload = payload
-	if req.HookEventName == "" {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "claudecode", "unknown", "rejected", "missing_event", 0)
-		}
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook_event_name is required"})
-		return
-	}
-	req.CWD = sanitizeHookCWD(req.CWD)
-	req.NewCWD = sanitizeHookCWD(req.NewCWD)
-	req.OldCWD = sanitizeHookCWD(req.OldCWD)
-	rawEventIDs := a.rememberClaudeCodeRawHookEvents(req)
-	a.emitClaudeCodeHookLLMEvent(r.Context(), req, rawEventIDs, b)
-
-	t0 := time.Now()
-	resp := a.evaluateClaudeCodeHook(r.Context(), req)
-	elapsed := time.Since(t0)
-
-	if a.health != nil {
-		a.health.RecordConnectorRequest()
-		if resp.Action == "block" {
-			a.health.RecordToolBlock()
-		}
-		if isToolInspectionEvent(req.HookEventName) {
-			a.health.RecordToolInspection()
-		}
-	}
-
-	if a.otel != nil {
-		reason := resp.Action
-		if resp.WouldBlock {
-			reason = "would_block"
-		}
-		a.otel.RecordConnectorHookInvocation(r.Context(), "claudecode", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
-		a.otel.RecordInspectEvaluation(r.Context(), "claudecode:"+req.HookEventName, resp.Action, resp.Severity)
-		a.otel.RecordInspectLatency(r.Context(), "claudecode:"+req.HookEventName, float64(elapsed.Milliseconds()))
-	}
-
-	if a.logger != nil {
-		details := fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-			resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
-		details = appendRawTelemetryDetails(details, "raw_payload", b)
-		details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
-		_ = a.logger.LogActionCtx(r.Context(), "claude-code-hook", req.HookEventName, details)
-	}
-
-	a.writeJSON(w, http.StatusOK, resp)
-}
-
-func isToolInspectionEvent(event string) bool {
-	switch event {
-	case "PreToolUse", "PostToolUse", "PostToolUseFailure", "PostToolBatch", "PermissionRequest":
-		return true
-	}
-	return false
-}
+// Claude Code hook traffic flows through the unified pipeline at
+// handleAgentHook("claudecode"); the profile-runtime registry invokes
+// the connector-specific evaluator kept below. The pipeline's shared
+// concerns — audit envelope refresh, dispatch metric, dedup, trace
+// propagation, OTel emissions — live in exactly one place
+// (handleAgentHook) so per-connector handlers cannot drift apart on
+// any of those signals. The evaluator stamps the unified-pipeline
+// correlation keys (resp.EvaluationID / resp.RuleIDs) on its return
+// value so downstream tooling and the audit envelope receive them.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
 	mode := a.claudeCodeMode()
 	if a.scannerCfg != nil && !a.claudeCodeEnabled() {
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
 	}
+	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
-	assetDecision := config.AssetPolicyDecision{}
-	assetMatched := false
+	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
 		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
@@ -186,13 +122,26 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			}
 		}
 	case "UserPromptSubmit", "UserPromptExpansion":
-		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: claudeCodePromptContent(req), Direction: "prompt"})
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodePromptContent(req), Direction: "prompt", Connector: "claudecode"})
+		if req.HookEventName == "UserPromptExpansion" {
+			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
+		}
 	case "PreToolUse", "PermissionRequest", "PermissionDenied":
-		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call"})
-		assetDecision, assetMatched = a.claudeCodeMCPAssetDecision(ctx, req)
+		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call", Connector: "claudecode"})
+		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		}
+		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
 	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
-		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result"})
-		assetDecision, assetMatched = a.claudeCodeMCPAssetDecision(ctx, req)
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
+		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		}
+		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
 	case "Stop", "SubagentStop", "SessionEnd":
 		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
@@ -200,14 +149,15 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "InstructionsLoaded", "ConfigChange", "FileChanged":
 		verdict = a.scanClaudeCodeEventFile(ctx, req)
 		if verdict == nil {
-			verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: claudeCodeEventContent(req), Direction: "prompt"})
+			verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeEventContent(req), Direction: "prompt", Connector: "claudecode"})
 		}
 	case "TaskCreated", "TaskCompleted", "TeammateIdle",
 		"PreCompact", "PostCompact", "Elicitation", "ElicitationResult", "Notification":
-		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: claudeCodeEventContent(req), Direction: "prompt"})
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeEventContent(req), Direction: "prompt", Connector: "claudecode"})
 	}
 
 	rawAction := normalizeCodexAction(verdict.Action)
+	rawActionBeforeAssets := rawAction
 	action := rawAction
 	wouldBlock := rawAction == "block" && mode != "action"
 	if rawAction == "block" && !claudeCodeCanEnforce(req.HookEventName) {
@@ -222,18 +172,104 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	if mode == "action" && rawAction == "confirm" && req.HookEventName != "PreToolUse" {
 		action = "alert"
 	}
-	mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
-		assetDecision, assetMatched, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
-	)
-	action = mergedAction
-	rawAction = mergedRawAction
-	verdict.Severity = mergedSeverity
-	verdict.Reason = mergedReason
-	verdict.Findings = mergedFindings
-	if assetWouldBlock {
-		wouldBlock = true
+	for _, asset := range assetDecisions {
+		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
+			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
+		)
+		action = mergedAction
+		rawAction = mergedRawAction
+		verdict.Severity = mergedSeverity
+		verdict.Reason = mergedReason
+		verdict.Findings = mergedFindings
+		if assetWouldBlock {
+			wouldBlock = true
+		}
 	}
-	return claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	// Fan the rule-level findings through the unified runtime
+	// finding pipeline so SIEM sees one EventScanFinding per
+	// matched rule and the correlator gets a chance to upgrade
+	// the verdict on multi-step attack flows. scanner="hook-rules".
+	// Done before dispatchClaudeCodeHookNotification so the OS toast
+	// can carry the same evaluation_id + rule_ids that the audit
+	// row + HTTP response will surface.
+	evalCtx := a.emitHookRuleFindings(ctx, "claudecode", req.HookEventName, verdict,
+		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
+	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
+		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx)
+	}
+	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	// Stamp the unified-pipeline correlation keys so the agent-hook
+	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
+	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
+	// both see them without a second pass.
+	resp.EvaluationID = evalCtx.EvaluationID
+	resp.RuleIDs = evalCtx.RuleIDs
+	return resp
+}
+
+// dispatchClaudeCodeHookNotification fires a user-session OS toast
+// for any non-allow verdict the hook produced. Routing is:
+//
+//   - action=="block"            → notifier.OnBlock
+//   - rawAction=="block" and we did not actually enforce (observe
+//     mode, or the hook event is not enforceable) → OnWouldBlock
+//   - rawAction=="confirm"       → OnApprovalPending
+//
+// All callers receive the same audit-shaped subtitle (source +
+// severity + connector + hook event) so operators can tell the
+// surface from the toast without opening the audit log. The reason
+// is run through redaction.ForSinkReason before display so a
+// regex-match verdict carrying echoed user content (PII, secrets)
+// does not land verbatim on the screen — this matches how proxy.go
+// and hilt.go feed the same dispatcher.
+// dispatchClaudeCodeHookNotification follows the same routing
+// contract documented on dispatchAgentHookNotification. The
+// rawAction=="confirm" && action!="confirm" branch covers observe
+// mode (claudecode's PreToolUse response is permissionDecision=allow
+// in observe mode, so no chat ask is issued) — those toasts go
+// through OnWouldBlock with WouldAsk=true so a single
+// notifications.block_would_block=false silences all observe-mode
+// noise without affecting real native asks.
+func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext) {
+	if a == nil || a.notifier == nil {
+		return
+	}
+	target := strings.TrimSpace(req.ToolName)
+	if target == "" {
+		target = req.HookEventName
+	}
+	safeReason := string(redaction.ForSinkReason(reason))
+	base := notifier.BlockEvent{
+		Source:       notifier.SourceHook,
+		Target:       target,
+		Reason:       safeReason,
+		Severity:     severity,
+		Connector:    "claudecode",
+		Event:        req.HookEventName,
+		EvaluationID: evalCtx.EvaluationID,
+		RuleIDs:      evalCtx.RuleIDs,
+	}
+	switch {
+	case action == "block":
+		a.notifier.OnBlock(base)
+	case rawAction == "block" && (wouldBlock || action != "block"):
+		a.notifier.OnWouldBlock(base)
+	case action == "confirm":
+		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
+			Subject:      fmt.Sprintf("%s (%s)", target, req.HookEventName),
+			Reason:       safeReason,
+			Severity:     severity,
+			Source:       notifier.SourceHook,
+			Connector:    "claudecode",
+			Event:        req.HookEventName,
+			EvaluationID: evalCtx.EvaluationID,
+			RuleIDs:      evalCtx.RuleIDs,
+		})
+	case rawAction == "confirm":
+		evt := base
+		evt.WouldAsk = true
+		a.notifier.OnWouldBlock(evt)
+	}
 }
 
 // claudeCodeEnabled returns true when the claude-code hook handler
@@ -247,8 +283,22 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	if a.scannerCfg == nil {
 		return false
 	}
+	// Per-connector explicit disable wins over every enable signal below:
+	// `guardrail disable --connector claudecode` yields allow-without-scan
+	// even though claudecode stays in guardrail.connectors (policy retained
+	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
+	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
+	// installs and any connector never explicitly disabled.
+	if !a.scannerCfg.Guardrail.EffectiveEnabled("claudecode") {
+		return false
+	}
 	hookCfg := a.scannerCfg.ConnectorHookConfig("claudecode")
 	if hookCfg.Enabled {
+		return true
+	}
+	// Multi-connector: membership in guardrail.connectors opts claudecode
+	// in even when it is not the singular primary (no-op for single).
+	if a.scannerCfg.Guardrail.HasConnector("claudecode") {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "claudecode")
@@ -260,13 +310,11 @@ func (a *APIServer) claudeCodeMode() string {
 		hookCfg := a.scannerCfg.ConnectorHookConfig("claudecode")
 		mode = strings.TrimSpace(hookCfg.Mode)
 		if mode == "" || mode == "inherit" {
-			mode = strings.TrimSpace(a.scannerCfg.Guardrail.Mode)
+			// Per-connector guardrail override wins over global mode.
+			mode = strings.TrimSpace(a.scannerCfg.Guardrail.EffectiveMode("claudecode"))
 		}
 	}
-	if mode != "action" {
-		return "observe"
-	}
-	return mode
+	return normalizeAgentHookMode(mode)
 }
 
 func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool) claudeCodeHookResponse {

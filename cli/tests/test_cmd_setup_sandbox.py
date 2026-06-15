@@ -87,11 +87,20 @@ class _MockGateway:
         self.port = 18789
 
 
+class _MockClaw:
+    """launcher generation now reads
+    ``cfg.claw.openclaw_home_original`` to pin the privileged
+    pre-sandbox repair to the operator-confirmed home path."""
+    def __init__(self, openclaw_home_original: str = ""):
+        self.openclaw_home_original = openclaw_home_original
+
+
 class _MockCfg:
-    def __init__(self):
+    def __init__(self, openclaw_home_original: str = ""):
         self.gateway = _MockGateway()
         self.guardrail = _MockGuardrail()
         self.openshell = _MockOpenshell()
+        self.claw = _MockClaw(openclaw_home_original)
 
 
 class TestGenerateSystemdUnits(unittest.TestCase):
@@ -321,6 +330,100 @@ class TestLauncherScriptConditionals(unittest.TestCase):
         self.assertNotIn("getaddrinfo", content)
         self.assertIn("openclaw gateway run", content)
 
+    # --- S3.HIGH_BUG: scoped sandbox cleanup regressions ---
+
+    def test_cleanup_sandbox_uses_saved_namespace_marker(self):
+        """cleanup-sandbox.sh must read the per-instance namespace marker
+        rather than regex-matching all sandbox|openshell namespaces."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        self.assertIn("sandbox.netns", content)
+        self.assertIn("SAVED_NS=", content)
+        # Legacy regex must only run when the operator explicitly opts in.
+        self.assertIn("DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", content)
+
+    def test_cleanup_sandbox_no_unconditional_regex_namespace_delete(self):
+        """The regex-based 'sandbox|openshell' namespace delete must NOT
+        run unconditionally in cleanup-sandbox.sh."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        # The legacy block, if present, MUST be guarded by the opt-in env var.
+        if "grep -E 'sandbox|openshell'" in content:
+            # Must appear inside an opt-in branch.
+            self.assertIn(
+                'DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP:-0}" = "1"',
+                content,
+            )
+
+    def test_cleanup_sandbox_no_blanket_veth_delete(self):
+        """Blanket `veth-h-*` delete is disallowed: it would remove other
+        sandbox instances' interfaces."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        self.assertNotIn("grep -oP 'veth-h-", content)
+
+    def test_cleanup_iptables_restores_route_localnet(self):
+        """cleanup-sandbox.sh must restore the saved route_localnet value
+        instead of forcing it to 0."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        self.assertIn("saved.route_localnet", content)
+        self.assertNotIn(
+            "sysctl -w net.ipv4.conf.all.route_localnet=0", content
+        )
+
+    def test_post_sandbox_saves_route_localnet(self):
+        """post-sandbox.sh must capture the prior route_localnet value
+        before flipping it to 1."""
+        self._gen(True, True)
+        content = self._read_script("post-sandbox.sh")
+        self.assertIn("saved.route_localnet", content)
+        self.assertIn("sysctl -n net.ipv4.conf.all.route_localnet", content)
+
+    def _gen_run_sandbox(self):
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _generate_run_sandbox_script,
+        )
+
+        cfg = _CfgFactory.make(True, True)
+        _generate_run_sandbox_script(self.data_dir, "10.200.0.1", cfg)
+
+    def test_run_sandbox_records_namespace_marker(self):
+        """run-sandbox.sh must persist the discovered namespace name into
+        $DATA_DIR/sandbox.netns so cleanup is scoped to this instance."""
+        self._gen_run_sandbox()
+        content = self._read_script("run-sandbox.sh")
+        self.assertIn("sandbox.netns", content)
+        self.assertIn("SANDBOX_NS=", content)
+
+    def test_run_sandbox_strays_are_scoped_to_data_dir(self):
+        """run-sandbox.sh stop must not kill processes by name only.
+        The finding (#5) was that pgrep -f matches across the
+        host. The replacement must verify processes belong to this
+        instance via /proc/<pid>/cmdline or cwd referencing $DATA_DIR."""
+        self._gen_run_sandbox()
+        content = self._read_script("run-sandbox.sh")
+        self.assertIn("_proc_is_ours", content)
+        self.assertIn("_kill_scoped_strays", content)
+        self.assertIn("/proc/$pid/cmdline", content)
+        # The legacy unscoped helper must be gone.
+        self.assertNotIn("_kill_strays openshell-sandbox", content)
+        self.assertNotIn("_kill_strays defenseclaw-gateway", content)
+
+    def test_pre_sandbox_skips_blanket_veth_delete(self):
+        """pre-sandbox.sh must not delete every veth-h-* on the host."""
+        self._gen(True, True)
+        content = self._read_script("pre-sandbox.sh")
+        self.assertNotIn("grep -oP 'veth-h-", content)
+
+    def test_pre_sandbox_uses_saved_namespace_marker(self):
+        """pre-sandbox.sh must prefer the saved namespace marker over
+        regex-matching shared host state."""
+        self._gen(True, True)
+        content = self._read_script("pre-sandbox.sh")
+        self.assertIn("sandbox.netns", content)
+        self.assertIn("DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", content)
+
 
 
 class TestPrePairDevice(unittest.TestCase):
@@ -336,6 +439,18 @@ class TestPrePairDevice(unittest.TestCase):
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.sandbox_home, ignore_errors=True)
 
+    def _write_device_key(self, blob: bytes) -> str:
+        """Write a device.key with mode 0o600 + the gateway provenance
+        sentinel that now requires before the pre-pair
+        flow will touch paired.json."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(blob)
+        os.chmod(path, 0o600)
+        with open(path + ".provenance", "w", encoding="utf-8") as f:
+            f.write("source=test\n")
+        return path
+
     def test_no_device_key(self):
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertFalse(result)
@@ -346,10 +461,7 @@ class TestPrePairDevice(unittest.TestCase):
             return json.load(f)
 
     def test_with_ed25519_key(self):
-        key_data = os.urandom(64)
-        key_path = os.path.join(self.data_dir, "device.key")
-        with open(key_path, "wb") as f:
-            f.write(key_data)
+        self._write_device_key(os.urandom(64))
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertTrue(result)
@@ -362,10 +474,7 @@ class TestPrePairDevice(unittest.TestCase):
         self.assertEqual(device["role"], "operator")
 
     def test_updates_existing_device(self):
-        key_data = os.urandom(64)
-        key_path = os.path.join(self.data_dir, "device.key")
-        with open(key_path, "wb") as f:
-            f.write(key_data)
+        self._write_device_key(os.urandom(64))
 
         _pre_pair_device(self.data_dir, self.sandbox_home)
         _pre_pair_device(self.data_dir, self.sandbox_home)
@@ -374,10 +483,7 @@ class TestPrePairDevice(unittest.TestCase):
         self.assertEqual(len(paired), 1, "Should update, not duplicate")
 
     def test_32_byte_pubkey(self):
-        key_data = os.urandom(32)
-        key_path = os.path.join(self.data_dir, "device.key")
-        with open(key_path, "wb") as f:
-            f.write(key_data)
+        self._write_device_key(os.urandom(32))
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertTrue(result)
@@ -386,6 +492,52 @@ class TestPrePairDevice(unittest.TestCase):
         self.assertEqual(len(paired), 1)
         device = list(paired.values())[0]
         self.assertEqual(device["displayName"], "defenseclaw-sidecar")
+
+    def test_f2551_overpermissive_mode_refused(self):
+        """device.key mode 0o644 (group/world read)
+        must be refused even with a provenance sentinel present."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(32))
+        os.chmod(path, 0o644)
+        with open(path + ".provenance", "w", encoding="utf-8") as f:
+            f.write("source=test\n")
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(result, "regression: 0o644 device.key was accepted")
+
+    def test_f2551_missing_provenance_refused(self):
+        """a 0o600 device.key without the gateway
+        provenance sentinel must be refused (a local user could have
+        planted the file before sandbox setup ran)."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(32))
+        os.chmod(path, 0o600)
+        # No .provenance file alongside.
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(result, "regression: device.key without sentinel accepted")
+
+    def test_f2551_legacy_optin_bypasses_sentinel(self):
+        """The DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1 escape hatch
+        keeps the legacy behavior for operators who can't yet
+        regenerate device.key via the new gateway flow."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(32))
+        os.chmod(path, 0o600)
+
+        prev = os.environ.get("DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY")
+        try:
+            os.environ["DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY"] = "1"
+            result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        finally:
+            if prev is None:
+                os.environ.pop("DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY", None)
+            else:
+                os.environ["DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY"] = prev
+        self.assertTrue(result, "legacy opt-in env var must keep working")
 
     def test_pem_encoded_key(self):
         import base64
@@ -404,6 +556,11 @@ class TestPrePairDevice(unittest.TestCase):
         key_path = os.path.join(self.data_dir, "device.key")
         with open(key_path, "w") as f:
             f.write(pem_data)
+        # regenerate the on-disk perms + provenance
+        # sentinel that the hardened pre-pair flow now requires.
+        os.chmod(key_path, 0o600)
+        with open(key_path + ".provenance", "w", encoding="utf-8") as f:
+            f.write("source=test\n")
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertTrue(result)

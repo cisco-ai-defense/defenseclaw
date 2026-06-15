@@ -208,9 +208,10 @@ func TestPluginDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 }
 
 // TestReadMCPServers_DispatchesViaConnector hooks into the codex
-// branch — Codex reads ./.mcp.json and Codex only. We point CWD
-// at a temp dir with a known .mcp.json and confirm we get its entries
-// back via the no-arg ReadMCPServers (i.e. dispatcher works).
+// branch — Codex reads <workspace>/.mcp.json and Codex only. We pin
+// claw.workspace_dir to a temp dir with a known .mcp.json and confirm
+// we get its entries back via the no-arg ReadMCPServers (i.e. the
+// dispatcher honors the configured workspace, not the daemon cwd).
 func TestReadMCPServers_DispatchesViaConnector(t *testing.T) {
 	tmp := t.TempDir()
 	mcp := map[string]any{
@@ -230,6 +231,12 @@ func TestReadMCPServers_DispatchesViaConnector(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
+	// Isolate HOME so the real user's ~/.codex/config.toml (which may
+	// register global MCP servers like playwright) doesn't leak into
+	// the assertion below — Codex layers the global TOML table with
+	// the project-local ./.mcp.json we wrote above.
+	t.Setenv("HOME", tmp)
+
 	prev, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -241,6 +248,7 @@ func TestReadMCPServers_DispatchesViaConnector(t *testing.T) {
 
 	cfg := &Config{}
 	cfg.Guardrail.Connector = "codex"
+	cfg.Claw.WorkspaceDir = tmp
 
 	entries, err := cfg.ReadMCPServers()
 	if err != nil {
@@ -249,6 +257,75 @@ func TestReadMCPServers_DispatchesViaConnector(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name != "hello" || entries[0].Command != "echo" {
 		t.Errorf("entries = %+v, want [{hello echo …}]", entries)
 	}
+}
+
+func TestReadMCPServers_UsesPinnedWorkspaceForProjectMCP(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	workspace := filepath.Join(tmp, "repo")
+	daemonCWD := filepath.Join(tmp, ".defenseclaw")
+	for _, dir := range []string{
+		home,
+		filepath.Join(workspace, ".github"),
+		filepath.Join(daemonCWD, ".github"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	t.Setenv("HOME", home)
+
+	writeMCP := func(path, name string) {
+		t.Helper()
+		data, err := json.Marshal(map[string]any{
+			"mcpServers": map[string]any{
+				name: map[string]any{"command": "echo", "args": []string{name}},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	writeMCP(filepath.Join(workspace, ".github", "mcp.json"), "pinned")
+	writeMCP(filepath.Join(daemonCWD, ".github", "mcp.json"), "daemon-cwd")
+
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+	if err := os.Chdir(daemonCWD); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	cfg := &Config{
+		DataDir: daemonCWD,
+		Claw:    ClawConfig{WorkspaceDir: workspace},
+	}
+	cfg.Guardrail.Connector = "copilot"
+
+	entries, err := cfg.ReadMCPServers()
+	if err != nil {
+		t.Fatalf("ReadMCPServers: %v", err)
+	}
+	if !hasMCPEntry(entries, "pinned") {
+		t.Fatalf("entries = %+v, want pinned workspace MCP server", entries)
+	}
+	if hasMCPEntry(entries, "daemon-cwd") {
+		t.Fatalf("entries = %+v, should not read daemon cwd MCP server", entries)
+	}
+}
+
+func hasMCPEntry(entries []MCPServerEntry, name string) bool {
+	for _, entry := range entries {
+		if entry.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // containsPath is intentionally local — strings.Contains over a slice.

@@ -30,7 +30,6 @@ import json
 import unittest
 
 from click.testing import CliRunner
-
 from defenseclaw.commands import _scan_ui
 
 

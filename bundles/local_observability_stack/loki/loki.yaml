@@ -39,6 +39,25 @@ limits_config:
   max_global_streams_per_user: 10000
   ingestion_rate_mb: 64
   ingestion_burst_size_mb: 128
+  # DefenseClaw audit/gateway events can carry large prompts, judge
+  # bodies, and raw HTTP request/response payloads — especially when
+  # `privacy.disable_redaction=true` is set on the sidecar. Defaults
+  # (256 KiB max_line_size, 64 KiB max_structured_metadata_size) cause
+  # silent drops on those payloads, breaking audit fidelity. We raise
+  # both ceilings and switch from "drop" to "truncate" so an oversize
+  # entry still lands in Loki (with a `[...]` tail) and the
+  # corresponding span / SQLite audit row stays correlatable.
+  #
+  # The OTel Collector's `transform/loki-payload-cap` processor caps
+  # bodies at 200 KiB and per-attribute strings at 8 KiB before the
+  # write reaches Loki, so these limits are headroom, not the primary
+  # defense. They should remain well above the collector caps so any
+  # future overflow is observable via the
+  # DefenseClawLokiIngestOverflow alert rather than a silent drop.
+  max_line_size: 1MB
+  max_line_size_truncate: true
+  max_structured_metadata_size: 256KB
+  max_structured_metadata_entries_count: 256
 
 ingester:
   chunk_idle_period: 2m

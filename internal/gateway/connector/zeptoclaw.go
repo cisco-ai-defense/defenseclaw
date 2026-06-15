@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -119,6 +120,13 @@ func (c *ZeptoClawConnector) AllowedHosts() []string {
 }
 
 func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	// Proxy connectors require the local guardrail proxy, which DefenseClaw
+	// does not host on Windows (hook-only there). Fail clearly instead of
+	// planting a half-configured proxy connector.
+	if !ConnectorSupportedOnHostOS(c.Name()) {
+		return errConnectorUnsupportedOnOS(c.Name(), runtime.GOOS)
+	}
+
 	// Surface 1: Patch ZeptoClaw config to route api_base through proxy.
 	if err := c.patchZeptoClawConfig(opts); err != nil {
 		return fmt.Errorf("zeptoclaw config patch: %w", err)
@@ -155,6 +163,11 @@ func (c *ZeptoClawConnector) Teardown(ctx context.Context, opts SetupOpts) error
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
 	}
+	// ZeptoClaw does not implement HookScriptOwner and operates through
+	// a proxy api_base in config.json, not a *-hook.sh script that
+	// a host agent process keeps cached. The shared inspect-*.sh
+	// scripts are intentionally left in place — they're owned by the
+	// hookwriter, not by any single connector.
 
 	if len(errs) > 0 {
 		return fmt.Errorf("zeptoclaw teardown errors: %s", strings.Join(errs, "; "))
@@ -414,18 +427,13 @@ func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSign
 // backed up via managed + legacy backup files. The connector also writes
 // the inspect-* hook scripts into <DataDir>/hooks/ for proxy-side tool inspection.
 func (c *ZeptoClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	hooks := make([]string, 0, len(HookScripts()))
-	for _, name := range HookScripts() {
-		hooks = append(hooks, filepath.Join(hookDir, name))
-	}
 	return AgentPaths{
 		PatchedFiles: []string{zeptoClawConfigPath()},
 		BackupFiles: []string{
 			managedFileBackupPath(opts.DataDir, c.Name(), "config.json"),
 			filepath.Join(opts.DataDir, "zeptoclaw_backup.json"),
 		},
-		HookScripts: hooks,
+		HookScripts: hookScriptPathsForConnector(opts, c),
 		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
 	}
 }
@@ -478,8 +486,7 @@ func (c *ZeptoClawConnector) HasUsableProviders() (int, error) {
 func (c *ZeptoClawConnector) SupportsComponentScanning() bool { return true }
 
 func (c *ZeptoClawConnector) ComponentTargets(cwd string) map[string][]string {
-	home := os.Getenv("HOME")
-	zeptoDir := filepath.Join(home, ".zeptoclaw")
+	zeptoDir := zeptoClawHomeDir()
 
 	targets := map[string][]string{
 		"skill":  {filepath.Join(zeptoDir, "skills"), filepath.Join(cwd, ".zeptoclaw", "skills")},
@@ -520,7 +527,17 @@ func zeptoClawConfigPath() string {
 	if ZeptoClawConfigPathOverride != "" {
 		return ZeptoClawConfigPathOverride
 	}
-	return filepath.Join(os.Getenv("HOME"), ".zeptoclaw", "config.json")
+	return filepath.Join(zeptoClawHomeDir(), "config.json")
+}
+
+// zeptoClawHomeDir returns the ZeptoClaw home directory. Priority:
+// ZEPTOCLAW_HOME env (custom override) → $HOME/.zeptoclaw (default).
+// userHomeDir keeps this cross-platform (e.g. %USERPROFILE% on Windows).
+func zeptoClawHomeDir() string {
+	if home := os.Getenv("ZEPTOCLAW_HOME"); home != "" {
+		return home
+	}
+	return filepath.Join(userHomeDir(), ".zeptoclaw")
 }
 
 // patchZeptoClawConfig reads ZeptoClaw's config.json, backs up the original

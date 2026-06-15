@@ -1,0 +1,63 @@
+---
+title: What is DefenseClaw?
+description: A 60-second pitch — DefenseClaw is the Cisco governance layer that wraps every AI coding agent (Claude Code, Codex, Cursor, OpenClaw, and more) with policy, audit, and human-in-the-loop approvals.
+keywords:
+  - what is DefenseClaw
+  - Cisco governance
+  - AI coding agent guardrail
+  - AI agent observability
+---
+
+DefenseClaw is the **enforcement and evidence layer** for AI coding agents. It sits between your agent (Claude Code, Codex, Cursor, OpenClaw, ...) and the rest of the world, and answers three questions for you, by default:
+
+1. **What is this agent allowed to do?** Skills, MCP servers, plugins, and generated code are scanned before they run.
+2. **What is the agent doing right now?** Prompts, completions, tool calls, and sandbox activity are inspected at runtime.
+3. **What did the agent do?** Every decision lands in an SQLite audit DB and your existing telemetry sinks (OTLP, Splunk, webhooks).
+
+## Three modes, one command
+
+<Cards>
+  <Card title="Observe" description="Log everything, block nothing. Use this for the first week." />
+  <Card title="Action" description="Block on HIGH and CRITICAL. CRITICAL always wins." />
+  <Card title="HITL" description="Pause risky actions for a human. Native ask on Claude Code, Cursor, Copilot CLI, OpenClaw; downgraded confirm elsewhere." />
+</Cards>
+
+## Why a separate sidecar?
+
+Inserting an inspection step inside the agent process means every agent has to grow its own copy. DefenseClaw moves the inspection out of the agent and into a single Go sidecar (`defenseclaw-gateway`), so:
+
+- The agent does not need to be modified — connectors are written *for* the agent (Claude Code's hooks, Codex's `config.toml`, Cursor's `hooks.json`, OpenClaw's plugin).
+- One audit log covers every agent the operator runs.
+- One config file serves every connector — there is exactly one `~/.defenseclaw/config.yaml`. The OPA admission policy is **shared** across all connectors, while guardrail *posture* (mode, fail mode, HILT, block message, rule pack) can optionally be set **per connector** when one gateway serves several hook connectors at once. See [Multi-connector](/docs/setup/guardrail/multi-connector).
+
+## Where DefenseClaw sits
+
+<Flow
+  direction="TB"
+  compact
+  caption="One Python CLI for the operator. One Go gateway for the data path. One TypeScript plugin per agent that needs in-process integration."
+>
+  <Node id="op" kind="operator">{`Operator\n(you)`}</Node>
+  <Node id="cli" kind="generic">{`defenseclaw CLI\nPython`}</Node>
+  <Node id="gateway" kind="gateway">{`defenseclaw-gateway\nGo sidecar`}</Node>
+  <Node id="agent" kind="agent">{`Agent\nClaude · Codex ·\nOpenClaw · ...`}</Node>
+  <Node id="sinks" kind="datastore">{`Sinks\nSQLite · JSONL ·\nOTLP · Splunk · webhooks`}</Node>
+  <Edge from="op" to="cli" />
+  <Edge from="cli" to="gateway" label="config · restart" />
+  <Edge from="agent" to="gateway" variant="bidirectional" label="hooks or proxy" />
+  <Edge from="gateway" to="sinks" />
+  <Edge from="op" to="gateway" variant="bidirectional" label="TUI · HITL" />
+</Flow>
+
+## What DefenseClaw is not
+
+<Callout type="warn">
+DefenseClaw does not prove an agent's behaviour is safe. It improves safety by combining static scanner results, runtime inspection, policy decisions, sandbox controls, and audit trails. High-risk deployments should pair it with human review, least-privilege credentials, sandboxing, CI gates, and production monitoring.
+</Callout>
+
+## Next
+
+<Cards>
+  <Card title="Install" href="/docs/get-started/install" description="One curl command, or build from source." />
+  <Card title="Quickstart" href="/docs/get-started/quickstart" description="Zero-prompt first-run setup." />
+</Cards>

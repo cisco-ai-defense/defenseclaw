@@ -4,9 +4,10 @@ Locks the contract that:
   * the dotenv file is rewritten atomically with mode 0o600
   * unrelated entries (OPENAI_API_KEY, etc.) survive rotation
   * a duplicate DEFENSECLAW_GATEWAY_TOKEN line is collapsed (never two)
-  * the hook-script refresh is delegated to ``defenseclaw-gateway
-    connector teardown && connector setup`` (i.e. we never re-implement
-    the per-connector logic in Python)
+  * the hook-script refresh is delegated to a full gateway restart, whose
+    boot loop re-runs Setup for EVERY active connector and re-bakes the
+    rotated token into each connector's hook ``.token`` file (the token is
+    a single shared secret, so rotation is inherently global)
 """
 
 from __future__ import annotations
@@ -15,9 +16,13 @@ import os
 import re
 import stat
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
+from click.testing import CliRunner
+from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import _rotate_token_atomic_write
+from defenseclaw.context import AppContext
 
 
 class RotateTokenFileWriteTests(unittest.TestCase):
@@ -91,6 +96,61 @@ class RotateTokenFileWriteTests(unittest.TestCase):
                 body = fh.read()
             self.assertEqual(body, original,
                              "atomic-write contract violated: original .env was modified before rename succeeded")
+
+
+def _make_rotate_ctx(td: str, connectors: list[str]):
+    """Minimal AppContext for driving rotate_token_cmd."""
+    app = AppContext()
+    app.cfg = SimpleNamespace(
+        data_dir=td,
+        gateway=SimpleNamespace(host="127.0.0.1", port=18789),
+        guardrail=SimpleNamespace(connector=(connectors[0] if connectors else "")),
+        active_connector=lambda: (connectors[0] if connectors else "openclaw"),
+        active_connectors=lambda: list(connectors),
+    )
+    return app
+
+
+class RotateTokenCommandFlowTests(unittest.TestCase):
+    """`setup rotate-token` rewrites .env then refreshes ALL active connectors
+    via a single gateway restart (the shared token must stay in lockstep)."""
+
+    def test_restart_refreshes_every_active_connector(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["claudecode", "codex"])
+            with mock.patch.object(cmd_setup, "_restart_services") as restart:
+                result = CliRunner().invoke(
+                    cmd_setup.rotate_token_cmd, ["--yes"], obj=app
+                )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            restart.assert_called_once()
+            # The whole active set is forwarded so the boot loop re-bakes the
+            # token into every connector — not just the primary.
+            self.assertEqual(
+                restart.call_args.kwargs.get("connectors"),
+                ["claudecode", "codex"],
+            )
+            # .env actually rotated on disk.
+            with open(os.path.join(td, ".env")) as fh:
+                self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=", fh.read())
+
+    def test_no_restart_skips_gateway_bounce(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            with mock.patch.object(cmd_setup, "_restart_services") as restart:
+                result = CliRunner().invoke(
+                    cmd_setup.rotate_token_cmd, ["--yes", "--no-restart"], obj=app
+                )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            restart.assert_not_called()
+            self.assertIn("--no-restart", result.output)
+            # Token is still rotated even when the refresh is deferred.
+            with open(os.path.join(td, ".env")) as fh:
+                self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=", fh.read())
 
 
 if __name__ == "__main__":

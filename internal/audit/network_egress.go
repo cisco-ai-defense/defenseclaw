@@ -181,7 +181,7 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 	alert := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: e.Timestamp,
-		Action:    "network-egress-blocked",
+		Action:    string(ActionNetworkEgressBlocked),
 		Target:    e.Hostname,
 		Actor:     "defenseclaw",
 		Details: fmt.Sprintf("url=%s method=%s decision=%s outcome=%s",
@@ -202,7 +202,9 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 
 	// Emit OTel alert counter.
 	if otel != nil {
-		otel.RecordAlert(ctx, "network-egress-blocked", "HIGH", "network-policy")
+		// Egress enforcement is a gateway-global control, not attributable
+		// to one connector; record connector="unknown".
+		otel.RecordAlert(ctx, "network-egress-blocked", "HIGH", "network-policy", "")
 	}
 
 	return nil

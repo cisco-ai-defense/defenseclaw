@@ -34,7 +34,7 @@ Coverage:
 * ``--json`` mode silences all of the above and emits the unchanged
   ``ScanResult.to_json()`` contract — *not* the new
   ``render_json_payload`` shape, because automation still parses
-  the legacy contract.
+  The legacy contract.
 """
 
 from __future__ import annotations
@@ -49,9 +49,9 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.models import Finding, ScanResult
+
 from tests.helpers import cleanup_app, make_app_context
 
 

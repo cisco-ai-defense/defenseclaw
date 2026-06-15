@@ -262,7 +262,7 @@ func (s *stubConnector) SetCredentials(string, string)         {}
 func (s *stubConnector) VerifyClean(connector.SetupOpts) error { return nil }
 
 // TestProxyShouldBindForConnector pins the routing decision behind
-// the codex/claudecode observability defaults. proxyShouldBindForConnector
+// the hook-connector observability defaults. proxyShouldBindForConnector
 // gates whether runGuardrail calls proxy.Run() (binding the proxy
 // listener) or short-circuits to ctx.Done() (observability-only,
 // agent talks directly to its native upstream). A regression that
@@ -272,49 +272,76 @@ func (s *stubConnector) VerifyClean(connector.SetupOpts) error { return nil }
 //   - skip the bind for openclaw (breaking every existing OpenClaw
 //     install on upgrade, since openclaw's data path goes through
 //     /v1/chat/completions on the proxy port).
-//
-// Each table row exercises one cell of (connector, enforcement
-// flags) → expected bind decision.
 func TestProxyShouldBindForConnector(t *testing.T) {
 	cases := []struct {
-		name          string
-		conn          connector.Connector
-		codexEnf      bool
-		claudeCodeEnf bool
-		expectBind    bool
+		name       string
+		conn       connector.Connector
+		expectBind bool
 	}{
-		{"codex_default_observability", &stubConnector{name: "codex"}, false, false, false},
-		{"codex_enforcement_on", &stubConnector{name: "codex"}, true, false, true},
-		{"claudecode_default_observability", &stubConnector{name: "claudecode"}, false, false, false},
-		{"claudecode_enforcement_on", &stubConnector{name: "claudecode"}, false, true, true},
-		// Sibling enforcement flag must NOT cross over: codex
-		// enforcement flipping on shouldn't change claudecode bind
-		// behavior.
-		{"claudecode_observability_with_codex_enf_on", &stubConnector{name: "claudecode"}, true, false, false},
-		// Always-bind connectors stay bound regardless of either flag.
-		{"openclaw_default", &stubConnector{name: "openclaw"}, false, false, true},
-		{"openclaw_with_codex_enf_off", &stubConnector{name: "openclaw"}, false, false, true},
-		{"zeptoclaw_default", &stubConnector{name: "zeptoclaw"}, false, false, true},
+		{"codex_observability", &stubConnector{name: "codex"}, false},
+		{"claudecode_observability", &stubConnector{name: "claudecode"}, false},
+		// Always-bind connectors stay bound.
+		{"openclaw_default", &stubConnector{name: "openclaw"}, true},
+		{"zeptoclaw_default", &stubConnector{name: "zeptoclaw"}, true},
+		// New hook-only connectors do not bind the proxy listener.
+		{"hermes_observability", &stubConnector{name: "hermes"}, false},
+		{"cursor_observability", &stubConnector{name: "cursor"}, false},
+		{"windsurf_observability", &stubConnector{name: "windsurf"}, false},
+		{"geminicli_observability", &stubConnector{name: "geminicli"}, false},
+		{"copilot_observability", &stubConnector{name: "copilot"}, false},
+		{"openhands_observability", &stubConnector{name: "openhands"}, false},
+		{"antigravity_observability", &stubConnector{name: "antigravity"}, false},
 		// Unknown connectors default to bind=true (conservative
 		// fail-closed for the proxy data path).
-		{"unknown_connector", &stubConnector{name: "frobozz"}, false, false, true},
+		{"unknown_connector", &stubConnector{name: "frobozz"}, true},
 		// Nil connector defends against a sidecar startup race where
 		// resolveActiveConnector returns nil before fallback kicks in.
-		{"nil_connector", nil, false, false, true},
+		{"nil_connector", nil, true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gc := &config.GuardrailConfig{
-				CodexEnforcementEnabled:      tc.codexEnf,
-				ClaudeCodeEnforcementEnabled: tc.claudeCodeEnf,
-			}
-			got := proxyShouldBindForConnector(tc.conn, gc)
+			got := proxyShouldBindForConnector(tc.conn, &config.GuardrailConfig{})
 			if got != tc.expectBind {
 				t.Errorf("proxyShouldBindForConnector(%v) = %v, want %v",
 					tc.name, got, tc.expectBind)
 			}
 		})
+	}
+}
+
+func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
+	cases := []struct {
+		name      string
+		connector string
+		want      bool
+	}{
+		{"codex", "codex", false},
+		{"claudecode", "claudecode", false},
+		{"openclaw", "openclaw", true},
+		{"zeptoclaw", "zeptoclaw", true},
+		{"hermes", "hermes", false},
+		{"cursor", "cursor", false},
+		{"windsurf", "windsurf", false},
+		{"geminicli", "geminicli", false},
+		{"copilot", "copilot", false},
+		{"openhands", "openhands", false},
+		{"unknown", "frobozz", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Guardrail: config.GuardrailConfig{
+					Connector: tc.connector,
+				},
+			}
+			if got := proxyShouldBindForConfiguredConnector(cfg); got != tc.want {
+				t.Errorf("proxyShouldBindForConfiguredConnector(%q) = %v, want %v", tc.connector, got, tc.want)
+			}
+		})
+	}
+	if got := proxyShouldBindForConfiguredConnector(nil); !got {
+		t.Errorf("proxyShouldBindForConfiguredConnector(nil) = %v, want true", got)
 	}
 }
 
@@ -413,6 +440,21 @@ func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
 		// a real listener.
 		{"codex_bind_all", "codex", "0.0.0.0", "", true},
 
+		// Hook-only connectors use local hook/native telemetry and should
+		// not dial the OpenClaw fleet WebSocket unless explicitly enabled.
+		{"hermes_loopback", "hermes", "127.0.0.1", "", false},
+		{"hermes_remote", "hermes", "gw.example.com", "", false},
+		{"cursor_loopback", "cursor", "127.0.0.1", "", false},
+		{"cursor_remote", "cursor", "10.0.0.5", "", false},
+		{"windsurf_loopback", "windsurf", "127.0.0.1", "", false},
+		{"windsurf_remote", "windsurf", "192.168.1.10", "", false},
+		{"geminicli_loopback", "geminicli", "127.0.0.1", "", false},
+		{"geminicli_remote", "geminicli", "gw.example.com", "", false},
+		{"copilot_loopback", "copilot", "127.0.0.1", "", false},
+		{"copilot_remote", "copilot", "10.0.0.5", "", false},
+		{"openhands_loopback", "openhands", "127.0.0.1", "", false},
+		{"openhands_remote", "openhands", "gw.example.com", "", false},
+
 		// Empty / unknown connector with no override → DISABLED.
 		// Reconnect spam against an unconfigured upstream is the
 		// worst possible default for a brand-new install.
@@ -424,6 +466,7 @@ func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
 		// to the same boolean so operators can spell it however
 		// they prefer.
 		{"override_enabled_codex_loopback", "codex", "127.0.0.1", "enabled", true},
+		{"override_enabled_copilot", "copilot", "127.0.0.1", "enabled", true},
 		{"override_on_codex_loopback", "codex", "127.0.0.1", "on", true},
 		{"override_true_codex_loopback", "codex", "127.0.0.1", "true", true},
 		{"override_disabled_openclaw_loopback", "openclaw", "127.0.0.1", "disabled", false},
@@ -510,10 +553,19 @@ func TestRunGatewayLoop_StandaloneShortCircuits(t *testing.T) {
 		t.Errorf("gateway.State = %q, want %q (standalone short-circuit failed)", got, StateDisabled)
 	}
 	if snap.Gateway.Details == nil {
-		t.Fatalf("gateway.Details = nil, want summary/connector/host metadata")
+		t.Fatalf("gateway.Details = nil, want summary/scope/host metadata")
 	}
-	if got, _ := snap.Gateway.Details["connector"].(string); got != "codex" {
-		t.Errorf("gateway.Details.connector = %q, want %q", got, "codex")
+	// Uniform wording: the standalone branch states the fleet-uplink scope
+	// by count for EVERY install — one connector or N — so a single active
+	// connector uses the SAME "process-global ... N connectors" note as the
+	// multi-connector roster (see TestRunGatewayLoop_StandaloneMultiConnectorRoster),
+	// not a singular "connector" key naming the one connector.
+	scope, _ := snap.Gateway.Details["scope"].(string)
+	if !strings.Contains(scope, "process-global") || !strings.Contains(scope, "1 connectors") {
+		t.Errorf("gateway.Details.scope = %q, want process-global count-based note (1 connectors)", scope)
+	}
+	if _, ok := snap.Gateway.Details["connector"]; ok {
+		t.Errorf("gateway.Details should not carry a singular 'connector' key (single vs multi distinction): %v", snap.Gateway.Details)
 	}
 	if got, _ := snap.Gateway.Details["host"].(string); got != "127.0.0.1" {
 		t.Errorf("gateway.Details.host = %q, want %q", got, "127.0.0.1")
@@ -533,6 +585,79 @@ func TestRunGatewayLoop_StandaloneShortCircuits(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("runGatewayLoop did not return after ctx cancel — short-circuit branch is leaking the goroutine")
+	}
+}
+
+// TestRunGatewayLoop_StandaloneMultiConnectorRoster pins the
+// multi-connector framing of the standalone "no fleet" branch: the
+// fleet uplink is process-global, so the Gateway subsystem must convey
+// that via a count-based "scope" note rather than naming a single
+// arbitrary connector. It must NOT re-enumerate connector names — that
+// roster lives in the status command's "Agents" section — so the
+// misleading singular "connector" key is also absent.
+func TestRunGatewayLoop_StandaloneMultiConnectorRoster(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		DataDir: tmp,
+		Guardrail: config.GuardrailConfig{
+			Enabled: true,
+			Connectors: map[string]config.PerConnectorGuardrailConfig{
+				"antigravity": {},
+				"claudecode":  {},
+				"codex":       {},
+			},
+		},
+		Gateway: config.GatewayConfig{
+			Host:      "127.0.0.1",
+			Port:      18789,
+			FleetMode: "auto",
+		},
+		Claw: config.ClawConfig{Mode: "antigravity"},
+	}
+
+	s := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- s.runGatewayLoop(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+
+	snap := s.health.Snapshot()
+	if got := snap.Gateway.State; got != StateDisabled {
+		t.Errorf("gateway.State = %q, want %q", got, StateDisabled)
+	}
+	if snap.Gateway.Details == nil {
+		t.Fatalf("gateway.Details = nil, want multi-connector scope metadata")
+	}
+	scope, _ := snap.Gateway.Details["scope"].(string)
+	if !strings.Contains(scope, "process-global") || !strings.Contains(scope, "3 connectors") {
+		t.Errorf("gateway.Details.scope = %q, want process-global count-based note", scope)
+	}
+	// The scope note must NOT re-enumerate connector names (that roster
+	// lives in the Agents section) and the misleading singular
+	// "connector" key must be absent in multi-connector mode.
+	for _, name := range []string{"antigravity", "claudecode", "codex"} {
+		if strings.Contains(scope, name) {
+			t.Errorf("gateway.Details.scope should not enumerate connector %q (duplicates Agents): %q", name, scope)
+		}
+	}
+	if _, ok := snap.Gateway.Details["connector"]; ok {
+		t.Errorf("gateway.Details should not carry singular 'connector' in multi-connector mode: %v", snap.Gateway.Details)
+	}
+	if _, ok := snap.Gateway.Details["connectors"]; ok {
+		t.Errorf("gateway.Details should not enumerate 'connectors' (duplicates Agents): %v", snap.Gateway.Details)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("runGatewayLoop returned error %v, want nil", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("runGatewayLoop did not return after ctx cancel")
 	}
 }
 
@@ -584,6 +709,7 @@ func TestSidecarFleetRPCsEnabled(t *testing.T) {
 	}{
 		{"codex_loopback_standalone", "codex", "127.0.0.1", "", false},
 		{"codex_remote_fleet", "codex", "10.0.0.5", "", true},
+		{"geminicli_hook_only", "geminicli", "10.0.0.5", "", false},
 		{"openclaw_default", "openclaw", "127.0.0.1", "", true},
 		{"override_disabled_on_openclaw", "openclaw", "127.0.0.1", "disabled", false},
 		{"override_enabled_on_codex_loopback", "codex", "127.0.0.1", "enabled", true},
@@ -605,22 +731,6 @@ func TestSidecarFleetRPCsEnabled(t *testing.T) {
 }
 
 func TestShouldRunProviderProbeForConnector(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "")
-	t.Setenv("ANTHROPIC_API_KEY", "")
-
-	codexConn := connector.NewCodexConnector()
-	claudeConn := connector.NewClaudeCodeConnector()
-
-	for _, conn := range []connector.Connector{codexConn, claudeConn} {
-		probe, ok := conn.(connector.ProviderProbe)
-		if !ok {
-			t.Fatalf("%s does not implement ProviderProbe", conn.Name())
-		}
-		if _, err := probe.HasUsableProviders(); err == nil {
-			t.Fatalf("%s probe unexpectedly passed without upstream credentials; test no longer covers the SSO-only startup regression", conn.Name())
-		}
-	}
-
 	cases := []struct {
 		name string
 		conn connector.Connector
@@ -628,35 +738,16 @@ func TestShouldRunProviderProbeForConnector(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "codex_observability_skips_probe",
-			conn: codexConn,
+			name: "codex_hook_only_skips_probe",
+			conn: &stubConnector{name: "codex"},
 			gc:   config.GuardrailConfig{Connector: "codex"},
 			want: false,
 		},
 		{
-			name: "codex_enforcement_runs_probe",
-			conn: codexConn,
-			gc: config.GuardrailConfig{
-				Connector:                    "codex",
-				CodexEnforcementEnabled:      true,
-				ClaudeCodeEnforcementEnabled: false,
-			},
-			want: true,
-		},
-		{
-			name: "claudecode_observability_skips_probe",
-			conn: claudeConn,
+			name: "claudecode_hook_only_skips_probe",
+			conn: &stubConnector{name: "claudecode"},
 			gc:   config.GuardrailConfig{Connector: "claudecode"},
 			want: false,
-		},
-		{
-			name: "claudecode_enforcement_runs_probe",
-			conn: claudeConn,
-			gc: config.GuardrailConfig{
-				Connector:                    "claudecode",
-				ClaudeCodeEnforcementEnabled: true,
-			},
-			want: true,
 		},
 		{
 			name: "openclaw_guardrail_runs_probe",
@@ -700,6 +791,26 @@ func (r *rollbackConnector) VerifyClean(connector.SetupOpts) error {
 	return nil
 }
 
+// fakeHookOwner is a minimal stubConnector that satisfies the
+// HookScriptOwner contract so the narrow verifyHookScriptsOrRetry path
+// can be exercised without a full builtin connector. setupCalls
+// counts Setup invocations so tests can assert the narrow retry path
+// never re-runs full Setup.
+type fakeHookOwner struct {
+	stubConnector
+	hooks      []string
+	setupCalls int
+}
+
+func (h *fakeHookOwner) HookScriptNames(connector.SetupOpts) []string {
+	return h.hooks
+}
+
+func (h *fakeHookOwner) Setup(_ context.Context, _ connector.SetupOpts) error {
+	h.setupCalls++
+	return nil
+}
+
 func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T) {
 	dir := t.TempDir()
 	conn := &rollbackConnector{stubConnector: stubConnector{name: "codex"}}
@@ -714,6 +825,133 @@ func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T
 	}
 	if got := connector.LoadActiveConnector(dir); got != "codex" {
 		t.Fatalf("active connector = %q, want codex so future mode switches can retry teardown", got)
+	}
+}
+
+// TestFailGuardrailWithRollback_ChainsHealthAndTeardown locks the
+// sidecar fail-loud contract: both the conn.Setup() error branch and
+// the verifyHookScriptsOrRetry error branch in runGuardrail funnel
+// through failGuardrailWithRollback, which MUST (a) run Teardown +
+// VerifyClean via recordAndRollbackFailedConnectorSetup, (b) persist
+// the partially-installed connector name so the next boot can finish
+// cleaning up, (c) flip Guardrail health to StateError with the
+// wrapped error message visible to operators, and (d) return the
+// wrapped error so the sidecar errCh propagates it. A future refactor
+// that drops any of these steps fails this test loudly.
+func TestFailGuardrailWithRollback_ChainsHealthAndTeardown(t *testing.T) {
+	dir := t.TempDir()
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "codex"}}
+	s := &Sidecar{health: NewSidecarHealth()}
+
+	bootErr := fmt.Errorf("connector codex hook verification failed: missing [codex-hook.sh]")
+	got := s.failGuardrailWithRollback(context.Background(), connector.SetupOpts{DataDir: dir}, conn, "hook verification", bootErr)
+	if got != bootErr {
+		t.Fatalf("failGuardrailWithRollback should return the input error verbatim, got: %v", got)
+	}
+	if !conn.teardownCalled {
+		t.Fatal("failGuardrailWithRollback did not chain into connector Teardown")
+	}
+	if !conn.verifyCalled {
+		t.Fatal("failGuardrailWithRollback did not chain into connector VerifyClean")
+	}
+	if got := connector.LoadActiveConnector(dir); got != "codex" {
+		t.Fatalf("active connector state = %q, want codex (operator must see what failed on next boot)", got)
+	}
+	snap := s.health.Snapshot()
+	if snap.Guardrail.State != StateError {
+		t.Fatalf("Guardrail health state = %q, want %q", snap.Guardrail.State, StateError)
+	}
+	if !strings.Contains(snap.Guardrail.LastError, "missing [codex-hook.sh]") {
+		t.Errorf("Guardrail health LastError should surface the operator-visible cause, got: %q", snap.Guardrail.LastError)
+	}
+}
+
+// failGuardrailWithRollback must be a no-op when given nil inputs so
+// the caller never has to guard the call site itself.
+func TestFailGuardrailWithRollback_NilInputs(t *testing.T) {
+	s := &Sidecar{health: NewSidecarHealth()}
+	if got := s.failGuardrailWithRollback(context.Background(), connector.SetupOpts{}, nil, "setup", fmt.Errorf("ignored")); got == nil {
+		t.Errorf("nil connector should still return the input error, got nil")
+	}
+	if got := s.failGuardrailWithRollback(context.Background(), connector.SetupOpts{}, &rollbackConnector{stubConnector: stubConnector{name: "x"}}, "setup", nil); got != nil {
+		t.Errorf("nil err should short-circuit and return nil, got: %v", got)
+	}
+}
+
+// When the retry hook writer cannot find the template (script name not
+// in the embedded FS), verifyHookScriptsOrRetry must wrap and surface
+// the error rather than silently swallowing it. The wrapped error must
+// mention the connector name so operator logs are diagnosable.
+func TestVerifyHookScriptsOrRetry_WrapsWriterError(t *testing.T) {
+	dir := t.TempDir()
+	conn := &fakeHookOwner{
+		stubConnector: stubConnector{name: "fakeconnector"},
+		hooks:         []string{"does-not-exist-in-embed.sh"},
+	}
+
+	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}, conn)
+	if err == nil {
+		t.Fatal("expected error when hook writer cannot find embedded template")
+	}
+	if conn.setupCalls != 0 {
+		t.Fatalf("narrow retry must NOT re-run Setup; got %d Setup calls", conn.setupCalls)
+	}
+	if !strings.Contains(err.Error(), "fakeconnector") {
+		t.Errorf("error should name the failing connector, got: %v", err)
+	}
+	if got := connector.LoadActiveConnector(dir); got != "" {
+		t.Fatalf("verifyHookScriptsOrRetry should not save active connector state, got %q", got)
+	}
+}
+
+// Happy-path retry: an owner whose hook script IS in the embedded FS
+// triggers a successful narrow hook-writer run, producing the missing
+// hook script on disk WITHOUT re-running Setup.
+func TestVerifyHookScriptsOrRetry_RestoresMissingHook(t *testing.T) {
+	dir := t.TempDir()
+	conn := connector.NewCodexConnector()
+
+	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}, conn)
+	if err != nil {
+		t.Fatalf("verifyHookScriptsOrRetry: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {
+		t.Fatalf("restored hook missing: %v", err)
+	}
+	// Narrow retry must also lay down the generic inspect-*.sh helpers
+	// because the writer treats them as the shared baseline.
+	if _, err := os.Stat(filepath.Join(dir, "hooks", "inspect-tool.sh")); err != nil {
+		t.Fatalf("generic inspect-tool.sh missing after narrow retry: %v", err)
+	}
+}
+
+// When every owned hook is already on disk, verifyHookScriptsOrRetry
+// must skip the retry entirely. This is the common steady-state path
+// on gateway boot when nothing is wrong, and the test guards against a
+// regression where the writer is invoked unconditionally and either
+// thrashes disk or clobbers operator-edited content.
+func TestVerifyHookScriptsOrRetry_NoRetryWhenHooksPresent(t *testing.T) {
+	dir := t.TempDir()
+	conn := connector.NewCodexConnector()
+
+	hookDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	const seedSentinel = "# operator-seeded sentinel — not the embedded template\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(hookDir, "codex-hook.sh"), []byte(seedSentinel), 0o700); err != nil {
+		t.Fatalf("seed hook: %v", err)
+	}
+
+	if err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}, conn); err != nil {
+		t.Fatalf("verifyHookScriptsOrRetry: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(hookDir, "codex-hook.sh"))
+	if err != nil {
+		t.Fatalf("re-read seeded hook: %v", err)
+	}
+	if string(body) != seedSentinel {
+		t.Errorf("seeded codex-hook.sh body was overwritten — retry path ran unexpectedly\ngot:\n%s", body)
 	}
 }
 
@@ -2284,40 +2522,22 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 	cases := []struct {
 		name             string
 		connector        string
-		codexEnforce     bool
-		claudeEnforce    bool
 		wantMode         string
 		wantIntercept    bool
 		wantTelemetryAll []string
 	}{
 		{
-			name:             "codex_observability_default",
+			name:             "codex_observability",
 			connector:        "codex",
 			wantMode:         "observability",
 			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks", "otel", "notify"},
 		},
 		{
-			name:             "codex_enforcement_explicit",
-			connector:        "codex",
-			codexEnforce:     true,
-			wantMode:         "guardrail",
-			wantIntercept:    true,
-			wantTelemetryAll: []string{"hooks", "otel", "notify"},
-		},
-		{
-			name:             "claudecode_observability_default",
+			name:             "claudecode_observability",
 			connector:        "claudecode",
 			wantMode:         "observability",
 			wantIntercept:    false,
-			wantTelemetryAll: []string{"hooks", "otel"},
-		},
-		{
-			name:             "claudecode_enforcement_explicit",
-			connector:        "claudecode",
-			claudeEnforce:    true,
-			wantMode:         "guardrail",
-			wantIntercept:    true,
 			wantTelemetryAll: []string{"hooks", "otel"},
 		},
 		{
@@ -2327,13 +2547,39 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantIntercept:    true,
 			wantTelemetryAll: []string{"hooks"},
 		},
+		{
+			name:             "hermes_observability_hooks_only",
+			connector:        "hermes",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"hooks"},
+		},
+		{
+			name:             "geminicli_observability_hooks_and_otel",
+			connector:        "geminicli",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"hooks", "otel"},
+		},
+		{
+			name:             "copilot_observability_hooks_and_otel",
+			connector:        "copilot",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"hooks", "otel"},
+		},
+		{
+			name:             "openhands_observability_hooks",
+			connector:        "openhands",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"hooks"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Guardrail.Connector = c.connector
-			cfg.Guardrail.CodexEnforcementEnabled = c.codexEnforce
-			cfg.Guardrail.ClaudeCodeEnforcementEnabled = c.claudeEnforce
 
 			api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
 			req := httptest.NewRequest(http.MethodGet, "/status", nil)
@@ -2374,7 +2620,72 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 					t.Errorf("telemetry[%d] = %v, want %s", i, tel[i], want)
 				}
 			}
+
+			// connector_modes is the plural per-connector roster. On a
+			// single-connector install it must still be present with exactly
+			// one entry mirroring the singular connector_mode, so consumers
+			// can always read the fan-out field.
+			modes, ok := result["connector_modes"].([]interface{})
+			if !ok || len(modes) == 0 {
+				t.Fatalf("connector_modes missing or empty: %T %v", result["connector_modes"], result["connector_modes"])
+			}
+			first, _ := modes[0].(map[string]interface{})
+			if first["connector"] != c.connector {
+				t.Errorf("connector_modes[0].connector = %v, want %s", first["connector"], c.connector)
+			}
+			if first["mode"] != c.wantMode {
+				t.Errorf("connector_modes[0].mode = %v, want %s", first["mode"], c.wantMode)
+			}
 		})
+	}
+}
+
+// TestAPIStatusConnectorModesFansOut is the multi-connector counterpart:
+// /status MUST emit one connector_modes entry per active connector (from
+// guardrail.connectors), each with its OWN mode — not just the primary's.
+// This is the API-contract guard behind the gateway-status "Connector Mode"
+// fan-out so a 3-connector install never collapses to a single posture.
+func TestAPIStatusConnectorModesFansOut(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":    {},
+		"openclaw": {},
+	}
+
+	api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	api.handleStatus(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Result().StatusCode)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	modes, ok := result["connector_modes"].([]interface{})
+	if !ok {
+		t.Fatalf("connector_modes missing or wrong type: %T", result["connector_modes"])
+	}
+	if len(modes) != 2 {
+		t.Fatalf("connector_modes len = %d, want 2 (one per active connector): %v", len(modes), modes)
+	}
+	got := map[string]string{}
+	for _, m := range modes {
+		mm, _ := m.(map[string]interface{})
+		name, _ := mm["connector"].(string)
+		mode, _ := mm["mode"].(string)
+		got[name] = mode
+	}
+	// codex is observability-only; openclaw always enforces (guardrail) —
+	// the two connectors carry DIFFERENT modes, so a single summary would
+	// have to drop one. The roster must preserve both.
+	if got["codex"] != "observability" {
+		t.Errorf("codex mode = %q, want observability (got roster %v)", got["codex"], got)
+	}
+	if got["openclaw"] != "guardrail" {
+		t.Errorf("openclaw mode = %q, want guardrail (got roster %v)", got["openclaw"], got)
 	}
 }
 
@@ -3522,7 +3833,13 @@ func TestInspectToolMessageContentFromArgs(t *testing.T) {
 	}
 }
 
-func TestInspectToolHILTUnsupportedDowngradesToAlert(t *testing.T) {
+// a HIGH-severity tool call that policy escalated to
+// "confirm" must fail CLOSED when the caller cannot deliver a native
+// human-in-the-loop approval. Pre-fix this test asserted the legacy
+// alert-only downgrade with would_block=false; that meant the
+// inspect-tool hook scripts (which only block on action==block)
+// forwarded the dangerous tool call as audit telemetry.
+func TestInspectToolHILTUnsupportedFailsClosed(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
@@ -3534,11 +3851,12 @@ func TestInspectToolHILTUnsupportedDowngradesToAlert(t *testing.T) {
 	_, verdict := postInspect(t, api,
 		`{"tool":"shell","args":{"command":"invoke the bash tool without confirmation"},"session_id":"sess-1"}`)
 
-	if verdict.Action != "alert" || verdict.RawAction != "confirm" {
-		t.Fatalf("action=%q raw=%q, want alert/confirm when approval cannot be delivered", verdict.Action, verdict.RawAction)
+	if verdict.Action != "block" || verdict.RawAction != "confirm" {
+		t.Fatalf("action=%q raw=%q, want block/confirm when approval cannot be delivered",
+			verdict.Action, verdict.RawAction)
 	}
-	if verdict.WouldBlock {
-		t.Fatal("unsupported HILT confirmation should not set would_block")
+	if !verdict.WouldBlock {
+		t.Fatal("would_block must be true when failing closed on missing HILT approval surface")
 	}
 }
 
@@ -4855,7 +5173,7 @@ func TestInjectionToVerdict(t *testing.T) {
 		}
 	})
 
-	t.Run("single_category_capped_medium", func(t *testing.T) {
+	t.Run("single_category_high", func(t *testing.T) {
 		data := map[string]interface{}{
 			"Instruction Manipulation": map[string]interface{}{"reasoning": "override", "label": true},
 			"Context Manipulation":     map[string]interface{}{"reasoning": "clean", "label": false},
@@ -4864,15 +5182,15 @@ func TestInjectionToVerdict(t *testing.T) {
 			"Token Exploitation":       map[string]interface{}{"reasoning": "clean", "label": false},
 		}
 		v := j.injectionToVerdict(data)
-		if v.Action != "alert" {
-			t.Errorf("action = %q, want alert (single cat gated)", v.Action)
+		if v.Action != "block" {
+			t.Errorf("action = %q, want block (single cat -> HIGH -> block)", v.Action)
 		}
-		if v.Severity != "MEDIUM" {
-			t.Errorf("severity = %q, want MEDIUM (single cat gated)", v.Severity)
+		if v.Severity != "HIGH" {
+			t.Errorf("severity = %q, want HIGH", v.Severity)
 		}
 	})
 
-	t.Run("two_categories_high", func(t *testing.T) {
+	t.Run("two_categories_critical", func(t *testing.T) {
 		data := map[string]interface{}{
 			"Instruction Manipulation": map[string]interface{}{"reasoning": "override", "label": true},
 			"Obfuscation":              map[string]interface{}{"reasoning": "encoded", "label": true},
@@ -4884,8 +5202,8 @@ func TestInjectionToVerdict(t *testing.T) {
 		if v.Action != "block" {
 			t.Errorf("action = %q, want block", v.Action)
 		}
-		if v.Severity != "HIGH" {
-			t.Errorf("severity = %q, want HIGH", v.Severity)
+		if v.Severity != "CRITICAL" {
+			t.Errorf("severity = %q, want CRITICAL", v.Severity)
 		}
 	})
 
@@ -5469,6 +5787,131 @@ func TestTokenAuth_AcceptCustomHeader(t *testing.T) {
 	}
 	if !*called {
 		t.Error("POST with X-DefenseClaw-Token: next handler was not called")
+	}
+}
+
+func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("loopback OTLP path token: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("loopback OTLP path token: next handler was not called")
+	}
+}
+
+func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeGeminiCLI: "scoped-token-abc",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("master token on scoped OTLP path: status=%d want 401", rr.Code)
+	}
+	if *called {
+		t.Fatal("next handler called for master token despite scoped token existing")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/geminicli/scoped-token-abc/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer secret-token-123")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("master bearer on scoped OTLP path: status=%d want 401", rr.Code)
+	}
+	if *called {
+		t.Fatal("next handler called for master bearer despite scoped token existing")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/geminicli/scoped-token-abc/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped token: status=%d want 200", rr.Code)
+	}
+}
+
+// TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType pins the
+// H-2 follow-up: the path-token branch of apiCSRFProtect skips the
+// X-DefenseClaw-Client header (OTLP exporters can't set arbitrary
+// headers) but MUST still enforce an OTLP-compatible Content-Type so a
+// browser-initiated CSRF POST with the default text/plain or
+// application/x-www-form-urlencoded cannot smuggle a malicious payload
+// in even if it somehow learned the path token.
+func TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cases := []struct {
+		name       string
+		ct         string
+		wantStatus int
+	}{
+		{"missing content-type rejected", "", http.StatusUnsupportedMediaType},
+		{"text/plain rejected", "text/plain", http.StatusUnsupportedMediaType},
+		{"form-urlencoded rejected", "application/x-www-form-urlencoded", http.StatusUnsupportedMediaType},
+		{"application/json accepted", "application/json", http.StatusOK},
+		{"application/json with charset accepted", "application/json; charset=utf-8", http.StatusOK},
+		{"application/x-protobuf accepted", "application/x-protobuf", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+			req.RemoteAddr = "127.0.0.1:54321"
+			if tc.ct != "" {
+				req.Header.Set("Content-Type", tc.ct)
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != tc.wantStatus {
+				t.Errorf("Content-Type=%q: status = %d, want %d", tc.ct, rr.Code, tc.wantStatus)
+			}
+		})
+	}
+}
+
+// TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected pins
+// the existing Origin gate stays active inside the path-token branch
+// (a browser tab on http://evil.example.com cannot bypass CSRF by
+// crafting an OTLP path-token URL — even if it somehow learned the
+// token).
+func TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://evil.example.com")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("non-localhost Origin: status = %d, want %d", rr.Code, http.StatusForbidden)
 	}
 }
 

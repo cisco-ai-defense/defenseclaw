@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -116,6 +117,33 @@ func TestEvaluateCodexHook_ExplicitEnableStillWorks(t *testing.T) {
 
 	if resp.RawAction != "block" {
 		t.Errorf("RawAction = %q, want block", resp.RawAction)
+	}
+}
+
+// TestEvaluateCodexHook_PerConnectorDisableAllowsWithoutScan pins the
+// defense-in-depth gate: when codex is a member of guardrail.connectors but
+// explicitly disabled (`guardrail disable --connector codex`), a hook that
+// still calls in is allowed without scanning, even though the prompt carries
+// a block-worthy keyword.
+func TestEvaluateCodexHook_PerConnectorDisableAllowsWithoutScan(t *testing.T) {
+	off := false
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex": {Enabled: &off},
+	}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := codexHookRequest{
+		HookEventName: "UserPromptSubmit",
+		Prompt:        trustExploitKeyword(),
+	}
+	resp := api.evaluateCodexHook(context.Background(), req)
+
+	if resp.RawAction != "allow" {
+		t.Errorf("RawAction = %q, want allow (disabled connector must not scan)", resp.RawAction)
 	}
 }
 
@@ -233,6 +261,168 @@ func TestEvaluateCodexHook_DirectMCPAddBlocked(t *testing.T) {
 	}
 }
 
+func TestEvaluateCodexHook_BlocksUnregisteredMCPPermissionRequest(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "github"}}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	resp := api.evaluateCodexHook(context.Background(), codexHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "mcp__rogue__search",
+		ToolInput:     map[string]interface{}{"query": "status"},
+	})
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-MCP") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", resp.Findings)
+	}
+	hook, ok := resp.CodexOutput["hookSpecificOutput"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("codex output = %+v, want hookSpecificOutput", resp.CodexOutput)
+	}
+	decision, ok := hook["decision"].(map[string]interface{})
+	if !ok || decision["behavior"] != "deny" {
+		t.Fatalf("permission decision = %+v, want behavior=deny", hook["decision"])
+	}
+}
+
+func TestEvaluateCodexHook_BlocksUnregisteredSkillPermissionRequest(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.RegistryRequired = true
+	cfg.AssetPolicy.Skill.Registry = []config.AssetPolicyRule{{Name: "trusted-skill"}}
+	enableSkillRuntimeDetection(cfg)
+
+	api := &APIServer{scannerCfg: cfg}
+
+	resp := api.evaluateCodexHook(context.Background(), codexHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "Skill",
+		ToolInput:     map[string]interface{}{"skill_name": "rogue-skill"},
+	})
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if resp.Severity != "HIGH" {
+		t.Fatalf("severity=%q, want HIGH", resp.Severity)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-SKILL") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-SKILL", resp.Findings)
+	}
+	if resp.Reason == "" {
+		t.Fatal("expected skill asset-policy block reason")
+	}
+	hook, ok := resp.CodexOutput["hookSpecificOutput"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("codex output = %+v, want hookSpecificOutput", resp.CodexOutput)
+	}
+	decision, ok := hook["decision"].(map[string]interface{})
+	if !ok || decision["behavior"] != "deny" {
+		t.Fatalf("permission decision = %+v, want behavior=deny", hook["decision"])
+	}
+	for _, want := range []string{"reason_code=not-in-approved-registry", "asset_type=skill", "asset_name=rogue-skill", "connector=codex", "source=registry-required", "registry_status=not-registered", "registry_configured=true"} {
+		if !strings.Contains(resp.Reason, want) {
+			t.Fatalf("reason %q missing %q", resp.Reason, want)
+		}
+	}
+}
+
+// TestEvaluateCodexHook_RegistryRequiredEmptyDeniesByDefault is the
+// Codex-side mirror of the Claude Code test. Empty registry +
+// registry_required=true must block under the new fail-closed default,
+// regardless of MCP.Default. Operators must opt into the looser
+// behavior via registry_empty_action="allow".
+func TestEvaluateCodexHook_RegistryRequiredEmptyDeniesByDefault(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+
+	api := &APIServer{scannerCfg: cfg}
+
+	resp := api.evaluateCodexHook(context.Background(), codexHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "mcp__rogue__search",
+		ToolInput:     map[string]interface{}{"query": "status"},
+	})
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-MCP") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", resp.Findings)
+	}
+	if !strings.Contains(resp.Reason, "reason_code=registry-required-but-empty") {
+		t.Fatalf("reason %q missing registry-required-but-empty reason_code", resp.Reason)
+	}
+}
+
+func TestEvaluateCodexHook_RegistryRequiredEmptyAllowOptInPermits(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	cfg.AssetPolicy.MCP.RegistryEmptyAction = "allow"
+
+	api := &APIServer{scannerCfg: cfg}
+
+	resp := api.evaluateCodexHook(context.Background(), codexHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "mcp__rogue__search",
+		ToolInput:     map[string]interface{}{"query": "status"},
+	})
+
+	if resp.Action != "allow" || resp.RawAction != "allow" {
+		t.Fatalf("action=%q raw=%q, want allow/allow", resp.Action, resp.RawAction)
+	}
+	if containsString(resp.Findings, "ASSET-POLICY-MCP") {
+		t.Fatalf("findings=%v, did not expect ASSET-POLICY-MCP", resp.Findings)
+	}
+}
+
+func TestEvaluateCodexHook_SkillDefaultDenyBlocksWithoutRegistry(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.Default = "deny"
+	enableSkillRuntimeDetection(cfg)
+
+	api := &APIServer{scannerCfg: cfg}
+
+	resp := api.evaluateCodexHook(context.Background(), codexHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "Skill",
+		ToolInput:     map[string]interface{}{"skill_name": "rogue-skill"},
+	})
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	for _, want := range []string{"reason_code=default-deny", "source=default-deny", "registry_status=unknown", "registry_configured=false"} {
+		if !strings.Contains(resp.Reason, want) {
+			t.Fatalf("reason %q missing %q", resp.Reason, want)
+		}
+	}
+}
+
 func TestEvaluateCodexHook_ObserveAssetPolicyWouldBlock(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"
@@ -286,6 +476,13 @@ func TestEvaluateCodexHook_RuntimeDetectionCanDisableTerminalMCP(t *testing.T) {
 	}
 }
 
+// TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock pins the
+// fix: when AssetPolicy is in action mode and MCP.Default is
+// "deny", an unknown terminal MCP command MUST block even when the
+// secondary `runtime_detection.unknown_terminal_mcp` knob is left at
+// its observe default. Operators that explicitly opt into
+// MCP.Default=deny should not have to discover and override the
+// secondary knob to get default-deny semantics.
 func TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"
@@ -305,11 +502,9 @@ func TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock(t *testing.T) 
 	}
 	resp := api.evaluateCodexHook(context.Background(), req)
 
-	if resp.Action != "allow" || resp.RawAction != "block" {
-		t.Fatalf("action=%q raw=%q, want allow/block", resp.Action, resp.RawAction)
-	}
-	if !resp.WouldBlock {
-		t.Fatal("unknown terminal MCP should default to would_block")
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block — MCP.Default=deny in action mode must not be silently downgraded by unknown_terminal_mcp=observe",
+			resp.Action, resp.RawAction)
 	}
 }
 
@@ -348,6 +543,7 @@ func TestMergeAssetDecision_ObserveDoesNotDowngradeExistingBlock(t *testing.T) {
 	action, rawAction, severity, reason, findings, wouldBlock := mergeAssetDecision(
 		decision,
 		true,
+		"mcp",
 		"PreToolUse",
 		"block",
 		"block",
@@ -459,7 +655,14 @@ func TestHandleCodexHook_EnrichesHTTPSpan(t *testing.T) {
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	api := &APIServer{}
-	handler := otelHTTPServerMiddleware("sidecar-api", http.HandlerFunc(api.handleCodexHook))
+	// PR #284: handleCodexHook was deleted; the unified pipeline
+	// now serves /api/v1/codex/hook via handleAgentHook("codex").
+	// The typed evaluator + span enricher (evaluateCodexHook /
+	// enrichCodexHookSpan) are invoked by the profile-runtime
+	// registry so the gen_ai.* and
+	// defenseclaw.codex.hook.* span attributes asserted below
+	// remain present.
+	handler := otelHTTPServerMiddleware("sidecar-api", api.handleAgentHook("codex"))
 
 	body, err := json.Marshal(codexHookRequest{
 		HookEventName: "PreToolUse",

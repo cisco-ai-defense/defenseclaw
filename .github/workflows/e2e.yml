@@ -15,7 +15,20 @@ concurrency:
 jobs:
   core:
     name: Core E2E
-    if: ${{ github.event_name != 'schedule' }}
+    # Closes avarice F-2067 (HIGH): the self-hosted runner has access
+    # to OPENCLAW_GATEWAY_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY,
+    # BIFROST_API_KEY, and SPLUNK_ACCESS_TOKEN via the env block
+    # below. Allowing fork PRs to dispatch this job hands attacker-
+    # controlled workflow code (e.g. a malicious test that prints
+    # secrets, or a workflow_run hijack) the keys to the kingdom AND
+    # persistent shell access on a long-lived ARM64 runner.
+    #
+    # Guard rail: only run on push, schedule, workflow_dispatch, or
+    # PRs whose head ref lives on this repo (i.e. internal PRs).
+    # External contributors instead rely on the GitHub-hosted shadow
+    # job further down the file. Mirrors the guard already in
+    # `full-live` below — we just forgot to clone it onto `core`.
+    if: ${{ github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 30
     env:
@@ -25,6 +38,12 @@ jobs:
       BIFROST_API_KEY: ${{ secrets.BIFROST_API_KEY }}
       SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
       SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
+      # docker-compose.ci.yml intentionally fails closed unless operators
+      # provide a private env file and Splunk password. CI uses the tracked
+      # non-secret example values explicitly so compose interpolation succeeds
+      # without weakening local/operator defaults.
+      SPLUNK_ENV_FILE: ../env/.env.example
+      SPLUNK_PASSWORD: DefenseClawLocalMode1!
       E2E_PROFILE: core
       DEFENSECLAW_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-core
       E2E_TEST_PREFIX: e2e-gh-${{ github.run_id }}-${{ github.run_attempt }}-core
@@ -164,7 +183,7 @@ jobs:
           docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -192,7 +211,7 @@ jobs:
           docker compose -f docker-compose.ci.yml restart splunk
           echo "Waiting for Splunk HEC after restart..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -229,7 +248,27 @@ jobs:
           }
 
       - name: Install DefenseClaw
-        run: make install
+        # These E2E jobs activate guardrail.connector=openclaw later on,
+        # which forces OpenClawConnector.Setup() to run. That Setup
+        # refuses to plant a placeholder extension and exits with
+        # "openclaw extension is not bundled in this gateway build"
+        # (internal/gateway/connector/openclaw.go:131).
+        #
+        # The Makefile's default target graph is subtle:
+        #   install: cli-install gateway-install maybe-openclaw-plugin-install
+        # and `gateway` depends on `sync-openclaw-extension`, which drops
+        # a `.placeholder` if extensions/defenseclaw/dist/ isn't there yet.
+        # With `CONNECTOR=openclaw` set, `maybe-openclaw-plugin-install`
+        # later builds the TS plugin — but the gateway binary has already
+        # been compiled with the placeholder embedded. Rebuilding the
+        # plugin dist/ after the fact does not re-run //go:embed.
+        #
+        # The right order is: build the TS plugin first (populates
+        # extensions/defenseclaw/dist/), THEN run install so that
+        # `gateway-install` -> `sync-openclaw-extension` picks up the
+        # real tree. `make plugin install` gives us that sequence in
+        # one line.
+        run: make plugin install
 
       - name: Activate venv
         run: |
@@ -322,12 +361,12 @@ jobs:
                   'kind':    'splunk_hec',
                   'enabled': True,
                   'splunk_hec': {
-                      'endpoint':   'http://127.0.0.1:8088/services/collector/event',
+                      'endpoint':   'https://127.0.0.1:8088/services/collector/event',
                       'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
                       'index':      'defenseclaw_local',
                       'source':     'defenseclaw',
                       'sourcetype': 'defenseclaw:json',
-                      'verify_tls': False,
+                      'insecure_skip_verify': True,
                   },
               },
               # Phase 6 mock HEC collector — observability_assertions.sh
@@ -520,6 +559,12 @@ jobs:
       AWS_REGION: us-east-1
       SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
       SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
+      # docker-compose.ci.yml intentionally fails closed unless operators
+      # provide a private env file and Splunk password. CI uses the tracked
+      # non-secret example values explicitly so compose interpolation succeeds
+      # without weakening local/operator defaults.
+      SPLUNK_ENV_FILE: ../env/.env.example
+      SPLUNK_PASSWORD: DefenseClawLocalMode1!
       E2E_PROFILE: full-live
       DEFENSECLAW_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-full-live
       E2E_TEST_PREFIX: e2e-gh-${{ github.run_id }}-${{ github.run_attempt }}-full-live
@@ -678,7 +723,7 @@ jobs:
           docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -704,7 +749,7 @@ jobs:
           docker compose -f docker-compose.ci.yml restart splunk
           echo "Waiting for Splunk HEC after restart..."
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            curl -sfk https://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
@@ -737,7 +782,27 @@ jobs:
           }
 
       - name: Install DefenseClaw
-        run: make install
+        # These E2E jobs activate guardrail.connector=openclaw later on,
+        # which forces OpenClawConnector.Setup() to run. That Setup
+        # refuses to plant a placeholder extension and exits with
+        # "openclaw extension is not bundled in this gateway build"
+        # (internal/gateway/connector/openclaw.go:131).
+        #
+        # The Makefile's default target graph is subtle:
+        #   install: cli-install gateway-install maybe-openclaw-plugin-install
+        # and `gateway` depends on `sync-openclaw-extension`, which drops
+        # a `.placeholder` if extensions/defenseclaw/dist/ isn't there yet.
+        # With `CONNECTOR=openclaw` set, `maybe-openclaw-plugin-install`
+        # later builds the TS plugin — but the gateway binary has already
+        # been compiled with the placeholder embedded. Rebuilding the
+        # plugin dist/ after the fact does not re-run //go:embed.
+        #
+        # The right order is: build the TS plugin first (populates
+        # extensions/defenseclaw/dist/), THEN run install so that
+        # `gateway-install` -> `sync-openclaw-extension` picks up the
+        # real tree. `make plugin install` gives us that sequence in
+        # one line.
+        run: make plugin install
 
       - name: Activate venv
         run: |
@@ -1049,12 +1114,12 @@ jobs:
                   'kind':    'splunk_hec',
                   'enabled': True,
                   'splunk_hec': {
-                      'endpoint':   'http://127.0.0.1:8088/services/collector/event',
+                      'endpoint':   'https://127.0.0.1:8088/services/collector/event',
                       'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
                       'index':      'defenseclaw_local',
                       'source':     'defenseclaw',
                       'sourcetype': 'defenseclaw:json',
-                      'verify_tls': False,
+                      'insecure_skip_verify': True,
                   },
               },
               # Phase 6 mock HEC collector (see core job for rationale).

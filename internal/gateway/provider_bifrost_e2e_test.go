@@ -218,19 +218,40 @@ func TestBifrostE2E_TenantKeyUniqueness(t *testing.T) {
 
 	// Verify each tuple materializes to an account carrying exactly its
 	// own credentials — no mutation from sibling tuples.
-	a1 := newTenantAccount(provKey, "key-1", k1, "")
-	a2 := newTenantAccount(provKey, "key-2", k2, "")
+	a1 := newTenantAccount(provKey, "key-1", k1, "", tlsOverrides{}, nil, nil, nil, nil)
+	a2 := newTenantAccount(provKey, "key-2", k2, "", tlsOverrides{}, nil, nil, nil, nil)
 	if a1.keys[0].Value.Val != "key-1" || a2.keys[0].Value.Val != "key-2" {
 		t.Errorf("tenant accounts leaked keys: a1=%q a2=%q",
 			a1.keys[0].Value.Val, a2.keys[0].Value.Val)
 	}
 
-	withBase := newTenantAccount(provKey, "key-1", k1, "http://custom:8080")
+	withBase := newTenantAccount(provKey, "key-1", k1, "http://custom:8080", tlsOverrides{}, nil, nil, nil, nil)
 	if withBase.config.NetworkConfig.BaseURL != "http://custom:8080" {
 		t.Errorf("baseURL not propagated: got %q", withBase.config.NetworkConfig.BaseURL)
 	}
 	if a1.config.NetworkConfig.BaseURL != "" {
 		t.Error("baseURL mutation leaked across sibling tenant accounts")
+	}
+
+	// Per-instance TLS overrides must flow through to the NetworkConfig so
+	// custom-providers.json entries can opt into a self-signed root or skip
+	// verification entirely in trusted-lab deployments.
+	withTLS := newTenantAccount(
+		provKey,
+		"key-1",
+		k1,
+		"https://lab.internal",
+		tlsOverrides{CACertPEM: "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n", InsecureSkipVerify: true},
+		nil, nil, nil, nil,
+	)
+	if !withTLS.config.NetworkConfig.InsecureSkipVerify {
+		t.Error("insecure_skip_verify did not propagate to NetworkConfig")
+	}
+	if withTLS.config.NetworkConfig.CACertPEM == "" {
+		t.Error("ca_cert_pem did not propagate to NetworkConfig")
+	}
+	if a1.config.NetworkConfig.InsecureSkipVerify || a1.config.NetworkConfig.CACertPEM != "" {
+		t.Error("TLS overrides leaked back into the bare-tenant account")
 	}
 }
 
@@ -642,7 +663,7 @@ func TestBifrostE2E_EmptyModelProviderInference(t *testing.T) {
 
 func TestBifrostE2E_BedrockABSKTenantAccount(t *testing.T) {
 	keyID := bifrostKeyID(schemas.Bedrock, "ABSKe2eTestKey123")
-	acc := newTenantAccount(schemas.Bedrock, "ABSKe2eTestKey123", keyID, "")
+	acc := newTenantAccount(schemas.Bedrock, "ABSKe2eTestKey123", keyID, "", tlsOverrides{}, nil, nil, nil, nil)
 
 	if len(acc.keys) != 1 {
 		t.Fatalf("expected 1 key, got %d", len(acc.keys))

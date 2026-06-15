@@ -1,0 +1,90 @@
+---
+title: Claude Code
+description: Claude Code connector wires PreToolUse, PostToolUse, UserPromptSubmit, Stop, and PermissionRequest hooks plus the native OTel exporter. Native ask is supported on PreToolUse for HITL.
+keywords:
+  - DefenseClaw Claude Code connector
+  - Claude Code hooks
+  - Claude Code PreToolUse
+  - Claude Code observability
+---
+
+The Claude Code connector wires DefenseClaw into [Anthropic's documented hook surfaces](https://docs.anthropic.com/) without inserting a proxy in the data path. Claude Code talks directly to its native upstream; DefenseClaw inspects via hooks + native OTel.
+
+<Callout type="info">
+The Claude Code connector is **hook-only**. There is no LLM-proxy data path — Claude Code talks directly to `api.anthropic.com` and DefenseClaw observes via hooks + native OTel.
+
+**`mode=action` is fully supported here, hook-natively.** When `guardrail.mode=action` (or `defenseclaw setup claude-code --mode action`), the `PreToolUse` hook returns a `permissionDecision: "deny"` verdict on policy hits and Claude Code blocks the tool call inside its own permission flow — including the HITL ask dialog when `--human-approval` is on. No proxy listener is involved.
+</Callout>
+
+## Setup
+
+```bash
+defenseclaw setup claude-code                # observe (default) — record only
+defenseclaw setup claude-code --mode action  # block on policy hits via PreToolUse deny
+```
+
+Pins `claw.mode=claudecode`, wires hooks + native OTel. No proxy listener binds for Claude Code in either mode.
+
+#### What this command sets vs. leaves at defaults
+
+Every other knob falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+
+| Knob | Value when omitted | Flag to override |
+| --- | --- | --- |
+| Policy mode | `observe` (record only) | `--mode observe\|action` |
+| Scanner backend | `local` (bundled regex packs, zero key) | `--scanner-mode local\|remote\|both` |
+| Rule pack | unset → built-in baseline (no overlay) | `--rule-pack default\|strict\|permissive` |
+| LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
+| Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
+| HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
+| Hook fail-mode | `open` (allow on guardrail-side failure) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
+| Block message | empty (uses built-in copy) | `--block-message "<text>"` |
+| Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
+| Verify after setup | on | `--no-verify` |
+
+See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
+
+## Files DefenseClaw will modify
+
+<Files>
+  <Folder name="~/.claude" defaultOpen>
+    <File name="settings.json (hooks block + OTEL_* env vars + CLAUDE_CODE_ENABLE_TELEMETRY)" />
+  </Folder>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <Folder name="hooks">
+      <File name="claudecode-hook.sh" />
+    </Folder>
+  </Folder>
+</Files>
+
+DefenseClaw stores a hash-checked backup of `settings.json` before edits. Teardown restores it byte-for-byte; if the file drifted, only DefenseClaw-owned entries are surgically removed.
+
+## Hook capabilities
+
+<HookEventsList connector="claudecode" />
+
+<Callout type="info">
+Claude Code is one of the few connectors that supports native PreToolUse ask. HITL approvals surface inside the agent UI itself, so the operator never has to leave Claude Code to decide.
+</Callout>
+
+## Telemetry channels at boot
+
+<Flow
+  direction="LR"
+  caption="Two telemetry channels: hooks for per-tool-call decisions and native OTel for raw model/token telemetry."
+>
+  <Node id="cc" kind="agent">Claude Code</Node>
+  <Node id="hooks" kind="connector">{`PreToolUse / PostToolUse /\nUserPromptSubmit / Stop /\nPermissionRequest hooks`}</Node>
+  <Node id="otel" kind="connector">{`Native OTel exporter\n(env-driven)`}</Node>
+  <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
+  <Edge from="cc" to="hooks" />
+  <Edge from="hooks" to="gateway" />
+  <Edge from="cc" to="otel" />
+  <Edge from="otel" to="gateway" />
+</Flow>
+
+## Disable
+
+```bash
+defenseclaw setup guardrail --disable
+```

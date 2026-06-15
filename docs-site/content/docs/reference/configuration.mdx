@@ -1,0 +1,372 @@
+---
+title: Configuration
+description: ~/.defenseclaw/config.yaml schema, environment variables, on-disk layout, and per-connector source-of-truth files. The single source of truth for "where does this setting live?"
+keywords:
+  - DefenseClaw configuration
+  - DefenseClaw config.yaml
+  - DefenseClaw environment variables
+  - DefenseClaw on-disk layout
+  - DEFENSECLAW_LLM_KEY
+---
+
+`~/.defenseclaw/config.yaml` is the single source of truth for operator-owned configuration. Most fields are managed by `defenseclaw setup *` commands; you can also hand-edit, then run `defenseclaw-gateway restart` (or `defenseclaw setup guardrail --restart`). Note `restart` is on the **Go sidecar binary** — the Python `defenseclaw` CLI has no top-level `gateway` group.
+
+## On-disk layout
+
+<Files>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <File name="config.yaml" />
+    <File name="audit.db" />
+    <File name="gateway-token" />
+    <File name="picked_connector" />
+    <Folder name=".venv">
+      <File name="…" />
+    </Folder>
+    <Folder name="hooks">
+      <File name="<connector>-hook.sh" />
+    </Folder>
+    <Folder name="policies" defaultOpen>
+      <Folder name="guardrail">
+        <Folder name="default">
+          <File name="shell.yaml" />
+          <File name="secrets.yaml" />
+          <File name="prompt-injection.yaml" />
+        </Folder>
+        <Folder name="strict" />
+        <Folder name="permissive" />
+      </Folder>
+      <Folder name="codeguard" />
+    </Folder>
+    <Folder name="backups">
+      <File name="<connector>-<timestamp>.json" />
+    </Folder>
+  </Folder>
+</Files>
+
+## config.yaml schema
+
+The shape below mirrors the dataclasses in `cli/defenseclaw/config.py` and the matching Go structs in `internal/config/`. Every block is optional — `defenseclaw setup *` writes only the fields it needs and the merge keeps your hand-edits intact.
+
+```yaml
+claw:
+  mode: claudecode             # active connector; pinned by setup aliases.
+                               # Set to `multi` automatically when more than one
+                               # connector is active (see guardrail.connectors below).
+                               # This value is mirrored to the OTel resource attr
+                               # `defenseclaw.claw.mode`.
+
+gateway:
+  host: 127.0.0.1              # gateway proxy bind host
+  port: 18789                  # gateway proxy port (sidecar -> upstream LLM traffic)
+  api_port: 18970              # gateway REST API port (hooks + TUI dial this)
+  api_bind: ""                 # optional override for the REST API bind address
+
+# Top-level OTel exporter — wires the sidecar to a collector. Written by
+# `setup local-observability up` or `setup observability add <preset>`.
+otel:
+  enabled: false
+  protocol: grpc               # grpc | http/protobuf
+  endpoint: ""                 # 127.0.0.1:4317 after local-observability up
+  service_name: defenseclaw
+  signals: [traces, metrics, logs]
+
+# Top-level LLM block. Written by `defenseclaw setup llm` (and copied
+# into per-component blocks via the `--inherit-from` machinery). The
+# `role` field decides who consumes this block at resolve time:
+#   - `unified` (default): every component that does not declare its
+#     own `llm:` reads from here.
+#   - `agent`: guardrail.judge.llm stays empty and inherits through
+#     the unified merge — proxy connectors only.
+#   - `judge`: writes guardrail.judge.llm directly, leaves the top
+#     level alone — useful for hook-based connectors that already
+#     route the agent's traffic elsewhere.
+# See `defenseclaw setup guardrail --llm-role judge_only|judge_and_agent`
+# for the connector-aware variant.
+llm:
+  provider: anthropic          # anthropic | openai | bedrock | vertex_ai | azure | custom
+  model: claude-sonnet-4-5
+  api_key_env: DEFENSECLAW_LLM_KEY
+  base_url: ""                 # optional override; LiteLLM picks a default per provider
+  role: unified                # unified | agent | judge
+  instance_name: ""            # binds to a ~/.defenseclaw/custom-providers.json entry; required with provider: custom
+  region: ""                   # generic regional hint (Bedrock / Vertex); provider-specific sub-blocks below take precedence
+  # forward_custom_headers controls whether the guardrail gateway
+  # forwards inbound HTTP headers from the agent to the upstream LLM
+  # provider on both /v1/chat/completions and the passthrough path
+  # (/v1/responses, /v1/messages, Bedrock/Gemini native, ...). Default
+  # is on; set to false to suppress all inbound header copying so the
+  # upstream only sees the canonical Authorization the gateway re-mints
+  # from the secrets sidecar. A small blocklist (proxy-hop, auth, host,
+  # X-DC-*, X-DefenseClaw-*, W3C trace context) plus RFC 7230 /
+  # printable-ASCII validation and 64-header / 32 KiB caps apply
+  # regardless. See docs/GUARDRAIL.md → Custom Header Forwarding.
+  forward_custom_headers: true
+
+  # Provider-specific sub-blocks. Only the one matching `provider`
+  # is consulted; the others may exist as leftover state from a
+  # previous setup and are ignored at resolve time.
+  bedrock:
+    region: us-east-1
+    auth_mode: iam_credentials # api_key | iam_credentials | profile | instance_role
+    access_key_env: AWS_ACCESS_KEY_ID
+    secret_key_env: AWS_SECRET_ACCESS_KEY
+    session_token_env: AWS_SESSION_TOKEN
+    profile_name: ""
+    inference_profile: us.     # optional model-id prefix
+    deployment_aliases: {}     # alias -> model-id, populated by --bedrock-deployment
+
+  vertex:
+    project_id: acme-prod-vertex
+    region: us-central1
+    auth_mode: service_account # service_account | adc | workload_identity
+    service_account_json_env: GOOGLE_APPLICATION_CREDENTIALS
+
+  azure:
+    endpoint: https://my-resource.openai.azure.com
+    api_version: 2024-10-21
+    auth_mode: api_key         # api_key | managed_identity
+    deployment_aliases: {}     # model -> deployment, populated by --azure-deployment-alias
+
+  # Inline TLS posture for self-signed or internal endpoints. Both
+  # `ca_cert_pem` and `insecure_skip_verify` exist so the gateway
+  # never has to read another file at request time; `doctor` warns
+  # when both are set on the same block.
+  tls:
+    ca_cert_pem: ""            # PEM bundle inlined from --tls-ca-cert-file
+    insecure_skip_verify: false
+
+guardrail:
+  enabled: true
+  connector: claudecode        # actively enforced connector
+  mode: action                 # observe | action
+  scanner_mode: local          # local | remote | both
+  rule_pack_dir: ~/.defenseclaw/policies/guardrail/default  # path; --rule-pack picks the bundled profile dir
+  port: 4000                   # guardrail proxy port
+  block_message: ""            # custom; empty -> default
+  detection_strategy: regex_only  # regex_only | regex_judge | judge_first
+
+  cisco:
+    endpoint: ""
+    api_key_env: CISCO_AI_DEFENSE_API_KEY
+    timeout_ms: 5000
+
+  # When `judge.llm` is omitted, the judge inherits from the top-level
+  # `llm:` block. Populate it explicitly to point the judge at a
+  # different backend (e.g. an internal Bedrock instance) without
+  # changing what the agent talks to.
+  judge:
+    enabled: false
+    model: anthropic/claude-sonnet-4-20250514
+    api_base: ""
+    api_key_env: DEFENSECLAW_LLM_KEY
+    llm: {}                    # same shape as top-level `llm:` above
+
+  hilt:
+    enabled: false
+    min_severity: HIGH         # stored uppercase; CLI accepts high|medium|low|critical
+
+  # Multi-connector overlay. One gateway can enforce guardrail policy for
+  # several hook connectors at once; each key under `connectors` is a
+  # connector name (codex, claudecode, antigravity, ...) carrying a
+  # subset of the guardrail knobs above. Every field is OPTIONAL and
+  # inherits the global `guardrail.*` value when unset. The singular
+  # `guardrail.connector` above keeps working for single-connector
+  # installs; this map is purely additive. Proxy connectors (openclaw,
+  # zeptoclaw) cannot appear here — multi-connector is hook-only.
+  # Managed by `defenseclaw setup <connector>` (choosing "Add") and the
+  # `defenseclaw guardrail ... --connector X` command group.
+  connectors:
+    codex:
+      enabled: true            # pointer field: omit = inherit (enabled); false = explicitly off
+      mode: action             # observe | action; inherits guardrail.mode when unset
+      hook_fail_mode: closed   # open | closed; inherits guardrail.hook_fail_mode
+      block_message: ""        # custom; inherits guardrail.block_message
+      rule_pack_dir: ~/.defenseclaw/policies/guardrail/strict  # inherits guardrail.rule_pack_dir
+      hilt:
+        enabled: true
+        min_severity: HIGH
+    claudecode:
+      mode: observe            # only logs; everything else inherits the global default
+
+# Top-level redaction switches; persistent kill-switches are deliberately
+# top-level so multi-tenant operators can audit them without grepping the
+# guardrail block.
+privacy:
+  disable_redaction: false     # true bypasses redaction on every sink
+
+# Audit fan-out is a top-level list; each entry is a kind-tagged sink.
+# `setup observability add <preset>` and `setup splunk` both write here.
+audit_sinks:
+  - name: org-splunk
+    kind: splunk_hec
+    enabled: true
+    endpoint: https://splunk.example.com/services/collector
+    splunk_hec:
+      token_env: SPLUNK_ACCESS_TOKEN
+      index: defenseclaw
+  - name: local-otlp-logs
+    kind: otlp_logs
+    enabled: true
+    endpoint: 127.0.0.1:4317
+    otlp_logs:
+      protocol: grpc
+      insecure: true
+
+# Notifier webhooks (Slack / PagerDuty / Webex / generic). Distinct from
+# audit sinks — these are managed by `defenseclaw setup webhook`.
+webhooks:
+  - name: oncall-slack
+    type: slack
+    enabled: true
+    url: https://hooks.slack.com/services/T000/B000/XXX
+    secret_env: ""             # optional HMAC for `type: generic`
+    min_severity: HIGH
+```
+
+The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/setup/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
+
+## `guardrail.connectors` and `claw.mode: multi`
+
+A single gateway can enforce guardrail policy for several **hook** connectors at once. Each connector that's active gets a `guardrail.connectors.<name>` block; the gateway resolves policy per connector and falls back to the global `guardrail.*` values for anything a block leaves unset.
+
+| Per-connector key | Type | Inherits when unset |
+| --- | --- | --- |
+| `enabled` | bool pointer — omit = inherit (on); `false` = explicitly off (drops it from the active set, removes its hooks) | on |
+| `mode` | `observe` \| `action` | `guardrail.mode` |
+| `hook_fail_mode` | `open` \| `closed` | `guardrail.hook_fail_mode` |
+| `block_message` | string | `guardrail.block_message` |
+| `rule_pack_dir` | path | `guardrail.rule_pack_dir` |
+| `hilt` | `{ enabled, min_severity }` | `guardrail.hilt` |
+
+`claw.mode` becomes **`multi`** automatically once more than one connector is active. That sentinel is mirrored onto the OTel resource attribute `defenseclaw.claw.mode`, so a fan-out gateway is distinguishable from a single-connector one in dashboards and SIEM. The singular `guardrail.connector` is untouched and still drives single-connector installs — the map is purely additive. Proxy connectors (OpenClaw, ZeptoClaw) cannot be entries here; multi-connector is hook-only. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/setup/guardrail/multi-connector).
+
+## Custom-provider overlay (`~/.defenseclaw/custom-providers.json`)
+
+Custom-provider instances live in a separate JSON overlay so the same instance definition can be shared across roles (agent, judge) and across hosts. The Python merger (`_apply_instance_overlay`) and the Go dispatcher (`buildProviderFromEffective`) both apply the same rule: **the role wins; the overlay fills blanks**.
+
+```json
+{
+  "providers": [
+    {
+      "name": "acme-internal-bedrock",
+      "base_provider_type": "bedrock",
+      "base_url": "https://llm.internal:8443",
+      "domains": ["llm.internal"],
+      "env_key": "ACME_BEDROCK_KEY",
+      "allowed_request_types": ["chat", "embedding"],
+      "available_models": ["us.anthropic.claude-sonnet-4-6"],
+      "request_path_overrides": {
+        "chat": "/openai/v1/chat/completions"
+      },
+
+      "tls": {
+        "ca_cert_pem": "-----BEGIN CERTIFICATE-----\n...",
+        "insecure_skip_verify": false
+      },
+
+      "bedrock": {
+        "region": "us-east-1",
+        "auth_mode": "iam_credentials",
+        "access_key_env": "AWS_ACCESS_KEY_ID",
+        "secret_key_env": "AWS_SECRET_ACCESS_KEY",
+        "session_token_env": "AWS_SESSION_TOKEN",
+        "profile_name": "",
+        "inference_profile": "us.",
+        "deployment_aliases": {
+          "fast": "anthropic.claude-3-haiku-20240307-v1:0"
+        }
+      },
+
+      "vertex": {
+        "project_id": "acme-prod-vertex",
+        "region": "us-central1",
+        "auth_mode": "service_account",
+        "service_account_json_env": "GOOGLE_APPLICATION_CREDENTIALS"
+      },
+
+      "azure": {
+        "endpoint": "https://my-resource.openai.azure.com",
+        "api_version": "2024-10-21",
+        "auth_mode": "api_key",
+        "deployment_aliases": {
+          "gpt-4o": "prod-gpt4o-eus"
+        }
+      }
+    }
+  ]
+}
+```
+
+In practice an entry only carries the sub-block matching its `base_provider_type` — extras are ignored at dispatch time but `defenseclaw doctor` warns about family mismatches (e.g. `bedrock` block with `base_provider_type: openai`), unknown `auth_mode` values, and dead overlay fields the role-level config already shadows. Auth modes are the same as on `setup llm` (`api_key` / `iam_credentials` / `profile` / `instance_role` for Bedrock; `service_account` / `adc` / `workload_identity` for Vertex; `api_key` / `managed_identity` for Azure).
+
+The `domains` array drives the gateway's URL → overlay lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this overlay entry's TLS, base_url, and sub-block posture. Any entry that declares `base_url` should also list the matching host in `domains`; `defenseclaw doctor` warns when the two diverge.
+
+## Environment variables
+
+A handful of high-traffic env vars are inlined below. The full inventory — every variable the CLI and gateway read, with file:line references — lives on [Reference → Environment variables](/docs/reference/env-vars).
+
+<TypeTable
+  type={{
+    "DEFENSECLAW_HOME": {
+      type: "path",
+      description: "Override the data directory (default ~/.defenseclaw). Affects config.yaml, .env, audit.db, gateway.jsonl, hook scripts, and the registries cache.",
+    },
+    "DEFENSECLAW_LLM_KEY": {
+      type: "string",
+      description: "Unified LLM key. Used by the guardrail upstream, the judge, and any scanner that calls an LLM.",
+    },
+    "CISCO_AI_DEFENSE_API_KEY": {
+      type: "string",
+      description: "Cisco AI Defense API key. Required when guardrail.scanner_mode is remote or both.",
+    },
+    "DEFENSECLAW_STRICT_AVAILABILITY": {
+      type: "0|1",
+      description: "When 1, transport-layer hook failures (gateway unreachable / 5xx) block the tool. Default is fail-open on transport.",
+    },
+    "DEFENSECLAW_FAIL_MODE": {
+      type: "open|closed",
+      description: "Per-shell override of guardrail.hook_fail_mode for response-layer failures. Read by every connector hook script.",
+    },
+    "DEFENSECLAW_DISABLE_REDACTION": {
+      type: "0|1",
+      description: "When 1, every persistent sink (audit DB, OTel logs, webhooks, Splunk HEC) emits raw values. The strongest opt-out; mirrors privacy.disable_redaction in config.",
+    },
+    "SPLUNK_ACCESS_TOKEN": {
+      type: "string",
+      description: "Splunk HEC token. Default consumer for any audit_sinks entry whose splunk_hec.token_env points at it.",
+    },
+  }}
+/>
+
+There is **no** `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR`, or `DEFENSECLAW_LOG_LEVEL` env var today. Use `DEFENSECLAW_HOME` to relocate the data directory, edit `gateway.host` / `gateway.port` / `gateway.api_port` in `config.yaml` to change bind addresses, and set log verbosity through the sidecar's `--log-level` flag (see `defenseclaw-gateway start --help`).
+
+## Per-connector source-of-truth files
+
+| Connector | File DefenseClaw mutates |
+| --- | --- |
+| OpenClaw | `~/.openclaw/openclaw.json`, `~/.openclaw/extensions/defenseclaw/` |
+| ZeptoClaw | `~/.zeptoclaw/config.json` |
+| Claude Code | `~/.claude/settings.json` |
+| Codex | `~/.codex/config.toml` |
+| Cursor | `~/.cursor/hooks.json` |
+| Windsurf | `~/.codeium/windsurf/hooks.json` |
+| Gemini CLI | `~/.gemini/settings.json` |
+| GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` by default; `<workspace>/.github/hooks/defenseclaw.json` with `--workspace` |
+| OpenHands | `~/.openhands/hooks.json` by default; `<workspace>/.openhands/hooks.json` with `--workspace` |
+| Antigravity | `~/.gemini/config/hooks.json` (global only — the path agy v1.0.x actually evaluates; the marketing-facing `~/.gemini/antigravity-cli/hooks.json` is silently ignored at runtime; agy merges all discovered hooks files, so DefenseClaw never patches workspace-local copies) |
+| Hermes | `~/.hermes/config.yaml` |
+| OpenCode | `~/.config/opencode/plugins/defenseclaw.js` (managed bridge plugin — written whole, not patched; removed on teardown) |
+
+A hash-checked backup of each file is stored in `~/.defenseclaw/backups/` before any mutation. Teardown (or `--disable`) restores the backup byte-for-byte; if the file has drifted since the backup, only DefenseClaw-owned entries are surgically removed.
+
+Hook connectors default to global/user scope. `claw.workspace_dir` is empty unless you pass `--workspace`; when set, OpenHands uses it for repo-local `.openhands/hooks.json`, `.agents/skills`, and deprecated `.openhands/skills` discovery while still scanning global user skills and the OpenHands public skills cache. Copilot uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Re-run `defenseclaw setup <connector>` without `--workspace` to return to global scope.
+
+Every hook setup also writes the resolved connector path contract to `~/.defenseclaw/hook_contract_lock.json`. The `locations` block records the pinned workspace, hook config file, generated hook script, and the MCP/skills/rules/plugins/agents surfaces that DefenseClaw will scan for that connector. Use `defenseclaw doctor` to compare that lock against the files the active SDK can actually load.
+
+## Reload without restart
+
+```bash
+defenseclaw-gateway policy reload
+```
+
+Tells the running sidecar to re-read OPA policies from disk without bouncing the daemon. Connector wiring (hook scripts, agent files) is not re-applied — use `defenseclaw setup guardrail --restart` for that. Note this is on the **Go sidecar binary** (`defenseclaw-gateway`), not the Python CLI; the Python CLI has no top-level `gateway` group.

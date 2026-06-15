@@ -32,6 +32,7 @@ import defenseclaw.config as config_mod
 from defenseclaw.config import (
     DEFAULT_OPENSHELL_VERSION,
     DEFAULT_SANDBOX_HOME,
+    AIDiscoveryConfig,
     AssetPolicyConfig,
     AssetPolicyRule,
     CiscoAIDefenseConfig,
@@ -91,10 +92,14 @@ class TestHelpers(unittest.TestCase):
 
     def test_validate_deployment_mode_valid(self):
         self.assertEqual(config_mod._validate_deployment_mode("managed_enterprise"), "managed_enterprise")
+        self.assertEqual(config_mod._validate_deployment_mode("managed"), "managed_enterprise")
+        self.assertEqual(config_mod._validate_deployment_mode("standalone"), "unmanaged_byod")
+        self.assertEqual(config_mod._validate_deployment_mode("ci"), "ci_cd")
+        self.assertEqual(config_mod._validate_deployment_mode("edge"), "server")
 
     def test_validate_deployment_mode_invalid(self):
         with self.assertRaises(ValueError):
-            config_mod._validate_deployment_mode("managed")
+            config_mod._validate_deployment_mode("freeform")
 
 
 class TestPaths(unittest.TestCase):
@@ -109,6 +114,10 @@ class TestPaths(unittest.TestCase):
 
 
 class TestDetectEnvironment(unittest.TestCase):
+    @patch("defenseclaw.config.platform.system", return_value="Windows")
+    def test_windows(self, _mock):
+        self.assertEqual(detect_environment(), "windows")
+
     @patch("defenseclaw.config.platform.system", return_value="Darwin")
     def test_macos(self, _mock):
         self.assertEqual(detect_environment(), "macos")
@@ -166,6 +175,138 @@ class TestSkillActionsConfig(unittest.TestCase):
         cfg = SkillActionsConfig()
         self.assertFalse(cfg.should_install_block("HIGH"))
         self.assertFalse(cfg.should_install_block("INFO"))
+
+
+class TestAIDiscoveryConfig(unittest.TestCase):
+    def test_default_config_enables_ai_discovery_for_new_installs(self):
+        cfg = default_config()
+        self.assertTrue(cfg.ai_discovery.enabled)
+        self.assertEqual(cfg.ai_discovery.mode, "enhanced")
+        self.assertTrue(cfg.ai_discovery.include_shell_history)
+        self.assertEqual(
+            cfg.ai_discovery.confidence_policy_path,
+            os.path.join(cfg.data_dir, "confidence.yaml"),
+        )
+
+    def test_disabled_default_is_omitted_on_save_round_trip(self):
+        cfg = Config(data_dir=tempfile.mkdtemp(), ai_discovery=AIDiscoveryConfig(enabled=False))
+        data = config_mod._config_to_dict(cfg)
+        self.assertNotIn("ai_discovery", data)
+
+    def test_merge_preserves_confidence_policy_path(self):
+        cfg = config_mod._merge_ai_discovery(
+            {"enabled": True, "confidence_policy_path": "/tmp/custom-confidence.yaml"}
+        )
+        self.assertEqual(cfg.confidence_policy_path, "/tmp/custom-confidence.yaml")
+
+
+class TestHookJudgeGateRoundTrip(unittest.TestCase):
+    """Opt-out persistence for the hook-lane judge keys.
+
+    The omitempty strip pops empty ``hook_connectors`` / zero
+    ``hook_timeout`` from the serialized dict, and the nested merge in
+    ``save()`` used to preserve any on-disk key the new dict omitted —
+    so an operator could opt IN but never opt OUT: clearing the gate
+    reported success while ``['*']`` was resurrected from the file on
+    every save. ``_OWNED_NESTED_KEYS`` closes that; these tests pin the
+    full file round trip both ways.
+    """
+
+    def _save_and_reload(self, cfg):
+        cfg.save()
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": cfg.data_dir}):
+            return config_mod.load()
+
+    def test_opt_in_then_opt_out_persists(self):
+        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg.guardrail.judge.hook_connectors = ["*"]
+        cfg.guardrail.judge.hook_timeout = 9.0
+        loaded = self._save_and_reload(cfg)
+        self.assertEqual(loaded.guardrail.judge.hook_connectors, ["*"])
+        self.assertEqual(loaded.guardrail.judge.hook_timeout, 9.0)
+
+        # Opt out: the cleared values must survive the save/merge.
+        loaded.guardrail.judge.hook_connectors = []
+        loaded.guardrail.judge.hook_timeout = 0.0
+        reloaded = self._save_and_reload(loaded)
+        self.assertEqual(reloaded.guardrail.judge.hook_connectors, [])
+        self.assertEqual(reloaded.guardrail.judge.hook_timeout, 0.0)
+
+        # And the keys are gone from the file (omitempty parity), not
+        # merely zeroed.
+        with open(os.path.join(loaded.data_dir, "config.yaml")) as f:
+            text = f.read()
+        self.assertNotIn("hook_connectors", text)
+        self.assertNotIn("hook_timeout", text)
+
+    def test_explicit_list_replaces_star_on_disk(self):
+        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg.guardrail.judge.hook_connectors = ["*"]
+        loaded = self._save_and_reload(cfg)
+        loaded.guardrail.judge.hook_connectors = ["hermes"]
+        reloaded = self._save_and_reload(loaded)
+        self.assertEqual(reloaded.guardrail.judge.hook_connectors, ["hermes"])
+
+    def test_never_opted_in_stays_clean(self):
+        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg.save()
+        with open(os.path.join(cfg.data_dir, "config.yaml")) as f:
+            text = f.read()
+        self.assertNotIn("hook_connectors", text)
+        self.assertNotIn("hook_timeout", text)
+
+    def test_stale_writer_does_not_delete_concurrent_gate(self):
+        # A long-lived process (TUI, open wizard) that loaded the config
+        # BEFORE another terminal ran `guardrail judge add hermes` holds
+        # an empty in-memory gate. Its later save of an unrelated change
+        # must NOT delete the gate the other process wrote — only a
+        # process that actually loaded a value and cleared it may drop
+        # the key (parity with the authoritative_base rescue for dict
+        # paths).
+        data_dir = tempfile.mkdtemp()
+        Config(data_dir=data_dir).save()
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            stale = config_mod.load()  # gate absent at load
+
+            # Concurrent writer adds the gate on disk.
+            other = config_mod.load()
+            other.guardrail.judge.hook_connectors = ["hermes"]
+            other.guardrail.judge.hook_timeout = 7.0
+            other.save()
+
+            # Stale process saves an unrelated change.
+            stale.gateway.port = 19999
+            stale.save()
+
+            reloaded = config_mod.load()
+        self.assertEqual(reloaded.guardrail.judge.hook_connectors, ["hermes"])
+        self.assertEqual(reloaded.guardrail.judge.hook_timeout, 7.0)
+        self.assertEqual(reloaded.gateway.port, 19999)
+
+    def test_dotted_literal_key_is_not_dropped(self):
+        # An unmodeled YAML key whose literal name contains dots (flat
+        # dotted style: `guardrail: {"judge.hook_connectors": ...}`)
+        # must never collide with the modeled dotted PATH
+        # guardrail.judge.hook_connectors — it is an extension key and
+        # the round-trip contract preserves it.
+        data_dir = tempfile.mkdtemp()
+        Config(data_dir=data_dir).save()
+        cfg_path = os.path.join(data_dir, "config.yaml")
+        import yaml as _yaml
+
+        with open(cfg_path) as f:
+            raw = _yaml.safe_load(f)
+        raw.setdefault("guardrail", {})["judge.hook_connectors"] = ["custom-ext"]
+        with open(cfg_path, "w") as f:
+            _yaml.safe_dump(raw, f, sort_keys=False)
+
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = config_mod.load()
+            cfg.save()
+
+        with open(cfg_path) as f:
+            saved = _yaml.safe_load(f)
+        self.assertEqual(saved["guardrail"].get("judge.hook_connectors"), ["custom-ext"])
 
 
 class TestMergeFunctions(unittest.TestCase):
@@ -934,22 +1075,86 @@ class TestConfigTopLevelSections(unittest.TestCase):
 
 
 class TestGatewayResolvedToken(unittest.TestCase):
-    def test_empty_token_env_reads_openclaw_env(self):
-        gw = GatewayConfig(token_env="", token="")
-        with patch.dict(os.environ, {"OPENCLAW_GATEWAY_TOKEN": "t1"}, clear=False):
-            self.assertEqual(gw.resolved_token(), "t1")
+    # Helper to wipe both gateway env vars from the test env so each
+    # case starts from a known-empty baseline. `patch.dict(..., clear=False)`
+    # only ADDS keys; leaking env vars from the developer's shell would
+    # silently make these tests false-positive.
+    _GATEWAY_VARS = ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN", "MY_TOK")
 
-    def test_custom_token_env_takes_precedence(self):
+    def _clean_env(self, **overrides: str) -> dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if k not in self._GATEWAY_VARS}
+        env.update(overrides)
+        return env
+
+    def test_empty_token_env_prefers_defenseclaw_over_openclaw(self):
+        """DEFENSECLAW_ wins over OPENCLAW_ when both are present.
+
+        The Go gateway writes ``DEFENSECLAW_GATEWAY_TOKEN`` on first
+        boot; old installs may still have ``OPENCLAW_GATEWAY_TOKEN``
+        in their dotenv. We must prefer the new name so the back-compat
+        shim doesn't silently route through stale credentials.
+        """
+        gw = GatewayConfig(token_env="", token="")
+        env = self._clean_env(
+            DEFENSECLAW_GATEWAY_TOKEN="new-token",
+            OPENCLAW_GATEWAY_TOKEN="legacy-token",
+        )
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(gw.resolved_token(), "new-token")
+
+    def test_empty_token_env_falls_back_to_openclaw_env(self):
+        """Legacy OPENCLAW_ still works when DEFENSECLAW_ is unset.
+
+        Protects upgraders whose Go gateway hasn't been restarted yet
+        and whose dotenv only carries the old name.
+        """
+        gw = GatewayConfig(token_env="", token="")
+        env = self._clean_env(OPENCLAW_GATEWAY_TOKEN="legacy-token")
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(gw.resolved_token(), "legacy-token")
+
+    def test_custom_token_env_takes_precedence_over_both_defaults(self):
+        """Operator-pinned env var beats both DEFENSECLAW_ and OPENCLAW_."""
         gw = GatewayConfig(token_env="MY_TOK", token="inline")
-        env = {"MY_TOK": "from-env", "OPENCLAW_GATEWAY_TOKEN": "other"}
-        with patch.dict(os.environ, env, clear=False):
+        env = self._clean_env(
+            MY_TOK="from-env",
+            DEFENSECLAW_GATEWAY_TOKEN="dc-tok",
+            OPENCLAW_GATEWAY_TOKEN="oc-tok",
+        )
+        with patch.dict(os.environ, env, clear=True):
             self.assertEqual(gw.resolved_token(), "from-env")
 
-    def test_custom_token_env_empty_ignores_openclaw_env(self):
-        gw = GatewayConfig(token_env="MY_TOK", token="fallback")
-        env = {"OPENCLAW_GATEWAY_TOKEN": "other"}
-        with patch.dict(os.environ, env, clear=False):
-            self.assertEqual(gw.resolved_token(), "fallback")
+    def test_custom_token_env_empty_falls_through_to_defenseclaw(self):
+        """Stale ``token_env`` pointing at an unset var falls through.
+
+        This is the exact case that bites operators upgrading from
+        OpenClaw: ``bootstrap.py`` wrote ``token_env=OPENCLAW_GATEWAY_TOKEN``
+        on first install, the operator never touched that var, and the
+        Go gateway only writes ``DEFENSECLAW_GATEWAY_TOKEN``. Without
+        the fall-through the CLI raises 'gateway token unavailable'
+        even though the right token is sitting in os.environ.
+        """
+        gw = GatewayConfig(token_env="MY_TOK", token="literal-fallback")
+        env = self._clean_env(DEFENSECLAW_GATEWAY_TOKEN="dc-tok")
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(gw.resolved_token(), "dc-tok")
+
+    def test_literal_token_is_last_resort_when_no_env_set(self):
+        """When neither token_env nor the auto-detect vars are set,
+        fall back to the literal ``self.token`` from config.yaml.
+        Plaintext-secret deprecation is handled by `_warn_plaintext_secrets`.
+        """
+        gw = GatewayConfig(token_env="", token="literal-from-yaml")
+        env = self._clean_env()
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(gw.resolved_token(), "literal-from-yaml")
+
+    def test_returns_empty_when_nothing_configured(self):
+        """No token anywhere → empty string. Callers gate on truthiness."""
+        gw = GatewayConfig(token_env="", token="")
+        env = self._clean_env()
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(gw.resolved_token(), "")
 
 
 class TestGuardrailHostField(unittest.TestCase):

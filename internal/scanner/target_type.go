@@ -27,7 +27,15 @@ func InferTargetType(scannerName string) string {
 }
 
 // NormalizeScannerEnum maps a raw scanner name to the v7 gateway-event
-// schema enum ("skill" | "mcp" | "plugin" | "aibom" | "codeguard").
+// schema enum. The enum is open to two families:
+//
+//   - "skill" | "mcp" | "plugin" | "aibom" | "codeguard": classic
+//     scanner-invocation sources (skill-scanner, mcp-scanner, etc.).
+//   - "hook-rules" | "inline-codeguard" | "ai-defense" |
+//     "asset-policy" | "tool-call-inspect" | "inspect-http" |
+//     "guardrail-llm" | "mid-stream" | "rescan": runtime
+//     finding-emitter sources fanned out through EmitInspectFindings.
+//
 // ClawShield family scanners are treated as codeguard siblings since
 // they ship builtin code/content detectors. Unknown scanners fall
 // back to "codeguard" (the most generic, always-schema-valid option)
@@ -49,21 +57,41 @@ func NormalizeScannerEnum(scannerName string) string {
 		"clawshield-vuln", "clawshield-secrets", "clawshield-pii",
 		"clawshield-malware", "clawshield-injection":
 		return "codeguard"
+	case "hook-rules",
+		"inline-codeguard",
+		"ai-defense",
+		"asset-policy",
+		"tool-call-inspect",
+		"inspect-http",
+		"guardrail-llm",
+		"mid-stream",
+		"rescan":
+		return scannerName
 	default:
 		return "codeguard"
 	}
 }
 
 // NormalizeTargetTypeEnum maps a raw target_type to the v7
-// gateway-event schema enum ("file" | "skill" | "mcp" | "plugin"
-// | "aibom"). Unknown / empty values are coerced to "file" (the
-// generic filesystem-object bucket) because the schema only allows
-// the listed enum values or nil, and we want to keep the payload
-// valid without hand-wiring every scanner. Callers should still
-// set TargetType on ScanResult when they have a better-typed value.
+// gateway-event schema enum. Two families:
+//
+//   - "file" | "skill" | "mcp" | "plugin" | "aibom": classic
+//     scanner-invocation targets.
+//   - "tool_call" | "prompt" | "completion" | "tool_response" |
+//     "inspect": runtime finding-emitter targets where the "target"
+//     is a tool name or message surface rather than a filesystem
+//     path.
+//
+// Unknown / empty values are coerced to "file" (the generic
+// filesystem-object bucket) because the schema only allows the
+// listed enum values or nil, and we want to keep the payload valid
+// without hand-wiring every scanner. Callers should still set
+// TargetType on ScanResult when they have a better-typed value.
 func NormalizeTargetTypeEnum(targetType string) string {
 	switch strings.TrimSpace(targetType) {
 	case "file", "skill", "mcp", "plugin", "aibom":
+		return targetType
+	case "tool_call", "prompt", "completion", "tool_response", "inspect":
 		return targetType
 	case "inventory":
 		return "aibom"

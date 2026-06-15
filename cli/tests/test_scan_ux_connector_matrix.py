@@ -53,18 +53,29 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_mcp import mcp
 from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_skill import skill
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.models import Finding, ScanResult
+
 from tests.helpers import cleanup_app, make_app_context
 
-
-# Supported connector names — keep in lockstep with
-# ``Config.active_connector`` and ``cmd_doctor._CONNECTOR_LABELS``.
-SUPPORTED_CONNECTORS = ("openclaw", "codex", "claudecode", "zeptoclaw")
+# Supported connector names — keep in lockstep with connector_paths.KNOWN_CONNECTORS
+# and cmd_doctor._CONNECTOR_LABELS.
+SUPPORTED_CONNECTORS = (
+    "openclaw",
+    "codex",
+    "claudecode",
+    "zeptoclaw",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+    "openhands",
+    "antigravity",
+)
 
 
 class _MatrixBase(unittest.TestCase):
@@ -125,7 +136,9 @@ class TestPluginScanConnectorMatrix(_MatrixBase):
             with self.subTest(connector=connector):
                 self._force_connector(connector)
                 result = self.runner.invoke(
-                    plugin, ["scan", "demo"], obj=self.app,
+                    plugin,
+                    ["scan", "demo"],
+                    obj=self.app,
                     catch_exceptions=False,
                 )
                 self.assertEqual(result.exit_code, 0, result.output)
@@ -159,7 +172,9 @@ class TestSkillScanConnectorMatrix(_MatrixBase):
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_preamble_shows_connector_for_every_supported_value(
-        self, mock_cls, _mock_info,
+        self,
+        mock_cls,
+        _mock_info,
     ) -> None:
         mock_scanner = MagicMock()
         mock_scanner.scan.return_value = self._clean_result(self.skill_dir)
@@ -169,8 +184,10 @@ class TestSkillScanConnectorMatrix(_MatrixBase):
             with self.subTest(connector=connector):
                 self._force_connector(connector)
                 result = self.runner.invoke(
-                    skill, ["scan", "demo-skill", "--path", self.skill_dir],
-                    obj=self.app, catch_exceptions=False,
+                    skill,
+                    ["scan", "demo-skill", "--path", self.skill_dir],
+                    obj=self.app,
+                    catch_exceptions=False,
                 )
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertIn(
@@ -194,7 +211,8 @@ class TestMCPScanConnectorMatrix(_MatrixBase):
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_single_target_preamble_shows_connector_for_every_supported_value(
-        self, mock_scan,
+        self,
+        mock_scan,
     ) -> None:
         mock_scan.return_value = self._clean_result("http://localhost:3000")
 
@@ -202,7 +220,9 @@ class TestMCPScanConnectorMatrix(_MatrixBase):
             with self.subTest(connector=connector):
                 self._force_connector(connector)
                 result = self.runner.invoke(
-                    mcp, ["scan", "http://localhost:3000"], obj=self.app,
+                    mcp,
+                    ["scan", "http://localhost:3000"],
+                    obj=self.app,
                     catch_exceptions=False,
                 )
                 self.assertEqual(result.exit_code, 0, result.output)
@@ -214,17 +234,21 @@ class TestMCPScanConnectorMatrix(_MatrixBase):
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_all_preamble_shows_connector_for_every_supported_value(
-        self, mock_scan,
+        self,
+        mock_scan,
     ) -> None:
         servers = [MCPServerEntry(name="alpha", url="http://a.example/mcp")]
-        self.app.cfg.mcp_servers = lambda: servers
+        self.app.cfg.mcp_servers = lambda connector=None: servers
         mock_scan.return_value = self._clean_result("http://a.example/mcp")
 
         for connector in SUPPORTED_CONNECTORS:
             with self.subTest(connector=connector):
                 self._force_connector(connector)
                 result = self.runner.invoke(
-                    mcp, ["scan", "--all"], obj=self.app, catch_exceptions=False,
+                    mcp,
+                    ["scan", "--all"],
+                    obj=self.app,
+                    catch_exceptions=False,
                 )
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertIn(
@@ -252,11 +276,14 @@ class TestSummaryAcrossConnectorsAlwaysRendersV1Schema(_MatrixBase):
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_summary_format_is_connector_invariant(self, mock_scan) -> None:
         mock_scan.return_value = ScanResult(
-            scanner="plugin-scanner", target="demo",
+            scanner="plugin-scanner",
+            target="demo",
             timestamp=datetime.now(timezone.utc),
             findings=[
                 Finding(
-                    id=str(uuid.uuid4()), severity="HIGH", title="x",
+                    id=str(uuid.uuid4()),
+                    severity="HIGH",
+                    title="x",
                     scanner="plugin-scanner",
                 ),
             ],
@@ -267,7 +294,10 @@ class TestSummaryAcrossConnectorsAlwaysRendersV1Schema(_MatrixBase):
         for connector in SUPPORTED_CONNECTORS:
             self._force_connector(connector)
             result = self.runner.invoke(
-                plugin, ["scan", "demo"], obj=self.app, catch_exceptions=False,
+                plugin,
+                ["scan", "demo"],
+                obj=self.app,
+                catch_exceptions=False,
             )
             self.assertEqual(result.exit_code, 0, result.output)
             for line in result.output.splitlines():
@@ -280,7 +310,8 @@ class TestSummaryAcrossConnectorsAlwaysRendersV1Schema(_MatrixBase):
         # Strip duration to compare the invariant skeleton.
         skeletons = {s.split(", in ")[0] for s in summaries}
         self.assertEqual(
-            len(skeletons), 1,
+            len(skeletons),
+            1,
             f"Summary line drifted across connectors: {summaries!r}",
         )
 

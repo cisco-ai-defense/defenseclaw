@@ -82,7 +82,7 @@ func TestStampAgentWatchContext(t *testing.T) {
 		TenantID:        "tenant-a",
 		WorkspaceID:     "workspace-1",
 		Environment:     "prod",
-		DeploymentMode:  "managed",
+		DeploymentMode:  "managed_enterprise",
 		DiscoverySource: "registry",
 	})
 	t.Cleanup(func() { SetAgentWatchContext(AgentWatchContext{}) })
@@ -99,8 +99,8 @@ func TestStampAgentWatchContext(t *testing.T) {
 	if e.Environment != "prod" {
 		t.Fatalf("environment=%q, want prod", e.Environment)
 	}
-	if e.DeploymentMode != "managed" {
-		t.Fatalf("deployment_mode=%q, want managed", e.DeploymentMode)
+	if e.DeploymentMode != "managed_enterprise" {
+		t.Fatalf("deployment_mode=%q, want managed_enterprise", e.DeploymentMode)
 	}
 	if e.DiscoverySource != "registry" {
 		t.Fatalf("discovery_source=%q, want registry", e.DiscoverySource)

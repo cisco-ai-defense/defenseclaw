@@ -510,6 +510,32 @@ would be blocked.
 `deny`, only `outbound` direction supported. Pre-populated allowlist includes
 Anthropic, OpenAI, GitHub, and other known LLM provider domains.
 
+### Firewall scope (global by design)
+
+The egress firewall is **global, not per-connector**. It is an OS-level
+packet filter (pf on macOS, iptables on Linux) compiled from a single
+`firewall.yaml` into one kernel ruleset that filters strictly by
+*destination* (domain / IP / port). The kernel cannot attribute an
+outbound connection to the connector that originated it — every
+DefenseClaw-managed agent egresses through the same network namespace —
+so there is deliberately no per-connector firewall surface. This holds
+even on a multi-connector install (one gateway serving Codex,
+Claude Code, Antigravity, … with independent `guardrail.connectors`
+policy): all connectors still share the one allowlist.
+
+Per-connector network needs are handled **additively**, not by splitting
+the ruleset. Each connector that implements
+`connector.AllowedHostsProvider` contributes hostnames via
+`AllowedHosts()`, and the sidecar folds every connector's contribution
+into the single allowlist with `FirewallConfig.MergeAllowedHosts` (a
+deduplicating set union) at boot. Hook-only connectors never open a
+proxy listener, so their agent traffic does not reach the firewall at
+all — only destination-based egress filtering applies. Contrast this
+with [`guardrail.connectors`](GUARDRAIL.md), which *is* per-connector:
+guardrail policy (mode, fail mode, HILT, block message, rule pack) is
+enforced independently per connector inside the gateway, while the
+firewall remains one host-wide control beneath them.
+
 ## Dual Policy Engines
 
 DefenseClaw has two distinct policy evaluation systems — do not confuse them:

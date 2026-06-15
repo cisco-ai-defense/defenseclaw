@@ -26,12 +26,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/pelletier/go-toml/v2"
@@ -263,7 +265,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex"}
+	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode"}
 	for _, name := range expected {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -274,23 +276,21 @@ func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	}
 }
 
-// TestConnector_AllowedHostsProvider_AllBuiltinsImplement is the
-// contract test for S3.3 / F26: every built-in connector must
-// expose AllowedHosts() so the firewall layer can fold its
-// per-connector hostnames into the static deny-by-default
-// allow-list at boot. A future connector that forgets to
-// implement this interface would silently fall through to "no
-// extra hosts" — instead of failing here, that connector's users
-// would see DNS-blocked errors on first chat.
+// TestConnector_AllowedHostsProvider_ProxyBuiltinsImplement is the
+// contract test for S3.3 / F26: every proxy-bound built-in connector
+// must expose AllowedHosts() so the firewall layer can fold its
+// per-connector hostnames into the static deny-by-default allow-list
+// at boot. A future proxy-bound connector that forgets to implement
+// this interface would silently fall through to "no extra hosts" —
+// instead of failing here, that connector's users would see
+// DNS-blocked errors on first chat.
 //
-// We assert two things: (1) every built-in implements the
-// interface; (2) the returned list is non-empty. An empty list
-// is allowed by the contract but for the four shipping
-// connectors it would be meaningless (every one talks to a
-// non-baseline host).
-func TestConnector_AllowedHostsProvider_AllBuiltinsImplement(t *testing.T) {
+// Hook-only connectors (codex, claudecode, hermes, cursor, …) are
+// excluded: their traffic never reaches the firewall because the
+// proxy listener does not bind for them.
+func TestConnector_AllowedHostsProvider_ProxyBuiltinsImplement(t *testing.T) {
 	r := NewDefaultRegistry()
-	for _, name := range []string{"openclaw", "zeptoclaw", "claudecode", "codex"} {
+	for _, name := range []string{"openclaw", "zeptoclaw"} {
 		conn, ok := r.Get(name)
 		if !ok {
 			t.Fatalf("registry missing %q", name)
@@ -482,7 +482,12 @@ func TestAllConnectors_ImplementInterface(t *testing.T) {
 // it exists on disk.
 func TestOpenClaw_ExtensionAvailable_OnFullBuild(t *testing.T) {
 	t.Parallel()
-	if _, err := openClawExtensionFS.ReadFile(filepath.Join(openClawPluginRoot, ".placeholder")); err == nil {
+	// embed.FS always uses forward-slash paths; filepath.Join would emit
+	// backslashes on Windows and never match the embedded entry, so the
+	// skip would not fire and the test would spuriously fail on a Windows
+	// placeholder build. Use path.Join (and the shared constant) to mirror
+	// openClawExtensionAvailable.
+	if _, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, openClawPlaceholderName)); err == nil {
 		t.Skip("gateway built without OpenClaw extension (placeholder present) — full-build assertion does not apply here")
 	}
 	if !openClawExtensionAvailable() {
@@ -971,11 +976,20 @@ func TestClaudeCode_Route(t *testing.T) {
 	if cs.ConnectorName != "claudecode" {
 		t.Errorf("ConnectorName = %q", cs.ConnectorName)
 	}
-	if cs.RawAPIKey != "sk-ant-api03-key" {
-		t.Errorf("RawAPIKey = %q", cs.RawAPIKey)
+	if cs.RawAPIKey != "" {
+		t.Errorf("RawAPIKey = %q, want empty (hook-only connector)", cs.RawAPIKey)
 	}
-	if v, ok := cs.ExtraHeaders["anthropic-version"]; !ok || v != "2023-06-01" {
-		t.Errorf("ExtraHeaders = %v", cs.ExtraHeaders)
+	if len(cs.ExtraHeaders) != 0 {
+		t.Errorf("ExtraHeaders = %v, want empty", cs.ExtraHeaders)
+	}
+	if cs.RawModel != "claude-sonnet-4-20250514" {
+		t.Errorf("RawModel = %q", cs.RawModel)
+	}
+	if !cs.Stream {
+		t.Error("expected Stream=true")
+	}
+	if cs.PassthroughMode {
+		t.Error("expected PassthroughMode=false for chat path")
 	}
 }
 
@@ -1194,6 +1208,291 @@ func TestClaudeCode_Teardown_RestoresSettings(t *testing.T) {
 	}
 }
 
+// Mirror of TestCodex_Teardown_WritesDisabledHookForCachedProcesses for the
+// Claude Code connector. After Teardown, the on-disk hook script must remain
+// at the path Claude Code may have cached, but with a no-op body so cached
+// processes do not surface exit-127 errors and do not forward stale payloads
+// to the (now removed) hook API endpoint.
+func TestClaudeCode_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	hookPath := filepath.Join(dir, "hooks", "claude-code-hook.sh")
+	setupHook, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read setup hook: %v", err)
+	}
+	if !strings.Contains(string(setupHook), "/api/v1/claude-code/hook") {
+		t.Fatalf("setup hook does not forward to Claude Code hook API\nfile:\n%s", setupHook)
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	info, err := os.Stat(hookPath)
+	if err != nil {
+		t.Fatalf("disabled hook missing after teardown: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Fatalf("disabled hook is not executable: mode %v", info.Mode())
+	}
+
+	disabledHook, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read disabled hook: %v", err)
+	}
+	disabled := string(disabledHook)
+	// Tombstone MUST carry the v<digit> schema marker so isOwnedHook /
+	// scriptHasMarker recognise it as DefenseClaw-owned. v0 is the
+	// "older than any tagged version" sentinel.
+	if !strings.Contains(disabled, "defenseclaw-managed-hook v") {
+		t.Errorf("disabled hook missing v<digit> tombstone marker\nfile:\n%s", disabled)
+	}
+	if !strings.Contains(disabled, "disabled tombstone") {
+		t.Errorf("disabled hook missing operator-visible 'disabled tombstone' tag\nfile:\n%s", disabled)
+	}
+	// Portability: POSIX shebang so the tombstone runs even on hosts
+	// without /bin/bash (Alpine, distroless, BSDs).
+	if !strings.HasPrefix(disabled, "#!/bin/sh\n") {
+		t.Errorf("disabled hook should start with POSIX shebang, got:\n%s", disabled)
+	}
+	if !strings.Contains(disabled, "exit 0") {
+		t.Errorf("disabled hook must exit successfully\nfile:\n%s", disabled)
+	}
+	if strings.Contains(disabled, "/api/v1/claude-code/hook") {
+		t.Errorf("disabled hook still forwards stale payloads\nfile:\n%s", disabled)
+	}
+}
+
+// TestEveryHookOwner_TeardownLeavesTombstone is the cross-connector
+// contract test for the tombstone behaviour individually exercised by
+// TestCodex_Teardown_WritesDisabledHookForCachedProcesses and
+// TestClaudeCode_Teardown_WritesDisabledHookForCachedProcesses.
+//
+// The goal is structural, not behavioural duplication: a single table
+// iterates every builtin Connector that implements HookScriptOwner and
+// asserts the shared tombstone contract enforced by
+// writeDisabledHookTombstone:
+//
+//  1. After Teardown the on-disk hook script still exists at the path
+//     a long-lived host agent process may have cached at startup.
+//  2. The file is owner-executable (0o700 ∧ 0o111 != 0).
+//  3. Body starts with `#!/bin/sh\n` (portable to Alpine / distroless
+//     hosts; no /bin/bash dependency).
+//  4. Body contains the `defenseclaw-managed-hook v<digit>` marker so
+//     scriptHasMarker / isOwnedHook recognise the tombstone as ours
+//     across future hook-script reinstalls.
+//  5. Body contains the literal `disabled tombstone` operator tag.
+//  6. Body contains `exit 0` (the whole point — cached PIDs exit
+//     successfully without forwarding stale payloads).
+//  7. Body does NOT reference the connector's hook API path —
+//     forwarding stale payloads to a torn-down endpoint is the exact
+//     failure mode the tombstone exists to prevent.
+//
+// Adding a new HookScriptOwner connector? Add a row here AND verify
+// HookScriptOwner is declared on the type. If you forget either side
+// the rest of the gateway will still install the hook but teardown
+// will leak it, and long-lived host agents that cached the path will
+// hit exit-127 on the next connector switch.
+func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
+	type tc struct {
+		name       string
+		hookScript string
+		hookAPI    string
+		// setup prepares any host-side config and path overrides the
+		// connector's Setup needs; the returned cleanup is run via
+		// t.Cleanup so per-row state never leaks across subtests.
+		setup func(t *testing.T) (Connector, SetupOpts)
+	}
+
+	hookOnlySetup := func(ext string, ctor func() *hookOnlyConnector, override *string) func(*testing.T) (Connector, SetupOpts) {
+		return func(t *testing.T) (Connector, SetupOpts) {
+			t.Helper()
+			dir := t.TempDir()
+			cfgDir := t.TempDir()
+			cfgPath := filepath.Join(cfgDir, "config"+ext)
+			prev := *override
+			*override = cfgPath
+			t.Cleanup(func() { *override = prev })
+			return ctor(), SetupOpts{
+				DataDir:      dir,
+				APIAddr:      "127.0.0.1:18970",
+				APIToken:     "tok-test",
+				WorkspaceDir: t.TempDir(),
+			}
+		}
+	}
+
+	cases := []tc{
+		{
+			name:       "codex",
+			hookScript: "codex-hook.sh",
+			hookAPI:    "/api/v1/codex/hook",
+			setup: func(t *testing.T) (Connector, SetupOpts) {
+				t.Helper()
+				dir := t.TempDir()
+				cfgPath := filepath.Join(dir, "config.toml")
+				if err := os.WriteFile(cfgPath, []byte("model_provider = \"openai\"\n"), 0o644); err != nil {
+					t.Fatalf("write codex config: %v", err)
+				}
+				prev := CodexConfigPathOverride
+				CodexConfigPathOverride = cfgPath
+				t.Cleanup(func() { CodexConfigPathOverride = prev })
+				return NewCodexConnector(), SetupOpts{
+					DataDir:   dir,
+					ProxyAddr: "127.0.0.1:4000",
+					APIAddr:   "127.0.0.1:18970",
+				}
+			},
+		},
+		{
+			name:       "claudecode",
+			hookScript: "claude-code-hook.sh",
+			hookAPI:    "/api/v1/claude-code/hook",
+			setup: func(t *testing.T) (Connector, SetupOpts) {
+				t.Helper()
+				dir := t.TempDir()
+				settingsDir := filepath.Join(dir, "claude-settings")
+				if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+					t.Fatalf("mkdir settings: %v", err)
+				}
+				cfgPath := filepath.Join(settingsDir, "settings.json")
+				if err := os.WriteFile(cfgPath, []byte(`{}`), 0o644); err != nil {
+					t.Fatalf("write claude settings: %v", err)
+				}
+				prev := ClaudeCodeSettingsPathOverride
+				ClaudeCodeSettingsPathOverride = cfgPath
+				t.Cleanup(func() { ClaudeCodeSettingsPathOverride = prev })
+				return NewClaudeCodeConnector(), SetupOpts{
+					DataDir:   dir,
+					ProxyAddr: "127.0.0.1:4000",
+					APIAddr:   "127.0.0.1:18970",
+				}
+			},
+		},
+		{
+			name:       "hermes",
+			hookScript: "hermes-hook.sh",
+			hookAPI:    "/api/v1/hermes/hook",
+			setup:      hookOnlySetup(".yaml", NewHermesConnector, &HermesConfigPathOverride),
+		},
+		{
+			name:       "cursor",
+			hookScript: "cursor-hook.sh",
+			hookAPI:    "/api/v1/cursor/hook",
+			setup:      hookOnlySetup(".json", NewCursorConnector, &CursorHooksPathOverride),
+		},
+		{
+			name:       "windsurf",
+			hookScript: "windsurf-hook.sh",
+			hookAPI:    "/api/v1/windsurf/hook",
+			setup:      hookOnlySetup(".json", NewWindsurfConnector, &WindsurfHooksPathOverride),
+		},
+		{
+			name:       "geminicli",
+			hookScript: "geminicli-hook.sh",
+			hookAPI:    "/api/v1/geminicli/hook",
+			setup:      hookOnlySetup(".json", NewGeminiCLIConnector, &GeminiSettingsPathOverride),
+		},
+		{
+			name:       "copilot",
+			hookScript: "copilot-hook.sh",
+			hookAPI:    "/api/v1/copilot/hook",
+			setup:      hookOnlySetup(".json", NewCopilotConnector, &CopilotHooksPathOverride),
+		},
+		{
+			name:       "openhands",
+			hookScript: "openhands-hook.sh",
+			hookAPI:    "/api/v1/openhands/hook",
+			setup:      hookOnlySetup(".json", NewOpenHandsConnector, &OpenHandsHooksPathOverride),
+		},
+		{
+			name:       "antigravity",
+			hookScript: "antigravity-hook.sh",
+			hookAPI:    "/api/v1/antigravity/hook",
+			setup:      hookOnlySetup(".json", NewAntigravityConnector, &AntigravityHooksPathOverride),
+		},
+	}
+
+	// Defence-in-depth: every Connector returned by setup must actually
+	// implement HookScriptOwner. If a future refactor drops the
+	// interface from one of these connectors the tombstone helper
+	// becomes silently inert for that connector, so we'd rather fail
+	// the table at the seam than ship a regression.
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			conn, opts := c.setup(t)
+			if _, ok := conn.(HookScriptOwner); !ok {
+				t.Fatalf("%s connector no longer implements HookScriptOwner — tombstone contract cannot apply", c.name)
+			}
+
+			if err := conn.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			hookPath := filepath.Join(opts.DataDir, "hooks", c.hookScript)
+			live, err := os.ReadFile(hookPath)
+			if err != nil {
+				t.Fatalf("read live hook after Setup: %v", err)
+			}
+			if !strings.Contains(string(live), c.hookAPI) {
+				t.Fatalf("live hook does not forward to %s (Setup precondition violated)\nfile:\n%s", c.hookAPI, live)
+			}
+
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+
+			info, err := os.Stat(hookPath)
+			if err != nil {
+				t.Fatalf("tombstone missing after Teardown — cached host PIDs would hit exit-127: %v", err)
+			}
+			if info.Mode()&0o111 == 0 {
+				t.Errorf("tombstone is not executable: mode %v — cached PIDs would still hit a fork/exec failure", info.Mode())
+			}
+
+			body, err := os.ReadFile(hookPath)
+			if err != nil {
+				t.Fatalf("read tombstone: %v", err)
+			}
+			content := string(body)
+
+			if !strings.HasPrefix(content, "#!/bin/sh\n") {
+				t.Errorf("tombstone shebang is not POSIX /bin/sh (Alpine/distroless hosts will break):\n%s", content)
+			}
+			if !strings.Contains(content, "defenseclaw-managed-hook v") {
+				t.Errorf("tombstone missing v<digit> schema marker — isOwnedHook will mis-classify it:\n%s", content)
+			}
+			if !strings.Contains(content, "disabled tombstone") {
+				t.Errorf("tombstone missing operator-visible 'disabled tombstone' tag:\n%s", content)
+			}
+			if !strings.Contains(content, "exit 0") {
+				t.Errorf("tombstone does not exit 0 — cached PIDs will not fail-safe:\n%s", content)
+			}
+			if strings.Contains(content, c.hookAPI) {
+				t.Errorf("tombstone still forwards stale payloads to %s:\n%s", c.hookAPI, content)
+			}
+		})
+	}
+}
+
 func TestClaudeCode_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 	dir := t.TempDir()
 	settingsDir := filepath.Join(dir, "claude-settings")
@@ -1309,17 +1608,29 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 		t.Error("expected non-loopback auth to fail when token configured")
 	}
 
-	// With token — loopback WITHOUT X-DC-Auth must still pass because
-	// codex-cli is a native Rust binary with no fetch interceptor that
-	// could inject X-DC-Auth. Its Authorization header carries the
-	// upstream provider API key, never the gateway token. Denying
-	// loopback when a gateway token is configured would make codex
-	// fundamentally unroutable. Non-loopback callers still require
-	// the token — bridge/remote deployments stay protected.
+	// with a gateway token configured, a loopback
+	// request that carries no X-DC-Auth, no master-key Authorization,
+	// and no recognized provider Authorization header MUST be
+	// rejected. The legacy code unconditionally trusted loopback
+	// here, which on a shared-user host let any local process use
+	// /c/codex/* as an unauthenticated provider relay. The native
+	// codex CLI continues to authenticate successfully because it
+	// sends Authorization: Bearer <provider-api-key>, which matches
+	// the operator-recorded provider snapshot — exercised in
+	// TestCodex_Authenticate_NativeBinaryLoopback.
 	r4 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r4.RemoteAddr = "127.0.0.1:54321"
-	if !c.Authenticate(r4) {
-		t.Error("loopback must be trusted for codex even when gateway token is set — codex cannot inject X-DC-Auth")
+	if c.Authenticate(r4) {
+		t.Error("loopback without X-DC-Auth/master-key/provider key must fail closed when gateway token is configured")
+	}
+
+	// Operator-explicit opt-in path: DEFENSECLAW_CODEX_LOOPBACK_TRUST=1
+	// preserves legacy loose behavior for single-user dev hosts.
+	t.Setenv("DEFENSECLAW_CODEX_LOOPBACK_TRUST", "1")
+	r5 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r5.RemoteAddr = "127.0.0.1:54321"
+	if !c.Authenticate(r5) {
+		t.Error("DEFENSECLAW_CODEX_LOOPBACK_TRUST=1 must restore legacy loose loopback behavior")
 	}
 }
 
@@ -1330,9 +1641,18 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 // inspection and forwarding to upstream) regardless of whether a
 // gateway token is configured — otherwise codex sees a 401 and no
 // traffic is ever inspected.
+//
+// the connector now requires the Authorization Bearer
+// to match a recorded codex provider key (operator-supplied via
+// SetProviderSnapshot), not just any string. This keeps the native
+// codex CLI working while denying arbitrary local processes that do
+// not know the provider key.
 func TestCodex_Authenticate_NativeBinaryLoopback(t *testing.T) {
 	c := NewCodexConnector()
 	c.SetCredentials("gw-tok-5c80", "")
+	c.SetProviderSnapshot(map[string]CodexProviderEntry{
+		"openrouter": {APIKey: "sk-or-v1-real-openrouter-key"},
+	})
 
 	r := httptest.NewRequest("POST", "/c/codex/responses", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
@@ -1340,8 +1660,20 @@ func TestCodex_Authenticate_NativeBinaryLoopback(t *testing.T) {
 	// Note: no X-DC-Auth — native binary has no way to inject it.
 
 	if !c.Authenticate(r) {
-		t.Fatal("codex loopback with provider Authorization must be accepted; " +
+		t.Fatal("codex loopback with recognized provider Authorization must be accepted; " +
 			"otherwise codex → proxy traffic gets 401'd and guardrail never runs")
+	}
+
+	// negative: an Authorization Bearer that does NOT
+	// match any recorded provider key must be rejected (this is the
+	// shared-host bypass that the finding documented).
+	c2 := NewCodexConnector()
+	c2.SetCredentials("gw-tok-5c80", "")
+	r2 := httptest.NewRequest("POST", "/c/codex/responses", nil)
+	r2.RemoteAddr = "127.0.0.1:54321"
+	r2.Header.Set("Authorization", "Bearer sk-attacker-supplied")
+	if c2.Authenticate(r2) {
+		t.Fatal("loopback Authorization that does not match any recorded provider key must be rejected")
 	}
 }
 
@@ -1361,15 +1693,13 @@ func TestCodex_Authenticate_NoCredentials(t *testing.T) {
 	}
 }
 
-// TestCodex_Authenticate_LoopbackWarnOnce pins PR #141 audit H1.
-// Codex cannot inject X-DC-Auth from its native binary, so loopback
-// remains trusted even when a gateway token is configured (otherwise
-// every codex request 401s and no guardrail runs — see
-// TestCodex_Authenticate_NativeBinaryLoopback for the production
-// rationale). H1 surfaces this architectural limitation by emitting a
-// one-time `[SECURITY]` line to stderr the first time the bypass is
-// exercised. We capture stderr, exercise the bypass twice, and assert
-// the warning fires exactly once and that auth still succeeds.
+// TestCodex_Authenticate_LoopbackWarnOnce pins the warn-once
+// telemetry behavior for the fail-closed default. When a
+// gateway token is configured and a loopback caller fails the
+// known-provider check, the connector logs a single
+// `[SECURITY] codex: rejecting loopback /c/codex/* request — ...`
+// line to stderr and rejects the request. Subsequent rejections do
+// not re-emit the warning.
 func TestCodex_Authenticate_LoopbackWarnOnce(t *testing.T) {
 	c := NewCodexConnector()
 	c.SetCredentials("gw-tok-h1", "")
@@ -1385,9 +1715,12 @@ func TestCodex_Authenticate_LoopbackWarnOnce(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		r := httptest.NewRequest("POST", "/c/codex/responses", nil)
 		r.RemoteAddr = "127.0.0.1:54321"
-		r.Header.Set("Authorization", "Bearer sk-or-upstream-key")
-		if !c.Authenticate(r) {
-			t.Fatalf("iter %d: codex loopback auth must still succeed (warn-only contract)", i)
+		// Authorization carries an unrecognized bearer (no provider
+		// snapshot configured) — the connector must reject and warn
+		// once.
+		r.Header.Set("Authorization", "Bearer sk-attacker-key")
+		if c.Authenticate(r) {
+			t.Fatalf("iter %d: codex loopback auth must reject when bearer is not a known provider key", i)
 		}
 	}
 
@@ -1396,11 +1729,10 @@ func TestCodex_Authenticate_LoopbackWarnOnce(t *testing.T) {
 	}
 	captured, _ := io.ReadAll(pipeR)
 	got := string(captured)
-	if !strings.Contains(got, "[SECURITY] codex: loopback request accepted") {
-		t.Errorf("stderr missing warn-once line; got:\n%s", got)
+	if !strings.Contains(got, "[SECURITY] codex: rejecting loopback") {
+		t.Errorf("stderr missing warn-once rejection line; got:\n%s", got)
 	}
-	// Three calls but only one warning line. Count occurrences.
-	if n := strings.Count(got, "[SECURITY] codex: loopback request accepted"); n != 1 {
+	if n := strings.Count(got, "[SECURITY] codex: rejecting loopback"); n != 1 {
 		t.Errorf("expected exactly 1 warn-once line, got %d:\n%s", n, got)
 	}
 }
@@ -1430,8 +1762,8 @@ func TestCodex_Route(t *testing.T) {
 	if cs.ConnectorName != "codex" {
 		t.Errorf("ConnectorName = %q, want codex", cs.ConnectorName)
 	}
-	if cs.RawAPIKey != "sk-openai-key" {
-		t.Errorf("RawAPIKey = %q, want sk-openai-key", cs.RawAPIKey)
+	if cs.RawAPIKey != "" {
+		t.Errorf("RawAPIKey = %q, want empty (hook-only connector)", cs.RawAPIKey)
 	}
 	if cs.RawModel != "gpt-4o" {
 		t.Errorf("RawModel = %q, want gpt-4o", cs.RawModel)
@@ -1442,8 +1774,8 @@ func TestCodex_Route(t *testing.T) {
 	if cs.PassthroughMode {
 		t.Error("expected PassthroughMode=false for chat path")
 	}
-	if cs.ExtraHeaders == nil {
-		t.Error("ExtraHeaders should not be nil")
+	if cs.RawUpstream != "" {
+		t.Errorf("RawUpstream = %q, want empty", cs.RawUpstream)
 	}
 }
 
@@ -1506,23 +1838,15 @@ func TestCodex_Setup(t *testing.T) {
 	}
 }
 
-// TestCodex_Setup_PatchesConnectorPrefixInConfigToml verifies the
-// /c/codex routing prefix lands in the only place codex-cli reads it:
-// [model_providers.*].base_url in ~/.codex/config.toml. We
-// intentionally do NOT write a global OPENAI_BASE_URL anymore (see
-// S8.1 / F31 in claw-agnostic-refactor) — exporting that env var
-// would silently route every other OpenAI-SDK client on the host
-// through this proxy.
-func TestCodex_Setup_PatchesConnectorPrefixInConfigToml(t *testing.T) {
+// TestCodex_Setup_DoesNotRewriteProvidersToProxy verifies hook-only Setup
+// leaves [model_providers.*].base_url values untouched (no /c/codex) and
+// still avoids legacy global env override files (S8.1 / F31).
+func TestCodex_Setup_DoesNotRewriteProvidersToProxy(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
 
-	// Seed a model_providers entry so the codex flow has something to
-	// rewrite (otherwise patchCodexConfig synthesizes a default openai
-	// entry, which would also pass — but we want to pin the patch
-	// path explicitly).
 	original := `model_provider = "openai"
 
 [model_providers.openai]
@@ -1535,11 +1859,7 @@ env_key = "OPENAI_API_KEY"
 	}
 
 	c := NewCodexConnector()
-	// Enforcement mode: this test asserts proxy-redirect behavior
-	// (/c/codex prefix in model_providers base_url), which only
-	// runs in the gated enforcement path. Default observability
-	// mode skips the redirect — see GuardrailConfig.CodexEnforcementEnabled.
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
@@ -1548,12 +1868,17 @@ env_key = "OPENAI_API_KEY"
 	if err != nil {
 		t.Fatalf("read patched config: %v", err)
 	}
-	if !strings.Contains(string(patched), "/c/codex") {
-		t.Errorf("config.toml missing /c/codex prefix after Setup; got:\n%s", patched)
+	s := string(patched)
+	if strings.Contains(s, "/c/codex") {
+		t.Errorf("config.toml must not rewrite providers to defenseclaw proxy; got:\n%s", patched)
+	}
+	if !strings.Contains(s, "https://api.openai.com/v1") {
+		t.Errorf("expected original openai base_url to remain; got:\n%s", patched)
+	}
+	if !strings.Contains(s, "PreToolUse") {
+		t.Error("expected hooks table to be installed")
 	}
 
-	// Negative assertion: the legacy global env files MUST NOT
-	// be written. This is the F31 contract.
 	if _, err := os.Stat(filepath.Join(dir, "codex_env.sh")); !os.IsNotExist(err) {
 		t.Errorf("codex_env.sh must not be written (S8.1 / F31)")
 	}
@@ -1562,183 +1887,6 @@ env_key = "OPENAI_API_KEY"
 	}
 }
 
-// TestCodex_Route_ResolvesUpstreamFromSnapshot documents the
-// critical native-binary routing path: codex sends LLM requests with
-// no X-DC-Target-URL header (it's a Rust binary with no fetch
-// interceptor). Route() must synthesize RawUpstream from the provider
-// snapshot captured at Setup — otherwise the proxy's passthrough
-// handler rejects the request with "missing X-DC-Target-URL".
-func TestCodex_Route_ResolvesUpstreamFromSnapshot(t *testing.T) {
-	c := NewCodexConnector()
-	c.SetProviderSnapshot(map[string]CodexProviderEntry{
-		"openrouter": {BaseURL: "https://openrouter.ai/api/v1", APIKey: "sk-or-snap"},
-	})
-	body := []byte(`{"model":"openai/gpt-4o-mini"}`)
-	r := httptest.NewRequest("POST", "/responses", nil)
-	r.Header.Set("Authorization", "Bearer incoming-client-key")
-
-	cs, err := c.Route(r, body)
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if cs.RawUpstream != "https://openrouter.ai/api/v1" {
-		t.Errorf("RawUpstream = %q, want snapshot base_url", cs.RawUpstream)
-	}
-	if cs.RawAPIKey != "sk-or-snap" {
-		t.Errorf("RawAPIKey = %q, want snapshot api_key", cs.RawAPIKey)
-	}
-}
-
-func TestCodex_Route_PrefersConfiguredModelProvider(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-	original := `model_provider = "openrouter"
-
-[model_providers.azure]
-name = "azure"
-base_url = "https://azure.example/openai"
-api_key = "azure-key"
-
-[model_providers.openrouter]
-name = "openrouter"
-base_url = "https://openrouter.ai/api/v1"
-env_key = "OPENROUTER_API_KEY"
-`
-	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	CodexConfigPathOverride = configPath
-	defer func() { CodexConfigPathOverride = "" }()
-	CodexAuthPathOverride = filepath.Join(dir, "no-such-auth.json")
-	defer func() { CodexAuthPathOverride = "" }()
-	t.Setenv("OPENROUTER_API_KEY", "sk-or-active-provider")
-
-	c := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	c.snapshotMu.RLock()
-	active := c.activeProvider
-	c.snapshotMu.RUnlock()
-	if active != "openrouter" {
-		t.Fatalf("activeProvider = %q, want openrouter", active)
-	}
-
-	body := []byte(`{"model":"gpt-5"}`)
-	r := httptest.NewRequest("POST", "/responses", nil)
-	r.Header.Set("Authorization", "Bearer incoming-client-key")
-	cs, err := c.Route(r, body)
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if cs.RawUpstream != "https://openrouter.ai/api/v1" {
-		t.Errorf("RawUpstream = %q, want active model_provider upstream", cs.RawUpstream)
-	}
-	if cs.RawAPIKey != "sk-or-active-provider" {
-		t.Errorf("RawAPIKey = %q, want active model_provider key", cs.RawAPIKey)
-	}
-}
-
-// TestCodex_Setup_CapturesProviderSnapshot verifies Setup reads each
-// [model_providers.*] entry from config.toml, resolves its env_key to
-// a live API key from the environment, and populates the in-memory
-// snapshot before overwriting base_url with the proxy URL.
-func TestCodex_Setup_CapturesProviderSnapshot(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-	original := `model_provider = "openrouter"
-
-[model_providers.openrouter]
-name = "openrouter"
-base_url = "https://openrouter.ai/api/v1"
-env_key = "OPENROUTER_API_KEY"
-`
-	os.WriteFile(configPath, []byte(original), 0o644)
-	CodexConfigPathOverride = configPath
-	defer func() { CodexConfigPathOverride = "" }()
-	t.Setenv("OPENROUTER_API_KEY", "sk-or-live-test-value")
-
-	c := NewCodexConnector()
-	// Enforcement mode required: SetProviderSnapshot only runs in
-	// the gated enforcement block (it's only consumed by Route()
-	// during proxy passthrough, which doesn't happen in the
-	// observability default).
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	snap := c.ProviderSnapshot()
-	entry, ok := snap["openrouter"]
-	if !ok {
-		t.Fatalf("snapshot missing openrouter entry; got %v", snap)
-	}
-	if entry.BaseURL != "https://openrouter.ai/api/v1" {
-		t.Errorf("snapshot BaseURL = %q, want original openrouter URL (NOT proxy)", entry.BaseURL)
-	}
-	if entry.APIKey != "sk-or-live-test-value" {
-		t.Errorf("snapshot APIKey = %q, want resolved from OPENROUTER_API_KEY env", entry.APIKey)
-	}
-}
-
-// TestCodex_Setup_RewritesModelProvidersBaseURL verifies the Codex
-// connector rewrites each [model_providers.*] base_url in
-// ~/.codex/config.toml to route through DefenseClaw's proxy. The env
-// var OPENAI_BASE_URL is NOT sufficient because Codex honors the
-// per-provider TOML value first, which means non-default providers
-// (openrouter, ollama, lmstudio) otherwise skip the proxy entirely.
-func TestCodex_Setup_RewritesModelProvidersBaseURL(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-	original := `model_provider = "openrouter"
-
-[model_providers.openrouter]
-name = "openrouter"
-base_url = "https://openrouter.ai/api/v1"
-env_key = "OPENROUTER_API_KEY"
-
-[model_providers.openai]
-name = "openai"
-base_url = "https://api.openai.com/v1"
-env_key = "OPENAI_API_KEY"
-`
-	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	CodexConfigPathOverride = configPath
-	defer func() { CodexConfigPathOverride = "" }()
-
-	c := NewCodexConnector()
-	// Enforcement mode required: this test asserts the proxy
-	// rewrite of [model_providers.*].base_url which only runs in
-	// the gated enforcement path.
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	data, _ := os.ReadFile(configPath)
-	rewritten := string(data)
-	proxy := "http://127.0.0.1:4000/c/codex"
-	// Accept either single- or double-quoted TOML string form.
-	proxyHits := strings.Count(rewritten, "base_url = '"+proxy+"'") +
-		strings.Count(rewritten, `base_url = "`+proxy+`"`)
-	if proxyHits != 2 {
-		t.Errorf("expected 2 base_url lines rewritten to proxy, got %d\nfile:\n%s",
-			proxyHits, rewritten)
-	}
-	if strings.Contains(rewritten, "openrouter.ai/api/v1") {
-		t.Error("original openrouter base_url still present — not rewritten")
-	}
-	if strings.Contains(rewritten, "api.openai.com/v1") {
-		t.Error("original openai base_url still present — not rewritten")
-	}
-}
-
-// TestCodex_Setup_ConfigTomlIsModeChmod600 pins the file mode of
 // the patched ~/.codex/config.toml. Codex's config.toml carries
 // env_key bindings and (after Setup) the DefenseClaw proxy URL. On
 // shared dev hosts the historical 0o644 mode let any local user
@@ -1785,7 +1933,7 @@ env_key = "OPENAI_API_KEY"
 
 // TestCodex_Setup_RegistersHooksInline verifies the Codex connector
 // writes an inline [hooks] HookEventsToml struct into config.toml
-// covering all five Codex events and pointing at the generated
+// covering all six Codex events and pointing at the generated
 // codex-hook.sh. The hooks key is NOT a path to a hooks.json file —
 // that would trigger a TOML parse error at codex startup.
 func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
@@ -1813,9 +1961,9 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	raw, _ := os.ReadFile(configPath)
 	content := string(raw)
 
-	// The [hooks] table must be present with each of the five events
+	// The [hooks] table must be present with each of the six events
 	// listed as sub-tables.
-	for _, evt := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"} {
+	for _, evt := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"} {
 		if !strings.Contains(content, "hooks."+evt) && !strings.Contains(content, "hooks\n"+evt) {
 			// Accept either dotted or nested rendering.
 			if !strings.Contains(content, evt) {
@@ -1839,12 +1987,45 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	if _, isTable := parsed["hooks"].(map[string]interface{}); !isTable {
 		t.Errorf("hooks key is not a table, got %T", parsed["hooks"])
 	}
+	hooks := parsed["hooks"].(map[string]interface{})
+	state, ok := hooks["state"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks.state missing — Codex would ask the user to review DefenseClaw hooks")
+	}
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	for _, tc := range []struct {
+		eventType string
+		eventKey  string
+		matcher   string
+		timeout   int
+	}{
+		{"SessionStart", "session_start", "startup|resume|clear", 30},
+		{"UserPromptSubmit", "user_prompt_submit", "", 30},
+		{"PreToolUse", "pre_tool_use", "*", 30},
+		{"PermissionRequest", "permission_request", "*", 30},
+		{"PostToolUse", "post_tool_use", "*", 30},
+		{"Stop", "stop", "", 90},
+	} {
+		key := fmt.Sprintf("%s:%s:0:0", configPath, tc.eventKey)
+		entry, ok := state[key].(map[string]interface{})
+		if !ok {
+			t.Fatalf("hooks.state missing trusted entry for %s (%s); state=%v", tc.eventType, key, state)
+		}
+		gotHash, _ := entry["trusted_hash"].(string)
+		wantHash := codexCommandHookHash(tc.eventKey, tc.matcher, hookPath, tc.timeout)
+		if gotHash != wantHash {
+			t.Errorf("trusted_hash for %s = %q, want %q", tc.eventType, gotHash, wantHash)
+		}
+		if _, ok := entry["enabled"]; ok {
+			t.Errorf("trusted state for %s should not force enabled; got %v", tc.eventType, entry)
+		}
+	}
 }
 
 // TestCodex_Setup_DefaultObservability_NoProxyRewrite is the headline
 // regression test for the codex/claude-code observability-only
-// architecture. With CodexEnforcement=false (the default), Setup must
-// install the [hooks] table and features.codex_hooks=true (so the
+// architecture. Codex is hook-only as of PR #265 — Setup must
+// install the [hooks] table and features.hooks=true (so the
 // codex-hook.sh script fires for tool-call telemetry) but must NOT:
 //   - rewrite cfg["openai_base_url"] to the proxy URL (codex talks
 //     directly to its native upstream — api.openai.com or
@@ -1879,14 +2060,8 @@ env_key = "OPENROUTER_API_KEY"
 	}
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
-	// Pin auth.json to a non-existent path so detectCodexChatGPTMode
-	// returns false (otherwise a developer's local `codex login`
-	// state would alter Setup's behavior).
-	CodexAuthPathOverride = filepath.Join(dir, "no-such-auth.json")
-	defer func() { CodexAuthPathOverride = "" }()
 
 	c := NewCodexConnector()
-	// CodexEnforcement omitted == false (the production default).
 	opts := SetupOpts{
 		DataDir:   dir,
 		ProxyAddr: "127.0.0.1:4000",
@@ -1948,8 +2123,11 @@ env_key = "OPENROUTER_API_KEY"
 		t.Error("hooks.PostToolUse missing — tool-result telemetry lost")
 	}
 	features, _ := parsed["features"].(map[string]interface{})
-	if v, _ := features["codex_hooks"].(bool); !v {
-		t.Errorf("features.codex_hooks must be true in observability mode (hooks would otherwise be ignored by codex), got=%v", features)
+	if v, _ := features["hooks"].(bool); !v {
+		t.Errorf("features.hooks must be true in observability mode (hooks would otherwise be ignored by codex), got=%v", features)
+	}
+	if _, legacy := features["codex_hooks"]; legacy {
+		t.Errorf("deprecated features.codex_hooks should be removed to avoid Codex startup warnings, got=%v", features)
 	}
 
 	// Subprocess sandbox JSON must NOT be created — that's
@@ -1957,6 +2135,132 @@ env_key = "OPENROUTER_API_KEY"
 	sandboxPath := filepath.Join(dir, "subprocess.json")
 	if _, err := os.Stat(sandboxPath); err == nil {
 		t.Errorf("subprocess.json was created in observability mode — sandbox is enforcement-only (path=%s)", sandboxPath)
+	}
+}
+
+// TestCodex_Setup_HealsStaleProxyRedirect covers the migration path
+// for operators upgrading from an installation done before codex
+// became hook-only. The legacy setup rewrote ~/.codex/config.toml's
+// top-level openai_base_url to point at the gateway's :4000/c/codex
+// proxy mount; that mount has since been removed but the operator's
+// config.toml still carries the now-broken value, so every Codex
+// turn fails with "stream disconnected before completion" against
+// the closed loopback port.
+//
+// The current Setup is intentionally non-destructive toward
+// openai_base_url (see TestCodex_Setup_DefaultObservability_NoProxyRewrite),
+// so without this heal the stale value would survive forever. This
+// test pins the narrow strip: only the loopback /c/codex URL shape
+// DefenseClaw itself wrote gets removed, and the heal is independent
+// of port number because the historical default of :4000 was
+// operator-configurable.
+func TestCodex_Setup_HealsStaleProxyRedirect(t *testing.T) {
+	cases := []struct {
+		name      string
+		staleURL  string
+		wantStrip bool
+	}{
+		{name: "ipv4_default_port_4000", staleURL: "http://127.0.0.1:4000/c/codex", wantStrip: true},
+		{name: "ipv4_custom_port", staleURL: "http://127.0.0.1:18971/c/codex", wantStrip: true},
+		{name: "localhost_alias", staleURL: "http://localhost:4000/c/codex", wantStrip: true},
+		{name: "ipv6_loopback", staleURL: "http://[::1]:4000/c/codex", wantStrip: true},
+		{name: "https_loopback", staleURL: "https://127.0.0.1:4000/c/codex", wantStrip: true},
+		{name: "trailing_slash", staleURL: "http://127.0.0.1:4000/c/codex/", wantStrip: true},
+		{name: "deeper_path", staleURL: "http://127.0.0.1:4000/c/codex/responses", wantStrip: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.toml")
+			original := `model = "gpt-5"
+openai_base_url = "` + tc.staleURL + `"
+`
+			if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			CodexConfigPathOverride = configPath
+			defer func() { CodexConfigPathOverride = "" }()
+
+			c := NewCodexConnector()
+			opts := SetupOpts{
+				DataDir:   dir,
+				ProxyAddr: "127.0.0.1:4000",
+				APIAddr:   "127.0.0.1:18970",
+			}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+
+			raw, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("read patched config: %v", err)
+			}
+			var parsed map[string]interface{}
+			if err := toml.Unmarshal(raw, &parsed); err != nil {
+				t.Fatalf("invalid TOML after Setup: %v", err)
+			}
+			if _, present := parsed["openai_base_url"]; present {
+				t.Errorf("openai_base_url=%q survived Setup — heal did not strip stale proxy redirect\nfile:\n%s",
+					parsed["openai_base_url"], raw)
+			}
+			// The /c/codex prefix must be entirely gone — there is no
+			// legitimate Codex config value pointing there.
+			if strings.Contains(string(raw), "/c/codex") {
+				t.Errorf("config.toml still contains /c/codex after Setup:\n%s", raw)
+			}
+			// Hooks must still be installed — the heal only removes the
+			// proxy redirect, not the telemetry wiring this Setup adds.
+			if _, ok := parsed["hooks"].(map[string]interface{}); !ok {
+				t.Errorf("[hooks] table missing after heal (got=%T)", parsed["hooks"])
+			}
+		})
+	}
+}
+
+// TestIsDefenseClawCodexProxyRedirect locks the strip-detector's blast
+// radius. The heal in patchCodexConfig must never delete a value that
+// wasn't written by DefenseClaw itself, so this table-driven test
+// asserts the full reject set for shapes an operator might legitimately
+// hand-write (enterprise gateways, public LLM hosts, non-HTTP schemes,
+// non-loopback IPs, /c/codex paths on non-loopback hosts).
+func TestIsDefenseClawCodexProxyRedirect(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		// Healed: the exact loopback /c/codex shape DefenseClaw wrote.
+		{name: "ipv4_default", url: "http://127.0.0.1:4000/c/codex", want: true},
+		{name: "ipv4_alt_port", url: "http://127.0.0.1:18971/c/codex", want: true},
+		{name: "ipv4_no_port", url: "http://127.0.0.1/c/codex", want: true},
+		{name: "localhost", url: "http://localhost:4000/c/codex", want: true},
+		{name: "ipv6", url: "http://[::1]:4000/c/codex", want: true},
+		{name: "https", url: "https://127.0.0.1:4000/c/codex", want: true},
+		{name: "trailing_slash", url: "http://127.0.0.1:4000/c/codex/", want: true},
+		{name: "responses_subpath", url: "http://127.0.0.1:4000/c/codex/responses", want: true},
+		{name: "uppercase_scheme", url: "HTTP://127.0.0.1:4000/c/codex", want: true},
+		{name: "whitespace_padded", url: "  http://127.0.0.1:4000/c/codex  ", want: true},
+
+		// Preserved: shapes an operator may legitimately write.
+		{name: "enterprise_https", url: "https://gateway.corp.example/openai", want: false},
+		{name: "openai_public", url: "https://api.openai.com/v1", want: false},
+		{name: "azure_openai", url: "https://my-aoai.openai.azure.com/", want: false},
+		{name: "loopback_non_codex_path", url: "http://127.0.0.1:8080/v1", want: false},
+		{name: "loopback_root", url: "http://127.0.0.1:4000/", want: false},
+		{name: "non_loopback_codex_path", url: "https://example.com/c/codex", want: false},
+		{name: "rfc1918_codex_path", url: "http://10.0.0.1:4000/c/codex", want: false},
+		{name: "file_scheme", url: "file:///c/codex", want: false},
+		{name: "ws_scheme", url: "ws://127.0.0.1:4000/c/codex", want: false},
+		{name: "empty", url: "", want: false},
+		{name: "garbage", url: "not a url at all", want: false},
+		{name: "fragment_match_attempt", url: "http://attacker.example/#http://127.0.0.1:4000/c/codex", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDefenseClawCodexProxyRedirect(tc.url); got != tc.want {
+				t.Errorf("isDefenseClawCodexProxyRedirect(%q) = %v, want %v", tc.url, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1981,8 +2285,6 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	}
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
-	CodexAuthPathOverride = filepath.Join(dir, "no-auth.json")
-	defer func() { CodexAuthPathOverride = "" }()
 
 	c := NewCodexConnector()
 	opts := SetupOpts{
@@ -2032,11 +2334,12 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	// `otel.exporter`" at codex startup — a regression that would block
 	// the entire CLI from launching, not just OTel export. The value
 	// must match the kebab-case serde tag for OtelHttpProtocol::Json,
-	// and "json" specifically is required because the gateway's OTLP-HTTP
-	// receiver only accepts application/json bodies (415s protobuf).
+	// and "json" specifically keeps Codex telemetry on the gateway's
+	// stable receive path. The receiver can normalize protobuf too, but
+	// Codex requires this explicit field either way.
 	protocol, _ := otlphttp["protocol"].(string)
 	if protocol != "json" {
-		t.Errorf("otlp-http protocol = %q, want %q (codex requires this field; gateway only accepts application/json)",
+		t.Errorf("otlp-http protocol = %q, want %q (codex requires this explicit field)",
 			protocol, "json")
 	}
 	headers, _ := otlphttp["headers"].(map[string]interface{})
@@ -2091,8 +2394,6 @@ log_user_prompt = false
 	}
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
-	CodexAuthPathOverride = filepath.Join(dir, "no-auth.json")
-	defer func() { CodexAuthPathOverride = "" }()
 
 	c := NewCodexConnector()
 	opts := SetupOpts{
@@ -2166,8 +2467,6 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 	}
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
-	CodexAuthPathOverride = filepath.Join(dir, "no-auth.json")
-	defer func() { CodexAuthPathOverride = "" }()
 
 	c := NewCodexConnector()
 	opts := SetupOpts{
@@ -2221,7 +2520,7 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 }
 
 // TestCodex_Setup_EnablesHooksFeature confirms the connector writes
-// features.codex_hooks = true into config.toml. Without this, Codex
+// features.hooks = true into config.toml. Without this, Codex
 // ignores any registered hooks because the feature gate defaults to
 // off.
 func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
@@ -2239,9 +2538,167 @@ func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
 	}
 
 	data, _ := os.ReadFile(configPath)
-	content := string(data)
-	if !strings.Contains(content, "codex_hooks") {
-		t.Errorf("config.toml missing codex_hooks feature flag\nfile:\n%s", content)
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("invalid TOML after Setup: %v", err)
+	}
+	features, _ := parsed["features"].(map[string]interface{})
+	if v, _ := features["hooks"].(bool); !v {
+		t.Errorf("config.toml missing hooks feature flag; features=%v\nfile:\n%s", features, data)
+	}
+	if _, legacy := features["codex_hooks"]; legacy {
+		t.Errorf("config.toml still contains deprecated codex_hooks feature flag\nfile:\n%s", data)
+	}
+}
+
+func TestCodexCommandHookHashMatchesCodexCanonicalIdentity(t *testing.T) {
+	got := codexCommandHookHash("pre_tool_use", "*", "/tmp/hook.sh", 30)
+	want := "sha256:73ec4bb1ffa348f02fcca6c5c0725cc825ba47aa298a7e72eab4e47856cbadbc"
+	if got != want {
+		t.Fatalf("codexCommandHookHash = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	key := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
+	otherKey := codexHookStateKey(codexHookStateKeySource(configPath), "post_tool_use", 2, 0)
+
+	state := map[string]interface{}{
+		key: map[string]interface{}{
+			"trusted_hash": "sha256:user-replacement",
+		},
+		otherKey: map[string]interface{}{
+			"trusted_hash": "sha256:unrelated",
+		},
+	}
+	hooks := map[string]interface{}{"state": state}
+	if removeOwnedCodexHookState(hooks, configPath, hookPath) {
+		t.Fatalf("user replacement trust state was removed: %v", hooks)
+	}
+	if _, ok := state[key]; !ok {
+		t.Fatalf("user replacement trust entry missing: %v", state)
+	}
+
+	state[key] = map[string]interface{}{
+		"trusted_hash": codexCommandHookHash("pre_tool_use", "*", hookPath, 30),
+	}
+	if !removeOwnedCodexHookState(hooks, configPath, hookPath) {
+		t.Fatal("DefenseClaw-owned trust state was not removed")
+	}
+	if _, ok := state[key]; ok {
+		t.Fatalf("DefenseClaw-owned trust entry still present: %v", state)
+	}
+	if _, ok := state[otherKey]; !ok {
+		t.Fatalf("unrelated trust entry removed: %v", state)
+	}
+}
+
+// TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust is
+// the end-to-end pin for the "user replaced our hook script with their
+// own" workflow: after Setup, the operator may swap the hook command
+// out (or change the timeout/matcher) for any of the events. On
+// Teardown, DefenseClaw must NOT delete those entries because the
+// trusted_hash no longer matches what we wrote. Removing them would
+// silently re-prompt the user to trust their own hooks on next Codex
+// launch — a confusing security UX failure.
+func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	c := NewCodexConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "tok-test",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// Operator simulates editing config.toml to register their own
+	// PreToolUse hook in place of (or alongside) ours. We model this
+	// by overwriting only the trust-state entry for that event. The
+	// real hook command stays whatever Setup wrote; what matters is
+	// that the trusted_hash diverges from codexCommandHookHash().
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after setup: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	hooks, _ := parsed["hooks"].(map[string]interface{})
+	if hooks == nil {
+		t.Fatalf("hooks block missing after Setup; cannot exercise user-modified branch")
+	}
+	state, _ := hooks["state"].(map[string]interface{})
+	if state == nil {
+		t.Fatalf("hooks.state missing after Setup; cannot exercise user-modified branch")
+	}
+	preToolUseKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
+	if _, ok := state[preToolUseKey]; !ok {
+		t.Fatalf("expected DefenseClaw to install pre_tool_use trust entry at %q; state=%v", preToolUseKey, state)
+	}
+	state[preToolUseKey] = map[string]interface{}{
+		"trusted_hash": "sha256:user-replacement-do-not-touch",
+	}
+	rewritten, err := toml.Marshal(parsed)
+	if err != nil {
+		t.Fatalf("re-marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, rewritten, 0o600); err != nil {
+		t.Fatalf("write user-modified config: %v", err)
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+
+	postRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after teardown: %v", err)
+	}
+	var post map[string]interface{}
+	if err := toml.Unmarshal(postRaw, &post); err != nil {
+		t.Fatalf("unmarshal post-teardown config: %v", err)
+	}
+
+	postHooks, _ := post["hooks"].(map[string]interface{})
+	if postHooks == nil {
+		t.Fatalf("teardown deleted entire hooks block even though user edits remain:\n%s", postRaw)
+	}
+	postState, _ := postHooks["state"].(map[string]interface{})
+	if postState == nil {
+		t.Fatalf("teardown deleted hooks.state even though user edit at %q must be preserved", preToolUseKey)
+	}
+	entry, ok := postState[preToolUseKey].(map[string]interface{})
+	if !ok {
+		t.Fatalf("teardown removed user trust entry at %q; state=%v", preToolUseKey, postState)
+	}
+	if got, _ := entry["trusted_hash"].(string); got != "sha256:user-replacement-do-not-touch" {
+		t.Fatalf("teardown clobbered user trusted_hash: got=%q want=sha256:user-replacement-do-not-touch", got)
+	}
+
+	// Untouched DefenseClaw entries (other events) must be removed,
+	// since their trusted_hash still matches what we wrote — that's
+	// the recognition signal teardown relies on.
+	for _, eventKey := range []string{"session_start", "user_prompt_submit", "permission_request", "post_tool_use", "stop"} {
+		key := codexHookStateKey(codexHookStateKeySource(configPath), eventKey, 0, 0)
+		if _, present := postState[key]; present {
+			t.Errorf("teardown failed to remove DefenseClaw-owned trust entry for %s at %q", eventKey, key)
+		}
 	}
 }
 
@@ -2327,8 +2784,19 @@ func TestCodex_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) {
 		t.Fatalf("read disabled hook: %v", err)
 	}
 	disabled := string(disabledHook)
-	if !strings.Contains(disabled, "defenseclaw-managed-hook disabled") {
-		t.Errorf("disabled hook missing tombstone marker\nfile:\n%s", disabled)
+	// Tombstone MUST carry the v<digit> schema marker so isOwnedHook /
+	// scriptHasMarker recognise it as DefenseClaw-owned. v0 is the
+	// "older than any tagged version" sentinel.
+	if !strings.Contains(disabled, "defenseclaw-managed-hook v") {
+		t.Errorf("disabled hook missing v<digit> tombstone marker\nfile:\n%s", disabled)
+	}
+	if !strings.Contains(disabled, "disabled tombstone") {
+		t.Errorf("disabled hook missing operator-visible 'disabled tombstone' tag\nfile:\n%s", disabled)
+	}
+	// Portability: POSIX shebang so the tombstone runs even on hosts
+	// without /bin/bash (Alpine, distroless, BSDs).
+	if !strings.HasPrefix(disabled, "#!/bin/sh\n") {
+		t.Errorf("disabled hook should start with POSIX shebang, got:\n%s", disabled)
 	}
 	if !strings.Contains(disabled, "exit 0") {
 		t.Errorf("disabled hook must exit successfully\nfile:\n%s", disabled)
@@ -2433,6 +2901,7 @@ func TestCodex_TeardownWithoutBackup_RemovesManagedConfig(t *testing.T) {
 		"codex-hook.sh",
 		"notify-bridge.sh",
 		"codex_hooks",
+		"trusted_hash",
 		"x-defenseclaw-token",
 		"x-defenseclaw-client",
 		"[otel]",
@@ -2457,7 +2926,7 @@ func TestCodex_VerifyCleanDetectsConfigResidue(t *testing.T) {
 		t.Fatalf("write hook: %v", err)
 	}
 	cfg := map[string]interface{}{
-		"hooks": buildCodexHooksTable(hookPath),
+		"hooks": buildCodexHooksTable(configPath, hookPath),
 		"otel":  buildCodexOtelBlock(SetupOpts{APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}),
 		"notify": []interface{}{
 			"bash",
@@ -2521,148 +2990,6 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 	}
 }
 
-// TestCodex_Setup_RedirectsBuiltinOpenAIViaTopLevelKey pins the post-PR
-// openai/codex#12024 contract: the built-in `openai` provider is
-// redirected via the top-level `openai_base_url` field, NOT via a
-// `[model_providers.openai]` table. Codex 5.x rejects the latter at
-// startup with "model_providers contains reserved built-in provider
-// IDs: `openai`. Built-in providers cannot be overridden." — which
-// took down both the codex agent and any agent harness (e.g. the
-// OpenClaw TUI) that spawns codex as a subprocess. This test parses
-// the patched config.toml back through the TOML decoder so the
-// assertion is structural (not just a substring match).
-func TestCodex_Setup_RedirectsBuiltinOpenAIViaTopLevelKey(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-	// Seed an operator config that DOES have the now-rejected
-	// [model_providers.openai] block — this is the exact shape that
-	// every install before this fix produced and that Codex 5.x
-	// refuses to load.
-	original := `model = "gpt-5.5"
-
-[model_providers.openai]
-name = "openai"
-base_url = "https://api.openai.com/v1"
-env_key = "OPENAI_API_KEY"
-`
-	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
-		t.Fatalf("seed config.toml: %v", err)
-	}
-	CodexConfigPathOverride = configPath
-	defer func() { CodexConfigPathOverride = "" }()
-
-	c := NewCodexConnector()
-	// Enforcement mode required: openai_base_url rewrite + reserved-
-	// id strip live behind the enforcement flag.
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("read patched config: %v", err)
-	}
-	var parsed map[string]interface{}
-	if err := toml.Unmarshal(raw, &parsed); err != nil {
-		t.Fatalf("patched config did not round-trip as valid TOML: %v\nfile:\n%s", err, raw)
-	}
-
-	wantProxy := "http://127.0.0.1:4000/c/codex"
-
-	// 1) The top-level openai_base_url MUST be set to the proxy URL.
-	gotBaseURL, ok := parsed["openai_base_url"].(string)
-	if !ok {
-		t.Fatalf("openai_base_url missing or not a string in patched config; parsed=%v", parsed)
-	}
-	if gotBaseURL != wantProxy {
-		t.Errorf("openai_base_url = %q, want %q", gotBaseURL, wantProxy)
-	}
-
-	// 2) The reserved [model_providers.openai] table MUST NOT be
-	//    present — that is the exact shape Codex 5.x rejects.
-	if providers, ok := parsed["model_providers"].(map[string]interface{}); ok {
-		if _, found := providers["openai"]; found {
-			t.Errorf("[model_providers.openai] still present after Setup — Codex 5.x rejects this with 'reserved built-in provider IDs'\nfile:\n%s", raw)
-		}
-		if _, found := providers["ollama"]; found {
-			t.Errorf("[model_providers.ollama] still present after Setup — reserved built-in")
-		}
-		if _, found := providers["lmstudio"]; found {
-			t.Errorf("[model_providers.lmstudio] still present after Setup — reserved built-in")
-		}
-	}
-}
-
-// TestCodex_Setup_StripsAllReservedProviderIDs pins that every
-// reserved Codex built-in (openai, ollama, lmstudio) is removed from
-// [model_providers.*] on Setup. Operators with multi-provider configs
-// pre-fix could have any combination of these tables; if any one
-// survives Setup, Codex 5.x 's startup validator (PR #12024) trips
-// on it and refuses to start.
-func TestCodex_Setup_StripsAllReservedProviderIDs(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-	original := `model = "gpt-5.5"
-
-[model_providers.openai]
-name = "openai"
-base_url = "https://api.openai.com/v1"
-
-[model_providers.ollama]
-name = "ollama"
-base_url = "http://localhost:11434/v1"
-
-[model_providers.lmstudio]
-name = "lmstudio"
-base_url = "http://localhost:1234/v1"
-
-[model_providers.openrouter]
-name = "openrouter"
-base_url = "https://openrouter.ai/api/v1"
-env_key = "OPENROUTER_API_KEY"
-`
-	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	CodexConfigPathOverride = configPath
-	defer func() { CodexConfigPathOverride = "" }()
-
-	c := NewCodexConnector()
-	// Enforcement mode required: this test asserts the reserved-id
-	// strip + per-provider rewrite which only run in enforcement.
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	raw, _ := os.ReadFile(configPath)
-	var parsed map[string]interface{}
-	if err := toml.Unmarshal(raw, &parsed); err != nil {
-		t.Fatalf("invalid TOML after Setup: %v", err)
-	}
-	providers, _ := parsed["model_providers"].(map[string]interface{})
-	for _, id := range []string{"openai", "ollama", "lmstudio"} {
-		if _, found := providers[id]; found {
-			t.Errorf("reserved provider %q still present in [model_providers] — Codex 5.x will refuse to start", id)
-		}
-	}
-	// The non-reserved provider MUST still be present and rewritten.
-	openrouter, ok := providers["openrouter"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("custom provider 'openrouter' missing after Setup — should be retained and rewritten")
-	}
-	if bu, _ := openrouter["base_url"].(string); bu != "http://127.0.0.1:4000/c/codex" {
-		t.Errorf("openrouter base_url = %q, want proxy redirect", bu)
-	}
-}
-
-// TestCodex_Teardown_RestoresOriginalOpenAIProviderBlock verifies
-// that an operator who had a pristine [model_providers.openai] block
-// (e.g. from an older Codex release that accepted overrides) gets it
-// back on Teardown — even though we stripped it on Setup. The
-// reserved-block backup channel is what makes "uninstall returns the
-// host to its original shape" still hold for these operators.
 func TestCodex_Teardown_RestoresOriginalOpenAIProviderBlock(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -2710,242 +3037,6 @@ env_key = "OPENAI_API_KEY"
 	}
 	if bu, _ := openai["base_url"].(string); bu != "https://api.openai.com/v1" {
 		t.Errorf("[model_providers.openai].base_url = %q, want pristine OpenAI URL", bu)
-	}
-}
-
-// TestCodex_Setup_SynthesizesOpenAISnapshot pins that the in-memory
-// provider snapshot ALWAYS includes a usable `openai` entry, even
-// when the operator's config.toml has no [model_providers.openai]
-// block (the new default after the Codex 5.x reserved-ID change).
-// Without this, Route() would have no upstream URL for codex's
-// `/c/codex/responses` traffic and the proxy would 502 every request.
-func TestCodex_Setup_SynthesizesOpenAISnapshot(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-	// Pristine config without any provider block — the realistic
-	// post-fix shape on a fresh Codex install.
-	original := `model = "gpt-5.5"
-`
-	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	CodexConfigPathOverride = configPath
-	defer func() { CodexConfigPathOverride = "" }()
-
-	// Pin auth.json to a path that does not exist so the detection
-	// helper returns false deterministically. Without this, a dev
-	// machine where the user has run `codex login` (which writes
-	// auth_mode="chatgpt" to ~/.codex/auth.json) would flip this
-	// test's expected default to the chatgpt backend URL — a flaky
-	// pass/fail that depends on the dev's local Codex login state.
-	CodexAuthPathOverride = filepath.Join(dir, "no-such-auth.json")
-	defer func() { CodexAuthPathOverride = "" }()
-
-	c := NewCodexConnector()
-	// Enforcement mode required: SetProviderSnapshot only runs in
-	// the enforcement path. Observability-mode default skips the
-	// snapshot entirely (no proxy passthrough means Route() is
-	// never consulted).
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	snap := c.ProviderSnapshot()
-	openai, ok := snap["openai"]
-	if !ok {
-		t.Fatalf("snapshot missing synthetic 'openai' entry — Route() will 502 on /c/codex/responses\nsnapshot=%v", snap)
-	}
-	if openai.BaseURL != "https://api.openai.com/v1" {
-		t.Errorf("synthetic openai BaseURL = %q, want canonical OpenAI URL", openai.BaseURL)
-	}
-}
-
-// TestCodex_Setup_SynthesizesChatGPTBackendWhenAuthModeChatGPT pins the
-// real-world regression we hit while running `defenseclaw setup
-// guardrail` against a Codex CLI that was logged in via ChatGPT/Plus
-// (auth_mode="chatgpt"). With OPENAI_API_KEY=null the only endpoint
-// that accepts the issued access_token is
-// `chatgpt.com/backend-api/codex/responses`. Synthesizing the
-// canonical `api.openai.com/v1` upstream produced a permanent 401
-// upstream-error loop, surfacing in the codex TUI as "Reconnecting…
-// 5/5" with hooks firing but no completion ever returning.
-//
-// We assert the synthetic snapshot points at the chatgpt backend URL,
-// because Route() concatenates the incoming `/responses` suffix to
-// produce the full upstream — and that's the only URL the user's auth
-// token will be valid against.
-func TestCodex_Setup_SynthesizesChatGPTBackendWhenAuthModeChatGPT(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(configPath, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	CodexConfigPathOverride = configPath
-	defer func() { CodexConfigPathOverride = "" }()
-
-	// Realistic auth.json shape from a `codex login` ChatGPT flow.
-	// We do NOT seed real tokens — the function under test only reads
-	// `auth_mode`. Anything else here is just shape padding.
-	authPath := filepath.Join(dir, "auth.json")
-	authJSON := `{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"x","access_token":"y","refresh_token":"z"}}`
-	if err := os.WriteFile(authPath, []byte(authJSON), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	CodexAuthPathOverride = authPath
-	defer func() { CodexAuthPathOverride = "" }()
-
-	c := NewCodexConnector()
-	// Enforcement mode required: SetProviderSnapshot only runs in
-	// the gated enforcement block.
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	snap := c.ProviderSnapshot()
-	openai, ok := snap["openai"]
-	if !ok {
-		t.Fatalf("snapshot missing synthetic 'openai' entry; got=%v", snap)
-	}
-	if openai.BaseURL != codexChatGPTBackendURL {
-		t.Fatalf(
-			"chatgpt-mode synthetic BaseURL = %q, want %q\n\n"+
-				"This is the bug surfaced by the defenseclaw setup guardrail flow on a\n"+
-				"`codex login`-authenticated CLI: api.openai.com/v1 will reject the issued\n"+
-				"ChatGPT access_token with 401, and the codex TUI loops forever on\n"+
-				"\"Reconnecting…\". The chatgpt backend URL is the only valid target.",
-			openai.BaseURL, codexChatGPTBackendURL,
-		)
-	}
-}
-
-// TestCodex_Setup_OperatorOpenAIBaseURLOverridesChatGPTDefault pins
-// that an explicit operator `openai_base_url` in their config (e.g.
-// an enterprise reverse-proxy or a custom Bifrost endpoint) wins over
-// BOTH the api.openai.com default AND the chatgpt-mode default.
-// Without this guard, an operator who set up an enterprise gateway
-// once and later logged in via ChatGPT would silently lose that
-// override on the next Setup() pass.
-func TestCodex_Setup_OperatorOpenAIBaseURLOverridesChatGPTDefault(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-	enterpriseURL := "https://gateway.corp.example/openai"
-	original := `model = "gpt-5"
-openai_base_url = "` + enterpriseURL + `"
-`
-	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	CodexConfigPathOverride = configPath
-	defer func() { CodexConfigPathOverride = "" }()
-
-	authPath := filepath.Join(dir, "auth.json")
-	if err := os.WriteFile(authPath, []byte(`{"auth_mode":"chatgpt"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	CodexAuthPathOverride = authPath
-	defer func() { CodexAuthPathOverride = "" }()
-
-	c := NewCodexConnector()
-	// Enforcement mode required: SetProviderSnapshot only runs in
-	// the gated enforcement block.
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	snap := c.ProviderSnapshot()
-	openai, ok := snap["openai"]
-	if !ok {
-		t.Fatalf("snapshot missing synthetic 'openai' entry; got=%v", snap)
-	}
-	if openai.BaseURL != enterpriseURL {
-		t.Fatalf("operator openai_base_url override lost: got %q, want %q", openai.BaseURL, enterpriseURL)
-	}
-}
-
-// TestDetectCodexChatGPTMode_ReturnsFalseOnMissingOrMalformed pins the
-// safe-default behavior of detectCodexChatGPTMode() — it must NOT
-// return true (which would force a chatgpt.com routing) when auth.json
-// is absent, malformed, or names a non-chatgpt mode. Symmetrically, it
-// MUST return true when auth.json is well-formed and reports
-// "chatgpt", regardless of casing.
-func TestDetectCodexChatGPTMode_ReturnsFalseOnMissingOrMalformed(t *testing.T) {
-	dir := t.TempDir()
-
-	cases := []struct {
-		name    string
-		setup   func() string // returns auth path (or "" for missing-file case)
-		want    bool
-		comment string
-	}{
-		{
-			name:    "missing file",
-			setup:   func() string { return filepath.Join(dir, "does-not-exist.json") },
-			want:    false,
-			comment: "operator may not have run `codex login` yet",
-		},
-		{
-			name: "malformed JSON",
-			setup: func() string {
-				p := filepath.Join(dir, "broken.json")
-				_ = os.WriteFile(p, []byte("not-json{{"), 0o600)
-				return p
-			},
-			want:    false,
-			comment: "manual edit / disk corruption must not flip routing",
-		},
-		{
-			name: "apikey mode",
-			setup: func() string {
-				p := filepath.Join(dir, "apikey.json")
-				_ = os.WriteFile(p, []byte(`{"auth_mode":"apikey","OPENAI_API_KEY":"sk-fake"}`), 0o600)
-				return p
-			},
-			want:    false,
-			comment: "OPENAI_API_KEY users must keep api.openai.com routing",
-		},
-		{
-			name: "chatgpt mode lowercase",
-			setup: func() string {
-				p := filepath.Join(dir, "chatgpt.json")
-				_ = os.WriteFile(p, []byte(`{"auth_mode":"chatgpt"}`), 0o600)
-				return p
-			},
-			want: true,
-		},
-		{
-			name: "chatgpt mode mixed case",
-			setup: func() string {
-				p := filepath.Join(dir, "chatgpt-mixed.json")
-				_ = os.WriteFile(p, []byte(`{"auth_mode":"ChatGPT"}`), 0o600)
-				return p
-			},
-			want:    true,
-			comment: "case-insensitive match — auth.json shape isn't a public contract",
-		},
-		{
-			name: "empty auth_mode",
-			setup: func() string {
-				p := filepath.Join(dir, "empty-mode.json")
-				_ = os.WriteFile(p, []byte(`{}`), 0o600)
-				return p
-			},
-			want:    false,
-			comment: "absent field defaults to false (safe: keeps api.openai.com)",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			CodexAuthPathOverride = tc.setup()
-			defer func() { CodexAuthPathOverride = "" }()
-			got := detectCodexChatGPTMode()
-			if got != tc.want {
-				t.Fatalf("detectCodexChatGPTMode() = %v, want %v (%s)", got, tc.want, tc.comment)
-			}
-		})
 	}
 }
 
@@ -3459,6 +3550,33 @@ func TestWriteAllHookScripts_CreatesAllFour(t *testing.T) {
 	}
 }
 
+// Mirrors the production layout used by OpenClawConnector.Setup, which
+// passes filepath.Join(opts.DataDir, "hooks") as the hookDir argument.
+// Verifies the new connector-scoped hook writer only lays down the
+// generic inspect-*.sh baseline for OpenClaw (no vendor *-hook.sh)
+// because OpenClawConnector deliberately does NOT implement
+// HookScriptOwner — see plan C2 / S2.5.
+func TestOpenClawHookWriter_WritesGenericHooksOnly(t *testing.T) {
+	dataDir := t.TempDir()
+	hookDir := filepath.Join(dataDir, "hooks")
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
+
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewOpenClawConnector()); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+
+	for _, name := range genericHookScripts {
+		if _, err := os.Stat(filepath.Join(hookDir, name)); err != nil {
+			t.Errorf("generic hook %s not created under hookDir: %v", name, err)
+		}
+	}
+	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "hermes-hook.sh"} {
+		if _, err := os.Stat(filepath.Join(hookDir, name)); !os.IsNotExist(err) {
+			t.Errorf("OpenClaw hook writer should not create vendor hook %s, stat err=%v", name, err)
+		}
+	}
+}
+
 func TestWriteHookScriptsWithToken_InjectsBearerHeader(t *testing.T) {
 	// The claude-code hook posts to /api/v1/claude-code/hook, which the API
 	// server's auth middleware guards with a bearer token. Without the
@@ -3534,15 +3652,15 @@ func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[stri
 	// and contains no .disabled sentinel so the hook proceeds to the
 	// curl path the caller cares about.
 	dcHome := t.TempDir()
-	cmd := exec.Command("bash", scriptPath)
-	// Plan B4 / S0.4: hooks lock PATH down by default. The test
-	// stubs `curl` inside an ephemeral tmpdir; tell the hardening
-	// helpers to keep our path rather than reset it to system bins.
+	// Hooks lock PATH down by default. The test stubs `curl` inside
+	// an ephemeral tmpdir; bake that path into the generated helper
+	// file so the runtime environment cannot spoof the trust decision.
 	hookPath := stubDir + ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	bakeHookPathForTest(t, scriptPath, hookPath)
+	cmd := exec.Command("bash", scriptPath)
 	cmd.Env = append(os.Environ(),
 		"PATH="+stubDir+":"+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
-		"DEFENSECLAW_HOOK_PATH="+hookPath,
 	)
 	for k, v := range extraEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -3556,6 +3674,27 @@ func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[stri
 		t.Fatalf("curl stub never recorded args: %v", err)
 	}
 	return string(data)
+}
+
+func bakeHookPathForTest(t *testing.T, scriptPath, hookPath string) {
+	t.Helper()
+	helperPath := filepath.Join(filepath.Dir(scriptPath), "_hardening.sh")
+	b, err := os.ReadFile(helperPath)
+	if err != nil {
+		t.Fatalf("read _hardening.sh: %v", err)
+	}
+	replacement := "DEFENSECLAW_BAKED_HOOK_PATH=" + shellSingleQuoteForTest(hookPath)
+	next := strings.Replace(string(b), `DEFENSECLAW_BAKED_HOOK_PATH=""`, replacement, 1)
+	if next == string(b) {
+		t.Fatalf("_hardening.sh missing DEFENSECLAW_BAKED_HOOK_PATH sentinel")
+	}
+	if err := os.WriteFile(helperPath, []byte(next), 0o644); err != nil {
+		t.Fatalf("write _hardening.sh baked hook path: %v", err)
+	}
+}
+
+func shellSingleQuoteForTest(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // containsAuthBearer returns true if the stubbed curl argv lines contain
@@ -3579,8 +3718,8 @@ func containsAuthBearer(curlArgs, token string) bool {
 
 func TestHookScripts_ReturnsList(t *testing.T) {
 	scripts := HookScripts()
-	if len(scripts) != 6 {
-		t.Errorf("HookScripts() returned %d scripts, want 6", len(scripts))
+	if len(scripts) != 13 {
+		t.Errorf("HookScripts() returned %d scripts, want 13", len(scripts))
 	}
 }
 
@@ -3752,6 +3891,91 @@ func TestTeardownSubprocessEnforcement(t *testing.T) {
 	}
 }
 
+// TestTeardown_DoesNotDeleteOtherConnectorsHookScripts is a regression
+// test for the exit-127 "command not found" bug observed during a
+// claudecode → codex switch. The old TeardownSubprocessEnforcement
+// iterated the GLOBAL hookScripts slice (every connector's *-hook.sh
+// + every generic inspect-*.sh) and removed them all from the shared
+// hooks dir. When called from one connector's Teardown that wiped
+// scripts owned by the incoming connector AND the shared inspect-*.sh
+// helpers, leaving the agent with an empty hooks/ dir if the
+// follow-up Setup hit any silent partial-install path.
+//
+// The fix scopes per-Teardown deletion to the calling connector's own
+// HookScriptOwner.HookScriptNames basenames. This test simulates the
+// failure: pre-populates hooks/ with codex-hook.sh + inspect-*.sh,
+// runs claudecode.Teardown, and asserts that codex-hook.sh and the
+// generic inspect-*.sh files SURVIVE (only claude-code-hook.sh is
+// removed).
+func TestTeardown_DoesNotDeleteOtherConnectorsHookScripts(t *testing.T) {
+	dir := t.TempDir()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
+
+	hookDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+
+	preExisting := []string{
+		"codex-hook.sh",
+		"claude-code-hook.sh",
+		"inspect-tool.sh",
+		"inspect-request.sh",
+		"inspect-response.sh",
+		"inspect-tool-response.sh",
+	}
+	for _, name := range preExisting {
+		if err := os.WriteFile(filepath.Join(hookDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	reg := NewDefaultRegistry()
+	cc, ok := reg.Get("claudecode")
+	if !ok {
+		t.Fatal("claudecode connector missing from registry")
+	}
+
+	if err := cc.Teardown(context.Background(), opts); err != nil {
+		// Some teardown sub-steps (settings.json restore, etc.) may
+		// surface non-fatal errors in a tmp dir without a real
+		// ~/.claude/settings.json. We only care about the hook-dir
+		// invariant here.
+		t.Logf("claudecode.Teardown returned (non-fatal in tmp env): %v", err)
+	}
+
+	// Invariant 1: claude-code-hook.sh — the script claudecode owns —
+	// should be replaced with a disabled tombstone so already-running
+	// Claude Code processes that cached the path do not fail with exit 127.
+	// The tombstone must carry the v<digit> schema marker so
+	// isOwnedHook/scriptHasMarker still recognise it as DefenseClaw-owned.
+	disabledHook, err := os.ReadFile(filepath.Join(hookDir, "claude-code-hook.sh"))
+	if err != nil {
+		t.Fatalf("claude-code-hook.sh disabled tombstone missing after teardown: %v", err)
+	}
+	if !strings.Contains(string(disabledHook), "defenseclaw-managed-hook v") {
+		t.Errorf("claude-code-hook.sh tombstone missing v<digit> marker, got:\n%s", string(disabledHook))
+	}
+	if !strings.Contains(string(disabledHook), "disabled tombstone") {
+		t.Errorf("claude-code-hook.sh should be a disabled tombstone, got:\n%s", string(disabledHook))
+	}
+
+	// Invariant 2: every other connector's hook script and every
+	// generic inspect-*.sh script must survive — they're owned by
+	// other connectors or shared infrastructure.
+	for _, name := range []string{
+		"codex-hook.sh",
+		"inspect-tool.sh",
+		"inspect-request.sh",
+		"inspect-response.sh",
+		"inspect-tool-response.sh",
+	} {
+		if _, err := os.Stat(filepath.Join(hookDir, name)); err != nil {
+			t.Errorf("expected %s to survive claudecode.Teardown, got stat err=%v", name, err)
+		}
+	}
+}
+
 // --- Security Surface Coverage tests ---
 
 func TestSecuritySurfaceCoverage(t *testing.T) {
@@ -3885,28 +4109,20 @@ func TestAllConnectors_Auth_Parity(t *testing.T) {
 			t.Errorf("%s: master key should authenticate", c.Name())
 		}
 
-		// No creds on loopback should fail for connectors with a fetch
-		// interceptor — closes the local-process bypass vector.
+		// No creds on loopback should fail for every connector now —
+		// closes the local-process bypass vector.
 		//
-		// Plan B1 / S0.3: ZeptoClaw used to trust loopback as a
-		// "native binary has no way to inject X-DC-Auth" carve-out;
-		// that was the local-IDOR vector. The hooks/inspect-*.sh
-		// shell scripts (which run on the same host) now inject
-		// X-DC-Auth bearing the synthesized gateway token, so
-		// ZeptoClaw no longer needs the loopback trust.
-		//
-		// Codex still trusts loopback because the OpenAI Python SDK
-		// inside the agent process has no equivalent shell wrapper
-		// to inject the header — that wiring is a Phase E follow-up.
+		// codex previously trusted loopback
+		// unconditionally because the native Rust binary has no
+		// fetch-interceptor seam for X-DC-Auth. That was a shared-host
+		// local-IDOR vector. The connector now requires the loopback
+		// caller to either present X-DC-Auth, the master key, or an
+		// Authorization Bearer matching a recorded provider key.
+		// Operators on single-user dev hosts can opt back into the
+		// legacy loose behavior with DEFENSECLAW_CODEX_LOOPBACK_TRUST=1.
 		r3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		r3.RemoteAddr = "127.0.0.1:54321"
-		accepted := c.Authenticate(r3)
-		loopbackTrust := c.Name() == "codex"
-		if loopbackTrust {
-			if !accepted {
-				t.Errorf("%s: loopback must be trusted so codex traffic can reach the proxy", c.Name())
-			}
-		} else if accepted {
+		if c.Authenticate(r3) {
 			t.Errorf("%s: should fail without credentials when token configured", c.Name())
 		}
 	}
@@ -3935,8 +4151,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 4 {
-		t.Errorf("expected 4 built-in connectors, got %d", r.Len())
+	if r.Len() != 12 {
+		t.Errorf("expected 12 built-in connectors, got %d", r.Len())
 	}
 }
 
@@ -3947,36 +4163,25 @@ func TestDiscoverPlugins_NonexistentDir(t *testing.T) {
 	}
 }
 
-// --- Surface 1: LLM traffic routing tests ---
+// --- Surface 1: Codex must not write legacy global env overrides ---
 //
-// Surface 1 is the codex-cli LLM-traffic redirection: codex must hit
-// the DefenseClaw proxy and not the upstream provider directly. The
-// canonical path is the [model_providers.*].base_url rewrite in
-// ~/.codex/config.toml; we explicitly DO NOT export a global
-// OPENAI_BASE_URL because that would co-route every other OpenAI-SDK
-// client on the host (see S8.1 / F31).
+// Codex is hook-only: Setup does not rewrite model_providers to the
+// proxy and does not write codex_env.sh / codex.env (S8.1 / F31).
 
 func TestCodex_Setup_Surface1_DoesNotExportGlobalEnv(t *testing.T) {
 	dir := t.TempDir()
 	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
 	defer func() { CodexConfigPathOverride = "" }()
 	c := NewCodexConnector()
-	// Enforcement mode required: this test asserts the /c/codex
-	// rewrite hits config.toml, which only happens in the gated
-	// enforcement path. Default observability mode does not write
-	// the proxy URL into config.toml at all (codex talks directly
-	// to its native upstream).
 	opts := SetupOpts{
-		DataDir:          dir,
-		ProxyAddr:        "127.0.0.1:4000",
-		APIAddr:          "127.0.0.1:18970",
-		CodexEnforcement: true,
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
 
-	// F31 contract: legacy env-override files MUST NOT be written.
 	if _, err := os.Stat(filepath.Join(dir, "codex_env.sh")); !os.IsNotExist(err) {
 		t.Errorf("codex_env.sh must not exist after Setup (S8.1 / F31)")
 	}
@@ -3984,162 +4189,12 @@ func TestCodex_Setup_Surface1_DoesNotExportGlobalEnv(t *testing.T) {
 		t.Errorf("codex.env must not exist after Setup (S8.1 / F31)")
 	}
 
-	// Check forensic backup is still recorded — even though we no
-	// longer overwrite the env, the backup gives Teardown / audit a
-	// pristine record of whether the operator already had
-	// OPENAI_BASE_URL set.
-	backupData, err := os.ReadFile(filepath.Join(dir, "codex_backup.json"))
-	if err != nil {
-		t.Fatalf("backup not saved: %v", err)
-	}
-	var backup codexBackup
-	if err := json.Unmarshal(backupData, &backup); err != nil {
-		t.Fatalf("decode backup: %v", err)
-	}
-	if backup.HadBaseURL {
-		t.Error("backup.HadBaseURL should be false when env not set")
-	}
-
-	// Check the routing actually landed in config.toml — that's the
-	// only place codex reads provider URLs from.
 	patched, err := os.ReadFile(filepath.Join(dir, "config.toml"))
 	if err != nil {
 		t.Fatalf("read config.toml: %v", err)
 	}
-	if !strings.Contains(string(patched), "/c/codex") {
-		t.Errorf("config.toml missing /c/codex prefix; got:\n%s", patched)
-	}
-}
-
-// TestCodex_Teardown_RemovesLegacyEnvFiles guarantees that an
-// upgrade-then-uninstall flow ends with the operator's host pristine:
-// even if a previous DefenseClaw release wrote codex_env.sh /
-// codex.env, today's Teardown removes them.
-func TestCodex_Teardown_RemovesLegacyEnvFiles(t *testing.T) {
-	dir := t.TempDir()
-	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
-	defer func() { CodexConfigPathOverride = "" }()
-	c := NewCodexConnector()
-	opts := SetupOpts{
-		DataDir:   dir,
-		ProxyAddr: "127.0.0.1:4000",
-		APIAddr:   "127.0.0.1:18970",
-	}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	// Simulate an old install that left these files behind.
-	for _, name := range []string{"codex_env.sh", "codex.env"} {
-		if err := os.WriteFile(filepath.Join(dir, name),
-			[]byte("# stale legacy override\nexport OPENAI_BASE_URL=stale\n"),
-			0o644); err != nil {
-			t.Fatalf("seed legacy %s: %v", name, err)
-		}
-	}
-
-	if err := c.Teardown(context.Background(), opts); err != nil {
-		t.Fatalf("Teardown: %v", err)
-	}
-
-	for _, name := range []string{"codex_env.sh", "codex.env", "codex_backup.json"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
-			t.Errorf("%s should be removed after Teardown", name)
-		}
-	}
-}
-
-func TestCodex_Setup_Surface1_BackupsExistingEnv(t *testing.T) {
-	dir := t.TempDir()
-	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
-	defer func() { CodexConfigPathOverride = "" }()
-	t.Setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-
-	c := NewCodexConnector()
-	opts := SetupOpts{
-		DataDir:   dir,
-		ProxyAddr: "127.0.0.1:4000",
-		APIAddr:   "127.0.0.1:18970",
-	}
-	c.Setup(context.Background(), opts)
-
-	backupData, _ := os.ReadFile(filepath.Join(dir, "codex_backup.json"))
-	var backup codexBackup
-	json.Unmarshal(backupData, &backup)
-	if !backup.HadBaseURL {
-		t.Error("backup.HadBaseURL should be true")
-	}
-	if backup.OldBaseURL != "https://api.openai.com/v1" {
-		t.Errorf("backup.OldBaseURL = %q", backup.OldBaseURL)
-	}
-}
-
-func TestClaudeCode_Setup_Surface1_WritesEnvFiles(t *testing.T) {
-	dir := t.TempDir()
-	settingsDir := filepath.Join(dir, "claude-settings")
-	os.MkdirAll(settingsDir, 0o755)
-	settingsPath := filepath.Join(settingsDir, "settings.json")
-	os.WriteFile(settingsPath, []byte(`{}`), 0o644)
-
-	ClaudeCodeSettingsPathOverride = settingsPath
-	defer func() { ClaudeCodeSettingsPathOverride = "" }()
-
-	c := NewClaudeCodeConnector()
-	// Enforcement mode required: writeEnvOverride only runs in the
-	// gated enforcement path. Default observability mode does not
-	// produce claudecode_env.sh / claudecode.env at all (claude code
-	// talks directly to api.anthropic.com).
-	opts := SetupOpts{
-		DataDir:               dir,
-		ProxyAddr:             "127.0.0.1:4000",
-		APIAddr:               "127.0.0.1:18970",
-		ClaudeCodeEnforcement: true,
-	}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup failed: %v", err)
-	}
-
-	envData, err := os.ReadFile(filepath.Join(dir, "claudecode_env.sh"))
-	if err != nil {
-		t.Fatalf("env file not created: %v", err)
-	}
-	if !strings.Contains(string(envData), "ANTHROPIC_BASE_URL") {
-		t.Error("env file missing ANTHROPIC_BASE_URL")
-	}
-	if !strings.Contains(string(envData), "/c/claudecode") {
-		t.Errorf("env file missing /c/claudecode prefix: %s", string(envData))
-	}
-
-	dotenvData, err := os.ReadFile(filepath.Join(dir, "claudecode.env"))
-	if err != nil {
-		t.Fatalf("dotenv file not created: %v", err)
-	}
-	if !strings.Contains(string(dotenvData), "/c/claudecode") {
-		t.Errorf("dotenv missing /c/claudecode prefix: %s", string(dotenvData))
-	}
-}
-
-func TestClaudeCode_Setup_WritesConnectorPrefix(t *testing.T) {
-	dir := t.TempDir()
-	settingsDir := filepath.Join(dir, "claude-settings")
-	os.MkdirAll(settingsDir, 0o755)
-	settingsPath := filepath.Join(settingsDir, "settings.json")
-	os.WriteFile(settingsPath, []byte(`{}`), 0o644)
-
-	ClaudeCodeSettingsPathOverride = settingsPath
-	defer func() { ClaudeCodeSettingsPathOverride = "" }()
-
-	c := NewClaudeCodeConnector()
-	// Enforcement mode required: writeEnvOverride is gated on
-	// opts.ClaudeCodeEnforcement.
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", ClaudeCodeEnforcement: true}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup failed: %v", err)
-	}
-
-	envData, _ := os.ReadFile(filepath.Join(dir, "claudecode_env.sh"))
-	if !strings.Contains(string(envData), "/c/claudecode") {
-		t.Error("env file missing /c/claudecode prefix")
+	if strings.Contains(string(patched), "/c/codex") {
+		t.Errorf("config.toml must not reference defenseclaw proxy URL; got:\n%s", patched)
 	}
 }
 
@@ -4172,7 +4227,7 @@ func TestClaudeCode_Teardown_Surface1_RemovesEnvFiles(t *testing.T) {
 
 // TestClaudeCode_Setup_DefaultObservability_NoEnvOverride is the
 // headline regression test for the claude-code observability default.
-// With ClaudeCodeEnforcement=false (the default), Setup must register
+// Claude Code is hook-only as of PR #265 — Setup must register
 // hooks (the entry point for tool-call telemetry into
 // /api/v1/claudecode/hook) but must NOT:
 //   - write claudecode_env.sh / claudecode.env (the
@@ -4198,8 +4253,6 @@ func TestClaudeCode_Setup_DefaultObservability_NoEnvOverride(t *testing.T) {
 	defer func() { ClaudeCodeSettingsPathOverride = "" }()
 
 	c := NewClaudeCodeConnector()
-	// ClaudeCodeEnforcement omitted == false (the production
-	// default).
 	opts := SetupOpts{
 		DataDir:   dir,
 		ProxyAddr: "127.0.0.1:4000",
@@ -4868,6 +4921,12 @@ func TestIsLoopback_IPv6Variants(t *testing.T) {
 // FAIL_MODE. A DefenseClaw outage must not brick the user's agent.
 // Operators who want strict availability must opt in explicitly via
 // DEFENSECLAW_STRICT_AVAILABILITY=1 (see the next test).
+//
+// NOTE on fail_mode in the failure log: this is metadata recording
+// the configured response-layer fail mode at write time, not the
+// transport-layer behavior under test. Post-, the safer default
+// for response-layer failures is "closed", so the metadata reflects
+// that. The transport-layer fail-open behavior remains unchanged.
 func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -4909,7 +4968,11 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		`"connector":"claudecode"`,
 		`"hook":"claude-code-hook"`,
 		`"category":"transport"`,
-		`"fail_mode":"open"`,
+		// The response-layer default is "closed", so the failure log
+		// metadata reflects that. The functional invariant under test
+		// (hook exits 0 / allows agent on transport failure) is
+		// unchanged — that is the `category=transport` dimension above.
+		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
 			t.Errorf("hook failure log missing %q:\n%s", want, logText)
@@ -5107,27 +5170,13 @@ func TestHookScript_FailOpen_Override(t *testing.T) {
 	}
 }
 
-// TestSetupOpts_HookFailMode_WinsOverEnforcement validates the
+// TestSetupOpts_HookFailMode_RespectsOperatorChoice validates the
 // resolution rules in WriteHookScriptsForConnectorObjectWithOpts.
 //
-// Contract (also documented at
-// WriteHookScriptsForConnectorObjectWithOpts):
-//
-//   - An EXPLICIT operator value (any non-empty trimmed string)
-//     wins over per-connector enforcement. Both "open" and
-//     "closed" are operator answers and the wizard / TUI / fail-mode
-//     subcommand surface that question explicitly — silently
-//     upgrading "open" to "closed" because enforcement is on would
-//     violate the operator-defined fail-mode contract.
-//   - An EMPTY HookFailMode means "operator never answered" and
-//     enforcement may upgrade the default to "closed".
-//   - Garbage values normalise to "open" (silently fail-open is
-//     strictly safer than silently fail-closed) AND count as an
-//     explicit answer for the purpose of enforcement upgrades —
-//     once we hit normaliseHookFailMode the original intent is
-//     gone, and treating the typo as enforcement-eligible would let
-//     a bad value be silently flipped to closed.
-func TestSetupOpts_HookFailMode_WinsOverEnforcement(t *testing.T) {
+// Contract:
+//   - Explicit "closed" stays closed when the connector supports it.
+//   - Empty / invalid HookFailMode normalizes to "open".
+func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -5135,34 +5184,27 @@ func TestSetupOpts_HookFailMode_WinsOverEnforcement(t *testing.T) {
 	cases := []struct {
 		name         string
 		opts         SetupOpts
-		connector    Connector // CodexConnector or ClaudeCodeConnector — picks which enforcement flag the resolution rule consults
+		connector    Connector // CodexConnector or ClaudeCodeConnector — picks which fail-mode the hook is rendered for
 		hookFile     string    // hook script the test inspects (codex-hook.sh / claude-code-hook.sh)
 		wantFailMode string
 	}{
 		{
-			name:         "operator_open_no_enforcement",
+			name:         "codex_operator_open",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
 			wantFailMode: "open",
 		},
 		{
-			name:         "operator_closed_no_enforcement",
+			name:         "codex_operator_closed",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "closed"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
 			wantFailMode: "closed",
 		},
 		{
-			name:         "operator_open_explicit_wins_over_codex_enforcement",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open", CodexEnforcement: true},
-			connector:    &CodexConnector{},
-			hookFile:     "codex-hook.sh",
-			wantFailMode: "open",
-		},
-		{
-			name:         "operator_open_explicit_wins_over_claudecode_enforcement",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open", ClaudeCodeEnforcement: true},
+			name:         "claudecode_operator_open",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open"},
 			connector:    &ClaudeCodeConnector{},
 			hookFile:     "claude-code-hook.sh",
 			wantFailMode: "open",
@@ -5175,11 +5217,17 @@ func TestSetupOpts_HookFailMode_WinsOverEnforcement(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			name:         "empty_opts_falls_back_to_open_default",
+			// The safer default is "closed": empty
+			// SetupOpts.HookFailMode renders the hook with
+			// FAIL_MODE=closed so response-layer failures (4xx,
+			// malformed JSON, missing action) BLOCK rather than
+			// silently allowing. Pre-existing installs are pinned to
+			// "open" by _migrate_0_4_0_seed_hook_fail_mode (Python).
+			name:         "codex_empty_opts_falls_back_to_closed_default",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
-			wantFailMode: "open",
+			wantFailMode: "closed",
 		},
 		{
 			name:         "empty_opts_with_codex_enforcement_upgrades_to_closed",
@@ -5196,11 +5244,14 @@ func TestSetupOpts_HookFailMode_WinsOverEnforcement(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			name:         "garbage_opts_value_normalizes_to_open",
+			// Garbage / typo values normalize to the safer "closed"
+			// sentinel so a misconfigured operator value never
+			// silently puts the agent into fail-OPEN mode.
+			name:         "codex_garbage_opts_value_normalizes_to_closed",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "this-is-not-a-real-mode"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
-			wantFailMode: "open",
+			wantFailMode: "closed",
 		},
 	}
 
@@ -5238,9 +5289,8 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 	}
 	dir := t.TempDir()
 	opts := SetupOpts{
-		APIAddr:          "127.0.0.1:99999",
-		APIToken:         "tok-test",
-		CodexEnforcement: false,
+		APIAddr:  "127.0.0.1:99999",
+		APIToken: "tok-test",
 	}
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
@@ -5270,11 +5320,288 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		// down / network error) rather than a response failure
 		// (4xx / parse error). Operators triage these differently.
 		`"category":"transport"`,
-		`"fail_mode":"open"`,
+		// Response-layer default is "closed" — transport-layer
+		// fail-open behavior under test here is unchanged (the hook
+		// still exits 0 and the agent still proceeds when the gateway
+		// is unreachable).
+		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("hook failure log missing %s:\n%s", want, logText)
 		}
+	}
+}
+
+// TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo pins the
+// Codex hook protocol contract: when the gateway returns a block
+// verdict with a structured `codex_output` JSON body (which every
+// block path in codex_hook.go does), the hook MUST print that JSON
+// to stdout and exit 0. It MUST NOT exit 2.
+//
+// Codex's hook protocol is strictly either-or:
+//   - exit 0 + JSON on stdout  → Codex parses the JSON decision
+//   - exit 2 + reason on stderr → Codex blocks with stderr text
+//
+// Doing BOTH (exit 2 with stdout JSON and empty stderr) makes Codex
+// pick the exit code, ignore stdout, find an empty stderr, then log
+// "exited with code 2 but did not write a blocking reason to stderr"
+// and FAIL OPEN. We hit that bug live with a CRITICAL prompt-injection
+// pattern (RSA private key paste): the gateway correctly returned
+// permissionDecision=deny on stdout, the hook also exited 2, and the
+// model still got the prompt because Codex treated the hook as
+// malformed.
+func TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	// Stand up a tiny gateway stub that returns a verdict shaped
+	// exactly like codex_hook.go:codexResponseFor for action=block on
+	// PreToolUse. The codex_output mirror is the critical bit — it's
+	// the JSON the hook script must echo to stdout.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"matched: PATH-ETC-SHADOW:/etc/shadow access",
+			"findings":["PATH-ETC-SHADOW:/etc/shadow access"],
+			"mode":"action",
+			"would_block":false,
+			"codex_output":{
+				"hookSpecificOutput":{
+					"hookEventName":"PreToolUse",
+					"permissionDecision":"deny",
+					"permissionDecisionReason":"matched: PATH-ETC-SHADOW:/etc/shadow access"
+				}
+			}
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test"}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":["bash","-lc","cat /etc/shadow"]}}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook should exit 0 when gateway returned structured codex_output (Codex protocol: JSON-on-stdout xor exit-2-on-stderr); got err=%v\nstdout=%q\nstderr=%q",
+			err, stdout.String(), stderr.String())
+	}
+
+	// stdout must carry the codex_output JSON Codex will parse.
+	stdoutText := stdout.String()
+	for _, want := range []string{
+		`"hookEventName":"PreToolUse"`,
+		`"permissionDecision":"deny"`,
+		`"permissionDecisionReason":"matched: PATH-ETC-SHADOW:/etc/shadow access"`,
+	} {
+		if !strings.Contains(stdoutText, want) {
+			t.Errorf("stdout missing %q\nfull stdout: %q", want, stdoutText)
+		}
+	}
+	// stderr must be empty (no "blocking" hint, no "fail" log) —
+	// otherwise Codex still logs "did not write a blocking reason to
+	// stderr" because we used the wrong protocol path.
+	if strings.TrimSpace(stderr.String()) != "" {
+		t.Errorf("stderr should be empty when block goes via structured stdout JSON, got: %q", stderr.String())
+	}
+}
+
+// TestClaudeCodeHookScript_StructuredBlock_ExitsZeroNotTwo pins the
+// same Anthropic-side hook protocol contract that
+// TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo pins for Codex:
+// when the gateway returns a block verdict with a structured
+// claude_code_output JSON body, the hook MUST print that JSON to
+// stdout and exit 0 — NOT exit 2.
+//
+// The bug here was structurally identical to the codex one: the
+// pre-fix script wrote claude_code_output to stdout AND exited 2 on
+// action=block, which is a Claude Code hook protocol violation.
+// Depending on Claude Code version that either silently swaps our
+// rich "matched: SEC-FOO" reason for a generic "Hook exited with code
+// 2" surface, or ignores stdout entirely. Either way the operator
+// loses the actual policy reason, and on some versions the agent
+// fails open the same way Codex did.
+func TestClaudeCodeHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"matched: SEC-PRIVKEY:Private key",
+			"findings":["SEC-PRIVKEY:Private key"],
+			"mode":"action",
+			"would_block":false,
+			"claude_code_output":{
+				"hookSpecificOutput":{
+					"hookEventName":"PreToolUse",
+					"permissionDecision":"deny",
+					"permissionDecisionReason":"matched: SEC-PRIVKEY:Private key"
+				}
+			}
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test"}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &ClaudeCodeConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat /etc/shadow"}}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook should exit 0 when gateway returned structured claude_code_output (Claude Code protocol: JSON-on-stdout xor exit-2-on-stderr); got err=%v\nstdout=%q\nstderr=%q",
+			err, stdout.String(), stderr.String())
+	}
+
+	stdoutText := stdout.String()
+	for _, want := range []string{
+		`"hookEventName":"PreToolUse"`,
+		`"permissionDecision":"deny"`,
+		`"permissionDecisionReason":"matched: SEC-PRIVKEY:Private key"`,
+	} {
+		if !strings.Contains(stdoutText, want) {
+			t.Errorf("stdout missing %q\nfull stdout: %q", want, stdoutText)
+		}
+	}
+	// stderr must be empty so Claude Code uses the rich JSON reason
+	// instead of the stderr fallback.
+	if strings.TrimSpace(stderr.String()) != "" {
+		t.Errorf("stderr should be empty when block goes via structured stdout JSON, got: %q", stderr.String())
+	}
+}
+
+// TestClaudeCodeHookScript_NoStructuredOutput_FallsBackToExitTwo
+// mirrors the codex fallback test for symmetry: legacy/edge code
+// paths that don't include a claude_code_output mirror still block
+// via exit 2 with the reason on stderr.
+func TestClaudeCodeHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"hypothetical legacy claude verdict",
+			"mode":"action",
+			"would_block":false
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test"}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &ClaudeCodeConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("hook should exit 2 when gateway block has no structured claude_code_output, got exit 0\nstdout=%q\nstderr=%q",
+			stdout.String(), stderr.String())
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr.ExitCode() != 2 {
+			t.Errorf("exit code = %d, want 2 (legacy block fallback)", exitErr.ExitCode())
+		}
+	}
+	if !strings.Contains(stderr.String(), "hypothetical legacy claude verdict") {
+		t.Errorf("stderr must carry the block reason on the legacy path, got: %q", stderr.String())
+	}
+}
+
+// TestCodexHookScript_NoStructuredOutput_EmitsInlineBlockJSON pins the
+// fallback path: if the gateway returns action=block but does NOT include
+// a codex_output mirror, the hook constructs minimal structured block JSON
+// and exits 0 so Codex v0.130+ treats it as a block decision rather than
+// "hook failed" (which is what exit 2 means on UserPromptSubmit).
+func TestCodexHookScript_NoStructuredOutput_EmitsInlineBlockJSON(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"hypothetical legacy verdict",
+			"mode":"action",
+			"would_block":false
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test"}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		t.Fatalf("hook should exit 0 with inline block JSON, got error: %v\nstdout=%q\nstderr=%q",
+			err, stdout.String(), stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("stdout must contain decision=block JSON, got: %q", out)
+	}
+	if !strings.Contains(out, "hypothetical legacy verdict") {
+		t.Errorf("stdout must carry the block reason in the inline JSON, got: %q", out)
 	}
 }
 
@@ -5501,6 +5828,12 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 		{"openclaw", func() Connector { return NewOpenClawConnector() }},
 		{"codex", func() Connector { return NewCodexConnector() }},
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }},
+		{"hermes", func() Connector { return NewHermesConnector() }},
+		{"cursor", func() Connector { return NewCursorConnector() }},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }},
+		{"copilot", func() Connector { return NewCopilotConnector() }},
+		{"openhands", func() Connector { return NewOpenHandsConnector() }},
 	}
 
 	for _, c := range cases {
@@ -5541,35 +5874,83 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 	}
 }
 
+// TestConnector_AgentPaths_HookScriptsCoverAll pins the per-connector
+// hook script contract. The expected lists are intentionally hardcoded
+// rather than computed via hookScriptNamesForConnector so that a
+// regression in the helper itself (e.g., dropping the generic
+// inspect-*.sh baseline, or attributing the wrong *-hook.sh to a
+// connector) fails this test loudly. The previous implementation used
+// the same helper for both sides of the comparison and would have
+// passed even if hookScriptNamesForConnector returned the wrong set.
+//
+// Update this table when adding/removing a builtin connector or
+// changing the genericHookScripts baseline.
 func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 	dataDir := t.TempDir()
 	opts := SetupOpts{DataDir: dataDir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	expected := HookScripts() // canonical list from subprocess.go
 
-	connectors := []Connector{
-		NewZeptoClawConnector(),
-		NewOpenClawConnector(),
-		NewCodexConnector(),
-		NewClaudeCodeConnector(),
+	// Canonical baseline every connector contributes.
+	generic := []string{
+		"inspect-tool.sh",
+		"inspect-request.sh",
+		"inspect-response.sh",
+		"inspect-tool-response.sh",
 	}
-	for _, conn := range connectors {
-		ap, ok := conn.(AgentPathProvider)
-		if !ok {
-			t.Fatalf("%s missing AgentPathProvider", conn.Name())
-		}
-		paths := ap.AgentPaths(opts)
-		// Each declared script name from the canonical list should
-		// appear at <DataDir>/hooks/<name> in the connector's
-		// reported HookScripts.
-		got := map[string]bool{}
-		for _, p := range paths.HookScripts {
-			got[filepath.Base(p)] = true
-		}
-		for _, want := range expected {
-			if !got[want] {
-				t.Errorf("%s: AgentPaths.HookScripts missing %q (got %v)", conn.Name(), want, paths.HookScripts)
+	withVendor := func(vendor string) []string {
+		out := make([]string, 0, len(generic)+1)
+		out = append(out, generic...)
+		out = append(out, vendor)
+		return out
+	}
+
+	cases := []struct {
+		ctor func() Connector
+		name string
+		want []string
+	}{
+		{func() Connector { return NewZeptoClawConnector() }, "zeptoclaw", generic},
+		{func() Connector { return NewOpenClawConnector() }, "openclaw", generic},
+		{func() Connector { return NewCodexConnector() }, "codex", withVendor("codex-hook.sh")},
+		{func() Connector { return NewClaudeCodeConnector() }, "claudecode", withVendor("claude-code-hook.sh")},
+		{func() Connector { return NewHermesConnector() }, "hermes", withVendor("hermes-hook.sh")},
+		{func() Connector { return NewCursorConnector() }, "cursor", withVendor("cursor-hook.sh")},
+		{func() Connector { return NewWindsurfConnector() }, "windsurf", withVendor("windsurf-hook.sh")},
+		{func() Connector { return NewGeminiCLIConnector() }, "geminicli", withVendor("geminicli-hook.sh")},
+		{func() Connector { return NewCopilotConnector() }, "copilot", withVendor("copilot-hook.sh")},
+		{func() Connector { return NewOpenHandsConnector() }, "openhands", withVendor("openhands-hook.sh")},
+		{func() Connector { return NewAntigravityConnector() }, "antigravity", withVendor("antigravity-hook.sh")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := tc.ctor()
+			ap, ok := conn.(AgentPathProvider)
+			if !ok {
+				t.Fatalf("%s missing AgentPathProvider", tc.name)
 			}
-		}
+			paths := ap.AgentPaths(opts)
+
+			// Order-independent membership check.
+			got := map[string]bool{}
+			for _, p := range paths.HookScripts {
+				got[filepath.Base(p)] = true
+			}
+			if len(got) != len(tc.want) {
+				t.Errorf("%s: AgentPaths.HookScripts has %d unique entries, want %d (got %v)", tc.name, len(got), len(tc.want), paths.HookScripts)
+			}
+			for _, want := range tc.want {
+				if !got[want] {
+					t.Errorf("%s: AgentPaths.HookScripts missing %q (got %v)", tc.name, want, paths.HookScripts)
+				}
+			}
+			// And every reported entry must be under <DataDir>/hooks/.
+			hookDir := filepath.Join(dataDir, "hooks")
+			for _, p := range paths.HookScripts {
+				if filepath.Dir(p) != hookDir {
+					t.Errorf("%s: hook script %q not under %q", tc.name, p, hookDir)
+				}
+			}
+		})
 	}
 }
 
@@ -5581,6 +5962,12 @@ func TestConnector_HookScriptProvider_MatchesAgentPaths(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
+		NewOpenHandsConnector(),
 	}
 	for _, conn := range connectors {
 		hsp, ok := conn.(HookScriptProvider)
@@ -5617,10 +6004,12 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 		// Codex routes via config.toml; OPENAI_BASE_URL is
 		// optional/discouraged. Scope is process-only.
 		{"codex", func() Connector { return NewCodexConnector() }, []EnvScope{EnvScopeProcess}},
-		// Claude Code honors ANTHROPIC_BASE_URL at startup but
-		// settings.json hooks are sufficient for guardrail
-		// enforcement, so the var is recommended-not-required.
-		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []EnvScope{EnvScopeProcess}},
+		{"hermes", func() Connector { return NewHermesConnector() }, []EnvScope{EnvScopeNone}},
+		{"cursor", func() Connector { return NewCursorConnector() }, []EnvScope{EnvScopeNone}},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, []EnvScope{EnvScopeNone}},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []EnvScope{EnvScopeNone}},
+		{"copilot", func() Connector { return NewCopilotConnector() }, []EnvScope{EnvScopeNone}},
+		{"openhands", func() Connector { return NewOpenHandsConnector() }, []EnvScope{EnvScopeNone}},
 	}
 
 	for _, c := range cases {
@@ -5662,19 +6051,17 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 	}
 }
 
-// TestConnector_ProviderProbe_AllBuiltinsImplement pins the plan A4
-// contract: every built-in connector exposes a HasUsableProviders()
-// hook so the sidecar boot path can refuse to start when no LLM
-// upstream is configured. This is intentionally compile-time mandatory
-// — a connector that drops the implementation should fail this test
-// before it ever ships, since a silent zero-provider boot would let
-// the gateway accept traffic that has no upstream to forward to.
-func TestConnector_ProviderProbe_AllBuiltinsImplement(t *testing.T) {
+// TestConnector_ProviderProbe_ProxyBuiltinsImplement pins the plan A4
+// contract: every proxy-bound built-in connector exposes a
+// HasUsableProviders() hook so the sidecar boot path can refuse to
+// start when no LLM upstream is configured. Hook-only connectors
+// (codex, claudecode, hermes, cursor, windsurf, geminicli, copilot,
+// openhands)
+// do not interpose on chat traffic, so the probe does not apply.
+func TestConnector_ProviderProbe_ProxyBuiltinsImplement(t *testing.T) {
 	connectors := []Connector{
 		NewZeptoClawConnector(),
 		NewOpenClawConnector(),
-		NewCodexConnector(),
-		NewClaudeCodeConnector(),
 	}
 	for _, conn := range connectors {
 		if _, ok := conn.(ProviderProbe); !ok {
@@ -5741,8 +6128,8 @@ func TestCodex_AgentPaths_Specifics(t *testing.T) {
 	}
 }
 
-// TestClaudeCode_AgentPaths_Specifics pins the Claude Code
-// footprint: settings.json + claudecode_backup.json + hook scripts.
+// TestClaudeCode_AgentPaths_Specifics pins the Claude Code footprint:
+// settings.json patched, managed pristine backup captured.
 func TestClaudeCode_AgentPaths_Specifics(t *testing.T) {
 	dataDir := t.TempDir()
 	tmpHome := t.TempDir()
@@ -5758,7 +6145,6 @@ func TestClaudeCode_AgentPaths_Specifics(t *testing.T) {
 	}
 	wantBackups := []string{
 		filepath.Join(dataDir, "connector_backups", "claudecode", "settings.json.json"),
-		filepath.Join(dataDir, "claudecode_backup.json"),
 	}
 	if !slices.Equal(paths.BackupFiles, wantBackups) {
 		t.Errorf("BackupFiles = %v, want %v", paths.BackupFiles, wantBackups)
@@ -5813,6 +6199,13 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 	}{
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
+		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
+		{"cursor", func() Connector { return NewCursorConnector() }, []string{"cursor-hook.sh"}},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, []string{"windsurf-hook.sh"}},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []string{"geminicli-hook.sh"}},
+		{"copilot", func() Connector { return NewCopilotConnector() }, []string{"copilot-hook.sh"}},
+		{"openhands", func() Connector { return NewOpenHandsConnector() }, []string{"openhands-hook.sh"}},
+		{"antigravity", func() Connector { return NewAntigravityConnector() }, []string{"antigravity-hook.sh"}},
 		{"openclaw", func() Connector { return NewOpenClawConnector() }, nil},
 		{"zeptoclaw", func() Connector { return NewZeptoClawConnector() }, nil},
 	}
@@ -5926,6 +6319,132 @@ func TestWriteHookScriptsForConnectorObject_HonoursInterface(t *testing.T) {
 		mustExist(t, filepath.Join(dir, "claude-code-hook.sh"))
 		mustNotExist(t, filepath.Join(dir, "codex-hook.sh"))
 	})
+}
+
+// TestHardening_SweepStaleHookDirs pins the L-3 fix: the v4
+// _hardening.sh helper sweeps orphaned hook-tmp.* directories under
+// DEFENSECLAW_HOME that the EXIT-trap cleanup couldn't remove (SIGKILL,
+// OOM, system reboot mid-hook, etc.). Without this sweep, every
+// fallback-path hook invocation (mktemp absent → uses
+// ${DEFENSECLAW_HOME}/hook-tmp.<PID>) on a long-running host
+// accumulates orphans forever.
+func TestHardening_SweepStaleHookDirs(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("find"); err != nil {
+		t.Skip("find not available")
+	}
+
+	// Materialize the embedded helper to disk so we can source it.
+	helperBytes, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read embed: %v", err)
+	}
+	tmp := t.TempDir()
+	helperPath := filepath.Join(tmp, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helperBytes, 0o600); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	dcHome := filepath.Join(tmp, "dchome")
+	if err := os.MkdirAll(dcHome, 0o700); err != nil {
+		t.Fatalf("mkdir dchome: %v", err)
+	}
+
+	// Stale orphans (older than 60 minutes) — must be swept.
+	stale1 := filepath.Join(dcHome, "hook-tmp.11111")
+	stale2 := filepath.Join(dcHome, "hook-tmp.22222")
+	for _, p := range []string{stale1, stale2} {
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+		// Drop a tracer file so we can verify the directory is
+		// recursively removed, not just emptied.
+		if err := os.WriteFile(filepath.Join(p, "tracer.txt"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write tracer in %s: %v", p, err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+
+	// Fresh hook-tmp dir (younger than 60 minutes) — must be preserved
+	// because the active hook could still be using it.
+	fresh := filepath.Join(dcHome, "hook-tmp.33333")
+	if err := os.MkdirAll(fresh, 0o700); err != nil {
+		t.Fatalf("mkdir fresh: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fresh, "tracer.txt"), []byte("y"), 0o600); err != nil {
+		t.Fatalf("write fresh tracer: %v", err)
+	}
+
+	// Unrelated sibling (not matching hook-tmp.*) — must be preserved
+	// regardless of mtime, so that the sweep is conservative about
+	// clobbering operator state.
+	unrelated := filepath.Join(dcHome, "audit-snapshot")
+	if err := os.MkdirAll(unrelated, 0o700); err != nil {
+		t.Fatalf("mkdir unrelated: %v", err)
+	}
+	old := time.Now().Add(-7 * 24 * time.Hour)
+	if err := os.Chtimes(unrelated, old, old); err != nil {
+		t.Fatalf("chtimes unrelated: %v", err)
+	}
+
+	cmd := exec.Command("bash", "-c", "set -e; source \"$0\"; _defenseclaw_sweep_stale_hook_dirs", helperPath)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+dcHome)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sweep failed: %v\n%s", err, out)
+	}
+
+	for _, p := range []string{stale1, stale2} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("stale dir %s still exists after sweep (err=%v) — orphans accumulate forever in the fallback path", p, err)
+		}
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh dir %s was swept but should have been preserved: %v", fresh, err)
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Errorf("unrelated dir %s was swept; the sweep must only touch hook-tmp.*: %v", unrelated, err)
+	}
+}
+
+func TestHardening_IgnoresRuntimeHookPathOverride(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	helperBytes, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read embed: %v", err)
+	}
+	tmp := t.TempDir()
+	helperPath := filepath.Join(tmp, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helperBytes, 0o600); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	cmd := exec.Command("bash", "-c", `source "$1"; defenseclaw_harden_env; printf '%s\n' "$PATH"; printf '%s\n' "${DEFENSECLAW_HOOK_PATH-unset}"`, "bash", helperPath)
+	cmd.Env = append(os.Environ(),
+		"DEFENSECLAW_HOME="+filepath.Join(tmp, "home"),
+		"DEFENSECLAW_HOOK_PATH="+filepath.Join(tmp, "evil"),
+		"DEFENSECLAW_HOOK_PATH_TRUSTED=1",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run hardening helper: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("unexpected helper output %q", out)
+	}
+	if strings.Contains(lines[0], "evil") {
+		t.Fatalf("runtime DEFENSECLAW_HOOK_PATH influenced PATH: %q", lines[0])
+	}
+	if lines[1] != "unset" {
+		t.Fatalf("DEFENSECLAW_HOOK_PATH after harden = %q, want unset", lines[1])
+	}
 }
 
 // TestParseHookSchemaVersion pins the digit-extraction contract used
@@ -6090,25 +6609,58 @@ func mustNotExist(t *testing.T, path string) {
 	}
 }
 
-// stringSlicesEqual is the order-sensitive equivalent of
-// reflect.DeepEqual for two []string. We use it (rather than
-// reflect.DeepEqual) when the test's *intent* is to communicate
-// "compare two ordered string slices"; reflect.DeepEqual would
-// work but obscures the contract for readers. Equality requires
-// identical lengths and pairwise element equality at every index.
-//
-// Defined here as a local helper rather than imported from a util
-// package because the connector test suite is the only consumer
-// today, and adding a public helper would invite the test-only
-// helper to leak into production code.
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+func TestZeptoClawConfigPath_ZEPTOCLAW_HOME(t *testing.T) {
+	// Ensure ZeptoClawConfigPathOverride is cleared for this test.
+	orig := ZeptoClawConfigPathOverride
+	ZeptoClawConfigPathOverride = ""
+	defer func() { ZeptoClawConfigPathOverride = orig }()
+
+	t.Run("uses ZEPTOCLAW_HOME when set", func(t *testing.T) {
+		t.Setenv("ZEPTOCLAW_HOME", "/custom/path")
+		got := zeptoClawConfigPath()
+		want := filepath.Join("/custom/path", "config.json")
+		if got != want {
+			t.Errorf("zeptoClawConfigPath() = %q, want %q", got, want)
 		}
-	}
-	return true
+	})
+
+	t.Run("falls back to HOME/.zeptoclaw when ZEPTOCLAW_HOME unset", func(t *testing.T) {
+		t.Setenv("ZEPTOCLAW_HOME", "")
+		t.Setenv("HOME", "/home/testuser")
+		got := zeptoClawConfigPath()
+		want := filepath.Join("/home/testuser", ".zeptoclaw", "config.json")
+		if got != want {
+			t.Errorf("zeptoClawConfigPath() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("ZeptoClawConfigPathOverride takes priority", func(t *testing.T) {
+		ZeptoClawConfigPathOverride = "/override/config.json"
+		defer func() { ZeptoClawConfigPathOverride = "" }()
+		t.Setenv("ZEPTOCLAW_HOME", "/custom/path")
+		got := zeptoClawConfigPath()
+		if got != "/override/config.json" {
+			t.Errorf("zeptoClawConfigPath() = %q, want override path", got)
+		}
+	})
+}
+
+func TestZeptoClawHomeDir(t *testing.T) {
+	t.Run("uses ZEPTOCLAW_HOME when set", func(t *testing.T) {
+		t.Setenv("ZEPTOCLAW_HOME", "/shared/.agent")
+		got := zeptoClawHomeDir()
+		if got != "/shared/.agent" {
+			t.Errorf("zeptoClawHomeDir() = %q, want /shared/.agent", got)
+		}
+	})
+
+	t.Run("falls back to HOME/.zeptoclaw", func(t *testing.T) {
+		t.Setenv("ZEPTOCLAW_HOME", "")
+		t.Setenv("HOME", "/home/testuser")
+		got := zeptoClawHomeDir()
+		want := filepath.Join("/home/testuser", ".zeptoclaw")
+		if got != want {
+			t.Errorf("zeptoClawHomeDir() = %q, want %q", got, want)
+		}
+	})
 }

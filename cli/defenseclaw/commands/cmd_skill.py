@@ -37,7 +37,14 @@ from defenseclaw.context import AppContext, pass_ctx
 
 @click.group()
 def skill() -> None:
-    """Manage OpenClaw skills — search, install, scan, block, allow, disable, enable, quarantine, restore."""
+    """Manage agent skills — search, install, scan, block, allow, disable, enable, quarantine, restore.
+
+    Multi-connector: skills are tracked per-connector. ``skill list``
+    shows every active connector's skills by default (pass ``--connector
+    X`` to narrow to one peer). The other subcommands take ``--connector
+    X`` to target a configured peer (default: the active connector);
+    ``skill scan --all`` fans out across every active connector.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -183,29 +190,40 @@ def _list_skills_via_sidecar(app: AppContext) -> dict[str, Any] | None:
         return None
 
 
-def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] | None:
-    """Get the full skill list, dispatching on the active connector.
+def _list_openclaw_skills_full(
+    app: AppContext | None = None, connector: str | None = None
+) -> dict[str, Any] | None:
+    """Get the full skill list, dispatching on the resolved connector.
 
     For ``openclaw`` (the historical default) we keep the sidecar →
     CLI fallback chain. For Codex / Claude Code / ZeptoClaw we walk
     the connector-specific skill directories via
     :func:`defenseclaw.skill_list.list_skills` (S4.4 adapter).
 
+    ``connector`` is the resolved multi-connector override
+    (``skill list --connector <name>``); it dispatches on that
+    connector instead of the active one. Defaults to the active
+    connector, so single-connector behaviour is unchanged.
+
     The returned shape stays ``{"skills": [...]}`` — same as
     ``openclaw skills list --json`` — so every downstream caller in
     this module continues to work unchanged.
     """
     if app is not None:
-        connector = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
-        if connector != "openclaw":
+        active = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        resolved = connector or active
+        if resolved != "openclaw":
             from defenseclaw.skill_list import list_skills as _adapter_list
-            return {"skills": _adapter_list(app.cfg)}
+            return {"skills": _adapter_list(app.cfg, connector=resolved)}
 
         # OpenClaw: prefer the live sidecar — it sees runtime state
         # the static CLI doesn't (recently-toggled skills, etc.).
-        result = _list_skills_via_sidecar(app)
-        if result is not None:
-            return result
+        # The sidecar only reflects the active connector, so use it
+        # only when the resolved connector matches the active one.
+        if resolved == active:
+            result = _list_skills_via_sidecar(app)
+            if result is not None:
+                return result
 
     out = _run_openclaw("skills", "list", "--json")
     if out is None:
@@ -214,7 +232,7 @@ def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] 
         # `openclaw` binary isn't on PATH (sandbox installs, CI, etc.).
         if app is not None and hasattr(app.cfg, "skill_dirs"):
             from defenseclaw.skill_list import list_skills as _adapter_list
-            return {"skills": _adapter_list(app.cfg, prefer_cli=False)}
+            return {"skills": _adapter_list(app.cfg, prefer_cli=False, connector=connector or None)}
         return None
     try:
         return json.loads(out)
@@ -222,18 +240,26 @@ def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] 
         return None
 
 
-def _get_openclaw_skill_info(name: str, app: AppContext | None = None) -> dict[str, Any] | None:
+def _get_openclaw_skill_info(
+    name: str, app: AppContext | None = None, connector: str | None = None,
+) -> dict[str, Any] | None:
     """Get info for a single skill.
 
     For OpenClaw, prefers the sidecar → CLI fallback chain. For
     other connectors, walks the connector-specific skill
     directories — there is no per-connector ``info`` subcommand.
+
+    ``connector`` overrides the resolved connector so a multi-connector
+    caller (``skill info/scan --connector <name>``) can inspect a
+    non-primary connector's skill; defaults to the active connector.
     """
     if app is not None:
-        connector = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
-        if connector != "openclaw":
+        resolved = connector or (
+            app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        )
+        if resolved != "openclaw":
             from defenseclaw.skill_list import list_skills as _adapter_list
-            for s in _adapter_list(app.cfg):
+            for s in _adapter_list(app.cfg, connector=resolved):
                 if s.get("name") == name:
                     return s
             return None
@@ -353,15 +379,90 @@ def _skill_display_name(s: dict[str, Any]) -> str:
 
 @skill.command("list")
 @click.option("--json", "as_json", is_flag=True, help="Output merged skill list as JSON")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help=(
+        "List skills for a specific configured connector. "
+        "Default: every active connector (on a single-connector install, "
+        "just that one). Pass --connector <name> to narrow the listing to "
+        "one configured peer."
+    ),
+)
 @pass_ctx
-def list_skills(app: AppContext, as_json: bool) -> None:
-    """List all skills for the active connector with their latest scan severity."""
+def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
+    """List skills with their latest scan severity.
 
-    oc_list = _list_openclaw_skills_full(app)
-    skills = oc_list.get("skills", []) if oc_list else []
+    By default this lists **every active connector's** skills — on a
+    multi-connector install each connector gets its own connector-tagged
+    section/table, so you no longer have to re-run with ``--connector``
+    per peer. ``--connector <name>`` narrows the listing to one configured
+    connector. Single-connector installs are unchanged (one table).
+    """
+    from defenseclaw.commands import resolve_list_connectors
+
+    connectors = resolve_list_connectors(app, connector_flag)
 
     scan_map = _build_scan_map(app.store)
     actions_map = _build_actions_map(app.store)
+
+    if as_json:
+        if len(connectors) > 1:
+            groups = [
+                {
+                    "connector": c,
+                    "skills": _skill_list_json_items(
+                        _collect_skills_for_connector(app, c, scan_map, actions_map),
+                        scan_map,
+                        actions_map,
+                    ),
+                }
+                for c in connectors
+            ]
+            click.echo(json.dumps(groups, indent=2, default=str))
+        else:
+            skills = _collect_skills_for_connector(app, connectors[0], scan_map, actions_map)
+            if not skills:
+                click.echo("[]")
+            else:
+                _print_skill_list_json(skills, scan_map, actions_map)
+        return
+
+    shown_any = False
+    for connector in connectors:
+        skills = _collect_skills_for_connector(app, connector, scan_map, actions_map)
+        if not skills:
+            if connector == "openclaw":
+                click.echo(ux.dim("No skills found. Is openclaw installed?"))
+            else:
+                click.echo(
+                    f"No skills found for connector={connector!r} "
+                    f"{ux.dim('(checked the connector-specific skill directories).')}",
+                )
+            continue
+        _print_skill_list_table(skills, scan_map, actions_map, connector)
+        shown_any = True
+
+    if shown_any:
+        from defenseclaw.commands import hint
+        hint("Scan all skills:  defenseclaw skill scan all")
+
+
+def _collect_skills_for_connector(
+    app: AppContext,
+    connector: str,
+    scan_map: dict[str, dict[str, Any]],
+    actions_map: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Resolve the merged skill list for a single connector.
+
+    Returns the post-phantom skill list. OpenClaw-only audit-DB phantoms
+    (enforcement-only / scan-history-only entries) are folded in exactly
+    as the single-connector path did.
+    """
+    oc_list = _list_openclaw_skills_full(app, connector=connector)
+    skills = oc_list.get("skills", []) if oc_list else []
 
     # The ``actions`` and ``scan_results`` tables are connector-untagged in
     # the shared audit DB (see cli/defenseclaw/db.py). Phantom rows from
@@ -369,77 +470,51 @@ def list_skills(app: AppContext, as_json: bool) -> None:
     # non-OpenClaw connector (codex, claudecode, zeptoclaw) would surface
     # skills that the active framework does not actually have on disk —
     # which is exactly the leak users were seeing in the Skills tab. Only
-    # surface phantoms when the active connector is OpenClaw; for the
-    # other connectors, the connector-aware filesystem walk
-    # (skill_list.list_skills → cfg.skill_dirs()) is the source of truth.
-    show_audit_phantoms = (
-        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
-    ) == "openclaw"
-
-    if not skills and (not show_audit_phantoms or (not actions_map and not scan_map)):
-        if as_json:
-            click.echo("[]")
-            return
-        connector = (
-            app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
-        )
-        if connector == "openclaw":
-            click.echo(ux.dim("No skills found. Is openclaw installed?"))
-        else:
-            click.echo(
-                f"No skills found for connector={connector!r} "
-                f"{ux.dim('(checked the connector-specific skill directories).')}",
-            )
-        return
+    # surface phantoms when the connector is OpenClaw; for the others the
+    # connector-aware filesystem walk (skill_list.list_skills →
+    # cfg.skill_dirs()) is the source of truth.
+    if connector != "openclaw":
+        return skills
 
     known_names = {s.get("name", "") for s in skills}
+    for name, ae in actions_map.items():
+        if name not in known_names:
+            skills.append({
+                "name": name,
+                "description": "",
+                "emoji": "",
+                "eligible": False,
+                "disabled": ae.actions.runtime == "disable",
+                "blockedByAllowlist": False,
+                "source": "enforcement",
+                "bundled": False,
+                "homepage": "",
+            })
+            known_names.add(name)
 
-    if show_audit_phantoms:
-        for name, ae in actions_map.items():
-            if name not in known_names:
-                skills.append({
-                    "name": name,
-                    "description": "",
-                    "emoji": "",
-                    "eligible": False,
-                    "disabled": ae.actions.runtime == "disable",
-                    "blockedByAllowlist": False,
-                    "source": "enforcement",
-                    "bundled": False,
-                    "homepage": "",
-                })
-                known_names.add(name)
+    for name in scan_map:
+        if name not in known_names:
+            skills.append({
+                "name": name,
+                "description": "",
+                "emoji": "",
+                "eligible": False,
+                "disabled": False,
+                "blockedByAllowlist": False,
+                "source": "scan-history",
+                "bundled": False,
+                "homepage": "",
+            })
+            known_names.add(name)
 
-        for name in scan_map:
-            if name not in known_names:
-                skills.append({
-                    "name": name,
-                    "description": "",
-                    "emoji": "",
-                    "eligible": False,
-                    "disabled": False,
-                    "blockedByAllowlist": False,
-                    "source": "scan-history",
-                    "bundled": False,
-                    "homepage": "",
-                })
-                known_names.add(name)
-
-    if as_json:
-        _print_skill_list_json(skills, scan_map, actions_map)
-        return
-
-    _print_skill_list_table(skills, scan_map, actions_map)
-
-    from defenseclaw.commands import hint
-    hint("Scan all skills:  defenseclaw skill scan all")
+    return skills
 
 
-def _print_skill_list_json(
+def _skill_list_json_items(
     skills: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
-) -> None:
+) -> list[dict[str, Any]]:
     items = []
     for s in skills:
         name = s.get("name", "")
@@ -464,23 +539,44 @@ def _print_skill_list_json(
         verdict_label, _ = _compute_verdict(actions_map.get(name), scan_map.get(name))
         item["verdict"] = verdict_label
         items.append(item)
-    click.echo(json.dumps(items, indent=2, default=str))
+    return items
+
+
+def _print_skill_list_json(
+    skills: list[dict[str, Any]],
+    scan_map: dict[str, dict[str, Any]],
+    actions_map: dict[str, Any],
+) -> None:
+    click.echo(json.dumps(
+        _skill_list_json_items(skills, scan_map, actions_map),
+        indent=2,
+        default=str,
+    ))
 
 
 def _print_skill_list_table(
     skills: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
+    connector: str = "",
 ) -> None:
     from rich.console import Console
     from rich.table import Table
+
+    from defenseclaw.commands import list_scope_title
 
     ready_count = sum(
         1 for s in skills if s.get("eligible") and not s.get("disabled")
     )
 
+    detail = f"({ready_count}/{len(skills)} ready)"
+    title = (
+        list_scope_title("Skills", connector, detail)
+        if connector
+        else f"Skills {detail}"
+    )
     console = Console()
-    table = Table(title=f"Skills ({ready_count}/{len(skills)} ready)")
+    table = Table(title=title)
     table.add_column("Status", style="bold", no_wrap=True)
     table.add_column("Skill", no_wrap=True, overflow="ellipsis", max_width=24)
     table.add_column("Description", no_wrap=True, overflow="ellipsis", max_width=34)
@@ -546,6 +642,14 @@ def _print_skill_list_table(
 @click.option("--remote", is_flag=True, help="Scan via sidecar API (for skills on a remote host)")
 @click.option("--all", "scan_all", is_flag=True, help="Scan all configured skills")
 @click.option(
+    "--connector", "connector_flag", default="",
+    help=(
+        "Scan a specific connector's skills. Default for 'skill scan all' "
+        "on multi-connector installs: every active connector (use "
+        "--connector <name> to narrow to one)."
+    ),
+)
+@click.option(
     "--action", is_flag=True, default=False,
     help="Apply enforcement actions (quarantine/block/disable) based on findings",
 )
@@ -557,6 +661,7 @@ def scan(
     scan_path: str,
     remote: bool,
     scan_all: bool,
+    connector_flag: str,
     action: bool,
 ) -> None:
     """Scan a skill by name, path, URL, or 'all' for all configured skills.
@@ -612,10 +717,26 @@ def scan(
     )
 
     if scan_all or target == "all":
-        if remote:
-            _scan_all_remote(app, as_json)
+        # Resolve which connector(s) `--all` should fan out across — for BOTH
+        # the local and --remote paths. An explicit --connector targets exactly
+        # one; otherwise a multi-connector install scans every active connector
+        # (so "all skills" means every connector's skills, not just the
+        # primary's). Single-connector installs keep the original single pass
+        # (connector=None ⇒ the active connector).
+        from defenseclaw.commands import resolve_list_connector
+        if connector_flag:
+            connectors: list[str | None] = [resolve_list_connector(app, connector_flag)]
+        elif hasattr(app.cfg, "active_connectors") and len(app.cfg.active_connectors()) > 1:
+            connectors = list(app.cfg.active_connectors())
         else:
-            _scan_all(app, scanner, as_json, enforce=action)
+            connectors = [None]
+        for c in connectors:
+            if len(connectors) > 1 and not as_json:
+                click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
+            if remote:
+                _scan_all_remote(app, as_json, connector=c)
+            else:
+                _scan_all(app, scanner, as_json, enforce=action, connector=c)
         return
 
     if not target:
@@ -624,7 +745,7 @@ def scan(
     # Resolve scan directory
     scan_dir = scan_path
     if not scan_dir:
-        info = _get_openclaw_skill_info(target, app)
+        info = _get_openclaw_skill_info(target, app, connector=connector_flag or None)
         if info and _skill_info_path(info):
             scan_dir = _skill_info_path(info) or ""
         else:
@@ -650,17 +771,33 @@ def scan(
         click.echo(f"BLOCKED: {name} — remove from block list first", err=True)
         raise SystemExit(2)
 
-    if pe.is_allowed("skill", name):
+    # F-0282: a bare ``pe.is_allowed("skill", name)`` check skips the scan
+    # on a NAME match alone. An operator allow that was registered for a
+    # trusted skill at a specific path would then also wave through a
+    # *different* on-disk skill that merely shares the name. Route the
+    # allow decision through the shared admission evaluator, which compares
+    # the presented ``source_path`` against any path-pinned allow (and fails
+    # closed on a mismatch — see F-0401). Only a genuine manual allow that
+    # matches the presented asset skips the scan; everything else falls
+    # through to a fresh scan.
+    from defenseclaw.enforce.admission import evaluate_admission as _evaluate_admission
+    allow_decision = _evaluate_admission(
+        pe,
+        policy_dir=app.cfg.policy_dir,
+        target_type="skill",
+        name=name,
+        source_path=scan_dir or "",
+    )
+    if allow_decision.verdict == "allowed" and allow_decision.source == "manual-allow":
         click.echo(ux._style(f"ALLOWED (skip scan): {name}", fg="green"))
         return
 
-    from defenseclaw.commands import _scan_ui
+    from defenseclaw.commands import _scan_ui, resolve_list_connector
 
-    connector = (
-        app.cfg.active_connector()
-        if hasattr(app.cfg, "active_connector")
-        else "openclaw"
-    )
+    # resolve_list_connector validates --connector against the active set
+    # and falls back to the active connector when unset (single-connector
+    # behaviour unchanged).
+    connector = resolve_list_connector(app, connector_flag)
     ctx = _scan_ui.ScanContext.for_skill(
         connector=connector,
         paths=[scan_dir],
@@ -724,14 +861,22 @@ def _apply_scan_enforcement(
     skill_name: str,
     skill_path: str,
     result,
+    connector: str | None = None,
 ) -> None:
     """Apply configured skill_actions policy based on scan severity.
 
     Allow-listed skills are exempt from auto-enforcement — only a manual
     ``skill block`` can override an allow entry.
+
+    ``connector`` attributes the enforcement to a specific connector during
+    multi-connector ``--all``/``--connector`` scans; defaults to the active
+    connector so single-connector behaviour is unchanged.
     """
     from defenseclaw.enforce.admission import evaluate_admission
 
+    resolved_connector = connector or (
+        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else ""
+    )
     decision = evaluate_admission(
         pe,
         policy_dir=app.cfg.policy_dir,
@@ -740,7 +885,7 @@ def _apply_scan_enforcement(
         source_path=skill_path,
         scan_result=result,
         fallback_actions=app.cfg.skill_actions,
-        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        connector=resolved_connector,
         asset_policy=app.cfg.asset_policy,
     )
 
@@ -805,11 +950,30 @@ def _enable_skill_via_gateway(app: AppContext, skill_name: str) -> bool:
     return True
 
 
-def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False) -> None:
+def _scan_all(
+    app: AppContext,
+    scanner,
+    as_json: bool,
+    *,
+    enforce: bool = False,
+    connector: str | None = None,
+) -> None:
     from defenseclaw.commands import _scan_ui
     from defenseclaw.enforce import PolicyEngine
 
-    oc_list = _list_openclaw_skills_full(app)
+    active = (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else "openclaw"
+    )
+    # When an explicit connector is requested (multi-connector fan-out or
+    # --connector) and it is NOT the active one, the OpenClaw-specific
+    # skill listing does not apply — walk that connector's skill_dirs
+    # directly. The default single-connector path is byte-identical.
+    resolved_connector = connector or active
+    use_openclaw_list = resolved_connector == active
+
+    oc_list = _list_openclaw_skills_full(app) if use_openclaw_list else None
     if oc_list and oc_list.get("skills"):
         skill_names = [s["name"] for s in oc_list["skills"]]
     else:
@@ -819,11 +983,7 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
     verdicts = []
     errors = 0
 
-    connector = (
-        app.cfg.active_connector()
-        if hasattr(app.cfg, "active_connector")
-        else "openclaw"
-    )
+    connector = resolved_connector
 
     # Build the target list up front so we can render an accurate
     # preamble (count + sources) before the first scanner run.
@@ -840,8 +1000,9 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
             targets.append((name, base_dir))
         sources = sorted({os.path.dirname(p) for _, p in targets if p})
     else:
-        # Fall back to directory scan
-        dirs = app.cfg.skill_dirs()
+        # Fall back to directory scan — resolve the target connector's
+        # skill dirs so a non-primary connector's skills are scanned.
+        dirs = app.cfg.skill_dirs(connector)
         sources = list(dirs)
         for skill_dir in dirs:
             if not os.path.isdir(skill_dir):
@@ -888,7 +1049,7 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
                         findings=len(result.findings),
                     )
             if not result.is_clean() and enforce:
-                _apply_scan_enforcement(app, pe, name, base_dir, result)
+                _apply_scan_enforcement(app, pe, name, base_dir, result, connector=connector)
         except Exception as exc:
             errors += 1
             if not as_json:
@@ -930,6 +1091,30 @@ def _resolve_path(app: AppContext, target: str) -> str | None:
     return None
 
 
+def _all_active_skill_dirs(app: AppContext) -> list[str]:
+    """Union of skill directories across every active connector.
+
+    Quarantine/restore resolve and validate against this union so a skill that
+    lives in a NON-primary connector can still be managed; single-connector
+    installs collapse to that one connector's dirs, so their behavior is
+    unchanged. Order-preserving and de-duplicated.
+    """
+    cfg = app.cfg
+    if hasattr(cfg, "active_connectors"):
+        try:
+            connectors: list[str | None] = list(cfg.active_connectors()) or [None]
+        except Exception:  # noqa: BLE001 — fall back to the active connector.
+            connectors = [None]
+    else:
+        connectors = [None]
+    dirs: list[str] = []
+    for c in connectors:
+        for d in cfg.skill_dirs(c):
+            if d not in dirs:
+                dirs.append(d)
+    return dirs
+
+
 def _skill_info_path(info: dict[str, Any] | None) -> str:
     if not info:
         return ""
@@ -944,11 +1129,18 @@ def _skill_info_path(info: dict[str, Any] | None) -> str:
 # Option 2: Remote scan via sidecar API
 # ---------------------------------------------------------------------------
 
-def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) -> None:
+def _scan_via_sidecar(
+    app: AppContext, target: str, name: str, as_json: bool, fatal: bool = True
+) -> None:
     """Send a scan request to the sidecar REST API (POST /v1/skill/scan).
 
     Used when DefenseClaw sidecar runs on a remote host and the CLI connects
     via SSM port-forward or direct network access.
+
+    ``fatal`` controls error handling: single-target scans exit 1 on failure
+    (default), but the multi-connector ``--all`` fan-out passes ``fatal=False``
+    so one connector's remote error (e.g. a sidecar 500 on a malformed skill
+    dir) is reported per-target and the rest of the fleet still gets scanned.
     """
     client = _sidecar_client(app)
 
@@ -959,7 +1151,9 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
         data = client.scan_skill(target=target, name=name)
     except Exception as exc:
         click.echo(f"error: remote scan failed: {exc}", err=True)
-        raise SystemExit(1)
+        if fatal:
+            raise SystemExit(1)
+        return
 
     if as_json:
         click.echo(json.dumps(data, indent=2, default=str))
@@ -994,9 +1188,15 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
             click.echo(f" {title}")
 
 
-def _scan_all_remote(app: AppContext, as_json: bool) -> None:
-    """Scan all skills via the sidecar API."""
-    oc_list = _list_openclaw_skills_full(app)
+def _scan_all_remote(app: AppContext, as_json: bool, connector: str | None = None) -> None:
+    """Scan all skills via the sidecar API.
+
+    ``connector`` selects whose skill list to scan; when None it falls back to
+    the active connector. The caller fans this out over every active connector
+    so ``skill scan --all --remote`` covers the whole fleet, matching the local
+    ``--all`` path.
+    """
+    oc_list = _list_openclaw_skills_full(app, connector=connector)
     if not oc_list or not oc_list.get("skills"):
         click.echo("No skills found via sidecar.")
         return
@@ -1007,7 +1207,7 @@ def _scan_all_remote(app: AppContext, as_json: bool) -> None:
         if not base_dir:
             click.echo(f"[scan] warning: no path for {name}", err=True)
             continue
-        _scan_via_sidecar(app, target=base_dir, name=name, as_json=as_json)
+        _scan_via_sidecar(app, target=base_dir, name=name, as_json=as_json, fatal=False)
         if not as_json:
             click.echo()
 
@@ -1034,7 +1234,7 @@ def _scan_from_url(app: AppContext, url: str, as_json: bool) -> None:
         _scan_from_http(app, url, as_json)
 
 
-def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
+def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
     """Download a skill from the npm registry, scan locally, then clean up.
 
     Skills are bundled inside the 'openclaw' npm package at skills/<name>/.
@@ -1043,8 +1243,11 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
     import shutil
     import tempfile
 
-    import requests
-
+    from defenseclaw.registries.adapters._base import (
+        MAX_SKILL_ARCHIVE_BYTES,
+        IngestError,
+        http_get,
+    )
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
     name, _version = _parse_clawhub_uri(uri)
@@ -1057,9 +1260,13 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
 
     # Get the tarball URL from npm
     try:
-        meta = requests.get("https://registry.npmjs.org/openclaw/latest", timeout=30).json()
+        meta = json.loads(http_get(
+            "https://registry.npmjs.org/openclaw/latest",
+            accept="application/json",
+            timeout=30,
+        ))
         tarball_url = meta.get("dist", {}).get("tarball")
-    except requests.RequestException as exc:
+    except (IngestError, json.JSONDecodeError) as exc:
         click.echo(f"error: npm registry lookup failed: {exc}", err=True)
         raise SystemExit(1)
 
@@ -1072,13 +1279,17 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
 
     tmpdir = tempfile.mkdtemp(prefix="defenseclaw-clawhub-")
     try:
-        resp = requests.get(tarball_url, timeout=120, stream=True)
-        resp.raise_for_status()
+        raw = http_get(
+            tarball_url,
+            accept="application/gzip, application/x-tar, application/octet-stream, */*;q=0.5",
+            timeout=120,
+            max_bytes=MAX_SKILL_ARCHIVE_BYTES,
+            payload_label="skill archive",
+        )
 
         archive_path = os.path.join(tmpdir, "openclaw.tgz")
         with open(archive_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=65536):
-                f.write(chunk)
+            f.write(raw)
 
         if not as_json:
             size_mb = os.path.getsize(archive_path) / (1024 * 1024)
@@ -1092,7 +1303,16 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
             click.echo(
                 f"[scan] extracting prefix={skill_prefix!r} → {skill_dir!s}"
             )
-        _safe_tar_extract(archive_path, skill_dir, skill_prefix, strip=3)
+        # ("Untrusted skill archives can decompress
+        # without an output cap"): _safe_tar_extract enforces the same
+        # post-decompression caps as _scan_from_http; surface the
+        # rejection cleanly so the temp tree (cleaned in `finally`) does
+        # not appear to have completed extraction.
+        try:
+            _safe_tar_extract(archive_path, skill_dir, skill_prefix, strip=3)
+        except _SkillExtractTooLargeError as exc:
+            click.echo(f"error: clawhub skill archive rejected: {exc}", err=True)
+            raise SystemExit(1)
 
         os.unlink(archive_path)  # free disk immediately
 
@@ -1122,8 +1342,9 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
             click.echo(result.to_json())
         else:
             _print_result(name, result)
+        return result
 
-    except requests.RequestException as exc:
+    except IngestError as exc:
         click.echo(f"error: download failed: {exc}", err=True)
         raise SystemExit(1)
     finally:
@@ -1132,59 +1353,100 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
             click.echo("[scan] cleaned up temporary files")
 
 
-def _scan_from_http(app: AppContext, url: str, as_json: bool) -> None:
+def _scan_from_http(
+    app: AppContext,
+    url: str,
+    as_json: bool,
+    *,
+    expected_sha256: str = "",
+    require_sha256: bool = False,
+    allow_private: bool = False,
+    auth_env: str = "",
+) -> Any:
     """Download a skill archive from HTTP(S), extract, scan, then clean up."""
+    import hashlib
     import shutil
     import tarfile
     import tempfile
     import zipfile
 
-    import requests
-
+    from defenseclaw.registries.adapters._base import (
+        MAX_SKILL_ARCHIVE_BYTES,
+        IngestError,
+        http_get,
+    )
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
     if not as_json:
         click.echo(f"[scan] fetching skill from {url}")
 
+    expected_sha256 = expected_sha256.strip().lower()
+    if require_sha256 and not expected_sha256:
+        click.echo("error: sha256 is required for registry http(s) skill archives", err=True)
+        raise SystemExit(1)
+    if expected_sha256 and not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
+        click.echo("error: sha256 must be 64 lowercase or uppercase hex chars", err=True)
+        raise SystemExit(1)
+
     tmpdir = tempfile.mkdtemp(prefix="defenseclaw-skill-")
     try:
-        resp = requests.get(url, timeout=60, stream=True)
-        resp.raise_for_status()
+        raw = http_get(
+            url,
+            auth_env=auth_env,
+            accept="application/gzip, application/x-tar, application/zip, application/octet-stream, */*;q=0.5",
+            allow_private=allow_private,
+            timeout=60,
+            max_bytes=MAX_SKILL_ARCHIVE_BYTES,
+            payload_label="skill archive",
+        )
+        if expected_sha256:
+            actual_sha256 = hashlib.sha256(raw).hexdigest()
+            if actual_sha256 != expected_sha256:
+                click.echo(
+                    "error: sha256 mismatch for skill archive "
+                    f"(expected {expected_sha256}, got {actual_sha256})",
+                    err=True,
+                )
+                raise SystemExit(1)
 
         download_path = os.path.join(tmpdir, "download")
         with open(download_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+            f.write(raw)
 
         extract_dir = os.path.join(tmpdir, "skill")
         os.makedirs(extract_dir, exist_ok=True)
 
-        if tarfile.is_tarfile(download_path):
-            if not as_json:
-                click.echo(f"[scan] tarfile: extracting {download_path!s} -> {extract_dir!s}")
-            with tarfile.open(download_path) as tf:
-                members = tf.getnames()
+        # ("Untrusted skill archives can decompress
+        # without an output cap"): replace the legacy `tf.extractall` /
+        # `zf.extractall` calls with capped streaming extractors so a
+        # malicious registry or scan URL cannot turn a small compressed
+        # body into multi-GB extraction or a member-count flood. Caps
+        # are enforced in :func:`_safe_tar_extractall_capped` and
+        # :func:`_safe_zip_extractall_capped`. On violation we delete
+        # the temp tree (the outer ``finally`` already handles that)
+        # and surface a clear error.
+        try:
+            if tarfile.is_tarfile(download_path):
                 if not as_json:
-                    n = len(members)
-                    preview = members[:20]
-                    more = f" ... ({n} total)" if n > 20 else ""
-                    click.echo(f"[scan] tarfile: members={n} first={preview!r}{more}")
-                tf.extractall(extract_dir, filter="data")
-            if not as_json:
-                click.echo(f"[scan] tarfile: extractall done -> listing={os.listdir(extract_dir)!r}")
-        elif zipfile.is_zipfile(download_path):
-            with zipfile.ZipFile(download_path) as zf:
-                safe_root = os.path.realpath(extract_dir)
-                for member in zf.infolist():
-                    member_path = os.path.realpath(
-                        os.path.join(extract_dir, member.filename),
-                    )
-                    if not member_path.startswith(safe_root + os.sep) and member_path != safe_root:
-                        click.echo(f"error: zip contains path-traversal entry: {member.filename}", err=True)
-                        raise SystemExit(1)
-                zf.extractall(extract_dir)
-        else:
-            click.echo("error: unsupported archive format (expected .tar.gz or .zip)", err=True)
+                    click.echo(f"[scan] tarfile: extracting {download_path!s} -> {extract_dir!s}")
+                with tarfile.open(download_path) as tf:
+                    members = tf.getnames()
+                    if not as_json:
+                        n = len(members)
+                        preview = members[:20]
+                        more = f" ... ({n} total)" if n > 20 else ""
+                        click.echo(f"[scan] tarfile: members={n} first={preview!r}{more}")
+                    _safe_tar_extractall_capped(tf, extract_dir)
+                if not as_json:
+                    click.echo(f"[scan] tarfile: extractall done -> listing={os.listdir(extract_dir)!r}")
+            elif zipfile.is_zipfile(download_path):
+                with zipfile.ZipFile(download_path) as zf:
+                    _safe_zip_extractall_capped(zf, extract_dir)
+            else:
+                click.echo("error: unsupported archive format (expected .tar.gz or .zip)", err=True)
+                raise SystemExit(1)
+        except _SkillExtractTooLargeError as exc:
+            click.echo(f"error: skill archive rejected: {exc}", err=True)
             raise SystemExit(1)
 
         entries = os.listdir(extract_dir)
@@ -1213,8 +1475,9 @@ def _scan_from_http(app: AppContext, url: str, as_json: bool) -> None:
             click.echo(result.to_json())
         else:
             _print_result(name, result)
+        return result
 
-    except requests.RequestException as exc:
+    except IngestError as exc:
         click.echo(f"error: download failed: {exc}", err=True)
         raise SystemExit(1)
     finally:
@@ -1245,6 +1508,144 @@ def _parse_clawhub_uri(uri: str) -> tuple[str, str | None]:
     return (name, version)
 
 
+# ("Untrusted skill archives can decompress without an
+# output cap"): MAX_SKILL_ARCHIVE_BYTES only caps the *compressed*
+# response body (128 MiB); a tiny tar/zip can still expand into many GB
+# or millions of members. The constants below bound total uncompressed
+# bytes, the member count, and per-file size on extraction. They are
+# generous enough for legitimate skill archives but bound the worst
+# case attackers can amplify into disk/CPU exhaustion.
+MAX_SKILL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024  # 512 MiB
+MAX_SKILL_MEMBER_COUNT = 10_000
+MAX_SKILL_PER_FILE_BYTES = 64 * 1024 * 1024  # 64 MiB
+
+
+class _SkillExtractTooLargeError(Exception):
+    """Raised when a tar/zip archive exceeds the post-decompression caps."""
+
+
+def _check_extract_caps(member_count: int, total_bytes: int, member_size: int, member_name: str) -> None:
+    if member_count > MAX_SKILL_MEMBER_COUNT:
+        raise _SkillExtractTooLargeError(
+            f"archive exceeds member-count cap "
+            f"({member_count} > {MAX_SKILL_MEMBER_COUNT})"
+        )
+    if member_size > MAX_SKILL_PER_FILE_BYTES:
+        raise _SkillExtractTooLargeError(
+            f"archive entry {member_name!r} exceeds per-file cap "
+            f"({member_size} > {MAX_SKILL_PER_FILE_BYTES})"
+        )
+    if total_bytes > MAX_SKILL_UNCOMPRESSED_BYTES:
+        raise _SkillExtractTooLargeError(
+            f"archive total uncompressed size exceeds cap "
+            f"({total_bytes} > {MAX_SKILL_UNCOMPRESSED_BYTES})"
+        )
+
+
+def _safe_tar_extractall_capped(tf, extract_dir: str) -> None:
+    """Extract every regular file from *tf* into *extract_dir* with caps.
+
+    Enforces `MAX_SKILL_MEMBER_COUNT`, `MAX_SKILL_PER_FILE_BYTES`, and
+    `MAX_SKILL_UNCOMPRESSED_BYTES`. Uses ``filter="data"`` semantics
+    (skip symlinks/hardlinks/devices) to avoid path-traversal and
+    privileged-bit smuggling. Raises `_SkillExtractTooLargeError` on cap
+    violation; callers must propagate so the temp directory is removed.
+    """
+    safe_root = os.path.realpath(extract_dir)
+    members = tf.getmembers()
+    if len(members) > MAX_SKILL_MEMBER_COUNT:
+        raise _SkillExtractTooLargeError(
+            f"tar archive lists {len(members)} members "
+            f"(> {MAX_SKILL_MEMBER_COUNT})"
+        )
+    total = 0
+    seen = 0
+    for member in members:
+        if member.issym() or member.islnk() or member.isdev() or member.ischr() or member.isblk() or member.isfifo():
+            continue
+        target = os.path.realpath(os.path.join(extract_dir, member.name))
+        if not (target == safe_root or target.startswith(safe_root + os.sep)):
+            raise _SkillExtractTooLargeError(
+                f"tar archive contains path-traversal entry {member.name!r}"
+            )
+        if member.isdir():
+            os.makedirs(target, exist_ok=True)
+            continue
+        if not member.isfile():
+            continue
+        seen += 1
+        size = max(member.size, 0)
+        total += size
+        _check_extract_caps(seen, total, size, member.name)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        src = tf.extractfile(member)
+        if src is None:
+            continue
+        try:
+            written = 0
+            with open(target, "wb") as dst:
+                while True:
+                    chunk = src.read(65536)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > MAX_SKILL_PER_FILE_BYTES:
+                        raise _SkillExtractTooLargeError(
+                            f"tar entry {member.name!r} streamed "
+                            f"more bytes than per-file cap "
+                            f"({written} > {MAX_SKILL_PER_FILE_BYTES})"
+                        )
+                    dst.write(chunk)
+        finally:
+            src.close()
+
+
+def _safe_zip_extractall_capped(zf, extract_dir: str) -> None:
+    """Extract every entry from *zf* into *extract_dir* with caps.
+
+    Enforces the same suite of limits as
+    :func:`_safe_tar_extractall_capped`. Refuses path traversal and
+    streams per-file content with a watchdog on the per-file cap.
+    """
+    safe_root = os.path.realpath(extract_dir)
+    infolist = zf.infolist()
+    if len(infolist) > MAX_SKILL_MEMBER_COUNT:
+        raise _SkillExtractTooLargeError(
+            f"zip archive lists {len(infolist)} members "
+            f"(> {MAX_SKILL_MEMBER_COUNT})"
+        )
+    total = 0
+    seen = 0
+    for member in infolist:
+        target = os.path.realpath(os.path.join(extract_dir, member.filename))
+        if not (target == safe_root or target.startswith(safe_root + os.sep)):
+            raise _SkillExtractTooLargeError(
+                f"zip archive contains path-traversal entry {member.filename!r}"
+            )
+        if member.is_dir():
+            os.makedirs(target, exist_ok=True)
+            continue
+        seen += 1
+        size = max(member.file_size, 0)
+        total += size
+        _check_extract_caps(seen, total, size, member.filename)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with zf.open(member, "r") as src, open(target, "wb") as dst:
+            written = 0
+            while True:
+                chunk = src.read(65536)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_SKILL_PER_FILE_BYTES:
+                    raise _SkillExtractTooLargeError(
+                        f"zip entry {member.filename!r} streamed more "
+                        f"bytes than per-file cap "
+                        f"({written} > {MAX_SKILL_PER_FILE_BYTES})"
+                    )
+                dst.write(chunk)
+
+
 def _safe_tar_extract(
     archive_path: str, dest_dir: str, prefix: str, *, strip: int = 0
 ) -> None:
@@ -1252,13 +1653,24 @@ def _safe_tar_extract(
 
     Each member name is validated after stripping *strip* leading path
     components to prevent path traversal (``..`` segments, absolute paths,
-    or symlinks escaping *dest_dir*).
+    or symlinks escaping *dest_dir*). ("Untrusted skill archives can decompress without an output cap"):
+    enforces the same global member-count, per-file, and total-bytes
+    caps that the HTTP scan path applies via
+    :func:`_safe_tar_extractall_capped`.
     """
     import tarfile
 
     real_dest = os.path.realpath(dest_dir)
     with tarfile.open(archive_path, "r:gz") as tf:
-        for member in tf.getmembers():
+        members = tf.getmembers()
+        if len(members) > MAX_SKILL_MEMBER_COUNT:
+            raise _SkillExtractTooLargeError(
+                f"tar archive lists {len(members)} members "
+                f"(> {MAX_SKILL_MEMBER_COUNT})"
+            )
+        total = 0
+        seen = 0
+        for member in members:
             if not member.name.startswith(prefix):
                 continue
             if member.issym() or member.islnk():
@@ -1274,22 +1686,30 @@ def _safe_tar_extract(
             if ".." in stripped.split(os.sep):
                 continue
 
-            member_copy = tarfile.TarInfo(name=stripped)
-            member_copy.size = member.size
-            member_copy.mode = 0o644 if not member.isdir() else 0o755
-
             if member.isdir():
                 os.makedirs(target, exist_ok=True)
             elif member.isfile():
+                seen += 1
+                size = max(member.size, 0)
+                total += size
+                _check_extract_caps(seen, total, size, member.name)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with tf.extractfile(member) as src:
                     if src is None:
                         continue
+                    written = 0
                     with open(target, "wb") as dst:
                         while True:
                             chunk = src.read(65536)
                             if not chunk:
                                 break
+                            written += len(chunk)
+                            if written > MAX_SKILL_PER_FILE_BYTES:
+                                raise _SkillExtractTooLargeError(
+                                    f"tar entry {member.name!r} streamed "
+                                    f"more bytes than per-file cap "
+                                    f"({written} > {MAX_SKILL_PER_FILE_BYTES})"
+                                )
                             dst.write(chunk)
 
 
@@ -1549,13 +1969,25 @@ def enable(app: AppContext, name: str) -> None:
 
 @skill.command()
 @click.argument("name")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help="Connector whose copy of the skill to quarantine "
+    "(default: search every active connector; required to disambiguate when "
+    "the same skill name exists under more than one).",
+)
 @click.option("--reason", default="", help="Reason for quarantine")
 @pass_ctx
-def quarantine(app: AppContext, name: str, reason: str) -> None:
+def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> None:
     """Quarantine a skill's files to the quarantine area.
 
     Moves the skill's directory to ~/.defenseclaw/quarantine/skills/ and records
     the action. The skill can be restored with 'skill restore'.
+
+    On a multi-connector install the skill is located across EVERY active
+    connector's skill directories; pass --connector to scope the search (and to
+    disambiguate when the same name exists under more than one connector).
     """
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
@@ -1565,10 +1997,18 @@ def quarantine(app: AppContext, name: str, reason: str) -> None:
         click.echo(f"error: invalid skill name {name!r}", err=True)
         raise SystemExit(1)
 
+    # Search scope: one connector (--connector) or the union of every active
+    # connector's skill dirs, so a non-primary connector's skill is reachable.
+    if connector_flag:
+        from defenseclaw.commands import resolve_list_connector
+        scope_dirs = app.cfg.skill_dirs(resolve_list_connector(app, connector_flag))
+    else:
+        scope_dirs = _all_active_skill_dirs(app)
+
     if os.path.isabs(name):
         # Validate absolute paths resolve inside a configured skill directory
         real = os.path.realpath(name)
-        allowed_roots = [os.path.realpath(c) for c in app.cfg.skill_dirs()]
+        allowed_roots = [os.path.realpath(c) for c in scope_dirs]
         if any(real == root for root in allowed_roots):
             click.echo(
                 f"error: path {name!r} must point to a specific skill directory, not the skill root",
@@ -1584,7 +2024,22 @@ def quarantine(app: AppContext, name: str, reason: str) -> None:
             raise SystemExit(1)
         skill_path: str | None = real
     else:
-        skill_path = _resolve_path(app, skill_name)
+        # Locate the named skill across the scope. If it exists under more than
+        # one connector, refuse and ask for --connector rather than guessing.
+        matches: list[str] = []
+        for d in scope_dirs:
+            candidate = os.path.join(d, skill_name)
+            if os.path.isdir(candidate) and candidate not in matches:
+                matches.append(candidate)
+        if len(matches) > 1:
+            click.echo(
+                f"error: skill {skill_name!r} exists under multiple connectors:\n"
+                + "\n".join(f"  - {m}" for m in matches)
+                + "\n  Pass --connector <name> to choose which one.",
+                err=True,
+            )
+            raise SystemExit(1)
+        skill_path = matches[0] if matches else None
 
     if not skill_path:
         click.echo(f"error: could not locate skill {skill_name!r} — provide an absolute path", err=True)
@@ -1615,13 +2070,24 @@ def quarantine(app: AppContext, name: str, reason: str) -> None:
 
 @skill.command()
 @click.argument("name")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help="Connector whose skill dirs the restore destination must fall within "
+    "(default: any active connector).",
+)
 @click.option("--path", "restore_path", default="", help="Override restore destination (defaults to original path)")
 @pass_ctx
-def restore(app: AppContext, name: str, restore_path: str) -> None:
+def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) -> None:
     """Restore a quarantined skill to its original location.
 
     By default restores to the original path recorded during quarantine.
     Use --path to override the restore destination.
+
+    The destination is validated against every active connector's skill
+    directories (so a non-primary connector's skill restores correctly);
+    pass --connector to scope the validation to one connector.
     """
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
@@ -1645,7 +2111,13 @@ def restore(app: AppContext, name: str, restore_path: str) -> None:
             raise SystemExit(1)
         restore_path = entry.source_path
 
-    allowed_roots = app.cfg.skill_dirs() if hasattr(app.cfg, "skill_dirs") and callable(app.cfg.skill_dirs) else None
+    if not (hasattr(app.cfg, "skill_dirs") and callable(app.cfg.skill_dirs)):
+        allowed_roots = None
+    elif connector_flag:
+        from defenseclaw.commands import resolve_list_connector
+        allowed_roots = app.cfg.skill_dirs(resolve_list_connector(app, connector_flag))
+    else:
+        allowed_roots = _all_active_skill_dirs(app)
     real_restore = os.path.realpath(restore_path)
     if allowed_roots:
         if not any(
@@ -1678,16 +2150,23 @@ def restore(app: AppContext, name: str, restore_path: str) -> None:
 @skill.command()
 @click.argument("name")
 @click.option("--json", "as_json", is_flag=True, help="Output skill info as JSON")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help="Inspect a specific connector's skill (multi-connector installs)",
+)
 @pass_ctx
-def info(app: AppContext, name: str, as_json: bool) -> None:
+def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None:
     """Show detailed information about a skill.
 
     Displays merged skill metadata from OpenClaw, latest scan results from the
     DefenseClaw audit database, and enforcement actions.
     """
-    skill_name = os.path.basename(name)
+    from defenseclaw.commands import resolve_list_connector
 
-    info_map = _get_openclaw_skill_info(skill_name, app)
+    skill_name = os.path.basename(name)
+    connector = resolve_list_connector(app, connector_flag)
+
+    info_map = _get_openclaw_skill_info(skill_name, app, connector=connector)
     if info_map is None:
         info_map = {"name": skill_name}
 
@@ -1751,8 +2230,12 @@ def info(app: AppContext, name: str, as_json: bool) -> None:
 @click.argument("name")
 @click.option("--force", is_flag=True, help="Force install (overwrites existing)")
 @click.option("--action", "take_action", is_flag=True, help="Apply skill_actions policy based on scan severity")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help="Attribute install/enforcement to a specific connector (multi-connector installs)",
+)
 @pass_ctx
-def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
+def install(app: AppContext, name: str, force: bool, take_action: bool, connector_flag: str) -> None:
     """Install and scan an OpenClaw skill via clawhub.
 
     By default, install only runs the scan and reports findings — no enforcement
@@ -1761,12 +2244,14 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
 
     Use --force to overwrite an existing skill.
     """
+    from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.admission import evaluate_admission
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
     skill_name = os.path.basename(name)
+    connector = resolve_list_connector(app, connector_flag)
     pe = PolicyEngine(app.store)
 
     pre_decision = evaluate_admission(
@@ -1776,8 +2261,13 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         name=skill_name,
         source_path=name,
         fallback_actions=app.cfg.skill_actions,
-        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        connector=connector,
         asset_policy=app.cfg.asset_policy,
+        # F-0283: a quarantined skill must NOT be (re)installed. Without
+        # this flag the admission evaluator never consulted quarantine
+        # state, so an asset that a prior scan quarantined could be
+        # reinstalled straight past the gate. Reject quarantined installs.
+        include_quarantine=True,
     )
 
     if pre_decision.verdict == "blocked":
@@ -1786,6 +2276,16 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         click.echo(
             f"error: skill {skill_name!r} is on the block list"
             f" — run 'defenseclaw skill allow {skill_name}' to unblock",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    if pre_decision.verdict == "rejected" and pre_decision.source == "quarantine":
+        if app.logger:
+            app.logger.log_action("install-rejected", skill_name, "reason=quarantined")
+        click.echo(
+            f"error: skill {skill_name!r} is quarantined"
+            f" — release the quarantine before reinstalling",
             err=True,
         )
         raise SystemExit(1)
@@ -1806,9 +2306,23 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
 
     # Locate and scan
     skill_path = _resolve_path(app, skill_name)
+    # when the post-install scan cannot run (skill
+    # unresolved, scanner crash) we must NOT leave the installed
+    # package on disk with no policy decision. Roll back the
+    # clawhub install before exiting.
     if not skill_path:
-        click.echo("[install] warning: could not locate installed skill for scan", err=True)
-        return
+        click.echo(
+            f"[install] could not locate installed skill {skill_name!r} for scan — "
+            "rolling back via clawhub uninstall",
+            err=True,
+        )
+        _run_clawhub_uninstall(skill_name)
+        if app.logger:
+            app.logger.log_action(
+                "install-rolled-back", skill_name,
+                "reason=skill-unresolved scan=skipped",
+            )
+        raise SystemExit(1)
 
     click.echo(f"[install] scanning {skill_path}...")
     scanner = SkillScannerWrapper(
@@ -1820,7 +2334,16 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
     try:
         result = scanner.scan(skill_path)
     except Exception as exc:
-        click.echo(f"error: scan failed: {exc}", err=True)
+        click.echo(
+            f"error: scan failed: {exc} — rolling back via clawhub uninstall",
+            err=True,
+        )
+        _run_clawhub_uninstall(skill_name)
+        if app.logger:
+            app.logger.log_action(
+                "install-rolled-back", skill_name,
+                f"reason=scan-failed exc={type(exc).__name__}",
+            )
         raise SystemExit(1)
 
     if app.logger:
@@ -1836,7 +2359,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         source_path=skill_path,
         scan_result=result,
         fallback_actions=app.cfg.skill_actions,
-        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        connector=connector,
         asset_policy=app.cfg.asset_policy,
     )
 
@@ -1922,3 +2445,28 @@ def _run_clawhub_install(skill_name: str, force: bool) -> None:
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         click.echo(f"error: clawhub install failed: {exc}", err=True)
         raise SystemExit(1)
+
+
+def _run_clawhub_uninstall(skill_name: str) -> None:
+    """Best-effort rollback for a partial install.
+
+    Runs `npx clawhub uninstall <skill>` with a short timeout. We
+    intentionally do not raise on rollback failures — the caller is
+    already exiting non-zero — but we surface the error to the
+    operator so they can manually remediate.
+    """
+    args = ["npx", "clawhub", "uninstall", skill_name]
+    try:
+        subprocess.run(args, check=False, timeout=120)
+    except subprocess.TimeoutExpired:
+        click.echo(
+            f"[install] warning: clawhub uninstall of {skill_name!r} timed out — "
+            "manual cleanup may be required",
+            err=True,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        click.echo(
+            f"[install] warning: clawhub uninstall of {skill_name!r} failed: {exc} — "
+            "manual cleanup may be required",
+            err=True,
+        )

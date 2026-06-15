@@ -19,15 +19,14 @@
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_plugin import (
     _build_plugin_actions_map,
     _build_plugin_scan_map,
@@ -37,7 +36,38 @@ from defenseclaw.commands.cmd_plugin import (
 )
 from defenseclaw.enforce import PolicyEngine
 from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
-from tests.helpers import make_app_context, cleanup_app
+
+from tests.helpers import cleanup_app, make_app_context
+
+
+class PluginConnectorFlagTest(unittest.TestCase):
+    """D3: --connector targeting for plugin scan (+ inconsistency fix)."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.app.cfg.plugin_dir = os.path.join(self.tmp_dir, "plugins")
+        os.makedirs(self.app.cfg.plugin_dir, exist_ok=True)
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def invoke(self, args: list[str]):
+        return self.runner.invoke(plugin, args, obj=self.app, catch_exceptions=False)
+
+    @patch("defenseclaw.commands.cmd_plugin._resolve_plugin_dir", return_value=None)
+    def test_scan_connector_flag_resolves_target(self, mock_resolve):
+        # The resolved connector (not bare guardrail.connector) must drive
+        # plugin-dir resolution; an invalid plugin still exits 1.
+        result = self.invoke(["scan", "ghost", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(mock_resolve.call_args.args[2], "codex")
+
+    def test_scan_connector_flag_rejects_unknown(self):
+        result = self.invoke(["scan", "ghost", "--connector", "nope"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
 
 
 class PluginCommandTestBase(unittest.TestCase):
@@ -84,6 +114,7 @@ class TestPluginInstall(PluginCommandTestBase):
     @staticmethod
     def _clean_result():
         from datetime import datetime, timedelta, timezone
+
         from defenseclaw.models import ScanResult
         return ScanResult(
             scanner="plugin-scanner", target="x",
@@ -148,6 +179,71 @@ class TestPluginList(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("alpha", result.output)
         self.assertIn("beta", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_list_table_title_shows_connector_in_scope(self, _mock_oc):
+        # Mirror the MCP/Skills tables: the list title names the connector
+        # in scope so the active-connector default is discoverable.
+        dest = os.path.join(self.app.cfg.plugin_dir, "alpha")
+        os.makedirs(dest)
+        result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=openclaw", result.output)
+
+
+class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
+    """Default ``plugin list`` (no --connector) fans out across every active
+    connector — one connector-tagged table each — mirroring ``skill list``.
+    A single-connector install keeps its flat JSON shape."""
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_default_lists_every_active_connector(self, _mock_oc):
+        # A DC-managed plugin lives in the shared plugin_dir, so it surfaces for
+        # each active connector; the per-connector tables must both appear.
+        os.makedirs(os.path.join(self.app.cfg.plugin_dir, "alpha"))
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=claudecode", result.output)
+        self.assertIn("connector=codex", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_default_json_groups_by_connector(self, _mock_oc):
+        os.makedirs(os.path.join(self.app.cfg.plugin_dir, "alpha"))
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertIsInstance(payload, list)
+        self.assertEqual({g["connector"] for g in payload}, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_connector_flag_still_narrows_to_one(self, _mock_oc):
+        os.makedirs(os.path.join(self.app.cfg.plugin_dir, "alpha"))
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertNotIn("connector=claudecode", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_single_connector_install_keeps_flat_json(self, _mock_oc):
+        os.makedirs(os.path.join(self.app.cfg.plugin_dir, "alpha"))
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertIsInstance(payload, list)
+        # Flat list of plugin dicts (no per-connector grouping wrapper).
+        self.assertTrue(all("connector" not in item or "plugins" not in item for item in payload))
 
 
 class TestPluginRemove(PluginCommandTestBase):
@@ -687,6 +783,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
     def _clean_scan_result(self, target="x"):
         from datetime import datetime, timedelta, timezone
+
         from defenseclaw.models import ScanResult
         return ScanResult(
             scanner="plugin-scanner", target=target,
@@ -696,6 +793,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
     def _critical_scan_result(self, target="x"):
         from datetime import datetime, timedelta, timezone
+
         from defenseclaw.models import Finding, ScanResult
         return ScanResult(
             scanner="plugin-scanner", target=target,
@@ -874,16 +972,47 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
-    def test_install_no_action_warns_but_installs(self, mock_fetch, mock_scan):
+    def test_install_no_action_refuses_critical_findings(self, mock_fetch, mock_scan):
+        """the legacy code printed "no action taken" and
+        STILL fell through to copytree() when a CRITICAL was found
+        without --action. We now refuse the install (fail closed) until
+        the operator either passes --action or explicitly allow-lists."""
         mock_scan.return_value = self._critical_scan_result()
         src = self._create_plugin_dir("warn-pkg")
         mock_fetch.return_value = src
 
         result = self._invoke_install(["install", "warn-pkg"])
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("refusing to install", result.output)
+        # The plugin must NOT have landed on disk.
+        self.assertFalse(
+            os.path.exists(os.path.join(self.app.cfg.plugin_dir, "warn-pkg")),
+            "regression: critical plugin was installed without --action",
+        )
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    @patch("defenseclaw.registry.fetch_npm_package")
+    def test_install_no_action_allows_low_severity_findings(self, mock_fetch, mock_scan):
+        """must not over-block: LOW/INFO scan findings without
+        --action still install with a warning so existing operator
+        workflows don't break."""
+        from datetime import datetime, timedelta, timezone
+        from defenseclaw.models import Finding, ScanResult
+        mock_scan.return_value = ScanResult(
+            scanner="plugin-scanner", target="x",
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(
+                id="info-finding", severity="LOW", title="minor",
+                description="lint", scanner="plugin-scanner",
+            )],
+            duration=timedelta(seconds=0.1),
+        )
+        src = self._create_plugin_dir("low-warn-pkg")
+        mock_fetch.return_value = src
+
+        result = self._invoke_install(["install", "low-warn-pkg"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("findings", result.output)
-        self.assertIn("no action taken", result.output)
-        self.assertIn("Installed plugin: warn-pkg", result.output)
+        self.assertIn("Installed plugin: low-warn-pkg", result.output)
 
     @patch("defenseclaw.registry.fetch_npm_package")
     def test_install_network_error(self, mock_fetch):
@@ -960,6 +1089,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
     def test_install_action_with_medium_severity_no_enforcement(self, mock_fetch, mock_scan):
         """Medium severity with default config has no file/runtime/install actions."""
         from datetime import datetime, timedelta, timezone
+
         from defenseclaw.models import Finding, ScanResult
         mock_scan.return_value = ScanResult(
             scanner="plugin-scanner", target="x",
@@ -1274,7 +1404,7 @@ class HostPluginEnumerationTests(unittest.TestCase):
         from defenseclaw.commands.cmd_plugin import _list_host_plugins
 
         class FakeCfg:
-            def plugin_dirs(self):
+            def plugin_dirs(self, connector=None):
                 return [self.tmp_dir]  # would normally contain plugins
 
         out = _list_host_plugins("openclaw", FakeCfg())
@@ -1300,7 +1430,7 @@ class HostPluginEnumerationTests(unittest.TestCase):
         outer_self = self
 
         class FakeCfg:
-            def plugin_dirs(self):
+            def plugin_dirs(self, connector=None):
                 return [a, b]  # noqa: F823 — closure over outer scope
 
         out = _list_host_plugins("claudecode", FakeCfg())
@@ -1340,7 +1470,7 @@ class MergeAllPluginsHostBranchTests(unittest.TestCase):
         outer = self
 
         class FakeCfg:
-            def plugin_dirs(self):
+            def plugin_dirs(self, connector=None):
                 return [outer.host_dir]
 
         return FakeCfg()

@@ -34,12 +34,13 @@ from defenseclaw.context import AppContext
 
 def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
              model: str = "openai/gpt-4o", llm_model: str = "",
-             hook_fail_mode: str = "open"):
+             hook_fail_mode: str = "closed"):
     """Build a minimal AppContext that the guardrail commands can drive.
 
-    ``hook_fail_mode`` mirrors the v3 ``guardrail.hook_fail_mode`` field
-    (defaults to "open" so fixtures without explicit fail-mode wiring
-    behave like a fresh, user-friendly install).
+    ``hook_fail_mode`` mirrors the v4 ``guardrail.hook_fail_mode`` field
+    (defaults to "closed" so fixtures without explicit fail-mode wiring
+    behave like a fresh, secure-by-default install — closes ). Tests that need to exercise the legacy fail-open path
+    pass ``hook_fail_mode="open"`` explicitly.
     """
     guardrail_cfg = SimpleNamespace(
         enabled=enabled,
@@ -114,10 +115,70 @@ class StatusCommandTests(unittest.TestCase):
         app = make_ctx(enabled=True, connector="openclaw", hook_fail_mode="closed")
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        # The fail mode is the most-asked-about UX knob now that hooks
-        # default open: status MUST surface it so operators can sanity-
-        # check their posture without grep-ing config.yaml.
-        self.assertIn("fail mode:  closed", result.output)
+        # The fail mode is a key posture knob: status MUST surface it so
+        # operators can sanity-check their posture without grep-ing
+        # config.yaml. It is folded into the (uniform) per-connector
+        # block as ``fail=...``.
+        self.assertIn("fail=closed", result.output)
+
+    def test_status_single_connector_uses_uniform_per_connector_block(self):
+        # A single-connector install renders the SAME per-connector block
+        # layout as a fan-out install: one "connectors:" section with one
+        # tagged block. No singular "connector / mode / fail mode" lines.
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="openclaw")
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("connectors:", result.output)
+        # Uniform per-connector block: "<label> (<name>): <state> mode=... fail=...".
+        self.assertIn("OpenClaw (openclaw): ", result.output)
+        self.assertIn("mode=observe", result.output)
+        # Default fail mode is the safer "closed" (response-layer
+        # failures block); see _normalize_hook_fail_mode / default_config.
+        self.assertIn("fail=closed", result.output)
+        # The retired singular lines (and the "multi-connector"-only
+        # footer hint) must NOT appear — there is exactly one rendering.
+        self.assertNotIn("• connector:", result.output)
+        self.assertNotIn("• mode:", result.output)
+        self.assertNotIn("• fail mode:", result.output)
+        self.assertNotIn("--connector", result.output)
+
+    def test_status_multi_connector_uses_same_layout(self):
+        # The fan-out install lists EVERY active connector with its own
+        # effective mode / fail mode, using the identical layout as the
+        # single-connector case — one block per connector, no count
+        # banner, no "primary" line, no special footer.
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="codex")
+        gc = app.cfg.guardrail
+        gc.effective_mode = lambda name="": {"codex": "action", "claudecode": "observe"}.get(name, "observe")
+        gc.effective_hook_fail_mode = lambda name="": "open"
+        # Forcing active_connectors INSIDE the test method (setUp does not
+        # reliably stick): two active connectors must both be listed.
+        self.app = app  # keep a handle for parity with the harness idiom
+        app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # Both connectors' blocks are present, each tagged by name.
+        self.assertIn("Claude Code (claudecode): ", result.output)
+        self.assertIn("Codex (codex): ", result.output)
+        self.assertIn("mode=action", result.output)
+        self.assertIn("mode=observe", result.output)
+        # No count banner, no singular lines, no per-connector footer hint.
+        self.assertNotIn("2 active", result.output)
+        self.assertNotIn("• connector:", result.output)
+        self.assertNotIn("• mode:", result.output)
+        self.assertNotIn("• fail mode:", result.output)
+        self.assertNotIn("--connector", result.output)
+
+
+class GroupHelpTests(unittest.TestCase):
+    def test_group_help_lists_policy_subcommands_and_connector(self):
+        runner = CliRunner()
+        result = runner.invoke(cmd_guardrail.guardrail, ["--help"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        for token in ("fail-mode", "hilt", "block-message", "--connector"):
+            self.assertIn(token, result.output)
 
 
 class FailModeCommandTests(unittest.TestCase):
@@ -330,15 +391,631 @@ class EnableCommandTests(unittest.TestCase):
         self.assertTrue(app.cfg.guardrail.enabled)
 
 
+def make_multi_ctx(connectors, *, enabled: bool = True):
+    """AppContext whose guardrail is a real GuardrailConfig with a
+    populated connectors map, so ``effective_enabled`` resolves correctly.
+
+    ``connectors`` maps connector name -> enabled state, where ``None``
+    means "present but unset" (inherits the default = enabled).
+    """
+    from defenseclaw import config as dcconfig
+
+    gc = dcconfig.GuardrailConfig()
+    gc.enabled = enabled
+    gc.mode = "observe"
+    gc.connector = ""
+    gc.port = 4000
+    gc.model = "openai/gpt-4o"
+    gc.hook_fail_mode = "open"
+    conns: dict[str, object] = {}
+    for name, on in connectors.items():
+        pc = dcconfig.PerConnectorGuardrailConfig()
+        if on is not None:
+            pc.enabled = on
+        conns[name] = pc
+    gc.connectors = conns
+
+    cfg = SimpleNamespace(
+        guardrail=gc,
+        data_dir="/tmp/dc",
+        gateway=SimpleNamespace(host="127.0.0.1", port=18789),
+        llm=SimpleNamespace(model="", api_key_env=""),
+    )
+    cfg.active_connector = lambda: (sorted(conns)[0] if conns else "openclaw")
+    cfg.active_connectors = lambda: (sorted(conns) if conns else ["openclaw"])
+    cfg.save = MagicMock()
+
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    app.logger.log_action = MagicMock()
+    return app
+
+
+class PerConnectorToggleTests(unittest.TestCase):
+    """`guardrail {enable,disable} --connector X` — scoped per-connector."""
+
+    def test_disable_one_connector_persists_and_restarts_only_it(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with patch(
+            "defenseclaw.commands.cmd_setup._restart_services"
+        ) as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.disable_cmd, ["--connector", "codex", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # Only codex's flag flips; claudecode is untouched.
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+        self.assertTrue(app.cfg.guardrail.effective_enabled("claudecode"))
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_called_once()
+        self.assertEqual(restart_mock.call_args.kwargs.get("connector"), "codex")
+
+    def test_enable_one_connector_flips_back(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(
+                cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
+        app.cfg.save.assert_called_once()
+
+    def test_disable_already_disabled_is_noop(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        result = runner.invoke(
+            cmd_guardrail.disable_cmd, ["--connector", "codex", "--yes"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("already disabled", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_case_insensitive_member_match(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(
+                cmd_guardrail.disable_cmd, ["--connector", "CODEX", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+
+    def test_connector_flag_rejected_on_single_connector_install(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})  # empty connectors map = single-connector
+        result = runner.invoke(
+            cmd_guardrail.disable_cmd, ["--connector", "codex", "--yes"], obj=app
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("only valid on multi-connector", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_unknown_connector_rejected(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        result = runner.invoke(
+            cmd_guardrail.disable_cmd, ["--connector", "windsurf", "--yes"], obj=app
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_disabling_last_enabled_connector_warns(self):
+        runner = CliRunner()
+        # claudecode already off → codex is the only enabled one.
+        app = make_multi_ctx({"codex": None, "claudecode": False})
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(
+                cmd_guardrail.disable_cmd, ["--connector", "codex", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("only enabled connector", result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+
+    def test_no_restart_persists_but_skips_gateway(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with patch(
+            "defenseclaw.commands.cmd_setup._restart_services"
+        ) as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.disable_cmd,
+                ["--connector", "codex", "--yes", "--no-restart"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+        restart_mock.assert_not_called()
+
+    def test_global_disable_unchanged_without_flag(self):
+        # The global kill switch must behave exactly as before when no
+        # --connector is passed: flip guardrail.enabled, leave the
+        # per-connector flags alone.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None}, enabled=True)
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(cmd_guardrail.disable_cmd, ["--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.guardrail.enabled)
+        self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
+
+    def test_global_disable_message_names_every_active_connector(self):
+        # The global kill switch tears down EVERY active connector, so the
+        # upfront message must name them all — not just the primary. Regression
+        # for the single-connector-blind display (it printed only "codex").
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None}, enabled=True)
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(cmd_guardrail.disable_cmd, ["--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Disabling guardrail for", result.output)
+        self.assertIn("Claude Code (claudecode)", result.output)
+        self.assertIn("Codex (codex)", result.output)
+
+    def test_global_enable_message_names_every_active_connector(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None}, enabled=False)
+        app.cfg.guardrail.model = "gpt-4o"
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(cmd_guardrail.enable_cmd, ["--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Enabling guardrail for", result.output)
+        self.assertIn("Claude Code (claudecode)", result.output)
+        self.assertIn("Codex (codex)", result.output)
+
+    def test_status_roster_shows_disabled_state(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # Both connectors get their own block in the uniform roster, each
+        # tagged by name with its own effective enabled state: codex was
+        # turned off (disabled), claudecode inherits the default (enabled).
+        self.assertIn("Codex (codex): ", result.output)
+        self.assertIn("Claude Code (claudecode): ", result.output)
+        self.assertIn("disabled", result.output)
+        self.assertIn("enabled", result.output)
+
+    def test_status_roster_shows_per_connector_rule_pack_and_hilt(self):
+        # Each connector can scan against its OWN rule pack AND HILT policy; the
+        # roster surfaces both. codex gets a custom pack + per-connector HILT;
+        # claudecode inherits the defaults.
+        from defenseclaw import config as dcconfig
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.connectors["codex"].rule_pack_dir = "/packs/strict"
+        app.cfg.guardrail.connectors["codex"].hilt = dcconfig.HILTConfig(
+            enabled=True, min_severity="LOW"
+        )
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("rule-pack=strict", result.output)   # codex's own pack
+        self.assertIn("rule-pack=default", result.output)  # claudecode inherits
+        self.assertIn("hilt=on@LOW", result.output)        # codex's own HILT
+
+    def test_status_global_disable_overrides_per_connector_enabled(self):
+        # Regression: when the GLOBAL guardrail kill switch is off, no
+        # connector may render a green "enabled" line — the gateway tears
+        # every connector down, so the per-connector effective_enabled
+        # (which only tracks individual overrides) must not contradict the
+        # top-level "enabled: no". Both connectors should read as disabled
+        # with an explicit "(guardrail off)" reason.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": True, "claudecode": None}, enabled=False)
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("enabled:    no", result.output)
+        self.assertIn("Codex (codex): ", result.output)
+        self.assertIn("Claude Code (claudecode): ", result.output)
+        # The off-because-global reason is shown and NOT a bare green enabled.
+        self.assertIn("disabled (guardrail off)", result.output)
+        # Sanity: the roster must not render a standalone "enabled" state for
+        # any connector while global is off (it would be misleading).
+        for line in result.output.splitlines():
+            if "(codex):" in line or "(claudecode):" in line:
+                self.assertNotIn(": enabled ", line, msg=line)
+
+
+class PerConnectorFailModeTests(unittest.TestCase):
+    """`guardrail fail-mode [open|closed] --connector X` — scoped override."""
+
+    def test_set_one_connector_closed_persists_and_restarts_only_it(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with patch(
+            "defenseclaw.commands.cmd_setup._restart_services"
+        ) as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd,
+                ["closed", "--connector", "codex", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # Only codex gets the override; claudecode keeps the global default.
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("codex"), "closed")
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "open")
+        # Global default is untouched.
+        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "open")
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_called_once()
+        self.assertEqual(restart_mock.call_args.kwargs.get("connector"), "codex")
+
+    def test_show_per_connector_value_without_mode(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
+        result = runner.invoke(
+            cmd_guardrail.fail_mode_cmd, ["--connector", "codex"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("closed", result.output)
+        self.assertIn("override", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_show_inherited_value_when_no_override(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        result = runner.invoke(
+            cmd_guardrail.fail_mode_cmd, ["--connector", "claudecode"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("inherited", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_connector_flag_rejected_on_single_connector_install(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="codex")
+        result = runner.invoke(
+            cmd_guardrail.fail_mode_cmd,
+            ["closed", "--connector", "codex", "--yes"],
+            obj=app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("multi-connector", result.output)
+
+    def test_unknown_connector_errors(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        result = runner.invoke(
+            cmd_guardrail.fail_mode_cmd,
+            ["closed", "--connector", "nope", "--yes"],
+            obj=app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_global_fail_mode_unchanged_without_flag(self):
+        # Regression: omitting --connector must keep the legacy global path.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "closed")
+
+    def test_bare_show_fans_out_to_all_active_connectors(self):
+        # No value AND no --connector: the bare read MUST show EVERY active
+        # connector's effective fail mode (not just the global/active one),
+        # so a 3-connector install shows all three.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("per connector", result.output)
+        self.assertIn("(codex)", result.output)
+        self.assertIn("(claudecode)", result.output)
+        # codex carries a closed override; claudecode inherits the open global.
+        self.assertIn("closed", result.output)
+        app.cfg.save.assert_not_called()
+
+
+class HILTCommandTests(unittest.TestCase):
+    """`guardrail hilt [on|off] [--min-severity X] [--connector Y]`."""
+
+    def test_show_global_when_no_args(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})  # single-connector / global path
+        app.cfg.guardrail.hilt.enabled = True
+        app.cfg.guardrail.hilt.min_severity = "HIGH"
+        result = runner.invoke(cmd_guardrail.hilt_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("min_severity", result.output)
+        self.assertIn("HIGH", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_bare_show_fans_out_to_all_active_connectors(self):
+        # Bare read on a multi-connector install MUST list each active
+        # connector's effective HILT posture, not just the global default.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.hilt.enabled = True
+        app.cfg.guardrail.hilt.min_severity = "HIGH"
+        result = runner.invoke(cmd_guardrail.hilt_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("per connector", result.output)
+        self.assertIn("(codex)", result.output)
+        self.assertIn("(claudecode)", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_set_global_on_with_min_severity(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})
+        app.cfg.guardrail.hilt.enabled = False
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, patch(
+            "defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"
+        ) as sync_mock:
+            result = runner.invoke(
+                cmd_guardrail.hilt_cmd,
+                ["on", "--min-severity", "MEDIUM", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(app.cfg.guardrail.hilt.enabled)
+        self.assertEqual(app.cfg.guardrail.hilt.min_severity, "MEDIUM")
+        app.cfg.save.assert_called_once()
+        sync_mock.assert_called_once()
+        restart_mock.assert_called_once()
+
+    def test_partial_change_preserves_other_field(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})
+        app.cfg.guardrail.hilt.enabled = True
+        app.cfg.guardrail.hilt.min_severity = "HIGH"
+        with patch("defenseclaw.commands.cmd_setup._restart_services"), patch(
+            "defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"
+        ):
+            result = runner.invoke(
+                cmd_guardrail.hilt_cmd, ["--min-severity", "LOW", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # enabled stays True; only severity changed.
+        self.assertTrue(app.cfg.guardrail.hilt.enabled)
+        self.assertEqual(app.cfg.guardrail.hilt.min_severity, "LOW")
+
+    def test_noop_when_unchanged(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})
+        app.cfg.guardrail.hilt.enabled = True
+        app.cfg.guardrail.hilt.min_severity = "HIGH"
+        result = runner.invoke(
+            cmd_guardrail.hilt_cmd, ["on", "--min-severity", "HIGH", "--yes"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("nothing to do", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_set_one_connector_persists_and_restarts_only_it(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with patch(
+            "defenseclaw.commands.cmd_setup._restart_services"
+        ) as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.hilt_cmd,
+                ["on", "--min-severity", "MEDIUM", "--connector", "codex", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        eff = app.cfg.guardrail.effective_hilt("codex")
+        self.assertTrue(eff.enabled)
+        self.assertEqual(eff.min_severity, "MEDIUM")
+        # claudecode still inherits the (disabled-by-default) global block.
+        self.assertIsNone(app.cfg.guardrail.connectors["claudecode"].hilt)
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_called_once()
+        self.assertEqual(restart_mock.call_args.kwargs.get("connector"), "codex")
+        # No OPA mirror for the per-connector path (data.json is global).
+
+    def test_show_per_connector_override(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        from defenseclaw import config as dcconfig
+
+        app.cfg.guardrail.connectors["codex"].hilt = dcconfig.HILTConfig(
+            enabled=True, min_severity="LOW"
+        )
+        result = runner.invoke(
+            cmd_guardrail.hilt_cmd, ["--connector", "codex"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("override", result.output)
+        self.assertIn("LOW", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_show_inherited_per_connector(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        result = runner.invoke(
+            cmd_guardrail.hilt_cmd, ["--connector", "claudecode"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("inherited", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_connector_flag_rejected_on_single_connector_install(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})
+        result = runner.invoke(
+            cmd_guardrail.hilt_cmd,
+            ["on", "--connector", "codex", "--yes"],
+            obj=app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("multi-connector", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_unknown_connector_errors(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None})
+        result = runner.invoke(
+            cmd_guardrail.hilt_cmd,
+            ["on", "--connector", "nope", "--yes"],
+            obj=app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
+        app.cfg.save.assert_not_called()
+
+
+class BlockMessageCommandTests(unittest.TestCase):
+    """`guardrail block-message [TEXT] [--clear] [--connector X]`."""
+
+    def test_show_global_default_when_empty(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})
+        result = runner.invoke(cmd_guardrail.block_message_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("default", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_bare_show_fans_out_to_all_active_connectors(self):
+        # Bare read on a multi-connector install MUST list each active
+        # connector's effective block message, not just the global one.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.block_message = "global msg"
+        app.cfg.guardrail.connectors["codex"].block_message = "codex msg"
+        result = runner.invoke(cmd_guardrail.block_message_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("per connector", result.output)
+        self.assertIn("(codex)", result.output)
+        self.assertIn("(claudecode)", result.output)
+        # codex shows its override; claudecode inherits the global message.
+        self.assertIn("codex msg", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_set_global_message(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.block_message_cmd,
+                ["Blocked by Acme Security", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.block_message, "Blocked by Acme Security")
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_called_once()
+
+    def test_clear_global_message(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})
+        app.cfg.guardrail.block_message = "old"
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(
+                cmd_guardrail.block_message_cmd, ["--clear", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.block_message, "")
+        app.cfg.save.assert_called_once()
+
+    def test_message_and_clear_are_mutually_exclusive(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})
+        result = runner.invoke(
+            cmd_guardrail.block_message_cmd, ["hi", "--clear", "--yes"], obj=app
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not both", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_set_one_connector_persists_and_restarts_only_it(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with patch(
+            "defenseclaw.commands.cmd_setup._restart_services"
+        ) as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.block_message_cmd,
+                ["Codex blocked", "--connector", "codex", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(
+            app.cfg.guardrail.effective_block_message("codex"), "Codex blocked"
+        )
+        # claudecode keeps the global (empty) message.
+        self.assertEqual(app.cfg.guardrail.connectors["claudecode"].block_message, "")
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_called_once()
+        self.assertEqual(restart_mock.call_args.kwargs.get("connector"), "codex")
+
+    def test_show_per_connector_override(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None})
+        app.cfg.guardrail.connectors["codex"].block_message = "Codex policy"
+        result = runner.invoke(
+            cmd_guardrail.block_message_cmd, ["--connector", "codex"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("override", result.output)
+        self.assertIn("Codex policy", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_clear_one_connector(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None})
+        app.cfg.guardrail.connectors["codex"].block_message = "Codex policy"
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(
+                cmd_guardrail.block_message_cmd,
+                ["--clear", "--connector", "codex", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.connectors["codex"].block_message, "")
+        app.cfg.save.assert_called_once()
+
+    def test_connector_flag_rejected_on_single_connector_install(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})
+        result = runner.invoke(
+            cmd_guardrail.block_message_cmd,
+            ["msg", "--connector", "codex", "--yes"],
+            obj=app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("multi-connector", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_unknown_connector_errors(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None})
+        result = runner.invoke(
+            cmd_guardrail.block_message_cmd,
+            ["msg", "--connector", "nope", "--yes"],
+            obj=app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
+        app.cfg.save.assert_not_called()
+
+
 class CommandRegistrationTests(unittest.TestCase):
     def test_guardrail_group_exposes_subcommands(self):
         names = set(cmd_guardrail.guardrail.commands.keys())
         # status / enable / disable are the day-1 lifecycle controls;
         # fail-mode was added in v3 to let operators flip response-
         # layer fail behavior without re-running the full setup
-        # wizard. Keep this assertion exact so accidental command
-        # removal (e.g. a careless `del`) is caught immediately.
-        self.assertEqual(names, {"enable", "disable", "status", "fail-mode"})
+        # wizard. hilt + block-message expose the remaining
+        # per-connector guardrail policy knobs (HILT approval gate and
+        # the custom block message) without hand-editing config.yaml.
+        # judge gates the hook-lane LLM judge per connector
+        # (guardrail.judge.hook_connectors) — registered from cmd_judge.
+        # Keep this assertion exact so accidental command removal
+        # (e.g. a careless `del`) is caught immediately.
+        self.assertEqual(
+            names,
+            {"enable", "disable", "status", "fail-mode", "hilt", "block-message", "judge"},
+        )
 
 
 if __name__ == "__main__":

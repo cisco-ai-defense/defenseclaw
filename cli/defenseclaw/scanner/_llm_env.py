@@ -25,9 +25,15 @@ env var from the resolved ``LLMConfig.provider_prefix()`` and writes it
 into ``os.environ`` before the scanner boots LiteLLM.
 
 Keeping this mapping in one place avoids the provider drift we saw
-when each scanner maintained its own two-entry dict (mcp.py had only
-openai+anthropic — silently ignored everyone else). The full provider
-list is kept in lockstep with:
+when each scanner maintained its own two-entry dict — historically
+``mcp.py`` had a hard-coded ``{openai, anthropic}`` base-URL table
+and ``skill.py`` had a matching ``llm_provider`` allowlist, both of
+which silently disabled the LLM analyzer for every other provider.
+Those wrapper-side tables have been removed; this single map is now
+the only place a provider needs to be added so the unified
+``DEFENSECLAW_LLM_KEY`` flows into the right LiteLLM env var.
+
+The full provider list is kept in lockstep with:
 
 * ``internal/gateway/bifrost_provider.go`` — Bifrost's routing table
 * ``internal/configs/providers.json``       — OpenClaw fetch interceptor
@@ -63,6 +69,17 @@ _PROVIDER_ENV_VARS: dict[str, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
     "azure": ("AZURE_OPENAI_API_KEY", "AZURE_API_KEY"),
     "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    # ``gemini-openai`` is a Bifrost routing key for Google's
+    # OpenAI-compatible Gemini endpoint. Same Google API key, but the
+    # Python LiteLLM bridge needs a separate entry so the env-var
+    # injector recognizes the prefix without warning spam. Note that
+    # LiteLLM itself doesn't natively understand the
+    # ``gemini-openai/`` model prefix — operators using this provider
+    # for the Python scanners must pin ``llm.base_url`` to the
+    # OpenAI-compatible endpoint and set ``llm.model`` to a bare
+    # ``openai/...`` shape; or stick with ``provider: gemini`` for
+    # the scanners and use ``gemini-openai`` only at the gateway.
+    "gemini-openai": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     "vertex_ai": ("GOOGLE_APPLICATION_CREDENTIALS",),
     # Bedrock has two auth modes. LiteLLM prefers the short-term API
     # bearer token (prefix ``ABSK...``, env var ``AWS_BEARER_TOKEN_BEDROCK``,

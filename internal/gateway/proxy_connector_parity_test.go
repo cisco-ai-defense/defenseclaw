@@ -22,10 +22,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// applyHermeticConnectorHomes redirects the four built-in connector
+// applyHermeticConnectorHomes redirects built-in connector
 // home/path overrides at a tmpdir so a parallel parity test does not
 // race against the developer's real ~/.openclaw, ~/.claude,
-// ~/.codex, ~/.zeptoclaw on disk.
+// ~/.codex, ~/.zeptoclaw, or hook-first connector configs on disk.
 //
 // The package-level *PathOverride globals are not mutex-protected, so
 // every parallel subtest in this file MUST snapshot and restore
@@ -73,6 +73,14 @@ func applyHermeticConnectorHomes(t *testing.T) {
 	prevCodex := connector.CodexConfigPathOverride
 	connector.CodexConfigPathOverride = filepath.Join(tmpHome, ".codex", "config.toml")
 	t.Cleanup(func() { connector.CodexConfigPathOverride = prevCodex })
+
+	prevOpenHands := connector.OpenHandsHooksPathOverride
+	connector.OpenHandsHooksPathOverride = filepath.Join(tmpHome, "workspace", ".openhands", "hooks.json")
+	t.Cleanup(func() { connector.OpenHandsHooksPathOverride = prevOpenHands })
+
+	prevAntigravity := connector.AntigravityHooksPathOverride
+	connector.AntigravityHooksPathOverride = filepath.Join(tmpHome, ".gemini", "config", "hooks.json")
+	t.Cleanup(func() { connector.AntigravityHooksPathOverride = prevAntigravity })
 
 	// Plan A4 / S0.12: ZeptoClaw's Setup refuses to proceed when the
 	// provider list is empty. Seed a single usable provider so the
@@ -188,10 +196,16 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	// under -race.
 	applyHermeticConnectorHomes(t)
 
-	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex"}
+	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"}
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
+			// Copilot's Setup refuses any WorkspaceDir nested inside
+			// DataDir (audit DB / gateway config / secrets must not
+			// be reachable from the workspace tree). Use a sibling
+			// temp dir so every connector in the matrix gets a
+			// hermetic, validation-clean workspace.
+			workspaceDir := t.TempDir()
 			reg := connector.NewDefaultRegistry()
 
 			// Plan E1 / round-3 follow-up: when the gateway binary
@@ -236,9 +250,11 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 				gatewayToken: "tok",
 				masterKey:    "mk",
 				setupOpts: connector.SetupOpts{
-					DataDir:   dir,
-					ProxyAddr: "127.0.0.1:4000",
-					APIAddr:   "127.0.0.1:18970",
+					DataDir:      dir,
+					ProxyAddr:    "127.0.0.1:4000",
+					APIAddr:      "127.0.0.1:18970",
+					APIToken:     "tok",
+					WorkspaceDir: workspaceDir,
 				},
 				health: NewSidecarHealth(),
 			}
@@ -276,9 +292,14 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	// than parallelize them.
 	applyHermeticConnectorHomes(t)
 
-	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode"} {
+	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"} {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
+			// See note in TestSwitchConnector_PerConnectorPersistsState:
+			// keep WorkspaceDir outside DataDir so copilot's Setup
+			// validation (and any future connector with the same
+			// guard) does not roll the switch back to codex.
+			workspaceDir := t.TempDir()
 			reg := connector.NewDefaultRegistry()
 
 			// Same OpenClaw extension probe as
@@ -312,9 +333,11 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 				gatewayToken: "tok",
 				masterKey:    "mk",
 				setupOpts: connector.SetupOpts{
-					DataDir:   dir,
-					ProxyAddr: "127.0.0.1:4000",
-					APIAddr:   "127.0.0.1:18970",
+					DataDir:      dir,
+					ProxyAddr:    "127.0.0.1:4000",
+					APIAddr:      "127.0.0.1:18970",
+					APIToken:     "tok",
+					WorkspaceDir: workspaceDir,
 				},
 				health:    NewSidecarHealth(),
 				inspector: NewGuardrailInspector("local", nil, nil, ""),

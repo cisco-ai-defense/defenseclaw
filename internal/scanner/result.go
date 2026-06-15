@@ -55,6 +55,47 @@ type Finding struct {
 	Category string `json:"category,omitempty"`
 	// LineNumber is 1-based when applicable; nil means unknown / N/A.
 	LineNumber *int `json:"line_number,omitempty"`
+	// Confidence is the detector's self-reported certainty in [0,1].
+	// Populated by regex/judge/AID detectors; 0 (omitted) for binary
+	// match-or-miss scanners.
+	Confidence float64 `json:"confidence,omitempty"`
+
+	// --- Multi-step correlation fields (see internal/guardrail/correlator.go) ---
+
+	// DataAxis labels the finding with one or more of the three lethal-
+	// trifecta axes: ingress_untrusted, sensitive_access, egress_external.
+	// The correlator intersects axes across a session's recent findings
+	// to detect attack flows without hardcoding rule-id lists.
+	DataAxis []string `json:"data_axis,omitempty"`
+
+	// ToolCapabilityClass categorizes the tool call this finding attaches to
+	// (read_fs, write_fs, exec_shell, network_fetch, send_message). Empty
+	// for non-tool-call surfaces. Lets correlator patterns reason about
+	// capability sequences across arbitrary MCP servers.
+	ToolCapabilityClass string `json:"tool_capability_class,omitempty"`
+
+	// ContentFingerprint is sha256(redacted_value)[:8] — a short hash of
+	// the sensitive value so we can match "same value appeared in
+	// sensitive_access AND egress_external" across turns without
+	// persisting the cleartext itself.
+	ContentFingerprint string `json:"content_fingerprint,omitempty"`
+
+	// ExternalEndpoint is the host/URL for any network-touching finding.
+	// Lets patterns distinguish an allowlisted API call from an
+	// attacker-controlled webhook.
+	ExternalEndpoint string `json:"external_endpoint,omitempty"`
+
+	// TurnID is a monotonic counter within a session. Cleaner than
+	// timestamps for sequence-based pattern matching (immune to clock
+	// skew) and makes TUI session replays trivial.
+	TurnID *int `json:"turn_id,omitempty"`
+
+	// DecisionPath is a structured audit trail of why this finding
+	// landed at its current severity — which regex matched, which
+	// judge category fired, whether `sensitive_context` override ran,
+	// whether rubric reconciliation adjusted the verdict. Freeform
+	// JSON; the correlator and the TUI both read it for explanations.
+	DecisionPath json.RawMessage `json:"decision_path,omitempty"`
 }
 
 type ScanResult struct {

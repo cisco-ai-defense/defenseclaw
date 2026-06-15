@@ -127,6 +127,32 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
         self.assertTrue(by_name["marked"]["eligible"])
         self.assertFalse(by_name["empty"]["eligible"])
 
+    def test_description_uses_skill_frontmatter(self):
+        cfg = _make_cfg(self.tmp, "openhands")
+        skill_root = os.path.join(self.tmp, "skills")
+        _seed_skill(
+            skill_root,
+            "frontmatter",
+            body="---\nname: frontmatter\ndescription: Frontmatter description\n---\n\n# Fallback\n",
+        )
+
+        with self._patch_skill_dirs([skill_root]):
+            rows = skill_list.list_skills(cfg)
+
+        self.assertEqual(rows[0]["description"], "Frontmatter description")
+
+    def test_openhands_installed_container_is_not_a_skill(self):
+        cfg = _make_cfg(self.tmp, "openhands")
+        openhands_skills = os.path.join(self.tmp, ".openhands", "skills")
+        installed = os.path.join(openhands_skills, "installed")
+        os.makedirs(installed, exist_ok=True)
+        _seed_skill(installed, "real-installed")
+
+        with self._patch_skill_dirs([openhands_skills, installed]):
+            rows = skill_list.list_skills(cfg)
+
+        self.assertEqual([r["name"] for r in rows], ["real-installed"])
+
     def test_dedup_across_skill_dirs(self):
         cfg = _make_cfg(self.tmp, "codex")
         a = os.path.join(self.tmp, "a")
@@ -236,6 +262,47 @@ class TestListSkillsForOpenClaw(unittest.TestCase):
         # crash and we must NOT fall back to the filesystem (the CLI
         # returned a successful response).
         self.assertEqual(rows, [])
+
+
+class TestListSkillsConnectorOverride(unittest.TestCase):
+    """WU13: ``list_skills(cfg, connector=...)`` walks the requested
+    connector's directories instead of the active one, so the TUI focus
+    selector (``skill list --connector <name>``) shows the right catalog."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="dc-skill-list-override-")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_override_walks_requested_connector_dirs(self):
+        cfg = _make_cfg(self.tmp, "codex")  # active connector = codex
+        # Arbitrary dir names (skill_dirs is patched below); avoid real
+        # dotted connector layouts so the sandbox doesn't block creation.
+        codex_root = os.path.join(self.tmp, "codex_skills")
+        cursor_root = os.path.join(self.tmp, "cursor_skills")
+        os.makedirs(codex_root, exist_ok=True)
+        os.makedirs(cursor_root, exist_ok=True)
+        _seed_skill(codex_root, "codex-skill")
+        _seed_skill(cursor_root, "cursor-skill")
+
+        dirs_by_connector = {"codex": [codex_root], "cursor": [cursor_root]}
+
+        def fake_skill_dirs(self_cfg, connector=None):
+            return dirs_by_connector.get(connector or "codex", [codex_root])
+
+        with patch(
+            "defenseclaw.config.Config.skill_dirs",
+            autospec=True,
+            side_effect=fake_skill_dirs,
+        ):
+            # No override → active connector (codex).
+            default_rows = skill_list.list_skills(cfg)
+            # Override → cursor's directories.
+            override_rows = skill_list.list_skills(cfg, connector="cursor")
+
+        self.assertEqual([r["name"] for r in default_rows], ["codex-skill"])
+        self.assertEqual([r["name"] for r in override_rows], ["cursor-skill"])
 
 
 if __name__ == "__main__":

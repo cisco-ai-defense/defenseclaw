@@ -170,12 +170,16 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
 	}
 
+	evalCtx := a.emitInspectVerdictFindings(r.Context(), "inspect-http",
+		"/api/v1/inspect/request", "prompt", verdict, elapsed, "emit_inspect_request")
+
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("severity=%s elapsed=%s mode=%s would_block=%v raw_action=%s model=%s",
 		verdict.Severity, elapsed, verdict.Mode, verdict.WouldBlock, verdict.RawAction, req.Model)
 	if requestID != "" {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
+	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
 	_ = a.logger.LogActionCtx(r.Context(), auditAction, "pre-request", auditDetails)
 
 	reveal := wantsReveal(r)
@@ -236,12 +240,16 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
 	}
 
+	evalCtx := a.emitInspectVerdictFindings(r.Context(), "inspect-http",
+		"/api/v1/inspect/response", "completion", verdict, elapsed, "emit_inspect_response")
+
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("severity=%s elapsed=%s mode=%s would_block=%v raw_action=%s model=%s",
 		verdict.Severity, elapsed, verdict.Mode, verdict.WouldBlock, verdict.RawAction, req.Model)
 	if requestID != "" {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
+	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
 	_ = a.logger.LogActionCtx(r.Context(), auditAction, "post-response", auditDetails)
 
 	reveal := wantsReveal(r)
@@ -303,12 +311,17 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
 	}
 
+	evalCtx := a.emitInspectVerdictFindings(r.Context(), "inspect-http",
+		"/api/v1/inspect/tool-response:"+req.Tool, "tool_response", verdict, elapsed,
+		"emit_inspect_tool_response")
+
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("tool=%s severity=%s elapsed=%s mode=%s would_block=%v raw_action=%s exit_code=%d",
 		req.Tool, verdict.Severity, elapsed, verdict.Mode, verdict.WouldBlock, verdict.RawAction, req.ExitCode)
 	if requestID != "" {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
+	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
 	_ = a.logger.LogActionCtx(r.Context(), auditAction, req.Tool, auditDetails)
 
 	reveal := wantsReveal(r)

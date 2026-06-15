@@ -27,12 +27,16 @@ from unittest.mock import patch
 from defenseclaw.migrations import (
     _LEGACY_FLAT_REGO_FILENAMES,
     MigrationContext,
+    _atomic_write_text,
     _migrate_0_3_0,
-    _migrate_0_3_0_from_pristine,
     _migrate_0_3_0_surgical,
     _migrate_0_4_0,
+    _migrate_0_4_0_normalize_claw_mode,
     _migrate_0_5_0,
+    _migrate_0_5_0_strip_codex_enforcement_keys,
+    _migrate_0_8_0,
     _parse_dotenv,
+    _read_active_connector_from_yaml,
     run_migrations,
 )
 
@@ -56,92 +60,121 @@ def _ctx(openclaw_home: str, data_dir: str | None = None) -> MigrationContext:
     )
 
 
-class TestMigrate030FromPristine(unittest.TestCase):
-    """Tests for the pristine-backup restore path."""
+class TestMigrate030PreservesOperatorChanges(unittest.TestCase):
+    """S3.HIGH_BUG ("Migration can overwrite live OpenClaw config
+    with a stale pristine snapshot"): the 0.3.0 migration MUST NOT replace
+    the live config with a pristine snapshot. Operator-added providers,
+    plugin entries, and model/workspace settings made AFTER the pristine
+    snapshot must survive the upgrade.
+    """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dclaw-mig-")
         self.oc_json = os.path.join(self.tmp, "openclaw.json")
-        self.pristine = os.path.join(self.tmp, "openclaw.json.pristine")
+        self.data_dir = os.path.join(self.tmp, "data")
+        os.makedirs(self.data_dir, exist_ok=True)
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
-    def test_restores_from_pristine_and_registers_plugin(self):
-        pristine_cfg = {
-            "models": {"providers": {"openai": {"key": "sk-test"}}},
-            "agents": {"defaults": {"model": {"primary": "claude-sonnet-4-20250514"}}},
-        }
-        _write_json(self.pristine, pristine_cfg)
+    def test_pristine_branch_is_never_used(self):
+        """Even when a pristine backup exists, the migration must not call
+        into a pristine-restore path. The dispatcher only calls the
+        surgical path now."""
+        # The pristine helper itself is gone. Keep this test as a guardrail
+        # against regressions that re-introduce the dangerous branch.
+        from defenseclaw import migrations
+        self.assertFalse(
+            hasattr(migrations, "_migrate_0_3_0_from_pristine"),
+            "_migrate_0_3_0_from_pristine must remain removed ()",
+        )
 
-        current_cfg = {
+    def test_operator_added_provider_is_preserved(self):
+        """An operator-added provider (e.g. 'azure-openai') made AFTER the
+        pristine snapshot was taken must survive the upgrade. The previous
+        pristine-restore branch silently dropped it; the surgical branch
+        keeps it."""
+        cfg = {
             "models": {
                 "providers": {
                     "openai": {"key": "sk-test"},
+                    "azure-openai": {"endpoint": "https://op-only.azure.example"},
                     "defenseclaw": {"url": "http://localhost:8080"},
                     "litellm": {"url": "http://localhost:8081"},
                 }
             },
-            "agents": {"defaults": {"model": {"primary": "defenseclaw/claude-sonnet-4-20250514"}}},
+            "agents": {
+                "defaults": {
+                    "model": {"primary": "defenseclaw/claude-sonnet-4-20250514"}
+                }
+            },
         }
-        _write_json(self.oc_json, current_cfg)
+        _write_json(self.oc_json, cfg)
 
-        _migrate_0_3_0_from_pristine(self.oc_json, self.pristine)
+        _migrate_0_3_0(_ctx(self.tmp, self.data_dir))
 
         result = _read_json(self.oc_json)
-        self.assertNotIn("defenseclaw", result.get("models", {}).get("providers", {}))
-        self.assertNotIn("litellm", result.get("models", {}).get("providers", {}))
+        providers = result["models"]["providers"]
+        # Legacy DefenseClaw entries removed.
+        self.assertNotIn("defenseclaw", providers)
+        self.assertNotIn("litellm", providers)
+        # Operator-added providers preserved.
+        self.assertIn("openai", providers)
+        self.assertIn("azure-openai", providers)
         self.assertEqual(
-            result["agents"]["defaults"]["model"]["primary"], "claude-sonnet-4-20250514"
+            providers["azure-openai"]["endpoint"], "https://op-only.azure.example"
         )
+        # Model primary unprefixed.
+        self.assertEqual(
+            result["agents"]["defaults"]["model"]["primary"],
+            "claude-sonnet-4-20250514",
+        )
+
+    def test_operator_added_plugin_entry_is_preserved(self):
+        """Plugins the operator added (other than DefenseClaw) must remain
+        registered after the upgrade."""
+        cfg = {
+            "plugins": {
+                "allow": ["my-custom-plugin"],
+                "entries": {
+                    "my-custom-plugin": {
+                        "enabled": True,
+                        "config": {"important": "value"},
+                    }
+                },
+                "load": {"paths": ["/opt/my-plugins"]},
+            },
+            "models": {"providers": {"defenseclaw": {"url": "x"}}},
+        }
+        _write_json(self.oc_json, cfg)
+
+        _migrate_0_3_0(_ctx(self.tmp, self.data_dir))
+
+        result = _read_json(self.oc_json)
+        # Operator's plugin still there.
+        self.assertIn("my-custom-plugin", result["plugins"]["allow"])
+        self.assertEqual(
+            result["plugins"]["entries"]["my-custom-plugin"]["config"]["important"],
+            "value",
+        )
+        self.assertIn("/opt/my-plugins", result["plugins"]["load"]["paths"])
+        # DefenseClaw plugin re-registered alongside it.
         self.assertIn("defenseclaw", result["plugins"]["allow"])
-        self.assertEqual(result["plugins"]["entries"]["defenseclaw"]["enabled"], True)
+        self.assertTrue(result["plugins"]["entries"]["defenseclaw"]["enabled"])
         install_path = os.path.join(self.tmp, "extensions", "defenseclaw")
         self.assertIn(install_path, result["plugins"]["load"]["paths"])
 
-    def test_creates_pre_migration_backup(self):
-        _write_json(self.pristine, {"plugins": {}})
-        _write_json(self.oc_json, {"old": True})
+    def test_creates_pre_migration_backup_when_changes_applied(self):
+        cfg = {"models": {"providers": {"defenseclaw": {"url": "x"}}}}
+        _write_json(self.oc_json, cfg)
 
-        _migrate_0_3_0_from_pristine(self.oc_json, self.pristine)
+        _migrate_0_3_0(_ctx(self.tmp, self.data_dir))
 
         backup = self.oc_json + ".pre-0.3.0-migration"
         self.assertTrue(os.path.isfile(backup))
-        self.assertEqual(_read_json(backup), {"old": True})
-
-    def test_preserves_existing_plugin_entries(self):
-        pristine_cfg = {
-            "plugins": {
-                "allow": ["other-plugin"],
-                "entries": {"other-plugin": {"enabled": True}},
-                "load": {"paths": ["/some/path"]},
-            }
-        }
-        _write_json(self.pristine, pristine_cfg)
-        _write_json(self.oc_json, {})
-
-        _migrate_0_3_0_from_pristine(self.oc_json, self.pristine)
-
-        result = _read_json(self.oc_json)
-        self.assertIn("other-plugin", result["plugins"]["allow"])
-        self.assertIn("defenseclaw", result["plugins"]["allow"])
-        self.assertIn("other-plugin", result["plugins"]["entries"])
-
-    def test_falls_back_to_surgical_on_corrupted_pristine(self):
-        with open(self.pristine, "w") as f:
-            f.write("not valid json{{{")
-
-        current_cfg = {
-            "models": {
-                "providers": {"defenseclaw": {"url": "http://localhost:8080"}}
-            },
-        }
-        _write_json(self.oc_json, current_cfg)
-
-        _migrate_0_3_0_from_pristine(self.oc_json, self.pristine)
-
-        result = _read_json(self.oc_json)
-        self.assertNotIn("defenseclaw", result.get("models", {}).get("providers", {}))
+        self.assertIn(
+            "defenseclaw", _read_json(backup)["models"]["providers"]
+        )
 
 
 class TestMigrate030Surgical(unittest.TestCase):
@@ -198,10 +231,20 @@ class TestMigrate030Surgical(unittest.TestCase):
         result = _read_json(self.oc_json)
         self.assertEqual(result["agents"]["defaults"]["model"]["primary"], "gpt-4o")
 
-    def test_noop_when_no_legacy_entries(self):
+    def test_noop_when_no_legacy_entries_and_plugin_registered(self):
+        # The surgical path now also re-registers the DefenseClaw plugin
+        # (work that previously lived in the deleted pristine-restore
+        # branch). A config that already has the plugin registered and no
+        # legacy provider entries is a true no-op.
+        install_path = os.path.join(self.tmp, "extensions", "defenseclaw")
         cfg = {
             "models": {"providers": {"openai": {"key": "sk-test"}}},
             "agents": {"defaults": {"model": {"primary": "claude-sonnet-4-20250514"}}},
+            "plugins": {
+                "allow": ["defenseclaw"],
+                "entries": {"defenseclaw": {"enabled": True}},
+                "load": {"paths": [install_path]},
+            },
         }
         _write_json(self.oc_json, cfg)
         mtime_before = os.path.getmtime(self.oc_json)
@@ -236,21 +279,12 @@ class TestMigrate030Dispatch(unittest.TestCase):
     def test_noop_when_no_openclaw_json(self):
         _migrate_0_3_0(_ctx(self.oc_home, self.data_dir))
 
-    @patch("defenseclaw.guardrail.pristine_backup_path")
-    @patch("defenseclaw.migrations._migrate_0_3_0_from_pristine")
-    def test_uses_pristine_when_available(self, mock_from_pristine, mock_pristine_path):
-        _write_json(self.oc_json, {})
-        mock_pristine_path.return_value = "/some/pristine/backup"
-
-        _migrate_0_3_0(_ctx(self.oc_home, self.data_dir))
-
-        mock_from_pristine.assert_called_once_with(self.oc_json, "/some/pristine/backup")
-
-    @patch("defenseclaw.guardrail.pristine_backup_path")
     @patch("defenseclaw.migrations._migrate_0_3_0_surgical")
-    def test_falls_back_to_surgical_when_no_pristine(self, mock_surgical, mock_pristine_path):
+    def test_always_uses_surgical_path(self, mock_surgical):
+        """S3.HIGH_BUG: the pristine-restore branch is gone.
+        Even if a pristine backup file exists, the migration MUST take
+        the surgical path so operator changes are preserved."""
         _write_json(self.oc_json, {})
-        mock_pristine_path.return_value = None
 
         _migrate_0_3_0(_ctx(self.oc_home, self.data_dir))
 
@@ -707,6 +741,47 @@ class TestMigrate040ClawModeNormalize(unittest.TestCase):
         self.assertIn("mode: openclaw  # legacy enum, retired in 0.4.0", text)
         self.assertNotIn("nemoclaw", text)
 
+    def test_rewrites_crlf_config_preserving_line_endings(self):
+        """A CRLF config (Windows operator, or one copied from a Windows
+        host) must be normalized in place — not silently flattened to
+        LF, which would churn the operator's VCS diff and diverge from
+        the other surgical rewriters that already preserve CRLF."""
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        with open(cfg_path, "w", newline="") as f:
+            f.write(
+                "claw:\r\n"
+                "  mode: nemoclaw  # legacy enum\r\n"
+                "  home_dir: ~/.openclaw\r\n"
+            )
+
+        ctx = _ctx(self.tmp, self.data_dir)
+        _migrate_0_4_0_normalize_claw_mode(ctx)
+
+        with open(cfg_path, newline="") as f:
+            text = f.read()
+        # Value flipped, inline comment + CRLF terminator preserved.
+        self.assertIn("  mode: openclaw  # legacy enum\r\n", text)
+        self.assertNotIn("nemoclaw", text)
+        # No mixed endings: every LF is part of a CRLF pair.
+        self.assertEqual(text.count("\n"), text.count("\r\n"))
+        self.assertIn("  home_dir: ~/.openclaw\r\n", text)
+
+    def test_rewrites_when_final_line_lacks_trailing_newline(self):
+        """A hand-edited config whose final line is the legacy mode
+        value with no trailing newline must still be rewritten — the
+        block matcher captures a terminator-less last line."""
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        with open(cfg_path, "w", newline="") as f:
+            f.write("claw:\n  mode: nemoclaw")  # deliberately no EOL
+
+        ctx = _ctx(self.tmp, self.data_dir)
+        _migrate_0_4_0_normalize_claw_mode(ctx)
+
+        with open(cfg_path, newline="") as f:
+            text = f.read()
+        self.assertEqual(text, "claw:\n  mode: openclaw")
+        self.assertNotIn("nemoclaw", text)
+
 
 class TestMigrate040SeedActiveConnector(unittest.TestCase):
     def setUp(self):
@@ -756,6 +831,73 @@ class TestMigrate040SeedActiveConnector(unittest.TestCase):
             state = json.load(f)
         self.assertEqual(state["name"], "claudecode")
 
+    def test_large_guardrail_block_without_connector_is_not_redos(self):
+        """A real-world ``guardrail:`` block carries many nested keys and
+        no ``connector:``. The connector probe must stay linear: the old
+        ``^guardrail:...(?:[ \\t]+[^\\n]*\\n)*?connector:`` pattern
+        backtracked catastrophically (multi-second 100% CPU) on such a
+        block, hanging the v3 active-connector seed during upgrade.
+
+        We assert (a) the value still falls back to ``claw.mode`` and
+        (b) the lookup completes well inside a generous budget so a
+        future ReDoS regression trips this test instead of a stuck CLI.
+        """
+        import time
+
+        body_lines = "".join(
+            f"  key_{i}: value-{i}-with-some-trailing-text\n" for i in range(40)
+        )
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        with open(cfg_path, "w") as f:
+            f.write(
+                "claw:\n  mode: openclaw\n"
+                "guardrail:\n  enabled: true\n  mode: action\n" + body_lines
+            )
+
+        start = time.perf_counter()
+        name = _read_active_connector_from_yaml(cfg_path)
+        elapsed = time.perf_counter() - start
+
+        self.assertEqual(name, "openclaw")
+        self.assertLess(
+            elapsed,
+            1.0,
+            msg=f"connector probe took {elapsed:.2f}s — possible ReDoS regression",
+        )
+
+    def test_seeds_active_connector_for_real_world_shaped_config(self):
+        """End-to-end: the 0.4.0 seed must complete (not hang) on a
+        config whose guardrail block has many keys but no connector."""
+        body_lines = "".join(f"  k{i}: v{i}\n" for i in range(40))
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        with open(cfg_path, "w") as f:
+            f.write(
+                "claw:\n  mode: openclaw\n"
+                "guardrail:\n  enabled: true\n" + body_lines
+            )
+
+        ctx = _ctx(self.tmp, self.data_dir)
+        _migrate_0_4_0(ctx)
+
+        state_path = os.path.join(self.data_dir, "active_connector.json")
+        with open(state_path) as f:
+            state = json.load(f)
+        self.assertEqual(state["name"], "openclaw")
+
+    def test_explicit_connector_after_blank_line_in_block(self):
+        """``_find_top_level_block`` captures blank lines inside a block,
+        so a ``connector:`` separated from the header by a blank line is
+        still resolved (the old indented-line-only scan stopped at the
+        blank line)."""
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        with open(cfg_path, "w") as f:
+            f.write(
+                "claw:\n  mode: openclaw\n"
+                "guardrail:\n  enabled: true\n\n  connector: codex\n"
+            )
+
+        self.assertEqual(_read_active_connector_from_yaml(cfg_path), "codex")
+
 
 class TestMigrate040NoTouchOnEmptyDataDir(unittest.TestCase):
     def test_short_circuits_when_data_dir_missing(self):
@@ -775,12 +917,17 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
     """Migration 0.4.0 surfaces ``guardrail.hook_fail_mode`` in
     pre-existing config.yaml so operators discover the new knob.
 
-    The runtime default is "open" (matches the Go-side
-    EffectiveHookFailMode + viper default) and so is the seeded
-    value. The migration MUST NOT overwrite an explicit operator
-    choice — including a "closed" choice we'd ourselves recommend
-    against — because operators have explicit override authority over
-    a no-touch upgrade migration.
+    Backwards-compat contract (closes ): pre-v3 installs
+    had no concept of a hook fail mode and shipped fail-OPEN
+    response-layer behavior at the gateway. The new v4 default is
+    fail-CLOSED, but flipping behavior under existing operators on
+    upgrade would be a noisy regression. So the seed migration writes
+    ``hook_fail_mode: open`` to ANY pre-existing config.yaml — pinning
+    legacy behavior for upgraders while letting NEW installs (which
+    skip this migration entirely) get the safer default. The migration
+    MUST NOT overwrite an explicit operator choice — including a
+    "closed" choice we'd ourselves recommend — because operators have
+    explicit override authority over a no-touch upgrade migration.
     """
 
     def setUp(self):
@@ -807,6 +954,30 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
 
+        data = self._read_yaml()
+        self.assertEqual(data["guardrail"]["hook_fail_mode"], "open")
+        self.assertTrue(any("hook_fail_mode" in c for c in ctx.changes))
+
+    def test_seeds_open_in_crlf_config(self):
+        """A CRLF-terminated config.yaml (Windows operator) must still get
+        the seed, and the inserted line must use CRLF so the file does not
+        end up with mixed line endings."""
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        # newline="" keeps our explicit \r\n bytes verbatim on write.
+        with open(cfg_path, "w", newline="") as f:
+            f.write(
+                "claw:\r\n  mode: openclaw\r\n"
+                "guardrail:\r\n  enabled: true\r\n  mode: observe\r\n"
+            )
+
+        ctx = _ctx(self.tmp, self.data_dir)
+        _migrate_0_4_0(ctx)
+
+        with open(cfg_path, newline="") as f:
+            raw = f.read()
+        self.assertIn("  hook_fail_mode: open\r\n", raw)
+        # No mixed endings: every LF in the file is part of a CRLF pair.
+        self.assertEqual(raw.count("\n"), raw.count("\r\n"))
         data = self._read_yaml()
         self.assertEqual(data["guardrail"]["hook_fail_mode"], "open")
         self.assertTrue(any("hook_fail_mode" in c for c in ctx.changes))
@@ -953,27 +1124,35 @@ class TestGuardrailConfigHookFailModeRoundTrip(unittest.TestCase):
     silently change the agent's policy posture.
     """
 
-    def test_loader_normalizes_typos_to_open(self):
+    def test_loader_normalizes_typos_to_closed(self):
+        # The secure default is "closed": a typo or any non-canonical
+        # value collapses to "closed" so a misconfigured config.yaml
+        # never silently puts the agent into fail-OPEN mode at the
+        # response-layer boundary. The "open" sentinel still
+        # round-trips because it is the documented opt-in.
         from defenseclaw.config import _merge_guardrail
         gc = _merge_guardrail({"hook_fail_mode": "OpEn"}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "open")
 
         gc = _merge_guardrail({"hook_fail_mode": "klosed"}, "/tmp")
-        # Anything other than the canonical "closed" sentinel falls
-        # back to "open" — silently fail-open is strictly safer than
-        # silently fail-closed. Mirrors normalizeHookFailMode in
+        # Anything other than the canonical "open" sentinel falls
+        # back to "closed" — silently fail-closed is strictly safer
+        # than silently fail-open. Mirrors normalizeHookFailMode in
         # internal/gateway/connector/subprocess.go.
-        self.assertEqual(gc.hook_fail_mode, "open")
+        self.assertEqual(gc.hook_fail_mode, "closed")
 
     def test_loader_accepts_explicit_closed(self):
         from defenseclaw.config import _merge_guardrail
         gc = _merge_guardrail({"hook_fail_mode": "closed"}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "closed")
 
-    def test_default_is_open_when_missing(self):
+    def test_default_is_closed_when_missing(self):
+        # Fresh install: no ``hook_fail_mode`` key in YAML at all.
+        # New v4 default is the safer "closed". Existing v3 installs
+        # are pinned to "open" by _migrate_0_4_0_seed_hook_fail_mode.
         from defenseclaw.config import _merge_guardrail
         gc = _merge_guardrail({"enabled": True}, "/tmp")
-        self.assertEqual(gc.hook_fail_mode, "open")
+        self.assertEqual(gc.hook_fail_mode, "closed")
 
 
 class TestMigrate050PurgeLegacyFlatPolicyBundle(unittest.TestCase):
@@ -1253,6 +1432,330 @@ class TestRunMigrations050(unittest.TestCase):
 
             # Stale file remains because 0.5.0 wasn't in range.
             self.assertTrue(os.path.isfile(stale))
+
+
+class TestMigrate050StripCodexEnforcementKeys(unittest.TestCase):
+    """0.5.0 deletes the retired ``guardrail.*_enforcement_enabled``
+    keys from config.yaml. This step had no dedicated unit coverage
+    before the surgical config rewriters were unified onto the shared
+    CRLF/EOF-aware block matcher — these tests lock in the contract
+    (sibling preservation, comment handling, CRLF, terminator-less
+    last line, idempotency)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dclaw-mig-050-strip-")
+        self.data_dir = os.path.join(self.tmp, "data")
+        os.makedirs(self.data_dir, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _ctx(self) -> MigrationContext:
+        return MigrationContext(openclaw_home=self.tmp, data_dir=self.data_dir)
+
+    def _write(self, body: str) -> None:
+        # newline="" keeps explicit \r\n bytes verbatim on write.
+        with open(os.path.join(self.data_dir, "config.yaml"), "w", newline="") as f:
+            f.write(body)
+
+    def _read(self) -> str:
+        with open(os.path.join(self.data_dir, "config.yaml"), newline="") as f:
+            return f.read()
+
+    def test_strips_both_keys_preserving_siblings(self):
+        self._write(
+            "guardrail:\n"
+            "  enabled: true\n"
+            "  codex_enforcement_enabled: true\n"
+            "  mode: action\n"
+            "  claudecode_enforcement_enabled: false\n"
+            "  block_message: hi\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        after = self._read()
+        self.assertNotIn("codex_enforcement_enabled", after)
+        self.assertNotIn("claudecode_enforcement_enabled", after)
+        # Unrelated keys survive, ordering intact.
+        self.assertIn("  enabled: true\n", after)
+        self.assertIn("  mode: action\n", after)
+        self.assertIn("  block_message: hi\n", after)
+        self.assertLess(after.index("mode: action"), after.index("block_message"))
+        joined = "\n".join(ctx.changes)
+        self.assertIn("codex_enforcement_enabled", joined)
+        self.assertIn("claudecode_enforcement_enabled", joined)
+
+    def test_idempotent_when_keys_absent(self):
+        original = "guardrail:\n  enabled: true\n  mode: action\n"
+        self._write(original)
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        self.assertEqual(self._read(), original)
+        self.assertEqual(ctx.changes, [])
+
+    def test_strips_key_with_inline_comment(self):
+        self._write(
+            "guardrail:\n"
+            "  codex_enforcement_enabled: true  # legacy knob, retired 0.5.0\n"
+            "  mode: action\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        after = self._read()
+        self.assertNotIn("codex_enforcement_enabled", after)
+        self.assertNotIn("legacy knob", after)
+        self.assertIn("  mode: action\n", after)
+
+    def test_preserves_crlf_line_endings(self):
+        """The deleted line must take its CRLF terminator with it — no
+        orphaned ``\\r`` and no flatten of the surviving lines."""
+        self._write(
+            "guardrail:\r\n"
+            "  enabled: true\r\n"
+            "  codex_enforcement_enabled: true\r\n"
+            "  mode: action\r\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        after = self._read()
+        self.assertNotIn("codex_enforcement_enabled", after)
+        # No orphaned \r left where the line was deleted.
+        self.assertNotIn("\r\r", after)
+        # No mixed endings: every LF is part of a CRLF pair.
+        self.assertEqual(after.count("\n"), after.count("\r\n"))
+        self.assertIn("  enabled: true\r\n", after)
+        self.assertIn("  mode: action\r\n", after)
+
+    def test_strips_key_on_final_line_without_trailing_newline(self):
+        self._write(
+            "guardrail:\n"
+            "  mode: action\n"
+            "  codex_enforcement_enabled: true"  # deliberately no EOL
+        )
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        after = self._read()
+        self.assertEqual(after, "guardrail:\n  mode: action\n")
+        self.assertNotIn("codex_enforcement_enabled", after)
+
+    def test_no_op_when_no_guardrail_block(self):
+        original = "claw:\n  mode: openclaw\n"
+        self._write(original)
+
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+
+        self.assertEqual(self._read(), original)
+        self.assertEqual(ctx.changes, [])
+
+    def test_no_op_when_config_missing(self):
+        ctx = self._ctx()
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)  # no config.yaml
+        self.assertEqual(ctx.changes, [])
+
+
+class TestMigrate080Compatibility(unittest.TestCase):
+    """0.8.0 preserves 0.7.x runtime behavior while new installs get safer
+    defaults."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dclaw-mig-080-")
+        self.data_dir = os.path.join(self.tmp, "data")
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.cfg_path = os.path.join(self.data_dir, "config.yaml")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _ctx(self) -> MigrationContext:
+        return MigrationContext(openclaw_home=self.tmp, data_dir=self.data_dir)
+
+    def _write(self, body: str) -> None:
+        with open(self.cfg_path, "w", newline="") as f:
+            f.write(body)
+
+    def _read(self) -> str:
+        with open(self.cfg_path, newline="") as f:
+            return f.read()
+
+    def test_pins_hook_fail_mode_and_legacy_sink_tls_opt_outs(self):
+        self._write(
+            "guardrail:\n"
+            "  enabled: true\n"
+            "  mode: action\n"
+            "audit_sinks:\n"
+            "  - name: local-splunk\n"
+            "    kind: splunk_hec\n"
+            "    splunk_hec:\n"
+            "      endpoint: https://splunk.local/services/collector/event\n"
+            "      verify_tls: false  # self-signed lab HEC\n"
+            "  - name: webhook\n"
+            "    kind: http_jsonl\n"
+            "    http_jsonl:\n"
+            "      url: https://hooks.local/events\n"
+            "      verify_tls: \"false\"\n"
+            "  - name: prod-splunk\n"
+            "    kind: splunk_hec\n"
+            "    splunk_hec:\n"
+            "      endpoint: https://splunk.example/services/collector/event\n"
+            "      verify_tls: true\n"
+            "  - name: explicit-new-flag\n"
+            "    kind: http_jsonl\n"
+            "    http_jsonl:\n"
+            "      url: https://hooks.example/events\n"
+            "      verify_tls: false\n"
+            "      insecure_skip_verify: false\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_8_0(ctx)
+
+        after = self._read()
+        self.assertIn("  hook_fail_mode: open\n", after)
+        self.assertIn(
+            "      verify_tls: false  # self-signed lab HEC\n"
+            "      insecure_skip_verify: true\n",
+            after,
+        )
+        self.assertIn(
+            "      verify_tls: \"false\"\n"
+            "      insecure_skip_verify: true\n",
+            after,
+        )
+        self.assertIn(
+            "      verify_tls: true\n"
+            "  - name: explicit-new-flag\n",
+            after,
+        )
+        self.assertIn(
+            "      verify_tls: false\n"
+            "      insecure_skip_verify: false\n",
+            after,
+        )
+        self.assertEqual(after.count("insecure_skip_verify: true"), 2)
+        joined = "\n".join(ctx.changes)
+        self.assertIn("hook_fail_mode", joined)
+        self.assertIn("verify_tls=false", joined)
+
+        # Idempotent: a second pass makes no byte changes.
+        ctx2 = self._ctx()
+        _migrate_0_8_0(ctx2)
+        self.assertEqual(self._read(), after)
+        self.assertFalse(any("verify_tls=false" in c for c in ctx2.changes))
+
+    def test_preserves_crlf_line_endings_for_sink_tls_insert(self):
+        self._write(
+            "guardrail:\r\n"
+            "  hook_fail_mode: open\r\n"
+            "audit_sinks:\r\n"
+            "  - name: local-splunk\r\n"
+            "    kind: splunk_hec\r\n"
+            "    splunk_hec:\r\n"
+            "      verify_tls: false\r\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_8_0(ctx)
+
+        after = self._read()
+        self.assertIn("      insecure_skip_verify: true\r\n", after)
+        self.assertEqual(after.count("\n"), after.count("\r\n"))
+
+    def test_handles_pyyaml_top_level_sequence_style(self):
+        self._write(
+            "guardrail:\n"
+            "  hook_fail_mode: open\n"
+            "audit_sinks:\n"
+            "- name: local-splunk\n"
+            "  kind: splunk_hec\n"
+            "  splunk_hec:\n"
+            "    verify_tls: false\n"
+        )
+
+        ctx = self._ctx()
+        _migrate_0_8_0(ctx)
+
+        after = self._read()
+        self.assertIn(
+            "    verify_tls: false\n"
+            "    insecure_skip_verify: true\n",
+            after,
+        )
+        self.assertTrue(any("verify_tls=false" in c for c in ctx.changes))
+
+    def test_run_migrations_applies_080_after_072_bootstrap(self):
+        self._write(
+            "guardrail:\n"
+            "  enabled: true\n"
+            "audit_sinks:\n"
+            "  - name: webhook\n"
+            "    kind: http_jsonl\n"
+            "    http_jsonl:\n"
+            "      url: https://hooks.local/events\n"
+            "      verify_tls: false\n"
+        )
+
+        count = run_migrations("0.7.2", "0.8.0", self.tmp, self.data_dir)
+
+        self.assertEqual(count, 1)
+        after = self._read()
+        self.assertIn("  hook_fail_mode: open\n", after)
+        self.assertIn("      insecure_skip_verify: true\n", after)
+        cursor = _read_json(os.path.join(self.data_dir, ".migration_state.json"))
+        self.assertIn("0.7.0", cursor["applied"])
+        self.assertIn("0.8.0", cursor["applied"])
+
+    def test_no_op_when_audit_sinks_absent(self):
+        original = "guardrail:\n  hook_fail_mode: closed\n"
+        self._write(original)
+
+        ctx = self._ctx()
+        _migrate_0_8_0(ctx)
+
+        self.assertEqual(self._read(), original)
+        self.assertEqual(ctx.changes, [])
+
+
+class TestAtomicWriteTextModePreservation(unittest.TestCase):
+    """``_atomic_write_text`` must preserve an existing file's perms
+    across a rewrite — a surgical one-line config edit must never
+    silently widen a file an operator hardened to 0o600 — while still
+    honouring the explicit ``mode`` for a freshly-created file."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dclaw-mig-atomic-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_preserves_existing_file_mode_on_rewrite(self):
+        path = os.path.join(self.tmp, "config.yaml")
+        with open(path, "w") as f:
+            f.write("old\n")
+        os.chmod(path, 0o600)
+
+        # Default mode is 0o644, but the existing 0o600 must win.
+        self.assertTrue(_atomic_write_text(path, "new\n"))
+
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        with open(path) as f:
+            self.assertEqual(f.read(), "new\n")
+
+    def test_uses_mode_param_for_new_file(self):
+        path = os.path.join(self.tmp, "fresh.json")
+        # File does not exist yet → the explicit mode pins the perms.
+        self.assertTrue(_atomic_write_text(path, "{}", mode=0o600))
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
 
 
 if __name__ == "__main__":

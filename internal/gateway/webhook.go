@@ -136,16 +136,62 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 	if len(endpoints) == 0 {
 		return nil
 	}
+	allowLoopback := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
 	return &WebhookDispatcher{
-		endpoints: endpoints,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		endpoints:    endpoints,
+		client:       newWebhookHTTPClient(allowLoopback, logger),
 		retryBackoff: webhookRetryBackoff,
 		sem:          make(chan struct{}, webhookMaxConcurrency),
 		logger:       logger,
 		debug:        os.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
 		done:         make(chan struct{}),
+	}
+}
+
+// newWebhookHTTPClient builds the http.Client used to deliver webhooks. It
+// installs:
+//
+//   - secureDialContext: every TCP dial re-resolves the destination and
+//     rejects private/loopback/link-local/cloud-metadata addresses. This
+//     defeats the F-1306 DNS-rebinding window where validateWebhookURL
+//     saw a public IP at config time but Go's default dialer later
+//     resolved a private IP.
+//
+//   - CheckRedirect: every redirect target is re-validated through
+//     validateWebhookURL. Pre-fix, an attacker-controlled webhook
+//     endpoint could 302 the dispatcher to http://127.0.0.1:6379/
+//     (Redis) or http://169.254.169.254/ (cloud IMDS) and have Go's
+//     default redirect policy follow it.
+//
+// allowLoopback is wired from DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1 so dev
+// workflows that intentionally point at 127.0.0.1 still work.
+func newWebhookHTTPClient(allowLoopback bool, logger *log.Logger) *http.Client {
+	transport := &http.Transport{
+		DialContext:           secureDialContext(allowLoopback, 10*time.Second),
+		MaxIdleConns:          10,
+		MaxIdleConnsPerHost:   5,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Conservative cap (Go's default is 10) and cheap.
+			if len(via) >= 5 {
+				return fmt.Errorf("webhook: redirect chain length %d exceeded", len(via))
+			}
+			if err := validateWebhookURL(req.URL.String()); err != nil {
+				if logger != nil {
+					logger.Printf("rejected redirect to %s: %v",
+						req.URL.Redacted(), err)
+				}
+				return fmt.Errorf("webhook redirect rejected: %w", err)
+			}
+			return nil
+		},
 	}
 }
 
@@ -498,6 +544,8 @@ func isRetryable(status int) bool {
 // URL validation (SSRF prevention)
 // ---------------------------------------------------------------------------
 
+var lookupWebhookIPs = net.LookupIP
+
 // validateWebhookURL ensures the URL is safe for outbound webhook delivery.
 // Blocks non-HTTP schemes, localhost, private/link-local IP ranges, and
 // cloud metadata endpoints.
@@ -525,7 +573,7 @@ func validateWebhookURL(rawURL string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		ips, resolveErr := net.LookupIP(host)
+		ips, resolveErr := lookupWebhookIPs(host)
 		if resolveErr != nil {
 			return nil // allow DNS names that can't be resolved at config time
 		}
@@ -549,6 +597,26 @@ func validateWebhookURL(rawURL string) error {
 }
 
 func isPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	// F-1225 (parity): collapse IPv4-mapped IPv6 ("::ffff:127.0.0.1") to
+	// its canonical IPv4 form so the IPv4 private-range checks below
+	// catch it. Without this, an attacker can use the v6-mapped form to
+	// route around the IPv4 ranges via dial syntax like
+	// http://[::ffff:127.0.0.1]/.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	// Use the standard library's classification helpers first — they
+	// reflect the kernel's view of "address class" and are kept current
+	// with new RFCs. The explicit CIDR list below is belt-and-suspenders
+	// in case future Go versions lag.
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast() || ip.IsPrivate() {
+		return true
+	}
 	privateRanges := []string{
 		"10.0.0.0/8",
 		"172.16.0.0/12",
@@ -581,6 +649,11 @@ func formatSlackPayload(event audit.Event) ([]byte, error) {
 	fields := []map[string]interface{}{
 		{"type": "mrkdwn", "text": fmt.Sprintf("*Severity:* %s", event.Severity)},
 		{"type": "mrkdwn", "text": fmt.Sprintf("*Target:* %s", event.Target)},
+	}
+	if event.Connector != "" {
+		fields = append(fields, map[string]interface{}{
+			"type": "mrkdwn", "text": fmt.Sprintf("*Connector:* %s", event.Connector),
+		})
 	}
 	if event.Details != "" {
 		details := event.Details
@@ -639,11 +712,12 @@ func formatPagerDutyPayload(event audit.Event, routingKey string) ([]byte, error
 			"severity":  pdSeverity,
 			"timestamp": event.Timestamp.Format(time.RFC3339),
 			"custom_details": map[string]string{
-				"action":   event.Action,
-				"target":   event.Target,
-				"severity": event.Severity,
-				"details":  event.Details,
-				"event_id": event.ID,
+				"action":    event.Action,
+				"target":    event.Target,
+				"severity":  event.Severity,
+				"details":   event.Details,
+				"event_id":  event.ID,
+				"connector": event.Connector,
 			},
 		},
 	}
@@ -660,6 +734,9 @@ func formatWebexPayload(event audit.Event, roomID string) ([]byte, error) {
 			"- **Actor:** %s\n",
 		icon, event.Action, severity, event.Target, event.Actor,
 	)
+	if event.Connector != "" {
+		markdown += fmt.Sprintf("- **Connector:** %s\n", event.Connector)
+	}
 	if event.Details != "" {
 		details := event.Details
 		if len(details) > 500 {
@@ -689,6 +766,12 @@ func formatGenericPayload(event audit.Event) ([]byte, error) {
 		"severity":  event.Severity,
 		"run_id":    event.RunID,
 		"trace_id":  event.TraceID,
+	}
+	// Attribute the alert to the originating connector so operators can
+	// route/triage per connector in a multi-connector install. Omitted
+	// when unknown to keep single-connector payloads unchanged.
+	if event.Connector != "" {
+		eventData["connector"] = event.Connector
 	}
 	if strings.Contains(strings.ToLower(event.Action), "block") {
 		eventData["defenseclaw_blocked"] = true

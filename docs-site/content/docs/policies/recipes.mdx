@@ -1,0 +1,35 @@
+---
+title: Recipes
+description: Catalog of regex rules, suppressions, sensitive tools, and judge categories shipped with the strict policy — search, copy, and remix.
+keywords:
+  - DefenseClaw recipes
+  - regex catalog
+  - guardrail rules
+  - suppressions
+---
+
+import { RecipeCatalog } from "@/components/policy-creator/recipe-catalog";
+
+The recipe catalog is the same library the [Policy creator](./creator) draws from. Every entry
+ships with the bundled `strict` policy so you can paste the YAML directly into your own pack —
+or use the wizard to drop one into a draft and tune it interactively.
+
+<Callout type="info" title="Where these come from">
+Each rule originates in `policies/guardrail/strict/rules/<category>.yaml` and gets compiled into
+this catalog at build time by `docs-site/scripts/build-policy-assets.ts`. The bundled strict
+pack is the source of truth — when it changes, this catalog regenerates.
+</Callout>
+
+<RecipeCatalog />
+
+## Reading a recipe
+
+| Field           | Meaning                                                                                                           |
+| --------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `kind`          | What this recipe slots into — a regex rule (`rule:secrets`, `rule:injection`, …) or one of the three suppression layers (`pre_judge_strip`, `finding_suppression`, `tool_suppression`). |
+| `id`            | Stable identifier the engine uses for telemetry. Keep this stable across edits.                                   |
+| `pattern`       | The Go-`regexp` (RE2) source the engine compiles. The wizard's regex tester checks this is RE2-compatible.        |
+| `severity`      | The wizard's severity ladder is `CRITICAL > HIGH > MEDIUM > LOW > INFO`. The guardrail block/alert thresholds use ranks. |
+| `confidence`    | Hint to the judge: how confident you are this is a true positive.                                                 |
+| `tags`          | Free-form. Useful for filtering and reporting.                                                                    |
+| `examples` / `counterexamples` | What the wizard's live tester will run through your pattern. Add your own in the regex tester for sanity. |

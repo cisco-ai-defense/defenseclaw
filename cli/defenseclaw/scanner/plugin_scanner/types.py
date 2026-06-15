@@ -197,6 +197,12 @@ class PluginManifest:
     dependencies: dict[str, str] | None = None
     scripts: dict[str, str] | None = None
     source: str | None = None
+    # Declared runtime entrypoint paths (package.json ``main``/``bin``
+    # values and connector-manifest entrypoints), relative to the plugin
+    # directory. These are force-scanned even when extensionless or under
+    # otherwise-skipped directories so a launcher referenced by the
+    # manifest cannot evade source/LLM analysis.
+    entrypoints: list[str] | None = None
 
 
 @dataclass
@@ -211,3 +217,7 @@ class PluginScanOptions:
     # module can stay decoupled from ``policy.LLMPolicy``; the scanner
     # applies it field-by-field to avoid clobbering unset fields.
     llm_override: dict[str, Any] | None = None
+    # When True, the MetaAnalyzer is skipped for this scan. Mirrors the
+    # CLI ``--no-meta`` flag so an operator's explicit request to disable
+    # meta analysis actually reaches the analyzer pipeline.
+    disable_meta: bool = False
