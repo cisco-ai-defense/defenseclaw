@@ -594,6 +594,49 @@ class TestMCPList(MCPCommandTestBase):
         self.assertEqual(data[0]["name"], "test-srv")
 
 
+class TestMcpListUnconfigured(MCPCommandTestBase):
+    """Zero-config ``mcp list`` must NOT fabricate a phantom openclaw.
+
+    After ``setup remove`` drops the last connector the config persists
+    every connector marker empty (claw.mode='', guardrail.connector='',
+    connectors={}). ``mcp list`` should then print a no-connector pointer
+    and exit cleanly rather than listing an openclaw table / silently
+    targeting ~/.openclaw (finding M1)."""
+
+    def _unconfigure(self):
+        self.app.cfg.claw.mode = ""
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.guardrail.connectors = {}
+
+    def test_unconfigured_prints_message_and_exits_clean(self):
+        self._unconfigure()
+        result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("no connector configured", result.output)
+        # No phantom openclaw table.
+        self.assertNotIn("connector=openclaw", result.output)
+        self.assertNotIn("MCP Servers", result.output)
+
+    def test_unconfigured_set_does_not_touch_phantom(self):
+        # The mutator path shares the resolver, so `mcp set` with nothing
+        # configured must also refuse rather than write to ~/.openclaw.
+        self._unconfigure()
+        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("no connector configured", result.output)
+
+    @patch("defenseclaw.config.Config.mcp_servers", return_value=[])
+    def test_explicit_openclaw_still_lists(self, _mock):
+        # A real openclaw install pins the marker, so it stays listable.
+        self.app.cfg.claw.mode = "openclaw"
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.guardrail.connectors = {}
+        result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("no connector configured", result.output)
+        self.assertIn("openclaw", result.output)
+
+
 class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
     """Default ``mcp list`` (no --connector) fans out across every active
     connector — one connector-tagged table each — mirroring ``skill list``
