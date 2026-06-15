@@ -338,3 +338,194 @@ func containsPath(paths []string, want string) bool {
 	}
 	return false
 }
+
+// ---------------------------------------------------------------------------
+// Root 1 — opencode / antigravity must NOT fall through to OpenClaw
+// ---------------------------------------------------------------------------
+
+// TestReadMCPServersForConnector_OpenCode pins that opencode reads its
+// own opencode.json `mcp` map (full read parity, mcp.md M2), splitting
+// the fused command argv and surfacing remote servers by URL.
+func TestReadMCPServersForConnector_OpenCode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	ocDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(ocDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := `{
+	  "mcp": {
+	    "fs": {"type": "local", "command": ["npx", "-y", "fs-mcp"], "environment": {"TOKEN": "x"}},
+	    "api": {"type": "remote", "url": "https://example.com/mcp"}
+	  }
+	}`
+	if err := os.WriteFile(filepath.Join(ocDir, "opencode.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Config{}
+	entries, err := c.ReadMCPServersForConnector("opencode")
+	if err != nil {
+		t.Fatalf("ReadMCPServersForConnector(opencode): %v", err)
+	}
+	if !hasMCPEntry(entries, "fs") || !hasMCPEntry(entries, "api") {
+		t.Fatalf("entries = %+v, want fs + api", entries)
+	}
+	for _, e := range entries {
+		switch e.Name {
+		case "fs":
+			if e.Command != "npx" || len(e.Args) != 2 || e.Args[0] != "-y" || e.Args[1] != "fs-mcp" {
+				t.Errorf("fs = %+v, want command=npx args=[-y fs-mcp]", e)
+			}
+			if e.Env["TOKEN"] != "x" || e.Transport != "local" {
+				t.Errorf("fs = %+v, want env TOKEN=x, transport=local", e)
+			}
+		case "api":
+			if e.URL != "https://example.com/mcp" || e.Transport != "remote" {
+				t.Errorf("api = %+v, want url + transport=remote", e)
+			}
+		}
+	}
+}
+
+// TestReadMCPServersForConnector_OpenCodeNeverReadsOpenClaw is the
+// Root-1 regression: opencode must read its own config, never
+// ~/.openclaw/openclaw.json, even when OpenClaw has servers and
+// opencode has none.
+func TestReadMCPServersForConnector_OpenCodeNeverReadsOpenClaw(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	clawDir := filepath.Join(home, ".openclaw")
+	if err := os.MkdirAll(clawDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	clawCfg := `{"mcp": {"servers": {"leaked": {"command": "do-not-show"}}}}`
+	clawPath := filepath.Join(clawDir, "openclaw.json")
+	if err := os.WriteFile(clawPath, []byte(clawCfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Config{}
+	c.Claw.ConfigFile = clawPath
+	entries, err := c.ReadMCPServersForConnector("opencode")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if hasMCPEntry(entries, "leaked") {
+		t.Fatalf("opencode leaked OpenClaw's server: %+v", entries)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries = %+v, want empty (no opencode.json present)", entries)
+	}
+}
+
+// TestReadMCPServersForConnector_AntigravityReturnsNil pins N1: Go must
+// give antigravity nil (like Python), not OpenClaw's servers.
+func TestReadMCPServersForConnector_AntigravityReturnsNil(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	clawDir := filepath.Join(home, ".openclaw")
+	if err := os.MkdirAll(clawDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	clawPath := filepath.Join(clawDir, "openclaw.json")
+	if err := os.WriteFile(clawPath, []byte(`{"mcp":{"servers":{"leaked":{"command":"x"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Config{}
+	c.Claw.ConfigFile = clawPath
+	entries, err := c.ReadMCPServersForConnector("antigravity")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("antigravity entries = %+v, want nil (never OpenClaw)", entries)
+	}
+}
+
+// TestSkillPluginDirs_OpenCodeAntigravityEmpty pins that the skill and
+// plugin dispatchers give opencode/antigravity an empty set rather than
+// falling through to the OpenClaw layout (claw.go:515/577 root).
+func TestSkillPluginDirs_OpenCodeAntigravityEmpty(t *testing.T) {
+	cfg := &Config{}
+	cfg.Claw.HomeDir = "/tmp/should-not-appear"
+	cfg.Claw.ConfigFile = "/tmp/should-not-appear/openclaw.json"
+	for _, conn := range []string{"opencode", "antigravity"} {
+		if dirs := cfg.SkillDirsForConnector(conn); len(dirs) != 0 {
+			t.Errorf("SkillDirsForConnector(%s) = %v, want empty", conn, dirs)
+		}
+		if dirs := cfg.PluginDirsForConnector(conn); len(dirs) != 0 {
+			t.Errorf("PluginDirsForConnector(%s) = %v, want empty", conn, dirs)
+		}
+	}
+}
+
+// TestConnectorHomeDir_OpenCodeAntigravity pins the home-dir parity with
+// Python connector_home: opencode → ~/.config/opencode, antigravity →
+// ~/.gemini/antigravity-cli, neither the OpenClaw home_dir (claw.go:406).
+func TestConnectorHomeDir_OpenCodeAntigravity(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := &Config{}
+	cfg.Claw.HomeDir = "/tmp/openclaw-home"
+
+	if got, want := cfg.ConnectorHomeDir("opencode"), filepath.Join(home, ".config", "opencode"); got != want {
+		t.Errorf("ConnectorHomeDir(opencode) = %q, want %q", got, want)
+	}
+	if got, want := cfg.ConnectorHomeDir("antigravity"), filepath.Join(home, ".gemini", "antigravity-cli"); got != want {
+		t.Errorf("ConnectorHomeDir(antigravity) = %q, want %q", got, want)
+	}
+	if got := cfg.ConnectorHomeDir("opencode"); strings.Contains(got, "openclaw-home") {
+		t.Errorf("ConnectorHomeDir(opencode) leaked OpenClaw home: %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Root 3 (Go side) — phantom-openclaw primitive
+// ---------------------------------------------------------------------------
+
+// TestHasConnectorConfigured pins the Go mirror of Python's
+// has_connector_configured() (mcp.md M1). It must distinguish a
+// genuinely-unconfigured install from an explicit one — WITHOUT changing
+// the activeConnector() "openclaw" floor that many call sites depend on.
+func TestHasConnectorConfigured(t *testing.T) {
+	var nilCfg *Config
+	if nilCfg.HasConnectorConfigured() {
+		t.Error("nil cfg must report no connector configured")
+	}
+
+	empty := &Config{}
+	if empty.HasConnectorConfigured() {
+		t.Error("all-empty config must NOT report a configured connector (phantom-openclaw root)")
+	}
+	// The floor is deliberately preserved — only the helper distinguishes
+	// the phantom from a real install.
+	if got := empty.activeConnector(); got != "openclaw" {
+		t.Errorf("activeConnector() floor changed to %q; must stay openclaw", got)
+	}
+
+	withConn := &Config{}
+	withConn.Guardrail.Connector = "opencode"
+	if !withConn.HasConnectorConfigured() {
+		t.Error("explicit guardrail.connector must report configured")
+	}
+
+	withMode := &Config{}
+	withMode.Claw.Mode = "openclaw"
+	if !withMode.HasConnectorConfigured() {
+		t.Error("explicit claw.mode must report configured")
+	}
+
+	whitespace := &Config{}
+	whitespace.Guardrail.Connector = "   "
+	if whitespace.HasConnectorConfigured() {
+		t.Error("whitespace-only connector must be treated as unset")
+	}
+
+	multi := &Config{}
+	multi.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {}}
+	if !multi.HasConnectorConfigured() {
+		t.Error("populated guardrail.connectors map must report configured")
+	}
+}
