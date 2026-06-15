@@ -72,6 +72,22 @@ let LLM_DOMAINS: string[] = providersConfig.providers.flatMap(
 let OLLAMA_PORTS: string[] = providersConfig.ollama_ports.map(String);
 
 /**
+ * Ollama model-discovery / health probes. These GETs carry no prompt or
+ * completion content, so the guardrail has nothing to inspect — and
+ * intercepting them is actively harmful: with no reachable Ollama the
+ * proxy cannot return a valid tags payload, so callers (e.g. the
+ * OpenClaw agent's startup probe) treat the empty/errored response as a
+ * hard failure instead of "no Ollama present" and never fall back to
+ * their configured provider. Inference endpoints (/api/chat,
+ * /api/generate) are NOT in this set and remain fully intercepted.
+ */
+const OLLAMA_DISCOVERY_PATHS = new Set([
+  "/api/tags",
+  "/api/version",
+  "/api/ps",
+]);
+
+/**
  * Apply a merged provider registry from the Go sidecar. Additive
  * only — we never drop a built-in domain or port because the
  * interceptor MUST default to the safer (more intercepting) choice
@@ -334,6 +350,57 @@ export function isLLMUrl(url: string, guardrailPort: number): boolean {
     return OLLAMA_PORTS.includes(port);
   }
   return false;
+}
+
+/**
+ * True only for an Ollama discovery probe that must bypass the proxy:
+ * a GET to an exact discovery pathname on a loopback Ollama port (never
+ * the proxy port itself). Matched on parsed pathname + method + host so
+ * an inference call cannot disguise itself as a probe via a crafted
+ * query string (e.g. "/api/chat?x=/api/tags") or non-loopback host.
+ */
+export function isOllamaDiscoveryProbe(
+  url: string,
+  method: string,
+  guardrailPort: number,
+): boolean {
+  if ((method || "GET").toUpperCase() !== "GET") return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+    return false;
+  }
+  const port = parsed.port;
+  if (!port || port === String(guardrailPort)) return false;
+  if (!OLLAMA_PORTS.includes(port)) return false;
+  return OLLAMA_DISCOVERY_PATHS.has(parsed.pathname);
+}
+
+/**
+ * Best-effort HTTP method extraction for the node http(s).request /
+ * http.get patched paths, where the method lives on an options bag that
+ * may be the first or second argument. Defaults to GET (the http.get
+ * default and the safe default for discovery-probe detection).
+ */
+function extractHttpMethod(
+  urlOrOptions: unknown,
+  secondArg: unknown,
+): string {
+  const opts =
+    typeof urlOrOptions === "object" &&
+    urlOrOptions !== null &&
+    !(urlOrOptions instanceof URL)
+      ? (urlOrOptions as { method?: unknown })
+      : typeof secondArg === "object" && secondArg !== null
+        ? (secondArg as { method?: unknown })
+        : undefined;
+  const m = opts?.method;
+  return typeof m === "string" && m ? m : "GET";
 }
 
 function isAlreadyProxied(url: string, guardrailPort: number): boolean {
@@ -880,6 +947,16 @@ export function createFetchInterceptor(
         return originalFetch!(input, init);
       }
 
+      const method = (input instanceof Request ? input.method : init?.method) ?? "GET";
+
+      // Ollama discovery probes carry no content to inspect; let them go
+      // direct so a missing Ollama refuses the connection cleanly and
+      // the caller falls back to its configured provider instead of
+      // erroring on an unparseable proxy response.
+      if (isOllamaDiscoveryProbe(urlStr, method, guardrailPort)) {
+        return originalFetch!(input, init);
+      }
+
       // Layer 0: the known-provider allowlist is cheap and path-free.
       const knownLLM = isLLMUrl(urlStr, guardrailPort);
       let shouldIntercept = knownLLM;
@@ -889,7 +966,6 @@ export function createFetchInterceptor(
       // Layer 1: request-shape detection. Only peek the body when the
       // allowlist didn't already match — peeking costs a clone().
       if (!knownLLM) {
-        const method = (input instanceof Request ? input.method : init?.method) ?? "GET";
         bodyShape = await peekBodyForShape(input, init);
         if (isLLMShapedRequest(urlStr, method, bodyShape, guardrailPort)) {
           shouldIntercept = true;
@@ -1280,6 +1356,23 @@ export function createFetchInterceptor(
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+      // Ollama discovery probes (GET /api/tags etc.) carry no content;
+      // let them reach the real (or absent) Ollama directly so discovery
+      // works for real users and a missing Ollama refuses cleanly.
+      if (
+        urlStr &&
+        isOllamaDiscoveryProbe(
+          urlStr,
+          extractHttpMethod(urlOrOptions, optionsOrCallback),
+          guardrailPort,
+        )
+      ) {
+        return originalHttpRequest!(
+          urlOrOptions as string,
+          optionsOrCallback as NodeRequestOptions,
+          callback,
+        );
+      }
       // Only re-route if the request shape would otherwise hit a
       // local Ollama instance. For any other http.request path we
       // pass through to the captured original to avoid breaking
