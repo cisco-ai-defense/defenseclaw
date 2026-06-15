@@ -360,11 +360,14 @@ class TestCoverage:
                 with pytest.raises(MCPWriteUnsupportedError):
                     set_mcp_server(name, "x", {"command": "y"})
             elif name == "opencode":
-                # opencode MCP lives in opencode.json, which DefenseClaw
-                # does not manage in v1; the connector governs tool
-                # execution via its bridge plugin only.
-                with pytest.raises(MCPWriteUnsupportedError):
+                # opencode now has full MCP write parity (mcp.md M2/M5):
+                # set writes the global ~/.config/opencode/opencode.json.
+                with pytest.MonkeyPatch.context() as m:
+                    m.setenv("HOME", str(tmp_path / "oc-home"))
                     set_mcp_server(name, "x", {"command": "y"})
+                    assert (
+                        tmp_path / "oc-home" / ".config" / "opencode" / "opencode.json"
+                    ).is_file()
             else:
                 # All other connectors have a documented MCP write path.
                 # Use chdir + isolated HOME so the test doesn't trash
@@ -373,3 +376,124 @@ class TestCoverage:
                     m.chdir(tmp_path)
                     m.setenv("HOME", str(tmp_path))
                     set_mcp_server(name, "x", {"command": "y"})
+
+
+# ---------------------------------------------------------------------------
+# opencode — full read+write parity (mcp.md M2/M5). Writes the global
+# ~/.config/opencode/opencode.json (project file under explicit workspace),
+# mapping into opencode's `mcp` schema (type/command-argv/environment).
+# ---------------------------------------------------------------------------
+
+class TestOpenCodeWrites:
+    def _global(self, home) -> os.PathLike:
+        return home / ".config" / "opencode" / "opencode.json"
+
+    def test_set_creates_global_with_opencode_schema(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        set_mcp_server(
+            "opencode", "demo",
+            {"command": "npx", "args": ["-y", "demo-mcp"], "env": {"K": "v"}},
+        )
+        path = self._global(tmp_path)
+        assert path.is_file()
+        data = json.loads(path.read_text())
+        # opencode's bespoke schema: top-level `mcp`, fused command argv,
+        # `environment` (not `env`), explicit type + enabled.
+        assert data["mcp"]["demo"] == {
+            "type": "local",
+            "command": ["npx", "-y", "demo-mcp"],
+            "enabled": True,
+            "environment": {"K": "v"},
+        }
+
+    def test_set_remote_server(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        set_mcp_server("opencode", "api", {"url": "https://x.example/mcp"})
+        data = json.loads(self._global(tmp_path).read_text())
+        assert data["mcp"]["api"] == {
+            "type": "remote",
+            "url": "https://x.example/mcp",
+            "enabled": True,
+        }
+
+    def test_set_preserves_unrelated_keys(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        path = self._global(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({
+            "$schema": "https://opencode.ai/config.json",
+            "theme": "tokyonight",
+            "mcp": {"existing": {"type": "local", "command": ["keep"]}},
+        }))
+        set_mcp_server("opencode", "demo", {"command": "npx"})
+        data = json.loads(path.read_text())
+        assert data["$schema"] == "https://opencode.ai/config.json"
+        assert data["theme"] == "tokyonight"
+        assert data["mcp"]["existing"] == {"type": "local", "command": ["keep"]}
+        assert data["mcp"]["demo"]["command"] == ["npx"]
+
+    def test_set_uses_0o600(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        set_mcp_server("opencode", "demo", {"command": "x", "env": {"API_KEY": "s"}})
+        mode = stat.S_IMODE(self._global(tmp_path).stat().st_mode)
+        assert mode == 0o600, f"opencode.json mode {oct(mode)} != 0o600"
+
+    def test_unset_removes_entry_preserves_others(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        path = self._global(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({
+            "mcp": {
+                "demo": {"type": "local", "command": ["x"]},
+                "keep": {"type": "local", "command": ["y"]},
+            },
+        }))
+        unset_mcp_server("opencode", "demo")
+        data = json.loads(path.read_text())
+        assert "demo" not in data["mcp"]
+        assert data["mcp"]["keep"] == {"type": "local", "command": ["y"]}
+
+    def test_unset_missing_is_noop(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        unset_mcp_server("opencode", "demo")  # no file — must not raise
+
+    def test_round_trip_set_read_unset(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        set_mcp_server("opencode", "demo", {"command": "npx", "args": ["demo-mcp"]})
+        entries = connector_paths.mcp_servers("opencode")
+        assert [e.name for e in entries] == ["demo"]
+        assert entries[0].command == "npx"
+        assert entries[0].args == ["demo-mcp"]
+
+        unset_mcp_server("opencode", "demo")
+        assert connector_paths.mcp_servers("opencode") == []
+
+    def test_workspace_writes_project_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        set_mcp_server(
+            "opencode", "demo", {"command": "npx"}, workspace_dir=str(workspace),
+        )
+        # Project file written; global left untouched.
+        assert (workspace / "opencode.json").is_file()
+        assert not self._global(tmp_path / "home").exists()
+        names = {
+            e.name
+            for e in connector_paths.mcp_servers("opencode", workspace_dir=str(workspace))
+        }
+        assert names == {"demo"}
+
+    def test_set_fails_closed_on_unparseable_existing(self, tmp_path, monkeypatch):
+        """A config we can't safely parse must NOT be clobbered — the
+        writer raises instead of overwriting unrelated content."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        path = self._global(tmp_path)
+        path.parent.mkdir(parents=True)
+        # Valid JSON but not an object (top-level array) → unexpected shape.
+        original = json.dumps([1, 2, 3])
+        path.write_text(original)
+        with pytest.raises(MCPWriteUnsupportedError):
+            set_mcp_server("opencode", "demo", {"command": "x"})
+        # File left exactly as it was.
+        assert path.read_text() == original

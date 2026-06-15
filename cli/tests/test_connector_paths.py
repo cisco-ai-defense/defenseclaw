@@ -113,6 +113,10 @@ class TestSkillDirs:
             workspace_dir=str(tmp_path),
         )
         assert connector_paths.skill_dirs("windsurf") == []
+        # opencode + antigravity expose no documented skills surface — must
+        # be [] (mirror windsurf), never OpenClaw's skill dirs.
+        assert connector_paths.skill_dirs("antigravity") == []
+        assert connector_paths.skill_dirs("opencode") == []
         assert os.path.join(str(tmp_path / "home"), ".gemini", "skills") in connector_paths.skill_dirs("geminicli")
         assert os.path.join(str(tmp_path), ".gemini", "skills") in connector_paths.skill_dirs(
             "geminicli",
@@ -233,6 +237,9 @@ class TestPluginDirs:
         )
         assert connector_paths.plugin_dirs("copilot") == []
         assert connector_paths.plugin_dirs("openhands") == []
+        assert connector_paths.plugin_dirs("antigravity") == []
+        # opencode is bridge-plugin-only — no plugin/extension discovery dir.
+        assert connector_paths.plugin_dirs("opencode") == []
 
     def test_no_overlap_between_connectors(self, tmp_path, monkeypatch):
         """Switching connectors must change the path set — pins the
@@ -511,6 +518,122 @@ class TestMCPServers:
             openclaw_config=str(oc_path),
         )
         assert [e.name for e in entries] == ["oc-srv"]
+
+
+# ---------------------------------------------------------------------------
+# opencode MCP reader — reads opencode.json's `mcp` map, never OpenClaw
+# ---------------------------------------------------------------------------
+
+
+class TestOpenCodeMCPReader:
+    def _write_global(self, home: Path, servers: dict) -> Path:
+        path = home / ".config" / "opencode" / "opencode.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"mcp": servers}))
+        return path
+
+    def test_reads_local_server_splits_command_argv(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        self._write_global(
+            home,
+            {
+                "fs": {
+                    "type": "local",
+                    "command": ["npx", "-y", "fs-mcp"],
+                    "environment": {"TOKEN": "secret"},
+                    "enabled": True,
+                },
+            },
+        )
+        entries = connector_paths.mcp_servers("opencode")
+        assert [e.name for e in entries] == ["fs"]
+        assert entries[0].command == "npx"
+        assert entries[0].args == ["-y", "fs-mcp"]
+        assert entries[0].env == {"TOKEN": "secret"}
+        assert entries[0].transport == "local"
+
+    def test_reads_remote_server(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        self._write_global(
+            home,
+            {"api": {"type": "remote", "url": "https://example.com/mcp", "enabled": True}},
+        )
+        entries = connector_paths.mcp_servers("opencode")
+        assert [e.name for e in entries] == ["api"]
+        assert entries[0].url == "https://example.com/mcp"
+        assert entries[0].transport == "remote"
+        assert entries[0].command == ""
+
+    def test_never_reads_openclaw_config(self, tmp_path, monkeypatch):
+        """The Root-1 leak: opencode must read its own config, never
+        ~/.openclaw/openclaw.json — even when openclaw has servers and
+        opencode has none."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        # Populate OpenClaw's config with a server that must NOT leak.
+        oc = home / ".openclaw"
+        oc.mkdir()
+        (oc / "openclaw.json").write_text(
+            json.dumps({"mcp": {"servers": {"leaked": {"command": "do-not-show"}}}})
+        )
+        # No opencode.json present → opencode sees nothing.
+        assert connector_paths.mcp_servers("opencode") == []
+        # Now add an opencode server; only it shows, never "leaked".
+        self._write_global(home, {"mine": {"type": "local", "command": ["mine"]}})
+        names = [e.name for e in connector_paths.mcp_servers("opencode")]
+        assert names == ["mine"]
+        assert "leaked" not in names
+
+    def test_project_file_layers_with_explicit_workspace(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        self._write_global(home, {"g": {"type": "local", "command": ["g-cmd"]}})
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        (workspace / "opencode.json").write_text(
+            json.dumps({"mcp": {"p": {"type": "local", "command": ["p-cmd"]}}})
+        )
+        # Without workspace: only the global server.
+        assert [e.name for e in connector_paths.mcp_servers("opencode")] == ["g"]
+        # With an explicit workspace: both global and project servers.
+        names = {e.name for e in connector_paths.mcp_servers("opencode", workspace_dir=str(workspace))}
+        assert names == {"g", "p"}
+
+    def test_no_config_returns_empty(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        assert connector_paths.mcp_servers("opencode") == []
+
+
+# ---------------------------------------------------------------------------
+# connector_home — opencode/antigravity resolve to their own dirs
+# ---------------------------------------------------------------------------
+
+
+class TestConnectorHome:
+    def test_opencode_home_is_xdg_config(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert connector_paths.connector_home("opencode") == os.path.join(
+            str(tmp_path), ".config", "opencode"
+        )
+
+    def test_antigravity_home(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert connector_paths.connector_home("antigravity") == os.path.join(
+            str(tmp_path), ".gemini", "antigravity-cli"
+        )
+
+    def test_opencode_home_is_not_openclaw(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        home = connector_paths.connector_home("opencode")
+        assert ".openclaw" not in home
 
 
 # ---------------------------------------------------------------------------
