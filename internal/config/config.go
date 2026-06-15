@@ -1177,7 +1177,7 @@ type GuardrailConfig struct {
 	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
 	HILT              HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
 
-	// Detection strategy: "regex_only" (default), "regex_judge", "judge_first".
+	// Detection strategy: "regex_only", "regex_judge" (default), "judge_first".
 	// Per-direction overrides take precedence over the global setting.
 	DetectionStrategy           string `mapstructure:"detection_strategy"            yaml:"detection_strategy,omitempty"`
 	DetectionStrategyPrompt     string `mapstructure:"detection_strategy_prompt"     yaml:"detection_strategy_prompt,omitempty"`
@@ -1620,7 +1620,7 @@ func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,
-// falling back to the global DetectionStrategy (default: "regex_only").
+// falling back to the global DetectionStrategy (default: "regex_judge").
 func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
 	var override string
 	switch direction {
