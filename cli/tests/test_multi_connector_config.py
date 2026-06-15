@@ -28,6 +28,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.config import (  # noqa: E402
+    ClawConfig,
     Config,
     GuardrailConfig,
     HILTConfig,
@@ -63,10 +64,53 @@ class TestActiveConnectors(unittest.TestCase):
         cfg.claw.mode = "zeptoclaw"
         self.assertEqual(cfg.active_connectors(), ["zeptoclaw"])
 
-    def test_default_openclaw(self):
+    def test_unconfigured_returns_empty(self):
+        # Nothing configured (every connector marker empty, as persisted by
+        # `setup remove` when the last connector is dropped): active_connectors
+        # must NOT fabricate a phantom ["openclaw"]. It returns [] so fan-out
+        # callers (status/aibom/list resolver) render a "no connector
+        # configured" empty state instead of operating against ~/.openclaw.
         cfg = Config()
         cfg.claw.mode = ""
+        self.assertFalse(cfg.has_connector_configured())
+        self.assertEqual(cfg.active_connectors(), [])
+
+    def test_explicit_openclaw_still_lists(self):
+        # A real openclaw install pins the marker (claw.mode / guardrail
+        # .connector == "openclaw"), so it stays distinguishable from the
+        # unconfigured case and still lists.
+        cfg = Config()
+        cfg.claw.mode = "openclaw"
+        self.assertTrue(cfg.has_connector_configured())
         self.assertEqual(cfg.active_connectors(), ["openclaw"])
+        cfg2 = Config(guardrail=GuardrailConfig(connector="openclaw"))
+        cfg2.claw.mode = ""
+        self.assertTrue(cfg2.has_connector_configured())
+        self.assertEqual(cfg2.active_connectors(), ["openclaw"])
+
+    def test_has_connector_configured_signals(self):
+        # The predicate is True for any non-empty marker and False only when
+        # all three are empty.
+        self.assertFalse(
+            Config(claw=ClawConfig(mode="")).has_connector_configured()
+        )
+        self.assertTrue(
+            Config(claw=ClawConfig(mode="codex")).has_connector_configured()
+        )
+        self.assertTrue(
+            Config(
+                guardrail=GuardrailConfig(connector="codex"),
+                claw=ClawConfig(mode=""),
+            ).has_connector_configured()
+        )
+        self.assertTrue(
+            Config(
+                guardrail=GuardrailConfig(
+                    connectors={"codex": PerConnectorGuardrailConfig()},
+                ),
+                claw=ClawConfig(mode=""),
+            ).has_connector_configured()
+        )
 
     def test_whitespace_keys_dropped(self):
         cfg = Config(

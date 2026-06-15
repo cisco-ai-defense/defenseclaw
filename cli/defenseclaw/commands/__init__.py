@@ -89,10 +89,30 @@ def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
       single-connector install and N names on a fan-out install, so the
       caller renders the same way regardless of count — the operator never
       has to think about "single vs multi".
+    * When **nothing is configured** (e.g. after ``setup remove`` clears the
+      last connector) this prints a one-line pointer to ``setup`` and exits
+      cleanly instead of fanning out to a phantom ``openclaw``. That keeps
+      every consumer — ``mcp/skill/plugin list``, ``codeguard``, and the
+      ``mcp set``/``unset`` mutators that share this resolver — from
+      silently operating against ``~/.openclaw`` when no connector exists.
     """
     if requested and requested.strip():
         return [resolve_list_connector(app, requested)]
     cfg = getattr(app, "cfg", None)
+    # Zero-config guard. ``active_connectors()`` already returns [] here, but
+    # the singular fallback at the bottom would otherwise floor back to
+    # "openclaw" — so intercept explicitly and surface the empty state. The
+    # message text mirrors the no-connector hint used elsewhere.
+    if cfg is not None and hasattr(cfg, "has_connector_configured"):
+        try:
+            configured = cfg.has_connector_configured()
+        except Exception:  # noqa: BLE001 — fail open to legacy behavior.
+            configured = True
+        if not configured:
+            click.echo(
+                "no connector configured — run 'defenseclaw setup <connector>'"
+            )
+            raise SystemExit(0)
     try:
         if cfg is not None and hasattr(cfg, "active_connectors"):
             names = [n for n in cfg.active_connectors() if n]
