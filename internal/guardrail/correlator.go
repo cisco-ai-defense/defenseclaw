@@ -62,6 +62,11 @@ type CorrelationPattern struct {
 	AllOf           []PatternClause  `yaml:"all_of,omitempty"`
 	Sequence        []SequenceClause `yaml:"sequence,omitempty"`
 	FingerprintLink []PatternClause  `yaml:"fingerprint_chain,omitempty"`
+	// Ordered, when set on an `all_of` pattern, requires the clauses to
+	// match distinct findings in temporal (arrival) order rather than
+	// as an unordered conjunction. Default false preserves the legacy
+	// unordered behavior and is fully backward compatible.
+	Ordered bool `yaml:"ordered,omitempty"`
 }
 
 // PatternClause matches any single finding in the window. A clause
@@ -129,6 +134,9 @@ func (p *CorrelationPattern) Match(window []CorrelationFinding) []CorrelationFin
 		return p.matchFingerprintLink(window)
 	}
 	if len(p.AllOf) > 0 {
+		if p.Ordered {
+			return p.matchOrderedAllOf(window)
+		}
 		return p.matchAllOf(window)
 	}
 	if len(p.Sequence) > 0 {
@@ -155,6 +163,43 @@ func (p *CorrelationPattern) matchAllOf(window []CorrelationFinding) []Correlati
 			seen[window[idx].ID] = true
 			contributing = append(contributing, window[idx])
 		}
+	}
+	return contributing
+}
+
+// matchOrderedAllOf is the order-aware variant of matchAllOf. The
+// AllOf clauses must be satisfied by DISTINCT findings appearing in
+// temporal order: clause[0] must match a finding that arrived no later
+// than the finding matching clause[1], and so on. Ordering keys on the
+// window's arrival order (newest-first, reversed here to oldest-first,
+// exactly as matchSequence does) because scan_findings.turn_id is not
+// populated today; TurnID would be a future tiebreak but is uniformly
+// zero across all connectors, so arrival order is authoritative.
+//
+// Same-arrival (same timestamp) findings are allowed to satisfy
+// adjacent clauses — the order constraint is non-decreasing, mirroring
+// the reflexive Eventually semantics of the symbolic trifecta model.
+func (p *CorrelationPattern) matchOrderedAllOf(window []CorrelationFinding) []CorrelationFinding {
+	// Window is newest-first; walk oldest-first so clause direction
+	// matches temporal order.
+	ordered := make([]CorrelationFinding, len(window))
+	for i, f := range window {
+		ordered[len(window)-1-i] = f
+	}
+
+	step := 0
+	var contributing []CorrelationFinding
+	for i := range ordered {
+		if step >= len(p.AllOf) {
+			break
+		}
+		if clauseMatches(p.AllOf[step], &ordered[i]) {
+			contributing = append(contributing, ordered[i])
+			step++
+		}
+	}
+	if step < len(p.AllOf) {
+		return nil
 	}
 	return contributing
 }
