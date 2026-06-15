@@ -293,11 +293,30 @@ def evaluate_asset_policy(
         return AdmissionDecision("allowed", f"{target_type} {name!r} is registered", source="asset-policy-registry")
 
     if getattr(policy, "registry_required", False):
-        return _asset_policy_block_or_observe(
-            asset_policy,
-            f"{target_type} {name!r} is not in the approved registry",
-            "asset-policy-registry-required",
-        )
+        # Split "registry configured but unmatched" from "registry empty",
+        # mirroring the Go gateway (internal/config/asset_policy.go
+        # EvaluateAssetPolicy): a *configured* (non-empty) registry that does
+        # not list this asset is always a hard "not approved" block.
+        if registry:
+            return _asset_policy_block_or_observe(
+                asset_policy,
+                f"{target_type} {name!r} is not in the approved registry",
+                "asset-policy-registry-required",
+            )
+        # Registry required but empty → governed by registry_empty_action.
+        # Only "deny" blocks; "warn"/"allow" fall through to the default check
+        # below. Per the OTHER-6 ruling this is intentionally looser than the
+        # Go gateway, which treats "warn" as "deny" (see
+        # _normalize_registry_empty_action).
+        if _normalize_registry_empty_action(
+            getattr(policy, "registry_empty_action", "deny")
+        ) == "deny":
+            return _asset_policy_block_or_observe(
+                asset_policy,
+                f"{target_type} {name!r} is blocked because asset policy "
+                f"requires a registry but none is configured",
+                "asset-policy-registry-required-empty",
+            )
 
     if str(getattr(policy, "default", "allow")).strip().lower() in {"deny", "block"}:
         return _asset_policy_block_or_observe(
@@ -317,6 +336,29 @@ def _asset_policy_block_or_observe(asset_policy: Any, reason: str, source: str) 
     if str(getattr(asset_policy, "mode", "observe")).strip().lower() == "action":
         return AdmissionDecision("blocked", reason, source=source)
     return AdmissionDecision("allowed", reason, source=source + "-observe")
+
+
+def _normalize_registry_empty_action(value: Any) -> str:
+    """Canonicalize registry_empty_action for an empty-but-required registry.
+
+    Returns one of ``"deny"`` / ``"warn"`` / ``"allow"`` (the three values
+    documented on ``config.AssetTypePolicy.registry_empty_action``). Only
+    ``"deny"`` blocks; both ``"warn"`` and ``"allow"`` fall through to the
+    default check. ``"deny"``/``"block"``/``""`` and any unrecognised value
+    stay fail-closed as ``"deny"``.
+
+    NOTE: this is an *intentional, ruled divergence* from the Go gateway, whose
+    ``normalizeRegistryEmptyAction`` collapses ``"warn"`` into ``"deny"``. The
+    OTHER-6 ruling chose the looser CLI-preview semantics (warn ⇒ fall through)
+    even though it means the Python preview and the Go runtime disagree on
+    ``"warn"`` until/unless the Go side is changed (config.go — not owned here).
+    """
+    v = str(value).strip().lower()
+    if v == "allow":
+        return "allow"
+    if v == "warn":
+        return "warn"
+    return "deny"
 
 
 def _find_asset_rule(

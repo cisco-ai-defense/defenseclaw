@@ -33,6 +33,7 @@ from defenseclaw.enforce.admission import (
     AdmissionPolicyData,
     effective_action_for,
     evaluate_admission,
+    evaluate_asset_policy,
     load_admission_policy,
 )
 from defenseclaw.enforce.policy import PolicyEngine
@@ -108,13 +109,15 @@ class TestEvaluateAdmissionAllowed(_StoreTestBase):
 
 class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
     def _asset_policy(self, *, mode="action", default="allow", registry_required=False,
-                      registry=None, allowed=None, denied=None):
+                      registry=None, allowed=None, denied=None,
+                      registry_empty_action="deny"):
         target_policy = SimpleNamespace(
             default=default,
             registry_required=registry_required,
             registry=registry or [],
             allowed=allowed or [],
             denied=denied or [],
+            registry_empty_action=registry_empty_action,
         )
         return SimpleNamespace(
             enabled=True,
@@ -177,6 +180,89 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
         )
         self.assertEqual(d.verdict, "blocked")
         self.assertEqual(d.source, "asset-policy-registry-required")
+
+    # --- OTHER-6: empty-but-required registry honors registry_empty_action,
+    # mirroring the Go gateway (internal/config/asset_policy.go). These probe
+    # evaluate_asset_policy directly because evaluate_admission folds a
+    # non-blocked asset verdict into the downstream scan flow.
+
+    def test_empty_required_registry_denies_by_default(self):
+        policy = self._asset_policy(registry_required=True, registry=[])
+        d = evaluate_asset_policy(policy, target_type="mcp", name="demo")
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-registry-required-empty")
+
+    def test_empty_required_registry_allow_falls_through_to_default(self):
+        policy = self._asset_policy(
+            registry_required=True, registry=[], registry_empty_action="allow",
+        )
+        d = evaluate_asset_policy(policy, target_type="mcp", name="demo")
+        self.assertEqual(d.verdict, "allowed")
+        self.assertEqual(d.source, "asset-policy-default-allow")
+
+    def test_empty_required_registry_allow_still_honors_default_deny(self):
+        # registry_empty_action="allow" only relaxes the empty-registry gate;
+        # a default=deny policy still blocks.
+        policy = self._asset_policy(
+            registry_required=True, registry=[],
+            registry_empty_action="allow", default="deny",
+        )
+        d = evaluate_asset_policy(policy, target_type="mcp", name="demo")
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-default-deny")
+
+    def test_empty_required_registry_warn_falls_through_to_default(self):
+        # OTHER-6 ruling: on the Python admission preview "warn" is treated like
+        # "allow" — it falls through to the default check (intentionally looser
+        # than the Go gateway, which collapses "warn" into "deny").
+        policy = self._asset_policy(
+            registry_required=True, registry=[], registry_empty_action="warn",
+        )
+        d = evaluate_asset_policy(policy, target_type="mcp", name="demo")
+        self.assertEqual(d.verdict, "allowed")
+        self.assertEqual(d.source, "asset-policy-default-allow")
+
+    def test_empty_required_registry_warn_still_honors_default_deny(self):
+        # "warn" only relaxes the empty-registry gate, not the default policy.
+        policy = self._asset_policy(
+            registry_required=True, registry=[],
+            registry_empty_action="warn", default="deny",
+        )
+        d = evaluate_asset_policy(policy, target_type="mcp", name="demo")
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-default-deny")
+
+    def test_empty_required_registry_observe_downgrades_block(self):
+        policy = self._asset_policy(
+            mode="observe", registry_required=True, registry=[],
+        )
+        d = evaluate_asset_policy(policy, target_type="mcp", name="demo")
+        self.assertEqual(d.verdict, "allowed")
+        self.assertEqual(d.source, "asset-policy-registry-required-empty-observe")
+
+    def test_nonempty_required_registry_unmatched_unchanged(self):
+        # The configured (non-empty) registry path is unchanged by OTHER-6.
+        policy = self._asset_policy(
+            registry_required=True,
+            registry=[SimpleNamespace(name="github")],
+        )
+        d = evaluate_asset_policy(policy, target_type="mcp", name="rogue")
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-registry-required")
+
+    def test_empty_required_registry_allow_not_blocked_end_to_end(self):
+        # Through the full admission path the empty+allow case must reach the
+        # normal scan flow rather than the old unconditional block.
+        policy = self._asset_policy(
+            registry_required=True, registry=[], registry_empty_action="allow",
+        )
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="demo",
+            asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
 
     def test_observe_mode_does_not_block_install_flow(self):
         policy = self._asset_policy(mode="observe", default="deny")
@@ -676,6 +762,62 @@ class TestLoadAdmissionPolicy(unittest.TestCase):
             f.write("{not json")
         policy = load_admission_policy(tmp)
         self.assertTrue(policy.allow_list_bypass_scan)
+
+
+class TestPolicyEngineToolConnectorScope(_StoreTestBase):
+    """T2: connector-scoped tool helpers (the @<connector>/<tool> gate).
+
+    Mirrors internal/enforce/policy_test.go::TestPolicyEngineToolConnectorScope.
+    """
+
+    def test_connector_block_isolated(self):
+        self.pe.block_tool_for_connector("delete_file", "hermes", "scoped")
+        self.assertTrue(self.pe.is_tool_blocked_for_connector("delete_file", "hermes"))
+        self.assertFalse(self.pe.is_tool_blocked_for_connector("delete_file", "codex"))
+        self.assertFalse(self.pe.is_tool_blocked_for_connector("delete_file", ""))
+        self.assertFalse(self.pe.is_tool_blocked_for_connector("delete_file"))
+
+    def test_global_block_hits_all_connectors(self):
+        self.pe.block_tool_for_connector("delete_file", "", "global")
+        for connector in ("", "hermes", "codex"):
+            self.assertTrue(
+                self.pe.is_tool_blocked_for_connector("delete_file", connector)
+            )
+
+    def test_connector_allow_isolated(self):
+        self.pe.allow_tool_for_connector("search", "hermes", "scoped")
+        self.assertTrue(self.pe.is_tool_allowed_for_connector("search", "hermes"))
+        self.assertFalse(self.pe.is_tool_allowed_for_connector("search", "codex"))
+        self.assertFalse(self.pe.is_tool_allowed_for_connector("search", ""))
+
+    def test_global_allow_applies_to_all_connectors(self):
+        self.pe.allow_tool_for_connector("search", "", "global")
+        for connector in ("", "hermes", "codex"):
+            self.assertTrue(
+                self.pe.is_tool_allowed_for_connector("search", connector)
+            )
+
+    def test_global_block_and_connector_allow_coexist(self):
+        # Resolution order is block-first; both rows are independently visible.
+        self.pe.block_tool_for_connector("write_file", "", "global block")
+        self.pe.allow_tool_for_connector("write_file", "hermes", "scoped allow")
+        self.assertTrue(self.pe.is_tool_blocked_for_connector("write_file", "hermes"))
+        self.assertTrue(self.pe.is_tool_allowed_for_connector("write_file", "hermes"))
+
+    def test_connector_allow_clears_enforcement(self):
+        target = "@hermes/run"
+        self.store.set_action_field("tool", target, "file", "quarantine", "scan")
+        self.store.set_action_field("tool", target, "runtime", "disable", "scan")
+        self.pe.allow_tool_for_connector("run", "hermes", "approved")
+        self.assertFalse(self.store.has_action("tool", target, "file", "quarantine"))
+        self.assertFalse(self.store.has_action("tool", target, "runtime", "disable"))
+
+    def test_connector_scope_orthogonal_to_source_scope(self):
+        # "@C/T" (connector) and "S/T" (source) are distinct namespaces: a
+        # connector-scoped block must not satisfy a source-scoped lookup.
+        self.pe.block_tool_for_connector("x", "hermes", "conn")
+        self.assertTrue(self.pe.is_tool_blocked_for_connector("x", "hermes"))
+        self.assertFalse(self.pe.is_tool_blocked("x", source="hermes"))
 
 
 if __name__ == "__main__":
