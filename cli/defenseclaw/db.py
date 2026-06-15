@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS actions (
     source_path TEXT,
     actions_json TEXT NOT NULL DEFAULT '{}',
     reason TEXT,
-    updated_at DATETIME NOT NULL
+    updated_at DATETIME NOT NULL,
+    connector TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS network_egress_events (
@@ -113,7 +114,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
 CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
 CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name ON actions(target_type, target_name);
+-- The actions uniqueness index is connector-aware (target_type, target_name,
+-- connector) and is created/migrated in _ensure_connector_column(). It is
+-- deliberately NOT declared here: executescript(SCHEMA) runs on every init(),
+-- so a 2-column UNIQUE index declared here would be recreated each open and
+-- would reject per-connector rows (SK-4).
 CREATE INDEX IF NOT EXISTS idx_egress_timestamp ON network_egress_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_egress_hostname ON network_egress_events(hostname);
 CREATE INDEX IF NOT EXISTS idx_egress_blocked ON network_egress_events(blocked);
@@ -250,6 +255,12 @@ class Store:
     def init(self) -> None:
         self.db.executescript(SCHEMA)
         self._ensure_run_id_columns()
+        # Add the per-connector column + swap the actions uniqueness index to
+        # (target_type, target_name, connector) BEFORE migrating the legacy
+        # block/allow lists, so the INSERT OR REPLACE block-last-wins ordering
+        # in _migrate_old_lists resolves conflicts against the new index and
+        # the migrated rows pick up connector='' (global).
+        self._ensure_connector_column()
         self._migrate_old_lists()
         self._ensure_v7_tables()
 
@@ -313,6 +324,41 @@ class Store:
             self.db.execute("ALTER TABLE audit_events ADD COLUMN structured_json TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_scan_run_id ON scan_results(run_id)")
+        self.db.commit()
+
+    def _ensure_connector_column(self) -> None:
+        """Add the per-connector column on ``actions`` and connector-scope its
+        uniqueness index (SK-4 foundation).
+
+        Idempotent and PRAGMA-guarded, following the same pattern as
+        :meth:`_ensure_run_id_columns`. Mirrors the Go migration
+        "multi-connector: per-connector column on actions + 3-col unique index"
+        in ``internal/audit/store.go`` so the two stores share one schema.
+
+        Existing rows keep ``connector=''`` — meaning **global / applies to
+        every connector** — so every pre-existing block/allow stays in force
+        after the upgrade (the back-compat anchor). The uniqueness key moves
+        from ``(target_type, target_name)`` to
+        ``(target_type, target_name, connector)`` so a target can carry one
+        global entry plus one entry per connector without colliding.
+        """
+        columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(actions)").fetchall()
+        }
+        if "connector" not in columns:
+            self.db.execute(
+                "ALTER TABLE actions ADD COLUMN connector TEXT NOT NULL DEFAULT ''"
+            )
+        # Swap the legacy 2-column uniqueness index for the connector-aware one.
+        # DROP first so an upgraded DB cannot keep both (the old one would
+        # reject per-connector rows). Both statements are guarded so re-running
+        # init() on an already-migrated DB is a no-op.
+        self.db.execute("DROP INDEX IF EXISTS idx_actions_type_name")
+        self.db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name_conn "
+            "ON actions(target_type, target_name, connector)"
+        )
         self.db.commit()
 
     def _ensure_v7_tables(self) -> None:
@@ -554,30 +600,42 @@ class Store:
         ]
 
     # -- Actions --
+    #
+    # Connector scoping (SK-4): every method below takes a ``connector``
+    # argument that defaults to ``""`` (global — applies to every connector),
+    # so existing callers are unchanged. Lookups and writes are **exact-match**
+    # on connector: the actions table is unique on
+    # (target_type, target_name, connector), so a target can hold one global
+    # entry plus one entry per connector and they never collide. The store is
+    # deliberately a storage primitive — it does NOT implement most-specific-
+    # wins resolution (connector then global fallback); the enforcement /
+    # admission layer composes the two exact-match lookups it needs.
 
     def set_action(
         self, target_type: str, target_name: str,
         source_path: str, state: ActionState, reason: str,
+        connector: str = "",
     ) -> None:
         actions_json = json.dumps(state.to_dict())
         aid = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         self.db.execute(
-            """INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(target_type, target_name) DO UPDATE SET
+            """INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
                  actions_json = excluded.actions_json,
                  reason = excluded.reason,
                  updated_at = excluded.updated_at,
                  source_path = COALESCE(excluded.source_path, source_path)""",
             (aid, target_type, target_name, source_path or None,
-             actions_json, reason, now),
+             actions_json, reason, now, connector),
         )
         self.db.commit()
 
     def set_action_field(
         self, target_type: str, target_name: str,
         field: str, value: str, reason: str,
+        connector: str = "",
     ) -> None:
         _validate(field, value)
         aid = str(uuid.uuid4())
@@ -585,71 +643,84 @@ class Store:
         init_json = json.dumps({field: value})
         path = f"$.{field}"
         self.db.execute(
-            """INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at)
-               VALUES (?, ?, ?, NULL, ?, ?, ?)
-               ON CONFLICT(target_type, target_name) DO UPDATE SET
+            """INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
+               VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+               ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
                  actions_json = json_set(actions_json, ?, ?),
                  reason = excluded.reason,
                  updated_at = excluded.updated_at""",
-            (aid, target_type, target_name, init_json, reason, now, path, value),
+            (aid, target_type, target_name, init_json, reason, now, connector, path, value),
         )
         self.db.commit()
 
-    def clear_action_field(self, target_type: str, target_name: str, field: str) -> None:
+    def clear_action_field(
+        self, target_type: str, target_name: str, field: str,
+        connector: str = "",
+    ) -> None:
         _validate(field, "")
         path = f"$.{field}"
         now = datetime.now(timezone.utc).isoformat()
         self.db.execute(
             """UPDATE actions SET actions_json = json_remove(actions_json, ?), updated_at = ?
-               WHERE target_type = ? AND target_name = ?""",
-            (path, now, target_type, target_name),
+               WHERE target_type = ? AND target_name = ? AND connector = ?""",
+            (path, now, target_type, target_name, connector),
         )
         self.db.execute(
-            """DELETE FROM actions WHERE target_type = ? AND target_name = ?
+            """DELETE FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?
                AND actions_json IN ('{}', 'null', '')""",
-            (target_type, target_name),
+            (target_type, target_name, connector),
         )
         self.db.commit()
 
-    def set_source_path(self, target_type: str, target_name: str, path: str) -> None:
+    def set_source_path(
+        self, target_type: str, target_name: str, path: str,
+        connector: str = "",
+    ) -> None:
         self.db.execute(
-            "UPDATE actions SET source_path = ? WHERE target_type = ? AND target_name = ?",
-            (path, target_type, target_name),
+            "UPDATE actions SET source_path = ? WHERE target_type = ? AND target_name = ? AND connector = ?",
+            (path, target_type, target_name, connector),
         )
         self.db.commit()
 
-    def remove_action(self, target_type: str, target_name: str) -> None:
+    def remove_action(
+        self, target_type: str, target_name: str, connector: str = "",
+    ) -> None:
         self.db.execute(
-            "DELETE FROM actions WHERE target_type = ? AND target_name = ?",
-            (target_type, target_name),
+            "DELETE FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?",
+            (target_type, target_name, connector),
         )
         self.db.commit()
 
-    def get_action(self, target_type: str, target_name: str) -> ActionEntry | None:
+    def get_action(
+        self, target_type: str, target_name: str, connector: str = "",
+    ) -> ActionEntry | None:
         cur = self.db.execute(
-            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
-               FROM actions WHERE target_type = ? AND target_name = ?""",
-            (target_type, target_name),
+            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
+               FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?""",
+            (target_type, target_name, connector),
         )
         row = cur.fetchone()
         if row is None:
             return None
         return self._row_to_action(row)
 
-    def has_action(self, target_type: str, target_name: str, field: str, value: str) -> bool:
+    def has_action(
+        self, target_type: str, target_name: str, field: str, value: str,
+        connector: str = "",
+    ) -> bool:
         _validate(field, value)
         cur = self.db.execute(
             f"""SELECT COUNT(*) FROM actions
-                WHERE target_type = ? AND target_name = ?
+                WHERE target_type = ? AND target_name = ? AND connector = ?
                 AND json_extract(actions_json, '$.{field}') = ?""",
-            (target_type, target_name, value),
+            (target_type, target_name, connector, value),
         )
         return cur.fetchone()[0] > 0
 
     def list_by_action(self, field: str, value: str) -> list[ActionEntry]:
         _validate(field, value)
         cur = self.db.execute(
-            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
+            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
                 FROM actions WHERE json_extract(actions_json, '$.{field}') = ?
                 ORDER BY updated_at DESC""",
             (value,),
@@ -661,24 +732,40 @@ class Store:
     ) -> list[ActionEntry]:
         _validate(field, value)
         cur = self.db.execute(
-            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
+            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
                 FROM actions WHERE json_extract(actions_json, '$.{field}') = ? AND target_type = ?
                 ORDER BY updated_at DESC""",
             (value, target_type),
         )
         return [self._row_to_action(r) for r in cur.fetchall()]
 
-    def list_actions_by_type(self, target_type: str) -> list[ActionEntry]:
-        cur = self.db.execute(
-            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
-               FROM actions WHERE target_type = ? ORDER BY updated_at DESC""",
-            (target_type,),
-        )
+    def list_actions_by_type(
+        self, target_type: str, connector: str | None = None,
+    ) -> list[ActionEntry]:
+        """List action entries for a target type.
+
+        ``connector=None`` (default) returns entries across **all** connectors
+        — every returned :class:`ActionEntry` carries its own ``.connector`` so
+        callers can group/resolve in Python. A concrete value (``""`` for
+        global, ``"hermes"`` for a peer) filters to exactly that connector.
+        """
+        if connector is None:
+            cur = self.db.execute(
+                """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
+                   FROM actions WHERE target_type = ? ORDER BY updated_at DESC""",
+                (target_type,),
+            )
+        else:
+            cur = self.db.execute(
+                """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
+                   FROM actions WHERE target_type = ? AND connector = ? ORDER BY updated_at DESC""",
+                (target_type, connector),
+            )
         return [self._row_to_action(r) for r in cur.fetchall()]
 
     def list_all_actions(self) -> list[ActionEntry]:
         cur = self.db.execute(
-            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
+            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
                FROM actions ORDER BY updated_at DESC"""
         )
         return [self._row_to_action(r) for r in cur.fetchall()]
@@ -796,6 +883,7 @@ class Store:
             actions=ActionState.from_dict(actions_dict),
             reason=row[5] or "",
             updated_at=_parse_ts(row[6]),
+            connector=(row[7] or "") if len(row) > 7 else "",
         )
 
 
