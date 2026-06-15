@@ -45,21 +45,137 @@ from defenseclaw.config import (
     MCPServerEntry,
 )
 from defenseclaw.models import Finding, ScanResult
+from defenseclaw.registries.ssrf import (
+    SSRFError,
+    pinned_getaddrinfo,
+    resolve_and_pin,
+)
 from defenseclaw.scanner._llm_env import inject_llm_env, litellm_model
 
 if TYPE_CHECKING:
     pass
 
-# Hard-coded per-provider HTTPS defaults. Only used when the operator
-# hasn't set ``llm.base_url`` — the mcp-scanner SDK wants an explicit
-# URL and won't fall back to LiteLLM's default discovery. Keep in sync
-# with ``cli/defenseclaw/scanner/_llm_env.py``'s provider map: any
-# new provider entry that has a stable HTTPS endpoint SHOULD be added
-# here too so mcp-scanner can reach it without manual config.
-_PROVIDER_BASE_URLS: dict[str, str] = {
-    "openai": "https://api.openai.com",
-    "anthropic": "https://api.anthropic.com",
-}
+
+# env vars whose names contain any of these
+# substrings are treated as potentially sensitive and never inherited
+# into the spawned MCP subprocess during a local scan. This is a
+# deliberately broad allowlist because LLM SDKs ship dozens of
+# provider-specific names (OPENAI_API_KEY, ANTHROPIC_API_KEY,
+# GOOGLE_API_KEY, GEMINI_API_KEY, AZURE_OPENAI_KEY, BEDROCK_*, AWS_*,
+# COHERE_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, PERPLEXITY_API_KEY,
+# DEEPSEEK_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, TOGETHER_API_KEY,
+# REPLICATE_API_TOKEN, HF_TOKEN/HUGGINGFACE_TOKEN, ...). Operators that
+# need to preserve a specific env var for the scanned MCP server should
+# put it on the `env:` block of the MCP entry; that block IS preserved.
+_SENSITIVE_ENV_SUBSTRINGS = (
+    "API_KEY", "APIKEY", "API_TOKEN", "TOKEN", "SECRET", "PASSWORD",
+    "PASSWD", "AUTH", "CREDENTIAL", "PRIVATE_KEY", "ACCESS_KEY",
+    "BEARER", "SESSION", "COOKIE", "WEBHOOK", "HEC_TOKEN",
+    "OPENAI", "ANTHROPIC", "GOOGLE", "GEMINI", "AZURE_OPENAI",
+    "BEDROCK", "AWS_", "COHERE", "GROQ", "MISTRAL", "PERPLEXITY",
+    "DEEPSEEK", "OPENROUTER", "XAI_", "TOGETHER", "REPLICATE",
+    "HF_TOKEN", "HUGGINGFACE", "DATABRICKS", "SAGEMAKER",
+    "CISCO", "DEFENSECLAW", "SPLUNK",
+    "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN",
+)
+
+# Baseline env vars that are SAFE to inherit into the subprocess —
+# things the spawned MCP server typically needs to find binaries,
+# config dirs, and locale.
+_SAFE_INHERIT_ENV = (
+    "PATH", "HOME", "USER", "SHELL", "TERM", "LOGNAME",
+    "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ",
+    "PWD", "PYTHONPATH", "NODE_PATH", "DISPLAY",
+)
+
+
+def _is_sensitive_env_name(name: str) -> bool:
+    upper = name.upper()
+    for token in _SENSITIVE_ENV_SUBSTRINGS:
+        if token in upper:
+            return True
+    return False
+
+
+def _safe_subprocess_env(operator_env: dict | None) -> dict:
+    """Build a scrubbed environment for a spawned MCP subprocess.
+
+    a full ``os.environ`` inheritance leaks
+    every operator-set secret to the scanned server. We start from an
+    allowlisted baseline (``PATH``, ``HOME``, ``LANG``, …), strip any
+    name that looks sensitive, then layer on top whatever the operator
+    explicitly placed on ``MCPServerEntry.env``. Operator-supplied
+    values always win — they are the contract for what the MCP server
+    is supposed to see.
+    """
+    out: dict[str, str] = {}
+    for name in _SAFE_INHERIT_ENV:
+        v = os.environ.get(name)
+        if v is None:
+            continue
+        if _is_sensitive_env_name(name):
+            continue
+        out[name] = v
+    if operator_env:
+        for k, v in operator_env.items():
+            if not isinstance(k, str):
+                continue
+            out[k] = "" if v is None else str(v)
+    return out
+
+
+# Launchers that resolve and run a *named package* rather than an
+# arbitrary operator/publisher-supplied script or binary. A malicious
+# manifest can at worst point one of these at a package (which the
+# scanner then inspects); it cannot turn the scan into "run this
+# absolute path / shell interpreter". Bare interpreters (bash, sh,
+# python, node -e, …), absolute paths, and relative paths are rejected
+# so the local-scan spawn cannot be coerced into arbitrary code
+# execution as the operator before any admission decision.
+_SAFE_STDIO_LAUNCHERS = frozenset({"npx", "uvx"})
+
+# argv tokens that turn an otherwise-allowlisted launcher into an
+# arbitrary-code-execution primitive (e.g. ``npx -c "<shell>"``).
+_FORBIDDEN_STDIO_FLAGS = frozenset({
+    "-c", "--command", "--eval", "-e", "--exec", "--script", "-x",
+})
+
+
+def is_safe_stdio_scan_command(command: str, args: list | None) -> bool:
+    """Return True only when *command* is an allowlisted package runner.
+
+    This is the single source of truth for "is it safe to spawn this
+    stdio MCP server during a scan" and is shared by both the registry
+    sync path (:mod:`defenseclaw.commands.cmd_registry`) and the local
+    ``mcp scan`` path so the two can never drift.
+
+    The check is a positive allowlist, not a denylist:
+
+    * the command must be a bare launcher name (no path separators) so
+      absolute / relative executable paths are rejected outright;
+    * that name must be in :data:`_SAFE_STDIO_LAUNCHERS`;
+    * no argv token may be a code-exec flag (``-c`` / ``-e`` / …).
+    """
+    if not isinstance(command, str):
+        return False
+    cmd = command.strip()
+    if not cmd:
+        return False
+    # No path components — only bare launcher names. This blocks
+    # absolute paths (``/tmp/evil``), relative paths (``./evil``,
+    # ``../evil``), and Windows-style paths regardless of host OS.
+    if "/" in cmd or "\\" in cmd:
+        return False
+    if os.sep in cmd or (os.altsep and os.altsep in cmd):
+        return False
+    if cmd.lower() not in _SAFE_STDIO_LAUNCHERS:
+        return False
+    for a in args or []:
+        if not isinstance(a, str):
+            return False
+        if a.strip() in _FORBIDDEN_STDIO_FLAGS:
+            return False
+    return True
 
 
 def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
@@ -109,13 +225,6 @@ class MCPScannerWrapper:
     def name(self) -> str:
         return "mcp-scanner"
 
-    def _resolve_llm_base_url(self) -> str:
-        """Resolve the LLM base URL from explicit config or provider name."""
-        llm = self._llm
-        if llm.base_url:
-            return llm.base_url
-        return _PROVIDER_BASE_URLS.get(llm.provider_prefix(), "")
-
     def _inject_env(self) -> None:
         """Inject LLM API key into provider-specific env var(s).
 
@@ -126,7 +235,13 @@ class MCPScannerWrapper:
         """
         inject_llm_env(self._llm)
 
-    def scan(self, target: str, server_entry: MCPServerEntry | None = None) -> ScanResult:
+    def scan(
+        self,
+        target: str,
+        server_entry: MCPServerEntry | None = None,
+        *,
+        allow_private: bool = False,
+    ) -> ScanResult:
         import time
         import warnings
 
@@ -149,18 +264,76 @@ class MCPScannerWrapper:
 
         llm = self._llm
         aid = self.cisco_ai_defense
-        self._inject_env()
+
+        # when scanning a LOCAL stdio MCP
+        # server we MUST NOT inject the operator's LLM API key into
+        # os.environ — the mcp-scanner SDK spawns the MCP subprocess
+        # with the parent process's full environment, so any env var
+        # we set here (OPENAI_API_KEY, ANTHROPIC_API_KEY,
+        # GOOGLE_API_KEY, …) leaks to the very server we're about to
+        # scan. The SDK accepts the key via MCPConfig.llm_provider_api_key
+        # below, so the LLM analyzer keeps working without env
+        # injection. Remote scans don't spawn a child process and
+        # need the env injection to keep parity with other scanners.
+        is_local = (
+            server_entry is not None
+            and server_entry.command
+            and not server_entry.url
+        )
+
+        # Fail closed BEFORE any subprocess spawn / network call. A
+        # local stdio scan must only launch an allowlisted package
+        # runner (never an arbitrary binary / shell), and a remote scan
+        # must pass the central SSRF guard (http/https only; private,
+        # loopback, link-local and CGNAT blocked unless the operator
+        # explicitly opts in with allow_private).
+        if is_local:
+            if not is_safe_stdio_scan_command(server_entry.command, server_entry.args):
+                raise ValueError(
+                    f"refusing to scan local MCP server {server_entry.name!r}: "
+                    f"command {server_entry.command!r} is not an allowlisted "
+                    f"stdio launcher (allowed: "
+                    f"{', '.join(sorted(_SAFE_STDIO_LAUNCHERS))})"
+                )
+        pinned_target: tuple[str, str, int] | None = None
+        if not is_local:
+            try:
+                # F-0344: resolve-and-pin (not just validate). The MCP
+                # scanner SDK connects with async httpx, which re-resolves
+                # the hostname at dial time — a DNS rebind between this
+                # check and that connect would defeat a validate-only
+                # guard. We capture the vetted IP here and pin the SDK's
+                # resolver to it for the duration of the remote scan.
+                ip, host, port = resolve_and_pin(target, allow_private=allow_private)
+                pinned_target = (host, port, ip)
+            except SSRFError as exc:
+                raise ValueError(
+                    f"refusing to scan remote MCP target {target!r}: {exc}"
+                ) from exc
+
+        if not is_local:
+            self._inject_env()
 
         # ``llm_model`` must be LiteLLM-shaped (``provider/model``) —
         # the mcp-scanner SDK passes it straight through to LiteLLM.
         # ``litellm_model()`` stitches bare ``llm.model`` + ``llm.provider``
         # when needed, otherwise uses the already-prefixed string.
+        #
+        # ``llm_base_url`` is forwarded verbatim. The mcp-scanner SDK
+        # only adds ``api_base`` to the LiteLLM request when this value
+        # is truthy (mcpscanner/core/analyzers/llm_analyzer.py),
+        # otherwise LiteLLM's own provider-default discovery handles
+        # routing — which works for Bedrock, Gemini, Vertex, Azure,
+        # Groq, Mistral, DeepSeek, OpenRouter, etc. So an empty string
+        # is the correct default; operators who need a custom endpoint
+        # set ``llm.base_url`` (or ``scanners.mcp_scanner.llm.base_url``)
+        # explicitly.
         sdk_config = MCPConfig(
             api_key=aid.resolved_api_key(),
             endpoint_url=aid.endpoint,
             llm_provider_api_key=llm.resolved_api_key(),
             llm_model=litellm_model(llm),
-            llm_base_url=self._resolve_llm_base_url(),
+            llm_base_url=llm.base_url,
             llm_timeout=llm.effective_timeout(),
             llm_max_retries=llm.effective_max_retries(),
         )
@@ -168,12 +341,16 @@ class MCPScannerWrapper:
         scanner = MCPSDKScanner(sdk_config)
         analyzers = self._parse_analyzers(AnalyzerEnum)
 
-        is_local = server_entry is not None and server_entry.command and not server_entry.url
-
         start = time.monotonic()
 
         if is_local:
             all_findings = self._scan_local(scanner, server_entry, analyzers)
+        elif pinned_target is not None:
+            # Pin the SDK's DNS resolution to the IP we vetted above so a
+            # rebind cannot redirect the connect to an internal address.
+            host, port, ip = pinned_target
+            with pinned_getaddrinfo(host, port, ip):
+                all_findings = self._scan_remote(scanner, target, analyzers)
         else:
             all_findings = self._scan_remote(scanner, target, analyzers)
 
@@ -215,8 +392,17 @@ class MCPScannerWrapper:
         server_def: dict = {"command": entry.command}
         if entry.args:
             server_def["args"] = entry.args
-        if entry.env:
-            server_def["env"] = entry.env
+        # ALWAYS hand the spawned MCP
+        # subprocess an explicit, scrubbed env dict. When the MCP SDK
+        # spawns a stdio server with env=None the child inherits the
+        # parent's process environment — including OPENAI_API_KEY,
+        # ANTHROPIC_API_KEY, GOOGLE_API_KEY, AWS_*, GITHUB_TOKEN,
+        # SPLUNK_HEC_TOKEN and every other secret the operator has
+        # exported in their shell. Even when the operator did not
+        # supply env= for the MCP entry, we fall back to a minimal
+        # baseline (PATH/HOME/etc.) plus the operator-specified env
+        # only, never the parent's full environment.
+        server_def["env"] = _safe_subprocess_env(entry.env)
 
         config_data = {"mcpServers": {entry.name: server_def}}
 

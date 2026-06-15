@@ -107,15 +107,25 @@ import click
     "agent_name",
     type=click.Choice(
         [
-            "openclaw", "zeptoclaw", "claudecode", "codex",
-            "hermes", "cursor", "windsurf", "geminicli", "copilot",
+            "openclaw",
+            "zeptoclaw",
+            "claudecode",
+            "codex",
+            "hermes",
+            "cursor",
+            "windsurf",
+            "geminicli",
+            "copilot",
+            "openhands",
+            "antigravity",
+            "opencode",
         ],
         case_sensitive=False,
     ),
     default=None,
     help="Agent framework connector (alias: --agent). "
-         "Defaults to <data_dir>/picked_connector when set by the installer, "
-         "else codex.",
+    "Defaults to <data_dir>/picked_connector when set by the installer, "
+    "else codex.",
 )
 @click.option(
     "--skip-gateway",
@@ -158,25 +168,27 @@ def quickstart_cmd(
 
     profile = mode or "observe"
 
-    report = run_first_run(FirstRunOptions(
-        connector=connector,
-        profile=profile,
-        scanner_mode=scanner_mode,
-        with_judge=with_judge,
-        start_gateway=not skip_gateway,
-        verify=True,
-        force=force,
-        # Empty string when --fail-mode is omitted means "leave the
-        # existing cfg.guardrail.hook_fail_mode untouched". Quickstart
-        # is non-interactive so we never prompt — operators flip this
-        # via the flag or via `defenseclaw guardrail fail-mode`.
-        hook_fail_mode=(fail_mode or "").lower(),
-        # HITL: ``None`` preserves the current toggle, so a quickstart
-        # rerun never silently disables HITL on an operator who set
-        # it via ``defenseclaw setup guardrail`` last week.
-        human_approval=human_approval,
-        hilt_min_severity=hilt_min_severity or "",
-    ))
+    report = run_first_run(
+        FirstRunOptions(
+            connector=connector,
+            profile=profile,
+            scanner_mode=scanner_mode,
+            with_judge=with_judge,
+            start_gateway=not skip_gateway,
+            verify=True,
+            force=force,
+            # Empty string when --fail-mode is omitted means "leave the
+            # existing cfg.guardrail.hook_fail_mode untouched". Quickstart
+            # is non-interactive so we never prompt — operators flip this
+            # via the flag or via `defenseclaw guardrail fail-mode`.
+            hook_fail_mode=(fail_mode or "").lower(),
+            # HITL: ``None`` preserves the current toggle, so a quickstart
+            # rerun never silently disables HITL on an operator who set
+            # it via ``defenseclaw setup guardrail`` last week.
+            human_approval=human_approval,
+            hilt_min_severity=hilt_min_severity or "",
+        )
+    )
     if json_summary:
         click.echo(json.dumps(report.to_dict(), indent=2))
     else:

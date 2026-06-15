@@ -1,0 +1,93 @@
+---
+title: Codex
+description: Codex connector wires config.toml hooks (UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, Stop, SessionStart), the native OTel exporter, and the notify bridge for agent-turn-complete events.
+keywords:
+  - DefenseClaw Codex connector
+  - Codex hooks
+  - Codex observability
+  - Codex notify bridge
+---
+
+The Codex connector wires DefenseClaw into [Codex's documented hooks](https://github.com/openai/codex), [native OpenTelemetry exporter](https://github.com/openai/codex/blob/main/docs/otel.md), and the notify bridge for agent-turn-complete events.
+
+<Callout type="info">
+The Codex connector is **hook-only**. There is no LLM-proxy data path — Codex talks directly to its native upstream (`api.openai.com` or the ChatGPT backend) and DefenseClaw observes via hooks + native OTel.
+
+**`mode=action` is fully supported here, hook-natively.** When `guardrail.mode=action` (or `defenseclaw setup codex --mode action`), the `PreToolUse` hook returns a `permissionDecision: "deny"` verdict on policy hits and Codex blocks the tool call inside its own permission flow. No proxy listener is involved.
+</Callout>
+
+## Setup
+
+```bash
+defenseclaw setup codex                # observe (default) — record only
+defenseclaw setup codex --mode action  # block on policy hits via PreToolUse deny
+```
+
+Pins `claw.mode=codex`, wires hooks + OTel + notify bridge. No proxy listener binds for Codex in either mode.
+
+#### What this command sets vs. leaves at defaults
+
+The three flags above explicitly set: connector, mode, and post-setup restart. Every other knob falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+
+| Knob | Value when omitted | Flag to override |
+| --- | --- | --- |
+| Policy mode | `observe` (record only) | `--mode observe\|action` |
+| Scanner backend | `local` (bundled regex packs, zero key) | `--scanner-mode local\|remote\|both` |
+| Rule pack | unset → built-in baseline (no overlay) | `--rule-pack default\|strict\|permissive` |
+| LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
+| Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
+| HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
+| Hook fail-mode | `open` (allow on guardrail-side failure) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
+| Block message | empty (uses built-in copy) | `--block-message "<text>"` |
+| Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
+| Verify after setup | on | `--no-verify` |
+
+See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
+
+## Files DefenseClaw will modify
+
+<Files>
+  <Folder name="~/.codex" defaultOpen>
+    <File name="config.toml ([hooks], [otel], [notify] blocks)" />
+  </Folder>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <Folder name="hooks">
+      <File name="codex-hook.sh" />
+    </Folder>
+  </Folder>
+</Files>
+
+The `[hooks]`, `[otel]`, and `[notify]` blocks are owned by DefenseClaw; everything else in `config.toml` is preserved verbatim.
+
+## Hook capabilities
+
+<HookEventsList connector="codex" />
+
+<Callout>
+Codex has no native ask surface here. Confirm verdicts are downgraded with `raw_action` preserved so operators can review the original action in the TUI / OpenClaw plugin.
+</Callout>
+
+## Telemetry channels at boot
+
+<Flow
+  direction="LR"
+  caption="Three independent channels make Codex one of the most thoroughly inspected agents."
+>
+  <Node id="codex" kind="agent">Codex</Node>
+  <Node id="hooks" kind="connector">{`UserPromptSubmit / PreToolUse /\nPermissionRequest / PostToolUse /\nStop / SessionStart`}</Node>
+  <Node id="otel" kind="connector">Native OTel exporter</Node>
+  <Node id="notify" kind="connector">{`Notify bridge\nagent-turn-complete`}</Node>
+  <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
+  <Edge from="codex" to="hooks" />
+  <Edge from="hooks" to="gateway" />
+  <Edge from="codex" to="otel" />
+  <Edge from="otel" to="gateway" />
+  <Edge from="codex" to="notify" />
+  <Edge from="notify" to="gateway" />
+</Flow>
+
+## Disable
+
+```bash
+defenseclaw setup guardrail --disable
+```

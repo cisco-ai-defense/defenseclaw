@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,90 +75,28 @@ type codexHookResponse struct {
 	WouldBlock        bool                   `json:"would_block"`
 	AdditionalContext string                 `json:"additional_context,omitempty"`
 	CodexOutput       map[string]interface{} `json:"codex_output,omitempty"`
+	// EvaluationID + RuleIDs join this hook response to the
+	// matching scan_findings rows / audit row. Additive — older
+	// connector hook scripts ignore the fields.
+	EvaluationID string   `json:"evaluation_id,omitempty"`
+	RuleIDs      []string `json:"rule_ids,omitempty"`
 }
 
-func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "method", 0)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(r.Body))
-	if err != nil {
-		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "invalid_json", 0)
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	var req codexHookRequest
-	if err := json.Unmarshal(b, &req); err != nil {
-		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "invalid_payload", int64(len(b)))
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Codex hook payload"})
-		return
-	}
-	req.Payload = payload
-	if req.HookEventName == "" {
-		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "missing_event", int64(len(b)))
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook_event_name is required"})
-		return
-	}
-	req.CWD = sanitizeHookCWD(req.CWD)
-	ctx := enrichCodexHookContext(r.Context(), req)
-	rawEventIDs := a.rememberCodexRawHookEvents(req)
-	a.emitCodexHookLLMEvent(ctx, req, rawEventIDs, b)
-
-	t0 := time.Now()
-	resp := a.evaluateCodexHook(ctx, req)
-	elapsed := time.Since(t0)
-
-	if a.health != nil {
-		a.health.RecordConnectorRequest()
-		if resp.Action == "block" {
-			a.health.RecordToolBlock()
-		}
-		if isToolInspectionEvent(req.HookEventName) {
-			a.health.RecordToolInspection()
-		}
-	}
-
-	if a.otel != nil {
-		reason := resp.Action
-		if resp.WouldBlock {
-			reason = "would_block"
-		}
-		enrichConnectorHookTelemetrySpan(ctx, "codex", req.HookEventName, "ok", reason, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed)
-		a.otel.RecordConnectorHookInvocation(ctx, "codex", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
-		a.otel.RecordInspectEvaluation(ctx, "codex:"+req.HookEventName, resp.Action, resp.Severity)
-		a.otel.RecordInspectLatency(ctx, "codex:"+req.HookEventName, float64(elapsed.Milliseconds()))
-		a.otel.EmitConnectorTelemetryLog(ctx, "hook", "codex", "ok", 1, int64(len(b)),
-			fmt.Sprintf("source=hook connector=codex event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d",
-				req.HookEventName, codexToolName(req), resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
-	}
-
-	details := fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-		resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
-	details = appendRawTelemetryDetails(details, "raw_payload", b)
-	details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
-	a.logConnectorHookAudit(ctx, "codex", req.HookEventName, details)
-
-	a.writeJSON(w, http.StatusOK, resp)
-}
-
-func enrichCodexHookContext(ctx context.Context, req codexHookRequest) context.Context {
-	ctx = ContextWithSessionID(ctx, req.SessionID)
-	agentName := strings.TrimSpace(req.AgentType)
-	if agentName == "" {
-		agentName = "codex"
-	}
-	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{
-		AgentID:   strings.TrimSpace(req.AgentID),
-		AgentName: agentName,
-		AgentType: agentName,
-	})
-	enrichHTTPSpanFromContext(ctx)
-	enrichCodexHookSpan(ctx, req)
-	return ctx
-}
+// handleCodexHook + enrichCodexHookContext were deleted in the
+// unified hook collector refactor. Codex hook traffic now flows
+// through the unified pipeline at handleAgentHook("codex"); the
+// typed evaluator (evaluateCodexHook, kept below) is invoked through
+// the HookProfile runtime registry. Codex-specific span enrichment
+// (turn_id, gen_ai.tool.call.id, model) is preserved by the runtime
+// callback immediately before evaluateCodexHook runs.
+//
+// The unified pipeline owns shared concerns (audit envelope refresh,
+// dispatch metric, dedup, trace propagation, OTel emissions) in
+// exactly one place now. See agent_hook.go and hook_profile_runtime.go
+// for the registry and shared-pipeline rationale. The evaluator
+// stamps the unified-pipeline correlation keys (resp.EvaluationID /
+// resp.RuleIDs) on its return value so downstream tooling and the
+// audit envelope receive them.
 
 func enrichCodexHookSpan(ctx context.Context, req codexHookRequest) {
 	span := trace.SpanFromContext(ctx)
@@ -203,6 +140,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	if a.scannerCfg != nil && !a.codexEnabled() {
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
 	}
+	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
@@ -220,16 +158,18 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			}
 		}
 	case "UserPromptSubmit":
-		verdict = a.inspectMessageContent(&ToolInspectRequest{
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:      "message",
 			Content:   req.Prompt,
 			Direction: "prompt",
+			Connector: "codex",
 		})
 	case "PreToolUse", "PermissionRequest":
 		verdict = a.inspectToolPolicy(&ToolInspectRequest{
 			Tool:      codexToolName(req),
 			Args:      codexToolArgs(req),
 			Direction: "tool_call",
+			Connector: "codex",
 		})
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
@@ -238,10 +178,11 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
 	case "PostToolUse":
-		verdict = a.inspectMessageContent(&ToolInspectRequest{
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:      "message",
 			Content:   codexToolResponseString(req.ToolResponse),
 			Direction: "tool_result",
+			Connector: "codex",
 		})
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
@@ -281,10 +222,20 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			wouldBlock = true
 		}
 	}
+	// Emit per-rule findings FIRST so the notification + audit
+	// rows produced below can carry the resulting evaluation_id
+	// and top rule_ids — keeping the SIEM pivot key identical
+	// across audit log, gateway.jsonl, OS notification, and the
+	// HTTP response body.
+	evalCtx := a.emitHookRuleFindings(ctx, "codex", req.HookEventName, verdict,
+		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock)
+		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx)
 	}
-	return codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	resp.EvaluationID = evalCtx.EvaluationID
+	resp.RuleIDs = evalCtx.RuleIDs
+	return resp
 }
 
 // dispatchCodexHookNotification mirrors the Claude Code path —
@@ -293,7 +244,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 // dispatchCodexHookNotification follows the same routing contract
 // documented on dispatchAgentHookNotification. See that comment for
 // the rationale behind WouldAsk routing through OnWouldBlock.
-func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool) {
+func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext) {
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -303,12 +254,14 @@ func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, 
 	}
 	safeReason := string(redaction.ForSinkReason(reason))
 	base := notifier.BlockEvent{
-		Source:    notifier.SourceHook,
-		Target:    target,
-		Reason:    safeReason,
-		Severity:  severity,
-		Connector: "codex",
-		Event:     req.HookEventName,
+		Source:       notifier.SourceHook,
+		Target:       target,
+		Reason:       safeReason,
+		Severity:     severity,
+		Connector:    "codex",
+		Event:        req.HookEventName,
+		EvaluationID: evalCtx.EvaluationID,
+		RuleIDs:      evalCtx.RuleIDs,
 	}
 	switch {
 	case action == "block":
@@ -317,12 +270,14 @@ func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, 
 		a.notifier.OnWouldBlock(base)
 	case action == "confirm":
 		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
-			Subject:   fmt.Sprintf("%s (%s)", target, req.HookEventName),
-			Reason:    safeReason,
-			Severity:  severity,
-			Source:    notifier.SourceHook,
-			Connector: "codex",
-			Event:     req.HookEventName,
+			Subject:      fmt.Sprintf("%s (%s)", target, req.HookEventName),
+			Reason:       safeReason,
+			Severity:     severity,
+			Source:       notifier.SourceHook,
+			Connector:    "codex",
+			Event:        req.HookEventName,
+			EvaluationID: evalCtx.EvaluationID,
+			RuleIDs:      evalCtx.RuleIDs,
 		})
 	case rawAction == "confirm":
 		evt := base
@@ -340,7 +295,24 @@ func (a *APIServer) codexEnabled() bool {
 	if a.scannerCfg == nil {
 		return false
 	}
+	// Per-connector explicit disable wins over every enable signal below:
+	// an operator who ran `guardrail disable --connector codex` gets
+	// allow-without-scan even though codex is still a member of
+	// guardrail.connectors (its policy is retained for re-enable).
+	// Defense-in-depth — the boot loop already tears codex's hooks down,
+	// so this only matters in the window before a restart or if a hook
+	// still calls in. EffectiveEnabled defaults to true, so this is a
+	// no-op for single-connector installs and any connector never
+	// explicitly disabled.
+	if !a.scannerCfg.Guardrail.EffectiveEnabled("codex") {
+		return false
+	}
 	if a.scannerCfg.ConnectorHookConfig("codex").Enabled {
+		return true
+	}
+	// Multi-connector: membership in guardrail.connectors opts codex in
+	// even when it is not the singular primary (no-op for single).
+	if a.scannerCfg.Guardrail.HasConnector("codex") {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "codex")
@@ -351,7 +323,8 @@ func (a *APIServer) codexMode() string {
 	if a.scannerCfg != nil {
 		mode = strings.TrimSpace(a.scannerCfg.ConnectorHookConfig("codex").Mode)
 		if mode == "" || mode == "inherit" {
-			mode = strings.TrimSpace(a.scannerCfg.Guardrail.Mode)
+			// Per-connector guardrail override wins over global mode.
+			mode = strings.TrimSpace(a.scannerCfg.Guardrail.EffectiveMode("codex"))
 		}
 	}
 	return normalizeAgentHookMode(mode)
@@ -661,12 +634,57 @@ func validateGitCwd(cwd string) (string, error) {
 // safeGitEnv returns environment variables that prevent git from executing
 // attacker-controlled config hooks (core.fsmonitor, core.hooksPath, etc.)
 // by disabling system/global config and pointing HOME to a safe empty dir.
+//
+// Avarice F-3347: the legacy implementation only disabled system and
+// global config. Repository-local `.git/config` remained active, so a
+// hostile workspace could set `core.fsmonitor`, `core.hooksPath`,
+// `protocol.<x>.allow=user`, etc. and have git execute attacker
+// commands during routine `git diff` / `git ls-files` calls. We use
+// GIT_CONFIG_COUNT/KEY/VALUE to provide a *replacement* config layer
+// that overrides anything set in the repository, and unset
+// GIT_CONFIG_PARAMETERS so a poisoned parent env can't add more.
 func safeGitEnv() []string {
-	return append(os.Environ(),
+	// (key, value) pairs that neutralise the most dangerous repo-
+	// local config knobs. Note: we cannot fully prevent git from
+	// reading `.git/config`, but per `gitconfig(5)`,
+	// GIT_CONFIG_KEY_<n>/VALUE_<n> entries override repo-local
+	// values so any malicious setting becomes a no-op for the
+	// hooks/diff helpers we run.
+	overrides := []string{
+		"core.fsmonitor", "false",
+		"core.fsmonitorhookversion", "1",
+		"core.hooksPath", "/dev/null",
+		"core.sshCommand", "false",
+		"core.gitProxy", "false",
+		"core.editor", "/bin/false",
+		"core.pager", "cat",
+		"diff.external", "false",
+		"diff.tool", "false",
+		"protocol.allow", "never",
+		"protocol.file.allow", "never",
+		"protocol.ext.allow", "never",
+		"uploadpack.allowFilter", "false",
+		"uploadpack.allowAnySHA1InWant", "false",
+		"safe.directory", "*",
+	}
+	env := append(os.Environ(),
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"HOME="+os.TempDir(),
+		// Disable any pre-existing GIT_CONFIG_PARAMETERS override
+		// inherited from a parent process.
+		"GIT_CONFIG_PARAMETERS=",
 	)
+	pairs := 0
+	for i := 0; i+1 < len(overrides); i += 2 {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", pairs, overrides[i]),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", pairs, overrides[i+1]),
+		)
+		pairs++
+	}
+	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", pairs))
+	return env
 }
 
 func runGitList(ctx context.Context, cwd string, args ...string) ([]string, error) {

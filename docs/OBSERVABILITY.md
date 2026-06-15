@@ -9,6 +9,22 @@ both are vendor-neutral, and both are configured declaratively in
 > `audit_sinks:`. Config load will refuse to start if the legacy block
 > is present. Migrate as described below.
 
+> **Release note — SQLite write-lock remediation (Phase 1–4):**
+> The sidecar now caps SQLite to a single open connection per database
+> (`SetMaxOpenConns(1)`), applies all performance pragmas via the DSN
+> (so they propagate to every pool connection), retries
+> `database is locked` with exponential backoff, persists LLM-judge
+> bodies through an async batched queue, and stores judge bodies in
+> their own file `~/.defenseclaw/judge_bodies.db` (`audit.judge_bodies_db`
+> in config). New OTel metrics
+> `defenseclaw.sqlite.busy_retries`,
+> `defenseclaw.judge.persist.drops`,
+> `defenseclaw.judge.persist.queue_depth`, and
+> `defenseclaw.judge.persist.batch_size` surface the new pathways —
+> see §4.2 and §5.1. The legacy `judge_responses` table on `audit.db`
+> remains readable but receives no new writes; operators may drop it
+> at their convenience (see §5.1 for the one-liner).
+
 ---
 
 ## 1. Concepts
@@ -88,6 +104,88 @@ metrics + traces, configurable via `otel:` in the config file or the
 standard `OTEL_*` environment variables. There is **no** Splunk-specific
 coupling in the telemetry stack; operators who need a Splunk access
 token put it in `otel.headers` or `OTEL_EXPORTER_OTLP_HEADERS`.
+
+### 1.4 Unified finding pipeline
+
+Every runtime detection — whether it originates from a hook-based
+connector, an inspect HTTP endpoint, the proxy guardrail, a tool-call
+inspection, a mid-stream check, an asset-policy evaluation, or a
+rescan drift comparison — goes through the same `scanner.EmitScanResult`
+choke point as classic skill/MCP scans. There is exactly one finding
+pipeline, regardless of source. Practically, this means every finding
+is guaranteed to land on **all** of the following surfaces:
+
+1. `gateway.jsonl` (and every fanned-out audit sink) — one `EventScan`
+   row plus one `EventScanFinding` row per finding.
+2. `audit.sqlite` — one `scan_results` row plus one `scan_findings`
+   row per finding.
+3. Prometheus / OTel — `defenseclaw_scan_findings_by_rule_total`
+   (per-rule), `defenseclaw_scan_findings_total` (per-severity),
+   `defenseclaw_scan_count_total`, and `defenseclaw_scan_duration_*`.
+4. Correlator inputs — multi-step attack patterns see every finding,
+   not just those from CLI scans.
+
+The runtime origin is encoded on the `scanner` label, so dashboards can
+slice findings by source without changing the query shape:
+
+| `scanner=` value     | Origin                                                |
+|----------------------|-------------------------------------------------------|
+| `skill`              | Classic skill scanner (CLI / install / watcher)       |
+| `mcp`                | Classic MCP scanner (CLI / install / watcher)         |
+| `hook-rules`         | Hook-based connector rule engine (claudecode, codex, cursor, windsurf, geminicli, copilot, hermes) |
+| `inspect-http`       | `/api/v1/inspect/{request,response,tool-response,tool}` |
+| `guardrail-llm`      | Proxy guardrail final-stage verdict                   |
+| `mid-stream`         | Mid-stream guardrail re-check                         |
+| `tool-call-inspect`  | Inline tool-call guardrail check during proxy flow    |
+| `asset-policy`       | Runtime asset-policy enforcement (skills/MCP install) |
+| `drift`              | Rescan drift detection (new/removed/changed findings) |
+
+#### `evaluation_id` — the runtime join key
+
+For runtime sources (everything except classic `skill`/`mcp`), every
+emission carries an `evaluation_id` (UUID) generated at the entry
+point and propagated through the entire fan-out. It surfaces as:
+
+- `scan.evaluation_id` on the aggregate `EventScan` row.
+- `scan_finding.evaluation_id` on every child `EventScanFinding` row.
+- `verdict.evaluation_id` on the corresponding `EventVerdict` (proxy
+  guardrail / hook / inspect flows).
+- `error.evaluation_id` on schema-violation `EventError` rows when the
+  dropped payload was attributable to an evaluation (so a malformed
+  finding does not become an anonymous infrastructure error).
+- `evaluation_id` column on the `scan_results` and `scan_findings`
+  audit DB tables.
+- Audit log `details` for hook / HILT / asset-policy decisions, as
+  `evaluation_id=<uuid> rule_ids=<id1,id2,...>`.
+
+#### Pivot examples
+
+```text
+# All findings that fired during one proxy request:
+gateway.jsonl: event_type=scan_finding evaluation_id="eval-…"
+
+# Aggregate scan row + every child finding + the verdict that gated
+# the request, joined on evaluation_id:
+SELECT * FROM scan_results    WHERE evaluation_id = 'eval-…';
+SELECT * FROM scan_findings   WHERE evaluation_id = 'eval-…';
+SELECT * FROM judge_responses WHERE evaluation_id = 'eval-…';
+
+# Prometheus: how many findings did rule X fire across all surfaces
+# in the last hour, regardless of whether they came from a hook, the
+# proxy, or a CLI scan?
+sum(increase(defenseclaw_scan_findings_by_rule_total{rule_id="…"}[1h]))
+```
+
+#### Connectors that emit findings
+
+All hook-based connectors — Claude Code (`claudecode`), Codex
+(`codex`), Cursor (`cursor`), Windsurf (`windsurf`), Gemini CLI
+(`geminicli`), Copilot (`copilot`), Hermes (`hermes`) — emit per-rule
+findings through this pipeline. The HTTP hook response keeps the
+existing `findings: []string` field (backward-compatible) and adds an
+opt-in `detailed_findings: []RuleFinding` block plus top-level
+`evaluation_id` and `rule_ids` fields. Clients that don't read the
+new fields are unaffected.
 
 ---
 
@@ -315,6 +413,7 @@ The gateway emits the following OTel metrics
 |--------|--------|
 | `defenseclaw.redaction.applied` | detector, field |
 | `defenseclaw.egress.events` | branch (known \| shape \| passthrough), decision (allow \| block), source (go \| ts) |
+| `defenseclaw.gateway.forwarded_headers` | path (chat-completions \| passthrough), result (ok \| rejected_invalid \| rejected_overflow) |
 
 **Sink delivery:**
 
@@ -333,6 +432,17 @@ The gateway emits the following OTel metrics
 | `defenseclaw.stream.lifecycle` | http.route, transition (open \| close), outcome |
 | `defenseclaw.stream.bytes_sent` | http.route, outcome |
 | `defenseclaw.stream.duration_ms` | http.route, outcome |
+
+**SQLite storage (Phase 1–3 write-lock remediation):**
+
+| Metric | Labels | Notes |
+|--------|--------|-------|
+| `defenseclaw.sqlite.busy_retries` | operation | Increments when `database is locked` is observed before a retry succeeds. With Phase 1 (pool cap + DSN pragmas) and Phase 2 (exponential-backoff retry) deployed, this counter should hover near zero in steady state. A non-zero rate is a leading indicator that some new write path bypasses the `audit.Store`/`inventory.Store` helpers. |
+| `defenseclaw.judge.persist.drops` | reason (`queue_full` \| `shutdown` \| `worker_error`) | Phase 3 async judge-persistence queue overflow counter. Any non-zero value means judge bodies were silently discarded — either because the proxy was generating judges faster than the worker could fsync them (raise `guardrail.judge_persist_queue_depth` or `DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE`) or because Shutdown ran out of time before draining (raise the sidecar shutdown grace period). |
+| `defenseclaw.judge.persist.queue_depth` | — | Current size of the async judge queue. Used together with `judge.persist.drops` to size queue depth empirically — a sustained queue depth at the cap is the precondition for drops. |
+| `defenseclaw.judge.persist.batch_size` | — | Histogram of rows committed per worker transaction (target up to 32 rows or every 100 ms). Higher means more rows are sharing a single fsync, which is the entire point of the async queue. |
+
+> **Alerting threshold suggestion:** alert when `rate(defenseclaw_sqlite_busy_retries_total[5m]) > 0` for more than 10 minutes, and page when any non-zero `defenseclaw_judge_persist_drops_total` sample is observed.
 
 **Schema validation:** `defenseclaw.schema.violations` (event_type, code) —
 see §8.1 below.
@@ -418,6 +528,40 @@ To opt back into raw evidence for a single `/inspect` HTTP response, use
 the `X-DefenseClaw-Reveal-PII: 1` header documented in `docs/API.md`.
 That path audit-logs the reveal and still writes the redacted copy to
 the store.
+
+---
+
+## 5.1 SQLite storage layout (Phase 4 split)
+
+DefenseClaw's local SQLite footprint is split across two files, each
+hardened with the same connection pool and pragma defaults (WAL,
+`busy_timeout=5000`, `synchronous=NORMAL`, `cache_size=-20000`,
+`temp_store=MEMORY`, `mmap_size=268435456`, `foreign_keys=ON`,
+`SetMaxOpenConns(1)`):
+
+| File | Default path | Tables (selected) | Config key |
+|------|--------------|-------------------|------------|
+| `audit.db` | `~/.defenseclaw/audit.db` | `audit_events`, `activity_events`, `scan_results`, `findings`, `network_egress`, `sink_health` | `audit_db` |
+| `judge_bodies.db` | `~/.defenseclaw/judge_bodies.db` | `judge_responses` | `judge_bodies_db` |
+
+The split exists because retained LLM-judge bodies are the largest and
+highest-frequency rows in the system (each capped at `MaxJudgeRawBytes
+= 64 KiB`). Keeping them in their own DB means audit/activity writers
+on `audit.db` never share a fsync window with judge body INSERTs,
+which is what made the pre-Phase-4 layout vulnerable to
+`SQLITE_BUSY` under burst load.
+
+The legacy `judge_responses` table on `audit.db` is preserved by the
+upgrade (so historical rows remain readable) but never receives new
+writes. Operators who want to reclaim that disk space can drop the
+legacy table at their convenience:
+
+```bash
+sqlite3 ~/.defenseclaw/audit.db "DROP TABLE IF EXISTS judge_responses; VACUUM;"
+```
+
+This is safe at any point after the upgraded sidecar has started; new
+judge bodies always land in `judge_bodies.db`.
 
 ---
 
@@ -619,7 +763,7 @@ writes the `otel:` block in `~/.defenseclaw/config.yaml` automatically):
 
 ```bash
 defenseclaw setup local-observability up
-defenseclaw gateway                            # start sidecar; it reads config.yaml
+defenseclaw-gateway start                      # start sidecar; it reads config.yaml
 defenseclaw setup local-observability status   # compose ps + reachability probes
 defenseclaw setup local-observability down     # stop (volumes preserved)
 defenseclaw setup local-observability reset    # stop + wipe data volumes
@@ -632,7 +776,7 @@ works for CI / scripted environments:
 cd bundles/local_observability_stack
 ./bin/openclaw-observability-bridge up         # or ./run.sh up (compat shim)
 eval "$(./bin/openclaw-observability-bridge env)"
-go run ./cmd/defenseclaw gateway
+go run ./cmd/defenseclaw
 ./bin/openclaw-observability-bridge down
 ```
 
@@ -674,7 +818,7 @@ severity, action, etc.
 
 | Variable | Source | Used on |
 | --- | --- | --- |
-| `connector` | `defenseclaw_connector_hook_invocations_total{connector}` ∪ `defenseclaw_otel_ingest_records_total{source}` | Connectors, Connector Detail (single-select), Security, HITL, Agent identity. |
+| `connector` | `label_values(defenseclaw_connector_hook_invocations_total, connector)` — hook invocations only, **not** unioned with `defenseclaw_otel_ingest_records_total{source}` (that metric carries only connectors pushing native OTLP and would silently exclude every hook-only connector). | Connectors + Connector Detail (single-connector deep dive) are connector-scoped; Security (Guardrail Evaluations), HITL, and Agent identity are connector-filterable (multi-select `connector` template var). |
 | `surface` | `defenseclaw_direction` (`prompt` / `completion` / `tool_call`) | Connector Detail, Security. |
 | `stage` | `defenseclaw_gateway_verdicts_total{verdict_stage}` | Security, Connector Detail. |
 | `action` | `defenseclaw_gateway_verdicts_total{verdict_action}` | Security, Connector Detail. |
@@ -737,6 +881,35 @@ DefenseClaw runs Codex, Claude Code, and the hook-first agent connectors in
 **observability mode** by default: enforcement is gated off, and connector
 telemetry feeds audit events + Prometheus counters + Grafana panels without
 modifying the agent traffic plane unless the connector explicitly supports it.
+
+### 9.0 Multi-connector telemetry
+
+A single gateway can enforce guardrail policy for several hook connectors at
+once (Codex, Claude Code, Antigravity, …), each with an independent policy
+block under `guardrail.connectors.<name>` in `~/.defenseclaw/config.yaml`
+(per-connector `mode`, `hook_fail_mode`, `hilt`, `block_message`,
+`rule_pack_dir`). Proxy connectors (OpenClaw, ZeptoClaw) cannot be peers —
+multi-connector is hook-only. When more than one connector is active,
+`claw.mode` is set to `multi`, and that sentinel is mirrored onto the OTel
+**resource** attribute `defenseclaw.claw.mode=multi` so a fan-out gateway is
+distinguishable from a single-connector one at the resource level.
+
+Every per-event rail carries a connector dimension, so telemetry can be sliced
+per connector:
+
+| Rail | Connector dimension |
+|------|---------------------|
+| OTel metrics | `connector` label (e.g. `defenseclaw_connector_hook_invocations_total{connector="codex"}`) |
+| OTel spans / logs | `defenseclaw.connector.source` attribute |
+| Audit rows + OTLP-ingest audit rows | top-level `connector` field, plus `structured.connector` on hook rows |
+| Splunk HEC | top-level `connector`, and `structured.connector` on hook events |
+
+Grafana's **Connectors (Overview)** and **Connector Detail** boards are built
+on the `connector` metric label; the **Guardrail Evaluations** (Security) board
+is connector-filterable via the multi-select `connector` template variable
+(see §8.0.1). The egress firewall is **not** part of this per-connector
+surface — it is one host-wide ruleset (see `docs/ARCHITECTURE.md` → Firewall
+scope); per-connector guardrail policy is enforced inside the gateway above it.
 
 ### 9.1 Channels
 
@@ -815,15 +988,18 @@ modifying the agent traffic plane unless the connector explicitly supports it.
 
 ### 9.2 SIEM consumer guidance
 
-Audit events emitted from the new ingest paths carry the same envelope
-shape as every other audit row but expose three new top-level
-attributes worth indexing in your SIEM:
+Audit events emitted from connector ingest paths carry the same v7
+envelope shape as every other audit row and sink event. The most useful
+fields to index are:
 
-| Field           | Type   | Meaning                                                                 |
-|-----------------|--------|-------------------------------------------------------------------------|
-| `action`        | enum   | One of `connector-hook`, `asset-policy`, `otel.ingest.{logs,metrics,traces,malformed}`, `codex.notify`, `codex.notify.<type>`, or `codex.notify.malformed`. Validators MUST accept the full enum *and* the `^codex\.notify\.[a-z0-9._-]{1,64}$` prefix family. |
-| `actor`         | string | Authenticated connector source from the `x-defenseclaw-source` header or the Gemini path token. Examples: `codex`, `claudecode`, `copilot`, `geminicli`, `unknown`. |
-| `details`       | string | Structured one-line summary: `signal=logs size=4096 bytes resources=2 logRecords=14 services=[codex=1,claudecode=1]`. |
+| Field | Type | Meaning |
+|--------|------|---------|
+| `schema_version` | integer | Required audit contract version. v7 events include provenance and three-tier agent identity. |
+| `action` | enum | One of `connector-hook`, `connector-hook-synthetic`, `asset-policy`, `otel.ingest.{logs,metrics,traces,malformed}`, `codex.notify`, `codex.notify.<type>`, or `codex.notify.malformed`. Validators MUST accept the full enum and the `^codex\.notify\.[a-z0-9._-]{1,64}$` prefix family. |
+| `actor` | string | Authenticated connector source from the `x-defenseclaw-source` header or the Gemini path token. Examples: `codex`, `claudecode`, `copilot`, `geminicli`, `unknown`. |
+| `structured` | object | Machine-readable payload when the row has one. Connector hook rows use `schema="defenseclaw.hook.v1"` from `schemas/hook-audit-envelope.json`. |
+| `details` | string | Legacy redacted summary. Connector-hook rows keep a quoted `details_json=` mirror during migration; new consumers should prefer `structured`. |
+| `content_hash`, `generation`, `binary_version` | string/integer | Provenance for deterministic replay and dashboard bucketing. |
 
 The matching OTel connector log contract
 (`schemas/otel/connector-telemetry-event.schema.json`) carries
@@ -886,35 +1062,27 @@ Provisioned in `bundles/local_observability_stack/`:
     inbound OTLP-HTTP bodies fail to parse for 10m, indicating
     schema drift or a misconfigured exporter.
 
-### 9.4 Toggling enforcement
+### 9.4 Hook-only enforcement
 
-Observability mode keeps connector enforcement code intact but inactive
-unless explicitly requested. For Codex and Claude Code, the proxy
-simply doesn't bind until the connector-specific enforcement switch is
-enabled:
+The Codex, Claude Code, Hermes, Cursor, Windsurf, Gemini CLI, Copilot
+CLI, and OpenHands connectors are hook-only. There is no LLM-proxy
+data path — those agents talk directly to their native upstreams and
+DefenseClaw observes / enforces via each connector's documented hook
+bus. There is no proxy listener to enable for hook connectors; in
+`guardrail.mode=action`, tool-call decisions are surfaced through the
+hook's deny verdict.
 
-```yaml
-# ~/.defenseclaw/config.yaml
-guardrail:
-  codex_enforcement_enabled: true        # codex
-  claude_code_enforcement_enabled: true  # claude code
-```
-
-Restart the gateway. The connector setup logic re-patches
-`~/.codex/config.toml` / `~/.claude/settings.json` to point traffic
-through the proxy and persists snapshots in
-`~/.defenseclaw/state/{codex,claudecode}-config.json` so a future
-mode flip cleanly reverts both the guardrail wiring AND the OTel /
-notify glue. See `internal/gateway/connector/{codex,claudecode}.go`
-for the full backup/restore contract.
+For connectors that still bind the proxy (OpenClaw, ZeptoClaw), set
+`guardrail.mode=action` and restart the gateway.
 
 ### 9.5 One-shot setup aliases
 
 For operators who only want telemetry (no enforcement, no proxy
-listener), DefenseClaw exposes dedicated setup paths that wrap the
-observability-only branch of `setup guardrail` and additionally pin
-`claw.mode` so the rest of the CLI/TUI surfaces the matching
-connector's source-of-truth files.
+listener), DefenseClaw exposes dedicated setup paths that default to
+`guardrail.mode=observe` and additionally pin `claw.mode` so the rest
+of the CLI/TUI surfaces the matching connector's source-of-truth
+files. The same aliases also accept `--mode action` for hook-native
+blocking without inserting a proxy.
 
 ```bash
 # Codex: hooks + native OTel + notify-bridge.sh
@@ -929,6 +1097,10 @@ defenseclaw setup cursor --yes
 defenseclaw setup windsurf --yes
 defenseclaw setup geminicli --yes
 defenseclaw setup copilot --yes
+defenseclaw setup openhands --yes
+
+# Hook-native blocking, still no proxy:
+defenseclaw setup openhands --yes --mode action
 
 # Optionally bring up the bundled Prom/Loki/Tempo/Grafana stack in
 # the same step:
@@ -941,10 +1113,8 @@ Both aliases persist:
 |-----------------------------------------------|-------------------|------------------------------------------------------------------------|
 | `claw.mode`                                   | selected connector | TUI / scanners read from the connector's documented local surfaces instead of the OpenClaw layout. |
 | `guardrail.connector`                         | selected connector | Drives `Config.activeConnector()` (Go) and `Config.active_connector()` (Python). |
-| `guardrail.codex_enforcement_enabled`         | `false`           | Keeps the proxy out of the data path even though `guardrail.enabled=true`. |
-| `guardrail.claudecode_enforcement_enabled`    | `false`           | Same as above for Claude Code.                                         |
 | `guardrail.enabled`                           | `true`            | Required so the gateway's `Connector.Setup()` runs and wires hooks + OTel + notify. |
-| `guardrail.mode`                              | `observe`         | Sensible if-flipped-on-later default.                                  |
+| `guardrail.mode`                              | `observe` by default, `action` with `--mode action` | Default mode for hook-only connectors is observability-only; action mode blocks through the hook. |
 | `<data_dir>/picked_connector`                 | selected connector | So `defenseclaw setup guardrail`, `init`, and quickstart default to the same connector on subsequent runs. |
 
 After both aliases run, the gateway is restarted (unless `--no-restart`

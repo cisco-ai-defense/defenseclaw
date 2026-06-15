@@ -1,0 +1,207 @@
+---
+title: Local observability stack
+description: One-command OpenTelemetry + Loki + Tempo + Prometheus + Grafana stack, pre-wired to the DefenseClaw gateway. Grafana on :3000, dashboards seeded, no manual config.
+keywords:
+  - defenseclaw setup local-observability
+  - DefenseClaw Grafana
+  - DefenseClaw OTel
+  - Loki Tempo Prometheus
+  - openclaw-observability-bridge
+---
+
+`defenseclaw setup local-observability` brings up a full local OpenTelemetry stack and wires the gateway to it in one shot. It's what the project itself uses for development, demos, and rule-pack tuning.
+
+<Video
+  src="local-observability"
+  caption="defenseclaw setup local-observability up — five containers come up, the gateway picks up the new OTLP endpoint, and Grafana dashboards populate live."
+/>
+
+## What it brings up
+
+The stack runs from `bundles/local_observability_stack/docker-compose.yml`:
+
+| Service | Image / role | Default port |
+| --- | --- | --- |
+| `otel-collector` | OpenTelemetry Collector — fans out to Prom/Loki/Tempo | `4317` (gRPC), `4318` (HTTP) |
+| `prometheus` | Metrics store | `9090` |
+| `loki` | Log store (gateway audit + sink failures) | `3100` |
+| `tempo` | Trace store (per-decision spans) | `3200` |
+| `grafana` | UI with seeded DefenseClaw dashboards | `3000` |
+
+All five run under one Compose project (`defenseclaw-local-observability`). They share a Docker network and the bundled Grafana datasources point at each container by service name.
+
+## Bring it up
+
+<Steps>
+  <Step>
+    **Start the stack.**
+
+    ```bash
+    defenseclaw setup local-observability up
+    ```
+
+    The `openclaw-observability-bridge` binary (shipped in `bundles/local_observability_stack/bin/`) drives Compose, waits for healthchecks, and writes the OTLP endpoint into `~/.defenseclaw/config.yaml` under `otel:`.
+  </Step>
+  <Step>
+    **Open Grafana.** [http://localhost:3000](http://localhost:3000) — anonymous viewer access is enabled by default for the demo dashboards. Sign in as `admin/admin` to edit.
+  </Step>
+  <Step>
+    **Generate traffic.** Run any DefenseClaw-managed agent, or send a synthetic event to every configured sink:
+
+    ```bash
+    defenseclaw setup observability test
+    ```
+
+    The `test` subcommand fans a probe through every enabled destination — OTel exporter, audit sinks, webhooks — so you can confirm Grafana, Splunk, and notifier wiring in one shot.
+  </Step>
+  <Step>
+    **Watch the dashboards populate.** "DefenseClaw → Overview" lights up first; per-rail dashboards (Guardrail, Admission, Judge, HITL) follow as the events flow.
+  </Step>
+</Steps>
+
+## Useful flags
+
+The `up` subcommand exposes the bridge configuration directly:
+
+```bash
+defenseclaw setup local-observability up \
+  --endpoint 127.0.0.1:4317 \
+  --signals traces,metrics,logs \
+  --service-name defenseclaw-gateway \
+  --with-audit-sink \
+  --timeout 90
+```
+
+| Flag | What it does |
+| --- | --- |
+| `--endpoint` | OTLP endpoint the gateway writes into `config.yaml`. Defaults to whatever the bridge published (`127.0.0.1:4317`). |
+| `--signals` | Comma-separated subset of `traces,metrics,logs`. Useful for low-volume installs that only want metrics. |
+| `--service-name` | Resource attribute set on every emitted span. Defaults to `defenseclaw`. |
+| `--with-audit-sink` / `--no-audit-sink` | Also (or don't) add an `audit_sinks: otlp_logs` entry so audit events flow as OTel logs. Default is on. |
+| `--no-config` | Bring containers up but do **not** modify `config.yaml`. Useful when you manage gateway config out-of-band. |
+| `--no-wait` | Don't block on healthchecks — fire-and-forget. |
+| `--timeout` | Seconds to wait for healthchecks. Default 180. |
+
+The OTLP protocol is read from the bridge readiness contract (currently `grpc`); there is no `--protocol` flag on `up`. Override it by editing `otel.protocol` in `config.yaml` if you need `http/protobuf`.
+
+## What ends up in `config.yaml`
+
+```yaml title="~/.defenseclaw/config.yaml (after up)"
+otel:
+  endpoint: 127.0.0.1:4317
+  protocol: grpc
+  insecure: true
+  signals: [traces, metrics, logs]
+  service_name: defenseclaw-gateway
+
+audit_sinks:
+  - kind: otlp_logs
+    name: local-otlp-logs
+    endpoint: 127.0.0.1:4317
+    protocol: grpc
+    insecure: true
+```
+
+If a sink with the same name already exists, the bridge updates it in place rather than adding a duplicate. Other sinks (Splunk HEC, JSONL, webhooks) are left untouched.
+
+## Bundled Grafana dashboards
+
+The bundle ships a full board set in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:
+
+<Files>
+  <Folder name="grafana/dashboards" defaultOpen>
+    <File name="defenseclaw-overview.json" />
+    <File name="defenseclaw-connectors.json" />
+    <File name="defenseclaw-connector-detail.json" />
+    <File name="defenseclaw-security.json" />
+    <File name="defenseclaw-policy-decisions.json" />
+    <File name="defenseclaw-hitl.json" />
+    <File name="defenseclaw-findings.json" />
+    <File name="defenseclaw-traffic.json" />
+    <File name="defenseclaw-scanners.json" />
+    <File name="defenseclaw-runtime.json" />
+    <File name="defenseclaw-reliability.json" />
+    <File name="defenseclaw-agent-identity.json" />
+    <File name="defenseclaw-ai-discovery.json" />
+  </Folder>
+</Files>
+
+| Dashboard (UID) | What it shows |
+| --- | --- |
+| **Overview** (`defenseclaw-overview`) | KPI strip + firing alerts + SLO gauges; the landing board. |
+| **Connectors / Hook Connectors** (`defenseclaw-connectors`) | **Primary multi-connector view.** Cross-connector compare: per-connector traffic, blocks, redactions, errors, hooks-vs-OTel drift. Filterable by the `connector` template variable. |
+| **Connector Detail** (`defenseclaw-connector-detail`) | Single-connector deep dive driven by `$connector`: identity, ingest, hooks, verdicts, judge, findings, HITL, scoped Loki streams. |
+| **Guardrail Evaluations / Security** (`defenseclaw-security`) | Verdict funnel by stage × action, severity breakdown, per-connector breakdown; connector-filterable. |
+| **Policy decisions** (`defenseclaw-policy-decisions`) | OPA verdicts by domain × verdict, egress branch, block-list hits. |
+| **HITL** (`defenseclaw-hitl`) | Chat HILT + exec approvals: approval/denial/timeout rates, pending gauge, MTTD. |
+| **Findings** (`defenseclaw-findings`) | Top rules, rule_id × time heatmap, finding-to-verdict correlation. |
+| **Proxy & LLM Guard** (`defenseclaw-traffic`) | HTTP surface latency/status, OTel ingest rates, trace samples. |
+| **Scanners** (`defenseclaw-scanners`) | Throughput, queue depth, scan duration, errors by type, quarantine actions. |
+| **Runtime & SLO** (`defenseclaw-runtime`) | Process health, runtime metrics, SLO histograms. |
+| **Reliability** (`defenseclaw-reliability`) | Schema violations, gateway errors, sink health, panics. |
+| **Agent identity** (`defenseclaw-agent-identity`) | Three-tier agent identity correlation, churn, discovery latency, per-connector header presence. |
+| **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Continuous AI inventory loop: active signals, per-vendor/product tables, confidence. |
+
+For a multi-connector gateway, start on **Connectors (Overview)** to compare connectors side by side, then click a connector cell to drill into **Connector Detail**.
+
+They're auto-provisioned via `bundles/local_observability_stack/grafana/provisioning/`. The folder is named "DefenseClaw" inside Grafana so they're easy to find. Edits you make in the UI are not persisted back to disk by default — copy them out with `Dashboard → JSON Model` if you want to keep them.
+
+## Tear it down
+
+```bash
+defenseclaw setup local-observability down
+```
+
+Stops all five containers and removes the Compose project. Dashboards and Grafana state live in named Docker volumes so they survive `down`/`up` cycles.
+
+To wipe everything including the volumes:
+
+```bash
+defenseclaw setup local-observability reset --yes
+```
+
+<Callout type="warn">
+`reset` is destructive — your historical traces, logs, and metrics
+go with it. Splunk HEC and JSONL sinks are unaffected. `down` only stops
+the containers; named Docker volumes survive across `down`/`up` cycles
+until you run `reset`.
+</Callout>
+
+## Status and logs
+
+```bash
+defenseclaw setup local-observability status
+defenseclaw setup local-observability logs --service grafana --follow
+```
+
+`status` shows container health and the resolved OTLP endpoint. `logs --service <name>` tails one of the five containers — useful when Grafana isn't picking up dashboards or the OTel collector is dropping spans. Drop `--service` to fan out logs from every container at once.
+
+## Use it alongside Splunk
+
+Local observability and Splunk are independent sinks. A common pattern:
+
+- Engineers and SREs use the local Grafana stack for live investigation.
+- The same gateway *also* forwards every event to the org Splunk for retention and SOC.
+
+Just run both setup commands — they edit different blocks in `config.yaml`:
+
+```bash
+defenseclaw setup local-observability up
+defenseclaw setup splunk --enterprise --hec-endpoint ... --hec-token ...
+```
+
+See [Splunk integration](/docs/observability/splunk) for the dashboards we ship for the local Splunk app and for tips on building your own SPL queries against the gateway sourcetypes.
+
+## Troubleshooting
+
+<Accordions>
+  <Accordion title="Grafana shows no data">
+    Send a synthetic event with `defenseclaw setup observability test`, then check the collector logs (`defenseclaw setup local-observability logs --service otel-collector --follow`). Most "no data" issues are the collector not being reachable from the gateway, not a Grafana problem.
+  </Accordion>
+  <Accordion title="Port already in use">
+    Grafana 3000, Loki 3100, Tempo 3200, OTLP 4317/4318, Prometheus 9090. The bundled compose file pins these ports; the `up` preflight refuses to launch if a non-stack process is bound to one of them. Free the conflicting port (or stop the foreign container shown in the preflight warning) and re-run `up`. There is no `--port-shift` flag — edit `bundles/local_observability_stack/docker-compose.yml` if you need to relocate a port permanently.
+  </Accordion>
+  <Accordion title="Reverting config.yaml">
+    `down` does not unwrite the `otel:` block. To fully detach the gateway, re-run `setup local-observability up --no-config` and then manually clear the block, or restore from `~/.defenseclaw/config.yaml.bak.<timestamp>` (created on every modification).
+  </Accordion>
+</Accordions>

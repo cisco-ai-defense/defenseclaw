@@ -22,8 +22,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -130,6 +133,121 @@ func TestFormatGenericPayload(t *testing.T) {
 	if evt["action"] != "block" {
 		t.Errorf("expected action=block, got %v", evt["action"])
 	}
+}
+
+// TestNotifyHookHealed_WebhookCarriesConnector pins connector attribution on
+// the hook self-heal webhook. Regression guard for the gap where
+// notifyHookHealed set only Target (not the first-class Connector field), so
+// the dispatched payload's connector dimension was empty. The heal webhook
+// must carry connector=<name> end-to-end like every other connector-scoped
+// alert.
+func TestNotifyHookHealed_WebhookCarriesConnector(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	var mu sync.Mutex
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = b
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	s := &Sidecar{webhooks: NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: srv.URL, Type: "generic", Enabled: true},
+	})}
+	s.notifyHookHealed("codex", []string{"/Users/x/.codex/config.toml"})
+	s.webhooks.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(body) == 0 {
+		t.Fatal("hook-heal webhook delivered no payload")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("unmarshal generic payload: %v", err)
+	}
+	event, _ := payload["event"].(map[string]any)
+	if event["connector"] != "codex" {
+		t.Errorf("hook-heal webhook connector=%v, want codex", event["connector"])
+	}
+}
+
+// TestFormatPayloads_IncludeConnector pins multi-connector attribution on
+// outbound webhook alerts: when the audit event carries a connector, every
+// payload formatter must surface it so operators can route/triage per
+// connector. Single-connector events (empty Connector) keep their original
+// shape — asserted by the generic-payload omission check below.
+func TestFormatPayloads_IncludeConnector(t *testing.T) {
+	evt := testEvent()
+	evt.Connector = "codex"
+
+	t.Run("generic", func(t *testing.T) {
+		payload, err := formatGenericPayload(evt)
+		if err != nil {
+			t.Fatalf("formatGenericPayload error: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(payload, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		event := m["event"].(map[string]interface{})
+		if event["connector"] != "codex" {
+			t.Errorf("generic payload connector=%v, want codex", event["connector"])
+		}
+	})
+
+	t.Run("generic_omits_when_empty", func(t *testing.T) {
+		payload, err := formatGenericPayload(testEvent()) // no connector
+		if err != nil {
+			t.Fatalf("formatGenericPayload error: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(payload, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		event := m["event"].(map[string]interface{})
+		if _, present := event["connector"]; present {
+			t.Errorf("connector key should be omitted when unset, got %v", event["connector"])
+		}
+	})
+
+	t.Run("slack", func(t *testing.T) {
+		payload, err := formatSlackPayload(evt)
+		if err != nil {
+			t.Fatalf("formatSlackPayload error: %v", err)
+		}
+		if !strings.Contains(string(payload), "codex") {
+			t.Errorf("slack payload missing connector: %s", payload)
+		}
+	})
+
+	t.Run("pagerduty", func(t *testing.T) {
+		payload, err := formatPagerDutyPayload(evt, "rk")
+		if err != nil {
+			t.Fatalf("formatPagerDutyPayload error: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(payload, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		cd := m["payload"].(map[string]interface{})["custom_details"].(map[string]interface{})
+		if cd["connector"] != "codex" {
+			t.Errorf("pagerduty custom_details.connector=%v, want codex", cd["connector"])
+		}
+	})
+
+	t.Run("webex", func(t *testing.T) {
+		payload, err := formatWebexPayload(evt, "")
+		if err != nil {
+			t.Fatalf("formatWebexPayload error: %v", err)
+		}
+		if !strings.Contains(string(payload), "codex") {
+			t.Errorf("webex payload missing connector: %s", payload)
+		}
+	})
 }
 
 func TestSeverityFiltering(t *testing.T) {
@@ -371,6 +489,12 @@ func TestNewWebhookDispatcherSkipsDisabled(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestValidateWebhookURL(t *testing.T) {
+	prevLookup := lookupWebhookIPs
+	lookupWebhookIPs = func(string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("93.184.216.34")}, nil
+	}
+	t.Cleanup(func() { lookupWebhookIPs = prevLookup })
+
 	tests := []struct {
 		name    string
 		url     string
@@ -406,6 +530,79 @@ func TestNewWebhookDispatcherRejectsUnsafeURL(t *testing.T) {
 	})
 	if d != nil {
 		t.Error("expected nil dispatcher when URL is private IP")
+	}
+}
+
+// TestWebhookCheckRedirect_RejectsPrivate pins F-1306 (avarice) at the
+// CheckRedirect closure layer.
+//
+// Pre-fix: webhooks were validated only at NewWebhookDispatcher time. The
+// http.Client used for actual delivery had no CheckRedirect, so a webhook
+// endpoint could 302 the dispatcher to http://127.0.0.1:6379/ (Redis) or
+// http://169.254.169.254/ (cloud IMDS) and Go's default redirect policy
+// would happily follow it.
+//
+// Post-fix: newWebhookHTTPClient installs a CheckRedirect that re-runs
+// validateWebhookURL on every redirect target.
+func TestWebhookCheckRedirect_RejectsPrivate(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "0")
+	logger := log.New(io.Discard, "", 0)
+	client := newWebhookHTTPClient(false, logger)
+	if client.CheckRedirect == nil {
+		t.Fatalf("F-1306: CheckRedirect not installed on webhook client")
+	}
+	type tc struct {
+		target  string
+		wantErr bool
+	}
+	cases := []tc{
+		{"https://example.com/path", false},
+		{"https://hooks.slack.com/services/T0/B0/abc", false},
+		// Cloud IMDS / loopback / RFC1918 / link-local — F-1306 cases.
+		{"http://169.254.169.254/", true},
+		{"http://127.0.0.1/", true},
+		{"http://[::1]/", true},
+		{"http://10.0.0.5/", true},
+		{"http://192.168.1.50/", true},
+		{"http://[fe80::1]/", true},
+		// F-1225 parity: scoped IPv6 must also be rejected.
+		{"http://[::1%25lo0]/", true},
+		// F-1225 parity: IPv4-mapped IPv6 must also be rejected.
+		{"http://[::ffff:127.0.0.1]/", true},
+	}
+	for _, c := range cases {
+		u, err := url.Parse(c.target)
+		if err != nil {
+			t.Fatalf("parse %s: %v", c.target, err)
+		}
+		req := &http.Request{URL: u, Method: "POST"}
+		gotErr := client.CheckRedirect(req, nil)
+		if c.wantErr && gotErr == nil {
+			t.Errorf("CheckRedirect(%s) = nil, want error (private/loopback target)", c.target)
+		}
+		if !c.wantErr && gotErr != nil {
+			t.Errorf("CheckRedirect(%s) = %v, want nil (public target)", c.target, gotErr)
+		}
+	}
+}
+
+// TestWebhookCheckRedirect_RejectsLongChain pins the redirect-chain cap
+// (defense-in-depth: even if every hop is public, an attacker can stall the
+// dispatcher with a redirect storm).
+func TestWebhookCheckRedirect_RejectsLongChain(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	client := newWebhookHTTPClient(false, logger)
+	u, err := url.Parse("https://example.com/path")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	req := &http.Request{URL: u, Method: "POST"}
+	via := make([]*http.Request, 5)
+	for i := range via {
+		via[i] = &http.Request{URL: u, Method: "POST"}
+	}
+	if err := client.CheckRedirect(req, via); err == nil {
+		t.Errorf("CheckRedirect(via len=5) = nil, want error (chain cap)")
 	}
 }
 

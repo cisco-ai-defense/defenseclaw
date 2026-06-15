@@ -29,7 +29,6 @@ from defenseclaw.commands.cmd_doctor import (
     _probe_splunk_hec,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -141,6 +140,64 @@ class ProbeSplunkHECTests(unittest.TestCase):
     def test_200_unexpected_hec_code_emits_warn(self):
         result = self._run_probe(200, _hec_body(9, "Server is busy"))
         self.assertEqual(len(_checks_with_status(result, "warn")), 1)
+
+    def test_insecure_skip_verify_disables_tls_verification_for_probe(self):
+        d = _make_destination()
+        cfg = _make_cfg()
+        result = _DoctorResult()
+        doc = {
+            "audit_sinks": [
+                {
+                    "name": d.name,
+                    "kind": "splunk_hec",
+                    "splunk_hec": {"insecure_skip_verify": True},
+                }
+            ]
+        }
+        with patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            return_value=(200, _hec_body(0, "Success")),
+        ) as probe, patch(
+            "defenseclaw.commands.cmd_doctor._resolve_audit_sink_endpoint_and_token",
+            return_value=(d.endpoint, "test-token"),
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._check_splunk_token_posture",
+        ), patch(
+            "defenseclaw.observability.writer._load_yaml",
+            return_value=doc,
+        ):
+            _probe_splunk_hec(cfg, d, result)
+        self.assertFalse(probe.call_args.kwargs["verify_tls"])
+        self.assertEqual(len(_checks_with_status(result, "pass")), 1)
+
+    def test_legacy_verify_tls_false_still_verifies_tls_for_probe(self):
+        d = _make_destination()
+        cfg = _make_cfg()
+        result = _DoctorResult()
+        doc = {
+            "audit_sinks": [
+                {
+                    "name": d.name,
+                    "kind": "splunk_hec",
+                    "splunk_hec": {"verify_tls": False},
+                }
+            ]
+        }
+        with patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            return_value=(200, _hec_body(0, "Success")),
+        ) as probe, patch(
+            "defenseclaw.commands.cmd_doctor._resolve_audit_sink_endpoint_and_token",
+            return_value=(d.endpoint, "test-token"),
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._check_splunk_token_posture",
+        ), patch(
+            "defenseclaw.observability.writer._load_yaml",
+            return_value=doc,
+        ):
+            _probe_splunk_hec(cfg, d, result)
+        self.assertTrue(probe.call_args.kwargs["verify_tls"])
+        self.assertEqual(len(_checks_with_status(result, "pass")), 1)
 
     # --- auth failure paths ---
 

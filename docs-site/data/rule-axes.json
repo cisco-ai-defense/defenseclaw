@@ -1,0 +1,460 @@
+{
+  "exact_rule_axes": [
+    {
+      "id": "C2-INTERACT-SH",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-METADATA-AWS",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-METADATA-AZURE",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-METADATA-GCP",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-NGROK",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-OAST",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-PIPEDREAM",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-REQUESTBIN",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-WEBHOOK-SITE",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-CURL-UPLOAD",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-ENV-DUMP",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "CMD-PIPE-CURL",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-PIPE-WGET",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-WGET-POST",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CRED-AWS-FILE",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "CRED-AWS-KEY",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "DNS-TUNNEL",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "ENT-BULK-SSN",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "INJ-DAN-MODE",
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "INJ-DELIMITER-HIJACK",
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "INJ-DISREGARD",
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "INJ-IGNORE-ALL",
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "INJ-IGNORE-PREVIOUS",
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "INJ-JAILBREAK",
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "INJ-OVERRIDE",
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "JUDGE-EXFIL-CHANNEL",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "JUDGE-TOOL-INJ-DESTRUCT",
+      "axes": []
+    },
+    {
+      "id": "JUDGE-TOOL-INJ-EXFIL",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "PATH-ETC-PASSWD",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "PATH-ETC-SHADOW",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "PATH-GIT-CREDS",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "PATH-NETRC",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "PATH-PROC-ENVIRON",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "PATH-SSH-KEY",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "PII-PASSPORT",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "PII-PASSWORD",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "PII-SSN",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "SEC-CONNSTR",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "SEC-DISCORD-WEBHOOK",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SEC-GITHUB",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "SEC-GOOGLE",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "SEC-PRIVKEY",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "SEC-SENDGRID",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "SEC-SLACK-TOKEN",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "SEC-SLACK-WEBHOOK",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SRC-ENV-READ",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "SRC-FETCH",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SRC-HTTP-SERVER",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SRC-NET-SERVER",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SRC-WS",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SSRF-AWS-META",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SSRF-AZURE-META",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SSRF-GCP-META",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SSRF-INTERNAL-HOST",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "SSRF-PRIVATE-IP",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "TRUST-AUTHORITY-CLAIM",
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "TRUST-NEW-INSTRUCTION",
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "TRUST-SAFETY-OVERRIDE",
+      "axes": [
+        "ingress_untrusted"
+      ]
+    }
+  ],
+  "prefix_axes": [
+    {
+      "prefixes": [
+        "SEC-",
+        "PATH-",
+        "ENT-",
+        "CRED-",
+        "PII-",
+        "CS-PII-",
+        "JSON-SEC-",
+        "COG-",
+        "JUDGE-PII-",
+        "JUDGE-EXFIL-"
+      ],
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "prefixes": [
+        "C2-",
+        "DNS-TUNNEL"
+      ],
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "prefixes": [
+        "INJ-",
+        "TRUST-",
+        "JAIL-",
+        "JUDGE-INJ-",
+        "JUDGE-TOOL-INJ-"
+      ],
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "prefixes": [
+        "SSRF-"
+      ],
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "prefixes": [
+        "META-REMOTE",
+        "META-EXEC"
+      ],
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "prefixes": [
+        "META-ENV-EXFIL",
+        "META-EXFIL"
+      ],
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "prefixes": [
+        "GW-ENV-WRITE",
+        "GW-ENV-READ"
+      ],
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "prefixes": [
+        "GW-"
+      ],
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "prefixes": [
+        "CMD-DESTRUCTIVE",
+        "SHELL-DESTRUCTIVE"
+      ],
+      "axes": null
+    }
+  ],
+  "prefix_capabilities": [
+    {
+      "prefixes": [
+        "CMD-DESTRUCTIVE",
+        "SHELL-DESTRUCTIVE"
+      ],
+      "capability": "exec_shell"
+    }
+  ]
+}

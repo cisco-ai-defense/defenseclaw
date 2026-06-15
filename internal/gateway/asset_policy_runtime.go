@@ -143,7 +143,21 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		Args:           probe.Args,
 		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
 	})
-	if isUnknownTerminalMCP(probe) && !assetRuntimeModeIsAction(runtimeDetection.UnknownTerminalMCP) && decision.RawAction == "block" {
+	// when MCP.Default is "deny" and the asset
+	// policy is itself in action mode, an unknown terminal MCP
+	// command MUST NOT be silently downgraded to allow just
+	// because the secondary `runtime_detection.unknown_terminal_mcp`
+	// knob defaults to observe. Operators who explicitly set
+	// MCP.Default=deny expect default-deny semantics. We only
+	// honor the downgrade for runtime detections that are NOT
+	// already covered by the operator's default-deny posture
+	// (i.e. when the asset policy is in observe mode OR
+	// MCP.Default isn't deny).
+	mcpAssetMode, mcpDefaultDeny := assetMCPModeFor(a, decision)
+	if isUnknownTerminalMCP(probe) &&
+		!assetRuntimeModeIsAction(runtimeDetection.UnknownTerminalMCP) &&
+		decision.RawAction == "block" &&
+		!(mcpAssetMode == config.AssetPolicyModeAction && mcpDefaultDeny) {
 		decision.Action = "allow"
 		decision.Mode = config.AssetPolicyModeObserve
 		decision.WouldBlock = true
@@ -163,12 +177,14 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 			"would_block":         fmt.Sprintf("%t", decision.WouldBlock),
 		})
 	}
+	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", connector, hookEvent)
 	if a.logger != nil {
-		a.logAssetPolicyAudit(ctx, "mcp:"+decision.TargetName,
-			fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
-				decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, decision.WouldBlock, decision.Reason))
+		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
+			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, decision.WouldBlock, decision.Reason)
+		details = appendHookEvaluationDetails(details, evalCtx)
+		a.logAssetPolicyAudit(ctx, connector, "mcp:"+decision.TargetName, details)
 	}
-	a.dispatchAssetPolicyNotification(decision, "mcp", connector, hookEvent)
+	a.dispatchAssetPolicyNotification(decision, "mcp", connector, hookEvent, evalCtx)
 	return decision, true
 }
 
@@ -190,6 +206,38 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 		SourcePath:     probe.SourcePath,
 		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
 	})
+	// a Claude Code agent can pass a crafted
+	// skill_name like "/tmp/attacker/trusted-skill/SKILL.md" and
+	// the previous code stripped it down to the basename
+	// "trusted-skill", which matches the operator's registered
+	// skill by name only. The path itself is attacker-controlled
+	// so the registry match is meaningless. We force-rewrite the
+	// decision to "unregistered" whenever the agent's literal
+	// input was path-shaped (probe.RawName carries the original
+	// when normalization changed it). This makes the decision
+	// fall through the registry-required guard the operator
+	// already configured.
+	if probe.RawName != "" && strings.ContainsAny(probe.RawName, `/\`) {
+		// Mark unregistered so registry-required policy denies.
+		decision.RegistryStatus = "unregistered"
+		// If the operator runs registry_required=true and the
+		// configured default for unknowns is deny (the policy
+		// the test in sets up), assetPolicyViolation
+		// already produces a block; we just need to make sure
+		// we don't reuse the cached "allow" path. Re-evaluate.
+		decision.RawAction = "block"
+		if decision.Mode == config.AssetPolicyModeAction {
+			decision.Action = "block"
+		} else {
+			decision.Action = "allow"
+			decision.WouldBlock = true
+		}
+		decision.Reason = appendVerdictReason(decision.Reason,
+			"path-shaped skill_name input forced unregistered match")
+		if strings.TrimSpace(decision.Source) == "" {
+			decision.Source = "skill-path-shaped"
+		}
+	}
 	if !decision.Enabled || decision.RawAction != "block" {
 		return decision, false
 	}
@@ -217,12 +265,14 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 		}
 		a.otel.EmitPolicyDecision("asset-policy", decision.Action, decision.TargetName, "skill", decision.Reason, attrs)
 	}
+	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, "skill", connector, hookEvent)
 	if a.logger != nil {
-		a.logAssetPolicyAudit(ctx, "skill:"+decision.TargetName,
-			fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s skill_name_raw=%q source_path=%q would_block=%v reason=%s",
-				decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason))
+		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s skill_name_raw=%q source_path=%q would_block=%v reason=%s",
+			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason)
+		details = appendHookEvaluationDetails(details, evalCtx)
+		a.logAssetPolicyAudit(ctx, connector, "skill:"+decision.TargetName, details)
 	}
-	a.dispatchAssetPolicyNotification(decision, "skill", connector, hookEvent)
+	a.dispatchAssetPolicyNotification(decision, "skill", connector, hookEvent, evalCtx)
 	return decision, true
 }
 
@@ -248,9 +298,13 @@ func hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets string, assetDec
 // for parity with the hook / proxy / HILT helpers — the toast is
 // rendered locally but a screenshot or screen recording is still a
 // data-exfil surface.
-func (a *APIServer) dispatchAssetPolicyNotification(decision config.AssetPolicyDecision, targetKind, connectorName, hookEvent string) {
+func (a *APIServer) dispatchAssetPolicyNotification(decision config.AssetPolicyDecision, targetKind, connectorName, hookEvent string, evalCtx ...hookEvaluationContext) {
 	if a == nil || a.notifier == nil {
 		return
+	}
+	var ec hookEvaluationContext
+	if len(evalCtx) > 0 {
+		ec = evalCtx[0]
 	}
 	target := strings.TrimSpace(decision.TargetName)
 	if target == "" {
@@ -259,12 +313,14 @@ func (a *APIServer) dispatchAssetPolicyNotification(decision config.AssetPolicyD
 		target = strings.ToLower(strings.TrimSpace(targetKind)) + ":" + target
 	}
 	ev := notifier.BlockEvent{
-		Source:    notifier.SourceAssetPolicy,
-		Target:    target,
-		Reason:    string(redaction.ForSinkReason(decision.Reason)),
-		Severity:  "HIGH",
-		Connector: connectorName,
-		Event:     hookEvent,
+		Source:       notifier.SourceAssetPolicy,
+		Target:       target,
+		Reason:       string(redaction.ForSinkReason(decision.Reason)),
+		Severity:     "HIGH",
+		Connector:    connectorName,
+		Event:        hookEvent,
+		EvaluationID: ec.EvaluationID,
+		RuleIDs:      ec.RuleIDs,
 	}
 	if decision.Action == "block" {
 		a.notifier.OnBlock(ev)
@@ -277,6 +333,24 @@ func (a *APIServer) dispatchAssetPolicyNotification(decision config.AssetPolicyD
 
 func isUnknownTerminalMCP(probe mcpRuntimeProbe) bool {
 	return probe.Surface == "terminal" && strings.EqualFold(strings.TrimSpace(probe.ServerName), "terminal-mcp")
+}
+
+// assetMCPModeFor returns the effective AssetPolicy mode and whether
+// the operator's MCP.Default is "deny". Used by to refuse the
+// `unknown_terminal_mcp=observe` downgrade when the operator has
+// already opted into MCP default-deny in action mode.
+func assetMCPModeFor(a *APIServer, decision config.AssetPolicyDecision) (string, bool) {
+	if a == nil || a.scannerCfg == nil {
+		return decision.Mode, false
+	}
+	mode := strings.TrimSpace(a.scannerCfg.AssetPolicy.Mode)
+	if mode == "" {
+		mode = decision.Mode
+	}
+	defaultDeny := strings.EqualFold(
+		strings.TrimSpace(a.scannerCfg.AssetPolicy.MCP.Default),
+		"deny")
+	return mode, defaultDeny
 }
 
 func assetRuntimeModeIsAction(mode string) bool {
@@ -823,7 +897,7 @@ func runtimeAssetCanEnforce(event string) bool {
 		return true
 	}
 	// Generic hook-only connectors (hermes, cursor, windsurf, geminicli,
-	// copilot) use varied case/spacing for the same semantic events
+	// copilot, openhands) use varied case/spacing for the same semantic events
 	// (preToolUse, pre_tool_call, beforeMCPExecution, beforeShellExecution,
 	// pre_run_command, premcptooluse, ...). Reusing the canonical
 	// tool-inspection set keeps the asset-policy enforcement gate

@@ -49,12 +49,28 @@ func EnsureGatewayToken(dotenvPath string) (string, error) {
 	firstBootMu.Lock()
 	defer firstBootMu.Unlock()
 
-	if t := strings.TrimSpace(ResolveAPIKey("DEFENSECLAW_GATEWAY_TOKEN", dotenvPath)); t != "" {
+	// Check the process environment directly (not via ResolveAPIKey which
+	// is gated by localKeyResolutionDisabled). In enterprise/sidecar mode
+	// the gateway token is injected via ConfigMap envFrom and must be
+	// respected even when local key resolution is disabled for LLM keys.
+	if t := strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")); t != "" {
 		return t, nil
 	}
-	// Compatibility shim: old installs may have the legacy var name.
-	if t := strings.TrimSpace(ResolveAPIKey("OPENCLAW_GATEWAY_TOKEN", dotenvPath)); t != "" {
+	if t := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_TOKEN")); t != "" {
 		return t, nil
+	}
+
+	// Fall back to dotenv file lookup (covers standalone CLI installs
+	// where the token lives in ~/.defenseclaw/.env).
+	if dotenvPath != "" {
+		if dotenv, err := loadDotEnv(dotenvPath); err == nil {
+			if t := strings.TrimSpace(dotenv["DEFENSECLAW_GATEWAY_TOKEN"]); t != "" {
+				return t, nil
+			}
+			if t := strings.TrimSpace(dotenv["OPENCLAW_GATEWAY_TOKEN"]); t != "" {
+				return t, nil
+			}
+		}
 	}
 
 	if dotenvPath == "" {

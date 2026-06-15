@@ -85,6 +85,16 @@ def cli(ctx: click.Context) -> None:
 
     Discovers AI usage, scans skills, MCP servers, plugins, and code
     before they run, and provides audit, telemetry, and enforcement.
+
+    \b
+    Multi-connector:
+      One gateway enforces N hook connectors (codex, claudecode,
+      antigravity, openclaw) tracked under guardrail.connectors. Add one
+      with 'defenseclaw setup <connector>' (choose Add when prompted),
+      remove with 'defenseclaw setup remove <name>'. Scope policy per peer
+      with 'defenseclaw guardrail ... --connector X', and inspect the
+      roster with 'defenseclaw status' / 'defenseclaw guardrail status'.
+      Note: OpenClaw/ZeptoClaw use the proxy path and cannot be multi peers.
     """
     ctx.ensure_object(AppContext)
     app = ctx.obj
@@ -181,17 +191,12 @@ def _ensure_codeguard_skill(cfg) -> None:
 
 
 def _try_launch_tui() -> bool:
-    """When invoked with no subcommand on a TTY, hand off to the Go TUI.
+    """When invoked with no subcommand on a TTY, launch the Textual TUI.
 
-    Uses :func:`defenseclaw.gateway.resolve_gateway_binary` instead of a
-    bare ``shutil.which`` so the handoff also works immediately after
-    ``make all`` — see the module docstring of ``defenseclaw.gateway``
-    for the full resolution order and rationale.
+    We only fall through to the Click CLI when stdin is not a TTY, when
+    the user passed an actual subcommand, or when ``--help``/``--version``
+    is on the command line.
     """
-    import os
-
-    from defenseclaw.gateway import resolve_gateway_binary
-
     if not sys.stdin.isatty():
         return False
 
@@ -201,16 +206,36 @@ def _try_launch_tui() -> bool:
     if any(a in {"-h", "--help", "--version"} for a in argv):
         return False
 
-    gateway = resolve_gateway_binary()
-    if gateway is None:
-        return False
+    from defenseclaw.tui import run_textual_tui
 
-    os.execvp(gateway, [gateway, "tui"])
-    return True  # unreachable
+    run_textual_tui()
+    return True
+
+
+def _force_utf8_io() -> None:
+    """Reconfigure stdout/stderr to UTF-8 so framing/status glyphs never crash.
+
+    Windows Python defaults its standard streams to the active legacy code page
+    (e.g. cp1252), whose charmap codec cannot encode the box-drawing characters
+    ``ux.banner()`` and the ``✓``/``✗`` status markers emit — ``defenseclaw
+    init`` died on a hosted Windows runner with ``UnicodeEncodeError: 'charmap'
+    codec can't encode`` before printing a single banner. Forcing UTF-8 is a
+    no-op where the streams are already UTF-8 (Linux/macOS) and degrades
+    gracefully if a stream is missing or not reconfigurable (e.g. redirected to
+    a plain object, or None under pythonw)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (ValueError, OSError):
+            pass
 
 
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
+    _force_utf8_io()
     if not _try_launch_tui():
         cli()
 

@@ -35,6 +35,37 @@ Use `<binary> --help` for any command.
 | `setup geminicli` / `setup copilot` | Configure observability aliases with native OTel where supported |
 | `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
 
+### guardrail
+
+Per-connector guardrail controls. Each verb prints the current value when run
+bare and mutates it when given an argument. `--connector X` scopes the change
+to one connector on a **multi-connector** install (writes
+`guardrail.connectors.<name>` in `~/.defenseclaw/config.yaml`); omit it to set
+the **global default** every connector inherits. On a single-connector install
+`--connector` is rejected (only one posture exists). Proxy connectors
+(OpenClaw, ZeptoClaw) are not valid `--connector` targets — multi-connector is
+hook-only.
+
+| Command | Description |
+|---------|-------------|
+| `guardrail status` | Read-only; **no `--connector` flag**. Shows the resolved guardrail posture (enabled, mode, fail mode, HILT, block message) as one per-connector block for EACH active connector — same layout whether one or N are wired |
+| `guardrail enable [--connector X]` | Turn the guardrail on globally, or re-enable a single previously-disabled connector (restores its hooks, no re-prompt) |
+| `guardrail disable [--connector X]` | Kill switch: global, or drop one connector from the active set and remove its hooks |
+| `guardrail fail-mode [open\|closed] [--connector X] [--yes] [--restart/--no-restart]` | Show/set the response-layer hook fail mode (e.g. `guardrail fail-mode closed --connector codex`) |
+| `guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X] [--yes] [--restart/--no-restart]` | Show/set human-in-the-loop approval policy |
+| `guardrail block-message "<text>" [--connector X]` | Show/set the message shown to the agent when an action is blocked |
+
+**Read fan-out vs. `--connector` writes.** On a multi-connector install the CLI
+splits in two: **read / status / inventory** commands fan out to *all* active
+connectors with one identical layout — `status`, `doctor`, `guardrail status`,
+the bare `guardrail fail-mode` / `hilt` / `block-message` reads, and
+`skill list` / `mcp list` / `plugin list`. **Mutating** guardrail verbs are
+single-target via `--connector X` (default = the active connector); omit it to
+set the global default. `guardrail status` is read-only and takes no
+`--connector`. Scan commands (`skill scan --all`, `mcp scan --all`,
+`aibom scan`) default to every active connector and narrow with a target or
+`--connector`.
+
 ### agent
 
 | Command | Description |
@@ -189,7 +220,7 @@ The Go binary runs the sidecar daemon and provides additional commands.
 | `start` | Start the sidecar as a background daemon |
 | `stop` | Stop the running daemon |
 | `restart` | Restart the daemon |
-| `status` | Show health of the running sidecar's subsystems |
+| `status` | Show health of the running sidecar's subsystems. On a multi-connector install it also renders a per-connector "Connector Mode" section from the `/status` endpoint's `connector_modes` array (one entry per active connector: `connector`, `mode`, `telemetry`, `proxy_intercept`). The `/status` payload also keeps the singular `connector_mode` field for the active connector as a back-compat alias. |
 
 ### scan
 

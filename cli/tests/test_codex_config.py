@@ -11,14 +11,14 @@
 """Plan E2 / item 3 — Codex config parity tests.
 
 Mirrors test_guardrail.py's OpenClaw flow but for Codex's
-``~/.codex/config.toml`` + ``./.mcp.json``: TOML shape parsing,
+``~/.codex/config.toml`` + explicit workspace ``.mcp.json``: TOML shape parsing,
 ``[hooks]`` block round-trip (S2.2 forward-compat write),
-``mcpServers`` enumeration via ``./.mcp.json``, and connector_paths
+``mcpServers`` enumeration via the global and workspace MCP surfaces, and connector_paths
 dispatcher coverage.
 
 Codex deliberately has the *narrowest* on-disk surface of the four
-connectors — TOML for general settings, project-local ``.mcp.json``
-for MCP. The ``[hooks]`` block is forward-compat only (plan C3 WONTFIX:
+connectors — TOML for general settings and global MCP, plus optional
+workspace-local ``.mcp.json`` for MCP. The ``[hooks]`` block is forward-compat only (plan C3 WONTFIX:
 codex doesn't honor it today). Tests here document the shape so any
 future refactor that drops the write must update both this file
 and ``codex.go::Setup``.
@@ -35,15 +35,15 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import connector_paths
+
 from tests.connector_fixtures import make_codex_config
 
 
 class _IsolatedHomeAndCwd:
     """Context manager: isolated HOME and CWD for codex tests.
 
-    Codex's ``mcp_servers`` reader uses ``./.mcp.json`` from the
-    current working directory (project-local convention), so we
-    chdir into a tmp project root for the duration of the test.
+    The current working directory is isolated for tests that pass an
+    explicit workspace_dir and need a project-local ``.mcp.json`` overlay.
     """
 
     def __init__(self) -> None:
@@ -98,11 +98,12 @@ class MakeCodexConfigShapeTests(unittest.TestCase):
 
 
 class CodexMCPReaderTests(unittest.TestCase):
-    """``connector_paths.mcp_servers('codex')`` reads ONLY from
-    ``./.mcp.json`` — Codex doesn't have a settings-style MCP block.
+    """``connector_paths.mcp_servers('codex')`` defaults to
+    ``~/.codex/config.toml`` and reads ``.mcp.json`` only for an
+    explicit workspace.
     """
 
-    def test_reads_dotmcp_json_in_cwd(self):
+    def test_reads_dotmcp_json_when_workspace_explicit(self):
         with _IsolatedHomeAndCwd() as iso:
             mcp_path = os.path.join(iso.cwd, ".mcp.json")
             with open(mcp_path, "w") as fh:
@@ -114,7 +115,7 @@ class CodexMCPReaderTests(unittest.TestCase):
                     },
                     fh,
                 )
-            entries = connector_paths.mcp_servers("codex")
+            entries = connector_paths.mcp_servers("codex", workspace_dir=iso.cwd)
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0].name, "codex-stdio")
             self.assertEqual(entries[0].command, "node")
@@ -126,11 +127,18 @@ class CodexMCPReaderTests(unittest.TestCase):
 
 
 class CodexSkillAndPluginDirsTests(unittest.TestCase):
-    def test_skill_dirs_includes_home_and_cwd(self):
+    def test_skill_dirs_default_to_home(self):
         with _IsolatedHomeAndCwd() as iso:
             dirs = connector_paths.skill_dirs("codex")
             self.assertIn(os.path.join(iso.home, ".codex", "skills"), dirs)
             cwd_skills = os.path.join(os.getcwd(), ".codex", "skills")
+            self.assertNotIn(cwd_skills, dirs)
+
+    def test_skill_dirs_include_workspace_when_explicit(self):
+        with _IsolatedHomeAndCwd() as iso:
+            dirs = connector_paths.skill_dirs("codex", workspace_dir=iso.cwd)
+            self.assertIn(os.path.join(iso.home, ".codex", "skills"), dirs)
+            cwd_skills = os.path.join(iso.cwd, ".codex", "skills")
             self.assertIn(cwd_skills, dirs)
 
     def test_plugin_dirs_includes_home_and_cache(self):

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -34,7 +35,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // DriftType classifies the kind of change detected between re-scans.
@@ -58,6 +61,13 @@ type DriftDelta struct {
 	Description string    `json:"description"`
 	Previous    string    `json:"previous,omitempty"`
 	Current     string    `json:"current,omitempty"`
+	// RuleID is the underlying detection rule that triggered this
+	// drift delta. Populated for finding-driven deltas
+	// (new_finding, resolved_finding, severity_escalation on a
+	// specific finding) so SIEM queries can join drift events back
+	// to the scan_findings rows they reference. Empty for content /
+	// dependency / endpoint deltas that don't map to a single rule.
+	RuleID string `json:"rule_id,omitempty"`
 }
 
 // rescanLoop runs periodic re-scans of all installed skills, plugins, and MCPs,
@@ -69,7 +79,7 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[rescan] periodic re-scan enabled (interval=%s)\n", interval)
-	_ = w.logger.LogAction("rescan-start", "", fmt.Sprintf("interval=%s", interval))
+	_ = w.logger.LogAction(string(audit.ActionRescanStart), "", fmt.Sprintf("interval=%s", interval))
 
 	// Bootstrap a baseline immediately so already-installed targets are not
 	// blind for the first full interval after startup.
@@ -89,7 +99,21 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 	}
 }
 
+// rescanOutcome reports whether a single target was actually scanned during a
+// rescan cycle or skipped because nothing relevant changed.
+type rescanOutcome int
+
+const (
+	rescanSkipped rescanOutcome = iota
+	rescanScanned
+)
+
 // runRescanCycle enumerates all installed targets and re-scans each one.
+//
+// The scanner is expensive (subprocess + optional LLM/network calls), so a
+// target is only scanned when its content or the scanner fingerprint changed
+// since the last baseline. Unchanged targets are skipped entirely, which keeps
+// the periodic loop cheap and stops scan_results from growing on every cycle.
 func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	targets := w.enumerateTargets()
 	if len(targets) == 0 {
@@ -97,14 +121,34 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[rescan] starting periodic re-scan of %d targets\n", len(targets))
-	_ = w.logger.LogAction("rescan", "", fmt.Sprintf("targets=%d", len(targets)))
 
+	// Scanner fingerprints depend on the target *type*, not the individual
+	// target, so compute them at most once per kind per cycle.
+	fpCache := make(map[InstallType]string)
+
+	var scanned, skipped int
 	for _, evt := range targets {
 		if ctx.Err() != nil {
 			return
 		}
-		w.rescanTarget(ctx, evt)
+		outcome := w.rescanTarget(ctx, evt, fpCache)
+		if outcome == rescanScanned {
+			scanned++
+			if w.otel != nil {
+				w.otel.RecordWatcherEvent(ctx, "rescan_scan", string(evt.Type), "")
+			}
+		} else {
+			skipped++
+			if w.otel != nil {
+				w.otel.RecordWatcherEvent(ctx, "rescan_skip", string(evt.Type), "")
+			}
+		}
 	}
+
+	fmt.Fprintf(os.Stderr, "[rescan] cycle complete: targets=%d scanned=%d skipped=%d\n",
+		len(targets), scanned, skipped)
+	_ = w.logger.LogAction(string(audit.ActionRescan), "",
+		fmt.Sprintf("targets=%d scanned=%d skipped=%d", len(targets), scanned, skipped))
 }
 
 // enumerateTargets lists all direct child directories under watched roots plus
@@ -170,111 +214,163 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	return targets
 }
 
-// rescanTarget scans a single target, compares with baseline, and emits drift alerts.
-func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent) {
+// rescanTarget snapshots a single target, decides whether a fresh scan is
+// warranted (content drift or scanner-fingerprint change), and only then runs
+// the scanner, diffs findings, emits drift alerts, and refreshes the baseline.
+// Targets whose content and scanner fingerprint are unchanged are skipped
+// without invoking the scanner or writing a scan_results row.
+func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[InstallType]string) rescanOutcome {
 	currentSnap, err := w.snapshotForEvent(evt)
 	if errors.Is(err, os.ErrNotExist) {
-		return
+		return rescanSkipped
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] snapshot %s: %v\n", evt.Path, err)
-		return
+		return rescanSkipped
 	}
+
+	fingerprint := w.cachedFingerprint(evt, fpCache)
 
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
-
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			w.storeBaseline(ctx, evt, currentSnap)
-			return
+			// First time we've seen this target: scan once to establish a
+			// baseline that future cycles can diff against.
+			result, scanID := w.scanAndEmit(ctx, evt)
+			w.persistSnapshot(evt, currentSnap, scanID, fingerprint)
+			if result == nil {
+				return rescanSkipped
+			}
+			return rescanScanned
 		}
 		fmt.Fprintf(os.Stderr, "[rescan] get baseline %s: %v\n", evt.Path, err)
-		return
+		return rescanSkipped
 	}
 
-	var deltas []DriftDelta
+	// Cheap content/dependency/config/endpoint drift derived purely from
+	// hashes — no scanner subprocess involved.
+	deltas := compareSnapshots(baseline, currentSnap)
 
-	// If a previous baseline exists but never recorded a scan result, keep
-	// retrying scan persistence so finding-based drift detection can recover.
-	if baseline.ScanID == "" {
-		w.storeBaseline(ctx, evt, currentSnap)
+	scan, reason := shouldRescan(baseline, currentSnap, fingerprint, w.cfg.Watch.RescanContentGated)
+	if !scan {
+		// Nothing changed and the scanner fingerprint matches: skip the
+		// expensive scan entirely. compareSnapshots derives from the same
+		// content hash, so deltas is empty here, but emit defensively in
+		// case a future cheap signal lands without a content-hash change.
+		if len(deltas) > 0 {
+			w.emitDriftAlerts(evt, deltas)
+			w.persistSnapshot(evt, currentSnap, baseline.ScanID, baseline.ScannerFingerprint)
+		}
+		return rescanSkipped
 	}
 
-	// Compare content-level drift (deps, config, endpoints).
-	deltas = append(deltas, compareSnapshots(baseline, currentSnap)...)
+	fmt.Fprintf(os.Stderr, "[rescan] scanning %s %s (%s)\n", evt.Type, evt.Name, reason)
 
-	// Run scanner and compare findings against last stored scan.
-	scanDeltas := w.compareScanResults(ctx, evt)
-	deltas = append(deltas, scanDeltas...)
+	// Drift, fingerprint change, or recovery: run the scanner exactly once
+	// and diff its findings against the previous baseline scan.
+	result, scanID := w.scanAndEmit(ctx, evt)
+	deltas = append(deltas, w.findingDrift(baseline, result)...)
 
-	if len(deltas) == 0 {
-		return
+	if len(deltas) > 0 {
+		w.emitDriftAlerts(evt, deltas)
 	}
 
-	w.emitDriftAlerts(evt, deltas)
-	w.storeBaseline(ctx, evt, currentSnap)
+	// Avarice F-3188: refuse to overwrite a previously-scanned baseline
+	// with an empty scan id. scanAndEmit returns scanID="" when the
+	// scanner is unavailable or crashes; persisting that would rewrite
+	// the trusted baseline to point at the (mutated, unscanned) current
+	// content, and the next cycle would treat the mutation as the
+	// trusted baseline. Leaving the prior baseline in place means the
+	// content hash still differs next cycle, so a recovered scanner
+	// retries and upgrades the baseline. When there is no prior scan id
+	// (first-time/recovery baseline) there is no trust state to lose, so
+	// we fall through and persist.
+	if scanID == "" && baseline.ScanID != "" {
+		fmt.Fprintf(os.Stderr,
+			"[rescan] refusing to overwrite baseline for %s without scanner evidence (F-3188)\n",
+			evt.Path)
+		return rescanScanned
+	}
+	w.persistSnapshot(evt, currentSnap, scanID, fingerprint)
+	return rescanScanned
 }
 
-// storeBaseline runs a scan and persists the snapshot as the new baseline.
-func (w *InstallWatcher) storeBaseline(ctx context.Context, evt InstallEvent, snap *TargetSnapshot) {
-	s := w.scannerFor(evt)
-	scanID := ""
-	if s != nil {
-		scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		defer cancel()
+// shouldRescan decides whether a target with an existing baseline needs a fresh
+// scan. It is a pure function of the baseline, the current snapshot, the
+// scanner fingerprint, and whether content-gating is enabled, so it can be unit
+// tested without a scanner or store. The returned reason is logged/metric-able.
+func shouldRescan(baseline *audit.SnapshotRow, snap *TargetSnapshot, fingerprint string, gated bool) (bool, string) {
+	if !gated {
+		return true, "gating-disabled"
+	}
+	if baseline == nil {
+		return true, "no-baseline"
+	}
+	// A baseline that never recorded a scan can't support finding-level drift
+	// detection; scan so it can recover.
+	if baseline.ScanID == "" {
+		return true, "no-baseline-scan"
+	}
+	if baseline.ContentHash == "" || baseline.ContentHash != snap.ContentHash {
+		return true, "content-changed"
+	}
+	if baseline.ScannerFingerprint != fingerprint {
+		return true, "scanner-fingerprint-changed"
+	}
+	return false, "unchanged"
+}
 
-		result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
-		if err == nil && result != nil {
-			scanID = w.persistScanResult(result)
-		}
+// scanAndEmit runs the scanner for evt once and fans the result through the
+// unified emission pipeline (one scan_results row + per-finding rows + events).
+// Returns the result and the generated scan ID, or (nil, "") when no scanner is
+// configured or the scan fails.
+func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*scanner.ScanResult, string) {
+	s := w.newScanner(evt)
+	if s == nil {
+		return nil, ""
 	}
 
+	scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[rescan] scan %s: %v\n", evt.Path, err)
+		return nil, ""
+	}
+	if result == nil {
+		return nil, ""
+	}
+	return result, w.emitRescanResult(scanCtx, result)
+}
+
+// persistSnapshot upserts the baseline snapshot (content/dep/config/endpoint
+// hashes plus the scan ID and scanner fingerprint) without running a scan.
+func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot, scanID, fingerprint string) {
 	depJSON, _ := json.Marshal(snap.DependencyHashes)
 	cfgJSON, _ := json.Marshal(snap.ConfigHashes)
 	epJSON, _ := json.Marshal(snap.NetworkEndpoints)
 
 	_ = w.store.SetTargetSnapshot(
 		string(evt.Type), evt.Path, snap.ContentHash,
-		string(depJSON), string(cfgJSON), string(epJSON), scanID,
+		string(depJSON), string(cfgJSON), string(epJSON), scanID, fingerprint,
 	)
 }
 
-// compareScanResults runs a fresh scan and diffs findings against the last stored scan.
-func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEvent) []DriftDelta {
-	s := w.scannerFor(evt)
-	if s == nil {
-		return nil
-	}
-
-	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			fmt.Fprintf(os.Stderr, "[rescan] compareScanResults: get baseline %s: %v\n", evt.Path, err)
-		}
-		return nil
-	}
-	if baseline.ScanID == "" {
+// findingDrift diffs a freshly scanned result against the baseline's previously
+// stored scan, returning finding-level and severity-escalation deltas. It does
+// NOT run the scanner — the caller passes the already-computed current result.
+func (w *InstallWatcher) findingDrift(baseline *audit.SnapshotRow, current *scanner.ScanResult) []DriftDelta {
+	if baseline == nil || baseline.ScanID == "" || current == nil {
 		return nil
 	}
 
 	prevScan, err := w.loadScanResult(baseline.ScanID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[rescan] compareScanResults: load baseline scan %s: %v\n", baseline.ScanID, err)
+		fmt.Fprintf(os.Stderr, "[rescan] findingDrift: load baseline scan %s: %v\n", baseline.ScanID, err)
 		return nil
 	}
 	if prevScan == nil {
-		return nil
-	}
-
-	scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-
-	current, err := s.Scan(scanCtx, w.scanTargetFor(evt))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[rescan] compareScanResults: scan %s: %v\n", evt.Path, err)
-		return nil
-	}
-	if current == nil {
 		return nil
 	}
 
@@ -293,6 +389,111 @@ func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEven
 	}
 
 	return deltas
+}
+
+// cachedFingerprint returns the scanner fingerprint for evt's type, computing
+// it (and caching) on first use within a cycle. The fingerprint depends only on
+// the scanner kind + config + binary version, not the individual target.
+func (w *InstallWatcher) cachedFingerprint(evt InstallEvent, cache map[InstallType]string) string {
+	if cache != nil {
+		if fp, ok := cache[evt.Type]; ok {
+			return fp
+		}
+	}
+	fp := w.scannerFingerprint(evt)
+	if cache != nil {
+		cache[evt.Type] = fp
+	}
+	return fp
+}
+
+// scannerFingerprint builds a stable hash over the inputs that determine a
+// scanner's output for a given target kind: the scanner binary (path + probed
+// version), the scan-affecting config flags, and the DefenseClaw provenance
+// (binary version + config/policy content hash + generation). When any of these
+// change, byte-identical targets are re-scanned so updated rules take effect.
+//
+// Secrets (API keys) are deliberately excluded — only non-sensitive routing
+// fields (model, provider, base URL) feed the fingerprint.
+func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
+	parts := []string{"kind=" + string(evt.Type)}
+
+	switch evt.Type {
+	case InstallSkill:
+		c := w.cfg.Scanners.SkillScanner
+		llm := w.cfg.ResolveLLM("scanners.skill")
+		parts = append(parts,
+			"binary="+c.Binary,
+			"binver="+w.scannerBinaryVersion(c.Binary),
+			fmt.Sprintf("use_llm=%t", c.UseLLM),
+			fmt.Sprintf("use_behavioral=%t", c.UseBehavioral),
+			fmt.Sprintf("enable_meta=%t", c.EnableMeta),
+			fmt.Sprintf("use_trigger=%t", c.UseTrigger),
+			fmt.Sprintf("use_virustotal=%t", c.UseVirusTotal),
+			fmt.Sprintf("use_aidefense=%t", c.UseAIDefense),
+			fmt.Sprintf("llm_consensus=%d", c.LLMConsensus),
+			"policy="+c.Policy,
+			fmt.Sprintf("lenient=%t", c.Lenient),
+			"llm_model="+llm.Model,
+			"llm_provider="+llm.Provider,
+			"llm_base_url="+llm.BaseURL,
+		)
+	case InstallMCP:
+		c := w.cfg.Scanners.MCPScanner
+		llm := w.cfg.ResolveLLM("scanners.mcp")
+		parts = append(parts,
+			"binary="+c.Binary,
+			"binver="+w.scannerBinaryVersion(c.Binary),
+			"analyzers="+c.Analyzers,
+			fmt.Sprintf("scan_prompts=%t", c.ScanPrompts),
+			fmt.Sprintf("scan_resources=%t", c.ScanResources),
+			fmt.Sprintf("scan_instructions=%t", c.ScanInstructions),
+			"llm_model="+llm.Model,
+			"llm_provider="+llm.Provider,
+			"llm_base_url="+llm.BaseURL,
+		)
+	case InstallPlugin:
+		bin := w.cfg.Scanners.PluginScanner
+		llm := w.cfg.ResolveLLM("scanners.plugin")
+		parts = append(parts,
+			"binary="+bin,
+			"binver="+w.scannerBinaryVersion(bin),
+			"llm_model="+llm.Model,
+			"llm_provider="+llm.Provider,
+			"llm_base_url="+llm.BaseURL,
+		)
+	}
+
+	prov := version.Current()
+	parts = append(parts,
+		"prov_binary="+prov.BinaryVersion,
+		"prov_content="+prov.ContentHash,
+		fmt.Sprintf("prov_generation=%d", prov.Generation),
+		fmt.Sprintf("prov_schema=%d", prov.SchemaVersion),
+	)
+
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+// scannerBinaryVersion best-effort probes `<binary> --version` so the
+// fingerprint changes when the (external) scanner is upgraded independently of
+// DefenseClaw. Failures (missing binary, no --version support, timeout) are
+// non-fatal and yield "" so the rest of the fingerprint still applies.
+func (w *InstallWatcher) scannerBinaryVersion(binary string) string {
+	binary = strings.TrimSpace(binary)
+	if binary == "" {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, binary, "--version").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // loadScanResult retrieves a past scan result from the audit store.
@@ -469,6 +670,7 @@ func diffFindings(prev, curr []scanner.Finding) []DriftDelta {
 				Severity:    string(f.Severity),
 				Description: fmt.Sprintf("new finding: %s (%s)", findingLabel(f), f.Severity),
 				Current:     findingLabel(f),
+				RuleID:      f.RuleID,
 			})
 			continue
 		}
@@ -483,6 +685,7 @@ func diffFindings(prev, curr []scanner.Finding) []DriftDelta {
 				Description: fmt.Sprintf("finding severity changed: %s (%s -> %s)", findingLabel(f), prevFinding.Severity, f.Severity),
 				Previous:    string(prevFinding.Severity),
 				Current:     string(f.Severity),
+				RuleID:      f.RuleID,
 			})
 		}
 	}
@@ -494,11 +697,41 @@ func diffFindings(prev, curr []scanner.Finding) []DriftDelta {
 				Severity:    "INFO",
 				Description: fmt.Sprintf("finding resolved: %s (was %s)", findingLabel(f), f.Severity),
 				Previous:    findingLabel(f),
+				RuleID:      f.RuleID,
 			})
 		}
 	}
 
 	return deltas
+}
+
+// driftRuleIDs collects the distinct rule identifiers from a set
+// of drift deltas, preserving discovery order and capping the
+// result at max entries. Empty rule IDs are skipped so the
+// `rule_ids=` suffix never carries empty tokens. The cap matches
+// the convention used by every other emission surface in the
+// gateway (hook handlers, proxy guardrail, inspect HTTP) so SIEM
+// dashboards can rely on a uniform fanout budget.
+func driftRuleIDs(deltas []DriftDelta, max int) []string {
+	if max <= 0 || len(deltas) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(deltas))
+	out := make([]string, 0, len(deltas))
+	for _, d := range deltas {
+		if d.RuleID == "" {
+			continue
+		}
+		if seen[d.RuleID] {
+			continue
+		}
+		seen[d.RuleID] = true
+		out = append(out, d.RuleID)
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
 }
 
 // emitDriftAlerts logs drift deltas as alert events in the audit store.
@@ -515,12 +748,23 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 
 	fmt.Fprintf(os.Stderr, "[rescan] drift detected in %s %s: %s\n", evt.Type, evt.Name, summary)
 
+	// Surface the drift's distinct underlying rule identifiers
+	// alongside the structured JSON details so SIEM queries can
+	// pivot on `rule_ids` consistently with hook + proxy + inspect
+	// emissions. The JSON details remain the source of truth for
+	// per-delta info; the string suffix is the SIEM-friendly view.
+	ruleIDs := driftRuleIDs(deltas, 8)
+	details := string(detailsJSON)
+	if len(ruleIDs) > 0 {
+		details += " rule_ids=" + strings.Join(ruleIDs, ",")
+	}
+
 	event := audit.Event{
 		Timestamp: time.Now().UTC(),
-		Action:    "drift",
+		Action:    string(audit.ActionDrift),
 		Target:    evt.Path,
 		Actor:     "defenseclaw-rescan",
-		Details:   string(detailsJSON),
+		Details:   details,
 		Severity:  maxSev,
 	}
 	if err := w.logger.LogEvent(event); err != nil {
@@ -528,7 +772,7 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 	}
 
 	if w.otel != nil {
-		w.otel.RecordWatcherEvent(context.Background(), "drift", string(evt.Type))
+		w.otel.RecordWatcherEvent(context.Background(), "drift", string(evt.Type), "")
 	}
 
 	if w.webhooks != nil {
@@ -622,20 +866,61 @@ func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
 	return entry.Name
 }
 
-// persistScanResult stores a scan result in the audit DB and returns the generated scan ID.
-func (w *InstallWatcher) persistScanResult(result *scanner.ScanResult) string {
+// emitRescanResult fans a watcher rescan result through the
+// unified scan emission pipeline so the rescan's per-rule findings
+// land on every observability surface: scan_results + scan_findings
+// DB rows, EventScan + EventScanFinding gateway.jsonl lines,
+// defenseclaw_scan_findings_by_rule_total metrics, and the
+// sliding-window correlator. Previously this path called
+// audit.Store.InsertScanResult directly which wrote only the
+// aggregate row and dropped every per-rule detection on the floor
+// — making periodic rescans invisible to SIEM finding queries.
+//
+// Returns the generated scan ID so persistSnapshot can record it as
+// the snapshot's baseline reference. On emission failure (writer or
+// persistence error) returns the empty string and lets the
+// snapshot store fall back to "" so callers don't see new failure modes.
+func (w *InstallWatcher) emitRescanResult(ctx context.Context, result *scanner.ScanResult) string {
 	if result == nil {
 		return ""
 	}
-	scanID := uuid.New().String()
-	raw, _ := result.JSON()
-	err := w.store.InsertScanResult(
-		scanID, result.Scanner, result.Target, result.Timestamp,
-		result.Duration.Milliseconds(), len(result.Findings),
-		string(result.MaxSeverity()), string(raw),
-	)
+	var pers scanner.ScanPersistence
+	if w.store != nil {
+		pers = w.store
+	}
+	var tel scanner.ScanTelemetry
+	if w.otel != nil {
+		tel = w.otel
+	}
+	gw := w.gatewayLogWriter()
+
+	agent := scanner.AgentIdentity{
+		RunID: rescanRunID(),
+	}
+	scanID, err := scanner.EmitScanResult(ctx, gw, pers, tel, result, agent)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[rescan] emit scan result for %s: %v\n", result.Target, err)
 		return ""
 	}
 	return scanID
+}
+
+// gatewayLogWriter returns the gateway.jsonl writer wired into the
+// watcher's audit logger, or nil when the logger has no writer
+// attached (test harnesses, sidecar-less CLI invocations).
+func (w *InstallWatcher) gatewayLogWriter() *gatewaylog.Writer {
+	if w == nil || w.logger == nil {
+		return nil
+	}
+	return w.logger.GatewayLogWriter()
+}
+
+// rescanRunID returns a fresh run ID for each rescan emission so
+// the emitted scan rows are attributable to a specific cycle, and
+// downstream correlator joins can scope findings to one rescan
+// rather than blending cycles. Watchers don't carry a request_id
+// (there's no HTTP request to correlate against), so the run_id is
+// the only correlation key available — making it required.
+func rescanRunID() string {
+	return "rescan-" + uuid.New().String()
 }

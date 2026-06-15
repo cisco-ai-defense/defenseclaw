@@ -117,8 +117,8 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printGatewayKV("Uptime", formatDuration(uptime))
 	fmt.Println()
 
-	if mode := fetchConnectorMode(client, bind, cfg.Gateway.APIPort); mode != nil {
-		printConnectorMode(mode)
+	if modes := fetchConnectorModes(client, bind, cfg.Gateway.APIPort); len(modes) > 0 {
+		printConnectorModes(modes)
 	}
 
 	Section("Subsystems")
@@ -132,22 +132,50 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		printSubsystem("Sandbox", *snap.Sandbox)
 	}
 
-	printConnector(snap.Connector)
+	printConnectors(&snap)
 
 	return nil
 }
 
-func printConnector(c *gateway.ConnectorHealth) {
-	if c == nil {
-		printGatewayKV("Agent", Dim("(no active connector)"))
+// printConnectors renders the active-connector roster. The HealthSnapshot
+// carries every active connector in Connectors; Connector is retained only
+// as a back-compat pointer for older sidecars that populated the singular
+// field. The roster is rendered the SAME way regardless of how many
+// connectors are active — one connector and N connectors share an identical
+// "Agents: N active" header and per-connector body — so operators never have
+// to reason about a "single vs multi" distinction. Each connector lists its
+// own live counters, keeping the Agent view consistent with the Guardrail
+// "N active" summary instead of showing only an arbitrary primary.
+func printConnectors(snap *gateway.HealthSnapshot) {
+	conns := snap.Connectors
+	// Back-compat: older sidecars only populate the singular Connector
+	// pointer. Promote it into the roster so the rendering path is
+	// count-agnostic and identical regardless of which field was filled.
+	if len(conns) == 0 && snap.Connector != nil {
+		conns = []gateway.ConnectorHealth{*snap.Connector}
+	}
+
+	if len(conns) == 0 {
+		printGatewayKV("Agents", Dim("(no active connector)"))
 		fmt.Println()
 		return
 	}
 
-	stateStr := strings.ToUpper(string(c.State))
-	line := fmt.Sprintf("%s (%s)%s", friendlyConnectorName(c.Name), c.Name, styledConnectorStateVerb(stateStr))
-	printGatewayKV("Agent", line)
+	printGatewayKV("Agents", fmt.Sprintf("%d active", len(conns)))
+	for i := range conns {
+		c := conns[i]
+		stateStr := strings.ToUpper(string(c.State))
+		header := fmt.Sprintf("%s (%s)%s",
+			friendlyConnectorName(c.Name), c.Name, styledConnectorStateVerb(stateStr))
+		fmt.Printf("             %s\n", header)
+		printConnectorBody(&c)
+	}
+	fmt.Println()
+}
 
+// printConnectorBody renders the per-connector since/mode/counter lines
+// under each "Agents:" roster entry.
+func printConnectorBody(c *gateway.ConnectorHealth) {
 	if !c.Since.IsZero() {
 		fmt.Printf("             %s%s\n", Dim("since "), c.Since.Format(time.RFC3339))
 	}
@@ -181,12 +209,15 @@ func printConnector(c *gateway.ConnectorHealth) {
 		Dim(fmt.Sprintf("tool inspections: %d", insp)),
 		toolBlk,
 		subBlk)
-	fmt.Println()
 }
 
-// friendlyConnectorName mirrors internal/tui/connector_label.go::FriendlyConnectorName
-// for the CLI text output. Kept duplicated to avoid pulling the TUI
-// package (and Bubble Tea) into the CLI binary import graph.
+// friendlyConnectorName renders a human-friendly connector label for the
+// CLI text output. The table is kept in sync with the Python CLI's
+// _FRIENDLY_CONNECTOR_NAMES (cli/defenseclaw/commands/cmd_status.py) so the
+// Go gateway status and the Python `defenseclaw status` agree on every
+// connector's display name instead of title-casing the raw id (e.g.
+// "geminicli" -> "Gemini CLI", not "Geminicli"). Duplicated rather than
+// shared to avoid pulling the TUI/Bubble Tea graph into the CLI binary.
 func friendlyConnectorName(name string) string {
 	switch strings.TrimSpace(name) {
 	case "", "openclaw":
@@ -197,6 +228,20 @@ func friendlyConnectorName(name string) string {
 		return "Claude Code"
 	case "codex":
 		return "Codex"
+	case "hermes":
+		return "Hermes"
+	case "cursor":
+		return "Cursor"
+	case "windsurf":
+		return "Windsurf"
+	case "geminicli":
+		return "Gemini CLI"
+	case "copilot":
+		return "GitHub Copilot CLI"
+	case "openhands":
+		return "OpenHands"
+	case "antigravity":
+		return "Antigravity"
 	default:
 		s := strings.TrimSpace(name)
 		if s == "" {
@@ -220,9 +265,35 @@ type connectorModeSummary struct {
 	ProxyIntercept bool     `json:"proxy_intercept"`
 }
 
-func fetchConnectorMode(client *http.Client, bind string, port int) *connectorModeSummary {
+// fetchConnectorModes returns one mode summary per active connector. It
+// prefers the gateway's plural connector_modes roster (every active
+// connector) and falls back to the singular connector_mode field for older
+// sidecars that predate the roster — so a single-connector install and an
+// N-connector install both yield a non-empty slice rendered the same way.
+func fetchConnectorModes(client *http.Client, bind string, port int) []connectorModeSummary {
 	addr := fmt.Sprintf("http://%s:%d/status", bind, port)
-	resp, err := client.Get(addr)
+	req, err := http.NewRequest(http.MethodGet, addr, nil)
+	if err != nil {
+		return nil
+	}
+	// ("Connector mode status fetch omits required
+	// API token"): /status sits behind tokenAuth, which only
+	// exempts GET /health. The previous client.Get call sent no
+	// auth headers and silently swallowed the resulting 401, so
+	// the CLI status command always omitted the connector_mode
+	// section against a normally-configured sidecar. Attach the
+	// resolved gateway token (under both the bearer and the
+	// X-DefenseClaw-Token aliases for compatibility); when the
+	// token cannot be resolved, fall back to the previous
+	// best-effort behaviour rather than error out -- the rest of
+	// `defenseclaw status` is still useful without this section.
+	if cfg != nil {
+		if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("X-DefenseClaw-Token", token)
+		}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil
 	}
@@ -231,18 +302,43 @@ func fetchConnectorMode(client *http.Client, bind string, port int) *connectorMo
 		return nil
 	}
 	var envelope struct {
-		ConnectorMode *connectorModeSummary `json:"connector_mode"`
+		ConnectorMode  *connectorModeSummary  `json:"connector_mode"`
+		ConnectorModes []connectorModeSummary `json:"connector_modes"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return nil
 	}
-	return envelope.ConnectorMode
+	if len(envelope.ConnectorModes) > 0 {
+		return envelope.ConnectorModes
+	}
+	if envelope.ConnectorMode != nil {
+		return []connectorModeSummary{*envelope.ConnectorMode}
+	}
+	return nil
 }
 
-func printConnectorMode(m *connectorModeSummary) {
+// printConnectorModes renders the "Connector Mode" section for EVERY active
+// connector. One connector and N connectors share the identical per-entry
+// layout (the section header appears once), so operators never reason about
+// a "single vs multi" distinction — mirroring the "Agents" roster above.
+func printConnectorModes(modes []connectorModeSummary) {
 	Section("Connector Mode")
+	for i := range modes {
+		if i > 0 {
+			fmt.Println()
+		}
+		printConnectorModeEntry(&modes[i])
+	}
+	fmt.Println()
+}
+
+func printConnectorModeEntry(m *connectorModeSummary) {
 	modeLabel := Style(fmt.Sprintf("%-18s", "Connector:"), "fg=bright_black", "bold")
-	fmt.Printf("    %s%s\n", modeLabel, m.Connector)
+	connectorName := m.Connector
+	if connectorName != "" {
+		connectorName = fmt.Sprintf("%s (%s)", friendlyConnectorName(m.Connector), m.Connector)
+	}
+	fmt.Printf("    %s%s\n", modeLabel, connectorName)
 	modeLine := Style(fmt.Sprintf("%-18s", "Mode:"), "fg=bright_black", "bold")
 	fmt.Printf("    %s%s\n", modeLine, m.Mode)
 	if len(m.Telemetry) > 0 {
@@ -255,7 +351,6 @@ func printConnectorMode(m *connectorModeSummary) {
 	}
 	pxLabel := Style(fmt.Sprintf("%-18s", "Proxy intercept:"), "fg=bright_black", "bold")
 	fmt.Printf("    %s%s\n", pxLabel, intercept)
-	fmt.Println()
 }
 
 func printSubsystem(name string, h gateway.SubsystemHealth) {
@@ -307,6 +402,12 @@ func formatDetailValue(v interface{}) (string, bool) {
 	case nil:
 		return "", false
 	default:
+		// Slices/maps (e.g. Guardrail's "connectors" roster or the
+		// per-sink array) are intentionally not rendered here: the
+		// authoritative per-connector enumeration lives in the "Agents"
+		// section, so re-listing names in every subsystem would just
+		// duplicate it. Subsystems convey multi-connector state via a
+		// count/scope detail instead.
 		return "", false
 	}
 }

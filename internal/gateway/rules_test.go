@@ -17,6 +17,8 @@
 package gateway
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -366,6 +368,12 @@ func TestSensitivePathRules(t *testing.T) {
 		{"etc sudoers (space-obfuscated)", `append line to etc sudoers`, "PATH-ETC-SUDOERS"},
 		{"/proc environ", `/proc/1/environ`, "PATH-PROC-ENVIRON"},
 		{"bash history", `~/.bash_history`, "PATH-HISTORY"},
+		// macOS: agy's run_command expands ~ via the shell BEFORE the regex
+		// sees it, so the home dir lands as /Users/<user>/... rather than the
+		// literal ~/... These must still match the same rules.
+		{"macOS SSH directory", `{"path": "/Users/alice/.ssh/id_rsa"}`, "PATH-SSH-DIR"},
+		{"macOS AWS credentials", `cat /Users/alice/.aws/credentials`, "PATH-AWS-CREDS"},
+		{"macOS bash history", `/Users/alice/.bash_history`, "PATH-HISTORY"},
 	}
 
 	for _, tc := range cases {
@@ -869,5 +877,187 @@ func TestApplyRulePackOverrides_DisabledInvalidRegexSkipped(t *testing.T) {
 	findings := ScanAllRules("enabled_good_deadbeef DISABLED-BAD", "exec")
 	if len(findings) != 1 || findings[0].RuleID != "ENABLED-GOOD" {
 		t.Fatalf("findings = %+v, want only ENABLED-GOOD", findings)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Per-connector rule sets (ApplyConnectorRulePackOverrides /
+// ScanAllRulesForConnector)
+// ---------------------------------------------------------------------------
+
+// secretOverridePack builds a rule pack that replaces the "secret" category
+// with a single custom rule, so each connector's set is trivially
+// distinguishable from the others and from the defaults.
+func secretOverridePack(ruleID, pattern string) *guardrail.RulePack {
+	return &guardrail.RulePack{
+		RuleFiles: []*guardrail.RulesFileYAML{
+			{
+				Version:  1,
+				Category: "secret",
+				Rules: []guardrail.RuleDefYAML{
+					{ID: ruleID, Pattern: pattern, Severity: "HIGH", Confidence: 0.99},
+				},
+			},
+		},
+	}
+}
+
+// resetConnectorRuleCategories saves and restores both the per-connector store
+// and the global set so each test starts from a clean slate.
+func resetConnectorRuleCategories(t *testing.T) {
+	t.Helper()
+	ruleCategoriesMu.Lock()
+	savedGlobal := allRuleCategories
+	savedConn := connectorRuleCategories
+	connectorRuleCategories = map[string][]ruleCategory{}
+	ruleCategoriesMu.Unlock()
+	t.Cleanup(func() {
+		ruleCategoriesMu.Lock()
+		allRuleCategories = savedGlobal
+		connectorRuleCategories = savedConn
+		ruleCategoriesMu.Unlock()
+	})
+}
+
+func ruleIDsForConnector(connector, text string) []string {
+	findings := ScanAllRulesForConnector(connector, text, "exec")
+	ids := make([]string, 0, len(findings))
+	for _, f := range findings {
+		ids = append(ids, f.RuleID)
+	}
+	return ids
+}
+
+func containsRuleID(ids []string, want string) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestScanAllRulesForConnector_PerConnectorIsolation verifies the core parity
+// fix: connector A scans against A's pack and connector B against B's pack, so
+// A's custom rule fires only on A and B's only on B — no cross-contamination.
+func TestScanAllRulesForConnector_PerConnectorIsolation(t *testing.T) {
+	resetConnectorRuleCategories(t)
+
+	ApplyConnectorRulePackOverrides("conn-a", secretOverridePack("CONN-A", `conn_a_token_[a-f0-9]+`))
+	ApplyConnectorRulePackOverrides("conn-b", secretOverridePack("CONN-B", `conn_b_token_[a-f0-9]+`))
+
+	aToken := "leaked conn_a_token_deadbeef here"
+	bToken := "leaked conn_b_token_deadbeef here"
+
+	// A's rule fires on A, not on B.
+	if ids := ruleIDsForConnector("conn-a", aToken); !containsRuleID(ids, "CONN-A") {
+		t.Errorf("connector A should detect CONN-A, got %v", ids)
+	}
+	if ids := ruleIDsForConnector("conn-a", bToken); containsRuleID(ids, "CONN-B") {
+		t.Errorf("connector A must NOT carry connector B's rule, got %v", ids)
+	}
+
+	// B's rule fires on B, not on A.
+	if ids := ruleIDsForConnector("conn-b", bToken); !containsRuleID(ids, "CONN-B") {
+		t.Errorf("connector B should detect CONN-B, got %v", ids)
+	}
+	if ids := ruleIDsForConnector("conn-b", aToken); containsRuleID(ids, "CONN-A") {
+		t.Errorf("connector B must NOT carry connector A's rule, got %v", ids)
+	}
+}
+
+// TestScanAllRulesForConnector_FallsBackToGlobal verifies that an empty
+// connector, or one with no registered set, uses the process-global
+// allRuleCategories — this is the single-connector / generic-inspect path and
+// must stay byte-for-byte unchanged.
+func TestScanAllRulesForConnector_FallsBackToGlobal(t *testing.T) {
+	resetConnectorRuleCategories(t)
+
+	// Register one connector so the map is non-empty, then query a DIFFERENT,
+	// unregistered connector — it must fall back to the defaults (which detect
+	// a real AWS key), not borrow conn-a's narrowed secret set.
+	ApplyConnectorRulePackOverrides("conn-a", secretOverridePack("CONN-A", `conn_a_token_[a-f0-9]+`))
+
+	awsKey := "AKIAIOSFODNN7EXAMPLE"
+	for _, connector := range []string{"", "unregistered"} {
+		ids := ruleIDsForConnector(connector, awsKey)
+		if !containsRuleID(ids, "SEC-AWS-KEY") {
+			t.Errorf("connector %q should fall back to global defaults and detect SEC-AWS-KEY, got %v", connector, ids)
+		}
+	}
+
+	// The default-backed ScanAllRules entry point is likewise unaffected.
+	if findings := ScanAllRules(awsKey, "exec"); len(findings) == 0 {
+		t.Error("ScanAllRules (global) should still detect the AWS key")
+	}
+}
+
+// TestScanAllRulesForConnector_ConcurrentNoCrossContamination hammers two
+// connectors' scan paths in parallel. With -race this catches any unsynced
+// access to the per-connector store and confirms each connector consistently
+// sees only its own rule under contention.
+func TestScanAllRulesForConnector_ConcurrentNoCrossContamination(t *testing.T) {
+	resetConnectorRuleCategories(t)
+
+	ApplyConnectorRulePackOverrides("conn-a", secretOverridePack("CONN-A", `conn_a_token_[a-f0-9]+`))
+	ApplyConnectorRulePackOverrides("conn-b", secretOverridePack("CONN-B", `conn_b_token_[a-f0-9]+`))
+
+	const iterations = 200
+	var wg sync.WaitGroup
+	errs := make(chan string, 2*iterations)
+
+	scan := func(connector, token, wantID, forbidID string) {
+		defer wg.Done()
+		ids := ruleIDsForConnector(connector, token)
+		if !containsRuleID(ids, wantID) {
+			errs <- fmt.Sprintf("%s: missing %s, got %v", connector, wantID, ids)
+		}
+		if containsRuleID(ids, forbidID) {
+			errs <- fmt.Sprintf("%s: leaked %s, got %v", connector, forbidID, ids)
+		}
+	}
+
+	for i := 0; i < iterations; i++ {
+		wg.Add(2)
+		go scan("conn-a", "conn_a_token_deadbeef", "CONN-A", "CONN-B")
+		go scan("conn-b", "conn_b_token_deadbeef", "CONN-B", "CONN-A")
+	}
+	wg.Wait()
+	close(errs)
+
+	for msg := range errs {
+		t.Error(msg)
+	}
+}
+
+// TestApplyConnectorRulePackOverrides_NilPackPinsDefaults verifies that a
+// connector with a nil/empty pack is pinned to the compiled-in defaults rather
+// than inheriting whatever the global happens to hold — so it can never
+// silently borrow the primary's narrowed set.
+func TestApplyConnectorRulePackOverrides_NilPackPinsDefaults(t *testing.T) {
+	resetConnectorRuleCategories(t)
+
+	// Narrow the GLOBAL set to a single custom secret rule (simulating a
+	// primary pack), then register conn-default with a nil pack.
+	ApplyRulePackOverrides(secretOverridePack("PRIMARY-ONLY", `primary_token_[a-f0-9]+`))
+	ApplyConnectorRulePackOverrides("conn-default", nil)
+
+	// conn-default must detect a real AWS key (compiled-in default), and must
+	// NOT carry the primary's narrowed rule.
+	ids := ruleIDsForConnector("conn-default", "AKIAIOSFODNN7EXAMPLE")
+	if !containsRuleID(ids, "SEC-AWS-KEY") {
+		t.Errorf("nil-pack connector should keep compiled-in defaults, got %v", ids)
+	}
+	if containsRuleID(ruleIDsForConnector("conn-default", "primary_token_deadbeef"), "PRIMARY-ONLY") {
+		t.Error("nil-pack connector must not inherit the primary's global override")
+	}
+
+	// Empty connector name is ignored (no panic, no entry).
+	ApplyConnectorRulePackOverrides("", secretOverridePack("IGNORED", `x`))
+	ruleCategoriesMu.RLock()
+	_, present := connectorRuleCategories[""]
+	ruleCategoriesMu.RUnlock()
+	if present {
+		t.Error("empty connector name should not be registered")
 	}
 }

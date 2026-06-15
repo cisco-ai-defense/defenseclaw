@@ -18,21 +18,22 @@
 
 import json
 import os
-import unittest
-from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
-import uuid
-
 import sys
+import unittest
+import uuid
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import click
 from click.testing import CliRunner
-
-from defenseclaw.commands.cmd_mcp import mcp, _parse_args, _build_mcp_scan_map
+from defenseclaw.commands.cmd_mcp import _build_mcp_scan_map, _parse_args, mcp
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.models import Finding, ScanResult
-from tests.helpers import make_app_context, cleanup_app
+
+from tests.helpers import cleanup_app, make_app_context
 
 
 class MCPCommandTestBase(unittest.TestCase):
@@ -144,6 +145,331 @@ class TestMCPScan(MCPCommandTestBase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         mock_run_scan.assert_called_once()
+
+    @patch("defenseclaw.commands.cmd_mcp._scan_all_mcp")
+    def test_scan_all_multi_connector_fans_out(self, mock_scan_all):
+        # D2 parity: `mcp scan --all` scans every active connector's servers.
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fanned = {c.args[1] for c in mock_scan_all.call_args_list}
+        self.assertEqual(fanned, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_mcp._scan_all_mcp")
+    def test_scan_all_connector_flag_targets_one(self, mock_scan_all):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_scan_all.assert_called_once()
+        self.assertEqual(mock_scan_all.call_args.args[1], "codex")
+
+    def test_scan_all_connector_flag_rejects_unknown(self):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all", "--connector", "nope"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
+
+    @staticmethod
+    def _split_brain_servers():
+        # ``ctx7`` lives only in codex; the active connector (claudecode)
+        # has a different server. Used to prove --connector scopes the
+        # named-target lookup to the chosen connector's config.
+        def fake_servers(connector=None):
+            if connector == "codex":
+                return [MCPServerEntry(name="ctx7", url="http://codex-ctx7", transport="sse")]
+            return [MCPServerEntry(name="other", url="http://cc-other", transport="sse")]
+
+        return fake_servers
+
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_scan_named_target_uses_connector_config(self, mock_scan):
+        # Option A: `mcp scan <name> --connector X` resolves the server
+        # name against X's MCP config (not the active connector's), so a
+        # server registered only to a non-active connector is scannable.
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = self._split_brain_servers()  # type: ignore[method-assign]
+        mock_scan.return_value = ScanResult(
+            scanner="mcp-scanner",
+            target="http://codex-ctx7",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        result = self.invoke(["scan", "ctx7", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("clean=1", result.output)
+        # Resolved against codex's config ⇒ codex's URL was scanned.
+        self.assertEqual(mock_scan.call_args.args[0], "http://codex-ctx7")
+
+    def test_scan_named_target_not_in_active_connector_fails_without_flag(self):
+        # Control: without --connector the name resolves against the active
+        # connector only, so a codex-only server is "not found" — proving
+        # the connector scoping is real, not cosmetic.
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = self._split_brain_servers()  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "ctx7"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not found", result.output)
+        # The error must name the connector actually searched (the active
+        # one, claudecode) rather than the legacy hardcoded "openclaw.json".
+        self.assertIn("claudecode", result.output)
+        self.assertNotIn("openclaw.json", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
+    def test_unset_connector_flag_targets_one(self, mock_unset):
+        # D2 parity: `mcp unset --connector X` removes from X's config.
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = MagicMock(
+            return_value=[MCPServerEntry(name="ctx7", url="http://x", transport="sse")]
+        )
+
+        result = self.invoke(["unset", "ctx7", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(mock_unset.call_args.kwargs.get("connector"), "codex")
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_fans_out_to_all_active_connectors(self, mock_set):
+        # Without --connector, `mcp set` writes the server to EVERY active
+        # connector's config (parity with codeguard install / the list reads).
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        called = {c.kwargs.get("connector") for c in mock_set.call_args_list}
+        self.assertEqual(called, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_connector_flag_targets_one(self, mock_set):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(
+            ["set", "ctx7", "--url", "https://x/mcp", "--skip-scan", "--connector", "codex"]
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        called = {c.kwargs.get("connector") for c in mock_set.call_args_list}
+        self.assertEqual(called, {"codex"})
+
+    @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
+    def test_unset_fans_out_to_all_connectors_with_the_server(self, mock_unset):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = MagicMock(
+            return_value=[MCPServerEntry(name="ctx7", url="http://x", transport="sse")]
+        )
+
+        result = self.invoke(["unset", "ctx7"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        called = {c.kwargs.get("connector") for c in mock_unset.call_args_list}
+        self.assertEqual(called, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
+    def test_unset_skips_connectors_without_the_server(self, mock_unset):
+        # Fan-out with isolation: a connector that doesn't have the server is
+        # skipped, not an error, so one missing entry never blocks the rest.
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        def _servers(connector=None):
+            if connector == "codex":
+                return [MCPServerEntry(name="ctx7", url="http://x", transport="sse")]
+            return []
+
+        self.app.cfg.mcp_servers = _servers  # type: ignore[method-assign]
+
+        result = self.invoke(["unset", "ctx7"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        called = [c.kwargs.get("connector") for c in mock_unset.call_args_list]
+        self.assertEqual(called, ["codex"])
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_skips_unsupported_connector_and_applies_to_rest(self, mock_set):
+        # Fan-out resilience: a connector with no MCP write surface
+        # (antigravity, which sorts FIRST) must be skipped, not abort the
+        # whole command — the writable connectors still get the server.
+        from defenseclaw.connector_paths import MCPWriteUnsupportedError
+
+        self.app.cfg.active_connectors = lambda: ["antigravity", "claudecode", "codex"]  # type: ignore[method-assign]
+
+        def _side_effect(cfg, name, entry, connector=None):
+            if connector == "antigravity":
+                raise MCPWriteUnsupportedError("antigravity does not publish a documented MCP install surface")
+
+        mock_set.side_effect = _side_effect
+
+        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        applied = {
+            c.kwargs.get("connector")
+            for c in mock_set.call_args_list
+        }
+        # write was attempted on all three, but only claudecode/codex succeeded
+        self.assertEqual(applied, {"antigravity", "claudecode", "codex"})
+        self.assertIn("skipped", result.output)
+        self.assertIn("antigravity", result.output)
+        self.assertIn("claudecode", result.output)
+        self.assertIn("codex", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_errors_only_when_no_connector_supports_writes(self, mock_set):
+        from defenseclaw.connector_paths import MCPWriteUnsupportedError
+
+        self.app.cfg.active_connectors = lambda: ["antigravity", "zeptoclaw"]  # type: ignore[method-assign]
+        mock_set.side_effect = MCPWriteUnsupportedError("no MCP write surface")
+
+        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("no connector accepted", result.output)
+        self.assertIn("no MCP write surface", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_set_per_connector_policy_block_skips_only_that_connector(self, mock_admit, mock_set):
+        # The core correctness fix: admission is evaluated PER connector, so a
+        # connector-scoped policy block (here: codex) skips only that connector
+        # while the server is still written to the others.
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        def _decide(pe, *, connector="", scan_result=None, **kwargs):
+            if connector == "codex":
+                return AdmissionDecision("blocked", "blocked on codex by asset rule", source="asset-policy-block")
+            return AdmissionDecision("allowed", "allow override", source="manual-allow")
+
+        mock_admit.side_effect = _decide
+
+        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        written = {c.kwargs.get("connector") for c in mock_set.call_args_list}
+        # codex was blocked by policy → never written; claudecode written.
+        self.assertEqual(written, {"claudecode"})
+        self.assertIn("blocked [codex]", result.output)
+        self.assertIn("claudecode", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
+    def test_unset_skips_unsupported_write_surface(self, mock_unset):
+        # A connector can expose the server via its READ surface yet have no
+        # writable surface (e.g. zeptoclaw). Removal must skip it, not abort,
+        # so a writable peer that has the server is still cleaned up.
+        from defenseclaw.connector_paths import MCPWriteUnsupportedError
+
+        self.app.cfg.active_connectors = lambda: ["codex", "zeptoclaw"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = MagicMock(
+            return_value=[MCPServerEntry(name="ctx7", url="http://x", transport="sse")]
+        )
+
+        def _side_effect(cfg, name, connector=None):
+            if connector == "zeptoclaw":
+                raise MCPWriteUnsupportedError("zeptoclaw has no MCP write surface")
+
+        mock_unset.side_effect = _side_effect
+
+        result = self.invoke(["unset", "ctx7"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Removed MCP server: ctx7", result.output)
+        self.assertIn("codex", result.output)
+        self.assertIn("skipped", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_multi_applied_summary_names_not_applied(self, mock_set):
+        # Partial fan-out: 2 connectors get the server, 1 has no write surface.
+        # The green summary must NAME the connector that didn't get it instead
+        # of only reporting "Added ... to 2 connectors" and hiding the gap.
+        from defenseclaw.connector_paths import MCPWriteUnsupportedError
+
+        self.app.cfg.active_connectors = lambda: ["antigravity", "claudecode", "codex"]  # type: ignore[method-assign]
+
+        def _side_effect(cfg, name, entry, connector=None):
+            if connector == "antigravity":
+                raise MCPWriteUnsupportedError("antigravity does not publish a documented MCP install surface")
+
+        mock_set.side_effect = _side_effect
+
+        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Added MCP server: ctx7 to 2 connectors", result.output)
+        self.assertIn("not applied: antigravity", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_isolates_unexpected_write_failure_and_exits_nonzero(self, mock_set):
+        # Distinct from MCPWriteUnsupportedError (a benign skip, exit 0): an
+        # *unexpected* write error (disk full, locked config) on one connector
+        # must not abort the rest or leave a silent partial write. The writable
+        # peer still gets the server, but the command exits non-zero so
+        # scripts/CI notice the partial application.
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        def _fail_first(cfg, name, entry, connector=None):
+            if connector == "claudecode":
+                raise OSError("disk full")
+
+        mock_set.side_effect = _fail_first
+
+        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        attempted = {c.kwargs.get("connector") for c in mock_set.call_args_list}
+        self.assertEqual(attempted, {"claudecode", "codex"})  # loop not aborted
+        self.assertIn("Added MCP server: ctx7", result.output)  # codex landed
+        self.assertIn("failed [claudecode]", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_single_connector_failure_propagates_verbatim(self, mock_set):
+        # A single-connector target keeps fail-loud, pre-fan-out behavior: the
+        # original error propagates as-is, with no multi-connector
+        # "failed [...]" isolation wrapping.
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        mock_set.side_effect = click.ClickException("write surface unsupported")
+
+        result = self.invoke(
+            ["set", "ctx7", "--url", "https://x/mcp", "--skip-scan", "--connector", "codex"]
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("write surface unsupported", result.output)
+        self.assertNotIn("failed [", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
+    def test_unset_isolates_unexpected_write_failure_and_exits_nonzero(self, mock_unset):
+        # Symmetric with mcp set: an unexpected removal failure on one connector
+        # must not block removal on the others, but still exits non-zero.
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = MagicMock(
+            return_value=[MCPServerEntry(name="ctx7", url="http://x", transport="sse")]
+        )
+
+        def _fail_first(cfg, name, connector=None):
+            if connector == "claudecode":
+                raise OSError("config locked")
+
+        mock_unset.side_effect = _fail_first
+
+        result = self.invoke(["unset", "ctx7"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        attempted = {c.kwargs.get("connector") for c in mock_unset.call_args_list}
+        self.assertEqual(attempted, {"claudecode", "codex"})  # loop not aborted
+        self.assertIn("Removed MCP server: ctx7", result.output)  # codex removed
+        self.assertIn("failed [claudecode]", result.output)
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_clean(self, mock_scan):
@@ -268,6 +594,67 @@ class TestMCPList(MCPCommandTestBase):
         self.assertEqual(data[0]["name"], "test-srv")
 
 
+class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
+    """Default ``mcp list`` (no --connector) fans out across every active
+    connector — one connector-tagged table each — mirroring ``skill list``
+    and ``plugin list``. A single-connector install keeps its flat JSON
+    shape."""
+
+    @staticmethod
+    def _one_server():
+        return [
+            MCPServerEntry(name="ctx7", command="uvx", args=["context7-mcp"], url="", transport="stdio"),
+        ]
+
+    def test_default_lists_every_active_connector(self):
+        self.app.cfg.mcp_servers = lambda connector=None: self._one_server()  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=claudecode", result.output)
+        self.assertIn("connector=codex", result.output)
+
+    def test_default_json_groups_by_connector(self):
+        self.app.cfg.mcp_servers = lambda connector=None: self._one_server()  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertIsInstance(payload, list)
+        self.assertEqual({g["connector"] for g in payload}, {"claudecode", "codex"})
+        # Each group carries its own server list under "mcp_servers".
+        for g in payload:
+            self.assertIn("mcp_servers", g)
+            self.assertEqual(g["mcp_servers"][0]["name"], "ctx7")
+
+    def test_connector_flag_still_narrows_to_one(self):
+        self.app.cfg.mcp_servers = lambda connector=None: self._one_server()  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertNotIn("connector=claudecode", result.output)
+
+    def test_single_connector_install_keeps_flat_json(self):
+        self.app.cfg.mcp_servers = lambda connector=None: self._one_server()  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertIsInstance(payload, list)
+        # Flat list of server dicts (no per-connector grouping wrapper).
+        self.assertEqual(payload[0]["name"], "ctx7")
+        self.assertTrue(all("mcp_servers" not in item for item in payload))
+
+
 # ---------------------------------------------------------------------------
 # _parse_args
 # ---------------------------------------------------------------------------
@@ -388,7 +775,6 @@ class TestBuildMCPScanMap(MCPCommandTestBase):
 
 class TestAttachErrorHandler(unittest.TestCase):
     def test_attaches_to_three_loggers(self):
-        import logging
         from defenseclaw.scanner.mcp import _attach_error_handler, _ErrorCapture
 
         errors: list[str] = []
@@ -409,6 +795,7 @@ class TestAttachErrorHandler(unittest.TestCase):
 
     def test_captures_error_from_child_logger(self):
         import logging
+
         from defenseclaw.scanner.mcp import _attach_error_handler, _ErrorCapture
 
         errors: list[str] = []
@@ -426,6 +813,7 @@ class TestAttachErrorHandler(unittest.TestCase):
 
     def test_error_capture_filters_by_level(self):
         import logging
+
         from defenseclaw.scanner.mcp import _ErrorCapture
 
         errors: list[str] = []

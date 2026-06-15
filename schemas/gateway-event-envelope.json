@@ -21,6 +21,7 @@
     "run_id":     { "type": ["string", "null"] },
     "request_id": { "type": ["string", "null"] },
     "session_id": { "type": ["string", "null"] },
+    "turn_id":    { "type": ["string", "null"] },
     "trace_id":   { "type": ["string", "null"] },
 
     "provider":  { "type": ["string", "null"] },
@@ -90,7 +91,9 @@
         "action":     { "type": "string", "enum": ["allow", "warn", "alert", "confirm", "block"] },
         "reason":     { "type": ["string", "null"] },
         "categories": { "type": ["array", "null"], "items": { "type": "string" } },
-        "latency_ms": { "type": ["integer", "null"] }
+        "latency_ms": { "type": ["integer", "null"] },
+        "evaluation_id": { "type": ["string", "null"], "description": "Optional join key linking this verdict to its per-finding scan_findings rows / EventScanFinding fan-out." },
+        "rule_ids":   { "type": ["array", "null"], "items": { "type": "string" }, "description": "Top detection rule identifiers that drove this verdict (capped at 8). Quick SIEM-pivot key." }
       }
     },
     "JudgePayload": {
@@ -121,10 +124,12 @@
       "type": "object",
       "required": ["subsystem", "message"],
       "properties": {
-        "subsystem": { "type": "string" },
-        "code":      { "type": ["string", "null"] },
-        "message":   { "type": "string" },
-        "cause":     { "type": ["string", "null"] }
+        "subsystem":     { "type": "string" },
+        "code":          { "type": ["string", "null"] },
+        "message":       { "type": "string" },
+        "cause":         { "type": ["string", "null"] },
+        "rule_id":       { "type": ["string", "null"], "description": "Optional rule identifier this error is attributable to (schema-gate violations on finding events, verdict-failure errors)." },
+        "evaluation_id": { "type": ["string", "null"], "description": "Optional join key linking this error to the evaluation that produced the broken event (matches ScanPayload.evaluation_id / VerdictPayload.evaluation_id)." }
       }
     },
     "DiagnosticPayload": {
@@ -202,9 +207,9 @@
         "confidence":     { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "state":          { "type": "string", "enum": ["new", "changed", "gone"] },
         "evidence_types": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 64 }, "maxItems": 16 },
-        "path_hashes":    { "type": ["array", "null"], "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "maxItems": 16 },
+        "path_hashes":    { "type": ["array", "null"], "items": { "type": "string", "pattern": "^(sha256|hmac-sha256):[0-9a-f]{64}$" }, "maxItems": 16 },
         "basenames":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+$" }, "maxItems": 16 },
-        "workspace_hash": { "type": ["string", "null"], "pattern": "^(sha256:[0-9a-f]{64})?$" },
+        "workspace_hash": { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
         "last_seen":      { "type": ["string", "null"], "format": "date-time" },
         "detector":       { "type": ["string", "null"], "maxLength": 64,
           "description": "populated only when privacy.disable_redaction=true" },
@@ -277,9 +282,9 @@
       "properties": {
         "type":          { "type": "string", "maxLength": 64 },
         "basename":      { "type": ["string", "null"], "maxLength": 128, "pattern": "^[^/\\\\]*$" },
-        "path_hash":     { "type": ["string", "null"], "pattern": "^(sha256:[0-9a-f]{64})?$" },
+        "path_hash":     { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
         "value_hash":    { "type": ["string", "null"], "maxLength": 256 },
-        "workspace_hash": { "type": ["string", "null"], "pattern": "^(sha256:[0-9a-f]{64})?$" },
+        "workspace_hash": { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
         "raw_path":      { "type": ["string", "null"], "maxLength": 4096,
           "description": "populated only when privacy.disable_redaction=true AND ai_discovery.store_raw_local_paths=true" },
         "quality":       { "type": ["number", "null"], "minimum": 0, "maximum": 1 },

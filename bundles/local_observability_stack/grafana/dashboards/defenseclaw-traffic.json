@@ -2,12 +2,19 @@
   "annotations": {
     "list": []
   },
-  "description": "Proxy-mode traffic surface: HTTP requests, SSE streams, tool calls, admission decisions, LLM bridge, Cisco Inspect, and the LLM judge + verdict cache. These panels only show data when DefenseClaw runs in proxy/router mode (openclaw, zeptoclaw).",
+  "description": "Proxy-mode traffic surface: HTTP requests, SSE streams, tool calls, admission decisions, LLM bridge, Cisco Inspect, and the LLM judge + verdict cache. These panels only show data when DefenseClaw runs in proxy/router mode (openclaw, zeptoclaw). NOTE: this board is intentionally GLOBAL and deliberately has no $connector template variable \u2014 the HTTP / tool / judge / admission metrics here are emitted per proxy process and are not tagged with a hook connector / source / tool=<connector>:<event> dimension. For per-connector breakdowns use the Hook Connectors and Connector Detail dashboards.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "liveNow": false,
   "links": [
+    {
+      "title": "Agent Activity (Live)",
+      "type": "link",
+      "url": "/d/defenseclaw-activity?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
     {
       "title": "Overview",
       "type": "link",
@@ -155,7 +162,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_http_auth_failures_total[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_gateway_errors_total[5m])) * 60 or vector(0)",
           "refId": "A"
         }
       ],
@@ -331,9 +338,13 @@
       },
       "targets": [
         {
-          "expr": "sum by (gen_ai_tool_name, tool_provider) (rate(defenseclaw_tool_calls_total[$__rate_interval]))",
+          "expr": "sum by (defenseclaw_tool_name) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"tool_invocation\" [$__interval]))",
           "legendFormat": "{{gen_ai_tool_name}} \u00b7 {{tool_provider}}",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
         }
       ],
       "description": "covered_by:\n  - defenseclaw_tool_calls \u2192 internal/telemetry/metrics.go (RecordToolCall)"
@@ -353,7 +364,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, gen_ai_tool_name) (rate(defenseclaw_tool_duration_milliseconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, gen_ai_tool_name) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket[$__rate_interval])))",
           "legendFormat": "{{gen_ai_tool_name}} p95",
           "refId": "A"
         }
@@ -380,12 +391,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (gen_ai_tool_name) (rate(defenseclaw_tool_errors_total[$__rate_interval]))",
+          "expr": "sum by (gen_ai_tool_name) (rate(defenseclaw_gateway_errors_total[$__rate_interval]))",
           "legendFormat": "err \u00b7 {{gen_ai_tool_name}}",
           "refId": "A"
         },
         {
-          "expr": "sum by (gen_ai_tool_name) (rate(defenseclaw_tool_calls_total{dangerous=\"true\"}[$__rate_interval]))",
+          "expr": "sum by (gen_ai_tool_name) (rate(defenseclaw_gateway_events_emitted_total{event_type=\"tool_invocation\", dangerous=\"true\"}[$__rate_interval]))",
           "legendFormat": "dangerous \u00b7 {{gen_ai_tool_name}}",
           "refId": "B"
         }
@@ -407,7 +418,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (decision) (rate(defenseclaw_admission_decisions_total[$__rate_interval]))",
+          "expr": "sum by (decision) (rate(defenseclaw_inspect_evaluations_total[$__rate_interval]))",
           "legendFormat": "{{decision}}",
           "refId": "A"
         }
@@ -439,7 +450,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_gateway_judge_invocations_total[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action!=\"allow\"}[5m])) * 60 or vector(0)",
           "refId": "A"
         }
       ],
@@ -469,17 +480,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(defenseclaw_gateway_judge_latency_milliseconds_bucket[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])) by (le))",
           "legendFormat": "p50",
           "refId": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(defenseclaw_gateway_judge_latency_milliseconds_bucket[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])) by (le))",
           "legendFormat": "p95",
           "refId": "p95"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(defenseclaw_gateway_judge_latency_milliseconds_bucket[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])) by (le))",
           "legendFormat": "p99",
           "refId": "p99"
         }
@@ -506,7 +517,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (judge_kind) (rate(defenseclaw_gateway_judge_invocations_total[$__rate_interval]))",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\"}[$__rate_interval])) or vector(0)",
           "legendFormat": "{{judge_kind}}",
           "refId": "A"
         }
@@ -563,7 +574,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (gen_ai_token_type, gen_ai_request_model) (rate(gen_ai_client_token_usage_sum[$__rate_interval]))",
+          "expr": "sum by (connector, event_type) (rate(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[$__rate_interval]))",
           "legendFormat": "{{gen_ai_request_model}} {{gen_ai_token_type}}",
           "refId": "A"
         }
@@ -590,17 +601,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(gen_ai_client_operation_duration_seconds_bucket[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(gen_ai_client_operation_duration_seconds_bucket[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "p95"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(gen_ai_client_operation_duration_seconds_bucket[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "p99"
         }

@@ -70,6 +70,23 @@ type metricsSet struct {
 	hookInvocations    metric.Int64Counter
 	hookLatency        metric.Float64Histogram
 
+	// Connector hook parity with codex notify.
+	// hookTokens: split by kind=prompt|completion|total so dashboards
+	// can sum any subset; bounded by connector × model cardinality.
+	// hookOutcome: split by action × severity × would_block so the
+	// alerting rules can group on "alerts that became blocks".
+	hookTokens  metric.Int64Counter
+	hookOutcome metric.Int64Counter
+
+	// unifiedHookDispatch bumps on every invocation of
+	// handleUnifiedConnectorHook. Operators graph it to confirm
+	// every connector's hook traffic is flowing through the unified
+	// dispatcher (vs. an out-of-tree handler registration that
+	// bypasses audit/metrics emission). Cardinality is bounded by
+	// connector (7 today); no event dimension to keep the series
+	// cheap — operators join with hookOutcome for richer breakdowns.
+	unifiedHookDispatch metric.Int64Counter
+
 	// Audit store metrics
 	auditDBErrors metric.Int64Counter
 	auditEvents   metric.Int64Counter
@@ -100,15 +117,15 @@ type metricsSet struct {
 	gatewayErrors    metric.Int64Counter
 	sinkSendFailures metric.Int64Counter
 
-	// v7 observability (Track 0 pre-allocation). Declared here so
-	// parallel tracks (1-10) do not touch metricsSet; each track's
-	// writers call the corresponding Record* method below.
+	// v7 observability instruments. Declared here so parallel
+	// subsystem writers do not touch metricsSet; each subsystem's
+	// emitter calls the corresponding Record* method below.
 	//
-	// Track 1/2/3 (scanner observability)
+	// Scanner observability
 	scanFindingsByRule metric.Int64Counter // per-scanner/rule_id
 	scannerQueueDepth  metric.Int64UpDownCounter
-	quarantineActions  metric.Int64Counter // op + result (Track 2)
-	// Track 6 (activity tracking)
+	quarantineActions  metric.Int64Counter // quarantine op + result
+	// Activity tracking
 	activityTotal       metric.Int64Counter
 	activityDiffEntries metric.Int64Histogram
 
@@ -117,19 +134,27 @@ type metricsSet struct {
 	// source (go|ts). Kept low-cardinality so Prometheus recording
 	// rules can roll this up per-branch without blowing up TSDB.
 	egressEvents metric.Int64Counter
-	// Track 7 (external integrations — sink health)
+
+	// Guardrail per-request agent-to-upstream header forwarding
+	// (llm.forward_custom_headers). Labels: path
+	// (chat-completions|passthrough), result (ok|rejected_invalid|
+	// rejected_overflow). The counter is incremented once per
+	// request: ok records the number of forwarded headers; rejected_*
+	// records 1 so operators can alert on validation-failure rates.
+	forwardedHeaders metric.Int64Counter
+	// External integrations — sink health
 	sinkBatchesDelivered metric.Int64Counter
 	sinkBatchesDropped   metric.Int64Counter
 	sinkQueueDepth       metric.Int64UpDownCounter
 	sinkDeliveryLatency  metric.Float64Histogram
 	sinkCircuitState     metric.Int64UpDownCounter
-	// Track 8 (HTTP/security events beyond RecordHTTPRequest)
+	// HTTP / security events (beyond RecordHTTPRequest)
 	httpAuthFailures      metric.Int64Counter
 	httpRateLimitBreaches metric.Int64Counter
 	webhookDispatches     metric.Int64Counter
 	webhookFailures       metric.Int64Counter
 	webhookLatency        metric.Float64Histogram
-	// Track 9 (capacity/SLO) — gauges record absolute snapshots on each tick.
+	// Capacity / SLO — gauges record absolute snapshots on each tick.
 	goroutines          metric.Int64Gauge
 	heapAlloc           metric.Int64Gauge
 	heapObjects         metric.Int64Gauge
@@ -144,27 +169,36 @@ type metricsSet struct {
 	sqliteBusyRetries   metric.Int64Counter
 	sloBlockLatency     metric.Float64Histogram
 	sloTUIRefresh       metric.Float64Histogram
-	// Track 7 — queue backpressure (generic; sink/scanner paths call RecordQueueDepth).
+	// Queue backpressure (generic; sink/scanner paths call RecordQueueDepth).
 	queueDepthGauge metric.Int64Gauge
 	queueDrops      metric.Int64Counter
-	// Track 7 — process health
+	// Process health
 	panicsTotal           metric.Int64Counter
 	telemetryExporterErrs metric.Int64Counter
 	exporterLastExportSec metric.Float64Gauge
 	tuiFilterApplied      metric.Int64Counter
 	judgeSemDepth         metric.Int64UpDownCounter
 	judgeSemDrops         metric.Int64Counter
+	// Judge-body persistence (Phase 3 of the SQLite write-lock fix):
+	// the async queue replaces the synchronous SetJudgePersistor
+	// closure that used to fire two sequential SQLite writes on the
+	// proxy hot path. Drops are the canary signal — a healthy
+	// sidecar should hold this at zero; a non-zero rate means the
+	// queue depth or batch size are mis-tuned for the offered load.
+	judgePersistDrops      metric.Int64Counter
+	judgePersistQueueDepth metric.Int64Gauge
+	judgePersistBatchSize  metric.Int64Histogram
 	// Track 10 (OTel log records + provenance fanout)
 	gatewayEventsEmitted metric.Int64Counter
 	provenanceBumps      metric.Int64Counter
 
-	// Track 1 / K4 — SSE streaming lifecycle telemetry
+	// SSE streaming lifecycle telemetry
 	streamLifecycle   metric.Int64Counter
 	streamBytesSent   metric.Int64Histogram
 	streamDurationMs  metric.Float64Histogram
 	redactionsApplied metric.Int64Counter
 
-	// Track 3 (guardrail LLM judge + verdict cache)
+	// Guardrail LLM judge + verdict cache
 	guardrailJudgeLatency metric.Float64Histogram
 	guardrailCacheHits    metric.Int64Counter
 	guardrailCacheMisses  metric.Int64Counter
@@ -223,7 +257,7 @@ type metricsSet struct {
 	codexNotifyTotal     metric.Int64Counter
 	codexNotifyMalformed metric.Int64Counter
 
-	// Track 6 (LLM bridge, OpenShell, Cisco, webhook circuit / cooldown)
+	// External integrations — LLM bridge, OpenShell, Cisco, webhook circuit / cooldown
 	llmBridgeLatency          metric.Float64Histogram
 	openShellExit             metric.Int64Counter
 	ciscoErrors               metric.Int64Counter
@@ -317,6 +351,40 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		// sub-100ms so dashboards can spot regressions long before
 		// they're user-visible; the long tail still captures stalls.
 		metric.WithExplicitBucketBoundaries(1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Hook token usage + outcome counters.
+	// Token-usage counters are additive across kind={prompt,completion,total}
+	// so a sum-by-connector PromQL gives the full token throughput per
+	// connector without joining three series. The metric name uses the
+	// same defenseclaw.connector.hook.* prefix as the existing
+	// invocations + latency counters so dashboards can build one
+	// per-connector panel that surfaces all four signals.
+	ms.hookTokens, err = m.Int64Counter("defenseclaw.connector.hook.tokens",
+		metric.WithUnit("{token}"),
+		metric.WithDescription("Token usage attributable to connector hook invocations. Split by kind=prompt|completion|total."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	ms.hookOutcome, err = m.Int64Counter("defenseclaw.connector.hook.outcome",
+		metric.WithUnit("{decision}"),
+		metric.WithDescription("Connector hook outcomes labelled by action, severity, and would_block."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// unifiedHookDispatch is a single-dimension counter (connector)
+	// to keep cardinality minimal; richer breakdowns can be derived
+	// from hookOutcome which is filtered to the same request set.
+	ms.unifiedHookDispatch, err = m.Int64Counter("defenseclaw.connector.hook.unified_dispatch",
+		metric.WithUnit("{invocation}"),
+		metric.WithDescription("Count of hook invocations routed through the unified hook collector, by connector."),
 	)
 	if err != nil {
 		return nil, err
@@ -501,7 +569,7 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		return nil, err
 	}
 
-	// v7 instruments — Track 1/2/3 scanner observability
+	// v7 instruments — scanner observability
 	ms.scanFindingsByRule, err = m.Int64Counter("defenseclaw.scan.findings.by_rule",
 		metric.WithUnit("{finding}"),
 		metric.WithDescription("Findings grouped by scanner + rule_id + severity"))
@@ -521,7 +589,7 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		return nil, err
 	}
 
-	// v7 instruments — Track 6 activity tracking
+	// v7 instruments — activity tracking
 	ms.activityTotal, err = m.Int64Counter("defenseclaw.activity.total",
 		metric.WithUnit("{activity}"),
 		metric.WithDescription("Operator mutations recorded (EventActivity)"))
@@ -543,7 +611,18 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		return nil, err
 	}
 
-	// v7 instruments — Track 7 external integrations
+	// Per-request header forwarding from agent to upstream LLM
+	// provider. Counts forwarded headers on the ok path; counts 1 per
+	// failed request on rejected_* so operators can alert on
+	// validation-failure rates without inflating ok totals.
+	ms.forwardedHeaders, err = m.Int64Counter("defenseclaw.gateway.forwarded_headers",
+		metric.WithUnit("{header}"),
+		metric.WithDescription("Inbound HTTP headers forwarded from the agent to the upstream LLM provider (path=chat-completions|passthrough, result=ok|rejected_invalid|rejected_overflow)"))
+	if err != nil {
+		return nil, err
+	}
+
+	// External integrations — sink health
 	ms.sinkBatchesDelivered, err = m.Int64Counter("defenseclaw.audit.sink.batches.delivered",
 		metric.WithUnit("{batch}"),
 		metric.WithDescription("Audit sink batches acknowledged by remote"))
@@ -575,7 +654,7 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		return nil, err
 	}
 
-	// v7 instruments — Track 8 HTTP/security
+	// v7 instruments — HTTP / security events
 	ms.httpAuthFailures, err = m.Int64Counter("defenseclaw.http.auth.failures",
 		metric.WithUnit("{failure}"),
 		metric.WithDescription("HTTP authentication failures by route + reason"))
@@ -618,7 +697,7 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000,
 	}
 
-	// v7 instruments — Track 9 capacity/SLO + Track 7 (gauges = absolute snapshots).
+	// v7 instruments — capacity / SLO + process-health gauges (absolute snapshots).
 	ms.goroutines, err = m.Int64Gauge("defenseclaw.runtime.goroutines",
 		metric.WithUnit("{goroutine}"),
 		metric.WithDescription("Current goroutine count"))
@@ -754,6 +833,30 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		return nil, err
 	}
 
+	ms.judgePersistDrops, err = m.Int64Counter("defenseclaw.judge.persist.drops",
+		metric.WithUnit("{drop}"),
+		metric.WithDescription("Judge bodies dropped before persistence (queue full)"))
+	if err != nil {
+		return nil, err
+	}
+	ms.judgePersistQueueDepth, err = m.Int64Gauge("defenseclaw.judge.persist.queue_depth",
+		metric.WithUnit("{item}"),
+		metric.WithDescription("Current depth of the async judge-persistence queue"))
+	if err != nil {
+		return nil, err
+	}
+	// Histogram buckets aligned with the 32-row max-batch policy in
+	// JudgeStore.run(): they capture both bursty single-row commits
+	// (latency-dominated) and full-batch commits (fsync-amortized)
+	// so dashboards can distinguish the two regimes.
+	ms.judgePersistBatchSize, err = m.Int64Histogram("defenseclaw.judge.persist.batch_size",
+		metric.WithUnit("{row}"),
+		metric.WithDescription("Rows committed per judge-persistence transaction"),
+		metric.WithExplicitBucketBoundaries(1, 2, 4, 8, 16, 24, 32, 48, 64))
+	if err != nil {
+		return nil, err
+	}
+
 	// v7 instruments — Track 10 OTel logs + provenance
 	ms.gatewayEventsEmitted, err = m.Int64Counter("defenseclaw.gateway.events.emitted",
 		metric.WithUnit("{event}"),
@@ -794,7 +897,7 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		return nil, err
 	}
 
-	// Track 6 — external integrations
+	// External integrations — LLM bridge, OpenShell, Cisco, webhook
 	ms.llmBridgeLatency, err = m.Float64Histogram("defenseclaw.llm_bridge.latency",
 		metric.WithUnit("ms"),
 		metric.WithDescription("LiteLLM bridge call latency (Python subprocess)"))
@@ -832,7 +935,7 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		return nil, err
 	}
 
-	// Track 3 — guardrail judge + verdict cache
+	// Guardrail LLM judge + verdict cache
 	ms.guardrailJudgeLatency, err = m.Float64Histogram("defenseclaw.guardrail.judge.latency",
 		metric.WithUnit("ms"),
 		metric.WithDescription("LLM judge invocation latency (cache miss path includes model round-trip)"),
@@ -1071,10 +1174,15 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	return &ms, nil
 }
 
-// RecordScan records scan-related metrics.
-func (p *Provider) RecordScan(ctx context.Context, scanner, targetType, verdict string, durationMs float64, findings map[string]int) {
+// RecordScan records scan-related metrics. connector is the originating
+// connector when the scan ran in a connector-scoped context; "" records
+// connector="unknown" on the scan-findings total so the label stays present.
+func (p *Provider) RecordScan(ctx context.Context, scanner, targetType, verdict string, durationMs float64, findings map[string]int, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 
 	baseAttrs := metric.WithAttributes(
@@ -1095,6 +1203,7 @@ func (p *Provider) RecordScan(ctx context.Context, scanner, targetType, verdict 
 				attribute.String("scanner", scanner),
 				attribute.String("target_type", targetType),
 				attribute.String("severity", severity),
+				attribute.String("connector", connector),
 			))
 			p.metrics.scanFindingsGauge.Add(ctx, int64(count), metric.WithAttributes(
 				attribute.String("target_type", targetType),
@@ -1159,15 +1268,15 @@ func (p *Provider) RecordApproval(ctx context.Context, result string, auto, dang
 // metric attributes when empty so pre-v7 callers do not inflate the
 // series count — see docs/OTEL-IMPLEMENTATION-STATUS.md for the
 // cardinality contract.
-func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerName, model, agentName, agentID string, prompt, completion int64) {
+func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerName, model, agentName, agentID, sessionID string, prompt, completion int64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
 	if prompt > 0 {
-		p.RecordLLMTokenUsage(ctx, operationName, providerName, model, agentName, agentID, "input", prompt)
+		p.RecordLLMTokenUsage(ctx, operationName, providerName, model, agentName, agentID, sessionID, "input", prompt)
 	}
 	if completion > 0 {
-		p.RecordLLMTokenUsage(ctx, operationName, providerName, model, agentName, agentID, "output", completion)
+		p.RecordLLMTokenUsage(ctx, operationName, providerName, model, agentName, agentID, sessionID, "output", completion)
 	}
 }
 
@@ -1175,7 +1284,7 @@ func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerN
 // token type. It is used for connector-native counters such as Claude Code's
 // cacheRead/cacheCreation token categories, while RecordLLMTokens preserves
 // the common input/output call-site contract.
-func (p *Provider) RecordLLMTokenUsage(ctx context.Context, operationName, providerName, model, agentName, agentID, tokenType string, tokens int64) {
+func (p *Provider) RecordLLMTokenUsage(ctx context.Context, operationName, providerName, model, agentName, agentID, sessionID, tokenType string, tokens int64) {
 	if !p.Enabled() || p.metrics == nil || tokens <= 0 {
 		return
 	}
@@ -1184,15 +1293,18 @@ func (p *Provider) RecordLLMTokenUsage(ctx context.Context, operationName, provi
 		tokenType = "unknown"
 	}
 	commonAttrs := []attribute.KeyValue{
-		attribute.String("gen_ai.operation.name", operationName),
-		attribute.String("gen_ai.provider.name", providerName),
-		attribute.String("gen_ai.request.model", model),
+		attribute.String("gen_ai.operation.name", NormalizeGenAIOperationLabel(operationName)),
+		attribute.String("gen_ai.provider.name", NormalizeGenAIProviderLabel(providerName)),
+		attribute.String("gen_ai.request.model", NormalizeModelLabel(model)),
 	}
 	if agentName != "" {
 		commonAttrs = append(commonAttrs, attribute.String("gen_ai.agent.name", agentName))
 	}
 	if agentID != "" {
 		commonAttrs = append(commonAttrs, attribute.String("gen_ai.agent.id", agentID))
+	}
+	if sessionID != "" {
+		commonAttrs = append(commonAttrs, attribute.String("gen_ai.conversation.id", sessionID))
 	}
 	attrs := append([]attribute.KeyValue{attribute.String("gen_ai.token.type", tokenType)}, commonAttrs...)
 	p.metrics.genAITokenUsage.Record(ctx, float64(tokens), metric.WithAttributes(attrs...))
@@ -1206,9 +1318,9 @@ func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, provide
 		return
 	}
 	attrs := []attribute.KeyValue{
-		attribute.String("gen_ai.operation.name", operationName),
-		attribute.String("gen_ai.provider.name", providerName),
-		attribute.String("gen_ai.request.model", model),
+		attribute.String("gen_ai.operation.name", NormalizeGenAIOperationLabel(operationName)),
+		attribute.String("gen_ai.provider.name", NormalizeGenAIProviderLabel(providerName)),
+		attribute.String("gen_ai.request.model", NormalizeModelLabel(model)),
 	}
 	if agentName != "" {
 		attrs = append(attrs, attribute.String("gen_ai.agent.name", agentName))
@@ -1220,15 +1332,40 @@ func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, provide
 }
 
 // RecordAlert records a runtime alert metric.
-func (p *Provider) RecordAlert(ctx context.Context, alertType, severity, source string) {
+// RecordAlert records a runtime/guardrail alert. connector is the
+// originating connector when known (e.g. derived from a "<connector>:<role>"
+// guardrail scanner); pass "" for genuinely global alerts (network-egress,
+// process runtime) — it normalizes to "unknown" so the label is present on
+// every series and connector-scoped dashboard selectors still match.
+func (p *Provider) RecordAlert(ctx context.Context, alertType, severity, source, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 	p.metrics.alertCount.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("alert.type", alertType),
 		attribute.String("alert.severity", severity),
 		attribute.String("alert.source", source),
+		attribute.String("connector", connector),
 	))
+}
+
+// guardrailConnectorFromScanner extracts the connector identity from a
+// composite guardrail scanner label. Connector-scoped evaluations use a
+// `<connector>:<role>` convention (e.g. "codex:guardrail-proxy",
+// "claudecode:policy-rules", "openclaw:hilt"); global/proxy-internal
+// scanners ("cisco-ai-defense", "codeguard", "opa-guardrail") have no
+// colon and return "". Surfacing this as a parallel `guardrail.connector`
+// dimension lets dashboards pivot guardrail metrics by connector with the
+// same label name the hook metrics use, instead of regex-splitting the
+// composite scanner label.
+func guardrailConnectorFromScanner(scanner string) string {
+	if c, _, found := strings.Cut(scanner, ":"); found {
+		return strings.TrimSpace(c)
+	}
+	return ""
 }
 
 // RecordGuardrailEvaluation records a guardrail evaluation metric.
@@ -1236,10 +1373,14 @@ func (p *Provider) RecordGuardrailEvaluation(ctx context.Context, scanner, actio
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.guardrailEvaluations.Add(ctx, 1, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("guardrail.scanner", scanner),
 		attribute.String("guardrail.action_taken", actionTaken),
-	))
+	}
+	if c := guardrailConnectorFromScanner(scanner); c != "" {
+		attrs = append(attrs, attribute.String("guardrail.connector", c))
+	}
+	p.metrics.guardrailEvaluations.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordGuardrailLatency records guardrail evaluation latency.
@@ -1247,9 +1388,13 @@ func (p *Provider) RecordGuardrailLatency(ctx context.Context, scanner string, d
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.guardrailLatency.Record(ctx, durationMs, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("guardrail.scanner", scanner),
-	))
+	}
+	if c := guardrailConnectorFromScanner(scanner); c != "" {
+		attrs = append(attrs, attribute.String("guardrail.connector", c))
+	}
+	p.metrics.guardrailLatency.Record(ctx, durationMs, metric.WithAttributes(attrs...))
 }
 
 // RecordScanError records a scanner invocation failure.
@@ -1291,13 +1436,22 @@ func (p *Provider) RecordAdmissionDecision(ctx context.Context, decision, target
 }
 
 // RecordWatcherEvent records a filesystem watcher event.
-func (p *Provider) RecordWatcherEvent(ctx context.Context, eventType, targetType string) {
+func (p *Provider) RecordWatcherEvent(ctx context.Context, eventType, targetType, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	// Connector-scoped events (e.g. hook self-heal) carry the originating
+	// connector; genuinely global watcher events (rescan/drift) pass "".
+	// Normalize empty to "unknown" so the label is present on every series
+	// and connector-scoped dashboard selectors still match — same contract
+	// as RecordAlert / RecordScanFindingByRule.
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 	p.metrics.watcherEvents.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event_type", eventType),
 		attribute.String("target_type", targetType),
+		attribute.String("connector", connector),
 	))
 }
 
@@ -1323,10 +1477,29 @@ func (p *Provider) RecordInspectEvaluation(ctx context.Context, tool, action, se
 		return
 	}
 	p.metrics.inspectEvaluations.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("tool", tool),
-		attribute.String("action", action),
+		attribute.String("tool", NormalizeMetricTextLabel(tool)),
+		attribute.String("connector", connectorFromInspectTool(tool)),
+		attribute.String("action", normalizeHookActionMetricLabel(action)),
 		attribute.String("severity", severity),
 	))
+}
+
+// connectorFromInspectTool derives the connector identity from the composite
+// inspect `tool` label. Hook paths build it as "<connector>:<event>" (see
+// hookMetricToolLabel), so the prefix before the first colon is the
+// connector — the exact convention dashboards already encode as
+// `tool=~"$connector:.*"`. Exposing it as a first-class `connector`
+// dimension lets PromQL and (crucially) SignalFlow group/split by connector
+// without a string-split, which SignalFlow cannot express. Bare tool labels
+// with no colon (e.g. a passthrough "Bash") resolve to "unknown" to keep the
+// label present on every series so "All"/regex selectors still match.
+func connectorFromInspectTool(tool string) string {
+	if c, _, found := strings.Cut(tool, ":"); found {
+		if c = strings.TrimSpace(c); c != "" {
+			return c
+		}
+	}
+	return "unknown"
 }
 
 // RecordInspectLatency records tool/message inspect latency.
@@ -1335,7 +1508,8 @@ func (p *Provider) RecordInspectLatency(ctx context.Context, tool string, durati
 		return
 	}
 	p.metrics.inspectLatency.Record(ctx, durationMs, metric.WithAttributes(
-		attribute.String("tool", tool),
+		attribute.String("tool", NormalizeMetricTextLabel(tool)),
+		attribute.String("connector", connectorFromInspectTool(tool)),
 	))
 }
 
@@ -1355,14 +1529,9 @@ func (p *Provider) RecordConnectorHookInvocation(ctx context.Context, connector,
 	if eventType == "" {
 		eventType = "unknown"
 	}
-	result = strings.TrimSpace(result)
-	if result == "" {
-		result = "unknown"
-	}
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "none"
-	}
+	eventType = NormalizeHookEventTypeLabel(eventType)
+	result = normalizeHookResultMetricLabel(result)
+	reason = normalizeHookActionMetricLabel(reason)
 	attrs := []attribute.KeyValue{
 		attribute.String("connector", connector),
 		attribute.String("event_type", eventType),
@@ -1371,6 +1540,315 @@ func (p *Provider) RecordConnectorHookInvocation(ctx context.Context, connector,
 	}
 	p.metrics.hookInvocations.Add(ctx, 1, metric.WithAttributes(attrs...))
 	p.metrics.hookLatency.Record(ctx, durationMs, metric.WithAttributes(attrs...))
+}
+
+// RecordHookTokenUsage records token-usage counts attributable to a
+// connector hook invocation. Promotes the same prompt/completion/total
+// triple that codex's notify endpoint and the OTLP ingestion path
+// already publish — so every connector reaches LLM-cost-dashboard
+// parity through the hook surface alone.
+//
+// Connector + model are required labels; missing values are
+// normalized to "unknown" so unlabeled hits still aggregate into a
+// catch-all bucket (rather than vanishing into the unlabeled time
+// series that PromQL filters drop).
+//
+// Counts that are <= 0 are silently ignored so a connector that
+// reports only one of the three fields does not record bogus zero-
+// valued time series. Callers should pass the parsed token counts
+// directly; the gateway runs no further normalization beyond the
+// model-label normalization documented on NormalizeModelLabel.
+func (p *Provider) RecordHookTokenUsage(ctx context.Context, connector, model string, promptTokens, completionTokens, totalTokens int64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	connector = strings.TrimSpace(connector)
+	if connector == "" {
+		connector = "unknown"
+	}
+	modelLabel := NormalizeModelLabel(model)
+	record := func(kind string, value int64) {
+		if value <= 0 {
+			return
+		}
+		p.metrics.hookTokens.Add(ctx, value, metric.WithAttributes(
+			attribute.String("connector", connector),
+			attribute.String("model", modelLabel),
+			attribute.String("kind", kind),
+		))
+	}
+	record("prompt", promptTokens)
+	record("completion", completionTokens)
+	record("total", totalTokens)
+}
+
+// modelLabelMaxLen caps the model attribute string length. Even with
+// the family-collapse path below, defence in depth: any model
+// identifier longer than this is replaced with a fixed prefix so a
+// hostile agent (or sloppy SDK) cannot push multi-kB strings into
+// TSDB labels.
+const modelLabelMaxLen = 64
+
+// modelFamilyPrefixes groups raw model identifiers (e.g.
+// "gpt-5-mini-2026-04-18") into a small set of stable families
+// ("gpt-5"). The metric carries the FAMILY, so a noisy or hostile
+// agent that emits arbitrary version suffixes cannot inflate
+// Prometheus / OTLP series cardinality. Operators who want the
+// fully-qualified model ID still have it as a span attribute on the
+// associated gen_ai.* trace — the metric just doesn't carry it.
+//
+// Adding a new family is a one-line append here; ordering does not
+// matter — NormalizeModelLabel uses the first matching prefix and
+// the families are designed not to overlap (gpt-4 vs gpt-5 are
+// disjoint prefixes by construction).
+var modelFamilyPrefixes = []string{
+	"gpt-5",
+	"gpt-4o",
+	"gpt-4",
+	"gpt-3.5",
+	"o1",
+	"o3",
+	"claude-3.5",
+	"claude-3-7",
+	"claude-3",
+	"claude-4",
+	"claude-opus",
+	"claude-sonnet",
+	"claude-haiku",
+	"gemini-1.5",
+	"gemini-2",
+	"gemini",
+	"llama-3",
+	"llama-4",
+	"mistral",
+	"deepseek",
+	"qwen",
+	"grok",
+	"command-r",
+	"phi-3",
+	"phi-4",
+}
+
+// NormalizeModelLabel projects an arbitrary, caller-supplied model
+// string onto the bounded family allowlist above. Cardinality
+// guarantees:
+//
+//   - Empty / whitespace → "unknown" (single bucket).
+//   - Unknown family → "other" (single bucket). Anything not in the
+//     allowlist collapses here so adding a brand-new model family
+//     without registering it cannot expand the label cardinality.
+//   - Recognised family → that family's prefix (e.g. all "gpt-5*"
+//     variants → "gpt-5").
+//   - Anything longer than modelLabelMaxLen → "other".
+//
+// Exported so tests + audit pipelines can apply the same normalization
+// when correlating metrics with the rich gen_ai.request.model span
+// attribute.
+func NormalizeModelLabel(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" {
+		return "unknown"
+	}
+	if len(m) > modelLabelMaxLen {
+		return "other"
+	}
+	for _, prefix := range modelFamilyPrefixes {
+		if m == prefix || strings.HasPrefix(m, prefix+"-") || strings.HasPrefix(m, prefix+".") || strings.HasPrefix(m, prefix+":") {
+			return prefix
+		}
+	}
+	return "other"
+}
+
+func NormalizeGenAIProviderLabel(provider string) string {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	if p == "" {
+		return "unknown"
+	}
+	if len(p) > 64 {
+		return "other"
+	}
+	switch {
+	case p == "openai" || strings.Contains(p, "openai"):
+		return "openai"
+	case p == "anthropic" || strings.Contains(p, "anthropic") || strings.Contains(p, "claude"):
+		return "anthropic"
+	case p == "google" || strings.Contains(p, "google") || strings.Contains(p, "gemini"):
+		return "google"
+	case p == "azure" || strings.Contains(p, "azure"):
+		return "azure"
+	case p == "bedrock" || strings.Contains(p, "bedrock"):
+		return "bedrock"
+	case p == "ollama" || strings.Contains(p, "ollama"):
+		return "ollama"
+	case p == "local" || p == "unknown":
+		return p
+	default:
+		return "other"
+	}
+}
+
+func NormalizeGenAIOperationLabel(operation string) string {
+	op := strings.ToLower(strings.TrimSpace(operation))
+	if op == "" {
+		return "unknown"
+	}
+	if len(op) > 64 {
+		return "other"
+	}
+	op = strings.ReplaceAll(op, "_", "-")
+	switch op {
+	case "chat", "completion", "completions", "responses", "response", "generate", "generation":
+		return "chat"
+	case "embedding", "embeddings", "embed":
+		return "embedding"
+	case "tool", "tool-call", "tool-result":
+		return "tool"
+	case "judge", "guardrail", "moderation":
+		return "judge"
+	case "unknown":
+		return "unknown"
+	default:
+		return "other"
+	}
+}
+
+func NormalizeHookEventTypeLabel(eventType string) string {
+	canon := strings.ToLower(strings.TrimSpace(eventType))
+	canon = strings.ReplaceAll(canon, "_", "")
+	canon = strings.ReplaceAll(canon, "-", "")
+	if canon == "" {
+		return "unknown"
+	}
+	switch canon {
+	case "prompt", "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt", "prellmcall", "beforeagent", "beforemodel":
+		return "prompt"
+	case "toolcall", "pretooluse", "beforetool", "pretoolcall", "permissionrequest", "beforeshellexecution", "beforemcpexecution", "beforereadfile", "beforetabfileread", "prereadcode", "prewritecode", "preruncommand", "premcptooluse":
+		return "tool_call"
+	case "toolresult", "posttooluse", "posttoolusefailure", "aftertool", "posttoolcall", "postreadcode", "postwritecode", "postruncommand", "postmcptooluse", "aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit", "afteragentresponse", "afteragentthought", "afteragent", "aftermodel", "posttoolbatch":
+		return "tool_result"
+	case "stop", "agentstop", "subagentstop":
+		return "stop"
+	case "notification":
+		return "notification"
+	case "sessionstart":
+		return "sessionstart"
+	default:
+		return "other"
+	}
+}
+
+func NormalizeMetricTextLabel(value string) string {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "" {
+		return "unknown"
+	}
+	if len(v) > 64 {
+		return "other"
+	}
+	var b strings.Builder
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.' || r == '_' || r == '-' || r == ':':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "other"
+	}
+	return out
+}
+
+func normalizeHookActionMetricLabel(action string) string {
+	a := strings.ToLower(strings.TrimSpace(action))
+	switch a {
+	case "":
+		return "unknown"
+	case "allow", "block", "alert", "confirm", "panic", "would_block", "none", "other":
+		return a
+	default:
+		return "other"
+	}
+}
+
+func normalizeHookResultMetricLabel(result string) string {
+	r := strings.ToLower(strings.TrimSpace(result))
+	switch r {
+	case "ok", "rejected", "panic", "unknown":
+		return r
+	case "":
+		return "unknown"
+	default:
+		return "other"
+	}
+}
+
+// RecordHookOutcome records a single hook decision split by the
+// dimensions dashboards already group on: connector, event, action,
+// severity, and the would_block bool. Operators alert on the same
+// dimensions in PromQL and SQL, so the counter is intentionally
+// labelled with all five — cardinality is bounded by event * action
+// (small finite sets) so the would_block dimension stays free.
+//
+// elapsedMs is logged with the corresponding hookLatency histogram
+// already; this helper is a separate counter so dashboards can
+// compute "block rate" without coupling to the latency exporter.
+func (p *Provider) RecordHookOutcome(ctx context.Context, connector, eventType, action, severity string, wouldBlock bool) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	connector = strings.TrimSpace(connector)
+	if connector == "" {
+		connector = "unknown"
+	}
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		eventType = "unknown"
+	}
+	eventType = NormalizeHookEventTypeLabel(eventType)
+	action = normalizeHookActionMetricLabel(action)
+	severity = strings.TrimSpace(severity)
+	if severity == "" {
+		severity = "NONE"
+	}
+	p.metrics.hookOutcome.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("connector", connector),
+		attribute.String("event_type", eventType),
+		attribute.String("action", action),
+		attribute.String("severity", severity),
+		attribute.Bool("would_block", wouldBlock),
+	))
+}
+
+// RecordUnifiedHookDispatch bumps the unified hook dispatch
+// counter every time handleUnifiedConnectorHook routes a request.
+// Operators graph per-connector counts to confirm every hook
+// surface is flowing through the unified pipeline (which owns
+// audit / metrics / dedup / trace propagation), not an
+// out-of-tree handler registration that bypasses them.
+//
+// Cardinality is bounded by len(registered connectors); the counter
+// is intentionally one-dimensional (connector only) so the series
+// remains cheap. Richer breakdowns come from hookOutcome which is
+// filtered to the same request set.
+func (p *Provider) RecordUnifiedHookDispatch(ctx context.Context, connector string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	connector = strings.TrimSpace(connector)
+	if connector == "" {
+		connector = "unknown"
+	}
+	p.metrics.unifiedHookDispatch.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("connector", connector),
+	))
 }
 
 // RecordAuditDBError records an SQLite audit store operation failure.
@@ -1383,15 +1861,33 @@ func (p *Provider) RecordAuditDBError(ctx context.Context, operation string) {
 	))
 }
 
-// RecordAuditEvent records that an audit event was persisted.
-func (p *Provider) RecordAuditEvent(ctx context.Context, action, severity string) {
+// RecordAuditEvent records that an audit event was persisted. An optional
+// connector argument adds a `connector` dimension so dashboards can count
+// audit-event volume per hook connector on multi-connector installs;
+// callers without connector context (admin actions, network-egress) omit
+// it and the series stays connector-agnostic.
+func (p *Provider) RecordAuditEvent(ctx context.Context, action, severity string, connector ...string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.auditEvents.Add(ctx, 1, metric.WithAttributes(
+	// Always emit the connector label so the audit_events series shape is
+	// stable. An unattributed event (variadic arg omitted, or empty/blank)
+	// normalizes to "unknown" rather than dropping the label — matching every
+	// other connector-labelled counter in this file (scan findings, guardrail/
+	// inspect evaluations, token usage) so `sum by (connector)` and
+	// `connector="..."` filters stay consistent across metrics.
+	conn := "unknown"
+	if len(connector) > 0 {
+		if c := strings.TrimSpace(connector[0]); c != "" {
+			conn = c
+		}
+	}
+	attrs := []attribute.KeyValue{
 		attribute.String("action", action),
 		attribute.String("severity", severity),
-	))
+		attribute.String("connector", conn),
+	}
+	p.metrics.auditEvents.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordConfigLoadError records a config load or validation error and emits
@@ -1479,29 +1975,34 @@ func (p *Provider) RecordSinkFailure(sinkKind, sinkName, reason string) {
 }
 
 // ==========================================================================
-// v7 observability Record* methods (Track 0 pre-allocation).
+// v7 observability Record* methods.
 //
 // Each method is implemented here with a safe no-op fast path so
-// parallel tracks (1-10) can call them immediately without waiting
-// for Track 0 to merge. If p or p.metrics is nil (OTel disabled)
-// the call is free.
+// every subsystem emitter (scanner, audit, sink, capacity, judge,
+// activity, …) can call them unconditionally without nil-checking
+// the provider. If p or p.metrics is nil (OTel disabled) the call
+// is free.
 //
-// Parallel tracks MUST NOT add new fields to metricsSet; add your
-// new calls here by editing this block only.
+// Per-subsystem emitters MUST NOT add new fields to metricsSet;
+// add new calls here by editing this block only.
 // ==========================================================================
 
 // RecordScanFindingByRule is called once per finding so dashboards
 // can rank hot rules per scanner/severity. The body is small
-// enough that Track 1/2/3 can call this from within their emit
-// loops without worrying about hot-path cost.
-func (p *Provider) RecordScanFindingByRule(ctx context.Context, scanner, ruleID, severity string) {
+// enough that scanner emit loops can call this on the hot path
+// without measurable cost.
+func (p *Provider) RecordScanFindingByRule(ctx context.Context, scanner, ruleID, severity, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 	p.metrics.scanFindingsByRule.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("scanner", scanner),
 		attribute.String("rule_id", ruleID),
 		attribute.String("severity", severity),
+		attribute.String("connector", connector),
 	))
 }
 
@@ -1540,7 +2041,8 @@ func (p *Provider) RecordScannerQueueDepth(ctx context.Context, scanner string, 
 }
 
 // RecordActivity records an operator mutation metric. Counterpart
-// for EventActivity emitted by Track 6.
+// for the EventActivity emission path in the activity-tracking
+// subsystem.
 func (p *Provider) RecordActivity(ctx context.Context, action, targetType, actor string, diffEntries int) {
 	if !p.Enabled() || p.metrics == nil {
 		return
@@ -1572,6 +2074,28 @@ func (p *Provider) RecordEgress(ctx context.Context, branch, decision, source st
 	))
 }
 
+// RecordForwardedHeaders records agent-to-upstream header forwarding.
+// Call once per request:
+//   - On success: result="ok", count=number of headers forwarded.
+//   - On validation failure: result="rejected_invalid" or
+//     "rejected_overflow", count=1 (request count, not header count).
+//
+// path is "chat-completions" or "passthrough"; values outside that set
+// are still accepted so the schema validator catches the regression
+// in test rather than the gateway silently dropping the sample.
+func (p *Provider) RecordForwardedHeaders(ctx context.Context, path, result string, count int64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	if count <= 0 {
+		return
+	}
+	p.metrics.forwardedHeaders.Add(ctx, count, metric.WithAttributes(
+		attribute.String("path", path),
+		attribute.String("result", result),
+	))
+}
+
 // RecordSinkBatch is DEPRECATED and intentionally a no-op.
 //
 // It used to emit defenseclaw.audit.sink.batches.{delivered,dropped}
@@ -1597,8 +2121,8 @@ func (p *Provider) RecordSinkBatch(ctx context.Context, sinkKind, sinkName, outc
 	_ = latencyMs
 }
 
-// RecordSinkBatchDelivered records a successful audit-sink delivery with
-// HTTP status_code and retry_count dimensions (v7 Track 5).
+// RecordSinkBatchDelivered records a successful audit-sink delivery
+// with HTTP status_code and retry_count dimensions (v7 audit sinks).
 func (p *Provider) RecordSinkBatchDelivered(ctx context.Context, sinkName, sinkKind string, statusCode, retryCount int, latencyMs float64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
@@ -1613,7 +2137,7 @@ func (p *Provider) RecordSinkBatchDelivered(ctx context.Context, sinkName, sinkK
 	p.metrics.sinkDeliveryLatency.Record(ctx, latencyMs, attrs)
 }
 
-// RecordSinkBatchFailed records a failed audit-sink delivery (v7 Track 5).
+// RecordSinkBatchFailed records a failed audit-sink delivery (v7 audit sinks).
 func (p *Provider) RecordSinkBatchFailed(ctx context.Context, sinkName, sinkKind string, statusCode, retryCount int) {
 	if !p.Enabled() || p.metrics == nil {
 		return
@@ -1626,7 +2150,8 @@ func (p *Provider) RecordSinkBatchFailed(ctx context.Context, sinkName, sinkKind
 	))
 }
 
-// RecordActivityTotal is an alias for RecordActivity (Track 0 instrument name).
+// RecordActivityTotal is an alias for RecordActivity matching the
+// instrument name in the v7 observability schema.
 func (p *Provider) RecordActivityTotal(ctx context.Context, action, targetType, actor string, diffEntries int) {
 	p.RecordActivity(ctx, action, targetType, actor, diffEntries)
 }
@@ -2035,9 +2560,46 @@ func (p *Provider) RecordJudgeSemaphore(ctx context.Context, delta int64, droppe
 	}
 }
 
+// RecordJudgePersistDrop increments the drop counter when the async
+// judge-persistence queue cannot accept a new job. reason should be
+// a low-cardinality string ("queue_full", "shutdown") so the
+// counter stays Prometheus-friendly.
+func (p *Provider) RecordJudgePersistDrop(ctx context.Context, reason string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.judgePersistDrops.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("reason", reason),
+	))
+}
+
+// RecordJudgePersistQueueDepth snapshots the current depth of the
+// async judge-persistence queue. Called from the worker after every
+// enqueue / drain so dashboards can track queue saturation in real
+// time without needing pollers in the worker.
+func (p *Provider) RecordJudgePersistQueueDepth(ctx context.Context, depth int64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.judgePersistQueueDepth.Record(ctx, depth)
+}
+
+// RecordJudgePersistBatchSize records the size of a single committed
+// persistence transaction. Tracking this distribution is how
+// operators verify the worker is actually batching (median should
+// climb toward 32 under load) instead of degenerating into a
+// one-row-per-commit pattern that defeats the purpose of the queue.
+func (p *Provider) RecordJudgePersistBatchSize(ctx context.Context, n int64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.judgePersistBatchSize.Record(ctx, n)
+}
+
 // RecordGatewayEventEmitted is called by the gatewaylog.Writer
-// choke point exactly once per Emit. Used by Track 10 to compare
-// emission rates against sink throughput.
+// choke point exactly once per Emit. Used to compare emission rates
+// against sink throughput (a divergence flags backpressure or a
+// dropped fan-out path).
 func (p *Provider) RecordGatewayEventEmitted(ctx context.Context, eventType, severity string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
@@ -2183,9 +2745,15 @@ func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result 
 		result = "ok"
 	}
 
+	// `connector` mirrors `source` so OTLP-ingest metrics share the same
+	// connector label name the hook metrics use; dashboards can filter
+	// every connector telemetry surface on a single `connector` variable
+	// instead of switching between `source` (ingest) and `connector`
+	// (hooks). `source` is retained for backward compatibility.
 	requestAttrs := metric.WithAttributes(
 		attribute.String("signal", signal),
 		attribute.String("source", source),
+		attribute.String("connector", source),
 		attribute.String("result", result),
 	)
 	p.metrics.otelIngestRequests.Add(ctx, 1, requestAttrs)
@@ -2193,12 +2761,14 @@ func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result 
 		p.metrics.otelIngestMalformed.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("signal", signal),
 			attribute.String("source", source),
+			attribute.String("connector", source),
 		))
 	}
 
 	volumeAttrs := metric.WithAttributes(
 		attribute.String("signal", signal),
 		attribute.String("source", source),
+		attribute.String("connector", source),
 	)
 	if records > 0 {
 		p.metrics.otelIngestRecords.Add(ctx, records, volumeAttrs)

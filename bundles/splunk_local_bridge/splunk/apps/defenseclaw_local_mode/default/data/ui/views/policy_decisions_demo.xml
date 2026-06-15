@@ -19,13 +19,26 @@
       <default>*</default>
       <initialValue>*</initialValue>
     </input>
+    <input type="dropdown" token="connector" searchWhenChanged="true">
+      <label>Connector</label>
+      <choice value="*">All</choice>
+      <default>*</default>
+      <initialValue>*</initialValue>
+      <search>
+        <query>`defenseclaw_demo_connector_events` | where connector!="(unknown)" | stats count by connector | sort - count</query>
+        <earliest>$time.earliest$</earliest>
+        <latest>$time.latest$</latest>
+      </search>
+      <fieldForLabel>connector</fieldForLabel>
+      <fieldForValue>connector</fieldForValue>
+    </input>
   </fieldset>
   <row>
     <panel>
       <title>Policy Events</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_policy_events` | where ("$decision$"="*" OR decision="$decision$") AND ("$policy_id$"="*" OR policy_id="$policy_id$" OR rule_id="$policy_id$") | stats count as policy_events</query>
+          <query>`defenseclaw_demo_policy_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$decision$"="*" OR decision="$decision$") AND ("$policy_id$"="*" OR policy_id="$policy_id$" OR rule_id="$policy_id$") | stats count as policy_events</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -36,7 +49,7 @@
       <title>Blocks And Denies</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_policy_events` | where decision="block" OR decision="deny" OR like(action, "%block%") OR like(action, "%deny%") | stats count as blocks_and_denies</query>
+          <query>`defenseclaw_demo_policy_events` | where ("$connector$"="*" OR connector="$connector$") AND (decision="block" OR decision="deny" OR like(action, "%block%") OR like(action, "%deny%")) | stats count as blocks_and_denies</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -47,7 +60,7 @@
       <title>Confirms</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_policy_events` | where decision="confirm" OR like(action, "%confirm%") | stats count as confirms</query>
+          <query>`defenseclaw_demo_policy_events` | where ("$connector$"="*" OR connector="$connector$") AND (decision="confirm" OR like(action, "%confirm%")) | stats count as confirms</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -58,7 +71,7 @@
       <title>Policies Firing</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_policy_events` | eval policy_or_rule=if(policy_id!="(none)", policy_id, rule_id) | where policy_or_rule!="(none)" | stats dc(policy_or_rule) as policies_firing</query>
+          <query>`defenseclaw_demo_policy_events` | eval policy_or_rule=if(policy_id!="(none)", policy_id, rule_id) | where ("$connector$"="*" OR connector="$connector$") AND policy_or_rule!="(none)" | stats dc(policy_or_rule) as policies_firing</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -71,7 +84,7 @@
       <title>Decisions Over Time</title>
       <chart>
         <search>
-          <query>`defenseclaw_demo_policy_events` | where ("$decision$"="*" OR decision="$decision$") AND ("$policy_id$"="*" OR policy_id="$policy_id$" OR rule_id="$policy_id$") | timechart span=15m count by decision limit=8 useother=t</query>
+          <query>`defenseclaw_demo_policy_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$decision$"="*" OR decision="$decision$") AND ("$policy_id$"="*" OR policy_id="$policy_id$" OR rule_id="$policy_id$") | timechart span=15m count by decision limit=8 useother=t</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -84,7 +97,7 @@
       <title>Severity Over Time</title>
       <chart>
         <search>
-          <query>`defenseclaw_demo_policy_events` | where ("$decision$"="*" OR decision="$decision$") AND ("$policy_id$"="*" OR policy_id="$policy_id$" OR rule_id="$policy_id$") | timechart span=15m count by severity limit=8 useother=t</query>
+          <query>`defenseclaw_demo_policy_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$decision$"="*" OR decision="$decision$") AND ("$policy_id$"="*" OR policy_id="$policy_id$" OR rule_id="$policy_id$") | timechart span=15m count by severity limit=8 useother=t</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -98,7 +111,7 @@
       <title>Top Policies And Rules</title>
       <table>
         <search>
-          <query>`defenseclaw_demo_policy_events` | eval policy_or_rule=if(policy_id!="(none)", policy_id, rule_id) | where ("$decision$"="*" OR decision="$decision$") AND policy_or_rule!="(none)" | stats count as events values(decision) as decisions values(severity) as severities values(connector) as connectors values(target) as targets by policy_or_rule | sort - events | head 20</query>
+          <query>`defenseclaw_demo_policy_events` | eval policy_or_rule=if(policy_id!="(none)", policy_id, rule_id) | where ("$connector$"="*" OR connector="$connector$") AND ("$decision$"="*" OR decision="$decision$") AND policy_or_rule!="(none)" | stats count as events values(decision) as decisions values(severity) as severities values(connector) as connectors values(target) as targets by policy_or_rule | sort - events | head 20</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -110,7 +123,7 @@
       <title>Top Blocked Targets</title>
       <table>
         <search>
-          <query>`defenseclaw_demo_policy_events` | where decision="block" OR decision="deny" OR like(action, "%block%") OR like(action, "%deny%") | stats count as events values(policy_id) as policies values(connector) as connectors values(severity) as severities by target | sort - events | head 20</query>
+          <query>`defenseclaw_demo_policy_events` | where ("$connector$"="*" OR connector="$connector$") AND (decision="block" OR decision="deny" OR like(action, "%block%") OR like(action, "%deny%")) | stats count as events values(policy_id) as policies values(connector) as connectors values(severity) as severities by target | sort - events | head 20</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -124,7 +137,7 @@
       <title>Recent Policy Decisions</title>
       <table>
         <search>
-          <query>`defenseclaw_demo_policy_events` | where ("$decision$"="*" OR decision="$decision$") AND ("$policy_id$"="*" OR policy_id="$policy_id$" OR rule_id="$policy_id$") | table timestamp connector policy_id rule_id decision severity run_id session_id target message | sort - timestamp | head 50</query>
+          <query>`defenseclaw_demo_policy_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$decision$"="*" OR decision="$decision$") AND ("$policy_id$"="*" OR policy_id="$policy_id$" OR rule_id="$policy_id$") | table timestamp connector policy_id rule_id decision severity run_id session_id target message | sort - timestamp | head 50</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>

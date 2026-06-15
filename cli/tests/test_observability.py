@@ -331,7 +331,12 @@ class WriterAuditSinksPresetTests(unittest.TestCase):
         )
         self.assertEqual(hec.get("token_env"), "DEFENSECLAW_SPLUNK_HEC_TOKEN")
         self.assertEqual(hec.get("index"), "defenseclaw")
-        self.assertTrue(hec.get("verify_tls"))
+        # production preset must NOT carry insecure_skip_verify;
+        # the Go sink's secure default (TLS verification ON) wins.
+        self.assertNotIn("insecure_skip_verify", hec)
+        # And the legacy verify_tls field is no longer emitted by the
+        # writer — operators with a real cert do not need any opt-out.
+        self.assertNotIn("verify_tls", hec)
         self.assertEqual(_read_dotenv(tmp).get("DEFENSECLAW_SPLUNK_HEC_TOKEN"), "hec-token")
 
     def test_set_destination_enabled_roundtrip(self) -> None:
@@ -514,7 +519,7 @@ class ObservabilityCLITests(unittest.TestCase):
 
     def test_splunk_enterprise_probe_success(self) -> None:
         self._add_enterprise_sink()
-        with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse(200, "OK")):
+        with patch("urllib.request.OpenerDirector.open", return_value=_FakeHTTPResponse(200, "OK")):
             result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Splunk Enterprise (HEC)", result.output)
@@ -529,7 +534,7 @@ class ObservabilityCLITests(unittest.TestCase):
             hdrs=None,
             fp=None,
         )
-        with patch("urllib.request.urlopen", side_effect=err):
+        with patch("urllib.request.OpenerDirector.open", side_effect=err):
             result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("HTTP 401 Unauthorized", result.output)
@@ -544,7 +549,7 @@ class ObservabilityCLITests(unittest.TestCase):
             hdrs=None,
             fp=None,
         )
-        with patch("urllib.request.urlopen", side_effect=err):
+        with patch("urllib.request.OpenerDirector.open", side_effect=err):
             result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("HTTP 403 Forbidden", result.output)
@@ -552,7 +557,7 @@ class ObservabilityCLITests(unittest.TestCase):
 
     def test_splunk_enterprise_probe_unreachable(self) -> None:
         self._add_enterprise_sink()
-        with patch("urllib.request.urlopen", side_effect=OSError("network down")):
+        with patch("urllib.request.OpenerDirector.open", side_effect=OSError("network down")):
             result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("network down", result.output)

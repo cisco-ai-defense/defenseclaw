@@ -45,8 +45,8 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_setup import setup as setup_group
+
 from tests.helpers import cleanup_app, make_app_context
 
 
@@ -189,7 +189,10 @@ class TestSetupRedaction_ConfigRoundTrip(unittest.TestCase):
 
     def test_disable_true_roundtrips_through_yaml(self):
         from defenseclaw.config import (
-            Config, PrivacyConfig, _config_to_dict, _merge_privacy,
+            Config,
+            PrivacyConfig,
+            _config_to_dict,
+            _merge_privacy,
         )
 
         cfg = Config()

@@ -56,7 +56,9 @@ if TYPE_CHECKING:
     from defenseclaw.config import Config
 
 
-def list_skills(cfg: Config, *, prefer_cli: bool = True) -> list[dict[str, Any]]:
+def list_skills(
+    cfg: Config, *, prefer_cli: bool = True, connector: str | None = None
+) -> list[dict[str, Any]]:
     """Return the connector-aware skill list.
 
     Parameters
@@ -70,13 +72,18 @@ def list_skills(cfg: Config, *, prefer_cli: bool = True) -> list[dict[str, Any]]
         filesystem when the CLI isn't available. When False we always
         walk the filesystem; useful in tests and inside sandboxes
         that don't have an ``openclaw`` binary on $PATH.
+    connector
+        Multi-connector override (``skill list --connector <name>``).
+        When supplied, that connector's directories are walked instead
+        of the active connector's. Defaults to
+        :meth:`Config.active_connector`.
     """
-    connector = cfg.active_connector()
-    if connector == "openclaw" and prefer_cli:
+    resolved = connector or cfg.active_connector()
+    if resolved == "openclaw" and prefer_cli:
         rows = _list_skills_via_openclaw_cli()
         if rows is not None:
             return rows
-    return _list_skills_from_filesystem(cfg)
+    return _list_skills_from_filesystem(cfg, connector=resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -147,17 +154,22 @@ def _list_skills_via_openclaw_cli() -> list[dict[str, Any]] | None:
 # ---------------------------------------------------------------------------
 
 
-def _list_skills_from_filesystem(cfg: Config) -> list[dict[str, Any]]:
+def _list_skills_from_filesystem(
+    cfg: Config, connector: str | None = None
+) -> list[dict[str, Any]]:
     """Walk every directory in ``cfg.skill_dirs()`` and return one
     row per immediate subdirectory.
 
     Mirrors the rules used by
     :func:`defenseclaw.inventory.claw_inventory._enumerate_skills_filesystem`
     so ``skill list`` and ``aibom scan`` agree on which skills exist.
+
+    ``connector`` selects which connector's directories to walk
+    (multi-connector focus); defaults to the active connector.
     """
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for skill_dir in cfg.skill_dirs():
+    for skill_dir in cfg.skill_dirs(connector):
         if not os.path.isdir(skill_dir):
             continue
         try:
@@ -165,6 +177,8 @@ def _list_skills_from_filesystem(cfg: Config) -> list[dict[str, Any]]:
         except OSError:
             continue
         for entry in sorted(entries):
+            if _is_openhands_installed_container(skill_dir, entry):
+                continue
             full = os.path.join(skill_dir, entry)
             if not os.path.isdir(full):
                 continue
@@ -185,6 +199,14 @@ def _list_skills_from_filesystem(cfg: Config) -> list[dict[str, Any]]:
     return rows
 
 
+def _is_openhands_installed_container(skill_dir: str, entry: str) -> bool:
+    return (
+        entry == "installed"
+        and os.path.basename(skill_dir) == "skills"
+        and os.path.basename(os.path.dirname(skill_dir)) == ".openhands"
+    )
+
+
 def _skill_dir_is_eligible(path: str) -> bool:
     for marker in ("SKILL.md", "skill.json", "README.md"):
         if os.path.isfile(os.path.join(path, marker)):
@@ -193,7 +215,7 @@ def _skill_dir_is_eligible(path: str) -> bool:
 
 
 def _read_skill_description(path: str) -> str:
-    """Return the first non-empty stripped line of SKILL.md / README.md.
+    """Return a short description from SKILL.md / README.md.
 
     Bounded to 2 KiB so we don't accidentally slurp a multi-MB README
     into the listing.
@@ -207,8 +229,24 @@ def _read_skill_description(path: str) -> str:
                 text = f.read(2048)
         except OSError:
             continue
+        frontmatter_description = _frontmatter_description(text)
+        if frontmatter_description:
+            return frontmatter_description[:200]
         for line in text.splitlines():
             stripped = line.strip().lstrip("#").strip()
             if stripped:
                 return stripped[:200]
+    return ""
+
+
+def _frontmatter_description(text: str) -> str:
+    if not text.startswith("---"):
+        return ""
+    end = text.find("\n---", 3)
+    if end < 0:
+        return ""
+    for line in text[3:end].splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "description":
+            return value.strip().strip("\"'")
     return ""

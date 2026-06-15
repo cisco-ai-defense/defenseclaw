@@ -1,0 +1,120 @@
+---
+title: Quick setup aliases
+description: defenseclaw setup codex, setup claude-code, setup cursor, setup copilot, setup hermes, setup opencode, setup geminicli, setup windsurf, setup openclaw, setup zeptoclaw — one command per agent, no questions asked.
+keywords:
+  - defenseclaw setup codex
+  - defenseclaw setup claude-code
+  - defenseclaw setup cursor
+  - defenseclaw setup copilot
+  - defenseclaw setup gemini cli
+  - defenseclaw setup hermes
+  - defenseclaw setup opencode
+  - defenseclaw setup windsurf
+  - defenseclaw setup openclaw
+  - defenseclaw setup zeptoclaw
+---
+
+Each connector has a top-level alias that wraps `defenseclaw setup guardrail` with the right defaults. Use them for fast subsequent runs and CI scripts.
+
+## Observability-only aliases (no enforcement)
+
+These connectors talk directly to their native upstream. DefenseClaw collects telemetry (hooks, native OTel, optional notify bridge) without sitting in the LLM data path.
+
+<Cards>
+  <Card title="Codex" href="/docs/connectors/codex" description="defenseclaw setup codex" />
+  <Card title="Claude Code" href="/docs/connectors/claudecode" description="defenseclaw setup claude-code" />
+  <Card title="Cursor" href="/docs/connectors/cursor" description="defenseclaw setup cursor" />
+  <Card title="Windsurf" href="/docs/connectors/windsurf" description="defenseclaw setup windsurf" />
+  <Card title="Gemini CLI" href="/docs/connectors/geminicli" description="defenseclaw setup geminicli" />
+  <Card title="GitHub Copilot CLI" href="/docs/connectors/copilot" description="defenseclaw setup copilot" />
+  <Card title="Hermes" href="/docs/connectors/hermes" description="defenseclaw setup hermes" />
+  <Card title="OpenCode" href="/docs/connectors/opencode" description="defenseclaw setup opencode" />
+</Cards>
+
+```bash
+defenseclaw setup claude-code
+defenseclaw setup codex --with-local-stack   # also brings up Prom/Loki/Tempo/Grafana
+defenseclaw setup cursor --no-restart        # apply config without bouncing the gateway
+```
+
+<Callout>
+The observability-only aliases pin `claw.mode=<connector>` so the rest of the CLI/TUI (skill scanner, MCP scanner, plugin scanner, overview panels) reads from the matching connector's source-of-truth files (e.g., `~/.codex/`, `~/.claude/`) instead of OpenClaw's default layout.
+</Callout>
+
+### What an observability-only alias does
+
+<Steps>
+
+<Step>
+Pins `guardrail.connector` and `claw.mode` to the chosen connector so downstream commands read the right state directory.
+</Step>
+
+<Step>
+Wires the hook scripts under `~/.defenseclaw/hooks/` and patches `~/.codex/config.toml` / `~/.claude/settings.json` with the hook references and native OTel env block. No proxy listener binds; the agent talks directly to its native upstream.
+</Step>
+
+<Step>
+Wires the connector's hook scripts and (where supported) native OTel exporter against the running gateway.
+</Step>
+
+<Step>
+Persists `config.yaml` and writes the `picked_connector` hint so future `defenseclaw setup guardrail` runs default to the same connector.
+</Step>
+
+<Step>
+Restarts the gateway (unless `--no-restart`).
+</Step>
+
+</Steps>
+
+### Common flags
+
+<TypeTable
+  type={{
+    "--yes / -y": {
+      type: "flag",
+      description: "Skip the confirmation prompt (non-interactive).",
+    },
+    "--restart / --no-restart": {
+      type: "flag",
+      description: "Restart defenseclaw-gateway after applying changes.",
+      default: "--restart",
+    },
+    "--with-local-stack / --no-local-stack": {
+      type: "flag",
+      description: "Bring up the bundled Prom/Loki/Tempo/Grafana stack via `defenseclaw setup local-observability up` once config is saved.",
+      default: "--no-local-stack",
+    },
+  }}
+/>
+
+## Full guardrail aliases (proxy connectors)
+
+OpenClaw and ZeptoClaw run the full guardrail proxy regardless of mode — there is no observability-only path because the proxy is the integration. Their aliases mirror `defenseclaw setup guardrail --connector <name>` with safer defaults.
+
+<Cards>
+  <Card title="OpenClaw" href="/docs/connectors/openclaw" description="defenseclaw setup openclaw" />
+  <Card title="ZeptoClaw" href="/docs/connectors/zeptoclaw" description="defenseclaw setup zeptoclaw" />
+</Cards>
+
+```bash
+defenseclaw setup openclaw --mode observe --restart
+defenseclaw setup openclaw --mode action --human-approval --rule-pack strict --restart
+```
+
+## Switch active connector
+
+Use `defenseclaw setup mode <connector>` to switch the active claw connector with smart guardrail inheritance — see [Switching connectors](/docs/setup/guardrail/switching-connectors).
+
+## Why aliases at all?
+
+Operators who only want telemetry (no traffic interception, no enforcement) used to walk through the full `setup guardrail` wizard, answer "yes" to a single confirm, and trust that the wizard did the right thing under the hood. The aliases shortcut that:
+
+```bash
+defenseclaw setup codex          # observability-only for Codex
+defenseclaw setup claude-code    # observability-only for Claude Code
+defenseclaw setup cursor         # observability-only for Cursor
+defenseclaw setup openclaw       # full guardrail for OpenClaw
+```
+
+Both halves also flip `claw.mode` so the rest of the CLI/TUI reads from the matching connector's source-of-truth files. Without this flip, `defenseclaw skill scan --all` after `setup codex` would scan `~/.openclaw/skills` and miss every Codex skill — a foot-gun the aliases explicitly close.

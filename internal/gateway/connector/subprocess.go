@@ -45,7 +45,7 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 type templateData struct {
 	APIAddr  string
 	APIToken string // gateway bearer token; empty when unconfigured (loopback-allow)
-	FailMode string // "open" (default, response-layer fails allow with a stderr warning) or "closed" (response-layer fails block); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	FailMode string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
 }
 
 // defaultHookFailMode is the fail mode injected into the response-
@@ -58,34 +58,66 @@ type templateData struct {
 // open unless the operator opts into strict availability via
 // DEFENSECLAW_STRICT_AVAILABILITY=1.
 //
-// "open" is the default because a DefenseClaw hook that exits 2 on
-// every gateway hiccup bricks the user's agent for the duration of
-// any DefenseClaw outage, which is strictly worse UX than a brief
-// observability gap. Operators who run a strict policy posture can
-// flip this to "closed" via DEFENSECLAW_FAIL_MODE=closed at runtime
-// or — for connectors that route through
-// WriteHookScriptsForConnectorObjectWithOpts — by enabling per-
-// connector enforcement at setup time.
-const defaultHookFailMode = "open"
+// "closed" is the safer default: a response-layer failure (4xx,
+// malformed JSON, missing action) means the gateway answered but the
+// verdict is untrustworthy, so the hook BLOCKS the tool/prompt rather
+// than forwarding an uninspected action. Operators who would rather
+// accept an observability gap than a hard block during a DefenseClaw
+// outage can flip this to "open" via DEFENSECLAW_FAIL_MODE=open at
+// runtime, or through the per-connector setup flow (which also
+// persists to guardrail.hook_fail_mode in config.yaml).
+const defaultHookFailMode = "closed"
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
 // the two values the hook scripts understand. Anything other than
-// "closed" (case-sensitive — the env var contract is documented as
-// lowercase) collapses to "open" so a typo never accidentally puts
-// the agent into fail-closed mode.
+// "open" (case-sensitive — the env var contract is documented as
+// lowercase) collapses to "closed" so a typo never accidentally puts
+// the agent into fail-OPEN mode at the response-layer boundary
+// (CodeGuard rule codeguard-0-authorization-access-control: deny by
+// default).
 func normalizeHookFailMode(mode string) string {
-	if strings.TrimSpace(mode) == "closed" {
-		return "closed"
+	if strings.TrimSpace(mode) == "open" {
+		return "open"
 	}
-	return "open"
+	return "closed"
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
 // into the given directory. Each shim calls /api/v1/inspect/tool before
 // delegating to the real binary.
+//
+// Avarice F-2029 / chain F-3397: the shim now authenticates each
+// inspection call using the gateway bearer token. The token is written
+// to ${shimDir}/.token (mode 0600) by WriteShimScriptsWithToken, the
+// same way the inspect-* hooks discover their token. WriteShimScripts
+// keeps the legacy no-token signature for backward compatibility but
+// internally always lays down a (possibly empty) token file so the
+// shim can find it; an empty token file produces shims that send no
+// Authorization header — matching the loopback-allow path used by
+// developer setups without a configured gateway token.
 func WriteShimScripts(shimDir, apiAddr string) error {
+	return WriteShimScriptsWithToken(shimDir, apiAddr, "")
+}
+
+// WriteShimScriptsWithToken generates the PATH shim scripts AND
+// persists a .token sidecar so each shim can authenticate inspection
+// calls. See F-2029 / F-3397 for the security rationale.
+func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		return fmt.Errorf("create shim dir: %w", err)
+	}
+
+	// F-2029 / F-3397: write the bearer token next to the shim
+	// scripts. The .token file is 0o600 so other workspace tooling
+	// can't slurp it; the shim sources the file at runtime via
+	// `. "${SHIM_DIR}/.token"`. An empty token still produces a
+	// well-formed file so the shim's source-or-fallback logic
+	// behaves deterministically across loopback-allow and
+	// authenticated deployments.
+	tokenPath := filepath.Join(shimDir, ".token")
+	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
+	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
+		return fmt.Errorf("write shim token file: %w", err)
 	}
 
 	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode}
@@ -130,13 +162,15 @@ var genericHookScripts = []string{
 // lifecycle hook scripts. Only the matching connector's scripts are
 // written during setup.
 var connectorHookScripts = map[string][]string{
-	"claudecode": {"claude-code-hook.sh"},
-	"codex":      {"codex-hook.sh"},
-	"copilot":    {"copilot-hook.sh"},
-	"cursor":     {"cursor-hook.sh"},
-	"geminicli":  {"geminicli-hook.sh"},
-	"hermes":     {"hermes-hook.sh"},
-	"windsurf":   {"windsurf-hook.sh"},
+	"antigravity": {"antigravity-hook.sh"},
+	"claudecode":  {"claude-code-hook.sh"},
+	"codex":       {"codex-hook.sh"},
+	"copilot":     {"copilot-hook.sh"},
+	"cursor":      {"cursor-hook.sh"},
+	"geminicli":   {"geminicli-hook.sh"},
+	"hermes":      {"hermes-hook.sh"},
+	"openhands":   {"openhands-hook.sh"},
+	"windsurf":    {"windsurf-hook.sh"},
 }
 
 // hookScripts returns the full list of hook scripts (generic + all
@@ -341,6 +375,10 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 		}
 	}
 
+	if err := writeHookConfigSidecar(hookDir, apiAddr, defaultHookFailMode); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -379,6 +417,62 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 
 	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: normalizeHookFailMode(failMode)}
 
+	scripts := hookScriptNamesFromExtras(extras)
+
+	for _, name := range scripts {
+		content, err := hookFS.ReadFile("hooks/" + name)
+		if err != nil {
+			return fmt.Errorf("read hook template %s: %w", name, err)
+		}
+		rendered, err := renderTemplate(string(content), data)
+		if err != nil {
+			return fmt.Errorf("render hook %s: %w", name, err)
+		}
+		hookPath := filepath.Join(hookDir, name)
+		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+			return fmt.Errorf("write hook %s: %w", name, err)
+		}
+	}
+	if err := writeHookConfigSidecar(hookDir, apiAddr, normalizeHookFailMode(failMode)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// hookConfigSidecarName is the file the native Go hook entrypoint reads on
+// Windows for the gateway address + fail mode. It lets the agent hook command
+// stay free of per-install flags (so its trust-hash / match string is stable),
+// while still conveying the operator's enforcement choice and a non-default
+// API port. The Bash hooks (Unix) bake these values into the script and ignore
+// this file.
+const hookConfigSidecarName = ".hookcfg"
+
+// writeHookConfigSidecar persists the gateway address and fail mode the native
+// Go hook entrypoint resolves at runtime. It is only written on Windows, where
+// the native entrypoint replaces the Bash hooks; Unix keeps the .sh hooks
+// unchanged and never reads this file.
+func writeHookConfigSidecar(hookDir, apiAddr, failMode string) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	body := fmt.Sprintf("DEFENSECLAW_GATEWAY_ADDR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
+		apiAddr, normalizeHookFailMode(failMode))
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		return fmt.Errorf("write hook config sidecar: %w", err)
+	}
+	return nil
+}
+
+func hookScriptNamesForConnector(opts SetupOpts, c Connector) []string {
+	var extras []string
+	if owner, ok := c.(HookScriptOwner); ok {
+		extras = owner.HookScriptNames(opts)
+	}
+	return hookScriptNamesFromExtras(extras)
+}
+
+func hookScriptNamesFromExtras(extras []string) []string {
 	scripts := make([]string, 0, len(genericHookScripts)+len(extras))
 	scripts = append(scripts, genericHookScripts...)
 	// De-dup: generic scripts must never collide with connector-owned
@@ -396,22 +490,17 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 		seen[n] = struct{}{}
 		scripts = append(scripts, n)
 	}
+	return scripts
+}
 
-	for _, name := range scripts {
-		content, err := hookFS.ReadFile("hooks/" + name)
-		if err != nil {
-			return fmt.Errorf("read hook template %s: %w", name, err)
-		}
-		rendered, err := renderTemplate(string(content), data)
-		if err != nil {
-			return fmt.Errorf("render hook %s: %w", name, err)
-		}
-		hookPath := filepath.Join(hookDir, name)
-		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
-			return fmt.Errorf("write hook %s: %w", name, err)
-		}
+func hookScriptPathsForConnector(opts SetupOpts, c Connector) []string {
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	names := hookScriptNamesForConnector(opts, c)
+	hooks := make([]string, 0, len(names))
+	for _, name := range names {
+		hooks = append(hooks, filepath.Join(hookDir, name))
 	}
-	return nil
+	return hooks
 }
 
 // WriteHookScriptsForConnectorObject is the canonical, interface-driven
@@ -433,7 +522,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 }
 
 // WriteHookScriptsForConnectorObjectWithOpts is the setup-time variant that
-// has access to connector enforcement flags AND the operator's
+// has access to connector setup flags AND the operator's
 // chosen response-layer fail mode (opts.HookFailMode).
 //
 // Resolution order for the response-layer FailMode template var
@@ -447,14 +536,8 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
 //     “GuardrailConfig.HookFailMode“.
-//  2. EMPTY/unset opts.HookFailMode falls back to per-connector
-//     enforcement: enabling proxy-redirect enforcement
-//     (CodexEnforcement / ClaudeCodeEnforcement) implies a strict
-//     policy posture, so the response-layer default flips to
-//     "closed" too. This only fires when the operator never made
-//     an explicit choice.
-//  3. Otherwise: defaultHookFailMode ("open").
-//  4. Hook-only connectors may use explicit "closed" only when their
+//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("closed").
+//  3. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
 //     vendor fail-closed fields.
@@ -462,33 +545,13 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // Transport-layer failures (gateway unreachable / 5xx) are NOT
 // governed by FailMode — they always allow unless the operator opts
 // in via DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of which
-// connector, enforcement state, or HookFailMode value.
+// connector or HookFailMode value.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	var extras []string
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	// Distinguish "operator did not answer" (empty string — fall
-	// through to enforcement-derived default) from an explicit
-	// "open" answer that must NOT be silently upgraded by the
-	// per-connector enforcement flags below. normalizeHookFailMode
-	// collapses both to "open", so we have to inspect the raw input
-	// here before normalisation to preserve the operator's intent.
-	rawTrimmed := strings.TrimSpace(opts.HookFailMode)
-	explicitChoice := rawTrimmed != ""
-	failMode := normalizeHookFailMode(opts.HookFailMode)
-	if !explicitChoice && failMode != "closed" {
-		switch c.Name() {
-		case "codex":
-			if opts.CodexEnforcement {
-				failMode = "closed"
-			}
-		case "claudecode":
-			if opts.ClaudeCodeEnforcement {
-				failMode = "closed"
-			}
-		}
-	}
+	failMode := resolveHookFailMode(opts, c)
 	if hp, ok := c.(HookCapabilityProvider); ok {
 		caps := hp.HookCapabilities(opts)
 		if failMode == "closed" && !caps.SupportsFailClosed {
@@ -496,6 +559,31 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 		}
 	}
 	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)
+}
+
+// resolveHookFailMode picks the response-layer fail mode for a hook
+// render given the operator's setup opts and the connector identity.
+// The explicit string in opts.HookFailMode always wins; an empty
+// value falls back to the connector-default and is upgraded to
+// "closed" when the operator has set the matching enforcement flag
+// for codex / claudecode (avarice F-0681).
+func resolveHookFailMode(opts SetupOpts, c Connector) string {
+	if strings.TrimSpace(opts.HookFailMode) != "" {
+		return normalizeHookFailMode(opts.HookFailMode)
+	}
+	if c != nil {
+		switch c.Name() {
+		case "codex":
+			if opts.CodexEnforcement {
+				return "closed"
+			}
+		case "claudecode":
+			if opts.ClaudeCodeEnforcement {
+				return "closed"
+			}
+		}
+	}
+	return defaultHookFailMode
 }
 
 // WriteHookScriptsForConnector generates the generic inspection scripts
@@ -597,13 +685,17 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 			return fmt.Errorf("sandbox policy: %w", err)
 		}
 		shimDir := filepath.Join(opts.DataDir, "shims")
-		if err := WriteShimScripts(shimDir, opts.APIAddr); err != nil {
+		// F-2029 / F-3397: persist the gateway bearer token alongside
+		// the shim scripts so every inspection call carries an
+		// Authorization header. Pre-fix the shim had no auth token
+		// available and silently downgraded a 401 to "allow".
+		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts (sandbox supplement): %w", err)
 		}
 
 	case SubprocessShims:
 		shimDir := filepath.Join(opts.DataDir, "shims")
-		if err := WriteShimScripts(shimDir, opts.APIAddr); err != nil {
+		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts: %w", err)
 		}
 
@@ -613,22 +705,88 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 	return nil
 }
 
-// TeardownSubprocessEnforcement removes shim scripts, individual hook scripts,
-// and sandbox policies. It removes files by name rather than nuking the shared
-// hooks/ directory, which may be used by other active connectors.
+// TeardownSubprocessEnforcement removes shim scripts and the sandbox
+// policy file. It deliberately does NOT touch the shared hooks/
+// directory anymore: the previous implementation iterated the GLOBAL
+// `hookScripts` slice (= every connector's *-hook.sh + every generic
+// inspect-*.sh) and deleted them all from the shared dir. When called
+// from one connector's Teardown — e.g. claudecode.Teardown during a
+// claudecode → codex switch — that wiped scripts owned by the
+// incoming connector AND the shared inspect-*.sh helpers. If the
+// follow-up codex.Setup() then failed to re-write codex-hook.sh
+// (silent partial install, mtime race, hostFS read miss, etc.), the
+// agent ended up with an empty hooks/ dir and every hook invocation
+// failed with exit 127 ("command not found").
+//
+// Per-connector hook lifecycle is now the responsibility of each
+// Connector.Teardown via writeDisabledHookTombstone, which replaces
+// the connector's own *-hook.sh in place with a v0 tombstone so
+// long-lived host processes that cached the absolute hook path exit
+// cleanly. The shared inspect-*.sh helpers are intentionally left
+// untouched across connector switches — they're written by every
+// connector's hookwriter and removing them here is what produced the
+// original exit-127 bug during a claudecode → codex switch.
 func TeardownSubprocessEnforcement(opts SetupOpts) error {
 	shimDir := filepath.Join(opts.DataDir, "shims")
 	_ = os.RemoveAll(shimDir)
-
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	for _, name := range hookScripts {
-		_ = os.Remove(filepath.Join(hookDir, name))
-	}
 
 	policyPath := filepath.Join(opts.DataDir, "policies", "defenseclaw-policy.yaml")
 	_ = os.Remove(policyPath)
 
 	return nil
+}
+
+// writeDisabledHookTombstone replaces <DataDir>/hooks/<scriptName>
+// with a no-op POSIX shell stub so a long-lived host agent process
+// that cached the absolute hook path exits cleanly (exit 0) instead
+// of either:
+//
+//   - ENOENT → exit 127 if the file had been removed during a connector
+//     switch, or
+//   - hitting a transport-failure fail-closed path when the operator
+//     has set DEFENSECLAW_STRICT_AVAILABILITY=1 and the gateway is
+//     gone or no longer serves the connector's hook endpoint.
+//
+// vendorLabel is interpolated into the tombstone body so an operator
+// reading the file later sees which connector tore down. Pass the
+// connector's lowercase name (e.g. "codex", "hermes") or a
+// human-friendly equivalent ("Claude Code") — both are fine.
+//
+// Format invariants — assert them in TestHookOwners_TeardownLeavesTombstone:
+//
+//   - Shebang is /bin/sh (not /bin/bash) so the tombstone runs on
+//     minimal hosts where /bin/bash is absent (Alpine, distroless,
+//     some BSDs). The body is literal `exit 0`; POSIX sh is enough.
+//   - Line 2 carries the v0 schema marker so scriptHasMarker /
+//     isOwnedHook recognise the tombstone as DefenseClaw-owned.
+//     v0 is the "older than any tagged version" sentinel; any
+//     actively-installed *-hook.sh (currently v3+) beats it in
+//     downgrade-safety comparisons.
+//   - The write is atomic (CreateTemp + rename) so a concurrent
+//     hook invocation either sees the prior content or the
+//     tombstone, never an empty/partial file.
+//   - The body never contains a /api/v1/.../hook URL — the
+//     tombstone MUST NOT forward stale payloads.
+//
+// File mode is 0o700 (owner-only rwx) to match the live hook scripts.
+func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) error {
+	if strings.TrimSpace(scriptName) == "" {
+		return fmt.Errorf("tombstone: empty scriptName")
+	}
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return fmt.Errorf("ensure hook dir: %w", err)
+	}
+	if vendorLabel == "" {
+		vendorLabel = "DefenseClaw connector"
+	}
+	body := "#!/bin/sh\n" +
+		"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
+		"# " + vendorLabel + " connector was torn down. Existing host processes may\n" +
+		"# keep this hook path cached until restart, so exit successfully\n" +
+		"# without forwarding stale payloads.\n" +
+		"exit 0\n"
+	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(body), 0o700)
 }
 
 // ShimBinaries returns the list of binary names that are shimmed.

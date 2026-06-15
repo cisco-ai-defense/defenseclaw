@@ -28,6 +28,7 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import connector_paths
+
 from tests.connector_fixtures import make_claudecode_settings
 
 
@@ -83,8 +84,8 @@ class MakeClaudeCodeSettingsShapeTests(unittest.TestCase):
 
 class ClaudeCodeMCPReaderTests(unittest.TestCase):
     """``connector_paths.mcp_servers('claudecode')`` reads
-    ``~/.claude/settings.json`` ``mcpServers`` and merges in
-    ``./.mcp.json`` (when present).
+    ``~/.claude/settings.json`` ``mcpServers`` and merges in an
+    explicit workspace ``.mcp.json`` when configured.
     """
 
     def test_reads_mcp_from_settings_json(self):
@@ -110,15 +111,27 @@ class ClaudeCodeMCPReaderTests(unittest.TestCase):
 
 
 class ClaudeCodeSkillAndPluginDirsTests(unittest.TestCase):
-    def test_skill_dirs_includes_home_and_cwd(self):
+    def test_skill_dirs_default_to_home(self):
         with _IsolatedHome() as home:
             dirs = connector_paths.skill_dirs("claudecode")
             self.assertIn(os.path.join(home, ".claude", "skills"), dirs)
+            self.assertNotIn(os.path.join(os.getcwd(), ".claude", "skills"), dirs)
+
+    def test_skill_dirs_include_workspace_when_explicit(self):
+        with _IsolatedHome() as home:
+            dirs = connector_paths.skill_dirs("claudecode", workspace_dir=os.getcwd())
+            self.assertIn(os.path.join(home, ".claude", "skills"), dirs)
             self.assertIn(os.path.join(os.getcwd(), ".claude", "skills"), dirs)
 
-    def test_plugin_dirs_includes_home_and_cwd(self):
+    def test_plugin_dirs_default_to_home(self):
         with _IsolatedHome() as home:
             dirs = connector_paths.plugin_dirs("claudecode")
+            self.assertIn(os.path.join(home, ".claude", "plugins"), dirs)
+            self.assertNotIn(os.path.join(os.getcwd(), ".claude", "plugins"), dirs)
+
+    def test_plugin_dirs_include_workspace_when_explicit(self):
+        with _IsolatedHome() as home:
+            dirs = connector_paths.plugin_dirs("claudecode", workspace_dir=os.getcwd())
             self.assertIn(os.path.join(home, ".claude", "plugins"), dirs)
             self.assertIn(os.path.join(os.getcwd(), ".claude", "plugins"), dirs)
 

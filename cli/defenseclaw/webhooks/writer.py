@@ -32,11 +32,13 @@ than hand-editing YAML.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import ipaddress
 import os
 import re
 import socket
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -371,6 +373,15 @@ def remove_webhook(name: str, data_dir: str) -> WebhookWriteResult:
 # ---------------------------------------------------------------------------
 
 
+# Tracked separately from the rest of the private/reserved set because
+# CGNAT (RFC 6598) has its own dedicated opt-out env var
+# (DEFENSECLAW_ALLOW_CGNAT) that operators on Tailscale-style overlays
+# already use on the Go side. Keeping the network out of
+# _PRIVATE_CIDRS lets us emit a more useful error message and
+# distinguish "you're trying to hit a private network" from "you're
+# trying to hit an overlay we can permit with one env switch".
+_CGNAT_CIDR = ipaddress.ip_network("100.64.0.0/10")
+
 _PRIVATE_CIDRS = [
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
@@ -387,13 +398,43 @@ def _is_private_ip(ip: ipaddress._BaseAddress) -> bool:
     return any(ip in net for net in _PRIVATE_CIDRS)
 
 
+def _is_cgnat(ip: ipaddress._BaseAddress) -> bool:
+    """True for RFC 6598 100.64.0.0/10. v4-only by construction."""
+    return ip.version == 4 and ip in _CGNAT_CIDR
+
+
+def _cgnat_allowed() -> bool:
+    """Return True when the operator has opted into dialing CGNAT.
+
+    Mirrors ``cgnatAllowed()`` in ``internal/netguard/netguard.go``
+    and ``extraReservedNets`` in ``internal/gateway/provider.go``:
+    only the literal string ``"1"`` opts in; anything else (typos
+    like ``"true"``, ``"yes"``, or even whitespace-padded ``" 1 "``)
+    leaves CGNAT blocked. Reading at call time (not import time)
+    means tests can flip the env var with ``patch.dict`` without a
+    module reload.
+    """
+    return os.environ.get("DEFENSECLAW_ALLOW_CGNAT") == "1"
+
+
 def validate_webhook_url(url: str) -> None:
     """Raise ``ValueError`` if ``url`` is unsafe for outbound delivery.
 
-    Mirrors ``validateWebhookURL`` in ``internal/gateway/webhook.go``:
-    blocks non-http(s) schemes, localhost, private/link-local ranges,
-    and cloud metadata endpoints. Set
-    ``DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1`` for local dev.
+    Mirrors ``validateWebhookURL`` / ``isPrivateIP`` in
+    ``internal/gateway/webhook.go``: blocks non-http(s) schemes,
+    localhost, RFC 1918 / link-local / loopback / IPv6 ULA / cloud
+    metadata endpoints, and (newly) RFC 6598 carrier-grade NAT.
+
+    Two distinct, single-purpose opt-out env vars match the Go side
+    and keep an "I want loopback for local dev" mistake from also
+    silently authorising every Tailscale endpoint:
+
+    * ``DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1`` — permit ``localhost``
+      and resolved loopback addresses only.
+    * ``DEFENSECLAW_ALLOW_CGNAT=1`` — permit the 100.64.0.0/10 CGNAT
+      block (Tailscale, T-Mobile/Comcast carrier NAT, AWS Cloud WAN
+      overlays, etc.). Everything else in the private/reserved set
+      stays blocked.
     """
     if not url:
         raise ValueError("webhook url is required")
@@ -428,6 +469,11 @@ def validate_webhook_url(url: str) -> None:
             if allow_local and literal_ip.is_loopback:
                 return
             raise ValueError(f"IP {literal_ip} is private/reserved")
+        if _is_cgnat(literal_ip) and not _cgnat_allowed():
+            raise ValueError(
+                f"IP {literal_ip} is in the RFC 6598 CGNAT range "
+                "(set DEFENSECLAW_ALLOW_CGNAT=1 to opt in)"
+            )
         return
 
     # Host is a DNS name. Match the Go behaviour: resolve and reject if
@@ -449,6 +495,46 @@ def validate_webhook_url(url: str) -> None:
             raise ValueError(
                 f"hostname {host!r} resolves to private IP {resolved}",
             )
+        if _is_cgnat(resolved) and not _cgnat_allowed():
+            raise ValueError(
+                f"hostname {host!r} resolves to RFC 6598 CGNAT IP "
+                f"{resolved} (set DEFENSECLAW_ALLOW_CGNAT=1 to opt in)"
+            )
+
+
+def redact_webhook_url(url: str) -> str:
+    """Return *url* with its secret-bearing parts masked for display.
+
+    Slack/PagerDuty/Teams/Discord webhook URLs embed the bearer secret in
+    the path (e.g. ``/services/T000/B000/XXXXXXXX``) and occasionally in
+    the query string or userinfo. Operators still need to see *where* a
+    hook points, so we keep the scheme + host[:port] and replace the
+    path/query/fragment (and any ``user:pass@``) with ``***``. Used by
+    ``webhook list`` and ``config show`` so neither prints the raw secret
+    (F-0181, F-0221).
+    """
+    if not isinstance(url, str) or not url:
+        return url
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return "***"
+    if not parts.scheme or not parts.netloc:
+        # Not a recognisable absolute URL — redact wholesale rather than
+        # risk echoing an opaque secret token.
+        return "***"
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    netloc = f"***@{host}" if (parts.username or parts.password) else host
+    redacted = f"{parts.scheme}://{netloc}"
+    if parts.path and parts.path != "/":
+        redacted += "/***"
+    if parts.query:
+        redacted += "?***"
+    if parts.fragment:
+        redacted += "#***"
+    return redacted
 
 
 # ---------------------------------------------------------------------------
@@ -472,11 +558,27 @@ def _load_yaml(path: str) -> dict[str, Any]:
 
 
 def _write_yaml(path: str, data: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-    os.replace(tmp, path)
+    """Atomically write *data* as YAML to *path* with 0600 permissions.
+
+    The staging file is created via :func:`tempfile.mkstemp` (``O_EXCL``)
+    in the target directory rather than a predictable ``<path>.tmp``. A
+    predictable temp name lets a local attacker pre-create or symlink it
+    to hijack the write or read the secret-bearing config mid-flight, and
+    a plain ``open()`` would also leave the file world-readable; we force
+    0600 since this config embeds webhook secrets (F-0441).
+    """
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".webhooks.", suffix=".tmp", dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 # ---------------------------------------------------------------------------

@@ -162,6 +162,7 @@ class Event:
     target: str = ""
     actor: str = "defenseclaw"
     details: str = ""
+    structured: dict[str, Any] = field(default_factory=dict)
     severity: str = ""
     run_id: str = ""
 

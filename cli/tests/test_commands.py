@@ -17,17 +17,17 @@
 """Tests for CLI commands — status, alerts, aibom, plugin, mcp, init."""
 
 import os
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-from defenseclaw.context import AppContext
 from defenseclaw.config import Config, default_config
+from defenseclaw.context import AppContext
 from defenseclaw.models import Event, Finding, ScanResult
 
 
@@ -59,7 +59,24 @@ class TestStatusCommand(unittest.TestCase):
         result = _invoke(status, app=_make_app(store=None))
         self.assertEqual(result.exit_code, 0)
         self.assertIn("DefenseClaw Status", result.output)
+        self.assertIn("Scope:", result.output)
+        self.assertIn("global user config", result.output)
         self.assertIn("not running", result.output)
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    @patch("shutil.which", return_value=None)
+    def test_status_shows_workspace_scope(self, _which, _oc):
+        from defenseclaw.commands.cmd_status import status
+
+        _oc.return_value.is_running.return_value = False
+        app = _make_app(store=None)
+        app.cfg.claw.workspace_dir = "/tmp/defenseclaw-workspace"
+
+        result = _invoke(status, app=app)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Scope:", result.output)
+        self.assertIn("workspace (", result.output)
+        self.assertIn("defenseclaw-workspace)", result.output)
 
     @patch("defenseclaw.gateway.OrchestratorClient")
     @patch("shutil.which", return_value="/usr/bin/openshell")

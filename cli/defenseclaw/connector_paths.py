@@ -51,10 +51,17 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+try:  # Python 3.11+ ships ``tomllib`` in the stdlib.
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 fallback to the ``tomli`` backport.
+    import tomli as tomllib
 
 import yaml
 
@@ -72,6 +79,9 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "windsurf",
     "geminicli",
     "copilot",
+    "openhands",
+    "antigravity",
+    "opencode",
 )
 """Allow-list of recognized agent-framework connector names.
 
@@ -82,13 +92,18 @@ import time) means a typo in ``guardrail.connector`` surfaces in
 producing wrong paths.
 """
 
-HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset({
-    "hermes",
-    "cursor",
-    "windsurf",
-    "geminicli",
-    "copilot",
-})
+HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
+    {
+        "hermes",
+        "cursor",
+        "windsurf",
+        "geminicli",
+        "copilot",
+        "openhands",
+        "antigravity",
+        "opencode",
+    }
+)
 """Connectors added through lifecycle hook surfaces.
 
 Kept as a compatibility constant for older tests/importers. These connectors
@@ -101,6 +116,7 @@ falling back to OpenClaw or returning hook-only empty paths.
 # Data classes
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class MCPServerEntry:
     """One MCP server registration as discovered from disk.
@@ -111,6 +127,7 @@ class MCPServerEntry:
     ``openclaw.json``). Optional fields default to empty so callers
     can treat the struct uniformly.
     """
+
     name: str = ""
     command: str = ""
     args: list[str] = field(default_factory=list)
@@ -123,6 +140,7 @@ class MCPServerEntry:
 # Connector-name normalization
 # ---------------------------------------------------------------------------
 
+
 def normalize(connector: str | None) -> str:
     """Return the canonical lowercase connector name.
 
@@ -133,6 +151,8 @@ def normalize(connector: str | None) -> str:
     if not connector:
         return "openclaw"
     name = connector.strip().lower()
+    if name in {"open-hands", "open_hands"}:
+        return "openhands"
     return name or "openclaw"
 
 
@@ -147,6 +167,7 @@ def is_known(connector: str | None) -> bool:
 # Go-side ``expandPath`` (which only handles a leading ``~/`` prefix).
 # ---------------------------------------------------------------------------
 
+
 def _expand(path: str) -> str:
     if path.startswith("~/"):
         return str(Path.home() / path[2:])
@@ -157,20 +178,39 @@ def _dedup(paths: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for p in paths:
+        if not p:
+            continue
         if p not in seen:
             seen.add(p)
             out.append(p)
     return out
 
 
+def _workspace_dir(workspace_dir: str | None = None) -> str:
+    raw = (workspace_dir or "").strip()
+    if not raw:
+        return ""
+    raw = _expand(raw)
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def _workspace_path(workspace_dir: str | None, *parts: str) -> str:
+    root = _workspace_dir(workspace_dir)
+    if not root:
+        return ""
+    return os.path.join(root, *parts)
+
+
 # ---------------------------------------------------------------------------
 # Public dispatchers
 # ---------------------------------------------------------------------------
+
 
 def connector_home(
     connector: str | None,
     *,
     openclaw_home: str | None = None,
+    workspace_dir: str | None = None,
 ) -> str:
     """Return the on-disk home directory for *connector*.
 
@@ -189,11 +229,34 @@ def connector_home(
     if name == "codex":
         return os.path.join(home, ".codex")
     if name == "zeptoclaw":
-        return os.path.join(home, ".zeptoclaw")
+        return os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
     if name == "geminicli":
         return os.path.join(home, ".gemini")
     if name == "copilot":
         return os.path.join(home, ".copilot")
+    if name == "openhands":
+        root = _workspace_dir(workspace_dir)
+        if root:
+            return os.path.join(root, ".openhands")
+        return os.path.join(home, ".openhands")
+    if name == "antigravity":
+        # Antigravity (`agy`) is global-only by design: agy v1.0.x
+        # merges every discovered hooks.json (global, project,
+        # legacy ~/.gemini/hooks.json), so DefenseClaw deliberately
+        # does NOT honor workspace_dir — multiple writes cause
+        # duplicate firings.
+        #
+        # NOTE: agy *advertises* ~/.gemini/antigravity-cli/ in its
+        # --help output, but empirically it reads PreToolUse hooks
+        # only from ~/.gemini/config/hooks.json (see
+        # internal/gateway/connector/hook_only.go ::
+        # antigravityHooksPath for the smoke-test evidence). We
+        # report the marketing-facing dir here as the "connector
+        # home" because it's the agy-owned directory operators
+        # know about; the actual hooks file path comes back via
+        # connector_config_files() below, which points at the
+        # path agy actually evaluates.
+        return os.path.join(home, ".gemini", "antigravity-cli")
     if name == "cursor":
         return os.path.join(home, ".cursor")
     if name == "windsurf":
@@ -212,6 +275,7 @@ def connector_config_files(
     *,
     openclaw_config: str | None = None,
     openclaw_home: str | None = None,
+    workspace_dir: str | None = None,
 ) -> list[str]:
     """Return the documented config file paths for *connector*.
 
@@ -224,43 +288,75 @@ def connector_config_files(
     name = normalize(connector)
     home = str(Path.home())
     paths: list[str] = []
-    cwd = os.getcwd()
     if name == "claudecode":
         paths = [
             os.path.join(home, ".claude", "settings.json"),
-            os.path.join(cwd, ".claude", "settings.json"),
+            _workspace_path(workspace_dir, ".claude", "settings.json"),
         ]
     elif name == "codex":
         paths = [
             os.path.join(home, ".codex", "config.toml"),
-            os.path.join(cwd, ".mcp.json"),
+            _workspace_path(workspace_dir, ".mcp.json"),
         ]
     elif name == "zeptoclaw":
+        zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
         paths = [
-            os.path.join(home, ".zeptoclaw", "config.json"),
-            os.path.join(cwd, ".mcp.json"),
+            os.path.join(zepto_home, "config.json"),
+            _workspace_path(workspace_dir, ".mcp.json"),
         ]
     elif name == "geminicli":
         paths = [
             os.path.join(home, ".gemini", "settings.json"),
-            os.path.join(cwd, ".gemini", "settings.json"),
+            _workspace_path(workspace_dir, ".gemini", "settings.json"),
         ]
     elif name == "copilot":
         paths = [
             os.path.join(home, ".copilot", "config.json"),
-            os.path.join(cwd, ".github", "copilot.json"),
+            os.path.join(home, ".copilot", "hooks", "defenseclaw.json"),
+            _workspace_path(workspace_dir, ".github", "copilot.json"),
+            _workspace_path(workspace_dir, ".github", "hooks", "defenseclaw.json"),
+        ]
+    elif name == "openhands":
+        paths = [
+            os.path.join(home, ".openhands", "hooks.json"),
+            os.path.join(home, ".openhands", "mcp.json"),
+            _workspace_path(workspace_dir, ".openhands", "hooks.json"),
+        ]
+    elif name == "antigravity":
+        # Global only — agy merges hooks files from all discovered
+        # locations, so listing the workspace path here would
+        # mislead operators into thinking DefenseClaw might patch it.
+        #
+        # The canonical path is ~/.gemini/config/hooks.json — that
+        # is the only path agy v1.0.x actually evaluates at
+        # runtime, even though `agy --help` still advertises
+        # ~/.gemini/antigravity-cli/ as the install location. The
+        # legacy path is also listed (best-effort) so doctor /
+        # inventory can surface stale defenseclaw-managed entries
+        # left behind from pre-v0.5.0 installs that wrote to the
+        # wrong file.
+        paths = [
+            os.path.join(home, ".gemini", "config", "hooks.json"),
+            os.path.join(home, ".gemini", "antigravity-cli", "hooks.json"),
+        ]
+    elif name == "opencode":
+        # opencode auto-loads plugins from ~/.config/opencode/plugins/;
+        # DefenseClaw installs a single bridge plugin there. There is no
+        # command-hook config file to patch.
+        paths = [
+            os.path.join(home, ".config", "opencode", "plugins", "defenseclaw.js"),
         ]
     elif name == "cursor":
         paths = [
             os.path.join(home, ".cursor", "mcp.json"),
-            os.path.join(cwd, ".cursor", "mcp.json"),
+            _workspace_path(workspace_dir, ".cursor", "mcp.json"),
         ]
     elif name == "windsurf":
         paths = list(_windsurf_mcp_paths(home))
     elif name == "hermes":
         paths = [
             os.path.join(home, ".hermes", "config.json"),
-            os.path.join(cwd, ".hermes", "config.json"),
+            _workspace_path(workspace_dir, ".hermes", "config.json"),
         ]
     elif name == "openclaw":
         if openclaw_config:
@@ -275,6 +371,7 @@ def skill_dirs(
     *,
     openclaw_home: str | None = None,
     openclaw_config: str | None = None,
+    workspace_dir: str | None = None,
 ) -> list[str]:
     """Return the skill directory list for *connector*.
 
@@ -291,21 +388,27 @@ def skill_dirs(
     """
     name = normalize(connector)
     if name == "claudecode":
-        return _claudecode_skill_dirs()
+        return _claudecode_skill_dirs(workspace_dir)
     if name == "codex":
-        return _codex_skill_dirs()
+        return _codex_skill_dirs(workspace_dir)
     if name == "zeptoclaw":
-        return _zeptoclaw_skill_dirs()
+        return _zeptoclaw_skill_dirs(workspace_dir)
     if name == "hermes":
         return _hermes_skill_dirs()
     if name == "cursor":
-        return _cursor_skill_dirs()
+        return _cursor_skill_dirs(workspace_dir)
     if name == "windsurf":
         return _windsurf_skill_dirs()
     if name == "geminicli":
-        return _gemini_skill_dirs()
+        return _gemini_skill_dirs(workspace_dir)
     if name == "copilot":
-        return _copilot_skill_dirs()
+        return _copilot_skill_dirs(workspace_dir)
+    if name == "openhands":
+        return _openhands_skill_dirs(workspace_dir)
+    if name == "antigravity":
+        # Antigravity v1 publishes only the hooks surface; no
+        # documented skills install/discovery path yet.
+        return []
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
 
 
@@ -313,6 +416,7 @@ def plugin_dirs(
     connector: str | None,
     *,
     openclaw_home: str | None = None,
+    workspace_dir: str | None = None,
 ) -> list[str]:
     """Return the plugin (extension) directory list for *connector*.
 
@@ -325,20 +429,24 @@ def plugin_dirs(
     """
     name = normalize(connector)
     if name == "claudecode":
-        return _claudecode_plugin_dirs()
+        return _claudecode_plugin_dirs(workspace_dir)
     if name == "codex":
         return _codex_plugin_dirs()
     if name == "zeptoclaw":
         return _zeptoclaw_plugin_dirs()
     if name == "hermes":
-        return _hermes_plugin_dirs()
+        return _hermes_plugin_dirs(workspace_dir)
     if name == "cursor":
         return []
     if name == "windsurf":
         return []
     if name == "geminicli":
-        return _gemini_plugin_dirs()
+        return _gemini_plugin_dirs(workspace_dir)
     if name == "copilot":
+        return []
+    if name == "openhands":
+        return []
+    if name == "antigravity":
         return []
     return _openclaw_plugin_dirs(openclaw_home)
 
@@ -347,6 +455,7 @@ def mcp_servers(
     connector: str | None,
     *,
     openclaw_config: str | None = None,
+    workspace_dir: str | None = None,
     openclaw_bin_resolver: Any = None,
     openclaw_cmd_prefix: list[str] | None = None,
 ) -> list[MCPServerEntry]:
@@ -354,9 +463,9 @@ def mcp_servers(
 
     Reads each framework's canonical config:
 
-    * Claude Code: ``~/.claude/settings.json`` then ``./.mcp.json``
-    * Codex:       ``./.mcp.json``
-    * ZeptoClaw:   ``~/.zeptoclaw/config.json`` then ``./.mcp.json``
+    * Claude Code: ``~/.claude/settings.json`` then explicit workspace ``.mcp.json``
+    * Codex:       ``~/.codex/config.toml`` then explicit workspace ``.mcp.json``
+    * ZeptoClaw:   ``~/.zeptoclaw/config.json`` then explicit workspace ``.mcp.json``
     * OpenClaw:    ``openclaw config get mcp.servers`` (preferred)
                     falling back to direct ``openclaw.json`` parse
 
@@ -367,21 +476,27 @@ def mcp_servers(
     """
     name = normalize(connector)
     if name == "claudecode":
-        return _claudecode_mcp_servers()
+        return _claudecode_mcp_servers(workspace_dir)
     if name == "codex":
-        return _codex_mcp_servers()
+        return _codex_mcp_servers(workspace_dir)
     if name == "zeptoclaw":
-        return _zeptoclaw_mcp_servers()
+        return _zeptoclaw_mcp_servers(workspace_dir)
     if name == "hermes":
         return _hermes_mcp_servers()
     if name == "cursor":
-        return _cursor_mcp_servers()
+        return _cursor_mcp_servers(workspace_dir)
     if name == "windsurf":
         return _windsurf_mcp_servers()
     if name == "geminicli":
         return _gemini_mcp_servers()
     if name == "copilot":
-        return _copilot_mcp_servers()
+        return _copilot_mcp_servers(workspace_dir)
+    if name == "openhands":
+        return _openhands_mcp_servers()
+    if name == "antigravity":
+        # Antigravity does not expose a documented MCP install
+        # surface; nothing to discover.
+        return []
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
@@ -393,68 +508,92 @@ def mcp_servers(
 # Per-connector implementations
 # ---------------------------------------------------------------------------
 
-def _claudecode_skill_dirs() -> list[str]:
+
+def _claudecode_skill_dirs(workspace_dir: str | None = None) -> list[str]:
     home = str(Path.home())
-    cwd = os.getcwd()
-    return _dedup([
-        os.path.join(home, ".claude", "skills"),
-        os.path.join(cwd, ".claude", "skills"),
-    ])
+    return _dedup(
+        [
+            os.path.join(home, ".claude", "skills"),
+            _workspace_path(workspace_dir, ".claude", "skills"),
+        ]
+    )
 
 
-def _codex_skill_dirs() -> list[str]:
+def _codex_skill_dirs(workspace_dir: str | None = None) -> list[str]:
     home = str(Path.home())
-    cwd = os.getcwd()
-    return _dedup([
-        os.path.join(home, ".codex", "skills"),
-        os.path.join(cwd, ".codex", "skills"),
-    ])
+    return _dedup(
+        [
+            os.path.join(home, ".codex", "skills"),
+            _workspace_path(workspace_dir, ".codex", "skills"),
+        ]
+    )
 
 
-def _zeptoclaw_skill_dirs() -> list[str]:
-    home = str(Path.home())
-    cwd = os.getcwd()
-    return _dedup([
-        os.path.join(home, ".zeptoclaw", "skills"),
-        os.path.join(cwd, ".zeptoclaw", "skills"),
-    ])
+def _zeptoclaw_skill_dirs(workspace_dir: str | None = None) -> list[str]:
+    zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(str(Path.home()), ".zeptoclaw")
+    return _dedup(
+        [
+            os.path.join(zepto_home, "skills"),
+            _workspace_path(workspace_dir, ".zeptoclaw", "skills"),
+        ]
+    )
 
 
 def _hermes_skill_dirs() -> list[str]:
     return [os.path.join(str(Path.home()), ".hermes", "skills")]
 
 
-def _cursor_skill_dirs() -> list[str]:
+def _cursor_skill_dirs(workspace_dir: str | None = None) -> list[str]:
     home = str(Path.home())
-    cwd = os.getcwd()
-    return _dedup([
-        os.path.join(cwd, ".cursor", "skills"),
-        os.path.join(cwd, ".agents", "skills"),
-        os.path.join(home, ".cursor", "skills"),
-        os.path.join(home, ".agents", "skills"),
-    ])
+    return _dedup(
+        [
+            os.path.join(home, ".cursor", "skills"),
+            os.path.join(home, ".agents", "skills"),
+            _workspace_path(workspace_dir, ".cursor", "skills"),
+            _workspace_path(workspace_dir, ".agents", "skills"),
+        ]
+    )
 
 
 def _windsurf_skill_dirs() -> list[str]:
     return []
 
 
-def _gemini_skill_dirs() -> list[str]:
-    cwd = os.getcwd()
-    return _dedup([
-        os.path.join(cwd, ".gemini", "skills"),
-        os.path.join(cwd, ".agents", "skills"),
-    ])
+def _gemini_skill_dirs(workspace_dir: str | None = None) -> list[str]:
+    return _dedup(
+        [
+            os.path.join(str(Path.home()), ".gemini", "skills"),
+            _workspace_path(workspace_dir, ".gemini", "skills"),
+            _workspace_path(workspace_dir, ".agents", "skills"),
+        ]
+    )
 
 
-def _copilot_skill_dirs() -> list[str]:
+def _copilot_skill_dirs(workspace_dir: str | None = None) -> list[str]:
     home = str(Path.home())
-    cwd = os.getcwd()
-    return _dedup([
-        os.path.join(cwd, ".github", "skills"),
-        os.path.join(cwd, ".agents", "skills"),
-        os.path.join(home, ".copilot", "skills"),
-    ])
+    return _dedup(
+        [
+            os.path.join(home, ".copilot", "skills"),
+            _workspace_path(workspace_dir, ".github", "skills"),
+            _workspace_path(workspace_dir, ".agents", "skills"),
+        ]
+    )
+
+
+def _openhands_skill_dirs(workspace_dir: str | None = None) -> list[str]:
+    home = str(Path.home())
+    return _dedup(
+        [
+            _workspace_path(workspace_dir, ".agents", "skills"),
+            _workspace_path(workspace_dir, ".openhands", "skills"),
+            _workspace_path(workspace_dir, ".openhands", "microagents"),
+            os.path.join(home, ".agents", "skills"),
+            os.path.join(home, ".openhands", "skills"),
+            os.path.join(home, ".openhands", "microagents"),
+            os.path.join(home, ".openhands", "skills", "installed"),
+            os.path.join(home, ".openhands", "cache", "skills", "public-skills", "skills"),
+        ]
+    )
 
 
 def _openclaw_skill_dirs(
@@ -479,49 +618,56 @@ def _openclaw_skill_dirs(
     return _dedup(dirs)
 
 
-def _claudecode_plugin_dirs() -> list[str]:
+def _claudecode_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
     home = str(Path.home())
-    cwd = os.getcwd()
-    return _dedup([
-        os.path.join(home, ".claude", "plugins"),
-        os.path.join(cwd, ".claude", "plugins"),
-    ])
+    return _dedup(
+        [
+            os.path.join(home, ".claude", "plugins"),
+            _workspace_path(workspace_dir, ".claude", "plugins"),
+        ]
+    )
 
 
 def _codex_plugin_dirs() -> list[str]:
     home = str(Path.home())
     base = os.path.join(home, ".codex", "plugins")
-    return _dedup([
-        base,
-        os.path.join(base, "cache"),
-    ])
+    return _dedup(
+        [
+            base,
+            os.path.join(base, "cache"),
+        ]
+    )
 
 
 def _zeptoclaw_plugin_dirs() -> list[str]:
+    zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(str(Path.home()), ".zeptoclaw")
+    base = os.path.join(zepto_home, "plugins")
+    return _dedup(
+        [
+            base,
+            os.path.join(base, "cache"),
+        ]
+    )
+
+
+def _hermes_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
     home = str(Path.home())
-    base = os.path.join(home, ".zeptoclaw", "plugins")
-    return _dedup([
-        base,
-        os.path.join(base, "cache"),
-    ])
+    return _dedup(
+        [
+            os.path.join(home, ".hermes", "plugins"),
+            _workspace_path(workspace_dir, ".hermes", "plugins"),
+        ]
+    )
 
 
-def _hermes_plugin_dirs() -> list[str]:
+def _gemini_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
     home = str(Path.home())
-    cwd = os.getcwd()
-    return _dedup([
-        os.path.join(home, ".hermes", "plugins"),
-        os.path.join(cwd, ".hermes", "plugins"),
-    ])
-
-
-def _gemini_plugin_dirs() -> list[str]:
-    home = str(Path.home())
-    cwd = os.getcwd()
-    return _dedup([
-        os.path.join(cwd, ".gemini", "extensions"),
-        os.path.join(home, ".gemini", "extensions"),
-    ])
+    return _dedup(
+        [
+            os.path.join(home, ".gemini", "extensions"),
+            _workspace_path(workspace_dir, ".gemini", "extensions"),
+        ]
+    )
 
 
 def _openclaw_plugin_dirs(openclaw_home: str | None) -> list[str]:
@@ -531,19 +677,23 @@ def _openclaw_plugin_dirs(openclaw_home: str | None) -> list[str]:
 
 # --- MCP readers -----------------------------------------------------------
 
-def _claudecode_mcp_servers() -> list[MCPServerEntry]:
+
+def _claudecode_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
     home = str(Path.home())
-    cwd = os.getcwd()
     entries: list[MCPServerEntry] = []
-    entries.extend(_read_mcp_settings_block(
-        os.path.join(home, ".claude", "settings.json"),
-        keys=("mcpServers",),
-    ))
-    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".mcp.json")))
+    entries.extend(
+        _read_mcp_settings_block(
+            os.path.join(home, ".claude", "settings.json"),
+            keys=("mcpServers",),
+        )
+    )
+    project_mcp = _workspace_path(workspace_dir, ".mcp.json")
+    if project_mcp:
+        entries.extend(_read_dotmcp_json(project_mcp))
     return _dedup_mcp_entries(entries)
 
 
-def _codex_mcp_servers() -> list[MCPServerEntry]:
+def _codex_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
     """Return the merged Codex MCP server list.
 
     Codex stores its global MCP server registry in
@@ -560,10 +710,11 @@ def _codex_mcp_servers() -> list[MCPServerEntry]:
     itself layers them at runtime.
     """
     home = str(Path.home())
-    cwd = os.getcwd()
     entries: list[MCPServerEntry] = []
     entries.extend(_read_codex_config_toml(os.path.join(home, ".codex", "config.toml")))
-    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".mcp.json")))
+    project_mcp = _workspace_path(workspace_dir, ".mcp.json")
+    if project_mcp:
+        entries.extend(_read_dotmcp_json(project_mcp))
     return _dedup_mcp_entries(entries)
 
 
@@ -583,17 +734,9 @@ def _read_codex_config_toml(path: str) -> list[MCPServerEntry]:
     callers can soft-fall back to ``./.mcp.json``.
 
     Implementation note: we use the stdlib :mod:`tomllib` (Python
-    3.11+) which is already a project requirement; no third-party
-    parser is added.
+    3.11+), falling back to the ``tomli`` backport on Python 3.10
+    (see the module-level import); no exec-based parser is used.
     """
-    try:
-        import tomllib  # Python 3.11+ stdlib — safe parser, no exec.
-    except ImportError:
-        # Defensive: cli/defenseclaw targets 3.12 in pyproject.toml,
-        # so this branch is unreachable in supported deployments.
-        # We still soft-fail rather than raising because the caller
-        # treats this as best-effort discovery.
-        return []
     try:
         with open(path, "rb") as f:
             data = tomllib.load(f)
@@ -606,23 +749,26 @@ def _read_codex_config_toml(path: str) -> list[MCPServerEntry]:
     for name, cfg in servers.items():
         if not isinstance(cfg, dict):
             continue
-        out.append(MCPServerEntry(
-            name=name,
-            command=str(cfg.get("command", "") or ""),
-            args=list(cfg.get("args", []) or []),
-            env={str(k): str(v) for k, v in (cfg.get("env", {}) or {}).items()},
-            url=str(cfg.get("url", "") or ""),
-            transport=str(cfg.get("transport", "") or ""),
-        ))
+        out.append(
+            MCPServerEntry(
+                name=name,
+                command=str(cfg.get("command", "") or ""),
+                args=list(cfg.get("args", []) or []),
+                env={str(k): str(v) for k, v in (cfg.get("env", {}) or {}).items()},
+                url=str(cfg.get("url", "") or ""),
+                transport=str(cfg.get("transport", "") or ""),
+            )
+        )
     return out
 
 
-def _zeptoclaw_mcp_servers() -> list[MCPServerEntry]:
-    home = str(Path.home())
-    cwd = os.getcwd()
+def _zeptoclaw_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+    zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(str(Path.home()), ".zeptoclaw")
     entries: list[MCPServerEntry] = []
-    entries.extend(_read_zepto_config(os.path.join(home, ".zeptoclaw", "config.json")))
-    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".mcp.json")))
+    entries.extend(_read_zepto_config(os.path.join(zepto_home, "config.json")))
+    project_mcp = _workspace_path(workspace_dir, ".mcp.json")
+    if project_mcp:
+        entries.extend(_read_dotmcp_json(project_mcp))
     return _dedup_mcp_entries(entries)
 
 
@@ -650,12 +796,13 @@ def _hermes_mcp_servers() -> list[MCPServerEntry]:
     )
 
 
-def _cursor_mcp_servers() -> list[MCPServerEntry]:
+def _cursor_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
     home = str(Path.home())
-    cwd = os.getcwd()
     entries: list[MCPServerEntry] = []
-    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".cursor", "mcp.json")))
     entries.extend(_read_dotmcp_json(os.path.join(home, ".cursor", "mcp.json")))
+    project_mcp = _workspace_path(workspace_dir, ".cursor", "mcp.json")
+    if project_mcp:
+        entries.extend(_read_dotmcp_json(project_mcp))
     return _dedup_mcp_entries(entries)
 
 
@@ -674,17 +821,25 @@ def _gemini_mcp_servers() -> list[MCPServerEntry]:
     )
 
 
-def _copilot_mcp_servers() -> list[MCPServerEntry]:
+def _copilot_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
     home = str(Path.home())
-    cwd = os.getcwd()
     entries: list[MCPServerEntry] = []
     entries.extend(_read_dotmcp_json(os.path.join(home, ".copilot", "mcp-config.json")))
-    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".github", "mcp.json")))
-    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".mcp.json")))
+    github_mcp = _workspace_path(workspace_dir, ".github", "mcp.json")
+    if github_mcp:
+        entries.extend(_read_dotmcp_json(github_mcp))
+    project_mcp = _workspace_path(workspace_dir, ".mcp.json")
+    if project_mcp:
+        entries.extend(_read_dotmcp_json(project_mcp))
     return _dedup_mcp_entries(entries)
 
 
+def _openhands_mcp_servers() -> list[MCPServerEntry]:
+    return _read_dotmcp_json(os.path.join(str(Path.home()), ".openhands", "mcp.json"))
+
+
 # --- Low-level file/CLI helpers --------------------------------------------
+
 
 def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
     try:
@@ -794,6 +949,7 @@ def _read_mcp_servers_via_openclaw_cli(
     """
     if openclaw_bin_resolver is None:
         import shutil
+
         bin_path = shutil.which("openclaw") or "openclaw"
     else:
         bin_path = openclaw_bin_resolver()
@@ -824,6 +980,7 @@ def _read_mcp_servers_from_openclaw_json(path: str) -> list[MCPServerEntry]:
     except json.JSONDecodeError:
         try:
             import json5  # type: ignore[import-untyped]
+
             data = json5.loads(raw)
         except Exception:
             return []
@@ -859,14 +1016,16 @@ def _parse_mcp_servers_dict(servers: dict[str, Any]) -> list[MCPServerEntry]:
     for name, cfg in servers.items():
         if not isinstance(cfg, dict):
             continue
-        out.append(MCPServerEntry(
-            name=name,
-            command=cfg.get("command", "") or "",
-            args=list(cfg.get("args", []) or []),
-            env=dict(cfg.get("env", {}) or {}),
-            url=cfg.get("url", "") or "",
-            transport=cfg.get("transport", "") or "",
-        ))
+        out.append(
+            MCPServerEntry(
+                name=name,
+                command=cfg.get("command", "") or "",
+                args=list(cfg.get("args", []) or []),
+                env=dict(cfg.get("env", {}) or {}),
+                url=cfg.get("url", "") or "",
+                transport=cfg.get("transport", "") or "",
+            )
+        )
     return out
 
 
@@ -878,14 +1037,16 @@ def _parse_mcp_servers_list(servers: list[Any]) -> list[MCPServerEntry]:
         name = str(cfg.get("name", "") or "")
         if not name:
             continue
-        out.append(MCPServerEntry(
-            name=name,
-            command=cfg.get("command", "") or "",
-            args=list(cfg.get("args", []) or []),
-            env=dict(cfg.get("env", {}) or {}),
-            url=cfg.get("url", "") or "",
-            transport=cfg.get("transport", "") or "",
-        ))
+        out.append(
+            MCPServerEntry(
+                name=name,
+                command=cfg.get("command", "") or "",
+                args=list(cfg.get("args", []) or []),
+                env=dict(cfg.get("env", {}) or {}),
+                url=cfg.get("url", "") or "",
+                transport=cfg.get("transport", "") or "",
+            )
+        )
     return out
 
 
@@ -904,6 +1065,7 @@ def _dedup_mcp_entries(entries: list[MCPServerEntry]) -> list[MCPServerEntry]:
 # MCP server WRITES — connector-specific set / unset adapters (S4.2)
 # ---------------------------------------------------------------------------
 
+
 class MCPWriteUnsupportedError(RuntimeError):
     """Raised when MCP set/unset is requested for a connector that
     doesn't expose a programmatic write surface.
@@ -921,6 +1083,7 @@ def set_mcp_server(
     name: str,
     entry: dict[str, Any],
     *,
+    workspace_dir: str | None = None,
     openclaw_config_setter: Any = None,
 ) -> None:
     """Add or update an MCP server in the active connector's registry.
@@ -940,10 +1103,12 @@ def set_mcp_server(
                      module.
     * Claude Code  — ``$HOME/.claude/settings.json[mcpServers][name]``
                      via :func:`_atomic_json_merge`.
-    * Codex        — ``./.mcp.json[mcpServers][name]``
-                     via :func:`_atomic_json_merge`.
+    * Codex        — ``~/.codex/config.toml[mcp_servers][name]``
+                     by default, or ``<workspace>/.mcp.json`` when
+                     *workspace_dir* is explicit.
     * ZeptoClaw    — :class:`MCPWriteUnsupportedError`.
-    * Hook-only    — :class:`MCPWriteUnsupportedError`.
+    * Hook-backed  — connector-owned JSON/YAML config when documented
+                     (for example OpenHands writes ``~/.openhands/mcp.json``).
     """
     name_n = normalize(connector)
     if name_n == "openclaw":
@@ -960,24 +1125,23 @@ def set_mcp_server(
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "codex":
-        # Codex has two registries: the global ``~/.codex/config.toml``
-        # ``[mcp_servers]`` table and the project-local ``./.mcp.json``.
-        # We only write to the project-local file from `defenseclaw mcp
-        # set` because (a) editing TOML safely requires a write path
-        # that preserves comments and ordering and (b) project-local
-        # writes are scoped to the current workspace which matches
-        # operator intent. Operators who want to register a global
-        # server should edit ``~/.codex/config.toml`` directly — the
-        # read path now picks it up automatically.
-        path = os.path.join(os.getcwd(), ".mcp.json")
-        _atomic_json_merge(path, ("mcpServers", name), entry)
+        workspace = _workspace_dir(workspace_dir)
+        if workspace:
+            _atomic_json_merge(os.path.join(workspace, ".mcp.json"), ("mcpServers", name), entry)
+        else:
+            _set_codex_global_mcp_server(name, entry)
         return
     if name_n == "hermes":
         path = os.path.join(str(Path.home()), ".hermes", "config.yaml")
         _atomic_yaml_merge(path, ("mcp", "servers", name), entry)
         return
     if name_n == "cursor":
-        path = os.path.join(os.getcwd(), ".cursor", "mcp.json")
+        workspace = _workspace_dir(workspace_dir)
+        path = (
+            os.path.join(workspace, ".cursor", "mcp.json")
+            if workspace
+            else os.path.join(str(Path.home()), ".cursor", "mcp.json")
+        )
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "windsurf":
@@ -995,9 +1159,30 @@ def set_mcp_server(
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "copilot":
-        path = os.path.join(os.getcwd(), ".github", "mcp.json")
+        workspace = _workspace_dir(workspace_dir)
+        path = (
+            os.path.join(workspace, ".github", "mcp.json")
+            if workspace
+            else os.path.join(str(Path.home()), ".copilot", "mcp-config.json")
+        )
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
+    if name_n == "openhands":
+        path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if name_n == "antigravity":
+        raise MCPWriteUnsupportedError(
+            "antigravity does not publish a documented MCP install "
+            "surface in agy v1.0.0. DefenseClaw will pick this up via "
+            "a contract bump once Google ships an MCP install path.",
+        )
+    if name_n == "opencode":
+        raise MCPWriteUnsupportedError(
+            "opencode MCP servers live in opencode.json, which DefenseClaw "
+            "does not manage in v1; the opencode connector governs tool "
+            "execution via its bridge plugin only.",
+        )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. "
@@ -1007,8 +1192,7 @@ def set_mcp_server(
     # Anything else — treat as an unknown framework. Refuse rather than
     # silently writing to the OpenClaw config.
     raise MCPWriteUnsupportedError(
-        f"set_mcp_server: unknown connector {connector!r}; "
-        f"expected one of {KNOWN_CONNECTORS}",
+        f"set_mcp_server: unknown connector {connector!r}; expected one of {KNOWN_CONNECTORS}",
     )
 
 
@@ -1016,6 +1200,7 @@ def unset_mcp_server(
     connector: str | None,
     name: str,
     *,
+    workspace_dir: str | None = None,
     openclaw_config_unsetter: Any = None,
 ) -> None:
     """Remove an MCP server from the active connector's registry.
@@ -1040,23 +1225,30 @@ def unset_mcp_server(
         _atomic_json_delete(path, ("mcpServers", name))
         return
     if name_n == "codex":
-        path = os.path.join(os.getcwd(), ".mcp.json")
-        _atomic_json_delete(path, ("mcpServers", name))
+        workspace = _workspace_dir(workspace_dir)
+        if workspace:
+            _atomic_json_delete(os.path.join(workspace, ".mcp.json"), ("mcpServers", name))
+        else:
+            _unset_codex_global_mcp_server(name)
         return
     if name_n == "hermes":
         path = os.path.join(str(Path.home()), ".hermes", "config.yaml")
         _atomic_yaml_delete(path, ("mcp", "servers", name))
         return
     if name_n == "cursor":
-        path = os.path.join(os.getcwd(), ".cursor", "mcp.json")
+        workspace = _workspace_dir(workspace_dir)
+        path = (
+            os.path.join(workspace, ".cursor", "mcp.json")
+            if workspace
+            else os.path.join(str(Path.home()), ".cursor", "mcp.json")
+        )
         _atomic_json_delete(path, ("mcpServers", name))
         return
     if name_n == "windsurf":
         path = _windsurf_existing_mcp_write_path()
         if not path:
             raise MCPWriteUnsupportedError(
-                "windsurf MCP writes are disabled until an existing documented "
-                "Windsurf MCP config file is present.",
+                "windsurf MCP writes are disabled until an existing documented Windsurf MCP config file is present.",
             )
         _atomic_json_delete(path, ("mcpServers", name))
         return
@@ -1065,18 +1257,132 @@ def unset_mcp_server(
         _atomic_json_delete(path, ("mcpServers", name))
         return
     if name_n == "copilot":
-        path = os.path.join(os.getcwd(), ".github", "mcp.json")
+        workspace = _workspace_dir(workspace_dir)
+        path = (
+            os.path.join(workspace, ".github", "mcp.json")
+            if workspace
+            else os.path.join(str(Path.home()), ".copilot", "mcp-config.json")
+        )
         _atomic_json_delete(path, ("mcpServers", name))
         return
+    if name_n == "openhands":
+        path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
+    if name_n == "antigravity":
+        raise MCPWriteUnsupportedError(
+            "antigravity does not publish a documented MCP install "
+            "surface in agy v1.0.0; nothing to remove.",
+        )
+    if name_n == "opencode":
+        raise MCPWriteUnsupportedError(
+            "opencode MCP servers live in opencode.json, which DefenseClaw "
+            "does not manage in v1; the opencode connector governs tool "
+            "execution via its bridge plugin only.",
+        )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
-            "zeptoclaw does not expose a programmatic MCP write surface. "
-            "Remove the server inside the ZeptoClaw UI.",
+            "zeptoclaw does not expose a programmatic MCP write surface. Remove the server inside the ZeptoClaw UI.",
         )
     raise MCPWriteUnsupportedError(
-        f"unset_mcp_server: unknown connector {connector!r}; "
-        f"expected one of {KNOWN_CONNECTORS}",
+        f"unset_mcp_server: unknown connector {connector!r}; expected one of {KNOWN_CONNECTORS}",
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex TOML MCP writer
+# ---------------------------------------------------------------------------
+
+
+def _codex_config_toml_path() -> str:
+    return os.path.join(str(Path.home()), ".codex", "config.toml")
+
+
+def _toml_string(value: Any) -> str:
+    return json.dumps(str(value))
+
+
+def _toml_array(values: Any) -> str:
+    if not isinstance(values, list):
+        return "[]"
+    return "[" + ", ".join(_toml_string(v) for v in values) + "]"
+
+
+def _codex_mcp_block(name: str, entry: dict[str, Any]) -> str:
+    """Render one Codex ``[mcp_servers]`` table.
+
+    This intentionally writes only the table DefenseClaw owns. The
+    surrounding config text is preserved by replacing that table in
+    place and appending it when absent.
+    """
+    table = f"mcp_servers.{_toml_string(name)}"
+    lines = [f"[{table}]"]
+    for key in ("command", "url", "transport"):
+        value = entry.get(key)
+        if value:
+            lines.append(f"{key} = {_toml_string(value)}")
+    if entry.get("args") is not None:
+        lines.append(f"args = {_toml_array(entry.get('args'))}")
+    env = entry.get("env")
+    if isinstance(env, dict) and env:
+        lines.append("")
+        lines.append(f"[{table}.env]")
+        for key in sorted(env):
+            lines.append(f"{_toml_string(key)} = {_toml_string(env[key])}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _codex_mcp_section_names(name: str) -> set[str]:
+    quoted = f"mcp_servers.{_toml_string(name)}"
+    names = {quoted, f"{quoted}.env"}
+    if all(ch.isalnum() or ch in {"_", "-"} for ch in name):
+        bare = f"mcp_servers.{name}"
+        names.update({bare, f"{bare}.env"})
+    return names
+
+
+def _strip_codex_mcp_block(text: str, name: str) -> str:
+    section_names = _codex_mcp_section_names(name)
+    out: list[str] = []
+    skipping = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section_name = stripped.strip("[]").strip()
+            skipping = section_name in section_names
+        if not skipping:
+            out.append(line)
+    return "\n".join(out).rstrip() + ("\n" if out else "")
+
+
+def _set_codex_global_mcp_server(name: str, entry: dict[str, Any]) -> None:
+    path = _codex_config_toml_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = ""
+    updated = _strip_codex_mcp_block(text, name)
+    if updated and not updated.endswith("\n\n"):
+        updated = updated.rstrip() + "\n\n"
+    updated += _codex_mcp_block(name, entry)
+    _capture_managed_mcp_backup(path)
+    _atomic_write_text(path, updated)
+
+
+def _unset_codex_global_mcp_server(name: str) -> bool:
+    path = _codex_config_toml_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return False
+    updated = _strip_codex_mcp_block(text, name)
+    if updated == text:
+        return False
+    _capture_managed_mcp_backup(path)
+    _atomic_write_text(path, updated)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1088,6 +1394,31 @@ def unset_mcp_server(
 # directory, fsync, then os.replace. Permissions are forced to 0o600
 # because the targets (~/.claude/settings.json, ./.mcp.json) frequently
 # carry credentials in the env: block.
+
+
+def _reject_symlink_config(path: str) -> None:
+    """Refuse to read/merge through a symlinked connector config path.
+
+    Workspace-scoped MCP configs (Codex ``.mcp.json``, Cursor
+    ``.cursor/mcp.json``, Copilot ``.github/mcp.json``) live in an
+    operator-chosen CWD. A malicious repository can pre-place that path
+    as a symlink to a private file readable by the operator (``~/.netrc``,
+    ``~/.aws/credentials``, etc.). A plain ``open(path)`` follows the
+    link, so the merge reads the private target and the subsequent
+    atomic rewrite leaks its contents into a repository-visible file.
+    Fail closed before any read so the secret never crosses the
+    workspace boundary (F-0041).
+    """
+    if os.path.islink(path):
+        try:
+            target = os.readlink(path)
+        except OSError:
+            target = "<unreadable>"
+        raise ValueError(
+            f"refusing to write MCP config {path}: path is a symlink -> "
+            f"{target!r} (following it could disclose the link target)",
+        )
+
 
 def _atomic_json_merge(
     path: str,
@@ -1101,6 +1432,7 @@ def _atomic_json_merge(
     0o600 on every write — these files commonly contain API keys
     in the ``env`` block.
     """
+    _reject_symlink_config(path)
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
         os.makedirs(parent, mode=0o700, exist_ok=True)
@@ -1157,6 +1489,7 @@ def _atomic_yaml_merge(
     keys: tuple[str, ...],
     value: dict[str, Any],
 ) -> None:
+    _reject_symlink_config(path)
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
         os.makedirs(parent, mode=0o700, exist_ok=True)
@@ -1225,7 +1558,36 @@ def restore_managed_mcp_backup(path: str) -> bool:
 
 
 def _capture_managed_mcp_backup(path: str) -> None:
-    if not os.path.isfile(path):
+    # workspace-scoped MCP configs (Codex .mcp.json,
+    # Cursor .cursor/mcp.json, Copilot .github/mcp.json) live in a
+    # CWD chosen by the operator. A malicious repository can pre-place
+    # those config paths as symlinks to private files readable by the
+    # operator (e.g. ~/.ssh/id_rsa, ~/.netrc, ~/.aws/credentials).
+    # `os.path.isfile` and `shutil.copy2` BOTH follow symlinks, so the
+    # private link target was being copied into a workspace-visible
+    # `.defenseclaw-<name>.bak` sibling and registered for restore.
+    #
+    # We refuse to back up via a symlink: if the path is a symlink we
+    # skip backup entirely (callers tolerate "no backup" — restore
+    # only runs when a backup is present), and we use os.lstat /
+    # follow_symlinks=False to keep the fix robust on mixed Linux/macOS.
+    try:
+        st = os.lstat(path)
+    except (FileNotFoundError, OSError):
+        return
+    if stat.S_ISLNK(st.st_mode):
+        # Hard fail-closed: refuse to follow the symlink, and log so the
+        # operator sees why no .bak was written.
+        try:
+            target = os.readlink(path)
+        except OSError:
+            target = "<unreadable>"
+        sys.stderr.write(
+            f"[defenseclaw] refusing to back up MCP config: {path} is a symlink "
+            f"-> {target!r}\n"
+        )
+        return
+    if not stat.S_ISREG(st.st_mode):
         return
     backup = _managed_mcp_backup_path(path)
     if os.path.exists(backup):
@@ -1234,7 +1596,9 @@ def _capture_managed_mcp_backup(path: str) -> None:
         # right absolute path even when called from a different cwd.
         _registry_register(os.path.abspath(path), backup)
         return
-    shutil.copy2(path, backup)
+    # follow_symlinks=False is defense-in-depth: even if a symlink slips
+    # past the lstat above (e.g. TOCTOU), copy2 will not follow it.
+    shutil.copy2(path, backup, follow_symlinks=False)
     os.chmod(backup, 0o600)
     _registry_register(os.path.abspath(path), backup)
 
@@ -1251,10 +1615,10 @@ def _managed_mcp_backup_path(path: str) -> str:
 #
 # The historical ``.defenseclaw-<name>.bak`` sibling-file scheme works
 # fine for user-scope configs (``~/.claude/settings.json``) because the
-# absolute path is stable. It breaks for workspace-scope configs (e.g.
-# Copilot's ``<cwd>/.github/mcp.json``) because the .bak is anchored to
-# the cwd at backup time; restoring after a ``cd`` either touches the
-# wrong workspace or no-ops silently.
+# absolute path is stable. It breaks for explicitly pinned workspace configs
+# (for example Copilot's ``<workspace>/.github/mcp.json``) because the .bak
+# is anchored to the target directory; restoring after a ``cd`` used to lose
+# track of the original file.
 #
 # The registry below is a single JSON file under
 # ``$DEFENSECLAW_HOME/connector_backups/mcp/registry.json`` that maps
@@ -1262,6 +1626,7 @@ def _managed_mcp_backup_path(path: str) -> str:
 # "backup": <abs sibling .bak>, "ts": <utc>}. ``restore_by_id`` and
 # ``restore_managed_mcp_backup`` look here first, ensuring restore is
 # anchored to the original target regardless of cwd.
+
 
 def _registry_dir() -> str:
     """Return the absolute MCP backup registry directory.
@@ -1304,6 +1669,7 @@ def _registry_save(state: dict[str, dict[str, str]]) -> None:
     except OSError:
         pass
     import tempfile
+
     fd, tmp = tempfile.mkstemp(prefix=".dc-mcp-registry-", dir=parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -1328,11 +1694,13 @@ def _registry_key(abs_target: str) -> str:
     ``path`` so legitimate restore flows can echo it back to the user.
     """
     import hashlib
+
     return hashlib.sha256(abs_target.encode("utf-8")).hexdigest()
 
 
 def _registry_register(abs_target: str, backup: str) -> None:
     import datetime as _dt
+
     state = _registry_load()
     state[_registry_key(abs_target)] = {
         "path": abs_target,
@@ -1395,6 +1763,28 @@ def _atomic_write_yaml(path: str, data: dict[str, Any]) -> None:
             pass
 
 
+def _atomic_write_text(path: str, text: str) -> None:
+    """Atomically write UTF-8 text with private permissions."""
+    import tempfile
+
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".dc-mcp-", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _windsurf_existing_mcp_write_path() -> str | None:
     for path in _windsurf_mcp_paths():
         if os.path.isfile(path):
@@ -1410,6 +1800,7 @@ def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
     atomicWriteFile contract for connector config patches.
     """
     import tempfile
+
     parent = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(prefix=".dc-mcp-", dir=parent)
     try:

@@ -59,7 +59,14 @@ func runPolicyDiff(_ *cobra.Command, _ []string) error {
 
 	missing := 0
 	for _, ep := range required {
-		covered := policy.HasEndpointForHost(ep.Host)
+		// ("Sandbox policy diff ignores endpoint
+		// ports"): the legacy implementation called
+		// HasEndpointForHost, so a policy entry for the same
+		// host on a different port wrongly reported the diff as
+		// covered. We now consult HasEndpointForHostPort which
+		// validates host AND port (with the OpenShell wildcard
+		// semantics for empty/missing ports lists).
+		covered := policy.HasEndpointForHostPort(ep.Host, ep.Port)
 		if covered {
 			fmt.Printf("  + %-35s (covered)\n", fmt.Sprintf("%s:%d", ep.Host, ep.Port))
 		} else {

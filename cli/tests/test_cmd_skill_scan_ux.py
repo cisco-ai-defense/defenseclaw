@@ -49,9 +49,9 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_skill import skill
 from defenseclaw.models import Finding, ScanResult
+
 from tests.helpers import cleanup_app, make_app_context
 
 
@@ -197,7 +197,7 @@ class TestScanAllUX(_SkillScanUXBase):
         # No openclaw CLI listing → falls through to skill_dirs walk.
         root = self._make_skills_dir(["alpha", "beta", "gamma"])
         # Patch active connector so skill_dirs() points at our temp root.
-        self.app.cfg.skill_dirs = lambda: [root]
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
 
         # Two clean, one blocked.
         responses = {
@@ -227,7 +227,7 @@ class TestScanAllUX(_SkillScanUXBase):
     def test_scan_all_handles_scanner_exception(self, mock_cls, _mock_list) -> None:
         """A scanner exception bumps the errored count without aborting the batch."""
         root = self._make_skills_dir(["alpha", "beta"])
-        self.app.cfg.skill_dirs = lambda: [root]
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
 
         def scan_impl(p):
             if p.endswith("/alpha"):
@@ -254,7 +254,7 @@ class TestScanAllUX(_SkillScanUXBase):
         """Empty skill_dirs() prints the expected guidance without crashing."""
         empty = os.path.join(self.tmp_dir, "empty-skills")
         os.makedirs(empty, exist_ok=True)
-        self.app.cfg.skill_dirs = lambda: [empty]
+        self.app.cfg.skill_dirs = lambda connector=None: [empty]
         mock_cls.return_value = MagicMock()
 
         result = self.invoke(["scan", "--all"])

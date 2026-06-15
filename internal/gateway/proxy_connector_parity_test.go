@@ -74,6 +74,14 @@ func applyHermeticConnectorHomes(t *testing.T) {
 	connector.CodexConfigPathOverride = filepath.Join(tmpHome, ".codex", "config.toml")
 	t.Cleanup(func() { connector.CodexConfigPathOverride = prevCodex })
 
+	prevOpenHands := connector.OpenHandsHooksPathOverride
+	connector.OpenHandsHooksPathOverride = filepath.Join(tmpHome, "workspace", ".openhands", "hooks.json")
+	t.Cleanup(func() { connector.OpenHandsHooksPathOverride = prevOpenHands })
+
+	prevAntigravity := connector.AntigravityHooksPathOverride
+	connector.AntigravityHooksPathOverride = filepath.Join(tmpHome, ".gemini", "config", "hooks.json")
+	t.Cleanup(func() { connector.AntigravityHooksPathOverride = prevAntigravity })
+
 	// Plan A4 / S0.12: ZeptoClaw's Setup refuses to proceed when the
 	// provider list is empty. Seed a single usable provider so the
 	// matrix subtest reaches the persist step.
@@ -188,10 +196,16 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	// under -race.
 	applyHermeticConnectorHomes(t)
 
-	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"}
+	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"}
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
+			// Copilot's Setup refuses any WorkspaceDir nested inside
+			// DataDir (audit DB / gateway config / secrets must not
+			// be reachable from the workspace tree). Use a sibling
+			// temp dir so every connector in the matrix gets a
+			// hermetic, validation-clean workspace.
+			workspaceDir := t.TempDir()
 			reg := connector.NewDefaultRegistry()
 
 			// Plan E1 / round-3 follow-up: when the gateway binary
@@ -240,7 +254,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 					ProxyAddr:    "127.0.0.1:4000",
 					APIAddr:      "127.0.0.1:18970",
 					APIToken:     "tok",
-					WorkspaceDir: filepath.Join(dir, "workspace"),
+					WorkspaceDir: workspaceDir,
 				},
 				health: NewSidecarHealth(),
 			}
@@ -278,9 +292,14 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	// than parallelize them.
 	applyHermeticConnectorHomes(t)
 
-	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"} {
+	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"} {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
+			// See note in TestSwitchConnector_PerConnectorPersistsState:
+			// keep WorkspaceDir outside DataDir so copilot's Setup
+			// validation (and any future connector with the same
+			// guard) does not roll the switch back to codex.
+			workspaceDir := t.TempDir()
 			reg := connector.NewDefaultRegistry()
 
 			// Same OpenClaw extension probe as
@@ -318,7 +337,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 					ProxyAddr:    "127.0.0.1:4000",
 					APIAddr:      "127.0.0.1:18970",
 					APIToken:     "tok",
-					WorkspaceDir: filepath.Join(dir, "workspace"),
+					WorkspaceDir: workspaceDir,
 				},
 				health:    NewSidecarHealth(),
 				inspector: NewGuardrailInspector("local", nil, nil, ""),

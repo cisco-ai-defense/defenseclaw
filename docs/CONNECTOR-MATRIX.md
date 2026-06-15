@@ -11,27 +11,128 @@ For the historical change log of how each row got to its current state, see
 
 ## At a glance
 
-| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex | Hermes | Cursor | Windsurf | Gemini CLI | Copilot CLI |
-| --------------------------- | -------- | --------- | ----------- | ----- | ------ | ------ | -------- | ---------- | ----------- |
-| LLM traffic interception    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         |
-| Proxy-side response scan    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         |
-| Hook telemetry              | OK       | n/a*      | OK          | OK    | OK     | OK     | OK       | OK         | OK          |
-| Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     |
-| Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | PreToolUse |
-| Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          |
-| Skill scan / list / enable  | OK       | OK        | OK          | OK    | skills | skills/rules | no skills | skills | skills/rules |
-| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | skills/plugins | skills | discovery | skills/extensions | skills |
-| Native OTLP ingest          | OK       | n/a       | OK          | OK    | hook-only | hook-only | hook-only | OK | env-opt-in |
+| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex | Hermes | Cursor | Windsurf | Gemini CLI | Copilot CLI | OpenHands |
+| --------------------------- | -------- | --------- | ----------- | ----- | ------ | ------ | -------- | ---------- | ----------- | --------- |
+| LLM traffic interception    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       |
+| Proxy-side response scan    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       |
+| Hook telemetry              | OK       | n/a*      | OK          | OK    | OK     | OK     | OK       | OK         | OK          | OK        |
+| Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     | partial   |
+| Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | PreToolUse | no        |
+| Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          | no        |
+| Skill scan / list / enable  | OK       | OK        | OK          | OK    | skills | skills/rules | no skills | skills | skills/rules | skills |
+| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | skills/plugins | skills | discovery | skills/extensions | skills | skills |
+| Native OTLP ingest          | OK       | n/a       | OK          | OK    | hook-only | hook-only | hook-only | OK | env-opt-in | hook-only |
 
 `*` = "not applicable" because the host agent has no schema slot for
 external-script hook invocation. See **By-design connector limitations**
 below for the architectural reason and how the security guarantee is
 preserved without it.
 
-The Hermes, Cursor, Windsurf, Gemini CLI, and Copilot CLI connectors do not
+The Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, and OpenCode connectors do not
 redirect LLM traffic through the proxy in v1. They are still first-class
 connectors with explicit hook, MCP, skill/rule/plugin/agent, CodeGuard, and
 telemetry capability rows where the vendor has documented local surfaces.
+
+### Observability dimension (multi-connector)
+
+Every hook connector emits a connector dimension on all telemetry rails, so a
+single gateway serving several connectors at once can be sliced per connector:
+the OTel metric label `connector`, the span/log attribute
+`defenseclaw.connector.source`, and the first-class `connector` field on audit
+rows / Splunk HEC / OTLP-ingest rows (plus `structured.connector` on hook
+rows). When more than one connector is active, `claw.mode` (and the OTel
+resource attribute `defenseclaw.claw.mode`) is set to `multi`. Per-connector
+*guardrail policy* lives under `guardrail.connectors.<name>` (hook connectors
+only; proxy connectors can't be multi peers). The egress **firewall** is the
+one cross-connector exception: it is global by design — a single host-wide
+ruleset filtering by destination, with per-connector allowed hosts merged into
+one allowlist at boot (see [`ARCHITECTURE.md` → Firewall scope](ARCHITECTURE.md)
+and [`OBSERVABILITY-CONTRACT.md` → Connector dimension fields](OBSERVABILITY-CONTRACT.md)).
+
+## Custom-provider enforcement (LLM traffic mode)
+
+Provider resolution is global, but whether a [custom provider](/docs/setup/unified-llm-key)
+touches the *agent* is per-connector. Each connector reports an
+`llm_traffic_mode` on `GET /v1/connectors` (and in `ConnectorCapabilities`):
+
+| Connector class | `llm_traffic_mode` | A bound custom provider… |
+| --- | --- | --- |
+| OpenClaw, ZeptoClaw | `proxy` | is **enforced** on the agent's model traffic (agent upstream, judge, or both) |
+| every hook connector (Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot, OpenHands, Antigravity, OpenCode) | `hooks-only` | configures DefenseClaw's **judge/aux model only** — the agent's own model calls are never routed through or inspected |
+
+The CLI states this when binding (`setup llm`) and when listing
+(`setup provider list`), so an operator can't silently attach a custom provider
+to a hook connector believing it changes the agent's model.
+
+## Platform support
+
+| Connector | macOS | Linux | Windows |
+| --------- | ----- | ----- | ------- |
+| OpenClaw, ZeptoClaw (proxy) | OK | OK | not supported |
+| Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, OpenCode (hook-based) | OK | OK | OK |
+
+Windows is **hook-only**: the shell-hook connectors run their hook
+decisions natively in the `defenseclaw` binary (the agent invokes
+`defenseclaw hook --connector <name> --event <event>`), so no Git Bash, `jq`,
+or shell shims are required. OpenCode is cross-platform without shims by a
+different route — its bridge plugin is JavaScript and calls the gateway over
+HTTP directly, so it never needs the native hook binary. The proxy connectors (OpenClaw, ZeptoClaw) need
+the local guardrail proxy, which DefenseClaw does not host on Windows; they are
+hidden from the connector pickers and rejected by setup there. The Go registry
+(`connectorSupportedOnOS`) and the Python `platform_support` module are the two
+sources of truth for this gating, kept in sync by a parity test.
+
+## Versioned Hook Contracts
+
+The machine-readable compatibility source lives at
+[`cli/defenseclaw/inventory/hook_contracts.json`](../cli/defenseclaw/inventory/hook_contracts.json).
+DefenseClaw setup refreshes `agent_discovery.json`, checks the installed
+connector version against this manifest, and refuses unsupported hook
+contracts in `mode=action` unless
+`DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing.
+
+After the gateway completes connector setup it writes
+`<data_dir>/hook_contract_lock.json`. That lock records the current
+installed connector version, normalized version, selected contract ID, hook
+script version, script digests, and DefenseClaw build version so a later
+doctor run can detect drift.
+
+Setup allows unsupported or unverified hook connector versions in observe mode
+with a warning. Action mode fails closed unless
+`DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing.
+
+| Connector | Current compatibility gate | Supported connector versions | Hook contract / script | AID surfaces |
+| --------- | -------------------------- | ---------------------------- | ---------------------- | ------------ |
+| OpenClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
+| ZeptoClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
+| Codex | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Claude Code | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| Cursor | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Gemini CLI | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Copilot CLI | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| OpenHands | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| OpenCode | hook contract | unversioned / stable plugin API | `opencode-hooks-v1` / `v6` (JS bridge plugin) | tool_call, tool_result |
+
+No hook contract currently has a `max_exclusive` ceiling. We only add an upper
+bound when an upstream release publishes a breaking hook change; otherwise,
+future connector versions remain reproducible through the lock file and drift
+checks instead of being blocked by a guessed major-version cap.
+
+Version floors are evidence-backed from upstream release notes or current
+vendor docs: Codex `0.124.0` is the stable-hooks release, Gemini CLI `0.26.0`
+enabled hooks by default, Cursor `1.7.0` introduced beta hooks, Hermes
+`0.11.0` added shell hooks for `pre_tool_call`, Windsurf `1.12.41` added user
+prompt hooks to the Cascade pre-hook set, and Copilot CLI `1.0.18` is the first
+release containing every event in the current DefenseClaw Copilot contract.
+OpenHands uses the current documented `.openhands/hooks.json` contract, has
+been validated with `OpenHands CLI 1.16.0`, and is accepted as unversioned
+until upstream publishes a hook-version floor. DefenseClaw installs OpenHands
+globally through `~/.openhands/hooks.json` by default and uses repo-local
+`.openhands/hooks.json` only when a workspace is pinned.
+Claude Code is pinned to the current documented hook surface captured at
+`2.1.144`; older Claude Code versions exposed smaller event sets.
 
 ## Hook Capability Matrix
 
@@ -41,7 +142,9 @@ telemetry capability rows where the vendor has documented local surfaces.
 | Cursor | yes | yes | `beforeShellExecution`, `beforeMCPExecution` | documented pre-action hooks | yes | user | `~/.cursor/hooks.json` |
 | Windsurf | yes | no | none | `pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use` | no | user | `~/.codeium/windsurf/hooks.json` |
 | Gemini CLI | yes | no | none | `BeforeAgent`, `BeforeModel`, `BeforeTool`, `AfterTool`, `AfterAgent` | yes | user | `~/.gemini/settings.json` |
-| Copilot CLI | yes | yes | `preToolUse` / `PreToolUse` | `PreToolUse`, `PermissionRequest`, stop/failure hooks | no | workspace | `<workspace>/.github/hooks/defenseclaw.json` |
+| Copilot CLI | yes | yes | `preToolUse` / `PreToolUse` | `PreToolUse`, `PermissionRequest`, stop/failure hooks | no | user,workspace | `~/.copilot/hooks/defenseclaw.json` or `<workspace>/.github/hooks/defenseclaw.json` |
+| OpenHands | yes | no | none | `pre_tool_use`, `user_prompt_submit`, `stop` | yes | user,workspace | `~/.openhands/hooks.json` or `<workspace>/.openhands/hooks.json` |
+| OpenCode | yes | no | none | `tool.execute.before` | yes | user | `~/.config/opencode/plugins/defenseclaw.js` (JS bridge plugin) |
 
 `confirm` verdicts are rendered as native ask only when the event is listed in
 `ask_events`. Unsupported `confirm` decisions are downgraded explicitly while
@@ -55,7 +158,9 @@ preserving `raw_action: "confirm"` in the hook response.
 | Cursor | `.cursor/mcp.json`, `~/.cursor/mcp.json` | `.cursor/skills`, `.agents/skills`, user equivalents | `.cursor/rules`, `AGENTS.md` | unsupported | unsupported | opt-in skill or rule |
 | Windsurf | existing documented/user MCP paths only | unsupported | existing documented/user rules paths only | unsupported | unsupported | opt-in rule only when a rules path exists |
 | Gemini CLI | `~/.gemini/settings.json` | `.gemini/skills`, `.agents/skills` | represented through skills/agents | `.gemini/extensions`, `~/.gemini/extensions` | `.gemini/agents`, `~/.gemini/agents` | opt-in skill |
-| Copilot CLI | `~/.copilot/mcp-config.json`, `.github/mcp.json`, `.mcp.json` | `.github/skills`, `.agents/skills`, `~/.copilot/skills` | `.github/instructions` | CLI marketplace/plugin flow | `.github/agents`, `~/.copilot/agents` | opt-in skill or rule |
+| Copilot CLI | `~/.copilot/mcp-config.json`, optional workspace `.github/mcp.json`, `.mcp.json` | `~/.copilot/skills`, optional workspace `.github/skills`, `.agents/skills` | optional workspace `.github/instructions` | CLI marketplace/plugin flow | `~/.copilot/agents`, optional workspace `.github/agents` | opt-in skill or rule |
+| OpenHands | `~/.openhands/mcp.json` | `~/.agents/skills`, `~/.openhands/skills/installed`, `~/.openhands/cache/skills/public-skills/skills` (`~/.openhands/skills`, `~/.openhands/microagents` discovery only; workspace equivalents with `--workspace`) | `AGENTS.md` discovery only when workspace-pinned | unsupported | unsupported | opt-in skill |
+| OpenCode | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) |
 
 CodeGuard native assets are never installed by CLI startup, `init`, sandbox
 setup, or sidecar setup. Operators must run `defenseclaw codeguard install`
@@ -70,7 +175,124 @@ non-CodeGuard paths require `--replace`.
 | Claude Code | native OTLP env in settings.json | header token | hook telemetry |
 | Gemini CLI | native logs/metrics/traces in settings.json | loopback path token | hook telemetry |
 | Copilot CLI | native traces/metrics via documented env vars | header token | hook telemetry |
-| Hermes / Cursor / Windsurf | no documented native OTLP | n/a | hook-generated logs, spans, counters |
+| OpenHands | no documented native OTLP | header token | hook telemetry |
+| Hermes / Cursor / Windsurf / OpenCode | no documented native OTLP | n/a | hook-generated logs, spans, counters |
+
+---
+
+## Live E2E coverage
+
+The [`.github/workflows/connector-live-e2e.yml`](../.github/workflows/connector-live-e2e.yml)
+workflow proves each hook connector end-to-end against real upstream agents
+and flags when an upstream release breaks a hook. It is intentionally
+separate from `e2e.yml` so it can go red on an upstream regression without
+blocking the OpenClaw stack gate. The harness lives under
+[`scripts/live-connector-e2e/`](../scripts/live-connector-e2e).
+
+### Two layers
+
+| Layer | What it proves | LLM? | Secrets? | OSes | When |
+| ----- | -------------- | ---- | -------- | ---- | ---- |
+| **A — Contract matrix** | Feeds golden stdin payloads into the *installed* hook entrypoint and asserts the gateway received the event, the verdict was shaped correctly, and teardown is clean. | no | no | linux, macos, windows | every run; fork-safe |
+| **B — Live agent matrix** | Installs the real agent at its latest version, runs `defenseclaw setup`, drives lifecycle + forced tool calls through the real harness, and asserts observe / block / OTLP / teardown. | yes (deterministic prompts) | yes | per the reality matrix below | nightly + manual dispatch |
+
+Layer A targets `~/.defenseclaw/hooks/<connector>-hook.sh` on Linux/macOS and
+the native `defenseclaw-gateway hook --connector <c> --event <e>` subcommand on
+Windows. Both forward the payload to the local gateway, so every assertion
+works against `~/.defenseclaw/gateway.jsonl` + `audit.db` regardless of OS.
+
+Hooks are **harness-driven**, not LLM-driven: the agent fires
+`SessionStart` / `PreToolUse` / etc. as a function of its lifecycle, so Layer B
+only needs the model to run the one shell command it is explicitly told to.
+Enforcement is proven with a filesystem **sentinel**: the allow probe runs a
+benign command that creates a marker file; the block probe asks the agent to
+read `/etc/shadow` (rule `PATH-ETC-SHADOW`, CRITICAL) — if the marker ever
+appears, the command ran and the block regressed. Reading `/etc/shadow` is
+harmless (permission denied) if a regression ever lets it through.
+
+### Per-connector reality matrix (Layer B)
+
+| Connector | Linux | macOS | Windows | Live driver headless invocation | Notes |
+| --------- | ----- | ----- | ------- | ------------------------------- | ----- |
+| Codex | live | live | live\* | `codex exec --json --full-auto` | native OTLP asserted |
+| Claude Code | live | live | live\* | `claude -p` | native OTLP asserted; native-ask is Layer A only |
+| Gemini CLI | live | live | live\* | `gemini -p -o json --approval-mode yolo` | advisory events cannot block |
+| Cursor | live | live | live\* | `cursor-agent -p --force` | gated on a one-time headless-hook validation |
+| Copilot CLI | live\* | live\* | live\* | `copilot -p` | user-level hooks only; entitled token |
+| OpenHands | live | — | — | `openhands --headless --json` | Docker runtime, Linux-only |
+| OpenCode | contract-only | contract-only | contract-only | — | JS bridge plugin (tool.execute.before blocks); live smoke pending |
+| Hermes | contract-only | contract-only | contract-only | — | full lifecycle mapped (`hermes-hooks-v1`): `pre_tool_call` blocks, `pre_llm_call` injects context, `post_tool_call`/`post_llm_call`/session/subagent observe; live smoke pending |
+| Windsurf | contract-only | contract-only | contract-only | — | no headless CLI/SDK |
+| Antigravity | contract-only | contract-only | contract-only | — | headless auth is OAuth, no API key |
+
+`\*` = advisory cell (`continue-on-error`) until it goes consistently green.
+All Windows live cells and every Copilot cell start advisory; they are promoted
+to gating once stable. Contract-only connectors run Layer A on every OS and are
+intentionally absent from Layer B.
+
+> **Current rollout:** the nightly schedule runs **Layer A only**. Layer B is
+> manual-dispatch-only and presently scoped to the connectors we can
+> authenticate with Azure OpenAI / Amazon Bedrock — **Codex, Claude Code, and
+> OpenHands**. **Gemini CLI, Cursor, and Copilot live cells are deferred** until
+> their native keys (`GOOGLE_API_KEY`, `CURSOR_API_KEY`, `COPILOT_CLI_TOKEN`)
+> are configured; all three still get full Layer A coverage in the meantime.
+
+### Alternative LLM auth (Azure OpenAI / Amazon Bedrock)
+
+The live drivers can source the model from a non-default backend. This only
+changes where the agent's LLM traffic goes — the hook bus, verdicts, and OTLP
+are unaffected, so hook coverage is identical. Selection is per backend, not
+global: set the repo Variable (`DC_USE_AZURE` / `DC_USE_BEDROCK` = `1`) to make
+it the nightly default, or flip the `use_azure` / `use_bedrock` dispatch toggle.
+
+| Connector | Default | Azure OpenAI (`DC_USE_AZURE=1`) | Amazon Bedrock (`DC_USE_BEDROCK=1`) |
+| --------- | ------- | ------------------------------- | ----------------------------------- |
+| Codex | `OPENAI_API_KEY` | yes — seeds `[model_providers.azure]` in `~/.codex/config.toml` | no (Codex is OpenAI-only) |
+| Claude Code | `ANTHROPIC_API_KEY` | no | yes — `CLAUDE_CODE_USE_BEDROCK=1` + AWS chain |
+| OpenHands | `LLM_API_KEY` | yes — `azure/<deployment>` via LiteLLM | yes — `bedrock/<profile>` via LiteLLM (wins if both set) |
+| Gemini CLI / Cursor / Copilot | native key | — | — |
+
+Required inputs per backend:
+
+- **Azure**: secret `AZURE_OPENAI_API_KEY`; Variables `AZURE_OPENAI_ENDPOINT`
+  (resource URL), `AZURE_OPENAI_DEPLOYMENT` (used as the model id),
+  optional `AZURE_OPENAI_API_VERSION` (OpenHands only; defaults to a recent
+  preview). The deployment must be a model the connector supports (Codex needs
+  a Responses-API-capable deployment).
+- **Bedrock**: secret `AWS_BEARER_TOKEN_BEDROCK` *or* the pair
+  `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ optional
+  `AWS_SESSION_TOKEN`); Variable `AWS_REGION` (defaults to `us-east-1`).
+  Optional model-id overrides: `CLAUDE_BEDROCK_MODEL`, `OPENHANDS_BEDROCK_MODEL`.
+
+Gemini CLI, Cursor, and Copilot have **no** Azure/Bedrock substitute — they
+require their native provider key (`GOOGLE_API_KEY`, `CURSOR_API_KEY`,
+`COPILOT_CLI_TOKEN`) to run live.
+
+### Version policy (alert-only)
+
+The workflow is an **evidence engine, not an auto-bumper**. Each live cell
+records the resolved upstream version into the job summary. On any live-cell
+failure the `report` job opens or updates a GitHub issue labeled
+`connector-regression` listing the failing connector / OS / event / version,
+and links the uploaded log artifact. It never edits a version file.
+
+Setting the highest approved version stays a deliberate human action:
+
+1. A maintainer triages whether DefenseClaw's decode/map/respond needs a fix or
+   the upstream agent changed its hook contract.
+2. If DefenseClaw must drop support for the new release, raise `min_inclusive`
+   or set `max_exclusive` in
+   [`cli/defenseclaw/inventory/hook_contracts.json`](../cli/defenseclaw/inventory/hook_contracts.json)
+   and [`internal/gateway/connector/hook_contract.go`](../internal/gateway/connector/hook_contract.go).
+3. Once green again, record the validated version in
+   [`cli/defenseclaw/inventory/validated_versions.json`](../cli/defenseclaw/inventory/validated_versions.json)
+   (per connector × OS: `last_validated_version`, `last_validated_at`,
+   `run_url`). This file is human-reviewed only; the workflow reads it for
+   context but never writes it.
+
+The runtime drift guard (`hook_contract_lock.json` + the action-mode
+fail-closed behavior described above) is unchanged — this workflow is what
+generates the evidence a maintainer uses to update the floors and ceilings.
 
 ---
 

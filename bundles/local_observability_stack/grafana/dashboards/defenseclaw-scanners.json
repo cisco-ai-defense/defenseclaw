@@ -2,12 +2,19 @@
   "annotations": {
     "list": []
   },
-  "description": "Scanner operational health: throughput, queue depth, scan duration, errors, quarantine. Rule-level finding analysis (top rules, heat map, target attribution, finding\u2192verdict correlation) lives on the Findings dashboard \u2014 click 'Open findings detail' from any scanner row.",
+  "description": "Scanner operations for hook connectors: scan events, findings by rule/scanner/severity (defenseclaw_scan_findings_by_rule_total), and live scan_finding detail from Loki.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "liveNow": false,
   "links": [
+    {
+      "title": "Agent Activity (Live)",
+      "type": "link",
+      "url": "/d/defenseclaw-activity?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
     {
       "title": "Overview",
       "type": "link",
@@ -55,9 +62,9 @@
           "type": "prometheus",
           "uid": "defenseclaw-prometheus"
         },
-        "definition": "label_values(defenseclaw_scan_count_total, scanner)",
+        "definition": "label_values(defenseclaw_gateway_events_emitted_total{event_type=\"scan\"}, scanner)",
         "query": {
-          "query": "label_values(defenseclaw_scan_count_total, scanner)",
+          "query": "label_values(defenseclaw_gateway_events_emitted_total{event_type=\"scan\"}, scanner)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -92,9 +99,9 @@
           "type": "prometheus",
           "uid": "defenseclaw-prometheus"
         },
-        "definition": "label_values(defenseclaw_scan_count_total, target_type)",
+        "definition": "label_values(defenseclaw_gateway_events_emitted_total{event_type=\"scan\"}, target_type)",
         "query": {
-          "query": "label_values(defenseclaw_scan_count_total, target_type)",
+          "query": "label_values(defenseclaw_gateway_events_emitted_total{event_type=\"scan\"}, target_type)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -202,7 +209,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_scan_count_total{scanner=~\"$scanner\", target_type=~\"$target_type\"}[5m])) * 60 or vector(0)",
+          "expr": "sum(increase(defenseclaw_gateway_events_emitted_total{event_type=\"scan\"}[$__range])) or vector(0)",
           "refId": "A"
         }
       ]
@@ -222,7 +229,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_scan_errors_total{scanner=~\"$scanner\", target_type=~\"$target_type\"}[5m])) * 60 or vector(0)",
+          "expr": "sum(increase(defenseclaw_gateway_errors_total[$__range])) or vector(0)",
           "refId": "A"
         }
       ],
@@ -264,7 +271,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_scan_findings_gauge{severity=~\"$severity\"}) or vector(0)",
+          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}[$__range])) or vector(0)",
           "refId": "A"
         }
       ]
@@ -284,7 +291,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_quarantine_actions_total[5m])) * 60 or vector(0)",
+          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"block\"}[$__range])) or vector(0)",
           "refId": "A"
         }
       ]
@@ -316,7 +323,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (scanner, verdict) (rate(defenseclaw_scan_count_total{scanner=~\"$scanner\", target_type=~\"$target_type\"}[$__rate_interval]))",
+          "expr": "sum by (event_type) (rate(defenseclaw_gateway_events_emitted_total{event_type=~\"scan|scan_finding\"}[$__rate_interval]))",
           "legendFormat": "{{scanner}} \u00b7 {{verdict}}",
           "refId": "A"
         }
@@ -342,17 +349,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(defenseclaw_scan_duration_milliseconds_bucket{scanner=~\"$scanner\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(defenseclaw_scan_duration_milliseconds_bucket{scanner=~\"$scanner\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "p95"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(defenseclaw_scan_duration_milliseconds_bucket{scanner=~\"$scanner\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(defenseclaw_ai_discovery_duration_milliseconds_bucket{scanner=~\"$scanner\"}[$__rate_interval])) by (le))",
           "legendFormat": "p99",
           "refId": "p99"
         }
@@ -378,7 +385,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (le) (increase(defenseclaw_scan_duration_milliseconds_bucket{scanner=~\"$scanner\"}[$__rate_interval]))",
+          "expr": "sum by (le) (increase(defenseclaw_ai_discovery_duration_milliseconds_bucket[$__range]))",
           "format": "heatmap",
           "legendFormat": "{{le}}",
           "refId": "A"
@@ -417,7 +424,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (severity) (rate(defenseclaw_scan_findings_total{scanner=~\"$scanner\", target_type=~\"$target_type\", severity=~\"$severity\"}[$__rate_interval]))",
+          "expr": "sum by (severity) (rate(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\"}[$__rate_interval]))",
           "legendFormat": "{{severity}}",
           "refId": "A"
         }
@@ -449,7 +456,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (scanner) (rate(defenseclaw_scan_findings_total{scanner=~\"$scanner\", target_type=~\"$target_type\", severity=~\"$severity\"}[$__rate_interval]))",
+          "expr": "sum by (scanner) (rate(defenseclaw_scan_findings_by_rule_total{severity=~\"$severity\"}[$__rate_interval]))",
           "legendFormat": "{{scanner}}",
           "refId": "A"
         }
@@ -487,7 +494,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (quarantine_op, quarantine_result) (rate(defenseclaw_quarantine_actions_total[$__rate_interval]))",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{action=\"block\"}[$__rate_interval])) or vector(0)",
           "legendFormat": "{{quarantine_op}} \u00b7 {{quarantine_result}}",
           "refId": "A"
         }
@@ -514,7 +521,7 @@
       },
       "targets": [
         {
-          "expr": "defenseclaw_scanner_queue_depth{scanner=~\"$scanner\"}",
+          "expr": "defenseclaw_runtime_goroutines",
           "legendFormat": "{{scanner}}",
           "refId": "A"
         }
@@ -546,7 +553,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (scanner, error_type) (rate(defenseclaw_scan_errors_total{scanner=~\"$scanner\"}[$__rate_interval]))",
+          "expr": "sum by (event_type) (rate(defenseclaw_gateway_errors_total[$__rate_interval]))",
           "legendFormat": "{{scanner}} \u00b7 {{error_type}}",
           "refId": "A"
         }
@@ -573,7 +580,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sort_desc(sum by (scanner, rule_id, severity) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}[1h]))))",
+          "expr": "topk(20, sum by (scanner, rule_id, severity) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}[$__range])))",
           "instant": true,
           "format": "table",
           "refId": "A"

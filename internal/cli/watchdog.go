@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -129,13 +128,33 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	fmt.Fprintf(os.Stderr, "[watchdog] starting: poll=%s debounce=%d url=%s\n",
 		interval, debounce, healthURL)
 
-	// Write PID file
+	// S3.HIGH_BUG ("Stale watchdog PID file can stop an
+	// unrelated process"): hold an exclusive lock on the PID file for the
+	// watchdog's entire lifetime so a second instance refuses to start,
+	// and record a JSON fingerprint (pid + executable + start time) so
+	// stop/status can verify the recorded PID still belongs to this
+	// process before signalling. acquireWatchdogPIDFile is
+	// platform-specific (flock on unix, LockFileEx on Windows).
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
-	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644)
-	defer os.Remove(pidPath)
+	exe, exeErr := os.Executable()
+	if exeErr != nil {
+		exe = ""
+	}
+	pidFile, err := acquireWatchdogPIDFile(pidPath, watchdogPIDInfo{
+		PID:        os.Getpid(),
+		Executable: exe,
+		StartTime:  time.Now().Unix(),
+	})
+	if err != nil {
+		return fmt.Errorf("watchdog: another instance is already running (cannot acquire %s): %w", pidPath, err)
+	}
+	defer func() {
+		_ = pidFile.Close()
+		_ = os.Remove(pidPath)
+	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), watchdogShutdownSignals()...)
 	defer stop()
 
 	// The watchdog subcommand overrides rootCmd.PersistentPreRunE (see the
@@ -212,7 +231,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 				if current != stateHealthy {
 					fmt.Fprintf(os.Stderr, "[watchdog] gateway recovered: %s → healthy\n", current)
 					_ = notify.Send("DefenseClaw", "Gateway is back online. Protection restored.")
-					dispatchHealthEvent(webhooks, "gateway-recovered", "INFO", "Gateway recovered from "+current.String())
+					dispatchHealthEvent(webhooks, string(audit.ActionGatewayRecovered), "INFO", "Gateway recovered from "+current.String())
 					// The watchdog is the only surface that observes the
 					// full "down → healthy" transition from outside the
 					// sidecar process, so this is where the reconnection
@@ -231,7 +250,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 				if failCount >= debounce && current == stateHealthy {
 					fmt.Fprintf(os.Stderr, "[watchdog] gateway degraded\n")
 					_ = notify.Send("DefenseClaw", "Gateway guardrail is disconnected. Prompt protection is disabled.")
-					dispatchHealthEvent(webhooks, "guardrail-degraded", "HIGH", "Guardrail proxy is disconnected; prompt protection is disabled")
+					dispatchHealthEvent(webhooks, string(audit.ActionGuardrailDegraded), "HIGH", "Guardrail proxy is disconnected; prompt protection is disabled")
 					current = stateDegraded
 					saveWatchdogState(dataDir, current)
 				}
@@ -241,7 +260,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 				if failCount >= debounce && current != stateDown {
 					fmt.Fprintf(os.Stderr, "[watchdog] gateway down (after %d failures)\n", failCount)
 					_ = notify.Send("DefenseClaw", "Gateway is not running. Your AI agent traffic is unprotected.")
-					dispatchHealthEvent(webhooks, "gateway-down", "CRITICAL", fmt.Sprintf("Gateway unreachable after %d consecutive failures", failCount))
+					dispatchHealthEvent(webhooks, string(audit.ActionGatewayDown), "CRITICAL", fmt.Sprintf("Gateway unreachable after %d consecutive failures", failCount))
 					current = stateDown
 					saveWatchdogState(dataDir, current)
 				}
@@ -319,17 +338,18 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
-	// Check if already running.
-	if data, err := os.ReadFile(pidPath); err == nil {
-		if pid, err := strconv.Atoi(string(data)); err == nil {
-			if proc, err := os.FindProcess(pid); err == nil {
-				if err := proc.Signal(syscall.Signal(0)); err == nil {
-					Warn(fmt.Sprintf("Watchdog is already running (PID %d)", pid))
-					return nil
-				}
-			}
-		}
+	// Probe for a running watchdog by attempting to take the PID-file
+	// lock. If the lock is held, the watchdog is alive. If the lock is
+	// free, any old PID file content is by definition stale (a live
+	// watchdog holds the lock for its whole lifetime) so we drop it
+	// before spawning the new child.
+	if locked, info := watchdogIsLocked(pidPath); locked {
+		Warn(fmt.Sprintf("Watchdog is already running (PID %d)", info.PID))
+		return nil
 	}
+	// Stale or absent: clear the file so the child gets a clean canvas
+	// and a name-only attacker cannot leave a fake PID for stop to signal.
+	_ = os.Remove(pidPath)
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -366,9 +386,9 @@ func (c *execCommand) start() error {
 		return fmt.Errorf("open %s: %w", os.DevNull, err)
 	}
 	proc, err := os.StartProcess(c.path, append([]string{c.path}, c.args...), &os.ProcAttr{
-		Dir:   "/",
+		Dir:   watchdogStartDir(),
 		Files: []*os.File{devNull, c.logFile, c.logFile},
-		Sys:   &syscall.SysProcAttr{Setsid: true},
+		Sys:   watchdogSysProcAttr(),
 	})
 	_ = devNull.Close()
 	if err != nil {
@@ -383,28 +403,33 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
-	data, err := os.ReadFile(pidPath)
+	info, err := readWatchdogPIDInfo(pidPath)
 	if err != nil {
 		fmt.Println(Dim("Watchdog is not running"))
 		return nil
 	}
 
-	pid, err := strconv.Atoi(string(data))
-	if err != nil {
-		fmt.Println(Dim("Watchdog is not running (invalid PID file)"))
+	// S3.HIGH_BUG ("Stale watchdog PID file can stop an unrelated
+	// process"): verify the recorded fingerprint BEFORE signalling. A
+	// PID-reuse race (the watchdog crashed and the kernel handed its PID
+	// to an unrelated user-owned process) used to send SIGTERM/SIGKILL to
+	// that unrelated process. The executable fingerprint / liveness check
+	// now rejects the stale PID and we just remove the file.
+	if !verifyWatchdogProcess(info) {
+		fmt.Println(Dim("Watchdog is not running (stale PID file removed)"))
 		_ = os.Remove(pidPath)
 		return nil
 	}
 
-	proc, err := os.FindProcess(pid)
+	proc, err := os.FindProcess(info.PID)
 	if err != nil {
 		fmt.Println(Dim("Watchdog is not running"))
 		_ = os.Remove(pidPath)
 		return nil
 	}
 
-	fmt.Printf("Stopping watchdog (PID %d)... ", pid)
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
+	fmt.Printf("Stopping watchdog (PID %d)... ", info.PID)
+	if err := watchdogTerminate(proc); err != nil {
 		fmt.Println(Dim("already stopped"))
 		_ = os.Remove(pidPath)
 		return nil
@@ -420,7 +445,12 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		_ = proc.Signal(syscall.SIGKILL)
+		// Re-verify the fingerprint immediately before force-kill so a
+		// fast-restart-and-PID-reuse window cannot be exploited to kill
+		// the new occupant of the recycled PID.
+		if verifyWatchdogProcess(info) {
+			_ = watchdogKill(proc)
+		}
 	}
 
 	_ = os.Remove(pidPath)
@@ -435,7 +465,7 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	cfg, cfgErr := config.Load()
 	enabled := cfgErr == nil && cfg.Gateway.Watchdog.Enabled
 
-	data, err := os.ReadFile(pidPath)
+	info, err := readWatchdogPIDInfo(pidPath)
 	if err != nil {
 		if enabled {
 			Warn("Watchdog: enabled but not running")
@@ -447,30 +477,105 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		fmt.Println(Dim("Watchdog: not running (invalid PID file)"))
+	// Same fingerprint check as stop. If the recorded executable no
+	// longer matches the live process the PID was reused by an unrelated
+	// process; report not-running and clear the stale file.
+	if !verifyWatchdogProcess(info) {
+		Warn(fmt.Sprintf("Watchdog: not running (PID %d does not match recorded fingerprint)", info.PID))
 		_ = os.Remove(pidPath)
 		return nil
 	}
 
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		Warn(fmt.Sprintf("Watchdog: not running (PID %d not found)", pid))
-		_ = os.Remove(pidPath)
-		return nil
-	}
-
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		Warn(fmt.Sprintf("Watchdog: not running (PID %d is stale)", pid))
-		_ = os.Remove(pidPath)
-		return nil
-	}
-
-	fmt.Printf("Watchdog: %s (PID %d)\n", Style("running", "fg=green", "bold"), pid)
+	fmt.Printf("Watchdog: %s (PID %d)\n", Style("running", "fg=green", "bold"), info.PID)
 
 	state := loadWatchdogState(dataDir)
 	fmt.Printf("  %s %s\n", Style("Last known state:", "fg=bright_black", "bold"), state.String())
 
 	return nil
+}
+
+// watchdogPIDInfo is the JSON payload of watchdog.pid. The fingerprint
+// (Executable + StartTime) lets stop/status verify that the recorded PID
+// is still the same process that wrote the file rather than a recycled
+// PID owned by an unrelated process. See S3.HIGH_BUG "Stale watchdog PID
+// file can stop an unrelated process".
+type watchdogPIDInfo struct {
+	PID        int    `json:"pid"`
+	Executable string `json:"executable,omitempty"`
+	StartTime  int64  `json:"start_time,omitempty"`
+}
+
+// writeWatchdogPIDInfo truncates f and writes info as JSON, flushing to
+// disk. The caller is responsible for holding the platform lock on f.
+func writeWatchdogPIDInfo(f *os.File, info watchdogPIDInfo) error {
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		return err
+	}
+	if err := json.NewEncoder(f).Encode(info); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
+// readWatchdogPIDInfo parses the JSON PID file. For backward compat with
+// older watchdog versions that wrote a bare integer PID, the parser also
+// accepts a plain decimal number; in that case the returned info has no
+// Executable / StartTime and verifyWatchdogProcess only does the liveness
+// check.
+func readWatchdogPIDInfo(path string) (watchdogPIDInfo, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return watchdogPIDInfo{}, err
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return watchdogPIDInfo{}, fmt.Errorf("watchdog: empty pid file")
+	}
+	var info watchdogPIDInfo
+	if err := json.Unmarshal([]byte(trimmed), &info); err == nil {
+		if info.PID > 0 {
+			return info, nil
+		}
+		return watchdogPIDInfo{}, fmt.Errorf("watchdog: invalid pid in pid file")
+	}
+	// Legacy plain-text fallback. Only the liveness check is possible.
+	pid, err := strconv.Atoi(trimmed)
+	if err != nil || pid <= 0 {
+		return watchdogPIDInfo{}, fmt.Errorf("watchdog: malformed pid file")
+	}
+	return watchdogPIDInfo{PID: pid}, nil
+}
+
+// verifyWatchdogProcess returns true only if the PID still resolves to a
+// running process AND, when an executable fingerprint is available and the
+// platform exposes /proc, /proc/<pid>/exe matches. Without this the
+// previous implementation treated ANY live process at the recorded PID as
+// "the watchdog" and would happily terminate an unrelated process that
+// grabbed the recycled PID after a crash. See DeepSec S3.HIGH_BUG.
+func verifyWatchdogProcess(info watchdogPIDInfo) bool {
+	if info.PID <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(info.PID)
+	if err != nil {
+		return false
+	}
+	if !watchdogProcessAlive(info.PID, proc) {
+		return false
+	}
+	if info.Executable == "" {
+		// Legacy/bare-int pid file: liveness is all we can verify.
+		return true
+	}
+	// Linux exposes the running binary at /proc/<pid>/exe; on platforms
+	// without it (macOS, Windows) we conservatively trust the liveness
+	// check, matching the daemon-side limitation.
+	exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
+	if err != nil || exePath == "" {
+		return true
+	}
+	return exePath == info.Executable
 }

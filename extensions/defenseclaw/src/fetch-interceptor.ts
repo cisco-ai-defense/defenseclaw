@@ -261,7 +261,34 @@ function extractHost(urlStr: string): string {
  * "api.openai.com.evil.test" or a substring match somewhere inside
  * the query string. Entries are stored lower-cased (see
  * applyProviderRegistry + providers.json build step).
+ *
+ * Avarice F-1589: pattern entries with `*` wildcards
+ * ("bedrock-runtime.*.amazonaws.com") match exactly one DNS label
+ * for each `*`. Legacy bare-prefix entries that end with `.` (e.g.
+ * "bedrock-runtime.") are explicitly rejected because the Go
+ * matcher treats them as full hostnames now and they would silently
+ * never match anything here.
  */
+function matchesWildcardDomain(host: string, pattern: string): boolean {
+  const hostLabels = host.split(".");
+  const patternLabels = pattern.split(".");
+  if (hostLabels.length < patternLabels.length) return false;
+  // Anchor at the right (TLD) so leading `*` segments can absorb
+  // arbitrary subdomains (e.g. an attacker prefix).
+  const offset = hostLabels.length - patternLabels.length;
+  for (let i = 0; i < patternLabels.length; i++) {
+    const p = patternLabels[i];
+    const h = hostLabels[offset + i];
+    if (p === "*") continue;
+    if (p !== h) return false;
+  }
+  // For exact match (no leading wildcard) require label counts to
+  // match, so "api.openai.com" doesn't accept "evil.api.openai.com"
+  // here — that's handled by the explicit subdomain branch in
+  // matchesLLMDomain.
+  return offset === 0 || patternLabels[0] === "*";
+}
+
 function matchesLLMDomain(host: string): boolean {
   if (!host) return false;
   for (const domain of LLM_DOMAINS) {
@@ -272,6 +299,17 @@ function matchesLLMDomain(host: string): boolean {
     const slash = domain.indexOf("/");
     const bare = slash >= 0 ? domain.slice(0, slash) : domain;
     if (!bare) continue;
+    // Avarice F-1589 / F-1185: explicitly reject the legacy
+    // ends-with-dot form ("bedrock-runtime.") which the Go side
+    // used to treat as a hostname prefix. With matchProviderDomain
+    // upgraded to require label-pinned wildcards, the corresponding
+    // TS matcher MUST also reject the legacy form to keep the two
+    // sides in sync.
+    if (bare.endsWith(".")) continue;
+    if (bare.includes("*")) {
+      if (matchesWildcardDomain(host, bare)) return true;
+      continue;
+    }
     if (host === bare) return true;
     if (host.endsWith("." + bare)) return true;
   }
@@ -299,11 +337,26 @@ export function isLLMUrl(url: string, guardrailPort: number): boolean {
 }
 
 function isAlreadyProxied(url: string, guardrailPort: number): boolean {
-  // Only skip requests already targeting the guardrail proxy itself.
-  return (
-    url.includes(`127.0.0.1:${guardrailPort}`) ||
-    url.includes(`localhost:${guardrailPort}`)
-  );
+  // Avarice F-1585: a substring check of the form
+  //   url.includes("127.0.0.1:<port>")
+  // would match any provider URL that happens to embed that string
+  // anywhere — path, query, fragment — and skip the guardrail
+  // entirely. Parse and compare hostname + port directly so a
+  // crafted query parameter like
+  //   https://api.openai.com/v1/chat/completions?proxy=127.0.0.1:43099
+  // routes through the proxy as expected.
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+  if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+    return false;
+  }
+  return port === String(guardrailPort);
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +384,10 @@ export const LLM_PATH_SUFFIXES: ReadonlyArray<string> = [
   ":streamGenerateContent",
   "/converse",
   "/converse-stream",
+  // Bedrock InvokeModel REST shape: POST /model/<id>/invoke and the
+  // streaming /invoke-with-response-stream variant.
+  "/invoke",
+  "/invoke-with-response-stream",
   "/api/chat",
   "/api/generate",
   "/responses",
@@ -396,6 +453,38 @@ function extractPath(urlStr: string): string {
 export function hasLLMPathSuffix(urlStr: string): boolean {
   const path = extractPath(urlStr);
   return LLM_PATH_SUFFIXES.some(s => path.endsWith(s) || path.includes(s));
+}
+
+/**
+ * Strip credential material out of `u`, mutating the URL in place. Provider
+ * secrets are routinely smuggled in the query string — Gemini's `?key=`, AWS
+ * SigV4 pre-signed `?X-Amz-Signature=` / `?X-Amz-Credential=`, and assorted
+ * `?token=` shapes — and occasionally in `user:pass@` userinfo. Any URL
+ * written to a log line or egress telemetry event must have these stripped
+ * first. The actual outbound request is built from a separate, unmodified
+ * URL, so redaction here never perturbs the proxied call.
+ */
+function redactUrlSecrets(u: URL): void {
+  for (const k of [...u.searchParams.keys()]) {
+    u.searchParams.set(k, "<redacted>");
+  }
+  if (u.username) u.username = "";
+  if (u.password) u.password = "";
+}
+
+/**
+ * Scrub secret-bearing query parameters out of a URL before it is written to
+ * a console log. Falls back to the original string if the URL cannot be
+ * parsed.
+ */
+export function scrubUrlForLog(urlStr: string): string {
+  try {
+    const u = new URL(urlStr);
+    redactUrlSecrets(u);
+    return u.toString();
+  } catch {
+    return urlStr;
+  }
 }
 
 /** Returns true when the hostname is on the package-registry / telemetry allowlist. */
@@ -744,14 +833,19 @@ export function createFetchInterceptor(
   const proxyBase = `http://127.0.0.1:${guardrailPort}`;
   let originalFetch: typeof globalThis.fetch | null = null;
   let originalHttpsRequest: typeof https.request | null = null;
+  let originalHttpRequest: typeof http.request | null = null;
+  let originalHttpGet: typeof http.get | null = null;
   let egressReporter: EgressReporter | null = null;
 
   // Extract { host, path } from a URL string without throwing. Missing
   // pieces are tolerated so the caller's downstream fetch is never
-  // perturbed by a malformed URL in telemetry.
+  // perturbed by a malformed URL in telemetry. Query-parameter values are
+  // redacted so secret-bearing URLs (Gemini ?key=, AWS SigV4 signatures)
+  // never reach the egress telemetry sink.
   function extractHostPath(urlStr: string): { host: string; path: string } {
     try {
       const u = new URL(urlStr);
+      redactUrlSecrets(u);
       return { host: u.hostname, path: `${u.pathname}${u.search}` };
     } catch {
       return { host: "", path: urlStr };
@@ -852,11 +946,11 @@ export function createFetchInterceptor(
 
       if (shapeBranch === "shape") {
         console.log(
-          `[defenseclaw] intercepted LLM-shaped call → ${urlStr} (body_shape=${bodyShape}) proxied via ${proxyBase}`,
+          `[defenseclaw] intercepted LLM-shaped call → ${scrubUrlForLog(urlStr)} (body_shape=${bodyShape}) proxied via ${proxyBase}`,
         );
       } else {
         console.log(
-          `[defenseclaw] intercepted LLM call → ${urlStr} proxied via ${proxyBase}`,
+          `[defenseclaw] intercepted LLM call → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`,
         );
       }
 
@@ -889,7 +983,8 @@ export function createFetchInterceptor(
     // Also patch https.request so axios, undici, and other non-fetch HTTP
     // clients are intercepted. All of them ultimately use node:https.request.
     originalHttpsRequest = https.request.bind(https);
-    const originalHttpRequest = http.request.bind(http);
+    originalHttpRequest = http.request.bind(http);
+    originalHttpGet = http.get.bind(http);
 
     type NodeRequestOptions = Record<string, unknown>;
     type NodeIncomingMessage = unknown;
@@ -910,8 +1005,69 @@ export function createFetchInterceptor(
       urlOrOptions: string | URL | NodeRequestOptions,
       secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
     ): string {
-      if (typeof urlOrOptions === "string") return urlOrOptions;
-      if (urlOrOptions instanceof URL) return urlOrOptions.toString();
+      // Avarice F-1587: when the first argument is a URL string or
+      // URL object, Node still merges the second options object's
+      // hostname/port/path/protocol overrides on top of it. The
+      // legacy code returned the first argument verbatim, so a
+      // caller could pass a benign URL ("https://example.com/foo")
+      // alongside an options bag containing
+      //   { hostname: "api.openai.com", path: "/v1/messages" }
+      // and the interceptor classified the request using only the
+      // benign URL. Force-merge the options overlay here so the
+      // shape and known-provider checks see the actual
+      // post-merge target.
+      const overlay = (typeof secondArg === "object" && secondArg !== null
+        ? (secondArg as {
+            host?: unknown;
+            hostname?: unknown;
+            port?: unknown;
+            path?: unknown;
+            protocol?: unknown;
+          })
+        : null);
+
+      if (typeof urlOrOptions === "string" || urlOrOptions instanceof URL) {
+        const base =
+          typeof urlOrOptions === "string" ? urlOrOptions : urlOrOptions.toString();
+        if (!overlay) return base;
+        let parsed: URL;
+        try {
+          parsed = new URL(base);
+        } catch {
+          return base;
+        }
+        if (typeof overlay.hostname === "string" && overlay.hostname) {
+          parsed.hostname = overlay.hostname;
+        } else if (typeof overlay.host === "string" && overlay.host) {
+          // overlay.host may include a port; fold it into hostname.
+          const colon = overlay.host.lastIndexOf(":");
+          if (colon > -1) {
+            parsed.hostname = overlay.host.slice(0, colon);
+            parsed.port = overlay.host.slice(colon + 1);
+          } else {
+            parsed.hostname = overlay.host;
+          }
+        }
+        if (overlay.port !== undefined && overlay.port !== null) {
+          parsed.port = String(overlay.port);
+        }
+        if (typeof overlay.path === "string" && overlay.path) {
+          // overlay.path is path+search per Node convention; take the
+          // first '?' as the search separator if present.
+          const q = overlay.path.indexOf("?");
+          if (q >= 0) {
+            parsed.pathname = overlay.path.slice(0, q);
+            parsed.search = overlay.path.slice(q);
+          } else {
+            parsed.pathname = overlay.path;
+            parsed.search = "";
+          }
+        }
+        if (typeof overlay.protocol === "string" && overlay.protocol) {
+          parsed.protocol = overlay.protocol;
+        }
+        return parsed.toString();
+      }
 
       const opts = urlOrOptions as {
         host?: unknown;
@@ -920,25 +1076,25 @@ export function createFetchInterceptor(
         path?: unknown;
         protocol?: unknown;
       };
-      const overlay = (typeof secondArg === "object" && secondArg !== null
+      const optsOverlay: typeof opts = (typeof secondArg === "object" && secondArg !== null
         ? (secondArg as typeof opts)
         : {});
 
       const host =
-        (typeof overlay.hostname === "string" && overlay.hostname) ||
-        (typeof overlay.host === "string" && overlay.host) ||
+        (typeof optsOverlay.hostname === "string" && optsOverlay.hostname) ||
+        (typeof optsOverlay.host === "string" && optsOverlay.host) ||
         (typeof opts.hostname === "string" && opts.hostname) ||
         (typeof opts.host === "string" && opts.host) ||
         "";
       const port =
-        (overlay.port !== undefined ? String(overlay.port) : "") ||
+        (optsOverlay.port !== undefined ? String(optsOverlay.port) : "") ||
         (opts.port !== undefined ? String(opts.port) : "");
       const path =
-        (typeof overlay.path === "string" && overlay.path) ||
+        (typeof optsOverlay.path === "string" && optsOverlay.path) ||
         (typeof opts.path === "string" && opts.path) ||
         "/";
       const proto =
-        (typeof overlay.protocol === "string" && overlay.protocol) ||
+        (typeof optsOverlay.protocol === "string" && optsOverlay.protocol) ||
         (typeof opts.protocol === "string" && opts.protocol) ||
         "https:";
 
@@ -1064,9 +1220,9 @@ export function createFetchInterceptor(
         };
 
         if (!knownForHTTPS && shapedForHTTPS) {
-          console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${urlStr} (path-match) proxied via ${proxyBase}`);
+          console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubUrlForLog(urlStr)} (path-match) proxied via ${proxyBase}`);
         } else {
-          console.log(`[defenseclaw] intercepted LLM call (https.request) → ${urlStr} proxied via ${proxyBase}`);
+          console.log(`[defenseclaw] intercepted LLM call (https.request) → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`);
         }
         // Egress telemetry for the https.request branches. body_shape
         // is intentionally "none" because req.write happens after we
@@ -1083,7 +1239,10 @@ export function createFetchInterceptor(
             reason: !knownForHTTPS && shapedForHTTPS ? "shape-match" : "known-provider",
           });
         }
-        return http.request(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
+        // F-1586: now that http.request is also patched, the proxy
+        // hop must use the captured original to avoid recursing
+        // back into this branch.
+        return originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
       }
 
       // Non-intercepted https.request — report silent passthrough so
@@ -1107,6 +1266,65 @@ export function createFetchInterceptor(
 
     https.request = patchedHttpsRequest as typeof https.request;
 
+    // Avarice F-1586: plain `http.request` callers (e.g. local
+    // Ollama clients hitting http://127.0.0.1:11434/api/chat)
+    // bypassed the interceptor entirely because only `https.request`
+    // and `globalThis.fetch` were patched. We share `patchedHttpsRequest`
+    // — it already routes through the proxy as plain http via
+    // `http.request` — but we explicitly downgrade the protocol on
+    // the first argument so a caller-supplied "http:" URL doesn't
+    // get rewritten to "https:".
+    function patchedHttpRequest(
+      urlOrOptions: string | URL | NodeRequestOptions,
+      optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
+      callback?: (res: NodeIncomingMessage) => void,
+    ): NodeClientRequest {
+      const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+      // Only re-route if the request shape would otherwise hit a
+      // local Ollama instance. For any other http.request path we
+      // pass through to the captured original to avoid breaking
+      // unrelated http traffic.
+      const ollamaCandidate = Boolean(
+        urlStr &&
+          isLLMUrl(urlStr, guardrailPort) &&
+          hasLLMPathSuffix(urlStr) &&
+          !isAlreadyProxied(urlStr, guardrailPort),
+      );
+      if (!ollamaCandidate) {
+        return originalHttpRequest!(
+          urlOrOptions as string,
+          optionsOrCallback as NodeRequestOptions,
+          callback,
+        );
+      }
+      // Re-use the https.request patched path. The proxy hop is
+      // plain http already, so the protocol downgrade is a no-op.
+      return patchedHttpsRequest(urlOrOptions, optionsOrCallback, callback);
+    }
+
+    http.request = patchedHttpRequest as typeof http.request;
+
+    // `http.get` is `http.request` plus an implicit `req.end()`. Some
+    // streaming clients call it directly, so it must be patched too —
+    // otherwise an http.get to a local Ollama endpoint slips past the
+    // proxy. Delegate to the shared patched request path and preserve the
+    // auto-end semantics so the GET actually fires.
+    function patchedHttpGet(
+      urlOrOptions: string | URL | NodeRequestOptions,
+      optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
+      callback?: (res: NodeIncomingMessage) => void,
+    ): NodeClientRequest {
+      const req = patchedHttpRequest(urlOrOptions, optionsOrCallback, callback);
+      try {
+        (req as unknown as { end?: () => void }).end?.();
+      } catch {
+        // Sink/stub requests may not implement end(); ignore.
+      }
+      return req;
+    }
+
+    http.get = patchedHttpGet as typeof http.get;
+
     console.log(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
@@ -1120,6 +1338,17 @@ export function createFetchInterceptor(
     // Restore https.request (safe because we used CJS require, not frozen ESM)
     if (originalHttpsRequest) {
       https.request = originalHttpsRequest;
+      originalHttpsRequest = null;
+    }
+    // Avarice F-1586: also restore the http.request patch so test
+    // teardown leaves the runtime clean.
+    if (originalHttpRequest) {
+      http.request = originalHttpRequest;
+      originalHttpRequest = null;
+    }
+    if (originalHttpGet) {
+      http.get = originalHttpGet;
+      originalHttpGet = null;
     }
     if (egressReporter) {
       egressReporter.stop();

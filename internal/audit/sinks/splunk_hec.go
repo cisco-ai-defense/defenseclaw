@@ -63,17 +63,30 @@ func (c circuitState) String() string {
 // hardcoding (token comes from cfg.Token via env-resolution at the
 // config layer).
 type SplunkHECConfig struct {
-	Name           string
-	Endpoint       string
-	Token          string
-	Index          string
-	Source         string
-	SourceType     string
-	VerifyTLS      bool
-	BatchSize      int
-	FlushIntervalS int
-	TimeoutS       int
-	Filter         SinkFilter
+	Name       string
+	Endpoint   string
+	Token      string
+	Index      string
+	Source     string
+	SourceType string
+	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-the
+	// transport defaulted to InsecureSkipVerify and operators had to set
+	// verify_tls=true to enable certificate validation. The field is
+	// retained for backward compatibility — when present and true it is
+	// honoured (no-op against the new secure default); when present and
+	// false it is IGNORED (the secure default wins) and the user is
+	// directed to InsecureSkipVerify.
+	VerifyTLS bool
+	// InsecureSkipVerify is the fix: TLS verification is ON by
+	// default and operators must explicitly set this true to disable it
+	// (e.g. dev environments with self-signed HEC). Closes the silent
+	// downgrade where omitting verify_tls leaked the HEC token to any
+	// MITM peer.
+	InsecureSkipVerify bool
+	BatchSize          int
+	FlushIntervalS     int
+	TimeoutS           int
+	Filter             SinkFilter
 
 	// Retry configuration. MaxRetries is the number of additional
 	// attempts after the first failure (0 = no retries, matches
@@ -116,11 +129,15 @@ func DefaultSourceTypeOverrides() map[string]string {
 		// Judge events go to their own sourcetype so the Splunk
 		// dashboards can pivot on model + verdict + confidence
 		// without colliding with regular audit lines.
+		// Key mirrors audit.ActionLLMJudgeResponse; this package
+		// cannot import internal/audit without creating a cycle.
 		"llm-judge-response": "defenseclaw:judge",
 		// Guardrail verdicts are the single highest-value audit
 		// signal for SOC teams; giving them a dedicated
 		// sourcetype lets search-head admins pin retention
 		// independently of the generic audit stream.
+		// Key mirrors audit.ActionGuardrailVerdict; this package
+		// cannot import internal/audit without creating a cycle.
 		"guardrail-verdict": "defenseclaw:verdict",
 	}
 }
@@ -159,6 +176,8 @@ type splunkEvent struct {
 	Event      any     `json:"event"`
 }
 
+const structuredSplunkHECEventsKey = "_splunk_hec_events"
+
 // splunkAuditEvent is the inner payload Splunk indexes. Mirrors the
 // pre-migration shape so search queries (`source=defenseclaw action=…`)
 // continue to work.
@@ -179,6 +198,7 @@ type splunkAuditEvent struct {
 	// macros.conf, Cisco SIEM AgentWatch) can key on them without
 	// reparsing `details`. Matches the contract in sinks.Event.
 	SessionID string `json:"session_id,omitempty"`
+	TurnID    string `json:"turn_id,omitempty"`
 	AgentName string `json:"agent_name,omitempty"`
 	// AgentID (configured logical id) and SidecarInstanceID
 	// (per-process UUID) are both part of the v7 three-tier identity
@@ -187,14 +207,23 @@ type splunkAuditEvent struct {
 	// an earlier revision of this struct, which the I1 integration
 	// test (TestCorrelation_RequestEnvelopeLandsOnAuditAndSink) now
 	// pins in place.
-	AgentID           string         `json:"agent_id,omitempty"`
-	AgentInstanceID   string         `json:"agent_instance_id,omitempty"`
-	SidecarInstanceID string         `json:"sidecar_instance_id,omitempty"`
-	PolicyID          string         `json:"policy_id,omitempty"`
-	DestinationApp    string         `json:"destination_app,omitempty"`
-	ToolName          string         `json:"tool_name,omitempty"`
-	ToolID            string         `json:"tool_id,omitempty"`
-	Structured        map[string]any `json:"structured,omitempty"`
+	AgentID           string `json:"agent_id,omitempty"`
+	AgentInstanceID   string `json:"agent_instance_id,omitempty"`
+	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
+	PolicyID          string `json:"policy_id,omitempty"`
+	DestinationApp    string `json:"destination_app,omitempty"`
+	ToolName          string `json:"tool_name,omitempty"`
+	ToolID            string `json:"tool_id,omitempty"`
+	// Connector is the hook connector identity (codex/claudecode/…) on
+	// multi-connector installs, surfaced top-level so Splunk searches and
+	// dashboards can `... connector="codex"` without coalescing from the
+	// structured payload. Empty for non-connector rows.
+	Connector     string         `json:"connector,omitempty"`
+	SchemaVersion int            `json:"schema_version,omitempty"`
+	ContentHash   string         `json:"content_hash,omitempty"`
+	Generation    uint64         `json:"generation,omitempty"`
+	BinaryVersion string         `json:"binary_version,omitempty"`
+	Structured    map[string]any `json:"structured,omitempty"`
 }
 
 // NewSplunkHECSink validates config and returns a ready-to-use sink. The
@@ -257,14 +286,14 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 		cfg.SourceTypeOverrides = merged
 	}
 
+	// TLS certificate verification is ON by default. Operators
+	// must opt INTO insecurity via InsecureSkipVerify. The legacy
+	// VerifyTLS field is honoured only when explicitly true (a no-op
+	// since the new default is secure); explicit false is ignored.
+	insecure := cfg.InsecureSkipVerify
 	transport := &http.Transport{
-		// Splunk HEC commonly runs with a self-signed cert in dev; keep
-		// the same behaviour as the legacy forwarder. Operators must
-		// explicitly opt in to TLS verification via verify_tls=true. This
-		// is acceptable because most production deployments terminate
-		// HEC behind a load balancer with a real cert.
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: !cfg.VerifyTLS,
+			InsecureSkipVerify: insecure,
 			MinVersion:         tls.VersionTLS12,
 		},
 	}
@@ -284,16 +313,13 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 		go s.flushLoop()
 	}
 
-	// Production HEC endpoints sit behind a real certificate. Warn
-	// when verify_tls is off while the endpoint scheme is https —
-	// the dev-self-signed default is kept but operators should see
-	// it in the boot logs so silent downgrades don't slip through
-	// review. URL schemes are case-insensitive per RFC 3986 §3.1,
-	// so we normalize the prefix before comparing to avoid silent
-	// misses on e.g. "Https://" or "HTTPS://".
-	if !cfg.VerifyTLS && strings.HasPrefix(strings.ToLower(cfg.Endpoint), "https://") {
+	// Production HEC endpoints sit behind a real certificate. // loud warning when verification is explicitly disabled and the
+	// endpoint is HTTPS — operators must see this in boot logs so
+	// silent downgrades don't slip through review. URL schemes are
+	// case-insensitive per RFC 3986 §3.1, so we normalize the prefix.
+	if insecure && strings.HasPrefix(strings.ToLower(cfg.Endpoint), "https://") {
 		fmt.Fprintf(os.Stderr,
-			"warning: audit sink %q (splunk_hec): TLS certificate verification disabled for %s — set verify_tls=true for production\n",
+			"warning: audit sink %q (splunk_hec): TLS certificate verification DISABLED for %s — remove insecure_skip_verify=true for production\n",
 			cfg.Name, cfg.Endpoint)
 	}
 
@@ -392,6 +418,7 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 	if !s.cfg.Filter.Matches(e) {
 		return nil
 	}
+	structured, extraEvents := splitStructuredSplunkHECEvents(e.Structured)
 	se := splunkEvent{
 		Time:       float64(e.Timestamp.Unix()) + float64(e.Timestamp.Nanosecond())/1e9,
 		Source:     s.cfg.Source,
@@ -410,6 +437,7 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			TraceID:           e.TraceID,
 			RequestID:         e.RequestID,
 			SessionID:         e.SessionID,
+			TurnID:            e.TurnID,
 			AgentName:         e.AgentName,
 			AgentID:           e.AgentID,
 			AgentInstanceID:   e.AgentInstanceID,
@@ -418,12 +446,25 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			DestinationApp:    e.DestinationApp,
 			ToolName:          e.ToolName,
 			ToolID:            e.ToolID,
-			Structured:        e.Structured,
+			Connector:         e.Connector,
+			SchemaVersion:     e.SchemaVersion,
+			ContentHash:       e.ContentHash,
+			Generation:        e.Generation,
+			BinaryVersion:     e.BinaryVersion,
+			Structured:        structured,
 		},
 	}
+	events := make([]splunkEvent, 0, 1+len(extraEvents))
+	events = append(events, se)
+	for i := range extraEvents {
+		if extraEvents[i].Index == "" {
+			extraEvents[i].Index = s.cfg.Index
+		}
+	}
+	events = append(events, extraEvents...)
 
 	s.mu.Lock()
-	s.batch = append(s.batch, se)
+	s.batch = append(s.batch, events...)
 	needsFlush := len(s.batch) >= s.cfg.BatchSize
 	s.mu.Unlock()
 
@@ -431,6 +472,81 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 		return s.Flush(ctx)
 	}
 	return nil
+}
+
+func splitStructuredSplunkHECEvents(structured map[string]any) (map[string]any, []splunkEvent) {
+	if len(structured) == 0 {
+		return structured, nil
+	}
+	raw, ok := structured[structuredSplunkHECEventsKey]
+	if !ok {
+		return structured, nil
+	}
+	cleaned := make(map[string]any, len(structured)-1)
+	for k, v := range structured {
+		if k != structuredSplunkHECEventsKey {
+			cleaned[k] = v
+		}
+	}
+	if len(cleaned) == 0 {
+		cleaned = nil
+	}
+
+	items := structuredSplunkHECEventItems(raw)
+	if len(items) == 0 {
+		return cleaned, nil
+	}
+	events := make([]splunkEvent, 0, len(items))
+	for _, item := range items {
+		event, ok := item["event"].(map[string]any)
+		if !ok || len(event) == 0 {
+			continue
+		}
+		events = append(events, splunkEvent{
+			Time:       splunkFloat(item["time"]),
+			Host:       splunkString(item["host"]),
+			Source:     splunkString(item["source"]),
+			SourceType: splunkString(item["sourcetype"]),
+			Index:      splunkString(item["index"]),
+			Event:      event,
+		})
+	}
+	return cleaned, events
+}
+
+func structuredSplunkHECEventItems(raw any) []map[string]any {
+	switch items := raw.(type) {
+	case []map[string]any:
+		return items
+	case []any:
+		out := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			if m, ok := item.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func splunkString(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+func splunkFloat(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case int64:
+		return float64(x)
+	case int:
+		return float64(x)
+	default:
+		return 0
+	}
 }
 
 func (s *SplunkHECSink) flushLoop() {

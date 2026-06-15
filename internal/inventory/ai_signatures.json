@@ -390,6 +390,88 @@
       "local_endpoints": []
     },
     {
+      "id": "antigravity",
+      "name": "Antigravity",
+      "vendor": "Google",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "antigravity",
+      "binary_names": [
+        "agy"
+      ],
+      "process_names": [
+        "agy",
+        "antigravity"
+      ],
+      "config_paths": [
+        "~/.gemini/config/hooks.json",
+        "~/.gemini/antigravity-cli/hooks.json",
+        ".antigravitycli/hooks.json"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "antigravity.google.com",
+        "antigravity.dev"
+      ],
+      "history_patterns": [
+        "antigravity",
+        "agy "
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "openhands",
+      "name": "OpenHands",
+      "vendor": "All Hands AI",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "openhands",
+      "binary_names": [
+        "openhands"
+      ],
+      "process_names": [
+        "openhands",
+        "OpenHands"
+      ],
+      "config_paths": [
+        ".openhands/hooks.json",
+        "~/.openhands/agent_settings.json",
+        "~/.openhands/cli_config.json",
+        "~/.openhands/mcp.json",
+        ".agents/skills",
+        ".openhands/skills",
+        ".openhands/microagents",
+        "~/.openhands/skills/installed",
+        "~/.openhands/cache/skills/public-skills/skills",
+        "AGENTS.md"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.openhands/mcp.json"
+      ],
+      "package_names": [
+        "openhands-ai",
+        "openhands"
+      ],
+      "env_var_names": [
+        "OPENHANDS_API_KEY",
+        "OPENHANDS_CONFIG_FILE"
+      ],
+      "domain_patterns": [
+        "openhands.dev"
+      ],
+      "history_patterns": [
+        "openhands",
+        "open hands"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
       "id": "aider",
       "name": "Aider",
       "vendor": "Aider",
@@ -468,9 +550,9 @@
       "id": "opencode",
       "name": "OpenCode",
       "vendor": "OpenCode",
-      "category": "ai_cli",
-      "confidence": 0.88,
-      "supported_connector": "",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "opencode",
       "binary_names": [
         "opencode"
       ],
@@ -1013,44 +1095,6 @@
         "qwen code",
         "qwen mcp",
         "qwen-code"
-      ],
-      "local_endpoints": []
-    },
-    {
-      "id": "openhands",
-      "name": "OpenHands",
-      "vendor": "OpenHands",
-      "category": "ai_cli",
-      "confidence": 0.88,
-      "supported_connector": "",
-      "binary_names": [
-        "openhands"
-      ],
-      "process_names": [
-        "openhands"
-      ],
-      "application_names": [],
-      "config_paths": [
-        "~/.openhands/agent_settings.json",
-        "~/.openhands/cli_config.json",
-        "~/.openhands/mcp.json"
-      ],
-      "extension_ids": [],
-      "mcp_paths": [
-        "~/.openhands/mcp.json"
-      ],
-      "package_names": [
-        "openhands-ai",
-        "openhands"
-      ],
-      "env_var_names": [
-        "OPENHANDS_CONFIG_FILE"
-      ],
-      "domain_patterns": [
-        "openhands.dev"
-      ],
-      "history_patterns": [
-        "openhands"
       ],
       "local_endpoints": []
     },

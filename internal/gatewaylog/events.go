@@ -267,6 +267,7 @@ type Event struct {
 	RunID     string `json:"run_id,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
+	TurnID    string `json:"turn_id,omitempty"`
 	// TraceID mirrors the OTel span's trace id for cross-sink
 	// correlation. Optional — unset events are still valid.
 	TraceID   string    `json:"trace_id,omitempty"`
@@ -304,6 +305,15 @@ type Event struct {
 	DestinationApp    string `json:"destination_app,omitempty"`
 	ToolName          string `json:"tool_name,omitempty"`
 	ToolID            string `json:"tool_id,omitempty"`
+
+	// Connector is the hook/proxy connector that produced this event
+	// (codex, claudecode, antigravity, openclaw, …). Optional —
+	// empty on single-connector installs and on events with no
+	// connector scope. Lets gateway.jsonl consumers (Splunk local
+	// bridge, AgentWatch) filter/group by connector with the same
+	// identity the audit rows and OTel telemetry carry, instead of
+	// inferring it from the model/agent fields.
+	Connector string `json:"connector,omitempty"`
 
 	// Multi-tenant / fleet-scoping fields.
 	//
@@ -457,6 +467,16 @@ type VerdictPayload struct {
 	Reason     string   `json:"reason,omitempty"`     // short, redacted
 	Categories []string `json:"categories,omitempty"` // e.g. [pii.email, injection.system_prompt]
 	LatencyMs  int64    `json:"latency_ms,omitempty"`
+	// EvaluationID joins this verdict to its per-finding rows in
+	// scan_findings and to the EventScanFinding fan-out emitted by
+	// the same runtime turn (hook, inspect, proxy, mid-stream,
+	// tool-call). Empty for verdicts that did not produce structured
+	// findings.
+	EvaluationID string `json:"evaluation_id,omitempty"`
+	// RuleIDs lists the (up to 8) detection rule identifiers that
+	// drove this verdict. Operators get a quick SIEM-pivot key
+	// without joining against scan_findings rows.
+	RuleIDs []string `json:"rule_ids,omitempty"`
 }
 
 // Finding matches the shape guardrail scanners emit. Keep the field
@@ -492,6 +512,17 @@ type JudgePayload struct {
 	Findings    []Finding `json:"findings,omitempty"`
 	RawResponse string    `json:"raw_response,omitempty"`
 	ParseError  string    `json:"parse_error,omitempty"`
+	// InputHash is the SHA-256 of the inspected judge *input*
+	// (the prompt/request bytes the judge was asked to evaluate),
+	// hex-encoded with the "sha256:" prefix when populated.
+	// ("Judge input_hash is computed from the
+	// response body") closure: the persistor previously hashed
+	// RawResponse and stored the resulting digest as InputHash,
+	// breaking dedup/pivot semantics. Callers that have the
+	// inspected bytes available should populate this; the audit
+	// store leaves InputHash empty when this is not provided
+	// rather than hashing the response body.
+	InputHash string `json:"input_hash,omitempty"`
 }
 
 // LifecyclePayload covers sidecar start/stop and config-reload
@@ -510,6 +541,18 @@ type ErrorPayload struct {
 	Code      string `json:"code,omitempty"` // stable short identifier
 	Message   string `json:"message"`
 	Cause     string `json:"cause,omitempty"`
+	// RuleID attributes this error to a specific detection rule
+	// when the broken event carried one (schema-gate violations
+	// on EventScanFinding, verdict-failure errors that reference
+	// a rule). Empty for errors that are not rule-attributable
+	// (boot failures, transport errors, audit DB faults).
+	RuleID string `json:"rule_id,omitempty"`
+	// EvaluationID joins this error to the upstream evaluation
+	// (scan_summary / hook / inspect / proxy guardrail) that
+	// produced the broken event. Empty when no upstream
+	// evaluation exists (e.g. schema gate firing on a config /
+	// admin emission, or a writer-level transport error).
+	EvaluationID string `json:"evaluation_id,omitempty"`
 }
 
 // DiagnosticPayload carries developer traces that don't fit the other
@@ -528,8 +571,8 @@ type DiagnosticPayload struct {
 // ScanFindingPayload tied to the same scan shares a ScanID.
 type ScanPayload struct {
 	ScanID      string         `json:"scan_id"`
-	Scanner     string         `json:"scanner"` // skill | mcp | plugin | aibom | codeguard
-	Target      string         `json:"target"`  // file path | skill name | server URL
+	Scanner     string         `json:"scanner"` // see scanner enum in scan-event.json schema
+	Target      string         `json:"target"`  // file path | skill name | server URL | tool name | message surface
 	TargetType  string         `json:"target_type,omitempty"`
 	Verdict     string         `json:"verdict,omitempty"` // clean | warn | block
 	DurationMs  int64          `json:"duration_ms,omitempty"`
@@ -538,6 +581,10 @@ type ScanPayload struct {
 	TotalCount  int            `json:"total_count,omitempty"`
 	ExitCode    int            `json:"exit_code,omitempty"`
 	Error       string         `json:"error,omitempty"` // scanner execution error
+	// EvaluationID joins this scan summary to the verdict / hook /
+	// inspect audit row that triggered it. Empty for classic
+	// scanner-invocation paths that have no upstream evaluation.
+	EvaluationID string `json:"evaluation_id,omitempty"`
 }
 
 // ScanFindingPayload [v7] records a single finding produced by a
@@ -557,6 +604,13 @@ type ScanFindingPayload struct {
 	LineNumber  int      `json:"line_number,omitempty"`
 	Remediation string   `json:"remediation,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
+	// Confidence is the detector's self-reported certainty in [0,1].
+	// Populated by regex/judge/AID detectors; omitted for binary
+	// scanners that don't compute a score.
+	Confidence float64 `json:"confidence,omitempty"`
+	// EvaluationID matches ScanPayload.EvaluationID — joins this
+	// finding to the verdict / hook / inspect row that produced it.
+	EvaluationID string `json:"evaluation_id,omitempty"`
 }
 
 // ActivityPayload [v7] records an operator-facing mutation

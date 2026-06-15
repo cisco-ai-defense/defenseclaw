@@ -251,9 +251,9 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	}
 }
 
-// emitAgentHookLLMEvent is the LLM-event emitter for the five
+// emitAgentHookLLMEvent is the LLM-event emitter for the six
 // hook-only connectors (hermes, cursor, windsurf, geminicli,
-// copilot). It mirrors emitClaudeCodeHookLLMEvent /
+// copilot, openhands). It mirrors emitClaudeCodeHookLLMEvent /
 // emitCodexHookLLMEvent so a "give me every prompt and tool call"
 // query against the gateway log returns the same shape regardless
 // of which framework the operator is running.
@@ -294,7 +294,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 			a.lastHookPromptID(source, req.SessionID),
 			promptIDForTurn(source, req.SessionID, req.TurnID),
 		)
-		meta.ToolID = req.TurnID
+		meta.ToolID = firstNonEmpty(firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"), req.TurnID)
 		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName)
 		emitToolInvocationEvent(ctx, meta, "call", req.ToolName, stringFromJSONRaw(req.ToolArgs), "", nil)
 	case isResultLikeEvent(req.HookEventName):
@@ -303,7 +303,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 			a.lastHookPromptID(source, req.SessionID),
 			promptIDForTurn(source, req.SessionID, req.TurnID),
 		)
-		meta.ToolID = req.TurnID
+		meta.ToolID = firstNonEmpty(firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"), req.TurnID)
 		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName)
 		emitToolInvocationEvent(ctx, meta, "result", req.ToolName, "", req.Content, nil)
 	}
@@ -370,6 +370,42 @@ func hookToolDestinationApp(serverName, toolName string) string {
 	return toolDestinationApp("builtin", "")
 }
 
+// hookPromptCacheMaxEntries bounds llmPromptBySourceSession and
+// llmPromptBySourceSessionTurn so a misbehaving or compromised
+// authenticated hook caller cannot drive the sidecar OOM by spamming
+// distinct (source, session) or (source, session, turn) keys.
+//
+// ("Hook prompt correlation maps grow without
+// eviction"): the previous implementation appended forever, with
+// keys derived directly from hook JSON (session_id, task_id,
+// turn_id, execution_id, tool_call_id) and no Stop/SessionEnd
+// cleanup. We now store entries in a bounded LRU that drops the
+// oldest entry once we hit the cap, which keeps memory usage
+// constant regardless of caller behaviour.
+const hookPromptCacheMaxEntries = 8192
+
+// putBoundedPromptID inserts key=>value into m, ordered by insertion
+// in `order`. When the map exceeds maxSize, the oldest insert is
+// evicted. Caller must hold a.llmPromptMu.
+func putBoundedPromptID(m map[string]string, order *[]string, key, value string, maxSize int) {
+	if _, exists := m[key]; !exists {
+		if len(m) >= maxSize {
+			// Evict oldest. order may have stale entries that
+			// were already deleted; skip those.
+			for len(*order) > 0 {
+				oldest := (*order)[0]
+				*order = (*order)[1:]
+				if _, stillThere := m[oldest]; stillThere {
+					delete(m, oldest)
+					break
+				}
+			}
+		}
+		*order = append(*order, key)
+	}
+	m[key] = value
+}
+
 func (a *APIServer) rememberHookPromptID(source, sessionID, turnID, promptID string) {
 	if a == nil || source == "" || sessionID == "" || promptID == "" {
 		return
@@ -379,12 +415,14 @@ func (a *APIServer) rememberHookPromptID(source, sessionID, turnID, promptID str
 	if a.llmPromptBySourceSession == nil {
 		a.llmPromptBySourceSession = map[string]string{}
 	}
-	a.llmPromptBySourceSession[source+"\x00"+sessionID] = promptID
+	putBoundedPromptID(a.llmPromptBySourceSession, &a.llmPromptBySourceSessionOrder,
+		source+"\x00"+sessionID, promptID, hookPromptCacheMaxEntries)
 	if turnID != "" {
 		if a.llmPromptBySourceSessionTurn == nil {
 			a.llmPromptBySourceSessionTurn = map[string]string{}
 		}
-		a.llmPromptBySourceSessionTurn[source+"\x00"+sessionID+"\x00"+turnID] = promptID
+		putBoundedPromptID(a.llmPromptBySourceSessionTurn, &a.llmPromptBySourceSessionTurnOrder,
+			source+"\x00"+sessionID+"\x00"+turnID, promptID, hookPromptCacheMaxEntries)
 	}
 }
 

@@ -23,8 +23,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 const maxAgentDiscoveryAgents = 32
@@ -161,7 +159,11 @@ func (a *APIServer) validateAgentDiscoveryReport(report *agentDiscoveryReport) (
 
 	reg := a.connectorRegistry
 	if reg == nil {
-		reg = connector.NewDefaultRegistry()
+		// Same singleton fast-path the hook hot path uses — see
+		// getFallbackConnectorRegistry. Per-request registry
+		// builds otherwise multiplied connector init cost across
+		// every agent-discovery POST.
+		reg = getFallbackConnectorRegistry()
 	}
 	var dropped []string
 	for name, signal := range report.Agents {

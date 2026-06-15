@@ -10,7 +10,11 @@
 
 package gateway
 
-import "github.com/defenseclaw/defenseclaw/internal/audit"
+import (
+	"context"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+)
 
 // persistAuditEvent routes audit events through audit.Logger when
 // available so redaction, sink fanout, and OTel counters all stay
@@ -21,6 +25,17 @@ func persistAuditEvent(logger *audit.Logger, store *audit.Store, event audit.Eve
 		return logger.LogEvent(event)
 	}
 	if store != nil {
+		return store.LogEvent(event)
+	}
+	return nil
+}
+
+func persistAuditEventCtx(ctx context.Context, logger *audit.Logger, store *audit.Store, event audit.Event) error {
+	if logger != nil {
+		return logger.LogEventCtx(ctx, event)
+	}
+	if store != nil {
+		audit.ApplyEnvelope(&event, audit.EnvelopeFromContext(ctx))
 		return store.LogEvent(event)
 	}
 	return nil

@@ -1,0 +1,68 @@
+---
+title: Overview
+description: DefenseClaw is the Cisco governance layer for AI coding agents — scan capabilities before they run, inspect runtime traffic, and export durable audit evidence across twelve first-class connectors.
+keywords:
+  - DefenseClaw overview
+  - Cisco
+  - AI agent guardrail
+  - AI coding agent security
+  - OpenClaw governance
+  - Claude Code guardrail
+  - Codex guardrail
+---
+
+DefenseClaw is the **Cisco** governance layer for AI coding agents. It enforces one rule: untrusted agent capabilities are scanned, governed, logged, and blocked when policy says they are unsafe.
+
+<Cards>
+  <Card title="Quickstart in 5 minutes" href="/docs/get-started/quickstart" description="Install, pick a connector, watch a guardrail block a destructive command." />
+  <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The central command. Modes, scanner backends, rule packs, judge, HITL." />
+  <Card title="Capability Matrix" href="/docs/capability-matrix" description="Which connectors can block, which can ask, which support fail-closed." />
+  <Card title="Stories" href="/docs/stories" description="Concrete walkthroughs — stop rm -rf on Claude Code, catch prompt injection on Codex, and more." />
+</Cards>
+
+## Three jobs, one runtime
+
+| Govern | Inspect | Prove |
+| --- | --- | --- |
+| Skills, MCP servers, plugins, and generated code before they run | Prompts, completions, tool calls, and sandbox activity at runtime | SQLite audit history, JSONL, OTLP, Splunk, webhooks, and TUI views |
+
+DefenseClaw combines a **Python operator CLI**, a **Go gateway sidecar**, and an **OpenClaw TypeScript plugin**. The CLI configures and inspects; the gateway runs the data path; the plugin wires the loop closed inside OpenClaw.
+
+## Architecture
+
+<Flow
+  direction="TB"
+  compact
+  caption="DefenseClaw spans three runtimes — Python CLI, Go gateway sidecar, OpenClaw plugin — and exposes one enforcement contract per connector."
+>
+  <Node id="agent" kind="agent">{`Agent runtime\nClaude · Codex ·\nOpenClaw · ...`}</Node>
+  <Node id="connector" kind="connector">{`Connector\nproxy or hooks`}</Node>
+  <Node id="gateway" kind="gateway">{`defenseclaw-gateway\nGo sidecar`}</Node>
+  <Node id="policy" kind="policy">{`Policy + Scanners\n+ optional LLM Judge`}</Node>
+  <Node id="audit" kind="datastore">SQLite + JSONL</Node>
+  <Node id="sinks" kind="datastore">OTLP · Splunk · Webhooks</Node>
+  <Node id="operator" kind="operator">{`Operator\nCLI · TUI · HITL`}</Node>
+  <Edge from="agent" to="connector" />
+  <Edge from="connector" to="gateway" emphasis />
+  <Edge from="gateway" to="policy" />
+  <Edge from="gateway" to="audit" />
+  <Edge from="gateway" to="sinks" />
+  <Edge from="operator" to="gateway" variant="bidirectional" label="setup · approve · audit" />
+</Flow>
+
+## What's in the box
+
+<Cards>
+  <Card title="10 connectors" href="/docs/connectors" description="OpenClaw, ZeptoClaw, Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands." />
+  <Card title="Observe → Action → HITL" href="/docs/hitl" description="Three operating modes that compose. Start safe, earn enforcement, escalate to a human only when needed." />
+  <Card title="OpenClaw integration" href="/docs/openclaw" description="The reference proxy connector. Fetch interceptor, before_tool_call hook, plugin-mediated approvals." />
+  <Card title="Reference" href="/docs/reference" description="CLI commands, gateway API, configuration files, environment variables." />
+</Cards>
+
+## Scope and limitations
+
+DefenseClaw improves safety by combining scanner results, runtime inspection, policy decisions, sandbox controls, and audit trails. It does **not** prove that an agent, skill, plugin, or model interaction is risk-free.
+
+<Callout type="warn">
+High-risk deployments should pair DefenseClaw with human review, least-privilege credentials, sandboxing, CI gates, and production monitoring. In observe mode, findings are logged without blocking. In action mode, configured HIGH and CRITICAL findings can block prompts, tool calls, or component admission.
+</Callout>

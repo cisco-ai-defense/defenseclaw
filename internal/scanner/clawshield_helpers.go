@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // csTextExtensions is the set of file extensions scanned by text-based ClawShield scanners.
@@ -37,13 +38,32 @@ var csTextExtensions = map[string]bool{
 
 // csCollectTextFiles returns all text-extension files under root.
 func csCollectTextFiles(root string) ([]string, error) {
-	info, err := os.Stat(root)
+	return csCollectFiles(root, func(path string) bool {
+		return csTextExtensions[filepath.Ext(path)]
+	})
+}
+
+// csCollectAllFiles returns all non-directory files under root (for binary-aware scanning).
+func csCollectAllFiles(root string) ([]string, error) {
+	return csCollectFiles(root, func(string) bool { return true })
+}
+
+func csCollectFiles(root string, include func(string) bool) ([]string, error) {
+	info, err := os.Lstat(root)
 	if err != nil {
 		return nil, err
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing to scan symlink %s", root)
+	}
 	if !info.IsDir() {
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("refusing to scan non-regular file %s", root)
+		}
 		return []string{root}, nil
 	}
+
+	absRoot, _ := filepath.Abs(root)
 	var files []string
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -56,33 +76,24 @@ func csCollectTextFiles(root string) ([]string, error) {
 			}
 			return nil
 		}
-		if csTextExtensions[filepath.Ext(path)] {
-			files = append(files, path)
-		}
-		return nil
-	})
-	return files, err
-}
-
-// csCollectAllFiles returns all non-directory files under root (for binary-aware scanning).
-func csCollectAllFiles(root string) ([]string, error) {
-	info, err := os.Stat(root)
-	if err != nil {
-		return nil, err
-	}
-	if !info.IsDir() {
-		return []string{root}, nil
-	}
-	var files []string
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
+		info, lerr := os.Lstat(path)
+		if lerr != nil {
 			return nil
 		}
-		if d.IsDir() {
-			name := d.Name()
-			if name == ".git" || name == "node_modules" {
-				return filepath.SkipDir
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil
+		}
+		if absRoot != "" {
+			abs, aerr := filepath.Abs(path)
+			if aerr != nil {
+				return nil
 			}
+			rel, rerr := filepath.Rel(absRoot, abs)
+			if rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				return nil
+			}
+		}
+		if !include(path) {
 			return nil
 		}
 		files = append(files, path)

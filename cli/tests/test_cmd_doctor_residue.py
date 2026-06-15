@@ -29,8 +29,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw.commands.cmd_doctor import (
     _CONNECTOR_RESIDUE_ARTIFACTS,
-    _DoctorResult,
     _check_connector_residue,
+    _DoctorResult,
     _fix_connector_residue,
 )
 

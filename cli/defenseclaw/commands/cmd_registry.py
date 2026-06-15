@@ -884,7 +884,7 @@ def _make_scan_callback(app: AppContext, *, allow_private: bool = False) -> Scan
         if entry.is_skill():
             return _run_skill_scan(app, cfg, source, entry, allow_private=allow_private)
         if entry.is_mcp():
-            return _run_mcp_scan(app, cfg, source, entry)
+            return _run_mcp_scan(app, cfg, source, entry, allow_private=allow_private)
         return None
 
     return _scan
@@ -928,6 +928,23 @@ def _run_skill_scan(  # type: ignore[no-untyped-def]
         return _scan_skill_via_clawhub(cmd_skill, app, target)
     if target.startswith(("http://", "https://")):
         require_sha256 = source.kind in _HASH_REQUIRED_SKILL_SOURCE_KINDS
+        # source.auth_env is the bearer token reserved
+        # for the registry/catalog origin. The legacy code forwarded it
+        # to entry.source_url, which a malicious manifest can point at
+        # an arbitrary HTTPS host. The first request would carry the
+        # operator's token to the attacker. We only forward auth_env
+        # when source_url is same-origin with the registry source URL;
+        # otherwise we drop the auth.
+        forward_auth_env = source.auth_env
+        if not _registry_same_origin(source.url, target):
+            if source.auth_env:
+                click.echo(
+                    f"[registry] dropping bearer token before fetching cross-origin "
+                    f"skill source_url {target!r} (registry source: {source.url!r}; "
+                    f")",
+                    err=True,
+                )
+            forward_auth_env = ""
         return _scan_skill_via_http(
             cmd_skill,
             app,
@@ -935,9 +952,35 @@ def _run_skill_scan(  # type: ignore[no-untyped-def]
             expected_sha256=entry.sha256,
             require_sha256=require_sha256,
             allow_private=allow_private,
-            auth_env=source.auth_env,
+            auth_env=forward_auth_env,
         )
     return None
+
+
+def _registry_same_origin(registry_url: str, manifest_url: str) -> bool:
+    """True if the manifest-supplied skill source_url
+    has the same scheme + host (case-insensitive) + port as the
+    registry source URL. We use this as the gate for forwarding
+    operator-supplied bearer tokens."""
+    import urllib.parse
+    if not registry_url or not manifest_url:
+        return False
+    try:
+        a = urllib.parse.urlparse(registry_url)
+        b = urllib.parse.urlparse(manifest_url)
+    except ValueError:
+        return False
+    if not a.scheme or not b.scheme:
+        return False
+    a_host = (a.hostname or "").lower()
+    b_host = (b.hostname or "").lower()
+    if not a_host or not b_host or a_host != b_host:
+        return False
+    if a.scheme.lower() != b.scheme.lower():
+        return False
+    a_port = a.port or (443 if a.scheme.lower() == "https" else 80)
+    b_port = b.port or (443 if b.scheme.lower() == "https" else 80)
+    return a_port == b_port
 
 
 def _scan_skill_via_clawhub(cmd_skill_module, app: AppContext, uri: str):  # type: ignore[no-untyped-def]
@@ -982,11 +1025,21 @@ def _scan_skill_via_http(  # type: ignore[no-untyped-def]
         raise RuntimeError(f"skill scan failed for {url}: {exc}") from exc
 
 
-def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: ManifestEntry):  # type: ignore[no-untyped-def]
+def _run_mcp_scan(  # type: ignore[no-untyped-def]
+    app: AppContext,
+    cfg: Config,
+    source: RegistrySource,
+    entry: ManifestEntry,
+    *,
+    allow_private: bool = False,
+):
     """Best-effort MCP scan via the SDK wrapper."""
     try:
         from defenseclaw.config import MCPServerEntry
-        from defenseclaw.scanner.mcp import MCPScannerWrapper
+        from defenseclaw.scanner.mcp import (
+            MCPScannerWrapper,
+            is_safe_stdio_scan_command,
+        )
     except ImportError:
         return None
     try:
@@ -1003,26 +1056,84 @@ def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: M
     if transport == "stdio":
         if not entry.command:
             return None
+        # a registry manifest is publisher-controlled.
+        # The legacy code passed publisher-supplied entry.command and
+        # entry.args straight to MCPScannerWrapper, which spawned the
+        # process during scan-mcp-config-file. A malicious catalog can
+        # publish `command="bash"`, `args=["-c", "<rce>"]` and run
+        # arbitrary code as the operator during routine
+        # `defenseclaw registry sync` BEFORE any admission decision.
+        # We refuse to spawn anything that is not an allowlisted package
+        # launcher (shared with the `mcp scan` path so the two cannot
+        # drift). MCPScannerWrapper.scan() re-validates as defense in
+        # depth, but we fail closed here too for a clear operator
+        # message and to avoid even constructing the scan config.
+        if not is_safe_stdio_scan_command(entry.command, list(entry.args)):
+            click.echo(
+                f"[registry] refusing to spawn manifest-supplied stdio command for "
+                f"scan: name={entry.name!r} command={entry.command!r}",
+                err=True,
+            )
+            return None
+        # F-0343: do NOT forward the operator's process secrets
+        # (os.environ) into a publisher-controlled MCP server. The
+        # legacy code populated env from os.environ.get(k) for every
+        # declared env var, leaking GITHUB_TOKEN / *_API_KEY / etc. to
+        # the very server being scanned. Pass empty placeholders so the
+        # scan still exercises the server's tool surface without
+        # handing it live credentials.
         server = MCPServerEntry(
             name=entry.name,
             command=entry.command,
             args=list(entry.args),
-            env={k: os.environ.get(k, "") for k in entry.env_required},
+            env={k: "" for k in entry.env_required},
         )
         try:
-            return scanner.scan(entry.name, server_entry=server)
+            return scanner.scan(
+                entry.name, server_entry=server, allow_private=allow_private
+            )
         except SystemExit:
             return None
         except Exception:  # noqa: BLE001
             return None
     if not entry.url:
         return None
+    # F-0344: validate generic registry MCP URLs through the central
+    # SSRF guard (loopback / link-local / private / CGNAT rejection +
+    # IP pinning) rather than an ad-hoc one-shot ipaddress check that
+    # missed the RFC 6598 CGNAT block. The scanner re-guards internally,
+    # but failing closed here gives a precise operator-facing message.
+    if not _registry_mcp_url_allowed(entry.url, allow_private=allow_private):
+        click.echo(
+            f"[registry] refusing to scan manifest MCP URL {entry.url!r} — "
+            f"resolves to loopback/private/link-local/CGNAT. Use "
+            f"`defenseclaw registry sync --allow-private` to opt in.",
+            err=True,
+        )
+        return None
     try:
-        return scanner.scan(entry.url)
+        return scanner.scan(entry.url, allow_private=allow_private)
     except SystemExit:
         return None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _registry_mcp_url_allowed(url: str, *, allow_private: bool = False) -> bool:
+    """Return True when *url* passes the central SSRF guard.
+
+    F-0344: delegate to :func:`defenseclaw.registries.ssrf.guard_url`
+    (the single source of truth that already blocks loopback,
+    link-local, multicast, private and RFC 6598 CGNAT ranges and pins
+    the resolved IP) instead of re-implementing a weaker check here.
+    ``allow_private`` plumbs the operator opt-in through to the guard.
+    """
+    from defenseclaw.registries.ssrf import SSRFError, guard_url
+    try:
+        guard_url(url, allow_private=allow_private)
+    except SSRFError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

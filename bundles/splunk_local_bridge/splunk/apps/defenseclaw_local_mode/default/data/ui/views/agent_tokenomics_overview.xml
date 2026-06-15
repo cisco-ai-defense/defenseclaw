@@ -1,0 +1,264 @@
+<form version="1.1" theme="dark">
+  <label>Agent Tokenomics Overview</label>
+  <description>Executive view of agent token consumption, cost pressure, and optimization opportunities from O11y / OTel GenAI telemetry.</description>
+
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="time">
+      <label>Time range</label>
+      <default>
+        <earliest>-24h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="text" token="agent" searchWhenChanged="true">
+      <label>Agent</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+    <input type="text" token="model" searchWhenChanged="true">
+      <label>Model</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+    <input type="dropdown" token="connector" searchWhenChanged="true">
+      <label>Connector</label>
+      <choice value="*">All</choice>
+      <default>*</default>
+      <initialValue>*</initialValue>
+      <search>
+        <query>`defenseclaw_demo_tokenomics_events` | where connector!="(unknown)" | stats count by connector | sort - count</query>
+        <earliest>$time.earliest$</earliest>
+        <latest>$time.latest$</latest>
+      </search>
+      <fieldForLabel>connector</fieldForLabel>
+      <fieldForValue>connector</fieldForValue>
+    </input>
+  </fieldset>
+
+  <row>
+    <panel>
+      <html>
+        <style>
+          .dashboard-body {
+            background: radial-gradient(circle at top left, #17345c 0%, #111827 38%, #060b14 100%) !important;
+          }
+          .tokenomics-hero {
+            border-radius: 18px;
+            padding: 26px 30px;
+            background: linear-gradient(135deg, rgba(7,27,58,0.98), rgba(11,92,173,0.92) 50%, rgba(0,128,145,0.84));
+            color: #ffffff;
+            box-shadow: 0 18px 45px rgba(0,0,0,0.35);
+            border: 1px solid rgba(255,255,255,0.18);
+          }
+          .tokenomics-hero h1 {
+            margin: 0;
+            font-size: 32px;
+            line-height: 1.1;
+            letter-spacing: 0;
+            font-weight: 800;
+          }
+          .tokenomics-hero p {
+            margin: 10px 0 0 0;
+            font-size: 15px;
+            max-width: 1120px;
+            color: #e7eefc;
+          }
+          .tokenomics-chip-row {
+            margin-top: 16px;
+          }
+          .tokenomics-chip {
+            display: inline-block;
+            margin-right: 8px;
+            margin-bottom: 8px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.13);
+            border: 1px solid rgba(255,255,255,0.20);
+            font-size: 12px;
+            color: #ffffff;
+          }
+        </style>
+        <div class="tokenomics-hero">
+          <h1>Agent Tokenomics Command View</h1>
+          <p>
+            Track which agents, models, connectors, and sessions are driving token consumption, then pivot
+            from cost pressure to runtime governance in Splunk and Cloud Control.
+          </p>
+          <div class="tokenomics-chip-row">
+            <span class="tokenomics-chip">Powered by O11y / OTel GenAI telemetry</span>
+            <span class="tokenomics-chip">Agent Watch</span>
+            <span class="tokenomics-chip">Cost proxy: tokens, not contract dollars</span>
+          </div>
+        </div>
+      </html>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Total Tokens</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_tokenomics_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$agent$"="*" OR agent_name="$agent$") AND ("$model$"="*" OR model="$model$") | stats sum(total_tokens) as value</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="numberPrecision">0</option>
+        <option name="underLabel">input + output + cached + reasoning + tool</option>
+        <option name="drilldown">none</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x118832","0xf8be34","0xd94e17"]</option>
+        <option name="rangeValues">[10000,50000]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Agent Sessions</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_tokenomics_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$agent$"="*" OR agent_name="$agent$") AND ("$model$"="*" OR model="$model$") | stats dc(session_id) as value</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="underLabel">sessions with token telemetry</option>
+        <option name="drilldown">none</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x0B5CAD","0x7B61FF","0xD94E17"]</option>
+        <option name="rangeValues">[5,25]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Tool Tokens</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_tokenomics_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$agent$"="*" OR agent_name="$agent$") AND ("$model$"="*" OR model="$model$") | stats sum(tool_tokens) as value</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="underLabel">tool-heavy workflows</option>
+        <option name="drilldown">none</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x118832","0xf8be34","0xd94e17"]</option>
+        <option name="rangeValues">[5000,25000]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Optimization Candidates</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_tokenomics_recommendations` | where waste_hint!="normal" | stats count as value</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="underLabel">sessions needing review</option>
+        <option name="drilldown">none</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x118832","0xf8be34","0xd94e17"]</option>
+        <option name="rangeValues">[1,5]</option>
+      </single>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Token Burn Over Time</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_tokenomics_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$agent$"="*" OR agent_name="$agent$") AND ("$model$"="*" OR model="$model$") | timechart span=15m sum(input_tokens) as input sum(output_tokens) as output sum(cached_tokens) as cached sum(reasoning_tokens) as reasoning sum(tool_tokens) as tool</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Token Mix</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_tokenomics_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$agent$"="*" OR agent_name="$agent$") AND ("$model$"="*" OR model="$model$") | stats sum(input_tokens) as input sum(output_tokens) as output sum(cached_tokens) as cached sum(reasoning_tokens) as reasoning sum(tool_tokens) as tool | eval scope="tokens" | untable scope token_type tokens | fields token_type tokens</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="charting.legend.placement">right</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Top Agents And Connectors By Token Usage</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_tokenomics_rollup` | where ("$connector$"="*" OR connector="$connector$") AND ("$agent$"="*" OR agent_name="$agent$") | table agent_name connector total_tokens input_tokens output_tokens cached_tokens reasoning_tokens tool_tokens sessions runs output_input_ratio cached_ratio models targets | sort - total_tokens | head 10</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">10</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Top Models By Token Usage</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_tokenomics_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$agent$"="*" OR agent_name="$agent$") AND ("$model$"="*" OR model="$model$") | stats sum(total_tokens) as total_tokens by model | sort - total_tokens | head 10</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.legend.placement">none</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Top Tools / Targets By Token Usage</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_tokenomics_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$agent$"="*" OR agent_name="$agent$") AND ("$model$"="*" OR model="$model$") AND target!="(none)" | stats sum(total_tokens) as total_tokens by target | sort - total_tokens | head 10</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.legend.placement">none</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Optimization And Governance Recommendations</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_tokenomics_recommendations` | table session_id run_id agents connectors models total_tokens input_tokens output_tokens cached_tokens reasoning_tokens tool_tokens waste_hint recommendation first_seen last_seen | sort - total_tokens | head 15</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Demo Readiness</title>
+      <table>
+        <search>
+          <query>| makeresults | eval check="Token telemetry present" | appendcols [ search `defenseclaw_demo_tokenomics_events` | stats count as observed_events sum(total_tokens) as total_tokens dc(session_id) as sessions ] | eval status=case(observed_events>0 AND total_tokens>0, "ready", observed_events>0, "events present but token totals low", 1=1, "no token events") | table check status observed_events total_tokens sessions</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">5</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</form>

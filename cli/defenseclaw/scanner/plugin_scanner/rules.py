@@ -111,7 +111,7 @@ COGNITIVE_FILES: set[str] = {
 # Structural rules
 # ---------------------------------------------------------------------------
 
-BINARY_EXTENSIONS: set[str] = {".exe", ".so", ".dylib", ".wasm", ".dll"}
+BINARY_EXTENSIONS: set[str] = {".exe", ".so", ".dylib", ".wasm", ".dll", ".node"}
 SCRIPT_EXTENSIONS: set[str] = {".sh", ".bat", ".cmd"}
 
 SAFE_DOTFILES: set[str] = {
@@ -184,11 +184,19 @@ SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
         tags=["code-execution"],
         capability="eval",
     ),
+    # SRC-CHILD-PROC was INFO and SRC-EXEC was INFO
+    # AND only enabled in strict. compute_assessment downgrades a
+    # finding set with only LOW/INFO severities to "benign", so a
+    # plugin that imported node:child_process and called
+    # exec("sh -c whoami") was classified benign even under strict.
+    # Direct command execution is the textbook RCE primitive — raise
+    # SRC-CHILD-PROC to MEDIUM and SRC-EXEC to HIGH and enable both
+    # in the default profile.
     SourcePatternRule(
         id="SRC-CHILD-PROC",
         pattern=re.compile(r"\bchild_process\b"),
         title="Imports child_process",
-        severity="INFO",
+        severity="MEDIUM",
         confidence=0.7,
         profiles=["default", "strict"],
         tags=["code-execution"],
@@ -198,9 +206,9 @@ SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
         id="SRC-EXEC",
         pattern=re.compile(r"\bexec\s*\("),
         title="Calls exec()",
-        severity="INFO",
-        confidence=0.5,
-        profiles=["strict"],
+        severity="HIGH",
+        confidence=0.85,
+        profiles=["default", "strict"],
         tags=["code-execution"],
         capability="child-process",
     ),

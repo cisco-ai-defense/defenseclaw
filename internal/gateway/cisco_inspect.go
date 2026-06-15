@@ -204,11 +204,27 @@ func (c *CiscoInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
 
 		if resp.StatusCode == http.StatusBadRequest && !triedWithoutRules {
 			lower := strings.ToLower(string(respBody))
+			// Multiple known 400 shapes from AID across deployments:
+			//   1. legacy: "already has rules configured" /
+			//      "pre-configured"
+			//   2. preview-2026: "invalid rule name: <X>" (the
+			//      preview deployment validates the names in our
+			//      defaultEnabledRules slice against the operator's
+			//      configured rule catalog, and emits this when our
+			//      hard-coded names don't exist there)
+			//   3. catch-all on rules / configuration / enabled_rules
+			// In every case the right retry is to drop the `config`
+			// block — the operator's pre-configured rules on the AID
+			// side still apply; we just stop trying to override them.
 			if strings.Contains(lower, "already has rules configured") ||
-				strings.Contains(lower, "pre-configured") {
+				strings.Contains(lower, "pre-configured") ||
+				strings.Contains(lower, "invalid rule") ||
+				strings.Contains(lower, "rules") ||
+				strings.Contains(lower, "enabled_rules") ||
+				strings.Contains(lower, "configuration") {
 				delete(payload, "config")
 				triedWithoutRules = true
-				fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] key has pre-configured rules, retrying without config\n")
+				fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] HTTP 400 with rules-related body, retrying without config\n")
 				continue
 			}
 		}
@@ -275,13 +291,21 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 		action = "block"
 	}
 
-	reason := "cisco: content flagged"
+	// Reason text explicitly names Cisco AI Defense (and the
+	// custom-policy lane) rather than the legacy "cisco: content
+	// flagged" string, so operators reading the verdict in the
+	// agent UI / audit log can tell an AID block apart from a regex
+	// or judge block on the same surface. When AID returns rule
+	// names we surface the top few; when it returns Block with no
+	// named rules (which the preview deployment sometimes does on
+	// custom-policy paths) we still credit the lane explicitly.
+	reason := "Cisco AI Defense custom policy block"
 	if len(findings) > 0 {
 		top := findings
 		if len(top) > 5 {
 			top = top[:5]
 		}
-		reason = "cisco: " + strings.Join(top, ", ")
+		reason = "Cisco AI Defense: " + strings.Join(top, ", ")
 	}
 
 	return &ScanVerdict{

@@ -454,6 +454,34 @@ func TestEmitGatewayEvent_NilPayloadDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestEmitGatewayEvent_VerdictCorrelationAttributes(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+	p.EmitGatewayEvent(gatewaylog.Event{
+		EventType:      gatewaylog.EventVerdict,
+		Severity:       gatewaylog.SeverityHigh,
+		SessionID:      "sess-1",
+		TurnID:         "turn-1",
+		PolicyID:       "policy-1",
+		DestinationApp: "builtin",
+		ToolName:       "Bash",
+		ToolID:         "call-1",
+		Verdict: &gatewaylog.VerdictPayload{
+			Stage:  gatewaylog.StageFinal,
+			Action: "block",
+			Reason: "matched policy",
+		},
+	})
+
+	rec := exp.snapshot()[0]
+	assertAttrString(t, rec, "defenseclaw.gateway.event_type", "verdict")
+	assertAttrString(t, rec, "gen_ai.conversation.id", "sess-1")
+	assertAttrString(t, rec, "defenseclaw.turn_id", "turn-1")
+	assertAttrString(t, rec, "defenseclaw.policy_id", "policy-1")
+	assertAttrString(t, rec, "defenseclaw.destination_app", "builtin")
+	assertAttrString(t, rec, "defenseclaw.tool_name", "Bash")
+	assertAttrString(t, rec, "gen_ai.tool.call.id", "call-1")
+}
+
 func TestEmitGatewayEvent_LLMEventAttributes(t *testing.T) {
 	p, exp := newProviderWithLogCapture(t)
 	exitCode := 2

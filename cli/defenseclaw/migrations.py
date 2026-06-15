@@ -108,100 +108,126 @@ def _migrate_0_3_0(ctx: MigrationContext) -> None:
     The fetch interceptor introduced in 0.3.0 handles routing transparently,
     so these entries are no longer needed and must be cleaned up on upgrade.
 
-    Strategy: restore the pristine backup of openclaw.json that was captured
-    before DefenseClaw first touched the file, then re-apply only the plugin
-    registration that 0.3.0 needs. This is cleaner than surgically patching
-    individual keys and avoids leaving behind stale or unexpected entries.
-
-    Falls back to surgical removal if no pristine backup exists (e.g.
-    guardrail was never enabled, or the backup was deleted).
+    S3.HIGH_BUG ("Migration can overwrite live OpenClaw config with a
+    stale pristine snapshot"): the previous strategy restored a pristine
+    backup taken BEFORE DefenseClaw first touched openclaw.json and then
+    re-applied only the plugin registration. That destroyed any model
+    providers, plugin entries, approval settings, or workspace config the
+    operator added between the pristine snapshot and the upgrade. The
+    pristine-restore branch is removed; we always surgically patch the
+    live config so operator changes are preserved.
     """
     oc_json = os.path.join(ctx.openclaw_home, "openclaw.json")
     if not os.path.isfile(oc_json):
         return
 
-    from defenseclaw.guardrail import pristine_backup_path
-
-    pristine = pristine_backup_path(oc_json, ctx.data_dir)
-
-    if pristine:
-        _migrate_0_3_0_from_pristine(oc_json, pristine)
-    else:
-        _migrate_0_3_0_surgical(oc_json)
-
-
-def _migrate_0_3_0_from_pristine(oc_json: str, pristine: str) -> None:
-    """Restore pristine openclaw.json and re-apply plugin registration."""
-    try:
-        with open(pristine) as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        click.echo(f"    pristine backup unreadable ({exc}), falling back to surgical fix")
-        _migrate_0_3_0_surgical(oc_json)
-        return
-
-    plugins = cfg.setdefault("plugins", {})
-    allow = plugins.setdefault("allow", [])
-    if "defenseclaw" not in allow:
-        allow.append("defenseclaw")
-    entries = plugins.setdefault("entries", {})
-    if "defenseclaw" not in entries:
-        entries["defenseclaw"] = {"enabled": True}
-    else:
-        entries["defenseclaw"]["enabled"] = True
-    install_path = os.path.join(os.path.dirname(oc_json), "extensions", "defenseclaw")
-    load = plugins.setdefault("load", {})
-    paths = load.setdefault("paths", [])
-    if install_path not in paths:
-        paths.append(install_path)
-
-    shutil.copy2(oc_json, oc_json + ".pre-0.3.0-migration")
-
-    with open(oc_json, "w") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-
-    click.echo(f"    restored openclaw.json from pristine backup ({os.path.basename(pristine)})")
-    click.echo("    re-applied plugin registration for 0.3.0")
+    _migrate_0_3_0_surgical(oc_json)
 
 
 def _migrate_0_3_0_surgical(oc_json: str) -> None:
-    """Fallback: surgically remove legacy entries when no pristine backup exists."""
+    """Surgically remove legacy entries from the LIVE openclaw.json.
+
+    Mutates only the keys DefenseClaw 0.2.x added (models.providers.defenseclaw,
+    models.providers.litellm, defenseclaw/litellm-prefixed primary model) and
+    re-registers the 0.3.0 plugin entry. All other operator-managed config
+    (other providers, plugin entries, approvals, workspace) is preserved.
+    """
     try:
         with open(oc_json) as f:
             cfg = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        click.echo(f"    openclaw.json unreadable ({exc}); skipping surgical fix")
+        return
+
+    if not isinstance(cfg, dict):
+        click.echo("    openclaw.json is not a JSON object; skipping surgical fix")
         return
 
     changed = False
     changes = []
 
+    # Step 1: remove ONLY the legacy defenseclaw/litellm provider entries
+    # that 0.2.0 injected. Any other provider the operator added stays.
     providers = cfg.get("models", {}).get("providers", {})
-    for key in ("defenseclaw", "litellm"):
-        if key in providers:
-            del providers[key]
-            changes.append(f"removed providers.{key}")
+    if isinstance(providers, dict):
+        for key in ("defenseclaw", "litellm"):
+            if key in providers:
+                del providers[key]
+                changes.append(f"removed providers.{key}")
+                changed = True
+
+    # Step 2: restore the unprefixed primary model name. We only touch
+    # values that start with the legacy prefixes; bare model names from
+    # the operator are not modified.
+    model = cfg.get("agents", {}).get("defaults", {}).get("model", {})
+    if isinstance(model, dict):
+        primary = model.get("primary", "")
+        if isinstance(primary, str) and primary.startswith(("defenseclaw/", "litellm/")):
+            restored = primary.split("/", 1)[1]
+            model["primary"] = restored
+            changes.append(f"restored model.primary: {primary} → {restored}")
             changed = True
 
-    model = cfg.get("agents", {}).get("defaults", {}).get("model", {})
-    primary = model.get("primary", "")
-    if primary.startswith(("defenseclaw/", "litellm/")):
-        restored = primary.split("/", 1)[1]
-        model["primary"] = restored
-        changes.append(f"restored model.primary: {primary} → {restored}")
-        changed = True
+    # Step 3: re-register the DefenseClaw plugin entry that 0.3.0 needs.
+    # We add only the keys we own; existing plugin registrations from
+    # the operator are not modified.
+    plugins = cfg.setdefault("plugins", {})
+    if isinstance(plugins, dict):
+        allow = plugins.setdefault("allow", [])
+        if isinstance(allow, list) and "defenseclaw" not in allow:
+            allow.append("defenseclaw")
+            changes.append("added plugins.allow[defenseclaw]")
+            changed = True
+        entries = plugins.setdefault("entries", {})
+        if isinstance(entries, dict):
+            existing = entries.get("defenseclaw")
+            if not isinstance(existing, dict):
+                entries["defenseclaw"] = {"enabled": True}
+                changes.append("added plugins.entries.defenseclaw")
+                changed = True
+            elif not existing.get("enabled"):
+                existing["enabled"] = True
+                changes.append("enabled plugins.entries.defenseclaw")
+                changed = True
+        install_path = os.path.join(
+            os.path.dirname(oc_json), "extensions", "defenseclaw"
+        )
+        load = plugins.setdefault("load", {})
+        if isinstance(load, dict):
+            paths = load.setdefault("paths", [])
+            if isinstance(paths, list) and install_path not in paths:
+                paths.append(install_path)
+                changes.append("added plugins.load.paths[defenseclaw]")
+                changed = True
 
     if not changed:
-        click.echo("    (no legacy entries found — nothing to change)")
+        click.echo("    (no legacy entries found and plugin already registered)")
         return
 
-    with open(oc_json, "w") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    # Always back up the live config before mutating it. This gives the
+    # operator a single-step rollback path if the surgical patch turns
+    # out to break their setup.
+    try:
+        shutil.copy2(oc_json, oc_json + ".pre-0.3.0-migration")
+    except OSError as exc:
+        click.echo(f"    WARNING: could not back up openclaw.json ({exc})")
+
+    # follow-up: the previous implementation used a non-atomic
+    # ``open(..., "w") + json.dump`` pair which could leave the user's
+    # Codex MCP config truncated mid-write if the process was killed.
+    # Route through the atomic temp-file + os.replace helper used for
+    # every other migration write so a crash here is harmless: either
+    # the new content is fully present or the old file is intact. We
+    # use mode=0o644 (not 0o600) because openclaw.json is a regular
+    # config file, not a secret store.
+    payload = json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
+    if not _atomic_write_text(oc_json, payload, mode=0o644):
+        click.echo("    WARNING: failed to write openclaw.json atomically")
+        return
 
     for c in changes:
         click.echo(f"    {c}")
-    click.echo("    (no pristine backup found — applied surgical fix)")
+    click.echo("    (surgical migration applied; live config preserved)")
 
 
 # ---------------------------------------------------------------------------
@@ -257,10 +283,10 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
 # the upgrade itself MUST NOT abort. Each step logs a click warning
 # and the migration moves on.
 
-# Legacy Codex env override files retired in S8.1 / F31. Mirrors the
-# constants in internal/gateway/connector/codex.go (codexEnvFileName,
-# codexDotenvFileName) — drift here would silently leave the file on
-# disk, which is exactly the failure mode we are migrating away from.
+# Legacy Codex env override files retired in S8.1 / F31 and finally
+# the surrounding proxy surface was removed in PR #265. We still scrub
+# these files on upgrade because they may exist on disk for users
+# coming from a release that did write them.
 _LEGACY_CODEX_ENV_FILES = ("codex_env.sh", "codex.env")
 
 # Legacy OTel claw.mode enum values that no longer round-trip through
@@ -269,6 +295,12 @@ _LEGACY_CODEX_ENV_FILES = ("codex_env.sh", "codex.env")
 # enabled, so for "opencode" (forward-looking placeholder for an
 # agent that never shipped) we fall back to "openclaw" too rather than
 # pretend the user opted into Codex.
+#
+# "opencode" here is ONLY the pre-0.4.0 placeholder enum, NOT the real
+# opencode connector shipped in 0.7.x. This remap is safe for the real
+# connector because it runs solely inside the cursor-gated 0.4.0
+# migration: a config old enough to be migrated across 0.4.0 cannot
+# contain the real connector. Do not apply this map outside that gate.
 _LEGACY_CLAW_MODE_REMAP = {
     "nemoclaw": "openclaw",
     "opencode": "openclaw",
@@ -291,6 +323,7 @@ def _migrate_0_4_0(ctx: MigrationContext) -> None:
         return
 
     _migrate_0_4_0_token_bootstrap(ctx)
+    _migrate_0_4_0_token_env_in_config(ctx)
     _migrate_0_4_0_tighten_perms(ctx)
     _migrate_0_4_0_remove_legacy_codex_env(ctx)
     _migrate_0_4_0_normalize_claw_mode(ctx)
@@ -355,6 +388,65 @@ def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
             "generated first-boot DEFENSECLAW_GATEWAY_TOKEN at "
             f"{env_path} (mode 0600, 32-byte CSPRNG)"
         )
+
+
+def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
+    """migrate stale ``gateway.token_env`` references.
+
+    The 0.4.0 migration above renames ``OPENCLAW_GATEWAY_TOKEN`` to
+    ``DEFENSECLAW_GATEWAY_TOKEN`` in ``~/.defenseclaw/.env`` but the
+    legacy installer also wrote ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN``
+    into ``config.yaml``. Python and TypeScript clients honour an
+    explicit ``token_env`` first, so on upgraded installs they kept
+    reading the (now deleted) env name and sent unauthenticated
+    ``/api/v1/inspect/*`` requests. The OpenClaw plugin's tool
+    inspection path turns those 401s into ``allow/observe``, so the
+    enforcement bypass is silent. We rewrite ``token_env`` in
+    ``config.yaml`` to the new name so the upgraded clients read the
+    same key the sidecar minted.
+    """
+    config_path = os.path.join(ctx.data_dir, "config.yaml")
+    if not os.path.isfile(config_path):
+        return
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            content = fh.read()
+    except OSError:
+        return
+    if "OPENCLAW_GATEWAY_TOKEN" not in content:
+        return
+    # Conservative line-rewriter that only touches the right-hand
+    # side of `token_env:` lines pointing at the legacy name. We
+    # avoid a full YAML round-trip to preserve operator comments and
+    # ordering byte-for-byte.
+    new_lines: list[str] = []
+    rewritten = 0
+    for line in content.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if (stripped.startswith("token_env:")
+                and "OPENCLAW_GATEWAY_TOKEN" in line):
+            new_lines.append(line.replace(
+                "OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN", 1))
+            rewritten += 1
+            continue
+        new_lines.append(line)
+    if rewritten == 0:
+        return
+    try:
+        # Atomic rewrite via tempfile + rename to avoid a partial
+        # write if the operator interrupts us mid-migration.
+        tmp = config_path + ".tmp-f3395"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.writelines(new_lines)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, config_path)
+    except OSError as exc:
+        ux.warn(f"could not migrate token_env in {config_path}: {exc}", indent="    ")
+        return
+    ctx.changes.append(
+        f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml "
+        "()"
+    )
 
 
 # Files under data_dir that carry credentials or pristine backups and
@@ -438,49 +530,66 @@ def _migrate_0_4_0_normalize_claw_mode(ctx: MigrationContext) -> None:
     YAML loader because the loader pulls in the entire dataclass tree
     (which has its own back-compat handling for the very fields we are
     trying to migrate) — a surgical sed-style edit is safer here. The
-    rewrite is anchored to the ``claw:`` block so a stray ``mode:
-    nemoclaw`` somewhere else in config.yaml is not touched.
+    rewrite is anchored to the ``claw:`` block (via
+    ``_find_top_level_block``) so a stray ``mode: nemoclaw`` somewhere
+    else in config.yaml is not touched. Reading through
+    ``_read_config_text`` + writing through ``_atomic_write_text``
+    preserves the file's line endings, so a CRLF config is rewritten in
+    place rather than flattened to LF.
+
+    The flow-style mapping ``claw: {mode: nemoclaw}`` is intentionally
+    NOT matched — those round-trip correctly through ``config.save()``
+    so the operator either edited them manually or the upgrade is
+    harmless.
     """
     cfg_path = os.path.join(ctx.data_dir, "config.yaml")
     if not os.path.isfile(cfg_path):
         return
 
-    try:
-        with open(cfg_path) as f:
-            text = f.read()
-    except OSError as exc:
-        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+    text = _read_config_text(cfg_path)
+    if text is None:
         return
 
-    new_text = text
+    block = _find_top_level_block(text, "claw")
+    if not block:
+        return
+
+    body = block.group("body")
+    new_body = body
     for legacy, replacement in _LEGACY_CLAW_MODE_REMAP.items():
-        # Match `mode: <legacy>` only inside the claw block. Since
-        # YAML allows arbitrary indentation we look for the literal
-        # `claw:` line followed (at any distance) by an indented
-        # `mode: <legacy>`. The trailing-context group preserves any
-        # closing quote, surrounding whitespace, and an optional
-        # YAML inline comment (``mode: nemoclaw  # legacy``) so a
-        # commented hand-edited line still normalizes cleanly. The
-        # pattern still rejects flow-style mappings (``claw: { mode:
-        # nemoclaw }``) — those round-trip correctly through
-        # ``config.save()`` so the operator either edited them
-        # manually or the upgrade is harmless.
+        # Match an indented ``mode: <legacy>`` line inside the claw
+        # body. The value may be bare or quoted; an inline comment
+        # (``mode: nemoclaw  # legacy``) is preserved because only the
+        # value group is substituted. ``(?:\r?\n|$)`` keeps a CRLF
+        # terminator intact and still matches a final line with no
+        # trailing newline.
         pattern = re.compile(
-            r"(^claw:[ \t]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+mode:[ \t]*[\"']?)"
+            r"(?P<prefix>^[ \t]+mode:[ \t]*)(?P<quote>[\"']?)"
             + re.escape(legacy)
-            + r"([\"']?[ \t]*(?:#[^\n]*)?$)",
+            + r"(?P=quote)(?P<suffix>[ \t]*(?:#[^\n]*)?(?:\r?\n|$))",
             flags=re.MULTILINE,
         )
-        new_text, count = pattern.subn(rf"\g<1>{replacement}\g<2>", new_text)
+        new_body, count = pattern.subn(
+            lambda m, repl=replacement: (
+                f"{m.group('prefix')}{m.group('quote')}{repl}"
+                f"{m.group('quote')}{m.group('suffix')}"
+            ),
+            new_body,
+        )
         if count:
             ctx.changes.append(
                 f"normalized claw.mode: {legacy} → {replacement} "
                 "(S3.1: legacy enum dropped from OTel schema)"
             )
 
-    if new_text != text:
-        if not _atomic_write_text(cfg_path, new_text):
-            ux.warn(f"could not write {cfg_path}", indent="    ")
+    if new_body == body:
+        return
+
+    new_text = text[: block.start("body")] + new_body + text[block.end("body") :]
+    if new_text == text:
+        return
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
 
 
 def _migrate_0_4_0_seed_active_connector(ctx: MigrationContext) -> None:
@@ -526,7 +635,10 @@ _GUARDRAIL_BLOCK_RE = re.compile(
     # the substitution callback in _migrate_0_4_0_seed_hook_fail_mode,
     # which preserves every comment, blank line, and scalar quoting
     # choice the operator made under ``guardrail:``.
-    r"^guardrail:[ \t]*\n",
+    # ``\r?\n`` so a CRLF-terminated config.yaml (Windows operator) is
+    # matched too — ``[ \t]*`` does not consume ``\r``, so a bare ``\n``
+    # anchor would silently skip the seed on CRLF files.
+    r"^guardrail:[ \t]*\r?\n",
     flags=re.MULTILINE,
 )
 
@@ -538,7 +650,7 @@ _GUARDRAIL_BLOCK_RE = re.compile(
 # ``hook_fail_mode:`` under another section (e.g. a hand-edited
 # alternative-config dump) from suppressing the seed.
 _GUARDRAIL_HOOK_FAIL_MODE_RE = re.compile(
-    r"^guardrail:[ \t]*\n"
+    r"^guardrail:[ \t]*\r?\n"
     r"(?P<body>(?:[ \t]+[^\n]*\n|\n)*)",
     flags=re.MULTILINE,
 )
@@ -548,19 +660,19 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     """Surface ``guardrail.hook_fail_mode`` in pre-existing config.yaml.
 
     Pre-v3 installs had no concept of a hook fail mode — every hook
-    was hardcoded to fail-closed on any gateway error, which gave
-    operators a strictly-bad UX whenever the gateway was down. The v3
-    wave introduces a dedicated config field; the runtime default is
-    ``"open"`` (set in defaultsFor() and EffectiveHookFailMode), but
-    we also write the explicit value to YAML on upgrade so:
+    was hardcoded to fail-OPEN on any gateway error, which made the
+    response-layer boundary silently leakable. The v3 wave introduced
+    a dedicated config field, and v4 () flipped the
+    BUILT-IN default to ``"closed"`` so new installs deny by default.
 
-    1. Operators inspecting ~/.defenseclaw/config.yaml after upgrade
-       SEE the new field and discover the knob exists. A field that
-       only lives in defaults is invisible — operators reach for
-       ``defenseclaw guardrail fail-mode`` only when they know it's
-       a thing.
-    2. The on-disk state is self-describing — no surprise behavior
-       change if a future release changes the runtime default.
+    To avoid a noisy behavior change under existing operators, this
+    migration writes ``hook_fail_mode: open`` into ANY pre-existing
+    config.yaml that doesn't already pin the field. That preserves
+    The legacy fail-OPEN behavior for upgraders while letting fresh
+    installs (which never run any migration on v4+) inherit the safer
+    default. Operators see the new field on next ``cat config.yaml``
+    and can opt into "closed" via ``defenseclaw guardrail fail-mode``
+    or by hand-editing the YAML.
 
     Skipped silently when the operator has already set a value (any
     value — we never overwrite an explicit choice, even one we
@@ -582,7 +694,10 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
         return
 
     try:
-        with open(cfg_path) as f:
+        # newline="" preserves the file's existing line endings (CRLF on a
+        # Windows operator's config) so the surgical insert below does not
+        # silently normalize the whole file to LF.
+        with open(cfg_path, newline="") as f:
             text = f.read()
     except OSError as exc:
         ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
@@ -602,7 +717,10 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
         return
 
     indent = _detect_block_indent(body)
-    insertion = f"{indent}hook_fail_mode: open\n"
+    # Match the file's line-ending style so we don't splice an LF line into
+    # a CRLF file (which would leave mixed terminators under guardrail:).
+    terminator = "\r\n" if block_match.group(0).endswith("\r\n") else "\n"
+    insertion = f"{indent}hook_fail_mode: open{terminator}"
     new_text = _GUARDRAIL_BLOCK_RE.sub(
         lambda m: m.group(0) + insertion, text, count=1,
     )
@@ -613,8 +731,8 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     if _atomic_write_text(cfg_path, new_text):
         ctx.changes.append(
             "seeded guardrail.hook_fail_mode='open' in config.yaml "
-            "(pre-v3 hooks were always fail-closed; new default is fail-open "
-            "to avoid bricking the agent on a gateway outage)"
+            "(legacy fail-open behavior preserved for upgraders; v4 "
+            "fresh installs default to 'closed' per )"
         )
 
 
@@ -831,33 +949,195 @@ def _dotenv_update_keys(
 
 
 def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
-    """Atomically write ``body`` to ``path`` with the given file mode.
+    """Atomically write ``body`` to ``path``.
 
-    Creates parent directories as needed (mode 0o700 for the directory
-    when it carries the secret-bearing files this migration touches).
+    The temp-file creation is hardened: it uses :func:`tempfile.mkstemp`
+    in the *target* directory so the bytes never exist on disk under a
+    predictable name, applies the file mode from creation, refuses to
+    write through a pre-existing symlink at ``path``, and calls
+    :func:`os.fsync` before :func:`os.replace` so a crash mid-rename
+    cannot leave a half-written file. For secret-bearing writes
+    (``mode <= 0o600``) the parent directory is tightened to 0o700 first,
+    even when it already exists with a more permissive mode. Non-secret
+    writes (``mode > 0o600``, e.g. the surgical ``openclaw.json``
+    migration at 0o644) leave the parent permissions alone, since
+    restricting the parent of a world-readable file would break unrelated
+    readers without improving confidentiality.
+
+    File mode: secret-bearing writes (``mode <= 0o600``) always pin the
+    requested tight mode and are never widened. Non-secret rewrites
+    preserve an existing file's current permissions across the rewrite,
+    so a ``config.yaml`` an operator locked down to 0o600 is not silently
+    widened to the 0o644 default; ``mode`` is only the fallback for a
+    newly-created file.
+
     Returns True on success.
     """
-    parent = os.path.dirname(path)
-    if parent:
-        try:
-            os.makedirs(parent, mode=0o700, exist_ok=True)
-        except OSError as exc:
-            ux.warn(f"could not create {parent}: {exc}", indent="    ")
-            return False
-    tmp = path + ".tmp"
+    import tempfile
+
+    parent = os.path.dirname(path) or "."
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        ux.warn(f"could not create {parent}: {exc}", indent="    ")
+        return False
+    # Tighten the parent dir even when it already existed with a more
+    # permissive mode (`exist_ok=True` does not re-apply the mode arg).
+    if mode <= 0o600:
+        try:
+            os.chmod(parent, 0o700)
+        except OSError:
+            pass
+    if os.path.islink(path):
+        ux.warn(
+            f"refusing to follow symlink at secret target {path}",
+            indent="    ",
+        )
+        return False
+    # Secret-bearing writes (mode <= 0o600) pin the requested tight mode
+    # and are never widened. Non-secret rewrites preserve the existing
+    # file's permissions so an operator-tightened config is not widened to
+    # the default; ``mode`` is the fallback for a newly-created file.
+    if mode <= 0o600:
+        effective_mode = mode
+    else:
+        try:
+            effective_mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            effective_mode = mode
+    fd = -1
+    tmp_path: str | None = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".tmp.",
+            suffix=os.path.basename(path) or ".tmp",
+            dir=parent,
+        )
+        os.fchmod(fd, effective_mode)
+        # newline="" writes ``body`` byte-for-byte (no \n -> os.linesep
+        # translation), so a caller that preserved a file's CRLF endings
+        # does not get them doubled to \r\r\n on Windows.
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            fd = -1  # ownership transferred; fdopen closes on exit
             f.write(body)
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        # Re-apply the effective mode after replace in case the FS quirks
+        # restored a different mode (e.g. tmpfs ACL inheritance).
+        try:
+            os.chmod(path, effective_mode)
+        except OSError:
+            pass
         return True
     except OSError as exc:
         ux.warn(f"could not write {path}: {exc}", indent="    ")
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
         return False
+    finally:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _read_config_text(cfg_path: str) -> str | None:
+    """Read a ``config.yaml`` for in-place rewriting, preserving newlines.
+
+    ``newline=""`` disables Python's universal-newline translation so a
+    CRLF file (a Windows operator's config, or one copied from a Windows
+    host) keeps its ``\\r\\n`` bytes verbatim. Paired with
+    ``_atomic_write_text`` (which also writes byte-for-byte), a migration
+    that edits a single line does not silently reflow the whole file from
+    CRLF to LF. Returns ``None`` (after warning) when the file cannot be
+    read so callers can bail without special-casing the error themselves.
+
+    Every surgical ``config.yaml`` rewriter reads through here so the
+    newline contract lives in one place instead of being re-derived
+    (and occasionally forgotten) per migration.
+    """
+    try:
+        with open(cfg_path, newline="") as f:
+            return f.read()
+    except OSError as exc:
+        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+        return None
+
+
+# Body of a top-level YAML block: every indented or blank line beneath
+# the header, stopping at the next column-0 key or end-of-file.
+#
+#   * ``[ \t]+[^\n]*\n``  — an indented line. ``[^\n]*`` swallows a
+#     trailing ``\r`` so CRLF lines match without a dedicated branch.
+#   * ``\r?\n``           — a blank line, CRLF-aware so a blank ``\r\n``
+#     inside the block is not mistaken for the block's end (a bare
+#     ``\n`` branch would stop at the ``\r`` and truncate the body).
+#   * trailing ``(?:[ \t]+[^\n]*)?`` — an optional final indented line
+#     with NO trailing newline, so a config whose last line lacks an EOL
+#     terminator is still captured (and therefore still rewritable).
+_TOP_LEVEL_BLOCK_BODY = r"(?P<body>(?:[ \t]+[^\n]*\n|\r?\n)*(?:[ \t]+[^\n]*)?)"
+
+
+def _find_top_level_block(text: str, key: str) -> re.Match[str] | None:
+    """Locate a column-0 ``<key>:`` block and capture its indented body.
+
+    Returns the match (with a named ``body`` group spanning the block
+    body) or ``None`` when no such block exists. Header and body are both
+    CRLF-aware and tolerate a final line without a trailing newline.
+
+    The surgical config rewriters (``claw.mode`` normalize, legacy
+    enforcement-key strip, gateway ``token_env`` realign) all locate
+    their block through here so "what counts as a top-level YAML block"
+    has exactly one definition. Previously each hand-rolled its own
+    regex, which is how the CRLF handling drifted apart between them.
+    """
+    return re.search(
+        r"^" + re.escape(key) + r":[ \t]*\r?\n" + _TOP_LEVEL_BLOCK_BODY,
+        text,
+        flags=re.MULTILINE,
+    )
+
+
+_TOP_LEVEL_KEY_LINE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*\s*:")
+
+
+def _find_top_level_yaml_block_body_span(text: str, key: str) -> tuple[int, int] | None:
+    """Return the body span for a top-level YAML block.
+
+    Unlike ``_find_top_level_block``, this helper treats top-level sequence
+    entries (``- name: ...``) as block body lines. PyYAML emits that style for
+    top-level lists by default, so migrations that inspect ``audit_sinks:``
+    need this broader matcher.
+    """
+    header_match = re.search(
+        r"^" + re.escape(key) + r":[ \t]*(?:#[^\n]*)?\r?\n",
+        text,
+        flags=re.MULTILINE,
+    )
+    if not header_match:
+        return None
+
+    pos = header_match.end()
+    end = pos
+    while end < len(text):
+        line_end = text.find("\n", end)
+        if line_end == -1:
+            line = text[end:]
+            next_pos = len(text)
+        else:
+            line = text[end : line_end + 1]
+            next_pos = line_end + 1
+
+        if _TOP_LEVEL_KEY_LINE_RE.match(line):
+            break
+        end = next_pos
+
+    return pos, end
 
 
 def _read_active_connector_from_yaml(cfg_path: str) -> str:
@@ -878,26 +1158,46 @@ def _read_active_connector_from_yaml(cfg_path: str) -> str:
     except OSError:
         return ""
 
-    # guardrail.connector wins if explicitly set (matches Config
-    # .activeConnector precedence in claw.go). The trailing
-    # ``[\t ]*(?:#[^\n]*)?$`` group accepts both bare values and
-    # values followed by a YAML inline comment so a hand-edited
-    # ``connector: codex  # gpt only`` still resolves cleanly.
-    m = re.search(
-        r"^guardrail:[ \t]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+connector:[ \t]*[\"']?([A-Za-z0-9_-]+)[\"']?[ \t]*(?:#[^\n]*)?$",
-        text,
-        flags=re.MULTILINE,
-    )
-    if m and m.group(1).strip():
-        return _normalize_legacy_connector(m.group(1))
+    # Scope the value search to the block body captured by
+    # ``_find_top_level_block`` instead of one monolithic regex over
+    # the whole file. The previous pattern wrapped the block body in a
+    # lazy ``(?:[ \t]+[^\n]*\n)*?`` and required a trailing
+    # ``connector:``/``mode:`` line; when that key was ABSENT from a
+    # large block (e.g. a 30-line ``guardrail:`` with no
+    # ``connector:``), the ambiguous ``[ \t]+`` / ``[^\n]*`` overlap
+    # forced catastrophic backtracking (seconds of 100% CPU on a real
+    # config) — a ReDoS that hung ``defenseclaw upgrade`` at the v3
+    # active-connector seed. ``_find_top_level_block`` captures the
+    # body in linear time, and the per-line ``^[ \t]+<field>:`` search
+    # below is anchored with no nested unbounded quantifier, so it
+    # cannot backtrack pathologically.
+    def _value_in_block(key: str, field: str) -> str:
+        block = _find_top_level_block(text, key)
+        if not block:
+            return ""
+        # ``(?:#[^\n]*)?`` accepts a trailing YAML inline comment so a
+        # hand-edited ``connector: codex  # gpt only`` still resolves;
+        # ``(?:\r?\n|$)`` keeps the match CRLF- and EOF-safe.
+        field_match = re.search(
+            r"^[ \t]+" + re.escape(field) + r":[ \t]*[\"']?"
+            r"([A-Za-z0-9_-]+)[\"']?[ \t]*(?:#[^\n]*)?(?:\r?\n|$)",
+            block.group("body"),
+            flags=re.MULTILINE,
+        )
+        if field_match and field_match.group(1).strip():
+            return field_match.group(1)
+        return ""
 
-    m = re.search(
-        r"^claw:[ \t]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+mode:[ \t]*[\"']?([A-Za-z0-9_-]+)[\"']?[ \t]*(?:#[^\n]*)?$",
-        text,
-        flags=re.MULTILINE,
-    )
-    if m and m.group(1).strip():
-        return _normalize_legacy_connector(m.group(1))
+    # guardrail.connector wins if explicitly set (matches Config
+    # .activeConnector precedence in claw.go); else fall back to
+    # claw.mode.
+    connector = _value_in_block("guardrail", "connector")
+    if connector:
+        return _normalize_legacy_connector(connector)
+
+    mode = _value_in_block("claw", "mode")
+    if mode:
+        return _normalize_legacy_connector(mode)
     return ""
 
 
@@ -960,6 +1260,37 @@ _LEGACY_FLAT_REGO_FILENAMES = (
 
 
 def _migrate_0_5_0(ctx: MigrationContext) -> None:
+    """0.5.0 upgrade — two independent sub-steps.
+
+    Step 1: ``_migrate_0_5_0_purge_flat_policy_bundle``
+            Deletes the legacy flat-layout policy bundle now that the
+            Go loader prefers ``<data_dir>/policies/rego/``. Closes
+            the HILT prompt-stage confirm-verdict regression.
+
+    Step 2: ``_migrate_0_5_0_strip_codex_enforcement_keys``
+            Removes the retired ``codex_enforcement_enabled`` and
+            ``claudecode_enforcement_enabled`` guardrail keys from
+            config.yaml. The LLM proxy data path for Codex / Claude
+            Code is removed in 0.5.0; enforcement is now selected by
+            the existing ``guardrail.mode`` field via the agent's
+            native hook bus (PreToolUse deny verdict on policy hits).
+
+    Each sub-step is independent and isolated by its own try/except
+    so a failure in one does not block the other. The migration as a
+    whole is permissive on errors — the upgrade itself NEVER aborts;
+    failures are logged and surfaced via ``defenseclaw doctor --fix``.
+    """
+    try:
+        _migrate_0_5_0_purge_flat_policy_bundle(ctx)
+    except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        ux.warn(f"policy-bundle cleanup step failed: {exc}", indent="    ")
+    try:
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+    except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        ux.warn(f"legacy enforcement-key strip step failed: {exc}", indent="    ")
+
+
+def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
     """Delete the legacy flat-layout policy bundle if a nested one exists.
 
     Why this is safe:
@@ -1113,6 +1444,438 @@ def _migrate_0_5_0(ctx: MigrationContext) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Migration: 0.5.0 — sub-step: strip legacy guardrail.*_enforcement_enabled
+# ---------------------------------------------------------------------------
+#
+# 0.5.0 also retires the LLM proxy data path for Codex and Claude
+# Code. Pre-0.5.0 guardrail config exposed two boolean fields that
+# selected between the (now-removed) LLM proxy data path and the
+# hook-only data path for those connectors:
+#
+#   guardrail.codex_enforcement_enabled: bool
+#   guardrail.claudecode_enforcement_enabled: bool
+#
+# Both fields are gone from the schema. The only supported enforcement
+# surface for those connectors is now the agent's native hook bus
+# (PreToolUse / UserPromptSubmit / PostToolUse). Enforcement vs
+# observation is selected via the existing ``guardrail.mode`` field —
+# ``action`` causes the PreToolUse hook to return a deny verdict on
+# policy hits, ``observe`` records only.
+#
+# Pre-0.5.0 config.yaml files on disk carry the legacy fields. The Go
+# loader (which uses viper's UnmarshalExact) and the Python config
+# loader (Pydantic with strict=False) both quietly ignore unknown
+# keys today, so leaving them in place would not break boot. But:
+#
+#   * The TUI's "configedit" panel would surface stale fields the
+#     operator can no longer edit usefully.
+#   * ``defenseclaw doctor`` may complain about config drift.
+#   * Operators reading config.yaml would have no way of knowing
+#     whether the fields still matter; the file is the source of
+#     truth for "what is this gateway doing" and dead fields make
+#     that diagnostic noisy.
+#
+# The cleanup is byte-level (no YAML round-trip) so operator
+# comments, blank lines, and key ordering inside the ``guardrail:``
+# block are preserved exactly. The substitution is anchored to the
+# guardrail block — a stray top-level ``codex_enforcement_enabled``
+# elsewhere in config.yaml is intentionally NOT touched.
+
+# Legacy keys to strip from the ``guardrail:`` block. The two
+# enforcement booleans are mutually independent — an operator who
+# explicitly opted into one but not the other will have only one key
+# on disk; the migration handles either combination.
+_LEGACY_GUARDRAIL_ENFORCEMENT_KEYS: tuple[str, ...] = (
+    "codex_enforcement_enabled",
+    "claudecode_enforcement_enabled",
+)
+
+
+def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
+    """Drop legacy guardrail.*_enforcement_enabled keys from config.yaml.
+
+    Idempotent: a config.yaml that has already been migrated (no
+    matching keys present) is a no-op. Failures on read or write are
+    logged via ux.warn and the migration continues — leaving stale
+    keys in place is strictly less bad than aborting the upgrade.
+
+    Comment-preservation contract: each match is deleted line-by-line
+    inside the ``guardrail:`` block, including any trailing inline
+    comment on the same line (``codex_enforcement_enabled: true  #
+    legacy``). Surrounding lines — comments above/below, blank
+    separator lines, and unrelated keys — are untouched. The
+    indentation of the deleted line is also preserved structurally
+    by virtue of the regex never touching neighbouring lines.
+
+    Action-mode preservation: this migration only DELETES keys. It
+    does NOT mutate ``guardrail.mode``. An operator who had set
+    ``codex_enforcement_enabled: true`` AND ``guardrail.mode: action``
+    keeps action mode (it now routes through the hook surface
+    automatically). An operator who had set ``true`` but left mode at
+    ``observe`` is left at observe — the same posture they had before
+    the upgrade, just expressed through the surviving knob.
+    """
+    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    if not os.path.isfile(cfg_path):
+        return
+
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+
+    block_match = _find_top_level_block(text, "guardrail")
+    if not block_match:
+        return
+
+    body_start = block_match.start("body")
+    body_end = block_match.end("body")
+    body = block_match.group("body")
+
+    removed: list[str] = []
+    new_body = body
+    for key in _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS:
+        # Delete the whole line carrying the legacy key (with its
+        # terminator). The pattern accepts any value form (quoted /
+        # unquoted bool, optional inline comment) and any leading
+        # indentation the operator chose. ``(?:\r?\n|$)`` removes the
+        # CRLF terminator with the line (no orphaned ``\r`` left behind)
+        # and also matches a final key line with no trailing newline.
+        pattern = re.compile(
+            r"^[ \t]+" + re.escape(key) + r"\s*:[^\n]*(?:\r?\n|$)",
+            flags=re.MULTILINE,
+        )
+        new_body, count = pattern.subn("", new_body)
+        if count:
+            removed.append(key)
+
+    if not removed:
+        return
+
+    new_text = text[:body_start] + new_body + text[body_end:]
+    if new_text == text:
+        return
+
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+
+    ctx.changes.append(
+        "stripped legacy guardrail enforcement key(s) "
+        f"({', '.join(removed)}) from config.yaml — Codex/Claude Code "
+        "now enforce via the agent's native hook bus selected by "
+        "guardrail.mode (action returns a PreToolUse deny verdict)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Migration: gateway.token_env realignment (registered at version 0.7.0)
+# ---------------------------------------------------------------------------
+#
+# The version key in MIGRATIONS is what the cursor uses to decide
+# whether to fire — symbol names and docstrings deliberately avoid
+# pinning to it so a future release manager can re-key without
+# touching the implementation.
+
+
+def _migrate_gateway_token_env_realign(ctx: MigrationContext) -> None:
+    """Single-step wrapper around ``_align_gateway_token_env_in_config``.
+
+    Repoints stale ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN`` in
+    config.yaml to the canonical ``DEFENSECLAW_GATEWAY_TOKEN`` so
+    the Python CLI and the Go gateway agree on the env var name
+    out of the box. The runtime fall-through in
+    ``GatewayConfig.resolved_token`` already MASKS the drift; this
+    migration cleans up the config so operators no longer rely on
+    that fall-through.
+
+    Wrapped in try/except per the migration playbook — a failure in
+    this step never aborts the upgrade; the auto-detect fall-through
+    keeps the CLI working until the operator runs ``defenseclaw
+    doctor --fix`` (which does the same rewrite under operator
+    confirmation).
+    """
+    try:
+        _align_gateway_token_env_in_config(ctx)
+    except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        ux.warn(f"gateway token_env rename step failed: {exc}", indent="    ")
+
+
+def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
+    """Rewrite ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN`` → ``DEFENSECLAW_GATEWAY_TOKEN``.
+
+    Trigger conditions (ALL must hold):
+
+    * ``config.yaml`` exists at ``<data_dir>/config.yaml``.
+    * The file contains a ``gateway:`` block with
+      ``token_env: OPENCLAW_GATEWAY_TOKEN`` (the bootstrap default
+      from before the rebranding fix's defaults patch).
+    * The dotenv at ``<data_dir>/.env`` carries
+      ``DEFENSECLAW_GATEWAY_TOKEN`` with a non-empty value (the
+      0.4.0 token-bootstrap migration normally promotes the legacy
+      var into this name; this migration just finishes the job on
+      the config side).
+
+    The dotenv-population check is the safety gate: we never want to
+    repoint ``token_env`` at an env var that doesn't exist anywhere,
+    because that turns a *silently-working-via-fall-through* config
+    into a *visibly-broken-with-no-fall-back* one. Better to leave
+    the legacy default in place and let the auto-detect ladder keep
+    serving requests.
+
+    Idempotent: if ``token_env`` already says
+    ``DEFENSECLAW_GATEWAY_TOKEN`` (Phase 3 default, or already
+    migrated), this is a no-op.
+
+    Comment-preservation contract: the regex matches ONLY the
+    ``token_env:`` line inside the ``gateway:`` block. Inline
+    comments on the same line are preserved; surrounding comments,
+    blank separators, and unrelated keys are untouched. Indentation
+    of the rewritten line is preserved exactly (we substitute the
+    value, not the line).
+
+    Custom-override safety: if ``token_env`` points at any var name
+    OTHER than ``OPENCLAW_GATEWAY_TOKEN`` (operator pinned a custom
+    name via ``defenseclaw setup gateway``), the migration leaves it
+    alone. Operator intent always wins over migration defaults.
+    """
+    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    if not os.path.isfile(cfg_path):
+        return
+
+    # Safety gate: only proceed if the canonical token is actually
+    # set in the dotenv. Without this, we'd repoint at an empty var
+    # and break the request path that the Phase 1+2 fall-through is
+    # currently keeping alive.
+    env_path = os.path.join(ctx.data_dir, ".env")
+    existing_env = _parse_dotenv(env_path)
+    if not existing_env.get("DEFENSECLAW_GATEWAY_TOKEN", "").strip():
+        return
+
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+
+    # Scope the rewrite to the ``gateway:`` block (via the shared
+    # CRLF/EOF-aware block matcher) so a stray ``token_env:`` under
+    # another section is never touched.
+    block_match = _find_top_level_block(text, "gateway")
+    if not block_match:
+        return
+
+    body_start = block_match.start("body")
+    body_end = block_match.end("body")
+    body = block_match.group("body")
+
+    # Match the ``token_env: OPENCLAW_GATEWAY_TOKEN`` line. The value
+    # may be unquoted (most common), single-quoted, or double-quoted;
+    # we accept all three so we never miss a legitimately-formatted
+    # legacy entry. An inline comment after the value is preserved
+    # because the substitution only touches the captured value group.
+    # ``(?:\r?\n|$)`` in the suffix keeps a CRLF terminator intact in
+    # the rewritten line (rather than dropping the ``\r`` and leaving
+    # mixed terminators) and still matches a final line with no
+    # trailing newline.
+    pattern = re.compile(
+        r"""
+        (?P<prefix>^[ \t]+token_env\s*:\s*)   # indent + key + colon + space
+        (?P<quote>["']?)                       # optional opening quote
+        OPENCLAW_GATEWAY_TOKEN                 # the literal legacy value
+        (?P=quote)                             # matching closing quote
+        (?P<suffix>[ \t]*(?:\#[^\n]*)?(?:\r?\n|$))  # trailing space + optional comment + EOL/EOF
+        """,
+        flags=re.MULTILINE | re.VERBOSE,
+    )
+
+    new_body, count = pattern.subn(
+        lambda m: f"{m.group('prefix')}{m.group('quote')}DEFENSECLAW_GATEWAY_TOKEN{m.group('quote')}{m.group('suffix')}",
+        body,
+    )
+    if count == 0:
+        return
+
+    new_text = text[:body_start] + new_body + text[body_end:]
+    if new_text == text:
+        return
+
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+
+    ctx.changes.append(
+        "repointed gateway.token_env from OPENCLAW_GATEWAY_TOKEN to "
+        "DEFENSECLAW_GATEWAY_TOKEN in config.yaml — matches the env "
+        "var the Go gateway writes on first boot, removes reliance on "
+        "the resolved_token auto-detect fall-through"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Migration: 0.8.0 — Preserve 0.7.x upgrade behavior under safer defaults
+# ---------------------------------------------------------------------------
+
+_AUDIT_SINK_TLS_SECTION_KEYS: tuple[str, ...] = ("splunk_hec", "http_jsonl")
+_FALSEY_YAML_BOOL_TOKENS: frozenset[str] = frozenset(("false", "no", "off", "0"))
+
+
+@dataclass(frozen=True)
+class _YamlKeyLine:
+    indent: str
+    key: str
+    value: str
+
+
+def _migrate_0_8_0(ctx: MigrationContext) -> None:
+    """Preserve explicit/implicit 0.7.x behavior during the 0.8.0 upgrade.
+
+    New installs should inherit the safer defaults added on this branch:
+    response-layer hook failures default to fail-closed, and audit sink TLS
+    verification defaults on. Existing installs are different: if a 0.7.x
+    config omitted ``guardrail.hook_fail_mode`` it had fail-open behavior, and
+    if a sink explicitly carried ``verify_tls: false`` it intentionally skipped
+    certificate verification. This migration pins those legacy choices in the
+    new explicit fields so a clean 0.7.2 -> 0.8.0 upgrade does not silently
+    change runtime behavior.
+    """
+    _migrate_0_4_0_seed_hook_fail_mode(ctx)
+    _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx)
+
+
+def _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx: MigrationContext) -> None:
+    """Map legacy sink ``verify_tls: false`` to ``insecure_skip_verify: true``.
+
+    The transport model changed from an opt-in ``verify_tls`` flag to an
+    opt-out ``insecure_skip_verify`` flag. Runtime code now intentionally
+    ignores ``verify_tls: false`` so a new config cannot accidentally disable
+    certificate verification. For upgraded configs, though, that old false
+    value was an explicit operator choice. Preserve it by adding the new
+    opt-out only under affected ``splunk_hec`` and ``http_jsonl`` sink blocks.
+
+    The rewrite is line-oriented and scoped to the top-level ``audit_sinks:``
+    block. It does not YAML round-trip the file, so comments, ordering, scalar
+    quoting, and CRLF line endings survive.
+    """
+    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    if not os.path.isfile(cfg_path):
+        return
+
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+
+    block_span = _find_top_level_yaml_block_body_span(text, "audit_sinks")
+    if block_span is None:
+        return
+
+    body_start, body_end = block_span
+    body = text[body_start:body_end]
+    new_body, inserted = _preserve_legacy_sink_tls_skip_verify_in_yaml_block(body)
+    if inserted == 0:
+        return
+
+    new_text = text[:body_start] + new_body + text[body_end:]
+    if new_text == text:
+        return
+
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+
+    ctx.changes.append(
+        "preserved legacy audit_sinks TLS behavior by adding "
+        f"insecure_skip_verify=true to {inserted} sink block(s) that had "
+        "verify_tls=false"
+    )
+
+
+def _preserve_legacy_sink_tls_skip_verify_in_yaml_block(body: str) -> tuple[str, int]:
+    """Insert ``insecure_skip_verify: true`` into affected sink sub-blocks."""
+    lines = body.splitlines(keepends=True)
+    inserted = 0
+    i = 0
+    while i < len(lines):
+        parsed = _parse_yaml_key_line(lines[i])
+        if parsed is None or parsed.key not in _AUDIT_SINK_TLS_SECTION_KEYS:
+            i += 1
+            continue
+
+        section_indent_len = len(parsed.indent)
+        j = i + 1
+        verify_idx: int | None = None
+        verify_indent = ""
+        has_insecure_skip_verify = False
+
+        while j < len(lines):
+            child = _parse_yaml_key_line(lines[j])
+            if child is None:
+                j += 1
+                continue
+
+            child_indent_len = len(child.indent)
+            if child_indent_len <= section_indent_len:
+                break
+
+            if child.key == "insecure_skip_verify":
+                has_insecure_skip_verify = True
+            elif (
+                child.key == "verify_tls"
+                and verify_idx is None
+                and _is_falsey_yaml_bool_literal(child.value)
+            ):
+                verify_idx = j
+                verify_indent = child.indent
+            j += 1
+
+        if verify_idx is not None and not has_insecure_skip_verify:
+            eol = _line_ending(lines[verify_idx])
+            if not lines[verify_idx].endswith("\n"):
+                lines[verify_idx] += eol
+                j += 1
+            lines.insert(
+                verify_idx + 1,
+                f"{verify_indent}insecure_skip_verify: true{eol}",
+            )
+            inserted += 1
+            i = j + 1
+            continue
+
+        i = max(j, i + 1)
+
+    return "".join(lines), inserted
+
+
+def _parse_yaml_key_line(line: str) -> _YamlKeyLine | None:
+    """Return basic key/value parts for a simple YAML mapping line."""
+    body = line.rstrip("\r\n")
+    stripped = body.lstrip(" \t")
+    if not stripped or stripped.startswith("#"):
+        return None
+    match = re.match(r"(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:(?P<value>.*)$", stripped)
+    if not match:
+        return None
+    return _YamlKeyLine(
+        indent=body[: len(body) - len(stripped)],
+        key=match.group("key"),
+        value=match.group("value").strip(),
+    )
+
+
+def _is_falsey_yaml_bool_literal(value: str) -> bool:
+    """Recognize YAML-style false values without evaluating arbitrary YAML."""
+    token = value.split("#", 1)[0].strip()
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
+        token = token[1:-1].strip()
+    return token.lower() in _FALSEY_YAML_BOOL_TOKENS
+
+
+def _line_ending(line: str) -> str:
+    if line.endswith("\r\n"):
+        return "\r\n"
+    if line.endswith("\n"):
+        return "\n"
+    return "\n"
+
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 
@@ -1131,8 +1894,31 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
     (
         "0.5.0",
         "Purge stale flat-layout policy bundle that blocked HILT prompt-stage "
-        "confirmations (see _migrate_0_5_0 docstring)",
+        "confirmations; strip retired guardrail.{codex,claudecode}_enforcement_enabled "
+        "keys (LLM proxy data path for Codex / Claude Code removed; enforcement "
+        "now routed through the agent's native hook bus via guardrail.mode=action) "
+        "— see _migrate_0_5_0 docstring",
         _migrate_0_5_0,
+    ),
+    (
+        # Ships in the 0.7.0 release. The function name deliberately
+        # does NOT mention a version so re-keying here at merge time
+        # (if a different version is cut) needs no rename.
+        "0.7.0",
+        "Repoint legacy gateway.token_env=OPENCLAW_GATEWAY_TOKEN in config.yaml "
+        "to the canonical DEFENSECLAW_GATEWAY_TOKEN so the Python CLI and the Go "
+        "gateway agree on the env var name (closes the 'gateway token unavailable' "
+        "trip the runtime fall-through in GatewayConfig.resolved_token already masks) "
+        "— see _migrate_gateway_token_env_realign docstring",
+        _migrate_gateway_token_env_realign,
+    ),
+    (
+        "0.8.0",
+        "Preserve 0.7.x upgrade behavior under safer 0.8.0 defaults: seed "
+        "guardrail.hook_fail_mode=open for existing configs that omitted it "
+        "and map legacy audit_sinks verify_tls=false to "
+        "insecure_skip_verify=true",
+        _migrate_0_8_0,
     ),
 ]
 
@@ -1209,6 +1995,24 @@ def run_migrations(
     # already in steady state.
     state = migration_state.load(data_dir)
     if state is None:
+        # ``load`` collapses several cases to ``None``. Most of them
+        # (missing / empty / corrupt cursor) are safe to bootstrap. But a
+        # cursor written by a NEWER build — schema greater than this
+        # build understands — must NOT be treated as a fresh host:
+        # bootstrapping would overwrite it with a stale schema-N cursor
+        # and erase the newer build's migration history (F-0081). Refuse
+        # so the operator can run ``defenseclaw doctor migration-state
+        # --reset`` instead of silently downgrading their state.
+        if migration_state.is_future_schema(data_dir):
+            raise migration_state.FutureSchemaError(
+                "migration cursor at "
+                f"{migration_state.state_path(data_dir)} was written by a "
+                "newer DefenseClaw build (schema "
+                f"{migration_state.detect_schema(data_dir)} > "
+                f"{migration_state.CURRENT_SCHEMA_VERSION}); refusing to "
+                "overwrite it. Run 'defenseclaw doctor migration-state "
+                "--reset' if you intend to run this older build."
+            )
         state = migration_state.bootstrap(
             None,
             from_version=from_version,
@@ -1235,15 +2039,19 @@ def run_migrations(
         if ver_t > to_t:
             continue
 
-        # In the upgrade case, also exclude entries strictly below
-        # ``from_version``. They should already be in the cursor;
-        # the bootstrap above handled that. Skipping here is a
-        # belt-and-suspenders against a malformed cursor that's
-        # missing entries we'd otherwise replay unnecessarily.
-        if not same_version_reapply and ver_t < from_t:
-            continue
-
         already_applied = migration_state.is_applied(state, ver)
+
+        # In the upgrade case, exclude entries strictly below
+        # ``from_version`` ONLY when the cursor already records them as
+        # applied. A lower-version migration that is MISSING from the
+        # cursor (e.g. one that failed on an earlier upgrade and was
+        # therefore never marked applied) must still be retried on a
+        # later upgrade rather than being skipped by the version
+        # comparison alone (F-0681). The cursor — not ``from_version`` —
+        # is the source of truth for what has run; migrations are
+        # idempotent, so re-attempting an unapplied lower version is safe.
+        if not same_version_reapply and ver_t < from_t and already_applied:
+            continue
 
         # Same-version reapply intentionally bypasses the cursor for
         # the matching version — see backward-compat note in the

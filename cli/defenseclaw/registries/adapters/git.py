@@ -36,7 +36,12 @@ from defenseclaw.registries.adapters._base import (
     normalize_url,
 )
 from defenseclaw.registries.manifest import Manifest, parse_manifest
-from defenseclaw.registries.ssrf import Resolver, SSRFError, guard_git_url
+from defenseclaw.registries.ssrf import (
+    Resolver,
+    SSRFError,
+    guard_git_url,
+    resolve_and_pin,
+)
 
 CLONE_TIMEOUT = 60.0
 MANIFEST_NAMES = (
@@ -57,6 +62,14 @@ def fetch_git(
         raise IngestError(f"source {source.id!r} has no URL")
     try:
         guard_git_url(url, allow_private=allow_private, resolver=resolver)
+        # F-0345: resolve-and-pin the host so we can bind git's connect to
+        # the exact IP we validated. guard_git_url() only proves the URL
+        # was safe at check time; git would otherwise re-resolve the
+        # hostname at clone time, leaving a DNS-rebind window where a
+        # low-TTL flip to an internal address slips past the guard.
+        pinned_ip, pinned_host, pinned_port = resolve_and_pin(
+            url, allow_private=allow_private, resolver=resolver
+        )
     except SSRFError as exc:
         raise IngestError(str(exc)) from exc
 
@@ -73,15 +86,38 @@ def fetch_git(
 
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
+    authed = False
     if source.auth_env:
         token = os.environ.get(source.auth_env, "")
         if token:
             env["GIT_ASKPASS"] = "echo"
             env["GIT_HTTP_EXTRAHEADER"] = f"Authorization: Bearer {token}"
+            authed = True
 
     with tempfile.TemporaryDirectory(prefix="dc-reg-git-") as tmp:
-        cmd = [
-            "git", "clone",
+        cmd = ["git"]
+        # F-0345: pin git's libcurl connect to the IP we just vetted, the
+        # same mechanism as curl ``--resolve host:port:ip``. This binds the
+        # TCP connect to the validated address while git still sends the
+        # original Host: header and uses it for TLS SNI / cert validation,
+        # so a DNS rebind between the guard check and the clone cannot
+        # redirect the (token-bearing) request to an internal host.
+        cmd += [
+            "-c",
+            f"http.curloptResolve={pinned_host}:{pinned_port}:{pinned_ip}",
+        ]
+        if authed:
+            # F-0345: the bearer token is injected via
+            # GIT_HTTP_EXTRAHEADER, which git would happily replay on a
+            # 30x redirect to a *different* host — handing the
+            # operator's registry token to whatever the (publisher- or
+            # MITM-controlled) redirect points at. We already
+            # SSRF-validated the original URL above; disabling redirect
+            # following entirely for authenticated clones guarantees the
+            # Authorization header can only ever reach that vetted host.
+            cmd += ["-c", "http.followRedirects=false"]
+        cmd += [
+            "clone",
             "--depth", "1",
             "--no-tags",
             "--single-branch",

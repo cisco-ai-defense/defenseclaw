@@ -35,14 +35,22 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_guardrail import guardrail
+
 from tests.helpers import cleanup_app, make_app_context
 
-
 _CONNECTORS = (
-    "openclaw", "zeptoclaw", "claudecode", "codex",
-    "hermes", "cursor", "windsurf", "geminicli", "copilot",
+    "openclaw",
+    "zeptoclaw",
+    "claudecode",
+    "codex",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+    "openhands",
+    "antigravity",
 )
 _CONNECTOR_LABELS = {
     "openclaw": "OpenClaw",
@@ -54,6 +62,8 @@ _CONNECTOR_LABELS = {
     "windsurf": "Windsurf",
     "geminicli": "Gemini CLI",
     "copilot": "GitHub Copilot CLI",
+    "openhands": "OpenHands",
+    "antigravity": "Antigravity",
 }
 
 
@@ -74,9 +84,7 @@ class GuardrailStatusMatrixTests(unittest.TestCase):
                 app, tmp_dir, db_path = _build_app_for(connector)
                 try:
                     runner = CliRunner()
-                    result = runner.invoke(
-                        guardrail, ["status"], obj=app, catch_exceptions=False
-                    )
+                    result = runner.invoke(guardrail, ["status"], obj=app, catch_exceptions=False)
                     self.assertEqual(result.exit_code, 0, msg=result.output)
                     self.assertIn(_CONNECTOR_LABELS[connector], result.output)
                     self.assertIn(connector, result.output)
@@ -93,9 +101,7 @@ class GuardrailEnableMatrixTests(unittest.TestCase):
                 app, tmp_dir, db_path = _build_app_for(connector)
                 try:
                     runner = CliRunner()
-                    with patch(
-                        "defenseclaw.commands.cmd_setup._restart_services"
-                    ) as mock_restart:
+                    with patch("defenseclaw.commands.cmd_setup._restart_services") as mock_restart:
                         result = runner.invoke(
                             guardrail,
                             ["enable", "--yes"],
@@ -121,9 +127,7 @@ class GuardrailDisableMatrixTests(unittest.TestCase):
                 app.cfg.save()
                 try:
                     runner = CliRunner()
-                    with patch(
-                        "defenseclaw.commands.cmd_setup._restart_services"
-                    ) as mock_restart:
+                    with patch("defenseclaw.commands.cmd_setup._restart_services") as mock_restart:
                         result = runner.invoke(
                             guardrail,
                             ["disable", "--yes"],
@@ -147,9 +151,7 @@ class GuardrailIdempotencyMatrixTests(unittest.TestCase):
                 app, tmp_dir, db_path = _build_app_for(connector)
                 try:
                     runner = CliRunner()
-                    with patch(
-                        "defenseclaw.commands.cmd_setup._restart_services"
-                    ) as mock_restart:
+                    with patch("defenseclaw.commands.cmd_setup._restart_services") as mock_restart:
                         result = runner.invoke(
                             guardrail,
                             ["disable", "--yes"],

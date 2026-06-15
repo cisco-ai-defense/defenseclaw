@@ -120,6 +120,33 @@ func TestEvaluateCodexHook_ExplicitEnableStillWorks(t *testing.T) {
 	}
 }
 
+// TestEvaluateCodexHook_PerConnectorDisableAllowsWithoutScan pins the
+// defense-in-depth gate: when codex is a member of guardrail.connectors but
+// explicitly disabled (`guardrail disable --connector codex`), a hook that
+// still calls in is allowed without scanning, even though the prompt carries
+// a block-worthy keyword.
+func TestEvaluateCodexHook_PerConnectorDisableAllowsWithoutScan(t *testing.T) {
+	off := false
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex": {Enabled: &off},
+	}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := codexHookRequest{
+		HookEventName: "UserPromptSubmit",
+		Prompt:        trustExploitKeyword(),
+	}
+	resp := api.evaluateCodexHook(context.Background(), req)
+
+	if resp.RawAction != "allow" {
+		t.Errorf("RawAction = %q, want allow (disabled connector must not scan)", resp.RawAction)
+	}
+}
+
 func TestEvaluateCodexHook_HILTPreToolUseDoesNotAsk(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
@@ -449,6 +476,13 @@ func TestEvaluateCodexHook_RuntimeDetectionCanDisableTerminalMCP(t *testing.T) {
 	}
 }
 
+// TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock pins the
+// fix: when AssetPolicy is in action mode and MCP.Default is
+// "deny", an unknown terminal MCP command MUST block even when the
+// secondary `runtime_detection.unknown_terminal_mcp` knob is left at
+// its observe default. Operators that explicitly opt into
+// MCP.Default=deny should not have to discover and override the
+// secondary knob to get default-deny semantics.
 func TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"
@@ -468,11 +502,9 @@ func TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock(t *testing.T) 
 	}
 	resp := api.evaluateCodexHook(context.Background(), req)
 
-	if resp.Action != "allow" || resp.RawAction != "block" {
-		t.Fatalf("action=%q raw=%q, want allow/block", resp.Action, resp.RawAction)
-	}
-	if !resp.WouldBlock {
-		t.Fatal("unknown terminal MCP should default to would_block")
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block — MCP.Default=deny in action mode must not be silently downgraded by unknown_terminal_mcp=observe",
+			resp.Action, resp.RawAction)
 	}
 }
 
@@ -623,7 +655,14 @@ func TestHandleCodexHook_EnrichesHTTPSpan(t *testing.T) {
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	api := &APIServer{}
-	handler := otelHTTPServerMiddleware("sidecar-api", http.HandlerFunc(api.handleCodexHook))
+	// PR #284: handleCodexHook was deleted; the unified pipeline
+	// now serves /api/v1/codex/hook via handleAgentHook("codex").
+	// The typed evaluator + span enricher (evaluateCodexHook /
+	// enrichCodexHookSpan) are invoked by the profile-runtime
+	// registry so the gen_ai.* and
+	// defenseclaw.codex.hook.* span attributes asserted below
+	// remain present.
+	handler := otelHTTPServerMiddleware("sidecar-api", api.handleAgentHook("codex"))
 
 	body, err := json.Marshal(codexHookRequest{
 		HookEventName: "PreToolUse",

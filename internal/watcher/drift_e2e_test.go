@@ -69,7 +69,7 @@ def run():
 	cfgJSON, _ := json.Marshal(snap1.ConfigHashes)
 	epJSON, _ := json.Marshal(snap1.NetworkEndpoints)
 
-	if err := store.SetTargetSnapshot("skill", skillDir, snap1.ContentHash, string(depJSON), string(cfgJSON), string(epJSON), ""); err != nil {
+	if err := store.SetTargetSnapshot("skill", skillDir, snap1.ContentHash, string(depJSON), string(cfgJSON), string(epJSON), "", ""); err != nil {
 		t.Fatalf("store baseline: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestDriftE2E_NoDriftOnUnchanged(t *testing.T) {
 	cfgJSON, _ := json.Marshal(snap.ConfigHashes)
 	epJSON, _ := json.Marshal(snap.NetworkEndpoints)
 
-	if err := store.SetTargetSnapshot("skill", skillDir, snap.ContentHash, string(depJSON), string(cfgJSON), string(epJSON), ""); err != nil {
+	if err := store.SetTargetSnapshot("skill", skillDir, snap.ContentHash, string(depJSON), string(cfgJSON), string(epJSON), "", ""); err != nil {
 		t.Fatal(err)
 	}
 

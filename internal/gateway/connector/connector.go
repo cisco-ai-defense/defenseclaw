@@ -72,39 +72,14 @@ type SetupOpts struct {
 	// connectors fall back to the process working directory.
 	WorkspaceDir string
 
-	// CodexEnforcement and ClaudeCodeEnforcement gate the
-	// proxy-redirect / blocking path for the Codex and Claude Code
-	// connectors respectively. The Sidecar populates these from
-	// cfg.Guardrail.CodexEnforcementEnabled and
-	// cfg.Guardrail.ClaudeCodeEnforcementEnabled. When false (the
-	// default), the connector's Setup() installs hooks + native
-	// OTel exporters but skips the proxy-redirect path
-	// (openai_base_url rewrite, ANTHROPIC_BASE_URL env override,
-	// reserved-id strip, subprocess sandbox). Observability still
-	// runs end-to-end via three independent channels per connector;
-	// see GuardrailConfig.CodexEnforcementEnabled in
-	// internal/config/config.go for the rationale.
-	//
-	// Per-connector flags (rather than a single InstallMode enum)
-	// because OpenClaw and ZeptoClaw run in full guardrail mode
-	// regardless and have no observability-only path; mixing the
-	// gates into one tri-state was producing an unused enforcement
-	// branch for those connectors.
-	CodexEnforcement      bool
-	ClaudeCodeEnforcement bool
-
 	// HookFailMode is the operator-chosen response-layer fail mode
 	// baked into every hook script we write. Values: "open" (default,
 	// allow on response-layer failures) or "closed" (block on
 	// response-layer failures). The sidecar populates this from
-	// cfg.Guardrail.EffectiveHookFailMode(); per-connector enforcement
-	// flags can still UPGRADE the value to "closed" (because enabling
-	// enforcement signals strict policy posture), but they NEVER
-	// downgrade an explicit "closed" choice to "open". Empty string
-	// is treated as the default ("open"). Transport-layer failures
-	// are governed separately by DEFENSECLAW_STRICT_AVAILABILITY in
-	// the hook scripts themselves and are NOT controlled by this
-	// field.
+	// cfg.Guardrail.EffectiveHookFailMode(); empty string is treated as
+	// the default ("open"). Transport-layer failures (gateway unreachable /
+	// 5xx) are governed separately by DEFENSECLAW_STRICT_AVAILABILITY in
+	// the hook scripts themselves and are NOT controlled by this field.
 	HookFailMode string
 
 	// HILTEnabled tells connectors with native approval surfaces to wire
@@ -119,6 +94,28 @@ type SetupOpts struct {
 	// implicitly. Server-side CodeGuard scanning remains independent from
 	// native skill/rule/plugin installation.
 	InstallCodeGuard bool
+
+	// AgentVersion is the raw local agent CLI version observed by trusted
+	// discovery (`<agent> --version`). HookProfile resolution treats this as
+	// audit/debug input, normalizes it locally, and maps it to a deterministic
+	// HookContract. Empty means "not probed"; it never implies latest.
+	AgentVersion string
+
+	// HookContractID optionally pins setup/profile resolution to a specific
+	// known contract. A non-empty value that does not match the resolved
+	// contract marks the profile incompatible instead of silently using a
+	// different hook surface.
+	HookContractID string
+
+	// CodexEnforcement signals that the operator turned on hard
+	// enforcement for the codex connector (see avarice F-0681).
+	// When true, an empty HookFailMode upgrades to "closed" instead
+	// of using the legacy "open" default — without overriding an
+	// explicit operator-supplied value.
+	CodexEnforcement bool
+
+	// ClaudeCodeEnforcement is the parallel flag for claudecode.
+	ClaudeCodeEnforcement bool
 }
 
 // Connector is the contract every agent framework adapter implements.
@@ -188,6 +185,35 @@ type SurfaceCapability struct {
 	Notes           []string `json:"notes,omitempty"`
 }
 
+// SurfaceLocations is the resolved, on-this-machine path manifest for a
+// connector surface. It is derived from SurfaceCapability and SetupOpts so
+// diagnostics can distinguish static capability ("OpenHands supports skills")
+// from the concrete path being watched in this workspace.
+type SurfaceLocations struct {
+	Supported      bool     `json:"supported"`
+	Scope          string   `json:"scope,omitempty"`
+	ConfigPaths    []string `json:"config_paths,omitempty"`
+	ReadPaths      []string `json:"read_paths,omitempty"`
+	WritePaths     []string `json:"write_paths,omitempty"`
+	InstallTargets []string `json:"install_targets,omitempty"`
+	DiscoveryOnly  bool     `json:"discovery_only,omitempty"`
+	RequiresOptIn  bool     `json:"requires_opt_in,omitempty"`
+	Notes          []string `json:"notes,omitempty"`
+}
+
+// ConnectorLocations is the resolved connector path contract captured into
+// hook_contract_lock.json and exposed by connector metadata. Static hook
+// contracts say what protocol DefenseClaw supports; this manifest says where
+// DefenseClaw installed hooks and where it will discover MCP servers, skills,
+// plugins, rules, and agents for the selected workspace.
+type ConnectorLocations struct {
+	WorkspaceDir         string                      `json:"workspace_dir,omitempty"`
+	HookConfigPaths      []string                    `json:"hook_config_paths,omitempty"`
+	HookScriptPaths      []string                    `json:"hook_script_paths,omitempty"`
+	TelemetryConfigPaths []string                    `json:"telemetry_config_paths,omitempty"`
+	Surfaces             map[string]SurfaceLocations `json:"surfaces,omitempty"`
+}
+
 // CodeGuardCapability models native Project CodeGuard asset installation for
 // a connector. Server-side CodeGuard scanning remains independent from this:
 // these flags only describe optional skill/rule/plugin assets placed into the
@@ -221,14 +247,41 @@ type TelemetryCapability struct {
 // doctor, API metadata, and future installer flows. HookCapabilityProvider
 // remains as a compatibility shim for the verdict mapper.
 type ConnectorCapabilities struct {
-	Hooks     HookCapability      `json:"hooks"`
-	MCP       SurfaceCapability   `json:"mcp"`
-	Skills    SurfaceCapability   `json:"skills"`
-	Rules     SurfaceCapability   `json:"rules"`
-	Plugins   SurfaceCapability   `json:"plugins"`
-	Agents    SurfaceCapability   `json:"agents"`
-	CodeGuard CodeGuardCapability `json:"codeguard"`
-	Telemetry TelemetryCapability `json:"telemetry"`
+	// LLMTrafficMode states whether DefenseClaw sits in the agent's LLM
+	// data path ("proxy") or only attaches to lifecycle hooks
+	// ("hooks-only"). It is the single honest signal for what a custom
+	// provider actually does when bound to this connector: on a proxy
+	// connector a custom provider can be the agent's enforced upstream
+	// model; on a hooks-only connector it can only be DefenseClaw's
+	// judge/aux model — the agent's own model traffic is never seen.
+	LLMTrafficMode string              `json:"llm_traffic_mode"`
+	Hooks          HookCapability      `json:"hooks"`
+	MCP            SurfaceCapability   `json:"mcp"`
+	Skills         SurfaceCapability   `json:"skills"`
+	Rules          SurfaceCapability   `json:"rules"`
+	Plugins        SurfaceCapability   `json:"plugins"`
+	Agents         SurfaceCapability   `json:"agents"`
+	CodeGuard      CodeGuardCapability `json:"codeguard"`
+	Telemetry      TelemetryCapability `json:"telemetry"`
+}
+
+// LLMTrafficModeProxy / LLMTrafficModeHooksOnly are the two values of
+// ConnectorCapabilities.LLMTrafficMode.
+const (
+	LLMTrafficModeProxy     = "proxy"
+	LLMTrafficModeHooksOnly = "hooks-only"
+)
+
+// LLMTrafficModeForConnector returns the traffic mode for a connector
+// name: "proxy" for the proxy/chat connectors (OpenClaw, ZeptoClaw)
+// that interpose on the LLM data path, "hooks-only" for every hook
+// connector. This is the authoritative classifier the API and CLI use
+// to describe custom-provider enforcement per connector.
+func LLMTrafficModeForConnector(name string) string {
+	if IsProxyConnector(normalizeConnectorName(name)) {
+		return LLMTrafficModeProxy
+	}
+	return LLMTrafficModeHooksOnly
 }
 
 // ConnectorCapabilityProvider — optional, connectors that can describe their
@@ -243,6 +296,164 @@ type ConnectorCapabilityProvider interface {
 // native HITL.
 type HookCapabilityProvider interface {
 	HookCapabilities(opts SetupOpts) HookCapability
+}
+
+// HookProfile is the declarative description a connector returns to
+// the unified hook collector. handleAgentHook is the sole entry point
+// for every connector hook route; connector-specific differences live
+// behind HookProfile callbacks and the gateway-side profile-runtime
+// registry. The HookProfile fields drive route registration
+// (HookAPIPath), trace-propagation (SupportsTraceparent), native OTLP
+// shape (NativeOTLP), versioned hook contracts, and the declarative
+// Decode / MapVerdict / Respond callbacks the connector-side tooling
+// can read without depending on gateway-private request types.
+//
+// Fields:
+//
+//   - Name: the connector's short name (matches Connector.Name()).
+//   - Capabilities: existing HookCapability (CanBlock, CanAskNative, AskEvents).
+//   - SupportsTraceparent: true when the connector's hook scripts forward
+//     W3C traceparent / tracestate headers from DEFENSECLAW_TRACEPARENT. The
+//     gateway uses this to decide whether to expect a propagated trace
+//     context vs. mint a fresh root span. v6-managed hooks set this true.
+//   - NativeOTLP: optional descriptor for the connector's native OTLP
+//     emission. nil when the connector does not emit native OTLP (cursor,
+//     windsurf, hermes today). Non-nil for codex (TOML), claudecode (env),
+//     geminicli (JSON + path-token), copilot (env).
+//   - Decode: optional decoder that translates a connector-specific raw
+//     payload into the shared HookProfileRequest shape. codex and
+//     claudecode set this so their bespoke per-connector evaluators
+//     can run from the unified handler with no extra HTTP surface.
+//     nil = caller uses the generic normalizeAgentHookRequest path.
+//   - MapVerdict: optional verdict mapper for connectors whose mode →
+//     action translation deviates from the generic mapHookAction (codex
+//     never enforces alert; claudecode's "can enforce" gate covers
+//     non-blockable events with rawAction=block + wouldBlock=true). nil =
+//     caller uses mapHookAction directly.
+//   - Respond: optional response shaper that produces the connector-
+//     specific top-level output map plus its JSON field name
+//     ("hook_output", "codex_output", "claude_code_output"). nil =
+//     caller uses hookOutputFor and the "hook_output" field.
+type HookProfile struct {
+	Name                    string
+	Capabilities            HookCapability
+	SupportsTraceparent     bool
+	NativeOTLP              *NativeOTLPSpec
+	ContractID              string
+	HookScriptVersion       string
+	HookConfigPathTemplates []string
+	ResponseFieldName       string
+	SupportedEvents         []string
+	AIDSurfaces             []string
+	AgentVersion            string
+	NormalizedAgentVersion  string
+	CompatibilityStatus     string
+	CompatibilityReason     string
+
+	// ContentEnvelopeKey names the single nested payload object this
+	// connector hides inspectable content in (hermes nests prompt /
+	// result text under "extra"). When set, the generic decoder —
+	// after every top-level content lookup misses — opens exactly
+	// this one declared sub-object and re-runs the expected
+	// content-key search inside it. Empty for flat-payload
+	// connectors, which therefore never take that path. Deliberately
+	// a single declared key, not a recursive scan: tool inputs /
+	// results carry attacker-influenced nested JSON, so the only
+	// sub-object ever opened is the one declared in the audited
+	// contract.
+	ContentEnvelopeKey string
+
+	// Profile-driven dispatch callbacks. All optional — the
+	// unified dispatch helper consults these fields when present
+	// (codex / claudecode set them today); generic connectors leave
+	// them nil and the unified handler falls through to the inlined
+	// generic evaluator.
+	Decode     func(payload map[string]interface{}) HookProfileRequest
+	MapVerdict func(in HookVerdictInput) HookVerdictOutput
+	Respond    func(in HookRespondInput) HookRespondOutput
+}
+
+// HookProfileRequest is the shared representation of a decoded hook
+// request used by the unified collector. Connector-specific payload
+// fields (codex's tool_response, claudecode's permission_mode,
+// command_args, etc.) live in Payload so connector-aware evaluators
+// can recover them without forcing the unified handler to know about
+// every vendor schema.
+//
+// Decode implementations MUST populate at least HookEventName and
+// Payload; other fields are populated when the corresponding payload
+// keys are present. The unified collector treats empty fields as
+// "not provided" and falls back to generic-extraction helpers.
+type HookProfileRequest struct {
+	ConnectorName string
+	HookEventName string
+	SessionID     string
+	TurnID        string
+	AgentID       string
+	AgentName     string
+	AgentType     string
+	CWD           string
+	ToolName      string
+	Content       string
+	Direction     string
+	Model         string
+	Payload       map[string]interface{}
+}
+
+// HookVerdictInput is the mode-mapping context fed to a profile's
+// MapVerdict. RawAction is the normalized upstream verdict
+// ("allow", "block", "alert", "confirm"), Event is the hook event
+// name, Mode is the connector-resolved guardrail mode
+// ("observe" or "action"), and Caps is the connector's hook
+// capability matrix. MapVerdict returns the final action plus a
+// would_block flag.
+type HookVerdictInput struct {
+	RawAction string
+	Event     string
+	Mode      string
+	Caps      HookCapability
+}
+
+// HookVerdictOutput is MapVerdict's return value. Action is the
+// final agent-visible decision ("allow", "block", "alert",
+// "confirm"); WouldBlock is true when the mapping demoted a block
+// because the connector cannot enforce on this event/mode.
+type HookVerdictOutput struct {
+	Action     string
+	WouldBlock bool
+}
+
+// HookRespondInput carries the rendered verdict and surrounding
+// context a profile's Respond uses to build the connector-specific
+// top-level output map. Tool / event / mode are duplicated from the
+// request so Respond does not need to keep a pointer to the original
+// HookProfileRequest.
+type HookRespondInput struct {
+	Req               HookProfileRequest
+	Action            string
+	RawAction         string
+	Reason            string
+	AdditionalContext string
+	Caps              HookCapability
+}
+
+// HookRespondOutput is Respond's return value. FieldName is the JSON
+// field name of the output map in the final response body
+// ("hook_output", "codex_output", "claude_code_output"). Output is
+// the map itself; a nil map means "omit the field entirely" (matches
+// the existing omitempty behavior on agentHookResponse.HookOutput).
+type HookRespondOutput struct {
+	FieldName string
+	Output    map[string]interface{}
+}
+
+// HookProfileProvider — optional, connectors that participate in the
+// unified hook collector declare their profile here. Connectors that do
+// not implement this interface continue to flow through the legacy
+// per-connector handlers and the HookCapabilityProvider path; the unified
+// collector falls back to a zero-value profile for them.
+type HookProfileProvider interface {
+	HookProfile(opts SetupOpts) HookProfile
 }
 
 // AllowedHostsProvider — optional. Connectors that depend on

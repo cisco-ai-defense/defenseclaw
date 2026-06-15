@@ -162,7 +162,7 @@ args = ["/opt/global-fs.js"]
 		t.Fatal(err)
 	}
 
-	entries, err := readMCPServersCodex()
+	entries, err := readMCPServersCodex(cwdDir)
 	if err != nil {
 		t.Fatalf("readMCPServersCodex: %v", err)
 	}

@@ -1,0 +1,162 @@
+---
+title: Observability
+description: Every prompt, tool call, scan finding, and HITL decision lands in your SIEM and your dashboards. DefenseClaw ships local Grafana/Loki/Tempo and local Splunk stacks you can stand up with one command.
+keywords:
+  - DefenseClaw observability
+  - defenseclaw setup splunk
+  - defenseclaw setup local-observability
+  - OTLP
+  - Splunk HEC
+  - Grafana
+  - audit sinks
+---
+
+The DefenseClaw gateway is observable by design. Every decision — admission, guardrail verdict, judge call, scanner finding, HITL approval — is structured, correlated by `trace_id`/`span_id`, and emitted on three independent rails:
+
+<Flow
+  direction="TB"
+  caption="Three independent sinks fanned out below the gateway. Failure on one rail does not affect the others."
+>
+  <Node id="gateway" kind="gateway">{`DefenseClaw Gateway\nadmission · guardrail ·\njudge · scan decisions`}</Node>
+  <Node id="otel" kind="connector">{`OpenTelemetry\nCollector`}</Node>
+  <Node id="hec" kind="connector">Splunk HEC</Node>
+  <Node id="local" kind="datastore">{`Local JSONL\n~/.defenseclaw/gateway.jsonl`}</Node>
+  <Node id="loki" kind="datastore">{`Loki · Tempo ·\nPrometheus`}</Node>
+  <Node id="splunk" kind="datastore">Splunk app</Node>
+  <Node id="grafana" kind="datastore">Grafana</Node>
+  <Node id="tui" kind="operator">DefenseClaw TUI</Node>
+  <Edge from="gateway" to="otel" label="OTLP" />
+  <Edge from="gateway" to="hec" label="HEC JSON" />
+  <Edge from="gateway" to="local" label="JSONL" />
+  <Edge from="otel" to="loki" />
+  <Edge from="hec" to="splunk" />
+  <Edge from="local" to="tui" />
+  <Edge from="loki" to="grafana" />
+</Flow>
+
+You can use any combination of those — they're independent sinks, not exclusive backends. Most teams start with one of the bundled local stacks while they're building policy, then add their production SIEM as a second sink without rewriting anything.
+
+## The two bundled stacks
+
+<Cards>
+  <Card
+    title="Local OTel + Grafana stack"
+    href="/docs/observability/local-observability"
+    description="One-command Compose stack: OTel Collector, Loki, Tempo, Prometheus, Grafana — all wired to the gateway by setup local-observability up."
+  />
+  <Card
+    title="Splunk (local + Enterprise)"
+    href="/docs/observability/splunk"
+    description="defenseclaw setup splunk runs three independent pipelines: --logs (local Splunk in Docker), --enterprise (remote HEC), --o11y (Splunk Observability Cloud)."
+  />
+</Cards>
+
+## What lands in observability
+
+Every event has the same envelope so you can correlate across rails:
+
+```json
+{
+  "ts": "2026-05-08T12:00:01.234Z",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "connector": "codex",
+  "agent": "claudecode",
+  "session_id": "...",
+  "kind": "guardrail.verdict",
+  "decision": "deny",
+  "rule": "secrets/aws_access_key",
+  "severity": "high",
+  "actor": { "operator": "vineeth", "host": "..." },
+  "payload": { "matched": "AKIA****", "tool": "fs.write" }
+}
+```
+
+The `connector` field is the multi-connector dimension: it names which hook connector (`codex`, `claudecode`, `antigravity`, …) the event came from. One gateway can serve several connectors at once, so every rail carries it — see [Filter by connector](#filter-by-connector) below.
+
+The `kind` field is your top-level taxonomy:
+
+| `kind` | Emitted when |
+| --- | --- |
+| `admission.scan` | Skill or MCP scanner finishes a scan |
+| `admission.decision` | Watcher applies an OPA verdict |
+| `guardrail.verdict` | A regex / LLM judge / inspector resolves |
+| `judge.call` | The LLM judge is invoked (with model + token usage) |
+| `hitl.prompt` | Operator is asked for approval |
+| `hitl.decision` | Operator answered allow/deny |
+| `tool.call` / `tool.result` | The agent invoked an MCP/native tool |
+| `proxy.request` / `proxy.response` | Gateway-proxied LLM call |
+| `gateway.lifecycle` | Start / reload / shutdown |
+
+You don't pick the schema in `setup` — you pick the *destinations*. Sinks are configured in `audit_sinks:` of `~/.defenseclaw/config.yaml` and the bundled commands maintain that block for you.
+
+## Audit contracts
+
+`gateway.jsonl` is still the live structured runtime log. `audit_events` is the SQLite audit store used by the TUI, exports, and audit sinks. The `details` column is intentionally backward-compatible text; new machine-readable audit payloads live in `structured_json` and export as `structured`.
+
+Connector hook audit rows use `schemas/hook-audit-envelope.json` (`schema: "defenseclaw.hook.v1"`). During migration, the same hook envelope is also embedded in `details_json=` inside `details` so existing Splunk SPL and grep workflows keep working. New consumers should read `structured`.
+
+## Filter by connector
+
+When one gateway enforces guardrail policy for several hook connectors at once (see [Multi-connector](/docs/setup/guardrail/multi-connector)), every rail carries a connector dimension so you can slice telemetry per connector:
+
+| Rail | Where the connector lives | Example filter |
+| --- | --- | --- |
+| OTel metrics | `connector` metric label | `defenseclaw_connector_hook_invocations_total{connector="codex"}` |
+| OTel spans / logs | `defenseclaw.connector.source` attribute | filter spans on `defenseclaw.connector.source = "codex"` |
+| Audit rows / OTLP-ingest audit rows | top-level `connector` field, plus `structured.connector` on hook rows | `connector="codex"` |
+| Splunk HEC | top-level `connector`, and `structured.connector` on hook events | `structured.connector="codex"` |
+
+The OTel **resource** attribute `defenseclaw.claw.mode` reports `multi` when more than one connector is active, so you can also tell a fan-out gateway apart from a single-connector one. Grafana's **Connectors (Overview)** and **Connector Detail** boards are built on the `connector` metric label, and the **Guardrail Evaluations** board is connector-filterable. See [Local observability stack](/docs/observability/local-observability#bundled-grafana-dashboards) and [Splunk](/docs/observability/splunk).
+
+## Pick a starting point
+
+<Tabs items={['Local first', 'Production SIEM', 'Both']}>
+  <Tab value="Local first">
+The fastest way to *see* what DefenseClaw is doing. One command brings up Grafana on `:3000` with pre-built dashboards.
+
+```bash
+defenseclaw setup local-observability up
+```
+
+→ [Local observability stack](/docs/observability/local-observability)
+  </Tab>
+  <Tab value="Production SIEM">
+You already have Splunk in the org. Point HEC at the gateway and you're done — no extra infra to operate.
+
+```bash
+defenseclaw setup splunk --enterprise \
+  --hec-endpoint https://splunk.example.com:8088 \
+  --hec-token "$DEFENSECLAW_SPLUNK_HEC_TOKEN"
+```
+
+→ [Splunk integration](/docs/observability/splunk)
+  </Tab>
+  <Tab value="Both">
+Run the local Grafana stack for engineering teams and forward the same events to Splunk for SOC. Each sink is independent — failures don't cascade.
+
+```bash
+defenseclaw setup local-observability up
+defenseclaw setup splunk --enterprise --hec-endpoint ... --hec-token ...
+```
+
+The gateway will fan out every event to both rails. Verify with `defenseclaw tui` (audit panel) or `tail -f ~/.defenseclaw/gateway.jsonl | jq`.
+  </Tab>
+</Tabs>
+
+## Common questions
+
+<Accordions>
+  <Accordion title="Where is the local audit JSONL?">
+    `~/.defenseclaw/gateway.jsonl`. Always written, even when remote sinks are configured. Useful as a fallback when the network is down. Inspect with `tail -f ~/.defenseclaw/gateway.jsonl | jq`, or open the audit panel inside `defenseclaw tui`.
+  </Accordion>
+  <Accordion title="What if a sink fails?">
+    Sinks are isolated. A 500 from Splunk HEC does not stop OTLP traces or local JSONL. The gateway emits a `sink_failure` metric and surfaces the error in the TUI, but the agent traffic is never blocked by an observability outage.
+  </Accordion>
+  <Accordion title="Can I send to my own OTLP collector?">
+    Yes. Edit `otel.endpoint` in `config.yaml` (or pass `--endpoint` to `setup local-observability up`). Anything OTLP gRPC/HTTP compatible — Honeycomb, Datadog, your collector — works without modification.
+  </Accordion>
+  <Accordion title="Does observability slow the gateway down?">
+    The gateway batches and ships out-of-band. Hot-path overhead is a single channel send. The Splunk HEC and OTLP exporters tolerate temporary backpressure with bounded queues.
+  </Accordion>
+</Accordions>

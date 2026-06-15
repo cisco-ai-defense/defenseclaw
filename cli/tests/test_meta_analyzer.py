@@ -26,9 +26,9 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw.scanner.plugin_scanner.types import Finding
 from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext
 from defenseclaw.scanner.plugin_scanner.analyzer_classes import MetaAnalyzer
+from defenseclaw.scanner.plugin_scanner.types import Finding
 
 
 def _make_finding(rule_id: str, severity: str = "HIGH", tags: list[str] | None = None) -> Finding:
@@ -392,6 +392,7 @@ class TestConsensusRemoved(unittest.TestCase):
 
     def test_llm_analyzer_does_not_import_consensus(self):
         import inspect
+
         import defenseclaw.scanner.plugin_scanner.llm_analyzer as mod
         source = inspect.getsource(mod)
         self.assertNotIn("consensus", source)

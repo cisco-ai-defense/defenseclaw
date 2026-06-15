@@ -114,6 +114,116 @@ func TestValidator_AcceptsGuardrailRuntimeActions(t *testing.T) {
 	}
 }
 
+// TestValidator_AcceptsRuntimeFindingScannerEnums covers the
+// scanner enum values used by runtime finding emitters fanned out
+// through EmitInspectFindings (hook handlers, /api/v1/inspect/*,
+// proxy guardrail, mid-stream, tool-call-inspect, watcher rescan).
+// Each value must validate on both EventScan and EventScanFinding;
+// a regression here causes events to be dropped at the writer's
+// schema gate.
+func TestValidator_AcceptsRuntimeFindingScannerEnums(t *testing.T) {
+	v := newRepoValidator(t)
+
+	runtimeScanners := []string{
+		"skill", "mcp", "plugin", "aibom", "codeguard",
+		"hook-rules", "inline-codeguard", "ai-defense", "asset-policy",
+		"tool-call-inspect", "inspect-http", "guardrail-llm", "mid-stream", "rescan",
+	}
+	for _, sc := range runtimeScanners {
+		scan := Event{
+			Timestamp:     time.Now().UTC(),
+			EventType:     EventScan,
+			Severity:      SeverityInfo,
+			SchemaVersion: 7,
+			Scan: &ScanPayload{
+				ScanID:  "scan-1",
+				Scanner: sc,
+				Target:  "synthetic",
+			},
+		}
+		if err := v.Validate(scan); err != nil {
+			t.Fatalf("EventScan with scanner=%q rejected: %v", sc, err)
+		}
+		finding := Event{
+			Timestamp:     time.Now().UTC(),
+			EventType:     EventScanFinding,
+			Severity:      SeverityInfo,
+			SchemaVersion: 7,
+			ScanFinding: &ScanFindingPayload{
+				ScanID:  "scan-1",
+				Scanner: sc,
+				Target:  "synthetic",
+			},
+		}
+		if err := v.Validate(finding); err != nil {
+			t.Fatalf("EventScanFinding with scanner=%q rejected: %v", sc, err)
+		}
+	}
+}
+
+// TestValidator_RejectsUnknownScannerEnum guards the writer's
+// schema gate: any new scanner value added in the future must be
+// declared in both scan-event.json and scan-finding-event.json
+// before code emits it.
+func TestValidator_RejectsUnknownScannerEnum(t *testing.T) {
+	v := newRepoValidator(t)
+	bad := Event{
+		Timestamp:     time.Now().UTC(),
+		EventType:     EventScanFinding,
+		Severity:      SeverityInfo,
+		SchemaVersion: 7,
+		ScanFinding: &ScanFindingPayload{
+			ScanID:  "scan-1",
+			Scanner: "definitely-not-a-real-scanner",
+			Target:  "synthetic",
+		},
+	}
+	if err := v.Validate(bad); err == nil {
+		t.Fatal("expected validation error for unknown scanner enum value")
+	}
+}
+
+// TestValidator_AcceptsVerdictEvaluationJoinKeys covers the new
+// evaluation_id + rule_ids fields on VerdictPayload that the
+// runtime finding emitters stamp so SIEM can join verdicts to
+// their per-finding scan_findings rows.
+func TestValidator_AcceptsVerdictEvaluationJoinKeys(t *testing.T) {
+	v := newRepoValidator(t)
+	e := validVerdict()
+	e.Verdict.EvaluationID = "eval-abc"
+	e.Verdict.RuleIDs = []string{"SECRET-AWS-AKIA", "PII-EMAIL"}
+	if err := v.Validate(e); err != nil {
+		t.Fatalf("verdict with evaluation_id+rule_ids rejected: %v", err)
+	}
+}
+
+// TestValidator_AcceptsScanFindingConfidenceAndEvaluationID covers
+// the new optional confidence + evaluation_id fields on
+// ScanFindingPayload.
+func TestValidator_AcceptsScanFindingConfidenceAndEvaluationID(t *testing.T) {
+	v := newRepoValidator(t)
+	conf := 0.87
+	_ = conf
+	e := Event{
+		Timestamp:     time.Now().UTC(),
+		EventType:     EventScanFinding,
+		Severity:      SeverityHigh,
+		SchemaVersion: 7,
+		ScanFinding: &ScanFindingPayload{
+			ScanID:       "scan-1",
+			Scanner:      "hook-rules",
+			Target:       "claudecode:PreToolUse",
+			RuleID:       "SECRET-AWS-AKIA",
+			Severity:     SeverityHigh,
+			Confidence:   0.87,
+			EvaluationID: "eval-abc",
+		},
+	}
+	if err := v.Validate(e); err != nil {
+		t.Fatalf("scan_finding with confidence+evaluation_id rejected: %v", err)
+	}
+}
+
 func TestValidator_AcceptsValidError(t *testing.T) {
 	v := newRepoValidator(t)
 	e := Event{
@@ -378,6 +488,88 @@ func TestWriter_StrictMode_ObserverPanicRecovered(t *testing.T) {
 	}()
 	if !strings.Contains(pretty.String(), "schema-violation observer panic") {
 		t.Fatalf("panic not surfaced on pretty sink:\n%s", pretty.String())
+	}
+}
+
+// TestWriter_StrictMode_ViolationErrorAttribution verifies that when a
+// scan_finding event is dropped for schema reasons, the synthesised
+// EventError carries the broken payload's rule_id + evaluation_id so
+// SIEM/dashboard filters keyed on those fields (a) still see the drop
+// and (b) can pivot back to the upstream evaluation. Without this,
+// schema-gate drops would look like anonymous infrastructure errors
+// even when the source clearly identified itself.
+func TestWriter_StrictMode_ViolationErrorAttribution(t *testing.T) {
+	v := newRepoValidator(t)
+	w, err := New(Config{Validator: v})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var got []Event
+	w.WithFanout(func(e Event) { got = append(got, e) })
+
+	// Emit a scan_finding that is malformed on purpose (missing
+	// required Finding.title/severity) but carries rule_id and
+	// evaluation_id. The strict validator will drop it; the
+	// synthesised EventError must echo both correlation keys.
+	w.Emit(Event{
+		EventType: EventScanFinding,
+		Severity:  SeverityHigh,
+		ScanFinding: &ScanFindingPayload{
+			RuleID:       "PII.EMAIL",
+			EvaluationID: "eval-abc-123",
+		},
+	})
+
+	if len(got) != 1 || got[0].EventType != EventError {
+		t.Fatalf("expected exactly one EventError on fanout, got %+v", got)
+	}
+	ep := got[0].Error
+	if ep == nil {
+		t.Fatalf("EventError has nil Error payload: %+v", got[0])
+	}
+	if ep.RuleID != "PII.EMAIL" {
+		t.Fatalf("EventError.Error.RuleID: got %q want %q", ep.RuleID, "PII.EMAIL")
+	}
+	if ep.EvaluationID != "eval-abc-123" {
+		t.Fatalf("EventError.Error.EvaluationID: got %q want %q", ep.EvaluationID, "eval-abc-123")
+	}
+}
+
+// TestWriter_StrictMode_ViolationErrorAttributionVerdict mirrors the
+// scan_finding case for verdict drops: a verdict missing required
+// fields still surfaces its evaluation_id + the first rule_id on the
+// EventError so verdict-failure alerts retain SIEM pivot keys.
+func TestWriter_StrictMode_ViolationErrorAttributionVerdict(t *testing.T) {
+	v := newRepoValidator(t)
+	w, err := New(Config{Validator: v})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var got []Event
+	w.WithFanout(func(e Event) { got = append(got, e) })
+
+	w.Emit(Event{
+		EventType: EventVerdict,
+		Severity:  SeverityHigh,
+		Verdict: &VerdictPayload{
+			// Stage/Action intentionally omitted to fail schema.
+			EvaluationID: "eval-verdict-42",
+			RuleIDs:      []string{"INJ.OVERRIDE", "INJ.SUFFIX"},
+		},
+	})
+
+	if len(got) != 1 || got[0].EventType != EventError {
+		t.Fatalf("expected exactly one EventError on fanout, got %+v", got)
+	}
+	ep := got[0].Error
+	if ep == nil {
+		t.Fatalf("EventError has nil Error payload: %+v", got[0])
+	}
+	if ep.RuleID != "INJ.OVERRIDE" {
+		t.Fatalf("EventError.Error.RuleID: got %q want %q", ep.RuleID, "INJ.OVERRIDE")
+	}
+	if ep.EvaluationID != "eval-verdict-42" {
+		t.Fatalf("EventError.Error.EvaluationID: got %q want %q", ep.EvaluationID, "eval-verdict-42")
 	}
 }
 

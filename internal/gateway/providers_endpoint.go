@@ -92,6 +92,10 @@ func (p *GuardrailProxy) handleReloadProviders(w http.ResponseWriter, r *http.Re
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// follow-up: promote peeked agent identity now that auth
+	// succeeded so emitLifecycleReload below stamps a stable
+	// agent_instance_id on its lifecycle event.
+	r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 	if err := ReloadProviderRegistry(); err != nil {
 		// Log full error server-side for operators; return a
 		// generic message to the caller so a malformed overlay

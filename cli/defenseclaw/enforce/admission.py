@@ -21,6 +21,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from defenseclaw import connector_paths
 from defenseclaw.config import SeverityAction
 
 
@@ -63,13 +64,17 @@ def _default_admission_policy() -> AdmissionPolicyData:
             },
         },
         first_party_allow={
+            # F-0541: provenance markers must be specific to the first-party
+            # asset's own directory, not a broad parent like ``.defenseclaw``
+            # or ``.openclaw/extensions`` that any sibling plugin/skill could
+            # be dropped into. Each marker pins the asset's leaf component.
             ("plugin", "defenseclaw"): (
                 "first-party DefenseClaw plugin",
-                [".defenseclaw", "extensions/defenseclaw"],
+                ["extensions/defenseclaw"],
             ),
             ("skill", "codeguard"): (
                 "first-party DefenseClaw skill",
-                [".defenseclaw", "workspace/skills/codeguard", "skills/codeguard"],
+                ["workspace/skills/codeguard", "skills/codeguard"],
             ),
         },
     )
@@ -93,6 +98,7 @@ def evaluate_admission(
     action_entry: Any | None = None,
     fallback_actions: Any | None = None,
     include_quarantine: bool = False,
+    allow_first_party: bool = True,
 ) -> AdmissionDecision:
     """Evaluate admission for a target using active policy data when available.
 
@@ -122,6 +128,36 @@ def evaluate_admission(
 
     allowed_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the allow list — scan skipped")
     if pe.is_allowed(target_type, name):
+        # an explicit operator allow that
+        # was registered with a source_path MUST NOT auto-allow a
+        # different on-disk asset just because it shares the
+        # registered name. Look up the stored entry and compare its
+        # source_path to the current source_path. If they differ
+        # we drop the allow and force a fresh scan/decision rather
+        # than honoring a name-only match. When the stored entry
+        # has no source_path (legacy allow) we keep current
+        # behavior to avoid breaking pre-fix entries; operators can
+        # re-allow with a path to opt into the strict mode.
+        #
+        # F-0401: when the allow IS path-pinned but the current request
+        # presents no source_path (empty/missing provenance, e.g. a
+        # non-local plugin/MCP pre-scan admission), we must NOT honor the
+        # pin as a match. An empty presented path cannot prove it is the
+        # pinned asset, so treat it as a mismatch and fail closed instead
+        # of falling through to an allow.
+        existing = pe.get_action(target_type, name) if hasattr(pe, "get_action") else None
+        existing_path = getattr(existing, "source_path", None) if existing else None
+        if existing_path and existing_path != source_path:
+            presented = source_path or "(no source path presented)"
+            return AdmissionDecision(
+                "rejected",
+                (
+                    f"allow entry for {target_type} '{name}' is pinned to "
+                    f"{existing_path!r}, but the presented asset is at "
+                    f"{presented!r} — failing closed"
+                ),
+                source="manual-allow-path-mismatch",
+            )
         return AdmissionDecision("allowed", allowed_reason, source="manual-allow")
 
     if include_quarantine and pe.is_quarantined(target_type, name):
@@ -130,8 +166,12 @@ def evaluate_admission(
 
     policy = load_admission_policy(policy_dir)
 
+    # F-0742: callers evaluating untrusted-provenance inventory rows (e.g. a
+    # ``source: user`` AIBOM entry) pass ``allow_first_party=False`` so the
+    # first-party allow list cannot bless an operator/third-party asset that
+    # merely lands under a first-party provenance directory.
     fp_entry = policy.first_party_allow.get((target_type, name))
-    if fp_entry is not None and policy.allow_list_bypass_scan:
+    if allow_first_party and fp_entry is not None and policy.allow_list_bypass_scan:
         fp_reason, fp_constraints = fp_entry
         if _matches_provenance(fp_constraints, source_path):
             return AdmissionDecision("allowed", fp_reason, source="policy-allow")
@@ -284,7 +324,12 @@ def _asset_rule_matches(
             return False
     if getattr(rule, "connector", ""):
         constrained = True
-        if str(rule.connector).strip().lower() != connector.strip().lower():
+        # Compare connector-name-insensitively (case + hyphen/underscore
+        # aliases) so an asset rule keyed on a documented alias such as
+        # "open-hands" still matches the registry-canonical active connector
+        # "openhands". A literal lower-case compare silently failed to fire
+        # the rule, letting a server through that policy meant to block.
+        if connector_paths.normalize(str(rule.connector)) != connector_paths.normalize(connector):
             return False
     if getattr(rule, "url", ""):
         constrained = True
@@ -438,13 +483,40 @@ def _scan_summary(scan_result: Any) -> tuple[int, str]:
 
 
 def _matches_provenance(constraints: list[str], source_path: str) -> bool:
-    """True if no constraints exist, or if source_path contains one of them."""
+    """True if no constraints exist, or if source_path is a path
+    *component* match against one of them.
+
+    The previous implementation compared each
+    constraint with ``in normalised``, which is a substring test on
+    the entire path string. That accepted attacker-controlled
+    paths whose components incidentally embed the constraint
+    (``/tmp/user/.defenseclaw-evil/defenseclaw``,
+    ``/tmp/user/workspace/skills/codeguard-malicious/codeguard``).
+    The fix requires each constraint to match either as a sequence
+    of path *components* or as a normalised path *prefix*, so a
+    constraint like ``.defenseclaw`` only matches when the full
+    component is exactly ``.defenseclaw`` (not ``.defenseclaw-evil``).
+    """
     if not constraints:
         return True
     if not source_path:
         return False
     normalised = source_path.replace("\\", "/").lower()
-    return any(c.lower() in normalised for c in constraints)
+    components = [c for c in normalised.split("/") if c]
+    for raw in constraints:
+        constraint = raw.replace("\\", "/").lower().strip("/")
+        if not constraint:
+            continue
+        constraint_parts = [p for p in constraint.split("/") if p]
+        if not constraint_parts:
+            continue
+        # Match constraint as a contiguous run of full path
+        # components in the source path.
+        clen = len(constraint_parts)
+        for i in range(len(components) - clen + 1):
+            if components[i : i + clen] == constraint_parts:
+                return True
+    return False
 
 
 def _action_reason(action_entry: Any | None, *, default: str) -> str:

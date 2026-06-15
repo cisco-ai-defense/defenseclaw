@@ -289,6 +289,38 @@ Mode is set in `~/.defenseclaw/config.yaml` (`guardrail.mode`) and passed into
 `NewGuardrailProxy` when the sidecar starts the guardrail proxy; hot-reload
 updates come from `guardrail_runtime.json`.
 
+### Per-connector overrides (`guardrail.connectors`)
+
+A single gateway can enforce guardrail policy for several **hook** connectors
+at once. Each active connector gets a `guardrail.connectors.<name>` block in
+`config.yaml` carrying any of `enabled`, `mode`, `hook_fail_mode`,
+`block_message`, `rule_pack_dir`, and `hilt` — every field is optional and
+inherits the corresponding global `guardrail.*` value when unset. The gateway
+resolves policy per connector at request time (`EffectiveMode(connector)`,
+`EffectiveHookFailModeFor(connector)`, …), falling back to the global value.
+`claw.mode` is set to `multi` once more than one connector is active. Proxy
+connectors (OpenClaw, ZeptoClaw) cannot be entries — multi-connector is
+hook-only. Operators manage these with `defenseclaw setup <connector>`
+(choosing **Add**) and the per-connector CLI:
+
+```bash
+defenseclaw guardrail status                      # read-only; per-connector blocks for ALL actives (no --connector flag)
+defenseclaw guardrail fail-mode  closed --connector codex
+defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
+defenseclaw guardrail block-message "Codex policy blocked this" --connector codex
+defenseclaw guardrail disable --connector codex   # scoped kill switch; `enable` restores
+```
+
+Omit `--connector` on the mutating verbs to operate on the global default;
+`guardrail status` is read-only and always fans out to every active connector.
+The plural `connector_modes` array on the gateway `/status` endpoint exposes the
+same per-connector view to API clients (one entry per active connector with
+`connector`, `mode`, `telemetry`, `proxy_intercept`), alongside the singular
+back-compat `connector_mode` for the active connector. The egress firewall is
+**not** part of this per-connector surface — it stays one host-wide ruleset
+(see `docs/ARCHITECTURE.md` → Firewall scope). Full operator how-to lives in
+the docs site under Setup → Multi-connector.
+
 Mode can be changed at runtime via hot-reload (no restart required):
 
 ```bash
@@ -880,6 +912,102 @@ responses in-process:
 - Periodically runs a quick local pattern scan on the growing buffer
 - In `action` mode, terminates the stream early if a high-severity threat is detected
 - After the stream completes, runs the full multi-scanner inspection pipeline on assembled content
+
+## Upstream Hydration for the Responses API (Passthrough)
+
+`handlePassthrough` resolves the upstream URL and API key in three
+priority layers, so the OpenAI Responses API (`/v1/responses`,
+`/openai/v1/responses`) and other provider-native passthrough paths
+reach a custom upstream even when the agent has neither a fetch
+interceptor nor an `api_key` in its own config:
+
+1. `X-DC-Target-URL` header from the fetch interceptor.
+2. `ConnectorSignals.RawUpstream` from the active connector's snapshot
+   (e.g. ZeptoClaw's `~/.zeptoclaw/config.json` `api_base`+`api_key`).
+3. **Direct-provider fallback** — `llm.base_url` from the gateway
+   config, with the API key resolved through the same chain that
+   `resolveConfiguredProvider` uses on the chat path:
+   `tokenResolver` (the enterprise secrets-sidecar hook installed via
+   `gateway.SetTokenResolver`) → `req.TargetAPIKey` (chat path only) →
+   `ResolveAPIKey(p.cfg.APIKeyEnv, ~/.defenseclaw/.env)`.
+
+When all three layers come up empty the gateway returns
+`400 missing X-DC-Target-URL header and no llm.base_url configured`.
+
+The fallback is what lets the Responses API reach a custom
+OpenAI-compatible provider in topologies where ZeptoClaw (or another
+native-binary agent) is configured with only `api_base` pointing at the
+guardrail proxy and the actual upstream + key come from the gateway's
+own configuration. Full prompt / response / tool inspection runs
+identically regardless of which layer produced the upstream — only the
+resolution path differs.
+
+## Custom Header Forwarding (`llm.forward_custom_headers`)
+
+The guardrail proxy forwards inbound HTTP headers from the agent to
+the upstream LLM provider on both the chat/completions path (via
+Bifrost's per-request `schemas.BifrostContextKeyExtraHeaders` context
+value) and the passthrough path (`/v1/responses`, `/v1/messages`,
+Bedrock/Gemini native, etc.). Enabled by default; operators opt out
+with `llm.forward_custom_headers: false`.
+
+When enabled, every inbound header is forwarded to the upstream
+provider except a small blocklist that matches the pre-refactor
+`handlePassthrough` inline list exactly (no silent behavior change vs.
+earlier gateway versions):
+
+- Proxy-hop / framework-internal: `X-DC-Target-URL`, `X-AI-Auth`,
+  `X-DC-Auth`, and any `X-DC-*` / `X-DefenseClaw-*` header.
+- Wire framing: `Host`, `Content-Length` — `Content-Length` is stripped
+  because guardrail notification injection can mutate the body size;
+  the Go HTTP client writes the authoritative value from
+  `upstreamReq.ContentLength`.
+- Authentication: `Authorization`, `X-API-Key`, `Api-Key` — re-minted
+  canonically by the gateway from the secrets sidecar so the upstream
+  always sees the resolved provider key, never a stale agent header.
+- W3C trace context: `Traceparent`, `Tracestate`.
+
+`internal/gateway/forward_headers.go` carries an annotated, commented-out
+**blocklist expansion** with danger ratings (HIGH / MEDIUM / LOW / ZERO)
+for `Cookie`, `Set-Cookie`, `Proxy-Authorization`, `Transfer-Encoding`,
+`TE`, `Trailers`, `Connection`, `Keep-Alive`, `Upgrade`,
+`Proxy-Authenticate`, `Baggage`, and `Content-Type`. Operators with a
+stricter posture (or who don't need any of the listed headers reaching
+their custom upstream) are encouraged to uncomment the HIGH-rated
+entries — at minimum `Cookie`, `Set-Cookie`, `Proxy-Authorization`,
+`Transfer-Encoding`, and `TE` — and bump the matching test in
+`forward_headers_test.go`. `Content-Type` is ZERO-rated (actively
+wrong to block, because Go's `http.NewRequestWithContext` does not
+auto-set it for a raw `io.Reader` body).
+
+Every header that survives the blocklist is validated against RFC 7230
+tchar (name) and printable ASCII + HTAB (value); CR/LF/NUL in a value
+yields HTTP 400 to block header- and log-injection. Soft caps of 64
+headers and 32 KiB combined name+value bytes per request yield HTTP
+413 to bound a hostile caller; the limits comfortably cover real
+provider headers (`anthropic-version`, `anthropic-beta`,
+`openai-organization`, tenant tags, tracing IDs).
+
+On the chat/completions path the resulting headers are attached to the
+request `context.Context` under
+`schemas.BifrostContextKeyExtraHeaders` — Bifrost's per-request
+extra-headers hook, honored by every provider through
+`providers/utils/utils.go:SetExtraHeaders` — so the upstream HTTP
+request the SDK emits carries them onto the wire. On the passthrough
+path they are written directly to the upstream `*http.Request`.
+
+`ConnectorSignals.ExtraHeaders` (declared on the connector contract
+for future use by ZeptoClaw/Codex/etc.) is also merged in with
+connector-wins semantics; the same blocklist and validation apply.
+
+Telemetry: `defenseclaw.gateway.forwarded_headers{path,result}`
+(path = `chat-completions` | `passthrough`; result = `ok` |
+`rejected_invalid` | `rejected_overflow`). The OTel counter is the
+steady-state signal — a per-request `forwarded_header_count=<n>`
+stderr line is gated behind `DEFENSECLAW_DEBUG=1` for local triage.
+Rejection-path stderr lines (`header forwarding rejected: <reason>`)
+remain unconditional because they are operator-actionable. Header
+names and values are never logged.
 
 ## Hot Reload
 

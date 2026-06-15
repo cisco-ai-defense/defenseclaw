@@ -46,6 +46,16 @@ func NewProviderForTest(reader *sdkmetric.ManualReader) (*Provider, error) {
 	}, nil
 }
 
+// InstallGlobalForTest wires p into the package-level global so the
+// helpers in global_provider.go (RecordSQLiteBusy, RecordJudgePersistDrop,
+// …) see it. Returns the previous global so tests can restore it.
+// Test code only — never call from production paths.
+func InstallGlobalForTest(p *Provider) (prev *Provider) {
+	prev = globalTelemetry.Load()
+	setGlobalTelemetryProvider(p)
+	return prev
+}
+
 // NewProviderForTraceTest creates a Provider wired to the given ManualReader
 // and an in-memory span exporter so tests can inspect both metrics and spans.
 func NewProviderForTraceTest(reader *sdkmetric.ManualReader, exporter *tracetest.InMemoryExporter) (*Provider, error) {

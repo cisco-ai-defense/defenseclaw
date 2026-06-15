@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -89,15 +90,22 @@ func (b *auditBridge) EmitAudit(e audit.Event) {
 		RunID:             e.RunID,
 		RequestID:         e.RequestID,
 		SessionID:         e.SessionID,
+		TurnID:            e.TurnID,
 		TraceID:           e.TraceID,
 		AgentID:           e.AgentID,
 		AgentName:         e.AgentName,
 		AgentInstanceID:   e.AgentInstanceID,
 		SidecarInstanceID: e.SidecarInstanceID,
-		PolicyID:          e.PolicyID,
-		DestinationApp:    e.DestinationApp,
-		ToolName:          e.ToolName,
-		ToolID:            e.ToolID,
+		// Carry connector attribution onto the bridged lifecycle row so
+		// gateway.jsonl (and anything tailing it) can filter bridged
+		// audit twins by connector in a multi-connector install — without
+		// this the JSONL bridge silently dropped the connector the audit
+		// Event already carried.
+		Connector:      e.Connector,
+		PolicyID:       e.PolicyID,
+		DestinationApp: e.DestinationApp,
+		ToolName:       e.ToolName,
+		ToolID:         e.ToolID,
 		Lifecycle: &gatewaylog.LifecyclePayload{
 			Subsystem:  subsystemForAction(e.Action),
 			Transition: transitionForAction(e.Action),
@@ -115,12 +123,12 @@ func (b *auditBridge) EmitAudit(e audit.Event) {
 // native emitter means auditing this switch too.
 func skipBridgeAction(action string) bool {
 	switch action {
-	case "guardrail-verdict",
+	case string(audit.ActionGuardrailVerdict),
 		// emitJudge already writes an EventJudge row; the matching
 		// "llm-judge-response" audit event exists for SQLite/Splunk
 		// fan-out (see sidecar.go judgePersistor) and must not be
 		// re-translated into a Lifecycle JSONL row.
-		"llm-judge-response",
+		string(audit.ActionLLMJudgeResponse),
 		// LogScan already emits a native EventScan (and EventScanFinding
 		// per finding) via scanner.EmitScanResult; the "scan" audit twin
 		// exists for SQLite/Splunk fan-out and must not be re-translated
@@ -141,11 +149,13 @@ func skipBridgeAction(action string) bool {
 // the field is never empty — sinks index on it.
 func subsystemForAction(action string) string {
 	switch {
-	case action == "scan":
+	case action == string(audit.ActionScan):
 		return "scanner"
-	case strings.HasPrefix(action, "watcher-") || action == "watch-start" || action == "watch-stop":
+	case strings.HasPrefix(action, "watcher-") ||
+		action == string(audit.ActionWatchStart) ||
+		action == string(audit.ActionWatchStop):
 		return "watcher"
-	case strings.HasPrefix(action, "sidecar-") || action == "gateway-ready":
+	case strings.HasPrefix(action, "sidecar-") || action == string(audit.ActionGatewayReady):
 		return "gateway"
 	case strings.HasPrefix(action, "api-"):
 		return "api"
@@ -175,13 +185,13 @@ func subsystemForAction(action string) string {
 // audit action verb.
 func transitionForAction(action string) string {
 	switch action {
-	case "sidecar-start", "watch-start":
+	case string(audit.ActionSidecarStart), string(audit.ActionWatchStart):
 		return "start"
-	case "sidecar-stop", "watch-stop":
+	case string(audit.ActionSidecarStop), string(audit.ActionWatchStop):
 		return "stop"
-	case "sidecar-connected", "gateway-ready":
+	case string(audit.ActionSidecarConnected), string(audit.ActionGatewayReady):
 		return "ready"
-	case "sidecar-disconnected", string(audit.ActionSinkFailure):
+	case string(audit.ActionSidecarDisconnected), string(audit.ActionSinkFailure):
 		return "degraded"
 	case string(audit.ActionSinkRestored):
 		return "restored"
@@ -223,6 +233,23 @@ func auditDetailsToMap(e audit.Event) map[string]string {
 	}
 	if e.Action != "" {
 		out["action"] = e.Action
+	}
+	// C2/DN2: promote the multi-connector identity to first-class keys so
+	// gateway.jsonl is attributable per connector without string-parsing
+	// the free-form details tail. Mirrors the SQLite columns (migration
+	// 16) and the structured envelope. Zero/empty values are omitted so
+	// non-hook lifecycle rows stay unchanged (single-connector no-op).
+	if e.Connector != "" {
+		out["connector"] = e.Connector
+	}
+	if e.StepIdx > 0 {
+		out["step_idx"] = strconv.Itoa(e.StepIdx)
+	}
+	if e.Enforced {
+		out["enforced"] = "true"
+	}
+	if e.RulePackDir != "" {
+		out["rule_pack_dir"] = e.RulePackDir
 	}
 	if len(out) == 0 {
 		return nil

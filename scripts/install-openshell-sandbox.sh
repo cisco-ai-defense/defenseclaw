@@ -44,6 +44,27 @@ warn()  { printf "${YELLOW}  !${NC} %s\n" "$*" >&2; }
 err()   { printf "${RED}  ✗${NC} %s\n" "$*" >&2; }
 die()   { err "$@"; exit 1; }
 
+# ── Helper: compute the sha256 of a file (sha256sum or shasum) ────────────────
+_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        die "no sha256sum/shasum available — cannot compute an integrity checksum"
+    fi
+}
+
+# ── Independent integrity anchor ──────────────────────────────────────────────
+# F-0548: the OCI tag is mutable and the registry serves whatever bytes it
+# likes for that tag. Pinning only the manifest digest still trusts the
+# registry's own content-addressing. Require an out-of-band sha256 of the
+# final extracted binary (sourced from a channel the operator controls, not
+# the registry) so a compromised or swapped image is caught before install.
+# OPENSHELL_SANDBOX_SHA256 is the public knob; DEFENSECLAW_OPENSHELL_BINARY_SHA256
+# remains supported for backwards compatibility.
+EXPECTED_SHA256="${OPENSHELL_SANDBOX_SHA256:-${DEFENSECLAW_OPENSHELL_BINARY_SHA256:-}}"
+
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
 while [[ $# -gt 0 ]]; do
@@ -142,6 +163,40 @@ for m in idx.get('manifests', []):
 sys.exit(1)
 ") || die "No linux/${OCI_ARCH} manifest in ${OCI_IMAGE}:${OPENSHELL_VERSION}"
 
+# the OCI tag itself is mutable. As defense in depth we still verify the
+# platform manifest digest when DEFENSECLAW_OPENSHELL_ARCH_DIGEST is pinned,
+# but that only re-checks the registry's own content-addressing. The
+# authoritative gate below requires an independent sha256 of the final
+# binary (EXPECTED_SHA256, from OPENSHELL_SANDBOX_SHA256 /
+# DEFENSECLAW_OPENSHELL_BINARY_SHA256) sourced out of band. Operators that
+# explicitly accept the unverified path can opt back in with
+# DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED=1.
+if [[ -n "${DEFENSECLAW_OPENSHELL_ARCH_DIGEST:-}" ]]; then
+    pinned="${DEFENSECLAW_OPENSHELL_ARCH_DIGEST}"
+    if [[ "${pinned,,}" != "${ARCH_DIGEST,,}" ]]; then
+        die "OCI manifest digest mismatch: pinned ${pinned} got ${ARCH_DIGEST}"
+    fi
+    info "OCI manifest digest verified against pinned DEFENSECLAW_OPENSHELL_ARCH_DIGEST"
+fi
+
+# Fail-closed BEFORE any layer blob is downloaded: without an independent
+# integrity anchor (and without an explicit opt-out) we refuse to install.
+if [[ -z "${EXPECTED_SHA256}" ]]; then
+    if [[ "${DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED:-0}" == "1" ]]; then
+        warn "OCI tag ${OPENSHELL_VERSION} is mutable and DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED=1 — proceeding without integrity verification"
+    else
+        die "Refusing to install openshell-sandbox from mutable tag ${OPENSHELL_VERSION} without an independent integrity anchor.
+  Set one of:
+    OPENSHELL_SANDBOX_SHA256=<hex>                      # pin final binary (recommended)
+    DEFENSECLAW_OPENSHELL_BINARY_SHA256=<hex>           # pin final binary (legacy alias)
+    DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED=1              # explicit opt-out (NOT recommended)
+  Optionally also set DEFENSECLAW_OPENSHELL_ARCH_DIGEST=sha256:<digest> to pin the platform manifest.
+ "
+    fi
+else
+    info "Independent integrity anchor present — will verify the extracted binary sha256 before install"
+fi
+
 # ── Step 2: Fetch platform manifest + image config ──────────────────────────
 
 info "Fetching image metadata..."
@@ -217,6 +272,17 @@ curl -fsSL \
 EXTRACTED="${TMPDIR}/${BINARY_PATH_IN_IMAGE}"
 if [[ ! -f "${EXTRACTED}" ]]; then
     die "${BINARY_NAME} not found in extracted layer — image layout may have changed"
+fi
+
+# Verify the extracted binary against the independent integrity anchor
+# before install. The fail-closed gate above guarantees EXPECTED_SHA256 is
+# set here unless the operator explicitly opted out of verification.
+if [[ -n "${EXPECTED_SHA256}" ]]; then
+    ACTUAL_SHA256="$(_sha256 "${EXTRACTED}")"
+    if [[ "${EXPECTED_SHA256,,}" != "${ACTUAL_SHA256,,}" ]]; then
+        die "Integrity check failed for ${BINARY_NAME}: expected ${EXPECTED_SHA256} got ${ACTUAL_SHA256}"
+    fi
+    ok "${BINARY_NAME}: integrity check passed (sha256 ${ACTUAL_SHA256})"
 fi
 
 # ── Step 5: Install ──────────────────────────────────────────────────────────

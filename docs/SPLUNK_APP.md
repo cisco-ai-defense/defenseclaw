@@ -13,6 +13,14 @@ For an existing remote Splunk Enterprise deployment, use
 `defenseclaw setup splunk --enterprise` instead. That path forwards audit
 events to an existing HEC endpoint and does not install this local Splunk app.
 
+> **Multi-connector indexing.** A single gateway can serve several hook
+> connectors at once. Enterprise HEC consumers should index the connector
+> dimension so events can be sliced per connector: the top-level `connector`
+> field (first-class on every audit row) and `structured.connector` on hook
+> rows (`action="connector-hook"`). Example:
+> `index=<your-index> action="connector-hook" structured.connector="codex"`.
+> See `docs/OBSERVABILITY-CONTRACT.md` → Connector dimension fields.
+
 For the legal and local-scope guardrails for this workflow, see
 [INSTALL.md](INSTALL.md).
 
@@ -56,7 +64,7 @@ The default local search contract is:
 - index: `defenseclaw_local`
 - source: `defenseclaw`
 - sourcetype: `defenseclaw:json`
-- local HEC endpoint: `http://127.0.0.1:8088/services/collector/event`
+- local HEC endpoint: `https://127.0.0.1:8088/services/collector/event`
 
 The app layers macros, eventtypes, saved searches, and dashboards on top of
 those signal families.
@@ -169,6 +177,38 @@ These pages provide Splunk-local equivalents for the demo Grafana/Loki
 dashboards. They use the same local index, `defenseclaw_local`, and the same
 event-indexed signal families listed above. They are designed for local demos
 where Splunk should be the visible dashboard surface.
+
+#### Executive Agent Watch Overview
+
+High-impact landing page for local Splunk demos of Agent Watch.
+
+Use it to inspect:
+
+- total observed agent sessions
+- active connectors
+- discovery signal volume
+- block/deny outcomes and human-review signals
+- highest-attention sessions by run/session/trace identifiers
+- policy and finding heatmaps
+
+This page is intended to start demos with an executive story before drilling
+into the detailed AI Discovery Inventory, Connector Activity, Policy Decisions,
+and Findings/HITL dashboards.
+
+#### Agent Tokenomics Overview
+
+Executive view of O11y / OTel GenAI token telemetry for agent sessions.
+
+Use it to inspect:
+
+- total token activity by agent, connector, model, and session
+- input, output, cached, reasoning, and tool-token mix
+- top token-driving models, tools, and targets
+- optimization candidates such as tool-heavy sessions, high reasoning-token use,
+  low cache leverage, or unusually large output expansion
+
+This page uses tokens as a cost proxy. It is not billing-authoritative and does
+not use confidential customer-specific model pricing.
 
 #### AI Discovery Inventory
 

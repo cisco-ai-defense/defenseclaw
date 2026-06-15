@@ -133,6 +133,24 @@ func connectorMatrix(t *testing.T) []ConnectorFixture {
 			ClawMode:       "copilot",
 			Apply:          hookOnlyFixtureApply("copilot"),
 		},
+		{
+			Name:           "openhands",
+			DestinationApp: "openhands",
+			ClawMode:       "openhands",
+			Apply:          hookOnlyFixtureApply("openhands"),
+		},
+		{
+			Name:           "antigravity",
+			DestinationApp: "antigravity",
+			ClawMode:       "antigravity",
+			Apply:          hookOnlyFixtureApply("antigravity"),
+		},
+		{
+			Name:           "opencode",
+			DestinationApp: "opencode",
+			ClawMode:       "opencode",
+			Apply:          hookOnlyFixtureApply("opencode"),
+		},
 	}
 }
 
@@ -161,6 +179,18 @@ func hookOnlyFixtureApply(name string) func(t *testing.T) (string, string) {
 			prev := connector.CopilotHooksPathOverride
 			connector.CopilotHooksPathOverride = filepath.Join(home, "workspace", ".github", "hooks", "defenseclaw.json")
 			t.Cleanup(func() { connector.CopilotHooksPathOverride = prev })
+		case "openhands":
+			prev := connector.OpenHandsHooksPathOverride
+			connector.OpenHandsHooksPathOverride = filepath.Join(home, "workspace", ".openhands", "hooks.json")
+			t.Cleanup(func() { connector.OpenHandsHooksPathOverride = prev })
+		case "antigravity":
+			prev := connector.AntigravityHooksPathOverride
+			connector.AntigravityHooksPathOverride = filepath.Join(home, ".gemini", "config", "hooks.json")
+			t.Cleanup(func() { connector.AntigravityHooksPathOverride = prev })
+		case "opencode":
+			prev := connector.OpenCodePluginPathOverride
+			connector.OpenCodePluginPathOverride = filepath.Join(home, ".config", "opencode", "plugins", "defenseclaw.js")
+			t.Cleanup(func() { connector.OpenCodePluginPathOverride = prev })
 		}
 		return home, t.TempDir()
 	}

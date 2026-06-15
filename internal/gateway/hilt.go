@@ -79,13 +79,35 @@ func (m *HILTApprovalManager) SetNotifier(n *notifier.Dispatcher) {
 	m.notifier = n
 }
 
-func (m *HILTApprovalManager) Request(ctx context.Context, sessionID, subject, severity, reason string, timeout time.Duration) (bool, string, error) {
+// HILTApprovalContext carries the optional correlation IDs that
+// surfaces upstream of HILT (proxy guardrail verdict, inspect
+// endpoint, hook handler) attach to a confirm decision so the
+// resulting approval audit row + OS notification carry the same
+// evaluation_id + top rule_ids as the verdict that triggered the
+// prompt. Pass the zero value when no structured findings exist
+// for this approval (legacy callers, blocklist confirms).
+type HILTApprovalContext struct {
+	EvaluationID string
+	RuleIDs      []string
+}
+
+// Request blocks until the user replies, the timeout fires, or the
+// caller's context cancels. The optional evalCtx (last variadic
+// slot) lets callers stamp the same evaluation_id + rule_ids on
+// the approval audit row + OS toast that surfaced on the verdict
+// upstream — pure-additive, so existing callers pass nothing and
+// get the prior behavior.
+func (m *HILTApprovalManager) Request(ctx context.Context, sessionID, subject, severity, reason string, timeout time.Duration, evalCtx ...HILTApprovalContext) (bool, string, error) {
+	var ec HILTApprovalContext
+	if len(evalCtx) > 0 {
+		ec = evalCtx[0]
+	}
 	if m == nil {
 		return false, hiltStatusUnsupported, fmt.Errorf("hilt approval unavailable")
 	}
 	sessionIDs := m.sessionCandidates(sessionID)
 	if m.client == nil || len(sessionIDs) == 0 {
-		m.record(ctx, hiltStatusUnsupported, subject, severity, "session/client unavailable")
+		m.record(ctx, hiltStatusUnsupported, subject, severity, "session/client unavailable", ec)
 		return false, hiltStatusUnsupported, fmt.Errorf("hilt approval unavailable")
 	}
 	if timeout <= 0 {
@@ -126,10 +148,10 @@ func (m *HILTApprovalManager) Request(ctx context.Context, sessionID, subject, s
 		if lastErr != nil {
 			details = lastErr.Error()
 		}
-		m.record(ctx, hiltStatusUnsupported, subject, severity, details)
+		m.record(ctx, hiltStatusUnsupported, subject, severity, details, ec)
 		return false, hiltStatusUnsupported, fmt.Errorf("hilt approval unavailable: %s", details)
 	}
-	m.record(ctx, hiltStatusRequested, subject, severity, safeReason)
+	m.record(ctx, hiltStatusRequested, subject, severity, safeReason, ec)
 	// Fire a user-session toast as soon as the chat-side prompt has
 	// been delivered. This is the single chokepoint covering every
 	// HILT path — guardrail confirm verdicts, OpenClaw inspect
@@ -148,6 +170,8 @@ func (m *HILTApprovalManager) Request(ctx context.Context, sessionID, subject, s
 			// through under the master Enabled gate, which keeps
 			// approval coverage independent of the per-source
 			// filter that operators use to silence chatty blocks.
+			EvaluationID: ec.EvaluationID,
+			RuleIDs:      ec.RuleIDs,
 		})
 	}
 
@@ -156,18 +180,18 @@ func (m *HILTApprovalManager) Request(ctx context.Context, sessionID, subject, s
 	select {
 	case approved := <-pending.result:
 		if approved {
-			m.record(ctx, hiltStatusApproved, subject, severity, safeReason)
+			m.record(ctx, hiltStatusApproved, subject, severity, safeReason, ec)
 			return true, hiltStatusApproved, nil
 		}
-		m.record(ctx, hiltStatusDenied, subject, severity, safeReason)
+		m.record(ctx, hiltStatusDenied, subject, severity, safeReason, ec)
 		return false, hiltStatusDenied, nil
 	case <-timer.C:
 		m.remove(id)
-		m.record(ctx, hiltStatusTimeout, subject, severity, safeReason)
+		m.record(ctx, hiltStatusTimeout, subject, severity, safeReason, ec)
 		return false, hiltStatusTimeout, nil
 	case <-ctx.Done():
 		m.remove(id)
-		m.record(ctx, hiltStatusTimeout, subject, severity, ctx.Err().Error())
+		m.record(ctx, hiltStatusTimeout, subject, severity, ctx.Err().Error(), ec)
 		return false, hiltStatusTimeout, ctx.Err()
 	}
 }
@@ -263,13 +287,23 @@ func (m *HILTApprovalManager) remove(id string) {
 	m.mu.Unlock()
 }
 
-func (m *HILTApprovalManager) record(ctx context.Context, action, subject, severity, details string) {
+func (m *HILTApprovalManager) record(ctx context.Context, action, subject, severity, details string, evalCtx ...HILTApprovalContext) {
 	if m == nil {
 		return
 	}
+	var ec HILTApprovalContext
+	if len(evalCtx) > 0 {
+		ec = evalCtx[0]
+	}
 	if m.logger != nil {
-		_ = m.logger.LogActionCtx(ctx, action, subject,
-			fmt.Sprintf("severity=%s details=%s", severity, redaction.ForSinkReason(details)))
+		body := fmt.Sprintf("severity=%s details=%s", severity, redaction.ForSinkReason(details))
+		if ec.EvaluationID != "" {
+			body += " evaluation_id=" + ec.EvaluationID
+		}
+		if len(ec.RuleIDs) > 0 {
+			body += " rule_ids=" + strings.Join(ec.RuleIDs, ",")
+		}
+		_ = m.logger.LogActionCtx(ctx, action, subject, body)
 	}
 	if m.otel != nil {
 		m.otel.RecordGuardrailEvaluation(ctx, "openclaw:hilt", action)

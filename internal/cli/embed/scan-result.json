@@ -6,7 +6,16 @@
   "type": "object",
   "required": ["scanner", "target", "timestamp", "findings"],
   "properties": {
-    "scanner":   { "type": "string", "enum": ["skill", "mcp", "plugin", "aibom", "codeguard", "skill-scanner", "mcp-scanner", "plugin-scanner"] },
+    "scanner":   {
+      "type": "string",
+      "description": "Source of the scan. Classic scanner invocations use skill|mcp|plugin|aibom|codeguard (or their *-scanner aliases). Runtime finding emitters fanned out via EmitInspectFindings use hook-rules|inline-codeguard|ai-defense|asset-policy|tool-call-inspect|inspect-http|guardrail-llm|mid-stream|rescan.",
+      "enum": [
+        "skill", "mcp", "plugin", "aibom", "codeguard",
+        "skill-scanner", "mcp-scanner", "plugin-scanner",
+        "hook-rules", "inline-codeguard", "ai-defense", "asset-policy",
+        "tool-call-inspect", "inspect-http", "guardrail-llm", "mid-stream", "rescan"
+      ]
+    },
     "target":    { "type": "string" },
     "timestamp": { "type": "string", "format": "date-time" },
     "duration":  { "type": ["string", "null"] },

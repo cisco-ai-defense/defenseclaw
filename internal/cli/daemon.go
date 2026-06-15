@@ -313,11 +313,30 @@ func summarizeHealth(body []byte) string {
 
 func collectDaemonArgs(cmd *cobra.Command) []string {
 	// When starting as daemon, we run the root command (sidecar mode)
-	// Pass through any flags that were set
+	// Pass through any flags that were set EXCEPT --token, which is
+	// a secret. Passing the token on argv would leave it visible in
+	// the long-lived daemon process via ps(1) and /proc/<pid>/cmdline
+	// for any local user that can see same-user processes -- closing
+	// finding "daemon start propagates gateway token on the
+	// child process command line".
+	//
+	// Instead, when --token was supplied we promote it into the
+	// process environment as DEFENSECLAW_GATEWAY_TOKEN so the child
+	// inherits it via the env block daemon.Start passes to
+	// exec.Command. The child's PreRunE / config loader (and
+	// GatewayConfig.ResolvedToken) already prefers the env var, so
+	// behaviour is preserved without ever putting the secret on argv.
 	var args []string
 
 	if sidecarToken != "" {
-		args = append(args, "--token", sidecarToken)
+		// Belt-and-suspenders: also set the canonical Go env name
+		// so the child inherits it. We intentionally do NOT append
+		// `--token <secret>` to args here.
+		_ = os.Setenv("DEFENSECLAW_GATEWAY_TOKEN", sidecarToken)
+		fmt.Fprintln(os.Stderr,
+			"[daemon] --token is deprecated; promoting to DEFENSECLAW_GATEWAY_TOKEN "+
+				"env so it is NOT exposed on argv. Set DEFENSECLAW_GATEWAY_TOKEN "+
+				"or gateway.token in config and stop passing --token.")
 	}
 	if sidecarHost != "" {
 		args = append(args, "--host", sidecarHost)

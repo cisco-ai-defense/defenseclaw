@@ -61,110 +61,205 @@ class TestSchemaVersion(unittest.TestCase):
 
 class TestSkillEntries(unittest.TestCase):
     def test_minimal_skill_entry(self):
-        m = parse_manifest(json.dumps(_wrap({
-            "name": "demo-skill",
-            "type": "skill",
-            "source_url": "clawhub://demo-skill",
-        })))
+        m = parse_manifest(
+            json.dumps(
+                _wrap(
+                    {
+                        "name": "demo-skill",
+                        "type": "skill",
+                        "source_url": "clawhub://demo-skill",
+                    }
+                )
+            )
+        )
         self.assertEqual(len(m.entries), 1)
         self.assertTrue(m.entries[0].is_skill())
 
     def test_skill_requires_source_url(self):
         with self.assertRaises(ManifestError):
-            parse_manifest(json.dumps(_wrap({
-                "name": "demo-skill", "type": "skill",
-            })))
+            parse_manifest(
+                json.dumps(
+                    _wrap(
+                        {
+                            "name": "demo-skill",
+                            "type": "skill",
+                        }
+                    )
+                )
+            )
 
     def test_skill_source_url_scheme_locked(self):
         for bad in ("file:///etc/passwd", "ftp://example.com", "ssh://x"):
             with self.subTest(url=bad):
                 with self.assertRaises(ManifestError):
-                    parse_manifest(json.dumps(_wrap({
-                        "name": "demo", "type": "skill", "source_url": bad,
-                    })))
+                    parse_manifest(
+                        json.dumps(
+                            _wrap(
+                                {
+                                    "name": "demo",
+                                    "type": "skill",
+                                    "source_url": bad,
+                                }
+                            )
+                        )
+                    )
 
     def test_skill_sha256_must_be_64_hex(self):
         with self.assertRaises(ManifestError):
-            parse_manifest(json.dumps(_wrap({
-                "name": "demo", "type": "skill",
-                "source_url": "https://example.com/x.tgz",
-                "sha256": "not-hex",
-            })))
+            parse_manifest(
+                json.dumps(
+                    _wrap(
+                        {
+                            "name": "demo",
+                            "type": "skill",
+                            "source_url": "https://example.com/x.tgz",
+                            "sha256": "not-hex",
+                        }
+                    )
+                )
+            )
 
     def test_skill_sha256_accepted_when_valid(self):
-        m = parse_manifest(json.dumps(_wrap({
-            "name": "demo", "type": "skill",
-            "source_url": "https://example.com/x.tgz",
-            "sha256": "a" * 64,
-        })))
+        m = parse_manifest(
+            json.dumps(
+                _wrap(
+                    {
+                        "name": "demo",
+                        "type": "skill",
+                        "source_url": "https://example.com/x.tgz",
+                        "sha256": "a" * 64,
+                    }
+                )
+            )
+        )
         self.assertEqual(m.entries[0].sha256, "a" * 64)
 
     def test_skill_homepage_must_be_http(self):
         with self.assertRaises(ManifestError):
-            parse_manifest(json.dumps(_wrap({
-                "name": "demo", "type": "skill",
-                "source_url": "https://x/y",
-                "homepage": "javascript:alert(1)",
-            })))
+            parse_manifest(
+                json.dumps(
+                    _wrap(
+                        {
+                            "name": "demo",
+                            "type": "skill",
+                            "source_url": "https://x/y",
+                            "homepage": "javascript:alert(1)",
+                        }
+                    )
+                )
+            )
 
 
 class TestMcpEntries(unittest.TestCase):
     def test_stdio_requires_command(self):
         with self.assertRaises(ManifestError):
-            parse_manifest(json.dumps(_wrap({
-                "name": "stdio-srv", "type": "mcp", "transport": "stdio",
-            })))
+            parse_manifest(
+                json.dumps(
+                    _wrap(
+                        {
+                            "name": "stdio-srv",
+                            "type": "mcp",
+                            "transport": "stdio",
+                        }
+                    )
+                )
+            )
 
     def test_command_character_class_locked(self):
         # The ; here would let a poisoned manifest smuggle a shell
         # metacharacter into the scanner subprocess if we ever invoked
         # via a shell. Refuse at parse time.
         with self.assertRaises(ManifestError):
-            parse_manifest(json.dumps(_wrap({
-                "name": "evil", "type": "mcp",
-                "transport": "stdio",
-                "command": "rm; sleep 5",
-            })))
+            parse_manifest(
+                json.dumps(
+                    _wrap(
+                        {
+                            "name": "evil",
+                            "type": "mcp",
+                            "transport": "stdio",
+                            "command": "rm; sleep 5",
+                        }
+                    )
+                )
+            )
 
     def test_command_dot_slash_allowed(self):
         # Operators do legitimately point at ./bin/foo or relative
         # paths under repo roots — the allow-list covers that case.
-        m = parse_manifest(json.dumps(_wrap({
-            "name": "bin", "type": "mcp",
-            "transport": "stdio",
-            "command": "./bin/foo",
-        })))
+        m = parse_manifest(
+            json.dumps(
+                _wrap(
+                    {
+                        "name": "bin",
+                        "type": "mcp",
+                        "transport": "stdio",
+                        "command": "./bin/foo",
+                    }
+                )
+            )
+        )
         self.assertEqual(m.entries[0].command, "./bin/foo")
 
     def test_env_required_must_be_uppercase(self):
         with self.assertRaises(ManifestError):
-            parse_manifest(json.dumps(_wrap({
-                "name": "srv", "type": "mcp",
-                "transport": "stdio", "command": "x",
-                "env_required": ["lowercase"],
-            })))
+            parse_manifest(
+                json.dumps(
+                    _wrap(
+                        {
+                            "name": "srv",
+                            "type": "mcp",
+                            "transport": "stdio",
+                            "command": "x",
+                            "env_required": ["lowercase"],
+                        }
+                    )
+                )
+            )
 
     def test_remote_transport_requires_url(self):
         with self.assertRaises(ManifestError):
-            parse_manifest(json.dumps(_wrap({
-                "name": "srv", "type": "mcp",
-                "transport": "streamable-http",
-            })))
+            parse_manifest(
+                json.dumps(
+                    _wrap(
+                        {
+                            "name": "srv",
+                            "type": "mcp",
+                            "transport": "streamable-http",
+                        }
+                    )
+                )
+            )
 
     def test_unknown_transport_rejected(self):
         with self.assertRaises(ManifestError):
-            parse_manifest(json.dumps(_wrap({
-                "name": "srv", "type": "mcp",
-                "transport": "unicorn", "command": "x",
-            })))
+            parse_manifest(
+                json.dumps(
+                    _wrap(
+                        {
+                            "name": "srv",
+                            "type": "mcp",
+                            "transport": "unicorn",
+                            "command": "x",
+                        }
+                    )
+                )
+            )
 
     def test_unknown_connector_rejected(self):
         with self.assertRaises(ManifestError):
-            parse_manifest(json.dumps(_wrap({
-                "name": "srv", "type": "mcp",
-                "transport": "stdio", "command": "x",
-                "connector": "fake",
-            })))
+            parse_manifest(
+                json.dumps(
+                    _wrap(
+                        {
+                            "name": "srv",
+                            "type": "mcp",
+                            "transport": "stdio",
+                            "command": "x",
+                            "connector": "fake",
+                        }
+                    )
+                )
+            )
 
 
 class TestNamesAndDuplicates(unittest.TestCase):
@@ -173,37 +268,47 @@ class TestNamesAndDuplicates(unittest.TestCase):
             with self.subTest(name=bad):
                 self.assertFalse(NAME_RE.match(bad))
                 with self.assertRaises(ManifestError):
-                    parse_manifest(json.dumps(_wrap({
-                        "name": bad, "type": "skill",
-                        "source_url": "https://x/y",
-                    })))
+                    parse_manifest(
+                        json.dumps(
+                            _wrap(
+                                {
+                                    "name": bad,
+                                    "type": "skill",
+                                    "source_url": "https://x/y",
+                                }
+                            )
+                        )
+                    )
 
     def test_duplicate_entry_rejected(self):
         with self.assertRaises(ManifestError):
-            parse_manifest(json.dumps(_wrap(
-                {"name": "dup", "type": "skill", "source_url": "https://x/y"},
-                {"name": "dup", "type": "skill", "source_url": "https://x/y"},
-            )))
+            parse_manifest(
+                json.dumps(
+                    _wrap(
+                        {"name": "dup", "type": "skill", "source_url": "https://x/y"},
+                        {"name": "dup", "type": "skill", "source_url": "https://x/y"},
+                    )
+                )
+            )
 
     def test_duplicate_across_types_allowed(self):
         # A skill named "foo" and an MCP named "foo" are *different*
         # assets — both are allowed in the same manifest.
-        m = parse_manifest(json.dumps(_wrap(
-            {"name": "foo", "type": "skill", "source_url": "https://x/y"},
-            {"name": "foo", "type": "mcp",
-             "transport": "stdio", "command": "f"},
-        )))
+        m = parse_manifest(
+            json.dumps(
+                _wrap(
+                    {"name": "foo", "type": "skill", "source_url": "https://x/y"},
+                    {"name": "foo", "type": "mcp", "transport": "stdio", "command": "f"},
+                )
+            )
+        )
         self.assertEqual(len(m.entries), 2)
 
 
 class TestParseFormats(unittest.TestCase):
     def test_yaml_accepted(self):
         body = (
-            "schema_version: 1\n"
-            "entries:\n"
-            "  - name: yaml-demo\n"
-            "    type: skill\n"
-            "    source_url: clawhub://yaml-demo\n"
+            "schema_version: 1\nentries:\n  - name: yaml-demo\n    type: skill\n    source_url: clawhub://yaml-demo\n"
         )
         m = parse_manifest(body)
         self.assertEqual(m.entries[0].name, "yaml-demo")
@@ -223,11 +328,14 @@ class TestParseFormats(unittest.TestCase):
 
 class TestFilterByContent(unittest.TestCase):
     def setUp(self):
-        self.manifest = parse_manifest(json.dumps(_wrap(
-            {"name": "s1", "type": "skill", "source_url": "https://x/1"},
-            {"name": "m1", "type": "mcp",
-             "transport": "stdio", "command": "x"},
-        )))
+        self.manifest = parse_manifest(
+            json.dumps(
+                _wrap(
+                    {"name": "s1", "type": "skill", "source_url": "https://x/1"},
+                    {"name": "m1", "type": "mcp", "transport": "stdio", "command": "x"},
+                )
+            )
+        )
 
     def test_skill_only(self):
         only = self.manifest.filter_by_content("skill")
@@ -251,21 +359,12 @@ class TestYAMLAutoTypingCoercion(unittest.TestCase):
     """
 
     def test_unquoted_datetime_generated_at_accepted(self):
-        body = (
-            "schema_version: 1\n"
-            "publisher: vendor\n"
-            "generated_at: 2026-05-07T20:00:00Z\n"
-            "entries: []\n"
-        )
+        body = "schema_version: 1\npublisher: vendor\ngenerated_at: 2026-05-07T20:00:00Z\nentries: []\n"
         m = parse_manifest(body)
         self.assertEqual(m.generated_at, "2026-05-07T20:00:00Z")
 
     def test_unquoted_date_generated_at_accepted(self):
-        body = (
-            "schema_version: 1\n"
-            "generated_at: 2026-05-07\n"
-            "entries: []\n"
-        )
+        body = "schema_version: 1\ngenerated_at: 2026-05-07\nentries: []\n"
         m = parse_manifest(body)
         self.assertEqual(m.generated_at, "2026-05-07")
 
@@ -298,11 +397,7 @@ class TestYAMLAutoTypingCoercion(unittest.TestCase):
         # generated_at — the operator either typed something they
         # didn't mean or the manifest is corrupted, and we want a
         # loud error either way.
-        body = (
-            "schema_version: 1\n"
-            "generated_at: yes\n"
-            "entries: []\n"
-        )
+        body = "schema_version: 1\ngenerated_at: yes\nentries: []\n"
         with self.assertRaises(ManifestError) as cm:
             parse_manifest(body)
         self.assertIn("bool", str(cm.exception))
@@ -312,12 +407,7 @@ class TestYAMLAutoTypingCoercion(unittest.TestCase):
         # lossless way; reject so the operator notices their
         # publisher emitted a structural value where a scalar was
         # expected.
-        body = (
-            "schema_version: 1\n"
-            "publisher:\n"
-            "  name: nested\n"
-            "entries: []\n"
-        )
+        body = "schema_version: 1\npublisher:\n  name: nested\nentries: []\n"
         with self.assertRaises(ManifestError):
             parse_manifest(body)
 
@@ -353,6 +443,9 @@ class TestKnownConstants(unittest.TestCase):
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "openhands",
+                "antigravity",
+                "opencode",
             },
         )
 

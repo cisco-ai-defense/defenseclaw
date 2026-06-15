@@ -17,6 +17,8 @@
 package gateway
 
 import (
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,7 +44,7 @@ type SubsystemHealth struct {
 	Details   map[string]interface{} `json:"details,omitempty"`
 }
 
-// ConnectorHealth reports the active connector's identity, mode, and counters.
+// ConnectorHealth reports a connector's identity, mode, and live counters.
 type ConnectorHealth struct {
 	Name               string                       `json:"name"`
 	State              SubsystemState               `json:"state"`
@@ -68,9 +70,13 @@ type HealthSnapshot struct {
 	// Sinks reports the aggregate health of all configured audit sinks
 	// (splunk_hec, otlp_logs, http_jsonl, …). Details["sinks"] holds
 	// per-sink state for the TUI/CLI to render individual rows.
-	Sinks     SubsystemHealth  `json:"sinks"`
-	Sandbox   *SubsystemHealth `json:"sandbox,omitempty"`
-	Connector *ConnectorHealth `json:"connector,omitempty"`
+	Sinks   SubsystemHealth  `json:"sinks"`
+	Sandbox *SubsystemHealth `json:"sandbox,omitempty"`
+	// Connector is the primary/active connector, retained for back-compat
+	// with single-connector clients. Connectors lists every active
+	// connector with its own live counters (multi-connector view).
+	Connector  *ConnectorHealth  `json:"connector,omitempty"`
+	Connectors []ConnectorHealth `json:"connectors,omitempty"`
 }
 
 type SidecarHealth struct {
@@ -83,15 +89,54 @@ type SidecarHealth struct {
 	aiDiscovery SubsystemHealth
 	sinks       SubsystemHealth
 	sandbox     *SubsystemHealth
-	conn        *ConnectorHealth
 	startedAt   time.Time
 
-	// Atomic counters for connector stats (lock-free hot path).
-	connRequests         atomic.Int64
-	connErrors           atomic.Int64
-	connToolInspections  atomic.Int64
-	connToolBlocks       atomic.Int64
-	connSubprocessBlocks atomic.Int64
+	// Per-connector health + counters. In multi-connector mode every active
+	// connector gets its own ConnectorHealth so live counters are truthful
+	// per connector rather than a process-global tally stapled onto one
+	// arbitrary "primary". The map structure is guarded by mu; per-entry
+	// counters are atomic for a lock-free increment hot path. primaryConn
+	// names the connector surfaced in the back-compat singular
+	// HealthSnapshot.Connector field.
+	connStats   map[string]*connectorStats
+	primaryConn string
+}
+
+// connectorStats holds one connector's static health plus its atomic live
+// counters. Pointers are stored in SidecarHealth.connStats so the atomics are
+// stable across snapshot reads.
+type connectorStats struct {
+	name               string
+	state              SubsystemState
+	since              time.Time
+	toolInspectionMode connector.ToolInspectionMode
+	subprocessPolicy   connector.SubprocessPolicy
+
+	requests         atomic.Int64
+	errors           atomic.Int64
+	toolInspections  atomic.Int64
+	toolBlocks       atomic.Int64
+	subprocessBlocks atomic.Int64
+}
+
+func (s *connectorStats) snapshot() ConnectorHealth {
+	return ConnectorHealth{
+		Name:               s.name,
+		State:              s.state,
+		Since:              s.since,
+		ToolInspectionMode: s.toolInspectionMode,
+		SubprocessPolicy:   s.subprocessPolicy,
+		Requests:           s.requests.Load(),
+		Errors:             s.errors.Load(),
+		ToolInspections:    s.toolInspections.Load(),
+		ToolBlocks:         s.toolBlocks.Load(),
+		SubprocessBlocks:   s.subprocessBlocks.Load(),
+	}
+}
+
+// connName normalizes a connector name into a stable map key.
+func connName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func NewSidecarHealth() *SidecarHealth {
@@ -201,33 +246,101 @@ func (h *SidecarHealth) SetSandbox(state SubsystemState, lastErr string, details
 	}
 }
 
-// SetConnector initializes connector health tracking for the active connector.
+// SetConnector registers (or updates) a connector's health entry and marks it
+// as the primary connector surfaced in the singular HealthSnapshot.Connector
+// field. Counters for an already-registered connector are preserved across
+// re-registration (e.g. a connector hot-swap) so live totals are not reset.
 func (h *SidecarHealth) SetConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy) {
+	h.registerConnector(name, mode, policy, true)
+}
+
+// RegisterConnector registers (or updates) a connector's health entry WITHOUT
+// changing which connector is primary. The multi-connector boot loop calls
+// this for every active connector so each appears with its own live counters.
+func (h *SidecarHealth) RegisterConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy) {
+	h.registerConnector(name, mode, policy, false)
+}
+
+func (h *SidecarHealth) registerConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy, primary bool) {
+	key := connName(name)
+	if key == "" {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.conn = &ConnectorHealth{
-		Name:               name,
-		State:              StateRunning,
-		Since:              time.Now(),
-		ToolInspectionMode: mode,
-		SubprocessPolicy:   policy,
+	if h.connStats == nil {
+		h.connStats = make(map[string]*connectorStats)
+	}
+	s := h.connStats[key]
+	if s == nil {
+		s = &connectorStats{name: key, since: time.Now()}
+		h.connStats[key] = s
+	}
+	s.state = StateRunning
+	s.toolInspectionMode = mode
+	s.subprocessPolicy = policy
+	if primary {
+		h.primaryConn = key
 	}
 }
 
-// RecordConnectorRequest increments the connector request counter.
-func (h *SidecarHealth) RecordConnectorRequest() { h.connRequests.Add(1) }
+// statsFor returns the counter bucket for a connector, lazily creating it so
+// counts are never lost if a hook fires before the connector is registered.
+// An empty name routes to the primary connector (back-compat).
+func (h *SidecarHealth) statsFor(name string) *connectorStats {
+	key := connName(name)
+	h.mu.RLock()
+	if key == "" {
+		key = h.primaryConn
+	}
+	s := h.connStats[key]
+	h.mu.RUnlock()
+	if s != nil {
+		return s
+	}
 
-// RecordConnectorError increments the connector error counter.
-func (h *SidecarHealth) RecordConnectorError() { h.connErrors.Add(1) }
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if key == "" {
+		key = h.primaryConn
+	}
+	if key == "" {
+		key = "unknown"
+	}
+	if h.connStats == nil {
+		h.connStats = make(map[string]*connectorStats)
+	}
+	if s = h.connStats[key]; s == nil {
+		s = &connectorStats{name: key, state: StateRunning, since: time.Now()}
+		h.connStats[key] = s
+	}
+	return s
+}
 
-// RecordToolInspection increments the tool inspection counter.
-func (h *SidecarHealth) RecordToolInspection() { h.connToolInspections.Add(1) }
+// RecordConnectorRequestFor increments the request counter for a connector.
+func (h *SidecarHealth) RecordConnectorRequestFor(name string) { h.statsFor(name).requests.Add(1) }
 
-// RecordToolBlock increments the tool block counter.
-func (h *SidecarHealth) RecordToolBlock() { h.connToolBlocks.Add(1) }
+// RecordConnectorErrorFor increments the error counter for a connector.
+func (h *SidecarHealth) RecordConnectorErrorFor(name string) { h.statsFor(name).errors.Add(1) }
 
-// RecordSubprocessBlock increments the subprocess block counter.
-func (h *SidecarHealth) RecordSubprocessBlock() { h.connSubprocessBlocks.Add(1) }
+// RecordToolInspectionFor increments the tool-inspection counter for a connector.
+func (h *SidecarHealth) RecordToolInspectionFor(name string) { h.statsFor(name).toolInspections.Add(1) }
+
+// RecordToolBlockFor increments the tool-block counter for a connector.
+func (h *SidecarHealth) RecordToolBlockFor(name string) { h.statsFor(name).toolBlocks.Add(1) }
+
+// RecordSubprocessBlockFor increments the subprocess-block counter for a connector.
+func (h *SidecarHealth) RecordSubprocessBlockFor(name string) {
+	h.statsFor(name).subprocessBlocks.Add(1)
+}
+
+// Back-compat no-arg variants route to the primary connector. Prefer the
+// *For(name) variants from hook handlers so counters stay per-connector.
+func (h *SidecarHealth) RecordConnectorRequest() { h.RecordConnectorRequestFor("") }
+func (h *SidecarHealth) RecordConnectorError()   { h.RecordConnectorErrorFor("") }
+func (h *SidecarHealth) RecordToolInspection()   { h.RecordToolInspectionFor("") }
+func (h *SidecarHealth) RecordToolBlock()        { h.RecordToolBlockFor("") }
+func (h *SidecarHealth) RecordSubprocessBlock()  { h.RecordSubprocessBlockFor("") }
 
 func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	h.mu.RLock()
@@ -246,14 +359,29 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Sandbox:     h.sandbox,
 	}
 
-	if h.conn != nil {
-		ch := *h.conn
-		ch.Requests = h.connRequests.Load()
-		ch.Errors = h.connErrors.Load()
-		ch.ToolInspections = h.connToolInspections.Load()
-		ch.ToolBlocks = h.connToolBlocks.Load()
-		ch.SubprocessBlocks = h.connSubprocessBlocks.Load()
-		snap.Connector = &ch
+	if len(h.connStats) > 0 {
+		names := make([]string, 0, len(h.connStats))
+		for name := range h.connStats {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		conns := make([]ConnectorHealth, 0, len(names))
+		for _, name := range names {
+			conns = append(conns, h.connStats[name].snapshot())
+		}
+		snap.Connectors = conns
+
+		// Back-compat singular: the primary connector (or the first
+		// registered when no primary was explicitly marked).
+		primary := h.primaryConn
+		if primary == "" {
+			primary = names[0]
+		}
+		if s := h.connStats[primary]; s != nil {
+			ch := s.snapshot()
+			snap.Connector = &ch
+		}
 	}
 
 	return snap

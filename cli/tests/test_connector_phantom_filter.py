@@ -39,11 +39,11 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_mcp import mcp as mcp_cli
 from defenseclaw.commands.cmd_plugin import plugin as plugin_cli
 from defenseclaw.commands.cmd_skill import skill as skill_cli
 from defenseclaw.models import ActionState
+
 from tests.helpers import cleanup_app, make_app_context
 
 

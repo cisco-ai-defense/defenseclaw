@@ -1,6 +1,6 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
-VERSION     := 0.5.0
+VERSION     := 0.8.0
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
@@ -12,15 +12,30 @@ RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/b
 
 DIST_DIR    := dist
 
+# Cross-platform virtualenv / executable layout. Windows Python venvs expose
+# console entry points under Scripts/ (not bin/) and binaries carry a .exe
+# suffix, which Go also appends to its build output. Detect the host once and
+# parameterize the handful of install paths that differ so `make install` works
+# on hosted Windows runners (the connector contract matrix) as well as
+# Linux/macOS. $(OS) is set to "Windows_NT" by Windows itself and inherited by
+# the MSYS/Git-Bash shell make runs there; it is unset elsewhere.
+ifeq ($(OS),Windows_NT)
+VENV_BIN := $(VENV)/Scripts
+EXE      := .exe
+else
+VENV_BIN := $(VENV)/bin
+EXE      :=
+endif
+
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov gateway-test tui-test go-test-cov \
+        plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-version-sync \
+        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
         set-version \
         _bundle-data \
-        dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
+        dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
 # Version stamping
@@ -263,21 +278,20 @@ dev-install:
 pycli: _bundle-data
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install from https://docs.astral.sh/uv/"; exit 1; }
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	uv venv $(VENV) --python 3.12 --clear
-	uv pip install -e . --python $(VENV)/bin/python
+	uv sync --frozen --no-dev --python 3.12
 
 dev-pycli: pycli
-	uv pip install --group dev --python $(VENV)/bin/python
+	uv sync --frozen --python 3.12
 	@echo ""
 	@echo "Done. Activate the environment and run:"
 	@echo "  source $(VENV)/bin/activate"
 	@echo "  defenseclaw --help"
 
 gateway: sync-openclaw-extension
-	go build $(GOFLAGS) -o $(GATEWAY) ./cmd/defenseclaw
-	@echo "Built $(GATEWAY)"
-	@echo "  Run with: ./$(GATEWAY)"
-	@echo "  Check status: ./$(GATEWAY) status"
+	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
+	@echo "Built $(GATEWAY)$(EXE)"
+	@echo "  Run with: ./$(GATEWAY)$(EXE)"
+	@echo "  Check status: ./$(GATEWAY)$(EXE) status"
 
 # sync-openclaw-extension copies the runtime files of the DefenseClaw
 # OpenClaw plugin into internal/gateway/connector/openclaw_extension so
@@ -352,7 +366,7 @@ gateway-cross: sync-openclaw-extension
 	@echo "Built $(BINARY)-$(GOOS)-$(GOARCH)"
 
 gateway-run: gateway
-	./$(GATEWAY)
+	./$(GATEWAY)$(EXE)
 
 start: gateway
 	@./scripts/start.sh $(ARGS)
@@ -371,8 +385,8 @@ plugin:
 
 cli-install: pycli
 	@mkdir -p $(INSTALL_DIR)
-	@ln -sf "$(CURDIR)/$(VENV)/bin/defenseclaw" "$(INSTALL_DIR)/defenseclaw"
-	@ln -sf "$(CURDIR)/$(VENV)/bin/litellm" "$(INSTALL_DIR)/litellm" 2>/dev/null || true
+	@ln -sf "$(CURDIR)/$(VENV_BIN)/defenseclaw$(EXE)" "$(INSTALL_DIR)/defenseclaw$(EXE)"
+	@ln -sf "$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" "$(INSTALL_DIR)/litellm$(EXE)" 2>/dev/null || true
 	@# Expose the scanner entry points (skill-scanner, mcp-scanner,
 	@# plus the -api / -pre-commit siblings) on PATH via the same
 	@# ~/.local/bin symlink pattern we already use for the main CLI.
@@ -384,9 +398,9 @@ cli-install: pycli
 	@# break install; the doctor check surfaces any real misses.
 	@for tool in skill-scanner skill-scanner-api skill-scanner-pre-commit \
 	             mcp-scanner mcp-scanner-api; do \
-		src="$(CURDIR)/$(VENV)/bin/$$tool"; \
+		src="$(CURDIR)/$(VENV_BIN)/$$tool$(EXE)"; \
 		if [ -x "$$src" ]; then \
-			ln -sf "$$src" "$(INSTALL_DIR)/$$tool"; \
+			ln -sf "$$src" "$(INSTALL_DIR)/$$tool$(EXE)"; \
 		fi; \
 	done
 	@echo "Installed defenseclaw CLI to $(INSTALL_DIR)"
@@ -405,16 +419,16 @@ gateway-install: cli-install gateway
 	@# entry, so the running process keeps the old inode and upgrades work
 	@# live. We copy to a sibling temp file first so a partial write can
 	@# never clobber a working binary.
-	@gwt="$(INSTALL_DIR)/$(GATEWAY)"; \
+	@gwt="$(INSTALL_DIR)/$(GATEWAY)$(EXE)"; \
 	tmp="$$gwt.new.$$$$"; \
 	trap 'rm -f "$$tmp"' EXIT INT TERM; \
-	cp $(GATEWAY) "$$tmp"; \
+	cp $(GATEWAY)$(EXE) "$$tmp"; \
 	chmod +x "$$tmp"; \
 	mv -f "$$tmp" "$$gwt"
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
-		codesign -f -s - $(INSTALL_DIR)/$(GATEWAY) 2>/dev/null || true; \
+		codesign -f -s - $(INSTALL_DIR)/$(GATEWAY)$(EXE) 2>/dev/null || true; \
 	fi
-	@echo "Installed $(GATEWAY) to $(INSTALL_DIR)"
+	@echo "Installed $(GATEWAY)$(EXE) to $(INSTALL_DIR)"
 	@# If a sidecar is already running it kept the old inode; tell the
 	@# operator so they know a restart is needed to pick up the new build.
 	@# Use pgrep -x against the *basename* only — `pgrep -f "$(GATEWAY)"`
@@ -423,7 +437,7 @@ gateway-install: cli-install gateway
 	@# it would fire a false "sidecar is running" hint on every build.
 	@if pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
 		echo "  Gateway sidecar is running an older build — restart with:"; \
-		echo "    $(INSTALL_DIR)/$(GATEWAY) restart"; \
+		echo "    $(INSTALL_DIR)/$(GATEWAY)$(EXE) restart"; \
 	fi
 	@if ! echo "$$PATH" | grep -q "$(INSTALL_DIR)"; then \
 		echo ""; \
@@ -465,17 +479,17 @@ plugin-install: cli-install plugin
 
 test: cli-test gateway-test
 
-cli-test:
-	$(VENV)/bin/python -m unittest discover -s cli/tests -v
+cli-test: _bundle-data
+	$(VENV)/bin/python -m pytest cli/tests -q
 
-cli-test-cov:
+cli-test-cov: _bundle-data
 	$(VENV)/bin/python -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
-gateway-test: sync-openclaw-extension
-	go test -race ./internal/gateway/ ./internal/tui/ ./test/... -v
+cli-test-snap:
+	$(VENV)/bin/python -m pytest cli/tests/tui -q $(if $(UPDATE),--snapshot-update,)
 
-tui-test:
-	go test -race -count=1 ./internal/tui/ -v
+gateway-test: sync-openclaw-extension
+	go test -race ./internal/gateway/ ./test/... -v
 
 go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -coverprofile=coverage.out ./...
@@ -488,7 +502,6 @@ go-connector-matrix-test: sync-openclaw-extension
 		./internal/config \
 		./internal/gateway \
 		./internal/gateway/connector \
-		./internal/tui \
 		./test/e2e \
 		-run 'Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix'
 
@@ -529,13 +542,16 @@ test-file:
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-provider-coverage
+check: check-v7 check-provider-coverage check-llm-catalog check-upgrade-manifest
 
-check-v7: check-audit-actions check-error-codes check-schemas
+check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
 
 check-audit-actions:
 	@$(VENV)/bin/python scripts/check_audit_actions.py
+
+check-audit-no-raw-literals:
+	@$(VENV)/bin/python scripts/check_audit_no_raw_literals.py
 
 check-error-codes:
 	@$(VENV)/bin/python scripts/check_error_codes.py
@@ -560,6 +576,18 @@ check-provider-coverage: sync-openclaw-extension
 		fi && \
 		npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.test.ts
 	@echo "check-provider-coverage: corpus is in sync across Go + TS."
+
+# check-llm-catalog cross-references the suggested model ids in
+# bundles/llm/model_catalog.json against LiteLLM's bundled registry,
+# failing on ids LiteLLM no longer knows or has marked deprecated. The
+# curated catalog carries provider/auth/region metadata LiteLLM does not
+# model (so it stays hand-maintained), but the model list still rots as
+# providers ship and retire models — this gate catches that drift.
+check-llm-catalog:
+	@$(VENV)/bin/python scripts/check_llm_catalog.py
+
+check-upgrade-manifest:
+	@python3 scripts/generate-upgrade-manifest.py --check
 
 # ---------------------------------------------------------------------------
 # Lint targets
@@ -604,7 +632,7 @@ go-lint: sync-openclaw-extension
 # Distribution targets — build release artifacts into dist/
 # ---------------------------------------------------------------------------
 
-dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-checksums
+dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-checksums
 	@echo ""
 	@echo "Release artifacts:"
 	@ls -lh $(DIST_DIR)/
@@ -633,9 +661,11 @@ _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/skills
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
+	@mkdir -p cli/defenseclaw/_data/llm
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/default
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/strict
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/permissive
+	@rm -rf cli/defenseclaw/_data/splunk_o11y_dashboards
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
 	cp policies/rego/data.json cli/defenseclaw/_data/policies/rego/
@@ -647,16 +677,35 @@ _bundle-data:
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
+	@# Curated LLM model catalog consumed by `defenseclaw setup llm` and the
+	@# Textual TUI model picker via importlib.resources. Tracked source lives
+	@# at bundles/llm/; _data/llm/ is the gitignored build-staging copy.
+	cp bundles/llm/model_catalog.json cli/defenseclaw/_data/llm/
 	@# splunk_local_bridge and local_observability_stack are bind-mounted by Docker
-	@# (Grafana, Loki, Splunk, etc.) when `defenseclaw obs up` is running. We must
-	@# rsync-with-delete instead of `rm -rf && cp -r` because Docker Desktop on
-	@# macOS captures the directory inode at container start time; replacing the
-	@# inode silently empties the in-container view of the bind-mounted volume
-	@# until the container is recreated. rsync --inplace --delete keeps the inode
-	@# stable, mutates files in place, and prunes anything no longer in bundles/
-	@# so dashboard / dashcfg edits propagate without restarting the obs stack.
-	rsync -a --delete --inplace bundles/splunk_local_bridge/        cli/defenseclaw/_data/splunk_local_bridge/
-	rsync -a --delete --inplace bundles/local_observability_stack/  cli/defenseclaw/_data/local_observability_stack/
+	@# (Grafana, Loki, Splunk, etc.) when `defenseclaw obs up` is running. Prefer
+	@# rsync-with-delete over `rm -rf && cp -r` because Docker Desktop on macOS
+	@# captures the directory inode at container start time; replacing the inode
+	@# silently empties the in-container view of the bind-mounted volume until the
+	@# container is recreated. rsync --inplace --delete keeps the inode stable,
+	@# mutates files in place, and prunes anything no longer in bundles/ so
+	@# dashboard / dashcfg edits propagate without restarting the obs stack.
+	@#
+	@# Hosted Windows runners ship no rsync (`make install` for the connector
+	@# contract matrix died here with CreateProcess failed). Fall back to a plain
+	@# mirror there. That fallback loses inode stability, but the obs Docker stack
+	@# — the only consumer of that property — never runs on those Windows build
+	@# hosts, so the tradeoff is safe. Mirrors the rsync-or-cp guard in
+	@# sync-openclaw-extension above.
+	@for d in splunk_local_bridge local_observability_stack; do \
+	  if command -v rsync >/dev/null 2>&1; then \
+	    rsync -a --delete --inplace "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	  else \
+	    rm -rf "cli/defenseclaw/_data/$$d"; \
+	    mkdir -p "cli/defenseclaw/_data/$$d"; \
+	    cp -R "bundles/$$d/." "cli/defenseclaw/_data/$$d/"; \
+	  fi; \
+	done
+	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
 dist-gateway:
@@ -701,9 +750,13 @@ dist-test:
 	chmod +x $(DIST_DIR)/test/*.sh 2>/dev/null || true
 	@echo "Test scripts copied to $(DIST_DIR)/test/"
 
+dist-upgrade-manifest:
+	@mkdir -p $(DIST_DIR)
+	python3 scripts/generate-upgrade-manifest.py --out $(DIST_DIR)/upgrade-manifest.json
+
 dist-checksums:
 	@test -d $(DIST_DIR) || { echo "Run 'make dist' first"; exit 1; }
-	cd $(DIST_DIR) && find . -type f ! -name checksums.txt | sort | xargs shasum -a 256 > checksums.txt
+	cd $(DIST_DIR) && find . -type f ! -name checksums.txt ! -name checksums.txt.sig ! -name checksums.txt.pem | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt
 	@echo "Checksums written to $(DIST_DIR)/checksums.txt"
 
 dist-clean:
@@ -712,7 +765,7 @@ dist-clean:
 	rm -rf sandbox-test-*
 
 clean:
-	rm -f $(GATEWAY) $(BINARY)-linux-* $(BINARY)-darwin-*
+	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(BINARY)-linux-* $(BINARY)-darwin-*
 	rm -rf $(VENV) cli/*.egg-info
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml

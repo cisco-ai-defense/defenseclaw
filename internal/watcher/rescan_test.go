@@ -560,32 +560,24 @@ func TestRescan_FromClaudeSettingsJSON(t *testing.T) {
 	}
 }
 
-// TestRescan_FromCodexConfigToml — plan E1 / item 5. Codex uses
-// `<cwd>/.mcp.json` (not config.toml — TOML doesn't carry MCP today).
-// The test stages the .mcp.json under a tmp cwd and asserts the
-// enumerator picks it up via the codex connector arm. Note: codex's
-// MCP reader uses os.Getwd, so we t.Chdir into the tmpdir to drive it.
+// TestRescan_FromCodexConfigToml — Codex defaults to the global
+// ~/.codex/config.toml MCP table. Workspace .mcp.json overlays are only
+// included when cfg.Claw.WorkspaceDir is explicitly pinned.
 func TestRescan_FromCodexConfigToml(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	t.Setenv("PATH", "")
 
-	origCwd, err := os.Getwd()
-	if err != nil {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	codexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chdir(origCwd) })
-
-	tmpCwd := t.TempDir()
-	if err := os.Chdir(tmpCwd); err != nil {
-		t.Fatal(err)
-	}
-
-	mcpJSON := `{
-		"mcpServers": {
-			"codex-stdio": {"command": "node", "args": ["mcp.js"]}
-		}
-	}`
-	if err := os.WriteFile(filepath.Join(tmpCwd, ".mcp.json"), []byte(mcpJSON), 0o600); err != nil {
+	configTOML := `[mcp_servers.codex-stdio]
+command = "node"
+args = ["mcp.js"]
+`
+	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(configTOML), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg.Guardrail.Connector = "codex"

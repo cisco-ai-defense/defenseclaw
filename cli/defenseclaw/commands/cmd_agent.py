@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import ipaddress
 import json
 import os
 import time
@@ -38,6 +39,41 @@ from defenseclaw.inventory import agent_discovery, ai_signatures
 @click.group()
 def agent() -> None:
     """Inspect locally installed agent surfaces."""
+
+
+def _emit_untrusted_prefix_hint(disc: agent_discovery.AgentDiscovery) -> None:
+    """Point operators at the generic remediation when a connector binary
+    was skipped for living outside a trusted install prefix.
+
+    Without this, the only signal is the per-row "binary path is not in a
+    trusted install prefix" error — accurate but not actionable. The hint
+    is connector-agnostic and recommends the same ``trusted-paths`` command
+    the setup gate now points at, so discovery and setup stay consistent.
+    """
+    from defenseclaw import ux
+
+    dirs: list[str] = []
+    seen: set[str] = set()
+    for sig in disc.agents.values():
+        if sig.error == agent_discovery.UNTRUSTED_PREFIX_ERROR and sig.binary_path:
+            parent = os.path.dirname(os.path.realpath(sig.binary_path))
+            if parent and parent not in seen:
+                seen.add(parent)
+                dirs.append(parent)
+    if not dirs:
+        return
+    n = len(dirs)
+    click.echo()
+    ux.warn(
+        f"{n} director{'y' if n == 1 else 'ies'} hold connector binaries outside a "
+        "trusted install prefix; they were skipped during version discovery."
+    )
+    for d in dirs:
+        ux.subhead(f"  Trust it with: defenseclaw setup trusted-paths add {d}")
+    ux.subhead(
+        "  Only trust directories you control — a trusted directory lets "
+        "DefenseClaw execute any binary placed there during discovery."
+    )
 
 
 @agent.command("discover")
@@ -75,6 +111,15 @@ def discover(
     gateway_token_env: str | None,
 ) -> None:
     """Run local agent discovery and optionally emit OTel telemetry."""
+    # `agent` is in main.SKIP_LOAD_COMMANDS, so the root group never loads
+    # config — and thus never hydrates ~/.defenseclaw/.env. Without this, a
+    # prefix persisted via `setup trusted-paths add` would be ignored here, so
+    # the untrusted-binary hint below would point at a fix this very command
+    # then disregards. Hydrate just the .env (cheap; no full config load or
+    # validation, keeping `agent` fast) so discovery honours persisted trust.
+    from defenseclaw.config import _load_dotenv_into_os, default_data_path  # noqa: PLC0415
+
+    _load_dotenv_into_os(str(default_data_path()))
     started = time.monotonic()
     disc = agent_discovery.discover_agents(use_cache=not no_cache, refresh=refresh)
     duration_ms = int((time.monotonic() - started) * 1000)
@@ -99,6 +144,7 @@ def discover(
         return
 
     click.echo(agent_discovery.render_discovery_table(disc).rstrip())
+    _emit_untrusted_prefix_hint(disc)
     if emit_otel:
         if otel_result["emitted"]:
             click.echo("  OTel: emitted agent discovery telemetry")
@@ -2060,6 +2106,26 @@ def _emit_discovery_report(
     return result
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Return True when ``host`` is the local loopback interface.
+
+    Mirrors the upgrade health-probe gate (``cmd_upgrade._is_loopback_host``):
+    ``localhost`` and any loopback IP literal (IPv4 ``127.0.0.0/8`` or IPv6
+    ``::1``) count as loopback; everything else — including ``0.0.0.0`` and
+    DNS names — is treated as non-loopback so the bearer token is not leaked.
+    """
+    candidate = (host or "").strip().lower()
+    if not candidate or candidate == "localhost":
+        return True
+    candidate = candidate.strip("[]")
+    if candidate == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
 def _resolve_gateway_target(
     app: AppContext,
     *,
@@ -2067,6 +2133,21 @@ def _resolve_gateway_target(
     gateway_port: int | None,
     gateway_token_env: str | None,
 ) -> tuple[str, int, str]:
+    """Resolve (host, port, token) for sidecar/orchestrator calls.
+
+    Token precedence mirrors :meth:`GatewayConfig.resolved_token`
+    (Phase 1) so the CLI and the config object can never disagree on
+    where credentials come from:
+
+    1. ``--gateway-token-env`` CLI override → ``os.environ[<that>]``.
+    2. Falls through to ``cfg.gateway.resolved_token()`` which itself
+       checks ``cfg.gateway.token_env`` → ``DEFENSECLAW_GATEWAY_TOKEN``
+       → ``OPENCLAW_GATEWAY_TOKEN`` → ``cfg.gateway.token`` literal.
+
+    Returns the empty string for the token component when nothing is
+    reachable; callers turn that into a friendly ClickException with
+    remediation text (see ``_usage_client``).
+    """
     host = gateway_host or "127.0.0.1"
     port = gateway_port or 18970
     token = os.environ.get(gateway_token_env or "", "") if gateway_token_env else ""
@@ -2088,6 +2169,24 @@ def _resolve_gateway_target(
             if not token and hasattr(gw, "resolved_token"):
                 token = gw.resolved_token()
 
+    # Last-resort safety net: even when no Config object is reachable
+    # (e.g. early-boot smoke tests, doctor pre-config) we still want
+    # `defenseclaw agent usage` to succeed if the Go gateway has
+    # written its token to the environment. Mirrors the auto-detect
+    # ladder in GatewayConfig.resolved_token so the two stay in sync.
+    if not token:
+        token = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
+    if not token:
+        token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+
+    # The gateway bearer token authenticates to the *local* sidecar. Only
+    # ever attach it to a loopback target: a non-loopback ``gw.host`` (a
+    # hostile/typo'd config or a hijacked DNS name) would otherwise receive
+    # the credential. Drop it so ``_usage_client`` fails closed with a
+    # remediation message instead of leaking the token off-box (F-0261).
+    if token and not _is_loopback_host(host):
+        token = ""
+
     return host, port, token
 
 
@@ -2105,8 +2204,49 @@ def _usage_client(
         gateway_token_env=gateway_token_env,
     )
     if not token:
-        raise click.ClickException("gateway token unavailable")
+        raise click.ClickException(_format_missing_token_error(app))
     return OrchestratorClient(host=host, port=port, token=token, timeout=5)
+
+
+def _format_missing_token_error(app: AppContext) -> str:
+    """Build the operator-facing 'gateway token unavailable' message.
+
+    The pre-fix error was a 3-word string with zero remediation; this
+    builds a 3-line message that tells the operator exactly which
+    var to set, where it should live, and which one-liner generates
+    or persists it. Mirrors the Go gateway's first-boot flow so the
+    advice never drifts from what the gateway is actually doing.
+
+    Why include the configured ``cfg.gateway.token_env``: helps the
+    operator confirm whether the resolver is looking at the right var
+    name. If it points at a custom var they don't recognise, that's
+    a signal to re-check ``defenseclaw setup gateway``.
+
+    Pulled into its own helper so Phase 5's regression test can lock
+    the wording (presence of remediation hints) without bringing the
+    whole click.ClickException raise path into the assertion.
+    """
+    configured_env = ""
+    cfg = getattr(app, "cfg", None)
+    gw = getattr(cfg, "gateway", None) if cfg is not None else None
+    if gw is not None:
+        configured_env = getattr(gw, "token_env", "") or ""
+
+    configured_clause = (
+        f" (cfg.gateway.token_env={configured_env!r})"
+        if configured_env
+        else ""
+    )
+    return (
+        "gateway token unavailable — the sidecar API requires "
+        f"DEFENSECLAW_GATEWAY_TOKEN{configured_clause}.\n"
+        "Fix: run `defenseclaw-gateway start` (auto-generates the token "
+        "on first boot, persisted to ~/.defenseclaw/.env), OR run "
+        "`defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN <token>` to "
+        "set it manually.\n"
+        "Then re-run this command. See `defenseclaw doctor` for a "
+        "deeper diagnostic if it still fails."
+    )
 
 
 # State weight for stable, "what's new first" sort order in both summary

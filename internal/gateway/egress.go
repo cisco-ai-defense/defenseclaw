@@ -63,6 +63,9 @@ func (p *GuardrailProxy) handleEgressEvent(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// follow-up: promote peeked agent identity now that auth
+	// succeeded so emitEgress below stamps a stable agent_instance_id.
+	r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 	// Reject non-JSON content types explicitly. Any caller that
 	// hits /v1/events/egress is a cooperating integration (TS
 	// interceptor, tests); refusing text/plain / form encoded /

@@ -38,6 +38,7 @@ def test_ai_signature_catalog_contains_supported_and_shadow_agents():
         "ai-sdks",
         "qwen-code",
         "openhands",
+        "antigravity",
         "lmstudio",
         "claude-desktop",
     }:

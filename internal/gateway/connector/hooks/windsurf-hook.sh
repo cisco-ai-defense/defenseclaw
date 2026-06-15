@@ -1,8 +1,11 @@
 #!/bin/bash
-# defenseclaw-managed-hook v3
+# defenseclaw-managed-hook v6
 # DefenseClaw Windsurf hook — forwards Cascade hook payloads to the
 # DefenseClaw gateway. Windsurf blocks pre-hooks when this script exits 2.
 set -euo pipefail
+# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
+HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
+export HOME
 
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
@@ -31,9 +34,12 @@ fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: windsurf hook refusing oversized payload" >&2
+  if [ "$FAIL_MODE" = "closed" ]; then
+    exit 2
+  fi
   exit 0
 }
-API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
+API_ADDR="{{.APIAddr}}"
 if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/.token" ]; then
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/.token"
@@ -63,10 +69,17 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 
+# W3C trace propagation: forward validated traceparent / tracestate.
+TRACE_HEADER_ARGS=()
+if command -v mapfile >/dev/null 2>&1; then
+  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
+fi
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/windsurf/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: windsurf-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {
@@ -88,15 +101,15 @@ fi
 # `// "allow"` default below, which silently allowed Cascade actions
 # even with FAIL_MODE=closed. We now route through fail_response so
 # the parse error is logged AND respects FAIL_MODE.
-if ! echo "$RESULT" | jq -e . >/dev/null 2>&1; then
+if ! echo "$RESULT" | _dc_jq -e . >/dev/null 2>&1; then
   fail_response "invalid JSON response"
 fi
 
-ACTION=$(echo "$RESULT" | jq -r '.action // "allow"' 2>/dev/null) || {
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 if [ "$ACTION" = "block" ]; then
-  REASON=$(echo "$RESULT" | jq -r '.reason // "DefenseClaw blocked this Cascade action."' 2>/dev/null || printf "DefenseClaw blocked this Cascade action.")
+  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "DefenseClaw blocked this Cascade action."' 2>/dev/null || printf "DefenseClaw blocked this Cascade action.")
   echo "$REASON" >&2
   exit 2
 fi

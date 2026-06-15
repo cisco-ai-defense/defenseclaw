@@ -2,12 +2,19 @@
   "annotations": {
     "list": []
   },
-  "description": "Rule-level findings detail. Driven by $rule_id, $scanner, $severity. Combines the Prometheus per-rule counter (defenseclaw_scan_findings_by_rule_total) with the Loki scan_finding event stream so operators can rank rules, map first/last-seen, and pivot into target attribution and finding\u2192verdict correlation.",
+  "description": "Rule-level findings detail. Driven by $rule_id, $scanner, $severity. Combines the Prometheus per-rule counter (defenseclaw_scan_findings_by_rule_total) with the Loki scan_finding event stream so operators can rank rules, map first/last-seen, and pivot into target attribution and finding\u2192verdict correlation. The $scanner dropdown is populated dynamically and covers the full unified finding pipeline: classic (skill, mcp), hook-rules (claudecode/codex/cursor/windsurf/copilot/geminicli/hermes), inspect-http, guardrail-llm, mid-stream, tool-call-inspect, asset-policy, and drift (rescan). Pivot from any per-rule row into the originating evaluation via the evaluation_id label.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "liveNow": false,
   "links": [
+    {
+      "title": "Agent Activity (Live)",
+      "type": "link",
+      "url": "/d/defenseclaw-activity?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
     {
       "title": "Overview",
       "type": "link",
@@ -39,6 +46,44 @@
   ],
   "templating": {
     "list": [
+      {
+        "name": "connector",
+        "label": "Connector",
+        "description": "Optional connector filter. Sourced from defenseclaw_connector_hook_invocations_total{connector}. The per-rule scan metric (defenseclaw_scan_findings_by_rule_total) now carries a first-class connector label, so this var narrows every per-rule panel via connector=~\"$connector\" as well as the finding\u2192verdict correlation panel (defenseclaw_inspect_evaluations_total, tool=<connector>:<event>) via tool=~\"$connector:.*\". Connector-agnostic scans (CLI file scans, background rescans) record connector=\"unknown\". Defaults to All (.+).",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_connector_hook_invocations_total, connector)",
+        "query": {
+          "query": "label_values(defenseclaw_connector_hook_invocations_total, connector)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
       {
         "name": "scanner",
         "label": "Scanner",
@@ -195,7 +240,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\"}[1h])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[1h])) or vector(0)",
           "refId": "A"
         }
       ]
@@ -215,7 +260,7 @@
       },
       "targets": [
         {
-          "expr": "count(group by (rule_id) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}[1h]) > 0)) or vector(0)",
+          "expr": "count(group by (rule_id) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\", connector=~\"$connector\"}[1h]) > 0)) or vector(0)",
           "refId": "A"
         }
       ]
@@ -235,7 +280,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"critical|CRITICAL\"}[1h])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"critical|CRITICAL\", connector=~\"$connector\"}[1h])) or vector(0)",
           "refId": "A"
         }
       ],
@@ -275,7 +320,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"high|critical|HIGH|CRITICAL\"}[1h])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"high|critical|HIGH|CRITICAL\", connector=~\"$connector\"}[1h])) or vector(0)",
           "refId": "A"
         }
       ],
@@ -315,7 +360,7 @@
       },
       "targets": [
         {
-          "expr": "topk(1, sum by (rule_id) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}[1h])))",
+          "expr": "topk(1, sum by (rule_id) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\", connector=~\"$connector\"}[1h])))",
           "refId": "A",
           "instant": true
         }
@@ -324,12 +369,11 @@
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ],
-          "fields": "/^rule_id$/"
+          ]
         },
         "colorMode": "value",
         "graphMode": "none",
-        "textMode": "value"
+        "textMode": "name"
       }
     },
     {
@@ -348,7 +392,7 @@
       },
       "targets": [
         {
-          "expr": "topk(1, sum by (target) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=\"scan_finding\" [1h])))",
+          "expr": "topk(1, sum by (audit_target) (count_over_time({service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\" [$__range])))",
           "refId": "A",
           "instant": true
         }
@@ -394,7 +438,7 @@
           "refId": "TOTAL",
           "instant": true,
           "format": "table",
-          "expr": "topk(20, sort_desc(sum by (scanner, rule_id, severity) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}[1h]))))"
+          "expr": "topk(20, sort_desc(sum by (scanner, rule_id, severity) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\", connector=~\"$connector\"}[1h]))))"
         }
       ],
       "transformations": [
@@ -509,7 +553,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (rule_id, severity) (rate(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\"}[$__rate_interval]))",
+          "expr": "sum by (rule_id, severity) (rate(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[$__rate_interval]))",
           "legendFormat": "{{rule_id}} \u00b7 {{severity}}",
           "refId": "A"
         }
@@ -536,7 +580,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (rule_id) (rate(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\"}[$__rate_interval]))",
+          "expr": "sum by (rule_id) (rate(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[$__rate_interval]))",
           "format": "time_series",
           "legendFormat": "{{rule_id}}",
           "refId": "A"
@@ -573,7 +617,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, max by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\"}[24h]) > 0)))",
+          "expr": "topk(20, max by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[24h]) > 0)))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -629,7 +673,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, min by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\"}[24h]) > 0)))",
+          "expr": "topk(20, min by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[24h]) > 0)))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -696,9 +740,14 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (target, rule_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=\"scan_finding\" | rule_id=~\"$rule_id\" [1h])))",
+          "expr": "topk(15, sum by (audit_target) (count_over_time({service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\" [$__range])))",
           "refId": "A",
-          "instant": true
+          "instant": true,
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "queryType": "instant"
         }
       ],
       "options": {
@@ -721,7 +770,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (tool, action) (increase(defenseclaw_inspect_evaluations_total{action!=\"allow\"}[1h]))) and on() (sum(increase(defenseclaw_scan_findings_by_rule_total{rule_id=~\"$rule_id\"}[1h])) > 0)",
+          "expr": "sum by (tool, action, severity) (increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", severity=~\"$severity\"}[$__range]))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -773,8 +822,12 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=\"scan_finding\" | rule_id=~\"$rule_id\"",
-          "refId": "A"
+          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"scan_finding\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
         }
       ],
       "options": {
@@ -782,6 +835,50 @@
         "wrapLogMessage": true,
         "dedupStrategy": "none",
         "enableLogDetails": true
+      }
+    },
+    {
+      "type": "row",
+      "title": "Findings by connector (Loki)",
+      "gridPos": {
+        "x": 0,
+        "y": 62,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Findings by connector",
+      "description": "EventScanFinding records carry a connector field. Counts scan_finding events grouped by connector so multi-connector installs can compare per-connector finding volume. Filtered by $connector (All = .+). Honors $rule_id.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 63,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (connector) (rate(defenseclaw_scan_findings_by_rule_total{connector=~\"$connector\", scanner=~\"$scanner\", severity=~\"$severity\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "{{connector}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 20
+          }
+        }
       }
     }
   ],

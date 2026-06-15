@@ -68,6 +68,16 @@ class CredentialSpec:
     This lets the registry track the real env var the user wired up
     (e.g. ``MY_CUSTOM_JUDGE_KEY``) instead of pretending the canonical
     one is expected.
+
+    ``bound_endpoint`` lets the registry attach the URL/host the
+    credential is paired with in ``config.yaml`` (e.g. AI Defense
+    region endpoint, Splunk HEC URL, judge LLM base URL). UX layers
+    (``keys set`` / ``keys fill-missing`` / doctor) can then render a
+    "↪ bound to <url>" hint right after the secret is saved or
+    probed, which is the primary signal an operator gets that a
+    fresh key is being paired with the wrong region/host. Returns
+    ``""`` when the credential has no paired endpoint or when the
+    config doesn't expose one.
     """
 
     env_name: str
@@ -76,6 +86,7 @@ class CredentialSpec:
     required: Callable[[Config], Requirement]
     auto_detected: bool = False
     effective_env_name: Callable[[Config], str] | None = None
+    bound_endpoint: Callable[[Config], str] | None = None
 
     def resolve_env_name(self, cfg: Config) -> str:
         """Return the env var name currently in effect for *cfg*."""
@@ -84,6 +95,19 @@ class CredentialSpec:
             if override:
                 return override
         return self.env_name
+
+    def resolve_bound_endpoint(self, cfg: Config) -> str:
+        """Return the paired endpoint URL/host for *cfg*, or ``""``.
+
+        Never raises — UX callers depend on a stable empty-string
+        sentinel so they can branch on truthiness without try/except.
+        """
+        if self.bound_endpoint is None:
+            return ""
+        try:
+            return self.bound_endpoint(cfg) or ""
+        except Exception:
+            return ""
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +275,20 @@ def _cisco_env(cfg: Config) -> str:
     return cad.api_key_env if cad is not None else ""
 
 
+def _cisco_endpoint(cfg: Config) -> str:
+    """Return the configured AI Defense region endpoint.
+
+    The single biggest source of "valid key looks invalid" reports is
+    a key issued for one regional deployment (us / eu / preview)
+    pasted into a config pointed at another. All three regions reply
+    with the same opaque ``401 invalid api key`` body, so the caller
+    can't tell auth from regional mismatch by status alone — the
+    only durable signal is "here's the URL we're sending it to".
+    """
+    cad = getattr(cfg, "cisco_ai_defense", None)
+    return getattr(cad, "endpoint", "") if cad is not None else ""
+
+
 def _virustotal_env(cfg: Config) -> str:
     sc = getattr(cfg, "scanners", None)
     if sc is None:
@@ -317,6 +355,7 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         description="API key for Cisco AI Defense remote scanner (scanner_mode=remote|both)",
         required=_cisco_ai_defense_key,
         effective_env_name=_cisco_env,
+        bound_endpoint=_cisco_endpoint,
     ),
     CredentialSpec(
         env_name="VIRUSTOTAL_API_KEY",
@@ -352,6 +391,145 @@ _BY_NAME: dict[str, CredentialSpec] = {spec.env_name: spec for spec in CREDENTIA
 def lookup(env_name: str) -> CredentialSpec | None:
     """Return the registered spec for *env_name*, or None if unknown."""
     return _BY_NAME.get(env_name)
+
+
+# ---------------------------------------------------------------------------
+# Custom-provider overlay env discovery
+# ---------------------------------------------------------------------------
+#
+# ``~/.defenseclaw/custom-providers.json`` lets operators declare an
+# arbitrary number of internal/self-hosted LLM endpoints, each with its
+# own ``env_keys`` list (e.g. ``ACME_INTERNAL_LLM_KEY``). Surfacing these
+# alongside the static CREDENTIALS table means ``defenseclaw keys list``
+# and ``doctor`` can pester the operator about them the same way they
+# pester about ``DEFENSECLAW_LLM_KEY`` — without us hard-coding every
+# custom env var.
+#
+# The check is best-effort: a missing overlay returns ``[]`` and a
+# malformed JSON file is silently ignored (the ``setup provider`` write
+# path raises hard on parse errors, so a corrupt overlay would have
+# been caught earlier).
+
+
+def _custom_provider_overlay_path(cfg: Config) -> str:
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        return ""
+    return os.path.join(data_dir, "custom-providers.json")
+
+
+def _custom_provider_env_keys(cfg: Config) -> dict[str, str]:
+    """Return ``{ENV_VAR: provider_name}`` for every env_key declared in
+    the overlay. Order follows file order; provider names later in the
+    file win on duplicate env_key, which matches the merge semantics on
+    the Go side (last entry wins).
+    """
+    path = _custom_provider_overlay_path(cfg)
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        import json  # noqa: PLC0415
+
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    if not isinstance(data, dict):
+        return {}
+    providers = data.get("providers") or []
+    if not isinstance(providers, list):
+        return {}
+    for entry in providers:
+        if not isinstance(entry, dict):
+            continue
+        pname = str(entry.get("name") or "").strip()
+        keys = entry.get("env_keys") or []
+        if not isinstance(keys, list):
+            continue
+        for k in keys:
+            key = str(k or "").strip()
+            if not key:
+                continue
+            out[key] = pname
+    return out
+
+
+def _custom_provider_predicate(env_key: str) -> Callable[[Config], Requirement]:
+    """Build a predicate that marks *env_key* REQUIRED when the overlay
+    still references it AND some component resolves to a non-local
+    provider that would benefit from a key.
+
+    Conservative classification: we surface the env var as REQUIRED
+    only when the operator has wired the same env var into a resolved
+    ``llm.api_key_env`` somewhere. Otherwise it's OPTIONAL — the
+    overlay declared it, but no live config currently consumes it.
+    """
+
+    def _check(cfg: Config) -> Requirement:
+        overlay = _custom_provider_env_keys(cfg)
+        if env_key not in overlay:
+            return Requirement.NOT_USED
+        # Walk every resolve_llm-recognised role so an operator who
+        # pinned the overlay env_key at any layer (top-level llm,
+        # guardrail role, judge role, or per-scanner override) gets
+        # the env classified as REQUIRED. "openclaw" was previously
+        # included here but is not a real resolve_llm path — keeping
+        # it would have spammed `defenseclaw doctor` with a warning
+        # per invocation. The empty string targets cfg.llm verbatim.
+        for path in (
+            "",
+            "guardrail",
+            "guardrail.judge",
+            "scanners.skill",
+            "scanners.mcp",
+            "scanners.plugin",
+        ):
+            try:
+                r = cfg.resolve_llm(path)
+            except Exception:
+                continue
+            if (getattr(r, "api_key_env", "") or "").strip() == env_key:
+                return Requirement.REQUIRED
+        return Requirement.OPTIONAL
+
+    return _check
+
+
+def discover_custom_provider_credentials(cfg: Config) -> list[CredentialSpec]:
+    """Return ad-hoc :class:`CredentialSpec` entries for every env_key
+    declared in ``custom-providers.json``.
+
+    These are *runtime* specs — not part of the static ``CREDENTIALS``
+    tuple — because they depend on operator overlay state. ``classify``
+    composes them with the static registry; ``lookup`` will not return
+    them.
+
+    Skips env_keys already present in :data:`_BY_NAME` so the canonical
+    ``DEFENSECLAW_LLM_KEY`` entry continues to drive the predicate
+    logic (and we don't end up with two specs for the same name).
+    """
+    overlay = _custom_provider_env_keys(cfg)
+    if not overlay:
+        return []
+    out: list[CredentialSpec] = []
+    for env_key, provider_name in overlay.items():
+        if env_key in _BY_NAME:
+            continue
+        feature = f"llm.custom.{provider_name}" if provider_name else "llm.custom"
+        description = (
+            f"Custom-provider key declared in custom-providers.json "
+            f"({provider_name or 'unnamed'} → {env_key})."
+        )
+        out.append(
+            CredentialSpec(
+                env_name=env_key,
+                feature=feature,
+                description=description,
+                required=_custom_provider_predicate(env_key),
+            )
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -448,19 +626,37 @@ def classify(cfg: Config) -> list[CredentialStatus]:
     """Classify every registered credential against the current config.
 
     The order follows ``CREDENTIALS`` so the UX is stable across runs.
+    Custom-provider env keys discovered in
+    ``~/.defenseclaw/custom-providers.json`` are appended after the
+    static registry so they show up in ``defenseclaw keys list`` /
+    ``doctor`` without polluting the canonical ordering.
+
     We resolve ``effective_env_name`` so when the operator has
     configured a custom env var (e.g. ``judge.api_key_env``), we show
     the name they actually wired up — not the canonical default.
     """
     data_dir = getattr(cfg, "data_dir", "") or ""
     statuses: list[CredentialStatus] = []
+    seen: set[str] = set()
     for spec in CREDENTIALS:
         env_name = spec.resolve_env_name(cfg)
+        seen.add(env_name)
         statuses.append(
             CredentialStatus(
                 spec=spec,
                 requirement=spec.required(cfg),
                 resolution=resolve(env_name, data_dir),
+            )
+        )
+    for spec in discover_custom_provider_credentials(cfg):
+        if spec.env_name in seen:
+            continue
+        seen.add(spec.env_name)
+        statuses.append(
+            CredentialStatus(
+                spec=spec,
+                requirement=spec.required(cfg),
+                resolution=resolve(spec.env_name, data_dir),
             )
         )
     return statuses

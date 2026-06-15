@@ -1,0 +1,369 @@
+---
+title: AI Discovery
+description: Find every AI agent, model, MCP server, skill, and provider running on the host. DefenseClaw runs a continuous fingerprinting scanner in the gateway and ships defenseclaw agent discover for an instant operator-side inventory.
+keywords:
+  - DefenseClaw AI discovery
+  - defenseclaw agent discover
+  - AI inventory
+  - AIBOM
+  - shadow AI
+  - AI bill of materials
+  - ai_discovery event
+  - defenseclaw aibom
+---
+
+Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is even running on this machine?"* AI Discovery is the four-surface inventory pipeline that answers it.
+
+![DefenseClaw TUI · AI Discovery view showing detected AI connectors, processes, package dependencies, and provider domains with identity and presence confidence scores](/images/tui/ai-discovery.jpg)
+
+The TUI's `AI Discovery` view (above) is the operator-facing rendering of the same pipeline this page documents — a live table of every detected AI agent, model, MCP server, skill, and package dependency with per-signal identity / presence confidence scores.
+
+<Cards>
+  <Card title="Continuous discovery" description="Go sidecar scanner. Fingerprints local AI artifacts, emits ai_discovery events on new / changed / gone." />
+  <Card title="On-demand discovery" description="defenseclaw agent discover. Operator-side path scan that lists every connector and its install state." />
+  <Card title="AIBOM" description="defenseclaw aibom scan. Connector inventory of skills, plugins, MCP servers, agents, tools, models, memory." />
+  <Card title="Registry" description="defenseclaw registry. Catalog-based admission for skills and MCP servers from corporate, smithery, git, or Clawhub manifests." />
+</Cards>
+
+The four are independent — you can run any subset. Most teams start with `defenseclaw agent discover` to see what's there, then turn on continuous discovery in the gateway, then add AIBOM for compliance evidence.
+
+## Run it now: 30-second tour
+
+```bash
+defenseclaw agent discover
+```
+
+That's it. The CLI walks the known connector paths (Claude, Codex, Cursor, OpenClaw, Hermes, Windsurf, Copilot CLI, Gemini CLI, …), checks for config files and binaries, probes versions inside trusted prefixes, and prints a table of what's installed.
+
+Add `--json` for machine-readable output or `--emit-otel` to also publish a sanitized report to the gateway so Splunk and Grafana light up:
+
+```bash
+defenseclaw agent discover --json --emit-otel
+```
+
+## How the four surfaces relate
+
+<Flow
+  direction="TB"
+  compact
+  caption="Continuous (gateway) and on-demand (CLI) discovery feed the same audit pipeline. AIBOM and the Registry sit alongside them, each contributing a different slice of the inventory."
+>
+  <Node id="op" kind="operator">{`Operator\ndefenseclaw CLI`}</Node>
+  <Node id="gateway" kind="gateway">DefenseClaw Gateway</Node>
+  <Node id="cont" kind="connector">{`Continuous scanner\nai_discovery.go`}</Node>
+  <Node id="disc" kind="connector">{`agent discover\nagent_discovery.py`}</Node>
+  <Node id="bom" kind="connector">{`aibom scan\nclaw_inventory.py`}</Node>
+  <Node id="reg" kind="connector">{`registry sync\nasset_policy`}</Node>
+  <Node id="audit" kind="datastore">{`Audit pipeline\nJSONL · OTLP · HEC`}</Node>
+  <Edge from="op" to="disc" />
+  <Edge from="op" to="bom" />
+  <Edge from="op" to="reg" />
+  <Edge from="gateway" to="cont" />
+  <Edge from="cont" to="audit" label="EventAIDiscovery" />
+  <Edge from="disc" to="gateway" label="POST /api/v1/agents/discovery" />
+  <Edge from="gateway" to="audit" label="agent_discovery" />
+  <Edge from="bom" to="audit" label="ScanResult" />
+  <Edge from="reg" to="gateway" label="asset_policy promotion" />
+</Flow>
+
+## What gets discovered
+
+The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every signal into one of the categories below. The on-demand CLI fills in connector-specific metadata for the same categories.
+
+| Category | What it surfaces |
+| --- | --- |
+| `connector` | Claude Code, Codex, Cursor, OpenClaw, Hermes, Windsurf, Copilot CLI, Gemini CLI, ZeptoClaw |
+| `cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
+| `process` | Live AI processes — model serving, sandbox runners, scanner subprocesses |
+| `ide_extension` | VS Code / JetBrains / Cursor extensions that talk to providers |
+| `mcp` | MCP servers configured for any connector (`mcpServers` blocks) |
+| `skill` | Claude / Cursor / OpenClaw skill bundles installed on disk |
+| `rule` | Rule packs and ruleset files referenced by config |
+| `plugin` | Connector plugins (TypeScript, Python, native) |
+| `package_dep` | `requirements.txt` / `package.json` / `pyproject.toml` AI deps |
+| `env_var` | AI provider env var *names* (never values) |
+| `shell_history` | Shell-history references to AI binaries (last-touched timestamps) |
+| `provider_domain` | DNS resolutions to known provider endpoints |
+| `workspace_artifact` | `.openclaw/`, `.claude/`, `.cursor/` directories in active workspaces |
+| `desktop_app` | Claude Desktop, Cursor, Windsurf macOS / Windows app installs |
+| `local_ai_endpoint` | Ollama, LM Studio, vLLM, llama.cpp listening sockets |
+
+Every signal carries `state ∈ {new, changed, gone}` with `last_seen` / `first_seen` timestamps so the dashboards can show drift over time, not just point-in-time snapshots.
+
+## Continuous discovery (gateway)
+
+The continuous scanner runs inside the gateway and emits `ai_discovery` events whenever a signal transitions state. It's off by default — turn it on once you have observability wired up:
+
+<Tabs items={['Enable', 'Status', 'One-shot scan', 'Disable']}>
+  <Tab value="Enable">
+```bash
+defenseclaw agent discovery enable --restart --scan
+```
+
+Toggles `ai_discovery.*` in `~/.defenseclaw/config.yaml`, restarts the gateway, and runs an immediate full scan so the dashboards are populated in seconds. Use `--yes` for non-interactive provisioning.
+  </Tab>
+  <Tab value="Status">
+```bash
+defenseclaw agent discovery status
+```
+
+Prints what's enabled, the active scan roots, the loaded signature pack, the last scan timestamp, and the total signal count.
+  </Tab>
+  <Tab value="One-shot scan">
+```bash
+defenseclaw agent discovery scan
+```
+
+Triggers `POST /api/v1/ai-usage/scan`. The scanner runs immediately and fires fresh `ai_discovery` events into the audit pipeline. No restart needed.
+  </Tab>
+  <Tab value="Disable">
+```bash
+defenseclaw agent discovery disable
+```
+
+Stops the scanner and clears the `ai_discovery.*` block. Existing audit events are preserved.
+  </Tab>
+</Tabs>
+
+### Tunable knobs
+
+`agent discovery enable` accepts a wide tunable surface so you can scope the scan to your environment:
+
+| Knob | Purpose |
+| --- | --- |
+| `--scan-roots` | Comma-separated filesystem roots to walk. Defaults inherit from `ai_discovery.scan_roots` (typically `~`). |
+| `--include-shell-history` / `--no-include-shell-history` | Read `~/.bash_history`, `~/.zsh_history` for AI invocations. |
+| `--include-package-manifests` / `--no-include-package-manifests` | Look at `package.json`, `pyproject.toml`, `requirements.txt`. |
+| `--include-env-var-names` / `--no-include-env-var-names` | Enumerate process env *names* (values are never read). |
+| `--include-network-domains` / `--no-include-network-domains` | Watch DNS for provider endpoints (Anthropic, OpenAI, Bedrock, …). |
+| `--scan-interval-min` | Minutes between rescans. Defaults inherit from `ai_discovery.scan_interval_min`. |
+
+Signature packs are managed separately under `defenseclaw agent signatures` (see below); there is no `--signature-pack` flag on `discovery enable`.
+
+Run `defenseclaw agent discovery enable --help` for the full list with defaults.
+
+### Signature packs
+
+The scanner uses a versioned signature pack to know what an "AI artifact" looks like. Packs are managed independently of the binary so we can ship new connector support without a release:
+
+```bash
+defenseclaw agent signatures list
+defenseclaw agent signatures install <pack>
+defenseclaw agent signatures validate <path>
+defenseclaw agent signatures disable <id>
+defenseclaw agent signatures enable <id>
+```
+
+The bundled pack covers every connector listed in [Capability matrix](/docs/capability-matrix). Custom packs are useful when you ship internal AI tooling and want it surfaced as a first-party signal rather than `unknown`.
+
+## On-demand discovery (CLI)
+
+`defenseclaw agent` is the operator-side surface — instant answers from a single shell invocation, no gateway required.
+
+### `agent discover`
+
+```bash
+defenseclaw agent discover --json --emit-otel
+```
+
+Walks the connector specs (`KNOWN_CONNECTORS` in `cli/defenseclaw/inventory/agent_discovery.py`) and reports:
+
+| Field | What it means |
+| --- | --- |
+| `installed` | Has config OR (binary present AND version probe succeeded) |
+| `has_config` / `config_basename` / `config_path_hash` | Config detection (basename and a hash, never the raw path) |
+| `has_binary` / `binary_basename` / `binary_path_hash` | Binary detection, same shape |
+| `version` / `version_probe_status` | Version string + probe outcome |
+| `error_class` | Reason if the probe failed (no exception text) |
+
+Notice what's *not* included: no full paths, no env values, no command output, no file contents. The on-demand report is sanitized at the source, then signed and sent to the gateway. See [Privacy and trust model](#privacy-and-trust-model) below.
+
+### `agent usage`, `processes`, `components`
+
+These three queries hit the **gateway's** AI usage view (built from continuous discovery), not the local filesystem:
+
+<Tabs items={['Usage', 'Processes', 'Components']}>
+  <Tab value="Usage">
+```bash
+defenseclaw agent usage --state new --state changed --json
+```
+
+Top-level rollup — what categories are present, how many of each, when each was last seen.
+
+Useful flags: `--detail`, `--state` (repeatable), `--category`, `--product`, `--component`, `--show-gone`, `--by-detector`, `--limit`.
+  </Tab>
+  <Tab value="Processes">
+```bash
+defenseclaw agent processes --limit 20
+```
+
+Live AI process table — model serving, sandbox runners, scanner subprocesses. Useful when something is running but you can't tell which agent spawned it.
+  </Tab>
+  <Tab value="Components">
+```bash
+defenseclaw agent components --ecosystem npm --min-identity 0.8
+defenseclaw agent components show ai-sdk
+defenseclaw agent components history ai-sdk
+```
+
+Package-dependency view: every AI-adjacent npm/pip/cargo dep across your workspaces. `show` and `history` drill into a single component's identity score and detection trail.
+  </Tab>
+</Tabs>
+
+### `agent confidence`
+
+Discovery isn't binary — every signal has a confidence score. To inspect what evidence backed a particular decision:
+
+```bash
+defenseclaw agent confidence explain claudecode
+defenseclaw agent confidence policy show
+defenseclaw agent confidence policy default
+defenseclaw agent confidence policy validate ./my-policy.yaml
+```
+
+`explain` shows the per-detector evidence trail. `policy` lets you tune the weights — useful when you have an internal connector that scores low because the bundled signature pack doesn't know about it.
+
+## AIBOM (AI Bill of Materials)
+
+Discovery answers *"what's there?"* AIBOM answers *"what's there, with provenance, in a format I can hand to compliance."*
+
+```bash
+defenseclaw aibom scan --json
+```
+
+For OpenClaw, `aibom scan` calls the live `openclaw` binary in parallel for each category (skills, plugins, MCP, agents+config, models, memory) and merges the results. For non-OpenClaw connectors it falls back to filesystem inventory.
+
+<Callout type="info">
+On a multi-connector install, a default `aibom scan` **fans out**: it produces one BOM section per active connector and merges them into a single document, mirroring the rest of the read/inventory commands. Pass `--connector <name>` to scope the BOM to a single connector.
+</Callout>
+
+The output is a custom JSON document with **per-item provenance** stamped by `stamp_aibom_inventory`:
+
+```json title="defenseclaw aibom scan --json (excerpt)"
+{
+  "provenance": {
+    "schema_version": "1.0.0",
+    "content_hash": "sha256:8c3a...",
+    "generation": "defenseclaw 2.4.1",
+    "binary_version": "..."
+  },
+  "skills": [
+    {
+      "name": "code-review",
+      "version": "1.2.0",
+      "source": "~/.claude/skills/code-review",
+      "provenance": { "content_hash": "sha256:...", "generation": "..." }
+    }
+  ],
+  "mcp_servers": [...],
+  "agents": [...],
+  "models": [...],
+  "memory": [...]
+}
+```
+
+Useful flags:
+
+| Flag | Purpose |
+| --- | --- |
+| `--json` | Machine-readable output (default is a human table) |
+| `--summary` | Counts only — useful for CI gates |
+| `--only` | CSV of categories: `skills,plugins,mcp,agents,models,memory` |
+
+<Callout type="info">
+There's no `--sign` or `--format=cyclonedx` today. Provenance is
+content-addressed (SHA-256 of each item) and stamped, but the
+output is a custom JSON shape — you'd export to CycloneDX
+downstream if your SBOM tooling requires it.
+</Callout>
+
+## Where the data lands
+
+Both continuous and on-demand discovery feed the same audit pipeline. Once you've got [Observability](/docs/observability) wired up, the bundled dashboards light up automatically.
+
+### Splunk: AI Discovery Inventory
+
+![Splunk · AI Discovery Inventory dashboard](/images/splunk/ai-discovery-inventory.png)
+
+The dashboard reads from the `defenseclaw_demo_ai_discovery_events` macro and breaks signals down by `vendor`, `category`, `state`, `detector`, and `severity`. The recent-events table surfaces `signal_id`, `scan_id`, and the human `message` so an analyst can pivot directly to the source.
+
+### Grafana
+
+The local observability stack ships `defenseclaw-ai-discovery.json` with parallel panels:
+
+- Prometheus counters: `defenseclaw_ai_discovery_signals_total{state, category}`
+- Loki queries: `{event_type="ai_discovery"}`
+- OTel logs: `defenseclaw.ai.discovery.*`
+
+It cross-links from the overview, runtime, and agent-identity dashboards so you can drill from "block rate spiked" → "which agent" → "when was this agent first discovered."
+
+## Privacy and trust model
+
+Discovery touches the most sensitive parts of the host filesystem. DefenseClaw is deliberately conservative:
+
+<Steps>
+  <Step>
+    **No raw values.** Env var *names* are recorded, never values. File paths are hashed (`config_path_hash`, `binary_path_hash`) — only basenames are kept.
+  </Step>
+  <Step>
+    **Trusted-prefix binary probing.** Version probes (`<binary> --version`) only run inside an allow-listed set of prefixes (`/usr/bin`, `/opt/homebrew`, …) plus anything in `DEFENSECLAW_TRUSTED_BIN_PREFIXES`. Untrusted binaries are recorded as present but not executed — `defenseclaw agent discover` prints the offending directory and the command to trust it. Manage the allow-list with `defenseclaw setup trusted-paths list|add|remove` (or the TUI's Trusted Paths panel): `add` validates the directory (refusing world-writable or relative paths unless `--force`) and persists it to `~/.defenseclaw/.env`; built-in defaults can never be removed.
+  </Step>
+  <Step>
+    **HMAC-stamped events.** Continuous-discovery events are signed with a per-installation HMAC (`PayloadHMAC` on the gateway envelope). Tampering downstream of the gateway is detectable.
+  </Step>
+  <Step>
+    **Sanitized on-demand reports.** `defenseclaw agent discover --emit-otel` builds a `_sanitized_discovery_report` before posting to the gateway. The full unredacted report stays on the operator's machine.
+  </Step>
+  <Step>
+    **Off by default for the network-y bits.** DNS, shell history, and process scanning are individually toggleable. The defaults are conservative — opt in to the broader scan modes once you've cleared them with your privacy team.
+  </Step>
+</Steps>
+
+## Use it alongside Registry
+
+Discovery tells you *what's there*. The [Registry](/docs/integrations) tells you *what's allowed*.
+
+A common production pattern:
+
+<Steps>
+  <Step>
+    Run `agent discover` and `aibom scan` to baseline what's installed.
+  </Step>
+  <Step>
+    Promote the entries you trust into your registry: `defenseclaw registry sync --all` after curating the manifests.
+  </Step>
+  <Step>
+    Flip on registry-required mode: `defenseclaw registry require --type skill --enabled`. Now anything *new* that discovery finds — but the registry doesn't recognise — is admission-blocked by default.
+  </Step>
+  <Step>
+    Approve specific entries as you go: `defenseclaw registry approve <source-id> <entry-name> --type skill` (or `--type mcp`). Approval is per entry, not per source — the source ID identifies the registry, and the entry name picks one cached skill or MCP server inside it. Discovery + admission are now closed-loop.
+  </Step>
+</Steps>
+
+## Common workflows
+
+<Accordions>
+  <Accordion title="Audit shadow AI on a developer laptop">
+    `defenseclaw agent discover --json | jq '[.[] | select(.installed)]'`. Pipe into your asset inventory or open a ticket per unexpected agent. No gateway required.
+  </Accordion>
+  <Accordion title="Trigger a fresh scan after onboarding a tool">
+    `defenseclaw agent discovery scan`. Faster than waiting for the next scheduled rescan, and fires `ai_discovery` events for the new artifacts so your dashboards reflect the install immediately.
+  </Accordion>
+  <Accordion title="Build an SBOM-shaped artifact for a release">
+    `defenseclaw aibom scan --json > aibom.json`. The provenance block is content-addressed so two independent runs produce identical hashes for unchanged inputs — useful for CI determinism checks.
+  </Accordion>
+  <Accordion title="My internal connector is mis-detected as `unknown`">
+    Two options: (1) author a custom signature pack and `defenseclaw agent signatures install ./my-pack` so continuous discovery learns it, or (2) run `defenseclaw agent confidence policy validate ./policy.yaml` and adjust the weights so the existing detectors score it correctly.
+  </Accordion>
+  <Accordion title="Discovery is too noisy on this host">
+    Scope it: `defenseclaw agent discovery enable --scan-roots ~/work --no-include-shell-history --no-include-network-domains`. The defaults are conservative for privacy, but on shared dev hosts you may also want to drop the package-manifest walk with `--no-include-package-manifests`.
+  </Accordion>
+</Accordions>
+
+## See also
+
+- [Observability](/docs/observability) — where the discovery events actually surface
+- [Splunk](/docs/observability/splunk) — the AI Discovery Inventory dashboard
+- [Capability Matrix](/docs/capability-matrix) — what hooks each discovered connector exposes
+- [Setup → Skill Scanner](/docs/setup/skill-scanner) and [MCP Scanner](/docs/setup/mcp-scanner) — what to do *with* discovered skills and MCP servers
+- [Reference → CLI](/docs/reference/cli) — full flag surface for `agent`, `aibom`, `registry`

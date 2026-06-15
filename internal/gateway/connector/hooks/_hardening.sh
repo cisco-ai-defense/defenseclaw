@@ -1,6 +1,7 @@
 #!/bin/bash
-# defenseclaw-managed-hook v5
-# Plan B4 / S0.4: shell-side hook hardening helpers.
+# defenseclaw-managed-hook v6
+# Shell-side hook hardening helpers.
+DEFENSECLAW_BAKED_HOOK_PATH=""
 #
 # Schema versions:
 #   v2 — initial hardening helpers (rlimit, env sanitization,
@@ -26,6 +27,17 @@
 #        (no helper signatures changed), so a downgrade to v3 only
 #        loses the stale-dir sweep — older hook scripts that source
 #        either version keep working unmodified.
+#   v6 — adds the _dc_jq shim: real jq when available (unchanged on
+#        Mac/Linux), python3 fallback for object + string fields, then a
+#        pure-shell string-only last resort.  This makes block decisions
+#        parse-able on hosts without jq.  No helper signatures changed;
+#        hook scripts just replace bare `jq` calls with `_dc_jq`.
+#        NOTE: an earlier iteration of v6 also restored curl/jq directories
+#        from the pre-lockdown PATH after hardening. That was removed because
+#        the pre-lockdown PATH is agent-controlled and restoring one of its
+#        directories could re-admit an agent-planted binary. Windows no
+#        longer uses these bash hooks (it runs the hook natively in the Go
+#        binary), so the Git Bash /mingw64 workaround is no longer needed.
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -35,6 +47,27 @@
 #        well above the largest legitimate prompt) using `head -c` and
 #        emits a transport-category log line + fail-closed error when
 #        the cap is exceeded so we don't silently truncate JSON.
+#   v6 — adds W3C trace context forwarding helpers. Hooks can now
+#        propagate an existing trace into the gateway via traceparent /
+#        tracestate headers so a single span in the operator's APM
+#        connects "agent saw tool call" → "gateway evaluated hook" →
+#        "scanner emitted finding" → "audit row persisted". The two
+#        new helpers:
+#          - defenseclaw_extract_trace_context: parses
+#            DEFENSECLAW_TRACEPARENT / DEFENSECLAW_TRACESTATE / the
+#            OTEL_* equivalents from the agent's exported env. Returns
+#            a curl -H argument array via stdout in line-buffered form
+#            (one header per line) so callers can ingest it with
+#            `mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)`.
+#          - defenseclaw_validate_traceparent: enforces the W3C format
+#            (version-traceid-spanid-flags, 55 chars total, all hex)
+#            before emitting the header so a hostile env value can't
+#            forge an arbitrary string into the gateway's trace
+#            context.
+#        The Go side accepts the headers only on the two hook-bearing
+#        routes (/api/v1/<connector>/hook, /api/v1/codex/notify) via
+#        shouldExtractHookTrace, so an unscoped caller cannot splice
+#        an arbitrary trace context into the gateway's trace tree.
 #
 # Sourced at the top of every hook in this directory (claude-code-hook.sh,
 # codex-hook.sh, inspect-*.sh) BEFORE any agent-supplied data is touched.
@@ -52,6 +85,15 @@
 # DEFENSECLAW_HOME/logs) are idempotent and pure — no side effects
 # beyond setting env / ulimit. They MUST NOT call out to the agent or
 # the gateway.
+
+# Windows compatibility: some agent runtimes (e.g. Codex on Windows) do
+# not set HOME when spawning hook subprocesses. Without this, `set -u`
+# causes an immediate "unbound variable" exit 1. Fall back to USERPROFILE
+# (standard on Windows) or ~ expansion.
+if [ -z "${HOME:-}" ]; then
+  HOME="${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}"
+  export HOME
+fi
 
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
@@ -89,14 +131,23 @@ defenseclaw_harden_env() {
         GIT_TRACE GIT_TRACE_PACKET GIT_TRACE_PACK_ACCESS \
         GIT_SSH GIT_SSH_COMMAND
 
-  # Lock down PATH — keep only the standard system bins where curl /
-  # jq / sed / tail / cat / mktemp must live. Operators (and tests)
-  # that need a custom path must set DEFENSECLAW_HOOK_PATH explicitly;
-  # the variable is sticky across the script so any subsequent
-  # subprocess inherits it. Setting it to an empty string disables
-  # the override and falls back to the locked-down default.
-  if [ -n "${DEFENSECLAW_HOOK_PATH:-}" ]; then
-    export PATH="$DEFENSECLAW_HOOK_PATH"
+  # Lock down PATH — keep only standard system bins unless setup baked
+  # a literal DEFENSECLAW_BAKED_HOOK_PATH into this helper file. Hooks
+  # inherit the agent environment, so runtime DEFENSECLAW_HOOK_PATH (or
+  # a companion "trusted" flag) is intentionally ignored; otherwise a
+  # compromised agent could prepend trojan curl/jq/head.
+  #
+  # We deliberately do NOT restore any directory derived from the
+  # pre-lockdown PATH. That PATH is agent-controlled, so adding one of its
+  # directories back (to recover a curl/jq not on the hardened PATH) could
+  # re-admit an agent-planted binary and defeat this lockdown. Tools that
+  # are missing from the standard dirs are handled by the _dc_jq parsing
+  # fallback below, not by widening PATH. On Windows the hook runs natively
+  # in the DefenseClaw Go binary (no bash), so the previous Git Bash
+  # /mingw64 special-casing is unnecessary here.
+  unset DEFENSECLAW_HOOK_PATH DEFENSECLAW_HOOK_PATH_TRUSTED
+  if [ -n "$DEFENSECLAW_BAKED_HOOK_PATH" ]; then
+    export PATH="$DEFENSECLAW_BAKED_HOOK_PATH"
   else
     export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   fi
@@ -168,6 +219,9 @@ defenseclaw_validate_path() {
   case "$val" in
     *[!A-Za-z0-9_./-]*) return 1 ;;
   esac
+  case "$val" in
+    *..*) return 1 ;;
+  esac
   return 0
 }
 
@@ -196,6 +250,116 @@ defenseclaw_json_escape() {
     printf '%s' "${1:-}" | tr '\000-\037' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g'
   } 2>/dev/null || printf unavailable
   return 0
+}
+
+# defenseclaw_json_string_field extracts a simple top-level JSON string field.
+# It is intentionally small: hook block/allow parsing only needs fields like
+# "action" and "reason" when jq is unavailable (common in Git Bash on Windows).
+defenseclaw_json_string_field() {
+  local json="${1:-}"
+  local field="${2:-}"
+  if [ -z "$field" ]; then
+    return 1
+  fi
+  printf '%s' "$json" | tr '\n\r' '  ' | sed -nE \
+    's/.*"'"$field"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' |
+    sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
+}
+
+# _dc_jq is a drop-in shim for jq covering the small subset of filters
+# used by DefenseClaw hook scripts.  When the real jq binary is present
+# (all Unix installs; some Windows installs) it is used unchanged.
+# When jq is absent the shim tries python3 (handles both string and
+# object fields such as claude_code_output), then falls back to
+# defenseclaw_json_string_field for string-only fields.  Object fields
+# (e.g. claude_code_output) return empty from the string-only fallback;
+# hook scripts handle empty output correctly (fall through to exit-2
+# block path).
+#
+# Supported filter forms (covers all patterns in DefenseClaw hooks):
+#   .field                    — raw value
+#   .field // empty           — value or nothing on null/missing
+#   .field // "default"       — value or literal default string
+#
+# Flags honored: -r (raw string output), -c (compact JSON output)
+# shellcheck disable=SC2120
+_dc_jq() {
+  if command -v jq >/dev/null 2>&1; then
+    jq "$@"
+    return
+  fi
+  local _dcjq_raw=0 _dcjq_compact=0 _dcjq_exit=0 _dcjq_filter=""
+  for _dcjq_a in "$@"; do
+    case "$_dcjq_a" in
+      -r)   _dcjq_raw=1 ;;
+      -c)   _dcjq_compact=1 ;;
+      # -e sets exit status from the output (used as a JSON-validity probe,
+      # e.g. `_dc_jq -e .`). Without it the identity filter would be parsed
+      # as the literal filter "-e" and the probe would silently misbehave.
+      -e)   _dcjq_exit=1 ;;
+      # Handle accidental merged forms: -r.field or -c.field (no space)
+      -r.*) _dcjq_raw=1;     _dcjq_filter="${_dcjq_a#-r}" ;;
+      -c.*) _dcjq_compact=1; _dcjq_filter="${_dcjq_a#-c}" ;;
+      *)    _dcjq_filter="$_dcjq_a" ;;
+    esac
+  done
+  # Python3 fallback: handles both string scalars and nested objects.
+  # All values are passed via env to avoid shell quoting issues.
+  # The script uses only double-quoted Python strings so it is safe
+  # inside shell single quotes.
+  if command -v python3 >/dev/null 2>&1; then
+    DCJQ_FILTER="$_dcjq_filter" DCJQ_RAW="$_dcjq_raw" DCJQ_COMPACT="$_dcjq_compact" \
+    DCJQ_EXIT="$_dcjq_exit" \
+      python3 -c \
+'import json,sys,os,re
+f=os.environ.get("DCJQ_FILTER","")
+raw=os.environ.get("DCJQ_RAW","0")=="1"
+compact=os.environ.get("DCJQ_COMPACT","0")=="1"
+exit_test=os.environ.get("DCJQ_EXIT","0")=="1"
+try:
+  data=json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+fs=f.strip()
+if fs in (".",""):
+  # Identity filter / validity probe (jq -e .): valid JSON exits 0.
+  if exit_test and (data is None or data is False):
+    sys.exit(1)
+  sep=(",",":") if compact else (", ",": ")
+  sys.stdout.write((data if (raw and isinstance(data,str)) else json.dumps(data,separators=sep))+"\n")
+  sys.exit(0)
+m=re.match(r"^\.(\w+)\s*(?://\s*(.+))?$",fs)
+if not m:
+  sys.exit(1)
+field=m.group(1)
+dflt=(m.group(2) or "").strip()
+val=data.get(field)
+if val is None:
+  if dflt in ("empty","null",""):
+    sys.exit(0)
+  dm=re.match(r"^\"(.*)\"$",dflt)
+  sys.stdout.write((dm.group(1) if dm else dflt)+"\n")
+  sys.exit(0)
+if isinstance(val,str):
+  sys.stdout.write(val+"\n")
+else:
+  sep=(",",":") if compact else (", ",": ")
+  sys.stdout.write(json.dumps(val,separators=sep)+"\n")'
+    return
+  fi
+  # String-only last resort: covers action / reason / block_reason.
+  # Object fields (claude_code_output, codex_output, hook_output) return
+  # empty; callers already handle the empty case correctly.
+  local _dcjq_field
+  case "$_dcjq_filter" in
+    # Identity filter / validity probe with no jq and no python3: we can't
+    # parse JSON, so pass the body through and succeed rather than emitting
+    # a false "invalid JSON" that would route a real verdict into fail mode.
+    .|"") cat; return 0 ;;
+  esac
+  _dcjq_field="${_dcjq_filter#.}"
+  _dcjq_field="${_dcjq_field%%[[:space:]]*}"
+  defenseclaw_json_string_field "$(cat)" "$_dcjq_field"
 }
 
 # defenseclaw_log_hook_failure writes a structured JSON line to
@@ -336,9 +500,10 @@ defenseclaw_handle_missing_token() {
 #   PAYLOAD="$(defenseclaw_read_stdin_capped)" || exit $?
 #
 # Returns 0 with the body on stdout. Returns 1 (overflow) with an
-# empty stdout. Returns 2 if `head` is missing on the system; in that
-# case we fall back to the legacy unbounded read so the hook still
-# functions on minimal containers, but we log the unbounded read as a
+# empty stdout. If `head` is missing we read the body with a bounded
+# python3 reader (overflow still returns 1); only when both head(1) and
+# python3 are absent do we fall back to a legacy unbounded read so the
+# hook still functions on minimal containers, logging it as a
 # transport-category event so operators can spot it.
 defenseclaw_read_stdin_capped() {
   local connector="${DEFENSECLAW_HOOK_CONNECTOR:-unknown}"
@@ -347,24 +512,174 @@ defenseclaw_read_stdin_capped() {
   case "$cap" in
     ''|*[!0-9]*) cap=1048576 ;;
   esac
-  if ! command -v head >/dev/null 2>&1; then
-    defenseclaw_log_hook_failure "$connector" "$hook_name" \
-      "head(1) missing; reading stdin unbounded (set DEFENSECLAW_HOOK_MAX_BODY)" \
-      transport "${FAIL_MODE:-open}"
-    cat
+  # Tier 1 — bounded python3 read (preferred). python3 is byte-exact on
+  # every OS: it reads at most cap+1 bytes and reports overflow precisely.
+  # We prefer it over head(1) because BSD/macOS `head -c N` OVER-READS a
+  # pipe (it drains everything past N), which defeats any "is there a
+  # byte past the cap?" probe and would silently truncate an oversized
+  # body instead of failing closed. python3 is the same interpreter the
+  # _dc_jq shim already relies on, so requiring it here adds no new dep on
+  # the hosts these hooks actually run on.
+  if command -v python3 >/dev/null 2>&1; then
+    local _dc_body _dc_rc
+    _dc_body="$(DCHOOK_CAP="$cap" python3 -c \
+'import sys,os
+cap=int(os.environ.get("DCHOOK_CAP","1048576"))
+data=sys.stdin.buffer.read(cap+1)
+if len(data)>cap:
+    sys.exit(3)
+sys.stdout.buffer.write(data)')"
+    _dc_rc=$?
+    if [ "$_dc_rc" -eq 3 ]; then
+      defenseclaw_log_hook_failure "$connector" "$hook_name" \
+        "stdin body exceeded ${cap} byte cap" transport "${FAIL_MODE:-open}"
+      echo "defenseclaw: hook payload exceeded ${cap} bytes; refusing to truncate" >&2
+      return 1
+    fi
+    printf '%s' "$_dc_body"
     return 0
   fi
-  local body
-  body="$(head -c "$cap")"
-  local overflow
-  overflow="$(head -c 1 2>/dev/null || true)"
-  if [ -n "$overflow" ]; then
-    defenseclaw_log_hook_failure "$connector" "$hook_name" \
-      "stdin body exceeded ${cap} byte cap" \
-      transport "${FAIL_MODE:-open}"
-    echo "defenseclaw: hook payload exceeded ${cap} bytes; refusing to truncate" >&2
+  # Tier 2 — head(1) fallback for python3-less hosts. Read cap+1 bytes in a
+  # SINGLE call and compare the captured length: a two-call probe
+  # (`head -c cap` then `head -c 1`) is unreliable because BSD head drains
+  # the pipe on the first read, so the second read always sees EOF and an
+  # oversized body would be truncated to cap bytes and accepted. The
+  # `; printf x` + `%x` strip-guard preserves trailing newlines so the
+  # length check is exact (command substitution otherwise trims them).
+  # LANG=C (set by defenseclaw_harden_env) makes ${#body} a byte count.
+  if command -v head >/dev/null 2>&1; then
+    local body
+    body="$(head -c "$((cap + 1))"; printf x)"
+    body="${body%x}"
+    if [ "${#body}" -gt "$cap" ]; then
+      defenseclaw_log_hook_failure "$connector" "$hook_name" \
+        "stdin body exceeded ${cap} byte cap" \
+        transport "${FAIL_MODE:-open}"
+      echo "defenseclaw: hook payload exceeded ${cap} bytes; refusing to truncate" >&2
+      return 1
+    fi
+    printf '%s' "$body"
+    return 0
+  fi
+  # Tier 3 — neither python3 nor head present (minimal container): legacy
+  # unbounded read so the hook still functions, logged so operators can
+  # spot the missing-tooling condition.
+  defenseclaw_log_hook_failure "$connector" "$hook_name" \
+    "head(1)/python3 missing; reading stdin unbounded (set DEFENSECLAW_HOOK_MAX_BODY)" \
+    transport "${FAIL_MODE:-open}"
+  cat
+  return 0
+}
+
+# defenseclaw_validate_traceparent returns 0 when $1 matches the W3C
+# trace context format (RFC 9110-bis / draft-ietf-tcs-traceparent):
+#
+#   version "-" trace-id "-" parent-id "-" trace-flags
+#
+#   version   :=  2 lower-hex chars
+#   trace-id  := 32 lower-hex chars, MUST NOT be all-zero
+#   parent-id := 16 lower-hex chars, MUST NOT be all-zero
+#   flags     :=  2 lower-hex chars
+#
+# Total 55 characters with the three dashes. Validation is intentionally
+# strict: the gateway treats traceparent as trusted input that joins
+# the agent's span tree with the gateway's. A hostile env value that
+# spoofs e.g. an admin's request would otherwise re-write the trace
+# graph.
+defenseclaw_validate_traceparent() {
+  local v="${1:-}"
+  case "${#v}" in
+    55) : ;;
+    *) return 1 ;;
+  esac
+  # Layout check: dashes at positions 3, 36, 53 (1-indexed).
+  case "$v" in
+    ??-????????????????????????????????-????????????????-??) : ;;
+    *) return 1 ;;
+  esac
+  # Strict-hex check: any non-hex char rejects. Uppercase hex is valid
+  # W3C trace-context and accepted by Go's OTel propagator.
+  case "$v" in
+    *[!0-9a-fA-F-]*) return 1 ;;
+  esac
+  # Trace-id and parent-id must not be all-zero.
+  local trace_id parent_id
+  trace_id="${v:3:32}"
+  parent_id="${v:36:16}"
+  case "$trace_id" in
+    00000000000000000000000000000000) return 1 ;;
+  esac
+  case "$parent_id" in
+    0000000000000000) return 1 ;;
+  esac
+  return 0
+}
+
+# defenseclaw_validate_tracestate accepts the comma-separated key=value
+# list defined by W3C. We bound the length to 512 bytes (W3C SHOULD
+# limit, the gateway also enforces it server-side) and refuse any byte
+# that would be log-injectable. Only ASCII printables, "=", ",", "@",
+# "_", "/", "-", and whitespace are permitted — matching the
+# tracestate ABNF. The allow-list is expressed via a $'...' ANSI-C
+# string so the literal tab inside the bracket expression survives
+# bash's POSIX glob parser (a bare \t would be a syntax error).
+defenseclaw_validate_tracestate() {
+  local v="${1:-}"
+  if [ ${#v} -gt 512 ]; then
     return 1
   fi
-  printf '%s' "$body"
+  local _allowed=$'A-Za-z0-9=,@_/. \t-'
+  case "$v" in
+    *[!$_allowed]*) return 1 ;;
+  esac
   return 0
+}
+
+# defenseclaw_extract_trace_context emits one curl `-H "..."` argument
+# per line (no carriage returns) for every trace header that should be
+# forwarded to the gateway. Callers consume the output via
+# `mapfile -t HEADERS < <(defenseclaw_extract_trace_context)` which
+# preserves the exact quoting curl expects.
+#
+# Source precedence (first non-empty wins per header):
+#
+#   traceparent:  DEFENSECLAW_TRACEPARENT, then TRACEPARENT, then
+#                 OTEL_TRACEPARENT.
+#   tracestate:   DEFENSECLAW_TRACESTATE,  then TRACESTATE,  then
+#                 OTEL_TRACESTATE.
+#
+# Validation runs on every candidate; an invalid value is logged via
+# defenseclaw_log_hook_failure (response category — bad input from
+# the agent) and skipped silently. The hook still posts to the
+# gateway; it just does so without trace propagation, which fails
+# safe (gateway starts a new root span).
+defenseclaw_extract_trace_context() {
+  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-unknown}"
+  local hook_name="${DEFENSECLAW_HOOK_NAME:-unknown}"
+
+  local tp
+  tp="${DEFENSECLAW_TRACEPARENT:-${TRACEPARENT:-${OTEL_TRACEPARENT:-}}}"
+  if [ -n "$tp" ]; then
+    if defenseclaw_validate_traceparent "$tp"; then
+      printf '%s\n' "-H"
+      printf '%s\n' "traceparent: $tp"
+    else
+      defenseclaw_log_hook_failure "$connector" "$hook_name" \
+        "rejected malformed traceparent (length=${#tp})" \
+        response "${FAIL_MODE:-open}"
+    fi
+  fi
+
+  local ts
+  ts="${DEFENSECLAW_TRACESTATE:-${TRACESTATE:-${OTEL_TRACESTATE:-}}}"
+  if [ -n "$ts" ]; then
+    if defenseclaw_validate_tracestate "$ts"; then
+      printf '%s\n' "-H"
+      printf '%s\n' "tracestate: $ts"
+    else
+      defenseclaw_log_hook_failure "$connector" "$hook_name" \
+        "rejected malformed tracestate (length=${#ts})" \
+        response "${FAIL_MODE:-open}"
+    fi
+  fi
 }
