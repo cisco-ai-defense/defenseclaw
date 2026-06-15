@@ -835,18 +835,22 @@ class TestBuildMCPScanMap(MCPCommandTestBase):
 # ---------------------------------------------------------------------------
 
 class TestAttachErrorHandler(unittest.TestCase):
-    def test_attaches_to_three_loggers(self):
+    def test_attaches_to_expected_loggers(self):
         from defenseclaw.scanner.mcp import _attach_error_handler, _ErrorCapture
 
-        errors: list[str] = []
+        errors: list[tuple[str, str]] = []
         handler = _ErrorCapture(errors)
         loggers = _attach_error_handler(handler)
 
-        self.assertEqual(len(loggers), 3)
+        # The transport loggers plus the LLM analyzer's own logger, so an
+        # unreachable LLM backend is captured (and surfaced as a skip
+        # notice) even when its logger does not propagate.
+        self.assertEqual(len(loggers), 5)
         logger_names = [lgr.name for lgr in loggers]
         self.assertIn("mcpscanner", logger_names)
         self.assertIn("mcpscanner.core", logger_names)
         self.assertIn("mcpscanner.core.scanner", logger_names)
+        self.assertIn("mcpscanner.core.analyzers.llm_analyzer", logger_names)
 
         for lgr in loggers:
             self.assertIn(handler, lgr.handlers)
@@ -859,7 +863,9 @@ class TestAttachErrorHandler(unittest.TestCase):
 
         from defenseclaw.scanner.mcp import _attach_error_handler, _ErrorCapture
 
-        errors: list[str] = []
+        # Captured entries are ``(logger_name, message)`` pairs so the
+        # caller can tell the LLM lane apart from the MCP transport.
+        errors: list[tuple[str, str]] = []
         handler = _ErrorCapture(errors)
         loggers = _attach_error_handler(handler)
 
@@ -867,7 +873,8 @@ class TestAttachErrorHandler(unittest.TestCase):
         child.error("Error connecting to stdio server npx: Connection closed")
 
         self.assertTrue(len(errors) >= 1)
-        self.assertTrue(any("connecting" in e.lower() for e in errors))
+        self.assertTrue(any("connecting" in msg.lower() for (_name, msg) in errors))
+        self.assertTrue(any(name == "mcpscanner.core.scanner" for (name, _msg) in errors))
 
         for lgr in loggers:
             lgr.removeHandler(handler)
@@ -877,7 +884,7 @@ class TestAttachErrorHandler(unittest.TestCase):
 
         from defenseclaw.scanner.mcp import _ErrorCapture
 
-        errors: list[str] = []
+        errors: list[tuple[str, str]] = []
         handler = _ErrorCapture(errors)
 
         logger = logging.getLogger("test.error_capture_filter")
@@ -889,7 +896,8 @@ class TestAttachErrorHandler(unittest.TestCase):
         logger.error("error message")
 
         self.assertEqual(len(errors), 1)
-        self.assertIn("error message", errors[0])
+        self.assertEqual(errors[0][0], "test.error_capture_filter")
+        self.assertIn("error message", errors[0][1])
 
         logger.removeHandler(handler)
 

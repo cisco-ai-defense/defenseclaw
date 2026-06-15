@@ -422,14 +422,38 @@ class MCPScannerWrapper:
         return self._convert(all_findings, target, elapsed)
 
     def _parse_analyzers(self, analyzer_enum_cls: type) -> list | None:
-        """Parse configured analyzer names into SDK enum values."""
+        """Resolve configured analyzer names into SDK enum values.
+
+        Selection is *model-driven* via the ``"auto"`` sentinel. ``auto``
+        means "run YARA always, and add the LLM analyzer only when a
+        model is actually configured for this scanner
+        (``resolve_llm('scanners.mcp')`` yielded one)". This is what lets
+        the unified LLM lane be default-on without firing LLM calls — and
+        failing — on installs that never set a model. Once the config
+        default flips from ``"yara"`` to ``"auto"`` (see
+        ``MCPScannerConfig.analyzers`` / the Go parity default), every
+        scan picks YARA+LLM when a model resolves and YARA-only otherwise.
+
+        An explicit comma-separated list (``yara`` / ``yara,llm,api`` / …)
+        is honoured verbatim as a local-only escape hatch — ``yara`` keeps
+        a scan YARA-only even when a model is configured. An empty value
+        preserves the legacy "let the SDK run every analyzer" meaning
+        (``None``) so deliberately blanking the field is not silently
+        narrowed.
+        """
         cfg = self.config
-        if not cfg.analyzers:
+        raw = (cfg.analyzers or "").strip()
+        if not raw:
             return None
+
         analyzer_map = {e.value: e for e in analyzer_enum_cls}
+
+        if raw.lower() == "auto":
+            return self._auto_analyzers(analyzer_map)
+
         valid_names = sorted(analyzer_map.keys())
         analyzers = []
-        for name in cfg.analyzers.split(","):
+        for name in raw.split(","):
             name = name.strip().lower()
             if not name:
                 continue
@@ -448,6 +472,27 @@ class MCPScannerWrapper:
             )
             return None
         return analyzers
+
+    def _auto_analyzers(self, analyzer_map: dict) -> list | None:
+        """Model-driven analyzer set for the ``"auto"`` default.
+
+        YARA always runs — it needs no model and no network. The LLM
+        analyzer is added only when the resolved LLM actually carries a
+        model (surfaced as a non-empty ``litellm_model``); with no model
+        we fall back to YARA-only so a default-on scan is a safe no-op
+        (no LLM call, no error) instead of a hard failure.
+        """
+        selected: list = []
+        yara = analyzer_map.get("yara")
+        if yara is not None:
+            selected.append(yara)
+        if litellm_model(self._llm):
+            llm = analyzer_map.get("llm")
+            if llm is not None:
+                selected.append(llm)
+        # If the SDK enum exposes neither name, defer to its own default
+        # (None = all) rather than handing it an empty list.
+        return selected or None
 
     def _scan_local(self, scanner: object, entry: MCPServerEntry,
                     analyzers: list | None) -> list[object]:
@@ -479,7 +524,7 @@ class MCPScannerWrapper:
             if analyzers is not None:
                 scan_kwargs["analyzers"] = analyzers
 
-            errors: list[str] = []
+            errors: list[tuple[str, str]] = []
             handler = _ErrorCapture(errors)
             loggers = _attach_error_handler(handler)
             try:
@@ -488,16 +533,38 @@ class MCPScannerWrapper:
                 for lgr in loggers:
                     lgr.removeHandler(handler)
 
-            connection_errors = [e for e in errors if "connect" in e.lower() or "connection" in e.lower()]
+            # Partition captured ERROR logs. An unreachable *LLM backend*
+            # (Ollama / vLLM / a cloud endpoint) must NOT abort a local
+            # MCP scan: the YARA lane ran fine and its findings are the
+            # whole point of the scan. Only a genuine *MCP server*
+            # connection failure — the stdio server we spawned — is fatal.
+            # Pre-fix this conflated the two and turned an unreachable LLM
+            # into a misleading "failed to connect to local server".
+            llm_errors = [m for (name, m) in errors if _is_llm_backend_error(name, m, self._llm)]
+            other_errors = [m for (name, m) in errors if not _is_llm_backend_error(name, m, self._llm)]
+
+            connection_errors = [
+                e for e in other_errors
+                if "connect" in e.lower() or "connection" in e.lower()
+            ]
             if connection_errors:
                 raise RuntimeError(
                     f"failed to connect to local server {entry.name!r} "
                     f"({entry.command}): {connection_errors[0]}"
                 )
-            if not results and errors:
+            if llm_errors:
+                # Graceful degrade: keep the YARA findings, surface a skip
+                # notice so the operator knows semantic analysis was
+                # skipped (rather than silently passing).
+                print(
+                    f"warning: LLM skipped (backend unreachable) while scanning "
+                    f"{entry.name!r}: {llm_errors[0]}",
+                    file=sys.stderr,
+                )
+            if not results and other_errors:
                 raise RuntimeError(
                     f"scan failed for local server {entry.name!r} "
-                    f"({entry.command}): {errors[0]}"
+                    f"({entry.command}): {other_errors[0]}"
                 )
 
             all_findings: list[object] = []
@@ -654,25 +721,85 @@ def _extract_findings(tool_result: object) -> list[object]:
     return []
 
 
-class _ErrorCapture(logging.Handler):
-    """Captures ERROR-level log messages from the SDK."""
+# Substrings that mark an SDK ERROR log as originating in the LLM lane
+# (the LLM analyzer or the LiteLLM call beneath it) rather than the MCP
+# stdio transport. Used to keep an unreachable LLM backend from aborting
+# a local scan whose YARA lane succeeded.
+_LLM_ERROR_LOGGER_SIGNALS = ("llm", "litellm")
+_LLM_ERROR_MESSAGE_SIGNALS = (
+    "litellm", "llm analyzer", "llmanalyzer", "llm_analyzer",
+    "ollama", "vllm", "lm studio", "lmstudio",
+    "apiconnectionerror", "api_base", "chat/completions", "11434",
+)
 
-    def __init__(self, errors: list[str]) -> None:
+
+def _is_llm_backend_error(logger_name: str, message: str, llm: LLMConfig) -> bool:
+    """Classify a captured SDK ERROR log as LLM-backend vs. MCP-server.
+
+    Returns True when the error came from the LLM lane — recognised by
+    the originating logger name, by LLM-specific text in the message, or
+    by the configured model / endpoint host appearing in the message.
+    Errs toward *False* (treat as an MCP-server error → fatal) for
+    ambiguous lines so a genuine unreachable MCP server is never silently
+    swallowed.
+    """
+    name = (logger_name or "").lower()
+    if any(sig in name for sig in _LLM_ERROR_LOGGER_SIGNALS):
+        return True
+    msg = (message or "").lower()
+    if any(sig in msg for sig in _LLM_ERROR_MESSAGE_SIGNALS):
+        return True
+    # The configured model / endpoint host showing up in the error is a
+    # strong signal it came from the LLM call, not the MCP transport.
+    model = litellm_model(llm).lower()
+    if model and model in msg:
+        return True
+    base = (llm.base_url or "").lower()
+    if base:
+        host = base.split("://")[-1].split("/")[0]
+        if host and host in msg:
+            return True
+    return False
+
+
+class _ErrorCapture(logging.Handler):
+    """Captures ERROR-level log messages from the SDK.
+
+    Stores ``(logger_name, message)`` pairs so callers can tell *which*
+    SDK component logged the error — the LLM analyzer's logger vs. the
+    MCP transport's — which is how a degraded LLM backend is told apart
+    from an unreachable MCP server.
+    """
+
+    def __init__(self, errors: list[tuple[str, str]]) -> None:
         super().__init__(level=logging.ERROR)
         self._errors = errors
 
     def emit(self, record: logging.LogRecord) -> None:
-        self._errors.append(self.format(record))
+        try:
+            msg = self.format(record)
+        except Exception:  # pragma: no cover - formatting must never raise here
+            msg = record.getMessage()
+        self._errors.append((record.name, msg))
 
 
 def _attach_error_handler(handler: logging.Handler) -> list[logging.Logger]:
     """Attach *handler* to mcpscanner loggers at every level.
 
     Some SDK versions set ``propagate=False`` on child loggers, so
-    attaching only to the parent ``mcpscanner`` logger misses errors.
-    Returns the list of loggers so the caller can remove the handler.
+    attaching only to the parent ``mcpscanner`` logger misses errors. The
+    LLM analyzer's own logger is included so an unreachable LLM backend is
+    captured (and surfaced as a skip notice) even when it doesn't
+    propagate. Returns the list of loggers so the caller can remove the
+    handler.
     """
-    names = ["mcpscanner", "mcpscanner.core", "mcpscanner.core.scanner"]
+    names = [
+        "mcpscanner",
+        "mcpscanner.core",
+        "mcpscanner.core.scanner",
+        "mcpscanner.core.analyzers",
+        "mcpscanner.core.analyzers.llm_analyzer",
+    ]
     loggers = [logging.getLogger(n) for n in names]
     for lgr in loggers:
         lgr.addHandler(handler)
