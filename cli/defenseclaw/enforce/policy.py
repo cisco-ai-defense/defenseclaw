@@ -178,3 +178,67 @@ class PolicyEngine:
         if not self.store:
             return []
         return self.store.list_by_action_and_type("install", "allow", "tool")
+
+    # ------------------------------------------------------------------
+    # Connector-scoped tool helpers (target_type="tool", "@<connector>/<tool>")
+    #
+    # The ``@`` sigil keeps connector scoping distinct from the orthogonal
+    # ``<source>/<tool>`` source scoping above. Runtime resolution order
+    # (mirrored by the Go gateway lanes via the policy.go methods of the same
+    # name) is, for request connector ``C`` and tool ``T``:
+    #   block @C/T → block T → allow @C/T → allow T → scan
+    # i.e. a global block still wins over a connector-scoped allow because
+    # callers consult is_tool_blocked_for_connector before
+    # is_tool_allowed_for_connector.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tool_connector_target(tool_name: str, connector: str) -> str:
+        """Build the connector-scoped tool key ``@<connector>/<tool>``.
+
+        Centralised here so the read gate and the write surface stay in
+        lockstep on the encoding.
+        """
+        return f"@{connector}/{tool_name}" if connector else tool_name
+
+    def is_tool_blocked_for_connector(self, tool_name: str, connector: str = "") -> bool:
+        """Return True if the tool is blocked for ``connector`` (scoped then global)."""
+        if not self.store:
+            return False
+        if connector:
+            scoped = self._tool_connector_target(tool_name, connector)
+            if self.store.has_action("tool", scoped, "install", "block"):
+                return True
+        return self.store.has_action("tool", tool_name, "install", "block")
+
+    def is_tool_allowed_for_connector(self, tool_name: str, connector: str = "") -> bool:
+        """Return True if the tool is allowed for ``connector`` (scoped then global).
+
+        Callers must check :meth:`is_tool_blocked_for_connector` first so a
+        global block wins over a connector-scoped allow.
+        """
+        if not self.store:
+            return False
+        if connector:
+            scoped = self._tool_connector_target(tool_name, connector)
+            if self.store.has_action("tool", scoped, "install", "allow"):
+                return True
+        return self.store.has_action("tool", tool_name, "install", "allow")
+
+    def block_tool_for_connector(self, tool_name: str, connector: str, reason: str) -> None:
+        """Block a tool, optionally scoped to a connector (``@<connector>/<tool>``)."""
+        if self.store:
+            target = self._tool_connector_target(tool_name, connector)
+            self.store.set_action_field("tool", target, "install", "block", reason)
+
+    def allow_tool_for_connector(self, tool_name: str, connector: str, reason: str) -> None:
+        """Allow a tool, optionally scoped to a connector.
+
+        Uses the same cleanup pattern as :meth:`allow_tool` for consistency.
+        """
+        if not self.store:
+            return
+        target = self._tool_connector_target(tool_name, connector)
+        self.store.set_action_field("tool", target, "install", "allow", reason)
+        self.store.clear_action_field("tool", target, "file")
+        self.store.clear_action_field("tool", target, "runtime")

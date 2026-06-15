@@ -179,6 +179,101 @@ func (e *PolicyEngine) RemoveAction(targetType, name string) error {
 	return e.store.RemoveAction(targetType, name)
 }
 
+// ----------------------------------------------------------------------------
+// Connector-scoped tool helpers (targetType="tool", key "@<connector>/<tool>")
+//
+// The "@" sigil keeps connector scoping distinct from the orthogonal
+// "<source>/<tool>" source scoping used by the CLI. Runtime resolution order,
+// for request connector C and tool T, is:
+//
+//	block @C/T → block T → allow @C/T → allow T → scan
+//
+// i.e. a global block still wins over a connector-scoped allow, because the
+// gateway lanes consult IsToolBlockedForConnector before
+// IsToolAllowedForConnector. Mirrors the Python PolicyEngine methods of the
+// same name in cli/defenseclaw/enforce/policy.py.
+// ----------------------------------------------------------------------------
+
+// toolConnectorTarget builds the connector-scoped tool key "@<connector>/<tool>".
+// Centralised so the read gate and any write surface stay in lockstep.
+func toolConnectorTarget(toolName, connector string) string {
+	if connector == "" {
+		return toolName
+	}
+	return "@" + connector + "/" + toolName
+}
+
+// IsToolBlockedForConnector reports whether toolName is blocked for connector,
+// checking the connector-scoped entry first and then the bare global entry.
+func (e *PolicyEngine) IsToolBlockedForConnector(toolName, connector string) (bool, error) {
+	if e.store == nil {
+		return false, nil
+	}
+	if connector != "" {
+		scoped := toolConnectorTarget(toolName, connector)
+		blocked, err := e.store.HasAction("tool", scoped, "install", "block")
+		if err != nil {
+			return false, err
+		}
+		if blocked {
+			return true, nil
+		}
+	}
+	return e.store.HasAction("tool", toolName, "install", "block")
+}
+
+// IsToolAllowedForConnector reports whether toolName is allowed for connector,
+// checking the connector-scoped entry first and then the bare global entry.
+// Callers must consult IsToolBlockedForConnector first so a global block wins
+// over a connector-scoped allow.
+func (e *PolicyEngine) IsToolAllowedForConnector(toolName, connector string) (bool, error) {
+	if e.store == nil {
+		return false, nil
+	}
+	if connector != "" {
+		scoped := toolConnectorTarget(toolName, connector)
+		allowed, err := e.store.HasAction("tool", scoped, "install", "allow")
+		if err != nil {
+			return false, err
+		}
+		if allowed {
+			return true, nil
+		}
+	}
+	return e.store.HasAction("tool", toolName, "install", "allow")
+}
+
+// BlockToolForConnector blocks toolName, optionally scoped to a connector.
+func (e *PolicyEngine) BlockToolForConnector(toolName, connector, reason string) error {
+	if e.store == nil {
+		return nil
+	}
+	return e.store.SetActionField("tool", toolConnectorTarget(toolName, connector), "install", "block", reason)
+}
+
+// AllowToolForConnector allows toolName, optionally scoped to a connector, and
+// clears residual file/runtime enforcement (mirrors Allow()).
+func (e *PolicyEngine) AllowToolForConnector(toolName, connector, reason string) error {
+	if e.store == nil {
+		return nil
+	}
+	target := toolConnectorTarget(toolName, connector)
+	if err := e.store.SetActionField("tool", target, "install", "allow", reason); err != nil {
+		return err
+	}
+	var errs []error
+	if err := e.store.ClearActionField("tool", target, "file"); err != nil {
+		errs = append(errs, fmt.Errorf("clear file action: %w", err))
+	}
+	if err := e.store.ClearActionField("tool", target, "runtime"); err != nil {
+		errs = append(errs, fmt.Errorf("clear runtime action: %w", err))
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("enforce: allow tool %q: partial cleanup: %v", target, errs)
+	}
+	return nil
+}
+
 // PolicyStableID returns a short stable identifier for the policy bundle
 // rooted at policyDir (used in OTel spans and metrics).
 func PolicyStableID(policyDir string) string {

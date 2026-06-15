@@ -173,3 +173,127 @@ func TestPolicyEngineAllowCleansUpEnforcement(t *testing.T) {
 		t.Error("skill should be allowed after Allow call")
 	}
 }
+
+// TestToolConnectorTarget pins the "@<connector>/<tool>" encoding so the read
+// gate and any write surface (CLI) can rely on the same key shape.
+func TestToolConnectorTarget(t *testing.T) {
+	if got := toolConnectorTarget("delete_file", "hermes"); got != "@hermes/delete_file" {
+		t.Errorf("toolConnectorTarget scoped = %q, want @hermes/delete_file", got)
+	}
+	if got := toolConnectorTarget("delete_file", ""); got != "delete_file" {
+		t.Errorf("toolConnectorTarget empty connector = %q, want delete_file", got)
+	}
+}
+
+func TestPolicyEngineToolConnectorScope(t *testing.T) {
+	t.Run("connector_block_isolated", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := pe.BlockToolForConnector("delete_file", "hermes", "scoped"); err != nil {
+			t.Fatalf("BlockToolForConnector: %v", err)
+		}
+
+		if b, _ := pe.IsToolBlockedForConnector("delete_file", "hermes"); !b {
+			t.Error("expected blocked for the scoped connector hermes")
+		}
+		if b, _ := pe.IsToolBlockedForConnector("delete_file", "codex"); b {
+			t.Error("connector-scoped block must not affect a different connector")
+		}
+		if b, _ := pe.IsToolBlockedForConnector("delete_file", ""); b {
+			t.Error("connector-scoped block must not apply globally")
+		}
+	})
+
+	t.Run("global_block_hits_all_connectors", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := pe.BlockToolForConnector("delete_file", "", "global"); err != nil {
+			t.Fatalf("BlockToolForConnector(global): %v", err)
+		}
+		for _, c := range []string{"", "hermes", "codex"} {
+			if b, _ := pe.IsToolBlockedForConnector("delete_file", c); !b {
+				t.Errorf("global block must apply to connector %q", c)
+			}
+		}
+	})
+
+	t.Run("connector_allow_isolated", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := pe.AllowToolForConnector("search", "hermes", "scoped"); err != nil {
+			t.Fatalf("AllowToolForConnector: %v", err)
+		}
+		if a, _ := pe.IsToolAllowedForConnector("search", "hermes"); !a {
+			t.Error("expected allowed for the scoped connector hermes")
+		}
+		if a, _ := pe.IsToolAllowedForConnector("search", "codex"); a {
+			t.Error("connector-scoped allow must not affect a different connector")
+		}
+		if a, _ := pe.IsToolAllowedForConnector("search", ""); a {
+			t.Error("connector-scoped allow must not apply globally")
+		}
+	})
+
+	t.Run("global_block_and_connector_allow_coexist", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		// Resolution order is block-first (block @C/T → block T → allow @C/T →
+		// allow T → scan); both rows are independently visible to the helpers,
+		// and the gateway lane picks block because it checks block first.
+		if err := pe.BlockToolForConnector("write_file", "", "global block"); err != nil {
+			t.Fatalf("BlockToolForConnector: %v", err)
+		}
+		if err := pe.AllowToolForConnector("write_file", "hermes", "scoped allow"); err != nil {
+			t.Fatalf("AllowToolForConnector: %v", err)
+		}
+		if b, _ := pe.IsToolBlockedForConnector("write_file", "hermes"); !b {
+			t.Error("global block must be visible to the connector block check")
+		}
+		if a, _ := pe.IsToolAllowedForConnector("write_file", "hermes"); !a {
+			t.Error("connector-scoped allow row must remain visible to the allow check")
+		}
+	})
+
+	t.Run("allow_clears_enforcement", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		target := "@hermes/run"
+		if err := store.SetActionField("tool", target, "file", "quarantine", "scan"); err != nil {
+			t.Fatalf("seed quarantine: %v", err)
+		}
+		if err := store.SetActionField("tool", target, "runtime", "disable", "scan"); err != nil {
+			t.Fatalf("seed disable: %v", err)
+		}
+
+		if err := pe.AllowToolForConnector("run", "hermes", "approved"); err != nil {
+			t.Fatalf("AllowToolForConnector: %v", err)
+		}
+		if q, _ := store.HasAction("tool", target, "file", "quarantine"); q {
+			t.Error("quarantine should be cleared after AllowToolForConnector")
+		}
+		if d, _ := store.HasAction("tool", target, "runtime", "disable"); d {
+			t.Error("disable should be cleared after AllowToolForConnector")
+		}
+	})
+
+	t.Run("nil_store_is_safe", func(t *testing.T) {
+		pe := NewPolicyEngine(nil)
+		if b, err := pe.IsToolBlockedForConnector("t", "hermes"); err != nil || b {
+			t.Error("expected false, nil for nil store")
+		}
+		if a, err := pe.IsToolAllowedForConnector("t", "hermes"); err != nil || a {
+			t.Error("expected false, nil for nil store")
+		}
+		if err := pe.BlockToolForConnector("t", "hermes", "r"); err != nil {
+			t.Error("expected nil error for nil store BlockToolForConnector")
+		}
+		if err := pe.AllowToolForConnector("t", "hermes", "r"); err != nil {
+			t.Error("expected nil error for nil store AllowToolForConnector")
+		}
+	})
+}
