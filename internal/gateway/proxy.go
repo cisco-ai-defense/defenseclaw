@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -2609,7 +2610,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// chat_template_kwargs, extra_body, and parallel_tool_calls must not be
 	// dropped by the structured provider translation path.
 	if req.TargetURL != "" {
-		p.rawForwardChatCompletion(w, r, body, &req)
+		p.rawForwardChatCompletion(w, r, body, &req, mode, customBlockMsg)
 		return
 	}
 
@@ -5111,14 +5112,14 @@ func (s *sseByteMeter) Flush() {
 // rawForwardChatCompletion preserves the original OpenAI-compatible JSON body
 // for fetch-intercepted requests while keeping DefenseClaw PRE-CALL and
 // POST-CALL guardrail checks active.
-func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http.Request, body []byte, req *ChatRequest) {
+func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http.Request, body []byte, req *ChatRequest, mode, customBlockMsg string) {
 	targetOrigin := strings.TrimRight(req.TargetURL, "/")
 	if targetOrigin == "" {
 		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header")
 		return
 	}
 
-	upstreamURL := targetOrigin + r.URL.RequestURI()
+	upstreamURL := rawForwardUpstreamURL(targetOrigin, r.URL.RequestURI())
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -5134,13 +5135,8 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 		return
 	}
 
-	upReq.Header.Set("Content-Type", "application/json")
-	if req.TargetAPIKey != "" {
-		upReq.Header.Set("Authorization", "Bearer "+strings.TrimPrefix(req.TargetAPIKey, "Bearer "))
-	}
-	if v := r.Header.Get("Accept"); v != "" {
-		upReq.Header.Set("Accept", v)
-	}
+	providerName := inferProviderFromURL(upstreamURL)
+	applyRawForwardRequestHeaders(upReq, r, providerName, req.TargetAPIKey)
 
 	resp, err := providerHTTPClient.Do(upReq)
 	if err != nil {
@@ -5149,6 +5145,11 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 	}
 	defer resp.Body.Close()
 
+	if req.Stream {
+		p.rawForwardChatCompletionStream(w, r, resp, req, mode, customBlockMsg)
+		return
+	}
+
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 20*1024*1024))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
@@ -5156,14 +5157,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		for k, vals := range resp.Header {
-			if strings.EqualFold(k, "Content-Length") {
-				continue
-			}
-			for _, v := range vals {
-				w.Header().Add(k, v)
-			}
-		}
+		copyRawForwardResponseHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(respBody)
 		return
@@ -5172,12 +5166,6 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 	completion, usage := extractRawForwardCompletion(respBody, req.Stream)
 
 	if completion != "" {
-		p.reloadRuntimeConfig()
-		p.rtMu.RLock()
-		mode := p.mode
-		customBlockMsg := p.blockMessage
-		p.rtMu.RUnlock()
-
 		postCtx, postCancel := p.postCallContext(r.Context())
 		defer postCancel()
 
@@ -5199,15 +5187,21 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 		}
 	}
 
-	for k, vals := range resp.Header {
-		if strings.EqualFold(k, "Content-Length") {
-			continue
-		}
-		for _, v := range vals {
-			w.Header().Add(k, v)
+	if toolCalls := extractRawForwardToolCalls(respBody, false); len(toolCalls) > 0 {
+		if verdict := p.inspectToolCalls(r.Context(), toolCalls); verdict != nil {
+			p.recordTelemetry(r.Context(), "tool-call", req.Model, verdict, 0, nil, nil,
+				rawTelemetryField{key: "raw_tool_calls", raw: toolCalls})
+			if verdict.Action == "block" && mode == "action" {
+				msg := blockMessage(customBlockMsg, "completion",
+					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
+				p.enqueueBlockNotification(verdict, "completion", req.Model)
+				p.writeBlockedResponse(w, req.Model, msg)
+				return
+			}
 		}
 	}
 
+	copyRawForwardResponseHeaders(w.Header(), resp.Header)
 	if w.Header().Get("Content-Type") == "" {
 		if req.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -5218,6 +5212,291 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(respBody)
+}
+
+func (p *GuardrailProxy) rawForwardChatCompletionStream(w http.ResponseWriter, r *http.Request, resp *http.Response, req *ChatRequest, mode, customBlockMsg string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeOpenAIError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	copyRawForwardResponseHeaders(w.Header(), resp.Header)
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
+	w.WriteHeader(resp.StatusCode)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(w, resp.Body)
+		flusher.Flush()
+		return
+	}
+
+	const maxBufferedTCBytes = 10 << 20
+	var accumulated strings.Builder
+	var tcAcc toolCallAccumulator
+	var bufferedTCFrames [][]byte
+	bufferedTCSize := 0
+	streamBlocked := false
+
+	blockStream := func(reason string) {
+		streamBlocked = true
+		msg := blockMessage(customBlockMsg, "completion", reason)
+		writeRawForwardBlockedStreamChunk(w, flusher, req.Model, msg)
+	}
+	inspectFinalText := func() bool {
+		if mode != "action" || accumulated.Len() == 0 {
+			return true
+		}
+		content := accumulated.String()
+		postCtx, postCancel := p.postCallContext(r.Context())
+		verdict := p.inspector.Inspect(postCtx, "completion", content,
+			[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
+		postCancel()
+		p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
+		p.recordTelemetry(r.Context(), "completion", req.Model, verdict, 0, nil, nil,
+			rawTelemetryString("raw_response_content", content))
+		if verdict != nil && verdict.Action == "block" {
+			p.enqueueBlockNotification(verdict, "completion", req.Model)
+			blockStream(verdict.Reason)
+			return false
+		}
+		return true
+	}
+	inspectBufferedToolCalls := func() bool {
+		assembled := tcAcc.JSON()
+		if len(assembled) == 0 {
+			return true
+		}
+		if verdict := p.inspectToolCalls(r.Context(), assembled); verdict != nil {
+			p.recordTelemetry(r.Context(), "tool-call", req.Model, verdict, 0, nil, nil,
+				rawTelemetryField{key: "raw_tool_calls", raw: assembled})
+			if verdict.Action == "block" && mode == "action" {
+				p.enqueueBlockNotification(verdict, "completion", req.Model)
+				blockStream(fmt.Sprintf("tool call blocked — %s", verdict.Reason))
+				return false
+			}
+		}
+		emitOpenAIToolCallEvents(r.Context(), proxyLLMEventMeta(p, r, req, inferProviderFromURL(req.TargetURL+req.TargetPath)), assembled)
+		return true
+	}
+	flushBufferedToolCalls := func() {
+		for _, frame := range bufferedTCFrames {
+			_, _ = w.Write(frame)
+		}
+		if len(bufferedTCFrames) > 0 {
+			flusher.Flush()
+		}
+		bufferedTCFrames = nil
+		bufferedTCSize = 0
+	}
+	processFrame := func(frame []byte) bool {
+		if len(frame) == 0 {
+			return true
+		}
+
+		payloads := rawForwardSSEDataPayloads(frame)
+		frameDone := false
+		frameHasToolCalls := false
+		frameToolCallFinish := false
+		frameText := ""
+		for _, payload := range payloads {
+			if payload == "[DONE]" {
+				frameDone = true
+				continue
+			}
+			text, toolCalls, finishReason := parseRawForwardSSEPayload(payload)
+			if text != "" {
+				frameText += text
+				accumulated.WriteString(text)
+			}
+			if len(toolCalls) > 0 {
+				tcAcc.Merge(toolCalls)
+				frameHasToolCalls = true
+			}
+			if finishReason == "tool_calls" {
+				frameToolCallFinish = true
+			}
+		}
+
+		if mode == "action" && frameText != "" {
+			content := accumulated.String()
+			verdict := p.inspector.InspectMidStream(r.Context(), "completion", content,
+				[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
+			p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
+			if verdict != nil && verdict.Action == "block" {
+				p.recordTelemetry(r.Context(), "completion", req.Model, verdict, 0, nil, nil,
+					rawTelemetryString("raw_response_content", content))
+				p.enqueueBlockNotification(verdict, "completion", req.Model)
+				blockStream(verdict.Reason)
+				return false
+			}
+		}
+
+		if frameDone {
+			if !inspectFinalText() || !inspectBufferedToolCalls() {
+				return false
+			}
+			flushBufferedToolCalls()
+			_, _ = w.Write(frame)
+			flusher.Flush()
+			return true
+		}
+
+		if mode == "action" && (frameHasToolCalls || frameToolCallFinish || len(bufferedTCFrames) > 0) {
+			bufferedTCSize += len(frame)
+			if bufferedTCSize > maxBufferedTCBytes {
+				blockStream(fmt.Sprintf("tool call blocked — buffered tool-call data exceeds %d bytes", maxBufferedTCBytes))
+				return false
+			}
+			bufferedTCFrames = append(bufferedTCFrames, append([]byte(nil), frame...))
+			if frameToolCallFinish {
+				if !inspectBufferedToolCalls() {
+					return false
+				}
+				flushBufferedToolCalls()
+			}
+			return true
+		}
+
+		_, _ = w.Write(frame)
+		flusher.Flush()
+		return true
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10<<20)
+	var frame bytes.Buffer
+	for scanner.Scan() {
+		line := scanner.Text()
+		frame.WriteString(line)
+		frame.WriteByte('\n')
+		if line == "" {
+			if !processFrame(frame.Bytes()) {
+				return
+			}
+			frame.Reset()
+		}
+	}
+	if frame.Len() > 0 && !processFrame(frame.Bytes()) {
+		return
+	}
+	if streamBlocked {
+		return
+	}
+	if !inspectFinalText() || !inspectBufferedToolCalls() {
+		return
+	}
+	flushBufferedToolCalls()
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] raw stream read error: %v\n", err)
+	}
+}
+
+func writeRawForwardBlockedStreamChunk(w http.ResponseWriter, flusher http.Flusher, model, msg string) {
+	blockChunk := StreamChunk{
+		ID: "chatcmpl-blocked", Object: "chat.completion.chunk",
+		Created: time.Now().Unix(), Model: model,
+		Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: "\n\n" + msg}}},
+	}
+	data, _ := json.Marshal(blockChunk)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
+func rawForwardUpstreamURL(targetURL, requestURI string) string {
+	base := strings.TrimRight(targetURL, "/")
+	if base == "" {
+		return requestURI
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return base + requestURI
+	}
+	reqURL, err := url.ParseRequestURI(requestURI)
+	if err != nil {
+		return base + requestURI
+	}
+
+	basePath := strings.TrimRight(u.EscapedPath(), "/")
+	requestPath := reqURL.EscapedPath()
+	if basePath != "" && basePath != "/" {
+		requestPath = stripDuplicateRawForwardPathPrefix(basePath, requestPath)
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/" + strings.TrimLeft(requestPath, "/")
+	u.RawQuery = reqURL.RawQuery
+	return u.String()
+}
+
+func stripDuplicateRawForwardPathPrefix(basePath, requestPath string) string {
+	baseParts := splitURLPathSegments(basePath)
+	reqParts := splitURLPathSegments(requestPath)
+	max := len(baseParts)
+	if len(reqParts) < max {
+		max = len(reqParts)
+	}
+	for n := max; n > 0; n-- {
+		match := true
+		for i := 0; i < n; i++ {
+			if baseParts[len(baseParts)-n+i] != reqParts[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			reqParts = reqParts[n:]
+			break
+		}
+	}
+	if len(reqParts) == 0 {
+		return "/"
+	}
+	return "/" + strings.Join(reqParts, "/")
+}
+
+func splitURLPathSegments(path string) []string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
+}
+
+func applyRawForwardRequestHeaders(upReq *http.Request, r *http.Request, providerName, targetAPIKey string) {
+	if fwd, ok := r.Context().Value(schemas.BifrostContextKeyExtraHeaders).(map[string][]string); ok {
+		for name, values := range fwd {
+			upReq.Header.Del(name)
+			for _, value := range values {
+				upReq.Header.Add(name, value)
+			}
+		}
+	}
+	upReq.Header.Set("Content-Type", "application/json")
+	if upReq.Header.Get("Accept") == "" {
+		if v := r.Header.Get("Accept"); v != "" {
+			upReq.Header.Set("Accept", v)
+		}
+	}
+	if targetAPIKey != "" {
+		key := strings.TrimPrefix(targetAPIKey, "Bearer ")
+		if strings.EqualFold(providerName, "azure") {
+			upReq.Header.Set("api-key", key)
+		} else {
+			upReq.Header.Set("Authorization", "Bearer "+key)
+		}
+	}
+}
+
+func copyRawForwardResponseHeaders(dst, src http.Header) {
+	for k, vals := range src {
+		if strings.EqualFold(k, "Content-Length") {
+			continue
+		}
+		for _, v := range vals {
+			dst.Add(k, v)
+		}
+	}
 }
 
 // extractRawForwardCompletion extracts assistant-visible text only.
@@ -5283,4 +5562,87 @@ func extractRawForwardCompletion(respBody []byte, stream bool) (string, *ChatUsa
 	}
 
 	return out.String(), nil
+}
+
+func extractRawForwardToolCalls(respBody []byte, stream bool) json.RawMessage {
+	if !stream {
+		var parsed ChatResponse
+		if err := json.Unmarshal(respBody, &parsed); err != nil {
+			return nil
+		}
+		var out json.RawMessage
+		for _, ch := range parsed.Choices {
+			if ch.Message != nil && len(ch.Message.ToolCalls) > 0 {
+				out = mergeToolCallChunks(out, ch.Message.ToolCalls)
+			}
+		}
+		return out
+	}
+
+	var acc toolCallAccumulator
+	for _, line := range strings.Split(string(respBody), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		_, toolCalls, _ := parseRawForwardSSEPayload(payload)
+		if len(toolCalls) > 0 {
+			acc.Merge(toolCalls)
+		}
+	}
+	return acc.JSON()
+}
+
+func rawForwardSSEDataPayloads(frame []byte) []string {
+	var payloads []string
+	for _, line := range strings.Split(string(frame), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload != "" {
+			payloads = append(payloads, payload)
+		}
+	}
+	return payloads
+}
+
+func parseRawForwardSSEPayload(payload string) (string, json.RawMessage, string) {
+	var chunk struct {
+		Choices []struct {
+			Delta        *ChatMessage `json:"delta,omitempty"`
+			Message      *ChatMessage `json:"message,omitempty"`
+			FinishReason *string      `json:"finish_reason,omitempty"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+		return "", nil, ""
+	}
+
+	var out strings.Builder
+	var toolCalls json.RawMessage
+	finishReason := ""
+	for _, ch := range chunk.Choices {
+		if ch.Delta != nil {
+			out.WriteString(ch.Delta.Content)
+			if len(ch.Delta.ToolCalls) > 0 {
+				toolCalls = mergeToolCallChunks(toolCalls, ch.Delta.ToolCalls)
+			}
+		}
+		if ch.Message != nil {
+			out.WriteString(ch.Message.Content)
+			if len(ch.Message.ToolCalls) > 0 {
+				toolCalls = mergeToolCallChunks(toolCalls, ch.Message.ToolCalls)
+			}
+		}
+		if ch.FinishReason != nil && *ch.FinishReason != "" {
+			finishReason = *ch.FinishReason
+		}
+	}
+	return out.String(), toolCalls, finishReason
 }
