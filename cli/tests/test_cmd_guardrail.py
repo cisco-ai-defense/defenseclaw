@@ -1008,11 +1008,13 @@ class CommandRegistrationTests(unittest.TestCase):
         # wizard. hilt + block-message expose the remaining
         # per-connector guardrail policy knobs (HILT approval gate and
         # the custom block message) without hand-editing config.yaml.
+        # judge gates the hook-lane LLM judge per connector
+        # (guardrail.judge.hook_connectors) — registered from cmd_judge.
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
             names,
-            {"enable", "disable", "status", "fail-mode", "hilt", "block-message"},
+            {"enable", "disable", "status", "fail-mode", "hilt", "block-message", "judge"},
         )
 
 

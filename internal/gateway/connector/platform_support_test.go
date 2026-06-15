@@ -36,6 +36,7 @@ var hookConnectorNames = []string{
 	"cursor",
 	"geminicli",
 	"hermes",
+	"opencode",
 	"openhands",
 	"windsurf",
 }

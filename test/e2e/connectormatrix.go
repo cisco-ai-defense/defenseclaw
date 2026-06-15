@@ -145,6 +145,12 @@ func connectorMatrix(t *testing.T) []ConnectorFixture {
 			ClawMode:       "antigravity",
 			Apply:          hookOnlyFixtureApply("antigravity"),
 		},
+		{
+			Name:           "opencode",
+			DestinationApp: "opencode",
+			ClawMode:       "opencode",
+			Apply:          hookOnlyFixtureApply("opencode"),
+		},
 	}
 }
 
@@ -181,6 +187,10 @@ func hookOnlyFixtureApply(name string) func(t *testing.T) (string, string) {
 			prev := connector.AntigravityHooksPathOverride
 			connector.AntigravityHooksPathOverride = filepath.Join(home, ".gemini", "config", "hooks.json")
 			t.Cleanup(func() { connector.AntigravityHooksPathOverride = prev })
+		case "opencode":
+			prev := connector.OpenCodePluginPathOverride
+			connector.OpenCodePluginPathOverride = filepath.Join(home, ".config", "opencode", "plugins", "defenseclaw.js")
+			t.Cleanup(func() { connector.OpenCodePluginPathOverride = prev })
 		}
 		return home, t.TempDir()
 	}

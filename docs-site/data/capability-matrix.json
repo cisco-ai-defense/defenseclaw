@@ -94,7 +94,24 @@
         "scope": "user"
       },
       "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
-      "notes": "Hooks live in ~/.hermes/config.yaml. Discovery surfaces for MCP, skills, plugins."
+      "notes": "Hooks live in ~/.hermes/config.yaml (hermes-hooks-v1; generic decoder lifts content from the per-event extra envelope). Full shell-hook lifecycle: pre_tool_call blocks, pre_llm_call injects context, post_tool_call/post_llm_call/on_session_start/on_session_end/subagent_stop observe. Setup sets hooks_auto_accept so events register on non-TTY/gateway runs. Discovery surfaces for MCP, skills, plugins."
+    },
+    {
+      "id": "opencode",
+      "label": "OpenCode",
+      "family": "hooks",
+      "toolInspection": "pre-execution",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["tool.execute.before"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "No native human-approval surface; blocks by throwing in the bridge plugin's tool.execute.before. confirm verdicts fall back to allow.",
+      "notes": "Governed by a DefenseClaw JS bridge plugin auto-loaded from ~/.config/opencode/plugins/defenseclaw.js (no opencode.json edit). tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) to abort the tool on a block decision; tool.execute.after is observe-only. Fail-closed is genuine — the bridge throws when the gateway is unreachable and FAIL_MODE=closed."
     },
     {
       "id": "geminicli",

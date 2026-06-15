@@ -1080,6 +1080,17 @@ class JudgeConfig:
     # so the operator's choice survives a process restart.
     exfil: bool = True
     timeout: float = 30.0
+    # ``hook_connectors`` gates the hook-lane judge per connector
+    # (mirrors Go ``JudgeConfig.HookConnectors``): hook connectors
+    # listed here forward prompts / tool results to the LLM judge in
+    # addition to the regex + Cisco AID lanes. Empty = hook lane off
+    # (the proxy lane is unaffected); ``"*"`` enables every connector.
+    hook_connectors: list[str] = field(default_factory=list)
+    # Hook-lane judge timeout in seconds (Go ``JudgeConfig.HookTimeout``).
+    # 0 means the gateway default (5s, sized under the hook scripts'
+    # ``curl --max-time 10`` budget — the proxy lane's 30s would let the
+    # client hang up before a verdict lands).
+    hook_timeout: float = 0.0
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
     # Prefer ``Config.resolve_llm("guardrail.judge")`` over reading this
     # directly; the legacy ``model``/``api_key_env``/``api_base`` fields
@@ -1552,6 +1563,13 @@ class Config:
     webhooks: list[WebhookConfig] = field(default_factory=list)
     privacy: PrivacyConfig = field(default_factory=lambda: PrivacyConfig())
     _loaded_authoritative_dicts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
+    # Loaded raw values of _OWNED_NESTED_KEYS paths (absent = key not in
+    # the file at load). Lets the merge distinguish "this process loaded
+    # a value and deliberately cleared it" (drop the on-disk key) from
+    # "this process never saw a value" (a concurrent writer added one —
+    # preserve it). Parity with _loaded_authoritative_dicts for the
+    # dict-shaped authoritative paths.
+    _loaded_owned_nested_values: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
 
@@ -1849,6 +1867,7 @@ class Config:
             merged = _merge_preserving_unmodeled(
                 existing, dataclass_data, owned_keys,
                 authoritative_base=self._loaded_authoritative_dicts,
+                owned_base=self._loaded_owned_nested_values,
             )
             write_config_yaml_secure(path, merged)
 
@@ -2036,6 +2055,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     from dataclasses import asdict
     d = asdict(cfg)
     d.pop("_loaded_authoritative_dicts", None)
+    d.pop("_loaded_owned_nested_values", None)
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
@@ -2047,6 +2067,15 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     guardrail = d.get("guardrail") or {}
     _strip_empty_llm(guardrail, "llm")
     _strip_empty_llm(guardrail.get("judge"), "llm")
+    # Mirror Go's ``yaml:",omitempty"`` on the hook-lane judge keys so a
+    # config that never opted into the hook-lane judge stays
+    # byte-identical after a load/save round-trip.
+    judge = guardrail.get("judge")
+    if isinstance(judge, dict):
+        if not judge.get("hook_connectors"):
+            judge.pop("hook_connectors", None)
+        if not judge.get("hook_timeout"):
+            judge.pop("hook_timeout", None)
     # Mirror Go's ``yaml:"connectors,omitempty"`` — drop the empty
     # per-connector overrides map so existing single-connector configs
     # stay byte-identical after a load/save round-trip. The block
@@ -2267,12 +2296,36 @@ _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset({
     "guardrail.connectors",
 })
 
+# Nested NON-dict keys the dataclass owns and may intentionally omit.
+#
+# ``_config_to_dict`` strips these when they hold their zero value
+# (omitempty parity with the Go side, so configs that never opted in
+# stay byte-identical across load/save). At the TOP level the merge
+# already handles this ("dataclass owns the key and chose to omit it →
+# drop"), but the nested merge preserves unknown keys by default — so
+# without this list, clearing an opted-in value pops the key from the
+# new dict and the merge resurrects the stale on-disk value forever
+# (observed live: ``guardrail judge remove all`` reported success while
+# ``hook_connectors: ['*']`` survived every save). These are list /
+# scalar keys, so the dict-shaped
+# ``_AUTHORITATIVE_MODELED_DICT_PATHS`` mechanism above cannot cover
+# them.
+#
+# Format: dotted YAML path of the KEY (not the containing dict).
+_OWNED_NESTED_KEYS: frozenset[str] = frozenset({
+    # Hook-lane judge gate: empty list = lane off, stripped on save.
+    "guardrail.judge.hook_connectors",
+    # Hook-lane judge timeout: 0 = gateway default, stripped on save.
+    "guardrail.judge.hook_timeout",
+})
+
 
 def _merge_preserving_unmodeled(
     existing: dict[str, Any],
     new: dict[str, Any],
     owned_top_level: frozenset[str],
     authoritative_base: dict[str, dict[str, Any]] | None = None,
+    owned_base: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Deep-merge ``new`` over ``existing`` while preserving unmodelled keys.
 
@@ -2319,7 +2372,10 @@ def _merge_preserving_unmodeled(
         if k in new:
             nv = new[k]
             if isinstance(ev, dict) and isinstance(nv, dict):
-                out[k] = _deep_merge_nested(ev, nv, path=k, authoritative_base=authoritative_base)
+                out[k] = _deep_merge_nested(
+                    ev, nv, path=k,
+                    authoritative_base=authoritative_base, owned_base=owned_base,
+                )
             else:
                 out[k] = nv
         elif k in owned_top_level:
@@ -2342,6 +2398,7 @@ def _deep_merge_nested(
     new: dict[str, Any],
     path: str = "",
     authoritative_base: dict[str, dict[str, Any]] | None = None,
+    owned_base: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Recursive deep-merge for nested dicts.
 
@@ -2370,13 +2427,34 @@ def _deep_merge_nested(
         return dict(new)
     out: dict[str, Any] = {}
     for k, ev in existing.items():
+        child = f"{path}.{k}" if path else k
         if k in new:
             nv = new[k]
             if isinstance(ev, dict) and isinstance(nv, dict):
-                child = f"{path}.{k}" if path else k
-                out[k] = _deep_merge_nested(ev, nv, path=child, authoritative_base=authoritative_base)
+                out[k] = _deep_merge_nested(
+                    ev, nv, path=child,
+                    authoritative_base=authoritative_base, owned_base=owned_base,
+                )
             else:
                 out[k] = nv
+        elif "." not in k and child in _OWNED_NESTED_KEYS:
+            # Dataclass owns this nested key and chose to omit it (the
+            # omitempty strip in ``_config_to_dict`` removed its zero
+            # value). Drop it ONLY when this process actually loaded a
+            # value and cleared it — that is what makes `guardrail judge
+            # remove` persist. When the loaded snapshot has no value,
+            # this process never owned a change and the on-disk value
+            # came from a concurrent writer (e.g. `judge add` in another
+            # terminal while a TUI/wizard session was open): preserve
+            # it, mirroring the stale-writer rescue the authoritative
+            # dict paths get via ``authoritative_base``. The `"." not in
+            # k` guard keeps a literal YAML key that merely contains
+            # dots (e.g. an unmodeled `judge.hook_connectors` directly
+            # under `guardrail:`) from colliding with the dotted path of
+            # a modeled key — those stay on the preserve path below.
+            if (owned_base or {}).get(child):
+                continue
+            out[k] = ev
         else:
             out[k] = ev
     for k, nv in new.items():
@@ -2852,6 +2930,8 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         tool_injection=raw.get("tool_injection", True),
         exfil=raw.get("exfil", True),
         timeout=raw.get("timeout", 30.0),
+        hook_connectors=raw.get("hook_connectors", []),
+        hook_timeout=raw.get("hook_timeout", 0.0),
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
         api_key_env=raw.get("api_key_env", ""),
@@ -3054,6 +3134,31 @@ def _snapshot_authoritative_dicts(raw: dict[str, Any]) -> dict[str, dict[str, An
                 break
             cur = cur.get(part, {})
         out[path] = dict(cur) if isinstance(cur, dict) else {}
+    return out
+
+
+def _snapshot_owned_nested_values(raw: dict[str, Any]) -> dict[str, Any]:
+    """Record the loaded raw value of each _OWNED_NESTED_KEYS path.
+
+    Paths absent from the file are simply omitted from the snapshot —
+    absence (vs an explicit zero value) is what lets the merge's
+    stale-writer rescue tell "this process never saw a value" apart
+    from "this process loaded one and cleared it". The walk is
+    structural (one dict level per path segment), so a literal YAML key
+    that merely *contains* dots never satisfies a path here.
+    """
+    out: dict[str, Any] = {}
+    for path in _OWNED_NESTED_KEYS:
+        cur: Any = raw
+        found = True
+        parts = path.split(".")
+        for part in parts[:-1]:
+            cur = cur.get(part) if isinstance(cur, dict) else None
+            if cur is None:
+                found = False
+                break
+        if found and isinstance(cur, dict) and parts[-1] in cur:
+            out[path] = cur[parts[-1]]
     return out
 
 
@@ -3450,6 +3555,7 @@ def load() -> Config:
         notifications=_merge_notifications(raw.get("notifications")),
     )
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
+    cfg._loaded_owned_nested_values = _snapshot_owned_nested_values(raw)
     _migrate_llm_fields(cfg)
     _warn_disable_redaction_config(cfg)
     _warn_plaintext_secrets(cfg)

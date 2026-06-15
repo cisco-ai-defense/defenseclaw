@@ -103,6 +103,34 @@ func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	}
 }
 
+// TestContentEnvelopeKeyDeclarations pins which connectors declare a
+// content envelope: hermes nests inspectable content under the
+// per-event "extra" object; every other contract is flat (and must
+// stay declared-empty so the generic decoder never opens an undeclared
+// sub-object). ApplyHookContract must copy the declaration onto the
+// resolved profile so the gateway decoder can read it.
+func TestContentEnvelopeKeyDeclarations(t *testing.T) {
+	for name, contracts := range builtinHookContracts {
+		for _, contract := range contracts {
+			want := ""
+			if name == "hermes" {
+				want = "extra"
+			}
+			if contract.ContentEnvelopeKey != want {
+				t.Errorf("%s %s ContentEnvelopeKey=%q want %q", name, contract.ContractID, contract.ContentEnvelopeKey, want)
+			}
+		}
+	}
+	hermes := NewHermesConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970"})
+	if hermes.ContentEnvelopeKey != "extra" {
+		t.Fatalf("hermes profile ContentEnvelopeKey=%q want %q", hermes.ContentEnvelopeKey, "extra")
+	}
+	cursor := NewCursorConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970"})
+	if cursor.ContentEnvelopeKey != "" {
+		t.Fatalf("cursor profile ContentEnvelopeKey=%q want empty", cursor.ContentEnvelopeKey)
+	}
+}
+
 func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 	type manifestContract struct {
 		ContractID   string `json:"contract_id"`
@@ -118,6 +146,7 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		AIDSurfaces             []string `json:"aid_surfaces"`
 		SupportsTraceparent     bool     `json:"supports_traceparent"`
 		NativeOTLP              bool     `json:"native_otlp"`
+		ContentEnvelopeKey      string   `json:"content_envelope_key"`
 		Capabilities            struct {
 			CanBlock           bool     `json:"can_block"`
 			CanAskNative       bool     `json:"can_ask_native"`
@@ -215,6 +244,9 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			}
 			if manifestContract.NativeOTLP != runtime.NativeOTLP {
 				t.Fatalf("%s native_otlp=%v want %v", runtime.ContractID, manifestContract.NativeOTLP, runtime.NativeOTLP)
+			}
+			if manifestContract.ContentEnvelopeKey != runtime.ContentEnvelopeKey {
+				t.Fatalf("%s content_envelope_key=%q want %q", runtime.ContractID, manifestContract.ContentEnvelopeKey, runtime.ContentEnvelopeKey)
 			}
 			if manifestContract.Capabilities.CanBlock != runtime.Capabilities.CanBlock {
 				t.Fatalf("%s can_block=%v want %v", runtime.ContractID, manifestContract.Capabilities.CanBlock, runtime.Capabilities.CanBlock)
@@ -350,7 +382,7 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 		t.Fatalf("loaded ContractID=%q want %q", loaded.ContractID, entry.ContractID)
 	}
 	changed := loaded
-	changed.ContractID = "hermes-hooks-v2"
+	changed.ContractID = "hermes-hooks-v0-other"
 	if !HookContractLockDrifted(loaded, changed) {
 		t.Fatalf("contract change should be drift")
 	}

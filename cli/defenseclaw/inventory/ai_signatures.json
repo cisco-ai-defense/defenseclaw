@@ -550,9 +550,9 @@
       "id": "opencode",
       "name": "OpenCode",
       "vendor": "OpenCode",
-      "category": "ai_cli",
-      "confidence": 0.88,
-      "supported_connector": "",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "opencode",
       "binary_names": [
         "opencode"
       ],

@@ -82,6 +82,7 @@ KNOWN_CONNECTORS = {
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
 }
 KNOWN_TYPES = {"skill", "mcp"}
 
