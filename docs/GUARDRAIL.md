@@ -60,6 +60,43 @@ X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
 | Ollama | localhost:11434 | Pass-through (no key needed) |
 | Bedrock | *.amazonaws.com | AWS SigV4 pass-through |
 
+### Self-hosted OpenAI-compatible providers
+
+The fetch interceptor can also protect self-hosted OpenAI-compatible providers, such as vLLM, when they are added to the provider registry.
+
+Operators can extend the built-in registry with `~/.defenseclaw/custom-providers.json`:
+
+```json
+{
+  "providers": [
+    {
+      "name": "vllm",
+      "domains": ["vllm.example.com"],
+      "env_keys": ["VLLM_API_KEY"],
+      "request_overrides": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    }
+  ],
+  "ollama_ports": []
+}
+```
+
+Fields:
+
+- `name` identifies the provider used by the guardrail proxy routing layer.
+- `domains` lists upstream hosts that should be recognized as this provider.
+- `env_keys` lists environment variables that may contain the upstream provider API key.
+- `request_overrides` is optional. When present, it is deep-merged into the OpenAI-compatible request body before raw-forwarding upstream.
+
+Use a routable provider hostname here. Direct private, link-local, and metadata IP targets are rejected by the chat-completion SSRF guard before request overrides are applied.
+
+`request_overrides` is intended for provider-specific request fields that are not part of the core Chat Completions schema. For example, some vLLM-hosted Qwen models use `chat_template_kwargs.enable_thinking=false` to suppress visible reasoning output.
+
+The guardrail still performs both PRE-CALL and POST-CALL inspection. Request overrides only affect the upstream request body sent to the provider; they do not bypass prompt or response scanning.
+
 ## Data Flow
 
 ### Fetch Interceptor Flow
