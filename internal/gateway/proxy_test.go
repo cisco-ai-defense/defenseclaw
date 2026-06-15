@@ -1887,6 +1887,97 @@ func TestHandlePassthrough_NonStreamingForward(t *testing.T) {
 	}
 }
 
+// TestHandlePassthroughGet_ForwardsOllamaDiscovery is the regression test for
+// the #258 full-live break: once the fetch interceptor began patching
+// http.get (F-1586), a local Ollama discovery probe
+// (GET 127.0.0.1:11434/api/tags) is routed through this proxy. The legacy
+// GET branch returned a bare 200 with no body, so the client could not parse
+// the model list and surfaced an opaque error ("no usable response"). The GET
+// passthrough must forward to the real upstream and copy the body back.
+func TestHandlePassthroughGet_ForwardsOllamaDiscovery(t *testing.T) {
+	var hits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET upstream, got %s", r.Method)
+		}
+		// Proxy-hop headers must be stripped before forwarding.
+		if r.Header.Get("X-DC-Target-URL") != "" {
+			t.Error("X-DC-Target-URL should be stripped before forwarding")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"llama3"}]}`))
+	}))
+	defer upstream.Close()
+
+	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "observe")
+
+	// The httptest server binds 127.0.0.1 (a private host); allow it past the
+	// SSRF guard the same way the other passthrough fixtures do.
+	prevAllow := passthroughAllowPrivateForTest
+	passthroughAllowPrivateForTest = true
+	t.Cleanup(func() { passthroughAllowPrivateForTest = prevAllow })
+
+	doGet := func(targetURL string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/tags", nil)
+		if targetURL != "" {
+			req.Header.Set("X-DC-Target-URL", targetURL)
+		}
+		req.RemoteAddr = "127.0.0.1:12345"
+		rec := httptest.NewRecorder()
+		proxy.handlePassthrough(rec, req)
+		return rec
+	}
+
+	t.Run("forwards to known upstream", func(t *testing.T) {
+		hits = 0
+		origDomains := providerDomains
+		providerDomains = append(providerDomains, struct {
+			domain string
+			name   string
+		}{"127.0.0.1", "ollama"})
+		defer func() { providerDomains = origDomains }()
+
+		rec := doGet(upstream.URL)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if hits != 1 {
+			t.Errorf("expected upstream hit exactly once, got %d", hits)
+		}
+		if !strings.Contains(rec.Body.String(), "llama3") {
+			t.Errorf("expected forwarded model list, got %q", rec.Body.String())
+		}
+	})
+
+	t.Run("no target returns bare 200 (legacy health probe)", func(t *testing.T) {
+		hits = 0
+		rec := doGet("")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if hits != 0 {
+			t.Errorf("expected no upstream hit, got %d", hits)
+		}
+		if rec.Body.Len() != 0 {
+			t.Errorf("expected empty body, got %q", rec.Body.String())
+		}
+	})
+
+	t.Run("unknown host is not forwarded (no open proxy)", func(t *testing.T) {
+		hits = 0
+		// providerDomains intentionally NOT registered for this upstream, so
+		// isKnownProviderDomain is false and the GET must not be forwarded.
+		rec := doGet(upstream.URL)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if hits != 0 {
+			t.Errorf("expected unknown host to NOT be forwarded, got %d hits", hits)
+		}
+	})
+}
+
 func TestHandlePassthrough_ResponseBlock(t *testing.T) {
 	// Mock upstream returns content that the inspector will block.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

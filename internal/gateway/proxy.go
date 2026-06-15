@@ -691,6 +691,81 @@ func (p *GuardrailProxy) requestLogger(next http.Handler) http.Handler {
 	})
 }
 
+// handlePassthroughGet forwards an intercepted GET request to the real
+// upstream identified by X-DC-Target-URL and copies the response back.
+//
+// Why this exists: the plugin's fetch interceptor patches http.request /
+// http.get (F-1586), so a local client's discovery probe — e.g. an Ollama
+// `GET http://127.0.0.1:11434/api/tags` — is now routed through this proxy
+// instead of going straight to the upstream. Returning a bare 200 with an
+// empty body (the legacy behavior) leaves the client unable to parse the
+// expected JSON (Ollama's `{"models":[...]}`), which surfaces as an opaque
+// client-side error and a "no usable response" agent failure.
+//
+// We only forward to known-provider / Ollama-loopback targets (after the
+// same SSRF / scheme / userinfo guards the POST path applies), so the GET
+// passthrough can never act as an open proxy to arbitrary hosts. When no
+// upstream is supplied (genuine health probe / unknown local path) the
+// legacy bare-200 behavior is preserved.
+func (p *GuardrailProxy) handlePassthroughGet(w http.ResponseWriter, r *http.Request) {
+	targetOrigin := r.Header.Get("X-DC-Target-URL")
+	if targetOrigin == "" {
+		// No upstream to forward to — genuine health probe / unknown path.
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// SSRF / userinfo / scheme guards — identical protection to the POST
+	// path. Blocks private / IMDS / non-http targets (with the Ollama
+	// loopback carve-out) and writes the structured 400/403 itself.
+	if guardUpstreamTargetURL(w, r, targetOrigin) {
+		return
+	}
+
+	// Restrict forwarding to recognized provider domains (incl. Ollama
+	// loopback) so a public, non-provider host can never be reached via the
+	// GET passthrough.
+	targetForMatch := targetOrigin + r.URL.Path
+	if !isKnownProviderDomain(targetForMatch) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	upstreamURL := targetOrigin + r.URL.Path
+	if r.URL.RawQuery != "" {
+		upstreamURL += "?" + r.URL.RawQuery
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "failed to build upstream request")
+		return
+	}
+	// Copy only forwardable headers (proxy-hop and auth headers are stripped
+	// by CopyForwardableHeaders), so no inbound credential leaks upstream.
+	if _, err := CopyForwardableHeaders(req.Header, r.Header); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid forwarded headers")
+		return
+	}
+
+	resp, err := providerHTTPClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] passthrough GET upstream error: %v\n", err)
+		writeOpenAIError(w, http.StatusBadGateway, "upstream request failed")
+		return
+	}
+	defer resp.Body.Close()
+
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	// 10 MiB cap mirrors the POST passthrough body budget.
+	_, _ = io.Copy(w, io.LimitReader(resp.Body, 10*1024*1024))
+}
+
 // handlePassthrough handles provider-native API paths (e.g. /v1/messages for
 // Anthropic, /v1beta/models/*/generateContent for Gemini) that the fetch
 // interceptor redirects to the proxy while preserving the original path.
@@ -700,8 +775,7 @@ func (p *GuardrailProxy) requestLogger(next http.Handler) http.Handler {
 // (from X-DC-Target-URL + original path). No format translation is needed.
 func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		// GET on unknown paths (health probes, etc.) — just 200 OK.
-		w.WriteHeader(http.StatusOK)
+		p.handlePassthroughGet(w, r)
 		return
 	}
 	if r.Method != http.MethodPost {
