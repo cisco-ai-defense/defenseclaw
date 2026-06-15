@@ -1429,7 +1429,16 @@ jobs:
           echo "event=$EVENT_NAME"
           echo "same_repo_pr=$SAME_REPO_PR"
 
-          if [ "$CORE_RESULT" != "success" ]; then
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$SAME_REPO_PR" != "true" ]; then
+            case "$CORE_RESULT" in
+              success|skipped)
+                ;;
+              *)
+                echo "Core E2E must either succeed or be skipped for external pull requests."
+                exit 1
+                ;;
+            esac
+          elif [ "$CORE_RESULT" != "success" ]; then
             echo "Core E2E must succeed."
             exit 1
           fi
