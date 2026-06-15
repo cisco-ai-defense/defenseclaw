@@ -129,6 +129,34 @@ func (c *Config) activeConnectors() []string {
 	return []string{c.activeConnector()}
 }
 
+// HasConnectorConfigured reports whether this config explicitly selects at
+// least one connector — i.e. the operator has actually run setup. It is the
+// Go mirror of Python's Config.has_connector_configured() (mcp.md M1, the
+// phantom-openclaw root) and lets callers distinguish a genuinely
+// unconfigured install from an explicit openclaw one.
+//
+// Deliberately NOT wired into activeConnector()/activeConnectors(): those
+// keep flooring to "openclaw" for backward compatibility (telemetry and
+// every path dispatcher depend on the default). The phantom-openclaw fix
+// belongs in the user-facing list/scan resolvers, which must consult this
+// helper first and report "no connector configured" instead of fanning out
+// to ["openclaw"] — mirroring R0-LIST's resolve_list_connectors change.
+func (c *Config) HasConnectorConfigured() bool {
+	if c == nil {
+		return false
+	}
+	if len(c.Guardrail.Connectors) > 0 {
+		return true
+	}
+	if strings.TrimSpace(c.Guardrail.Connector) != "" {
+		return true
+	}
+	if strings.TrimSpace(string(c.Claw.Mode)) != "" {
+		return true
+	}
+	return false
+}
+
 // ActiveConnector returns the resolved connector name for external packages
 // that need to stamp connector-scoped telemetry/resource attributes.
 func (c *Config) ActiveConnector() string {
@@ -175,6 +203,13 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 		return readMCPServersCopilot(workspaceDir)
 	case "openhands":
 		return readMCPServersOpenHands()
+	case "opencode":
+		return readMCPServersOpenCode(workspaceDir)
+	case "antigravity":
+		// agy v1 documents no MCP install surface; never fall through to
+		// OpenClaw's config. Mirrors connector_paths.mcp_servers(
+		// "antigravity") == [] on the Python side (N1).
+		return nil, nil
 	default:
 		return readMCPServersOpenClaw(c.Claw.ConfigFile)
 	}
@@ -425,6 +460,15 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 			return filepath.Join(workspace, ".openhands")
 		}
 		return filepath.Join(home, ".openhands")
+	case "antigravity":
+		// agy's marketing-facing install dir; matches
+		// connector_paths.connector_home("antigravity") on the Python
+		// side. Never fall through to OpenClaw's home_dir.
+		return filepath.Join(home, ".gemini", "antigravity-cli")
+	case "opencode":
+		// opencode keeps its config under ~/.config/opencode/ (XDG-style);
+		// matches connector_paths.connector_home("opencode").
+		return filepath.Join(home, ".config", "opencode")
 	default:
 		if c == nil {
 			return expandPath("~/.openclaw")
@@ -537,7 +581,11 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".cursor", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		})
-	case "windsurf":
+	case "windsurf", "opencode", "antigravity":
+		// No documented skills install/discovery surface. Return nil so
+		// these never fall through to OpenClaw's skill dirs — parity with
+		// connector_paths.skill_dirs() == [] on the Python side (opencode
+		// is bridge-plugin-only; agy v1 ships only the hooks surface).
 		return nil
 	case "geminicli":
 		return dedupNonEmpty([]string{
@@ -597,7 +645,7 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			filepath.Join(home, ".gemini", "extensions"),
 			workspaceJoin(cwd, ".gemini", "extensions"),
 		})
-	case "cursor", "windsurf", "copilot", "openhands", "antigravity":
+	case "cursor", "windsurf", "copilot", "openhands", "antigravity", "opencode":
 		return nil
 	default:
 		return c.pluginDirsOpenClaw()
@@ -783,6 +831,90 @@ func readMCPServersCopilot(workspaceDir string) ([]MCPServerEntry, error) {
 func readMCPServersOpenHands() ([]MCPServerEntry, error) {
 	home, _ := os.UserHomeDir()
 	return readMCPFromDotMCPJSON(filepath.Join(home, ".openhands", "mcp.json"))
+}
+
+// readMCPServersOpenCode reads opencode's MCP registrations. opencode
+// stores servers under a top-level `mcp` map — a different schema from
+// the `mcpServers` shape the other connectors use: each entry is
+// {type:"local", command:[...], environment:{...}} or {type:"remote",
+// url:...}. The global ~/.config/opencode/opencode.json is read first,
+// then the pinned project opencode.json when a workspace is set, so
+// per-project servers layer on top the way opencode loads them. Parity
+// with connector_paths._opencode_mcp_servers on the Python side.
+func readMCPServersOpenCode(workspaceDir string) ([]MCPServerEntry, error) {
+	home, _ := os.UserHomeDir()
+	cwd := strings.TrimSpace(workspaceDir)
+	var paths []string
+	if home != "" {
+		paths = append(paths,
+			filepath.Join(home, ".config", "opencode", "opencode.json"),
+			filepath.Join(home, ".config", "opencode", "opencode.jsonc"),
+		)
+	}
+	if cwd != "" {
+		paths = append(paths,
+			filepath.Join(cwd, "opencode.json"),
+			filepath.Join(cwd, "opencode.jsonc"),
+		)
+	}
+	var entries []MCPServerEntry
+	for _, path := range paths {
+		if e, err := readMCPFromOpenCodeConfig(path); err == nil {
+			entries = append(entries, e...)
+		}
+	}
+	return dedupMCPEntries(entries), nil
+}
+
+// readMCPFromOpenCodeConfig parses the top-level `mcp` map out of an
+// opencode config file. Go's encoding/json does not accept JSONC
+// comments, so a hand-authored opencode.jsonc with comments yields an
+// error here and is skipped by the caller (best-effort); the canonical
+// global opencode.json is plain JSON.
+func readMCPFromOpenCodeConfig(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		MCP map[string]struct {
+			Type        string            `json:"type"`
+			Command     []string          `json:"command"`
+			Environment map[string]string `json:"environment"`
+			URL         string            `json:"url"`
+		} `json:"mcp"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	entries := make([]MCPServerEntry, 0, len(doc.MCP))
+	for name, cfg := range doc.MCP {
+		kind := strings.ToLower(strings.TrimSpace(cfg.Type))
+		if kind == "remote" || (kind == "" && cfg.URL != "" && len(cfg.Command) == 0) {
+			entries = append(entries, MCPServerEntry{
+				Name:      name,
+				URL:       cfg.URL,
+				Transport: "remote",
+			})
+			continue
+		}
+		command := ""
+		var args []string
+		if len(cfg.Command) > 0 {
+			command = cfg.Command[0]
+			if len(cfg.Command) > 1 {
+				args = cfg.Command[1:]
+			}
+		}
+		entries = append(entries, MCPServerEntry{
+			Name:      name,
+			Command:   command,
+			Args:      args,
+			Env:       cfg.Environment,
+			Transport: "local",
+		})
+	}
+	return entries, nil
 }
 
 func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
