@@ -3,6 +3,13 @@ name: defenseclaw-splunk-local
 services:
   splunk:
     image: ${SPLUNK_IMAGE}
+    # LOCAL DEV ONLY. Defaults to the bundled ../env/.env.example so
+    # `docker compose -f docker-compose.local.yml up` boots with zero setup
+    # using throwaway local credentials. This is safe only because every
+    # port below is published on 127.0.0.1 (loopback is the security
+    # boundary). Override SPLUNK_ENV_FILE to point at a private env file for
+    # any non-throwaway use. The CI profile (docker-compose.ci.yml) has NO
+    # such default and fails closed (F-0581/F-0584).
     env_file:
       - ${SPLUNK_ENV_FILE:-../env/.env.example}
     ports:
