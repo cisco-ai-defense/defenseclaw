@@ -41,21 +41,32 @@ func AxesForRuleID(ruleID string) []DataAxis {
 	}
 	// Prefix-based fallback so a newly added rule inherits sensible
 	// axes from its family without requiring a code change. Covers
-	// the regex families shipped in policies/guardrail/*/rules/*.yaml
-	// and the plugin-scanner rule families (GW-*, META-*, STRUCT-*).
+	// the regex families in policies/guardrail/*/rules/*.yaml, the
+	// plugin-scanner families (GW-*, META-*, JSON-SEC-*, SRC-*), the
+	// ClawShield PII detector (CS-PII-*), the cognitive-tamper pack
+	// (COG-*), and the LLM judges (JUDGE-*). Family members whose axis
+	// differs from the group default are pinned via exact ruleAxes
+	// entries above, which are consulted first.
 	switch {
 	case strings.HasPrefix(ruleID, "SEC-"),
 		strings.HasPrefix(ruleID, "PATH-"),
 		strings.HasPrefix(ruleID, "ENT-"),
 		strings.HasPrefix(ruleID, "CRED-"),
-		strings.HasPrefix(ruleID, "PII-"):
+		strings.HasPrefix(ruleID, "PII-"),
+		strings.HasPrefix(ruleID, "CS-PII-"),
+		strings.HasPrefix(ruleID, "JSON-SEC-"),
+		strings.HasPrefix(ruleID, "COG-"),
+		strings.HasPrefix(ruleID, "JUDGE-PII-"),
+		strings.HasPrefix(ruleID, "JUDGE-EXFIL-"):
 		return []DataAxis{AxisSensitiveAccess}
 	case strings.HasPrefix(ruleID, "C2-"),
 		strings.HasPrefix(ruleID, "DNS-TUNNEL"):
 		return []DataAxis{AxisEgressExternal}
 	case strings.HasPrefix(ruleID, "INJ-"),
 		strings.HasPrefix(ruleID, "TRUST-"),
-		strings.HasPrefix(ruleID, "JAIL-"):
+		strings.HasPrefix(ruleID, "JAIL-"),
+		strings.HasPrefix(ruleID, "JUDGE-INJ-"),
+		strings.HasPrefix(ruleID, "JUDGE-TOOL-INJ-"):
 		return []DataAxis{AxisIngressUntrusted}
 	case strings.HasPrefix(ruleID, "SSRF-"):
 		// SSRF probes read internal metadata endpoints AND make an
@@ -94,6 +105,85 @@ func AxesForRuleID(ruleID string) []DataAxis {
 func AxesForJudgeCategory(judge, category string) []DataAxis {
 	key := strings.ToLower(judge) + "." + strings.ToLower(category)
 	return judgeAxes[key]
+}
+
+// AxesForFinding is the single labeling entrypoint the finding
+// enricher should call. It resolves data-axis labels from every
+// signal a persisted finding carries, in priority order:
+//
+//  1. AxesForRuleID(ruleID) — regex / plugin / clawshield / judge
+//     rule families (covers JUDGE-* via the prefix fallbacks).
+//  2. AxesForJudgeCategory(category) — when a finding stamped its
+//     judge category instead of a stable JUDGE-* rule id. The
+//     category is treated as "<judge>.<category>" or matched against
+//     every judge namespace.
+//  3. literal axis labels carried in Tags — honours the documented
+//     InspectFinding.Tags contract so a producer can self-declare
+//     "ingress_untrusted" / "sensitive_access" / "egress_external".
+//
+// Returns nil when nothing matches; callers treat nil as "unlabeled".
+func AxesForFinding(ruleID, category string, tags []string) []DataAxis {
+	if axes := AxesForRuleID(ruleID); len(axes) > 0 {
+		return axes
+	}
+	if axes := axesFromCategory(category); len(axes) > 0 {
+		return axes
+	}
+	if axes := axesFromTags(tags); len(axes) > 0 {
+		return axes
+	}
+	return nil
+}
+
+// axesFromCategory tries to resolve a finding's free-form Category
+// against the judge axis table. It accepts either a fully-qualified
+// "<judge>.<category>" key or a bare category, in which case it
+// probes every judge namespace for a match. This keeps
+// AxesForJudgeCategory live for findings that carry a category but
+// no stable JUDGE-* rule id.
+func axesFromCategory(category string) []DataAxis {
+	c := strings.ToLower(strings.TrimSpace(category))
+	if c == "" {
+		return nil
+	}
+	if axes, ok := judgeAxes[c]; ok && len(axes) > 0 {
+		return axes
+	}
+	for _, judge := range []string{"injection", "pii", "exfil", "tool-injection"} {
+		if axes := AxesForJudgeCategory(judge, c); len(axes) > 0 {
+			return axes
+		}
+	}
+	return nil
+}
+
+// axesFromTags scans a finding's tags for literal axis labels. A
+// producer that already knows its trifecta role can emit
+// "ingress_untrusted" / "sensitive_access" / "egress_external" as a
+// tag and have it honoured without a code change here.
+func axesFromTags(tags []string) []DataAxis {
+	var out []DataAxis
+	seen := map[DataAxis]bool{}
+	for _, t := range tags {
+		switch DataAxis(strings.ToLower(strings.TrimSpace(t))) {
+		case AxisIngressUntrusted:
+			if !seen[AxisIngressUntrusted] {
+				seen[AxisIngressUntrusted] = true
+				out = append(out, AxisIngressUntrusted)
+			}
+		case AxisSensitiveAccess:
+			if !seen[AxisSensitiveAccess] {
+				seen[AxisSensitiveAccess] = true
+				out = append(out, AxisSensitiveAccess)
+			}
+		case AxisEgressExternal:
+			if !seen[AxisEgressExternal] {
+				seen[AxisEgressExternal] = true
+				out = append(out, AxisEgressExternal)
+			}
+		}
+	}
+	return out
 }
 
 // ruleAxes is the canonical mapping from regex rule ID to data-axis
@@ -147,6 +237,40 @@ var ruleAxes = map[string][]DataAxis{
 	"TRUST-AUTHORITY-CLAIM": {AxisIngressUntrusted},
 	"TRUST-NEW-INSTRUCTION": {AxisIngressUntrusted},
 	"TRUST-SAFETY-OVERRIDE": {AxisIngressUntrusted},
+
+	// Judge findings whose axis differs from their family default.
+	// These exact entries are consulted before the JUDGE-* prefix
+	// fallbacks in AxesForRuleID, so they override them.
+	"JUDGE-EXFIL-CHANNEL":     {AxisEgressExternal},
+	"JUDGE-TOOL-INJ-EXFIL":    {AxisSensitiveAccess, AxisEgressExternal},
+	"JUDGE-TOOL-INJ-DESTRUCT": {}, // destructive = separate flow, not trifecta
+
+	// Command rules that open an outbound channel (curl/wget upload,
+	// pipe-to-shell from the network). These read no secret on their
+	// own but provide the egress leg of an exfil flow.
+	"CMD-CURL-UPLOAD": {AxisEgressExternal},
+	"CMD-WGET-POST":   {AxisEgressExternal},
+	"CMD-PIPE-CURL":   {AxisEgressExternal},
+	"CMD-PIPE-WGET":   {AxisEgressExternal},
+	"CMD-ENV-DUMP":    {AxisSensitiveAccess},
+
+	// Cloud metadata C2 endpoints read instance credentials (sensitive)
+	// over an outbound call (egress) — both axes. The C2- prefix
+	// fallback only sets egress, so these exact entries add the
+	// sensitive-access leg.
+	"C2-METADATA-AWS":   {AxisSensitiveAccess, AxisEgressExternal},
+	"C2-METADATA-GCP":   {AxisSensitiveAccess, AxisEgressExternal},
+	"C2-METADATA-AZURE": {AxisSensitiveAccess, AxisEgressExternal},
+
+	// SRC-* is a mixed family (some read secrets, some open the
+	// network, some exec). Only the data-axis-bearing members are
+	// listed; SRC-EXEC / SRC-CHILD-PROC carry a capability instead
+	// (see CapabilityForRuleID) and intentionally have no axis.
+	"SRC-ENV-READ":    {AxisSensitiveAccess},
+	"SRC-FETCH":       {AxisEgressExternal},
+	"SRC-NET-SERVER":  {AxisEgressExternal},
+	"SRC-HTTP-SERVER": {AxisEgressExternal},
+	"SRC-WS":          {AxisEgressExternal},
 }
 
 // judgeAxes maps "judge.category" (both lowercased) to axes. The keys
@@ -259,9 +383,9 @@ func DumpRuleAxesSnapshot() RuleAxesSnapshot {
 	return RuleAxesSnapshot{
 		Exact: exactCopy,
 		PrefixAxes: []PrefixAxisRule{
-			{Prefixes: []string{"SEC-", "PATH-", "ENT-", "CRED-", "PII-"}, Axes: []DataAxis{AxisSensitiveAccess}},
+			{Prefixes: []string{"SEC-", "PATH-", "ENT-", "CRED-", "PII-", "CS-PII-", "JSON-SEC-", "COG-", "JUDGE-PII-", "JUDGE-EXFIL-"}, Axes: []DataAxis{AxisSensitiveAccess}},
 			{Prefixes: []string{"C2-", "DNS-TUNNEL"}, Axes: []DataAxis{AxisEgressExternal}},
-			{Prefixes: []string{"INJ-", "TRUST-", "JAIL-"}, Axes: []DataAxis{AxisIngressUntrusted}},
+			{Prefixes: []string{"INJ-", "TRUST-", "JAIL-", "JUDGE-INJ-", "JUDGE-TOOL-INJ-"}, Axes: []DataAxis{AxisIngressUntrusted}},
 			{Prefixes: []string{"SSRF-"}, Axes: []DataAxis{AxisSensitiveAccess, AxisEgressExternal}},
 			{Prefixes: []string{"META-REMOTE", "META-EXEC"}, Axes: []DataAxis{AxisIngressUntrusted}},
 			{Prefixes: []string{"META-ENV-EXFIL", "META-EXFIL"}, Axes: []DataAxis{AxisSensitiveAccess, AxisEgressExternal}},
