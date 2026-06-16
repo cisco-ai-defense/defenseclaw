@@ -162,6 +162,23 @@ class TestPluginInstall(PluginCommandTestBase):
         self.assertEqual(len(actions), 1)
 
 
+class TestPluginInstallConnectorHelp(unittest.TestCase):
+    """N4: ``install --connector`` scopes admission/policy, not placement —
+    files always land in the managed plugin_dir. The help text must say so,
+    so an operator never mistakes --connector for a placement control."""
+
+    def test_install_connector_help_clarifies_scope_not_location(self):
+        runner = CliRunner()
+        result = runner.invoke(plugin, ["install", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        # Collapse Click's line-wrapping so multi-word phrases match
+        # regardless of where the help column breaks them.
+        normalized = " ".join(result.output.split())
+        self.assertIn("admission/policy", normalized)
+        self.assertIn("NOT the install location", normalized)
+        self.assertIn("plugin_dir", normalized)
+
+
 class TestPluginList(PluginCommandTestBase):
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_list_empty(self, _mock_oc):
@@ -500,6 +517,50 @@ class TestPluginDisableEnable(PluginCommandTestBase):
         result = self.invoke(["disable", "@openclaw/xai-plugin"])
         self.assertEqual(result.exit_code, 0, result.output)
         mock_cls.return_value.disable_plugin.assert_called_once_with("xai")
+
+
+class TestPluginRuntimeToggleConnectorGuard(PluginCommandTestBase):
+    """N5: runtime disable/enable is OpenClaw-only. On a non-OpenClaw active
+    connector the CLI must fail loudly instead of silently patching the
+    OpenClaw plugins schema through the gateway and reporting a false success.
+    The real hook-connector runtime toggle is a deferred gateway-side
+    follow-up (plugins.md N5)."""
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_disable_unsupported_on_non_openclaw_connector(self, mock_cls):
+        self.app.cfg.guardrail.connector = "hermes"
+        result = self.invoke(["disable", "any-plugin"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("unsupported", result.output)
+        self.assertIn("hermes", result.output)
+        # The gateway must never be contacted on an unsupported peer.
+        mock_cls.return_value.disable_plugin.assert_not_called()
+        # And no runtime-disable policy row should be written.
+        self.assertFalse(
+            self.app.store.has_action("plugin", "any-plugin", "runtime", "disable")
+        )
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_enable_unsupported_on_non_openclaw_connector(self, mock_cls):
+        self.app.cfg.guardrail.connector = "hermes"
+        result = self.invoke(["enable", "any-plugin"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("unsupported", result.output)
+        self.assertIn("hermes", result.output)
+        mock_cls.return_value.enable_plugin.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_disable_still_works_on_openclaw_default(self, mock_cls, _mock_list):
+        # Regression guard: the default OpenClaw active connector path is
+        # unchanged by the N5 guard (claw.mode=openclaw in the test config).
+        mock_cls.return_value.disable_plugin.return_value = {"status": "disabled"}
+        result = self.invoke(["disable", "oc-plugin"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("disabled via gateway RPC", result.output)
+        self.assertTrue(
+            self.app.store.has_action("plugin", "oc-plugin", "runtime", "disable")
+        )
 
 
 class TestPluginQuarantineRestore(PluginCommandTestBase):
@@ -1398,6 +1459,23 @@ class HostPluginEnumerationTests(unittest.TestCase):
 
         out = _scan_plugin_dir("/nonexistent/path/that/should/not/exist", "claudecode")
         self.assertEqual(out, [])
+
+    def test_scan_plugin_dir_skips_cache_and_dotdirs(self):
+        """N6: a ``cache`` working dir and dot-prefixed dirs are not plugins
+        and must not surface as phantom rows; real plugins still list."""
+        from defenseclaw.commands.cmd_plugin import _scan_plugin_dir
+
+        # codex/zeptoclaw seed a sibling ``cache`` dir next to real plugins;
+        # version control / OS cruft seeds dot-prefixed dirs.
+        os.makedirs(os.path.join(self.tmp_dir, "cache"))
+        os.makedirs(os.path.join(self.tmp_dir, ".git"))
+        self._seed("real-plugin", {"id": "real-plugin", "name": "Real"})
+
+        out = _scan_plugin_dir(self.tmp_dir, "codex")
+        ids = sorted(p["id"] for p in out)
+        self.assertEqual(ids, ["real-plugin"])
+        self.assertNotIn("cache", ids)
+        self.assertNotIn(".git", ids)
 
     def test_list_host_plugins_skips_openclaw(self):
         """OpenClaw enumeration goes through the openclaw binary, not us."""
