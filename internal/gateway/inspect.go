@@ -281,7 +281,23 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 
 // inspectToolPolicy runs all rule categories against the tool args.
 // No tool-name gating — every pattern fires on every tool.
+//
+// This is the no-context entry point used by the native hook handlers
+// (codex / claude-code / agent). The optional judge lane (J3-3b) runs
+// under a deadline-free context.Background() so it is bounded only by
+// its own HookTimeout, never the 200ms rule-scan cap; see
+// inspectToolPolicyCtx for the variant the generic /inspect/tool
+// endpoint uses to short-circuit the judge under its 200ms deadline.
 func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdict {
+	return a.inspectToolPolicyCtx(context.Background(), req)
+}
+
+// inspectToolPolicyCtx is inspectToolPolicy with an explicit context for
+// the judge lane's deadline guard. The generic /inspect/tool endpoint
+// (handleInspectTool) passes its 200ms-capped ctx so the judge
+// short-circuits there exactly as the message lane does; native hook
+// callers reach this through inspectToolPolicy with context.Background().
+func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
 	// Static block/allow list takes priority — checked before any rule
 	// scanning. Connector-scoped (@C/T) entries resolve before the bare
 	// global entry, mirroring the sidecar lane and the PolicyEngine helpers:
@@ -355,62 +371,75 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 		cgFindings = a.runCodeGuardOnArgs(req)
 	}
 
+	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 && len(cgFindings) == 0 {
+		verdict = &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 		// Regex + CodeGuard found nothing locally. Give the AID lane a
 		// turn — operators with custom AID policies (e.g. block
 		// `createJiraIssue`, throttle `addComment`) want their rules to
 		// fire even when no DefenseClaw built-in pattern matched.
 		if aid := a.hookAIDInspect(toolName, argsStr); aid != nil && aid.Action != "allow" && aid.Action != "" {
-			return mergeWithAIDVerdict(nil, aid)
+			verdict = mergeWithAIDVerdict(nil, aid)
 		}
-		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
-	}
+	} else {
+		severity := HighestSeverity(ruleFindings)
+		confidence := HighestConfidence(ruleFindings, severity)
 
-	severity := HighestSeverity(ruleFindings)
-	confidence := HighestConfidence(ruleFindings, severity)
-
-	for _, cf := range cgFindings {
-		if cf.Severity == scanner.SeverityCritical {
-			severity = "CRITICAL"
-			break
+		for _, cf := range cgFindings {
+			if cf.Severity == scanner.SeverityCritical {
+				severity = "CRITICAL"
+				break
+			}
+			if cf.Severity == scanner.SeverityHigh && severity != "CRITICAL" {
+				severity = "HIGH"
+			}
 		}
-		if cf.Severity == scanner.SeverityHigh && severity != "CRITICAL" {
-			severity = "HIGH"
+
+		action := guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, severity, true)
+
+		reasons := make([]string, 0, minInt(len(ruleFindings), 5))
+		for i, f := range ruleFindings {
+			if i >= 5 {
+				break
+			}
+			reasons = append(reasons, f.RuleID+":"+f.Title)
+		}
+
+		findingStrs := FindingStrings(ruleFindings)
+		for _, cf := range cgFindings {
+			findingStrs = append(findingStrs, fmt.Sprintf("codeguard:%s:%s", cf.ID, cf.Title))
+		}
+
+		verdict = &ToolInspectVerdict{
+			Action:           action,
+			Severity:         severity,
+			Confidence:       confidence,
+			Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
+			Findings:         findingStrs,
+			DetailedFindings: ruleFindings,
+		}
+
+		// AID lane: also forward to Cisco AI Defense when the operator has
+		// configured a key. Strictest verdict wins via mergeWithAIDVerdict.
+		// We send the rule reasons text rather than just the args because
+		// AID's classifier reads free-text content; the rule names give it
+		// useful context. The lane is silent when no AID client is wired
+		// or when ScanHookSurface=false.
+		if aid := a.hookAIDInspect(toolName, argsStr); aid != nil {
+			verdict = mergeWithAIDVerdict(verdict, aid)
 		}
 	}
 
-	action := guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, severity, true)
-
-	reasons := make([]string, 0, minInt(len(ruleFindings), 5))
-	for i, f := range ruleFindings {
-		if i >= 5 {
-			break
-		}
-		reasons = append(reasons, f.RuleID+":"+f.Title)
-	}
-
-	findingStrs := FindingStrings(ruleFindings)
-	for _, cf := range cgFindings {
-		findingStrs = append(findingStrs, fmt.Sprintf("codeguard:%s:%s", cf.ID, cf.Title))
-	}
-
-	verdict := &ToolInspectVerdict{
-		Action:           action,
-		Severity:         severity,
-		Confidence:       confidence,
-		Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
-		Findings:         findingStrs,
-		DetailedFindings: ruleFindings,
-	}
-
-	// AID lane: also forward to Cisco AI Defense when the operator has
-	// configured a key. Strictest verdict wins via mergeWithAIDVerdict.
-	// We send the rule reasons text rather than just the args because
-	// AID's classifier reads free-text content; the rule names give it
-	// useful context. The lane is silent when no AID client is wired
-	// or when ScanHookSurface=false.
-	if aid := a.hookAIDInspect(toolName, argsStr); aid != nil {
-		verdict = mergeWithAIDVerdict(verdict, aid)
+	// Judge lane (J3-3b): forward the tool args to the LLM judge for
+	// connectors opted into the tool_call direction via
+	// guardrail.judge.hook_connectors + EffectiveStrategy("tool_call").
+	// Tool-call args are agent-initiated input, so they are judged under
+	// the "prompt" direction (injection + exfil). The shipped default
+	// (regex_only) returns nil and no LLM round-trip happens. Runs after
+	// the regex/AID lanes so regex_judge can skip the round-trip when the
+	// local lanes already condemned the call.
+	if jv := a.runHookJudge(ctx, "tool_call", "prompt", req.Connector, argsStr, toolName, verdict); jv != nil {
+		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
 	return verdict
 }
@@ -624,21 +653,13 @@ const maxConcurrentHookJudges = 16
 const defaultHookJudgeTimeout = 5 * time.Second
 
 // hookJudgeInspect runs the LLM judge on hook-lane message content for
-// connectors gated on via guardrail.judge.hook_connectors. Returns nil
-// whenever the judge does not produce a usable verdict — not wired,
-// connector not gated, strategy regex_only, regex/AID already decisive
-// under regex_judge, caller deadline too short, at capacity, judge
-// failed — so the caller keeps the regex/AID verdict unchanged
-// (fail-open on judge unavailability, same contract as the AID lane).
+// connectors gated on via guardrail.judge.hook_connectors. It maps the
+// request direction to the proxy lane's judge vocabulary and delegates
+// to runHookJudge; for message content the strategy direction and the
+// judge direction coincide. Returns nil whenever the judge produces no
+// usable verdict (see runHookJudge) so the caller keeps the regex/AID
+// verdict unchanged.
 func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectRequest, content string, current *ToolInspectVerdict) *ScanVerdict {
-	if a == nil || a.hookJudge == nil || a.scannerCfg == nil || content == "" {
-		return nil
-	}
-	jcfg := &a.scannerCfg.Guardrail.Judge
-	if !jcfg.HookConnectorEnabled(req.Connector) {
-		return nil
-	}
-
 	// RunJudges speaks the proxy lane's direction vocabulary: "prompt"
 	// selects the injection + exfil (+ PII-prompt) judges, "completion"
 	// the PII-completion judge. Hook tool_result content is tool/model
@@ -648,8 +669,51 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 	if strings.EqualFold(req.Direction, "prompt") {
 		direction = "prompt"
 	}
+	// Message content threads the caller ctx so the generic /inspect/tool
+	// endpoint's 200ms deadline still short-circuits the judge below.
+	return a.runHookJudge(ctx, direction, direction, req.Connector, content, req.Tool, current)
+}
 
-	switch a.scannerCfg.Guardrail.EffectiveStrategy(direction) {
+// runHookJudge is the shared hook-lane judge core for all three hook
+// surfaces — message content, tool-call args (J3-3b), and tool output
+// (J3-3d). It is the opt-in gate: the judge runs only when the operator
+// has BOTH listed the connector in guardrail.judge.hook_connectors AND
+// opted the surface's direction into a judge strategy via
+// EffectiveStrategy(strategyDirection). The shipped default (regex_only)
+// returns nil and no LLM round-trip happens.
+//
+//   - strategyDirection is the operator opt-in surface: "tool_call" for
+//     tool-call args, "completion" for tool output / completions,
+//     "prompt" for prompts. Maps to the --detection-strategy-* flags
+//     fu/setup writes onto `setup guardrail`.
+//   - judgeDirection is the proxy-lane vocabulary RunJudges speaks:
+//     "prompt" runs injection + exfil (+ PII-prompt); "completion" the
+//     PII-completion judge.
+//
+// The judge round-trip is bounded by its OWN timeout (JudgeConfig.HookTimeout,
+// else defaultHookJudgeTimeout) derived from the supplied parent ctx —
+// NEVER the 200ms rule-scan cap (J3-3c). Callers that must escape that
+// cap (the tool lanes) pass a deadline-free context.Background(),
+// mirroring the proxy lane's inspectToolResult; the message lane threads
+// its caller ctx so the generic /inspect/tool endpoint's 200ms deadline
+// still short-circuits the judge here.
+//
+// Returns nil — caller keeps the regex/AID verdict (fail-open, the same
+// contract as the AID lane) — when: not wired, connector not gated,
+// strategy regex_only, regex/AID already decisive under regex_judge,
+// caller deadline too short, at capacity, or the judge failed. A judge
+// failure/timeout is logged LOUDLY to stderr; the lane never silently
+// substitutes a clean pass.
+func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
+	if a == nil || a.hookJudge == nil || a.scannerCfg == nil || content == "" {
+		return nil
+	}
+	jcfg := &a.scannerCfg.Guardrail.Judge
+	if !jcfg.HookConnectorEnabled(connector) {
+		return nil
+	}
+
+	switch a.scannerCfg.Guardrail.EffectiveStrategy(strategyDirection) {
 	case "judge_first":
 		// Judge always runs.
 	case "regex_judge":
@@ -663,10 +727,12 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 		return nil
 	}
 
-	// The legacy /inspect handler runs under a 200ms deadline
+	// The generic /inspect handlers run under a 200ms deadline
 	// (inspectScanTimeout) — no judge round-trip fits, and blowing
 	// that deadline would 504 the whole verdict. Skip unless the
-	// caller's remaining budget can plausibly carry an LLM call.
+	// caller's remaining budget can plausibly carry an LLM call. The
+	// tool lanes pass a deadline-free context.Background() so they are
+	// never gated out here (J3-3c).
 	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < time.Second {
 		return nil
 	}
@@ -675,7 +741,7 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 	case a.hookJudgeSem <- struct{}{}:
 	default:
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (at capacity) connector=%s direction=%s\n",
-			req.Connector, direction)
+			connector, strategyDirection)
 		return nil
 	}
 	defer func() { <-a.hookJudgeSem }()
@@ -687,12 +753,22 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 	jctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	toolName := req.Tool
 	if strings.EqualFold(toolName, "message") {
 		toolName = ""
 	}
-	v := a.hookJudge.RunJudges(jctx, direction, content, toolName)
+	v := a.hookJudge.RunJudges(jctx, judgeDirection, content, toolName)
 	if v == nil || v.JudgeFailed {
+		// Degrade LOUD: surface the judge unavailability so operators
+		// can see the lane fell back to the regex/AID verdict rather
+		// than mistaking the absence of a judge finding for a clean
+		// judge pass. Fail-open to the local verdict matches the proxy
+		// lane (guardrail.go judge_first fallback) and the AID lane.
+		failedScanner := ""
+		if v != nil {
+			failedScanner = v.Scanner
+		}
+		fmt.Fprintf(os.Stderr, "[inspect] hook judge unavailable (connector=%s direction=%s scanner=%q); keeping regex/AID verdict\n",
+			connector, strategyDirection, failedScanner)
 		return nil
 	}
 	return v
@@ -731,7 +807,11 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		if strings.ToLower(req.Tool) == "message" && (req.Content != "" || req.Direction == "outbound") {
 			v = a.inspectMessageContent(ctx, &req)
 		} else {
-			v = a.inspectToolPolicy(&req)
+			// Pass the 200ms-capped ctx so the tool-call judge lane's
+			// deadline guard short-circuits on this generic endpoint
+			// (mirroring the message lane); native hook callers go
+			// through inspectToolPolicy with a deadline-free context.
+			v = a.inspectToolPolicyCtx(ctx, &req)
 		}
 		ch <- verdictResult{v}
 	}()
