@@ -76,6 +76,32 @@ def test_plugins_gate_follows_filter_in_multi_connector(monkeypatch) -> None:
     assert "plugins" not in app._visible_panels()
 
 
+def test_plugins_visible_under_all_when_openclaw_in_set(monkeypatch) -> None:
+    """A4: under the merged "All" view the Plugins tab shows whenever OpenClaw
+    is anywhere in the active set — even when the primary connector is Codex.
+    Previously both gates resolved to the primary under "All", hiding Plugins
+    for a ``[codex, openclaw]`` roster."""
+
+    app = DefenseClawTUI(config=_config_for("codex"))
+    monkeypatch.setattr(app, "_active_connector_names", lambda: ["codex", "openclaw"])
+
+    app.connector_filter = ""  # All
+    assert app._panel_hidden("plugins") is False
+    assert "plugins" in app._visible_panels()
+
+
+def test_plugins_hidden_under_all_without_openclaw(monkeypatch) -> None:
+    """A4 guard: the "All" view with no OpenClaw in the active set keeps the
+    Plugins tab hidden (no false positive from the active-set clause)."""
+
+    app = DefenseClawTUI(config=_config_for("codex"))
+    monkeypatch.setattr(app, "_active_connector_names", lambda: ["codex", "cursor"])
+
+    app.connector_filter = ""  # All
+    assert app._panel_hidden("plugins") is True
+    assert "plugins" not in app._visible_panels()
+
+
 @pytest.mark.asyncio
 async def test_digit_five_is_noop_when_plugins_hidden() -> None:
     app = DefenseClawTUI(config=_config_for("claudecode"))

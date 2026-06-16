@@ -140,6 +140,14 @@ def status(app: AppContext, as_json: bool) -> None:
         else:
             click.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('not found', fg='yellow')}")
 
+    # N3: surface the active policy's scanner action overrides (data.json).
+    # Only `policy show` exposed these before, so `status` was blind to a
+    # policy that, say, downgrades a scanner surface to warn/allow. Empty for a
+    # policy that declares none, so the common case renders nothing.
+    overrides_summary = _scanner_overrides_summary(cfg)
+    if overrides_summary:
+        click.echo(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}")
+
     # Counts from DB. The numeric labels stay tight-aligned to match
     # the legacy 16-char column; we color the labels and leave the
     # numbers in default fg so they stand out.
@@ -484,6 +492,44 @@ def _print_observability_status(cfg) -> None:
                 click.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
         elif d.enabled and d.endpoint:
             click.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
+
+
+def _scanner_overrides_summary(cfg) -> str:
+    """One-line summary of the active policy's scanner action overrides (N3).
+
+    Reads the active policy's synced ``data.json`` (the same file ``policy
+    show`` reads) and formats its ``scanner_overrides`` block, e.g.
+    ``mcp: MEDIUM install=block, file=quarantine | plugin: HIGH ...``. Returns
+    ``""`` when the policy declares none or the file is unreadable, so default
+    installs and missing-policy installs render nothing.
+    """
+    try:
+        from defenseclaw.enforce.admission import _read_policy_data
+        from defenseclaw.tui.services.overview_state import (
+            format_scanner_overrides_summary,
+        )
+
+        data = _read_policy_data(getattr(cfg, "policy_dir", "") or "")
+    except Exception:  # noqa: BLE001 — the override line is purely informational.
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    overrides = data.get("scanner_overrides", {})
+    flat: list[tuple[str, str, str, str]] = []
+    if isinstance(overrides, dict):
+        for scanner_type, sevs in overrides.items():
+            if not isinstance(sevs, dict):
+                continue
+            for severity, surface_actions in sevs.items():
+                if not isinstance(surface_actions, dict):
+                    continue
+                for surface in ("install", "file", "runtime"):
+                    action = surface_actions.get(surface)
+                    if action:
+                        flat.append(
+                            (str(scanner_type), str(severity), surface, str(action))
+                        )
+    return format_scanner_overrides_summary(tuple(flat))
 
 
 def _scanner_status_map(cfg) -> dict[str, str]:
