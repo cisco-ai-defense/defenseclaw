@@ -72,15 +72,36 @@ def _status_row(key: str, value: str) -> None:
 
 
 @click.command()
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help=(
+        "Emit status as a JSON document (environment, scanners, enforcement, "
+        "activity, and the full per-connector roster with effective mode). "
+        "Config/DB-derived; no live /health counters."
+    ),
+)
 @pass_ctx
-def status(app: AppContext) -> None:
+def status(app: AppContext, as_json: bool) -> None:
     """Show DefenseClaw status.
 
     Displays environment, sandbox health, scanner availability,
     enforcement counts, and activity summary. On multi-connector installs
     it also lists the active connector roster with each peer's mode.
+
+    ``--json`` emits the same information as a machine-readable document for
+    automation and the TUI.
     """
     cfg = app.cfg
+
+    # SU-13: machine-readable status for automation/TUI. Emitted before any
+    # human rendering so the output is pure JSON.
+    if as_json:
+        import json
+
+        click.echo(json.dumps(_status_payload(app), indent=2))
+        return
 
     # Title block — `═` divider matches the legacy double-line look
     # but now scales to the title length and renders cyan-bold.
@@ -123,9 +144,23 @@ def status(app: AppContext) -> None:
     # the legacy 16-char column; we color the labels and leave the
     # numbers in default fg so they stand out.
     if app.store:
+        # SU-05: surface audit-DB errors instead of silently dropping the
+        # Enforcement + Activity sections. The previous bare `except: pass`
+        # made the output look complete when the DB was missing/locked/corrupt
+        # — the operator saw neither counts nor any error. Render the section
+        # headers with an explicit "unavailable" line on failure. status stays
+        # exit-0 (it is an informational command parsed by the TUI/scripts and
+        # should not hard-fail on a transient DB read); the error is visible.
         try:
             counts = app.store.get_counts()
-            ux.section("Enforcement")
+        except Exception as exc:  # noqa: BLE001 — surface the error, don't hide it
+            counts = None
+            db_error = str(exc)
+        else:
+            db_error = ""
+
+        ux.section("Enforcement")
+        if counts is not None:
             for label, val in (
                 ("Blocked skills", counts.blocked_skills),
                 ("Allowed skills", counts.allowed_skills),
@@ -133,14 +168,24 @@ def status(app: AppContext) -> None:
                 ("Allowed MCPs", counts.allowed_mcps),
             ):
                 click.echo(f"    {_label((label + ':').ljust(16))} {val}")
-            ux.section("Activity")
+        else:
+            click.echo(
+                f"    {ux._style('unavailable', fg='yellow')} "
+                f"{ux.dim(f'(audit DB error: {db_error})')}"
+            )
+
+        ux.section("Activity")
+        if counts is not None:
             for label, val in (
                 ("Total scans", counts.total_scans),
                 ("Active alerts", counts.alerts),
             ):
                 click.echo(f"    {_label((label + ':').ljust(16))} {val}")
-        except Exception:
-            pass
+        else:
+            click.echo(
+                f"    {ux._style('unavailable', fg='yellow')} "
+                f"{ux.dim(f'(audit DB error: {db_error})')}"
+            )
 
     # Observability destinations (OTel exporter + audit sinks)
     _print_observability_status(cfg)
@@ -439,3 +484,123 @@ def _print_observability_status(cfg) -> None:
                 click.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
         elif d.enabled and d.endpoint:
             click.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
+
+
+def _scanner_status_map(cfg) -> dict[str, str]:
+    """Scanner availability as a JSON-friendly map (mirrors the text Scanners
+    section): ``installed`` / ``not_found`` / ``built-in``."""
+    out: dict[str, str] = {}
+    for name, binary in (
+        ("skill-scanner", cfg.scanners.skill_scanner.binary),
+        ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
+        ("codeguard", "built-in"),
+    ):
+        if binary == "built-in":
+            out[name] = "built-in"
+        else:
+            out[name] = "installed" if shutil.which(binary) else "not_found"
+    return out
+
+
+def _connector_roster(cfg) -> list[dict]:
+    """Config-derived connector roster (name / friendly / mode / enabled).
+
+    Shares the ``active_connectors()`` + ``effective_mode`` / ``effective_enabled``
+    derivation used by the human ``Agents`` section (minus the live /health
+    annotations), so ``status --json`` and the text output never disagree. It is
+    phantom-safe: ``active_connectors()`` returns ``[]`` on an unconfigured
+    install, so the roster is empty rather than a fabricated ``openclaw``.
+    """
+    try:
+        actives = [c for c in (cfg.active_connectors() if hasattr(cfg, "active_connectors") else []) if c]
+    except Exception:
+        actives = []
+    gc = getattr(cfg, "guardrail", None)
+
+    def _mode(name: str) -> str:
+        if gc is not None and hasattr(gc, "effective_mode"):
+            try:
+                return (gc.effective_mode(name) or "").strip()
+            except Exception:
+                return ""
+        return ""
+
+    def _enabled(name: str) -> bool:
+        if gc is None or not hasattr(gc, "effective_enabled"):
+            return True
+        try:
+            return bool(gc.effective_enabled(name))
+        except Exception:
+            return True
+
+    return [
+        {
+            "name": c,
+            "friendly": _friendly_connector_name(c),
+            "mode": _mode(c),
+            "enabled": _enabled(c),
+        }
+        for c in actives
+    ]
+
+
+def _status_payload(app) -> dict:
+    """Build the machine-readable status document for ``status --json`` (SU-13).
+
+    Config + audit-DB derived only (no live ``/health`` call) so the JSON is
+    fast and reliable for automation even when the sidecar is down. Includes a
+    cheap ``sidecar.running`` probe but not per-connector live counters.
+    SU-05: audit-DB read failures surface as ``enforcement``/``activity`` =
+    ``null`` plus an ``audit_db_error`` field, never a silent drop.
+    """
+    cfg = app.cfg
+    payload: dict = {
+        "environment": cfg.environment,
+        "data_dir": cfg.data_dir,
+        "config": f"{cfg.data_dir}/config.yaml",
+        "audit_db": cfg.audit_db,
+        "scope": _connector_scope_text(cfg),
+        "sandbox": {"available": bool(shutil.which(cfg.openshell.binary))},
+        "scanners": _scanner_status_map(cfg),
+        "connectors": _connector_roster(cfg),
+    }
+
+    if app.store:
+        try:
+            counts = app.store.get_counts()
+        except Exception as exc:  # noqa: BLE001 — surface, don't hide (SU-05)
+            payload["enforcement"] = None
+            payload["activity"] = None
+            payload["audit_db_error"] = str(exc)
+        else:
+            payload["enforcement"] = {
+                "blocked_skills": counts.blocked_skills,
+                "allowed_skills": counts.allowed_skills,
+                "blocked_mcps": counts.blocked_mcps,
+                "allowed_mcps": counts.allowed_mcps,
+            }
+            payload["activity"] = {
+                "total_scans": counts.total_scans,
+                "active_alerts": counts.alerts,
+            }
+    else:
+        payload["enforcement"] = None
+        payload["activity"] = None
+
+    bind = "127.0.0.1"
+    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
+        bind = cfg.guardrail.host
+    try:
+        from defenseclaw.gateway import OrchestratorClient
+
+        client = OrchestratorClient(
+            host=bind,
+            port=cfg.gateway.api_port,
+            token=cfg.gateway.resolved_token(),
+        )
+        running = bool(client.is_running())
+    except Exception:
+        running = False
+    payload["sidecar"] = {"running": running}
+
+    return payload
