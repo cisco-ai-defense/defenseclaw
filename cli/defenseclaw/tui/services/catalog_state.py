@@ -109,6 +109,15 @@ class CatalogCommandIntent:
     binary: str = "defenseclaw"
     category: str = "enforce"
     hint: str = ""
+    # N1: self-described risk so the dispatcher can route a known-destructive
+    # action (e.g. plugin remove, which deletes files from disk) through the
+    # strong consequence/danger confirm instead of relying solely on the
+    # ``infer_command_risk`` keyword heuristic. ``"read-only"`` (the default)
+    # preserves existing behaviour: the command preview re-classifies the risk
+    # from the argv, so every other intent is unchanged. The app dispatch that
+    # upgrades a ``"destructive"`` catalog intent to the C1 consequence modal
+    # lives in ``app.py`` (the ``tui/app`` lane).
+    risk: str = "read-only"
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -1300,6 +1309,9 @@ def plugin_action_intent(
         label=f"{label_prefix} {target}",
         args=tuple(args),
         origin=origin,
+        # N1: plugin remove (``x``) deletes files from disk — flag it so the
+        # dispatcher routes it through the destructive/consequence confirm.
+        risk="destructive" if key == "x" else "read-only",
     )
 
 
