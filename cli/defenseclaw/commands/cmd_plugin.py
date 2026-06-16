@@ -1737,65 +1737,95 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 # plugin disable (runtime, via gateway RPC)
 # ---------------------------------------------------------------------------
 
+_PLUGIN_RUNTIME_PROBE_CONNECTORS = {"claudecode"}
+
+
+def _normalize_runtime_connector(connector: str) -> str:
+    from defenseclaw import connector_paths
+    return connector_paths.normalize(connector or "openclaw")
+
+
+def _plugin_runtime_probe_enforced(connector: str) -> bool:
+    return _normalize_runtime_connector(connector) in _PLUGIN_RUNTIME_PROBE_CONNECTORS
+
+
+def _warn_plugin_runtime_disable_advisory(plugin_name: str, connector: str, scoped: bool) -> None:
+    scope = f"connector={connector}" if scoped else f"active connector={connector}"
+    click.secho(
+        f"warning: plugin runtime disable is advisory for {scope}; that connector "
+        "does not emit plugin runtime events DefenseClaw can gate. Use "
+        f"'defenseclaw plugin quarantine {plugin_name}"
+        + (f" --connector {connector}" if scoped else "")
+        + "' for hard enforcement on that peer.",
+        fg="yellow",
+    )
+
+
 @plugin.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for disabling")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
 def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
-    """Disable a plugin at runtime via the gateway.
+    """Disable a plugin at runtime.
 
-    Sends an RPC to prevent the agent from using the plugin until
-    re-enabled. This is runtime-only — it does not block install or
+    OpenClaw uses the gateway RPC. Hook connectors store a runtime-disable
+    policy row that the hook runtime gate enforces when that connector emits
+    plugin runtime events. This is runtime-only — it does not block install or
     quarantine files.
 
-    Requires the gateway to be running. Runtime disable is OpenClaw-only;
-    bare records the disable GLOBALLY, ``--connector openclaw`` narrows the
-    audit record to that peer.
+    Bare records the disable GLOBALLY, ``--connector <name>`` narrows the
+    runtime-disable record to that peer.
     """
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
-    # N5: runtime disable is OpenClaw-only. The gateway RPC patches
-    # OpenClaw's plugins.allow / plugins.entries schema (see Go
-    # internal/gateway/rpc.go:pluginConfigRaw); no hook connector exposes an
-    # equivalent runtime toggle. Resolve the requested connector (a non-empty
-    # --connector validates against the active set) and fail loudly on a
-    # non-OpenClaw peer rather than silently patching the wrong schema and
-    # reporting a false success. A real hook-connector runtime-disable
-    # mechanism is a gateway-side follow-up (plugins.md N5(c)).
-    connector = resolve_list_connector(app, connector_flag)
-    if connector != "openclaw":
-        click.echo(
-            f"error: runtime disable is unsupported for {connector!r} — only "
-            f"OpenClaw exposes a runtime plugin toggle. Use "
-            f"'defenseclaw plugin quarantine {name}' to neutralize its files "
-            f"instead.",
-            err=True,
-        )
-        raise SystemExit(1)
-
-    plugin_name = _resolve_openclaw_plugin_id(name, connector)
-
-    client = _sidecar_client(app)
-    try:
-        resp = client.disable_plugin(plugin_name)
-    except Exception as exc:
-        click.echo(f"error: gateway disable failed: {exc}", err=True)
-        raise SystemExit(1)
-
-    if resp.get("status") != "disabled":
-        click.echo(f"error: gateway returned unexpected response: {resp}", err=True)
-        raise SystemExit(1)
-
-    click.echo(f"[plugin] {plugin_name!r} disabled via gateway RPC")
+    connector = _normalize_runtime_connector(resolve_list_connector(app, connector_flag))
+    plugin_name = (
+        _resolve_openclaw_plugin_id(name, connector)
+        if connector == "openclaw"
+        else os.path.basename(name)
+    )
 
     if not reason:
         reason = "manual disable via CLI"
 
     pe = PolicyEngine(app.store)
+    if connector == "openclaw":
+        client = _sidecar_client(app)
+        try:
+            resp = client.disable_plugin(plugin_name)
+        except Exception as exc:
+            click.echo(f"error: gateway disable failed: {exc}", err=True)
+            raise SystemExit(1)
+
+        if resp.get("status") != "disabled":
+            click.echo(f"error: gateway returned unexpected response: {resp}", err=True)
+            raise SystemExit(1)
+
+        click.echo(f"[plugin] {plugin_name!r} disabled via gateway RPC")
+    elif connector_flag:
+        click.echo(
+            f"[plugin] {plugin_name!r} runtime disable recorded "
+            f"(connector={connector})"
+        )
+        if _plugin_runtime_probe_enforced(connector):
+            click.echo(
+                f"  Enforced by hook runtime gate for connector={connector}."
+            )
+        else:
+            _warn_plugin_runtime_disable_advisory(plugin_name, connector, True)
+    else:
+        click.echo(f"[plugin] {plugin_name!r} runtime disable recorded globally")
+        if _plugin_runtime_probe_enforced(connector):
+            click.echo(
+                "  Enforced by hook runtime gates for connectors that emit plugin events."
+            )
+        else:
+            _warn_plugin_runtime_disable_advisory(plugin_name, connector, False)
+
     if connector_flag:
-        pe.disable_for_connector("plugin", plugin_name, connector_flag, reason)
+        pe.disable_for_connector("plugin", plugin_name, connector, reason)
     else:
         pe.disable("plugin", plugin_name, reason)
 
@@ -1814,7 +1844,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
 def enable(app: AppContext, name: str, connector_flag: str) -> None:
-    """Enable a previously disabled plugin via the gateway.
+    """Enable a previously disabled plugin.
 
     This is a runtime-only action. ``--connector <name>`` clears only that
     peer's runtime-disable record (bare clears the global record).
@@ -1822,37 +1852,37 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
-    # N5: runtime enable is OpenClaw-only — mirror of disable(). The gateway
-    # RPC speaks OpenClaw's plugins schema only, so fail loudly on a
-    # non-OpenClaw peer rather than misfiring a config patch.
-    connector = resolve_list_connector(app, connector_flag)
-    if connector != "openclaw":
+    connector = _normalize_runtime_connector(resolve_list_connector(app, connector_flag))
+    plugin_name = (
+        _resolve_openclaw_plugin_id(name, connector)
+        if connector == "openclaw"
+        else os.path.basename(name)
+    )
+
+    if connector == "openclaw":
+        client = _sidecar_client(app)
+        try:
+            resp = client.enable_plugin(plugin_name)
+        except Exception as exc:
+            click.echo(f"error: gateway enable failed: {exc}", err=True)
+            raise SystemExit(1)
+
+        if resp.get("status") != "enabled":
+            click.echo(f"error: gateway returned unexpected response: {resp}", err=True)
+            raise SystemExit(1)
+
+        click.echo(f"[plugin] {plugin_name!r} enabled via gateway RPC")
+    elif connector_flag:
         click.echo(
-            f"error: runtime enable is unsupported for {connector!r} — only "
-            f"OpenClaw exposes a runtime plugin toggle. Use "
-            f"'defenseclaw plugin restore {name}' if you quarantined its files.",
-            err=True,
+            f"[plugin] {plugin_name!r} runtime disable cleared "
+            f"(connector={connector})"
         )
-        raise SystemExit(1)
-
-    plugin_name = _resolve_openclaw_plugin_id(name, connector)
-
-    client = _sidecar_client(app)
-    try:
-        resp = client.enable_plugin(plugin_name)
-    except Exception as exc:
-        click.echo(f"error: gateway enable failed: {exc}", err=True)
-        raise SystemExit(1)
-
-    if resp.get("status") != "enabled":
-        click.echo(f"error: gateway returned unexpected response: {resp}", err=True)
-        raise SystemExit(1)
-
-    click.echo(f"[plugin] {plugin_name!r} enabled via gateway RPC")
+    else:
+        click.echo(f"[plugin] {plugin_name!r} global runtime disable cleared")
 
     pe = PolicyEngine(app.store)
     if connector_flag:
-        pe.enable_for_connector("plugin", plugin_name, connector_flag)
+        pe.enable_for_connector("plugin", plugin_name, connector)
     else:
         pe.enable("plugin", plugin_name)
 
