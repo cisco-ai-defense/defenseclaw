@@ -616,10 +616,12 @@ class TestPluginInfo(PluginCommandTestBase):
         self.assertIn("Quarantined: False", result.output)
 
     def test_info_not_installed(self):
+        # P-D: a plugin that exists nowhere (not installed, no scan/enforcement
+        # record, not quarantined) errors with a not-found message instead of
+        # rendering a phantom "Installed: False" card. Mirrors skill SK-2.
         result = self.invoke(["info", "ghost-plugin"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("ghost-plugin", result.output)
-        self.assertIn("Installed:   False", result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("not found", result.output)
 
     def test_info_json_installed(self):
         self._install_plugin("jsonplug")
@@ -631,11 +633,11 @@ class TestPluginInfo(PluginCommandTestBase):
         self.assertIn("path", data)
 
     def test_info_json_not_installed(self):
+        # P-D: even with --json, a true miss errors rather than emitting a
+        # phantom not-installed card.
         result = self.invoke(["info", "missing-plug", "--json"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        data = json.loads(result.output.strip())
-        self.assertFalse(data["installed"])
-        self.assertEqual(data["name"], "missing-plug")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("not found", result.output)
 
 
 @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
