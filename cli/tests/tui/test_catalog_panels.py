@@ -603,6 +603,60 @@ def test_mcp_and_plugin_mutation_intents_thread_focus() -> None:
     assert plugin.handle_key("s").intent.args == ("plugin", "scan", "pg", "--connector", "codex")
 
 
+def test_action_intents_target_selected_row_owner_under_all() -> None:
+    """R5 (A3/E2/E3): under the merged "All" view focus is OFF, yet every row is
+    tagged with its owning connector. scan/info/install/unset must target that
+    owner — not the active/primary connector ("could not resolve skill" /
+    "No MCP servers configured") — while global block/allow stay connector-agnostic."""
+
+    skills = SkillsPanelModel(connector="codex")
+    skills.show_connector_column = True
+    skills.apply_merged(
+        [
+            ("codex", json.dumps([{"name": "alpha", "status": "active"}])),
+            ("cursor", json.dumps([{"name": "beta", "status": "active"}])),
+        ]
+    )
+    # The "All" view: no focus, so only the row's own owner drives --connector.
+    assert skills.connector_focus_enabled is False
+
+    skills.select_row(1)  # the cursor-owned row
+    assert skills.selected().name == "beta"
+    assert skills.action_intent("s").args == ("skill", "scan", "beta", "--connector", "cursor")
+    assert skills.action_intent("i").args == ("skill", "info", "beta", "--connector", "cursor")
+    # Enforcement verbs stay global even with a tagged row.
+    assert skills.action_intent("b").args == ("skill", "block", "beta")
+    assert skills.action_intent("a").args == ("skill", "allow", "beta")
+
+    skills.select_row(0)  # the codex-owned row → its own owner, not "all"
+    assert skills.action_intent("s").args == ("skill", "scan", "alpha", "--connector", "codex")
+
+    mcp = MCPsPanelModel(connector="codex")
+    mcp.show_connector_column = True
+    mcp.apply_merged(
+        [
+            ("codex", json.dumps([{"name": "srv-a"}])),
+            ("cursor", json.dumps([{"name": "srv-b"}])),
+        ]
+    )
+    mcp.select_row(1)
+    assert mcp.action_intent("s").args == ("mcp", "scan", "srv-b", "--connector", "cursor")
+    assert mcp.action_intent("x").args == ("mcp", "unset", "srv-b", "--connector", "cursor")
+
+    plugin = PluginsPanelModel(connector="openclaw")
+    plugin.show_connector_column = True
+    plugin.apply_merged(
+        [
+            ("openclaw", json.dumps([{"id": "pg-a", "name": "pg-a"}])),
+            ("codex", json.dumps([{"id": "pg-b", "name": "pg-b"}])),
+        ]
+    )
+    plugin.select_row(1)
+    assert plugin.action_intent("s").args == ("plugin", "scan", "pg-b", "--connector", "codex")
+    # Direct-scan ('s' in handle_key) follows the row owner too.
+    assert plugin.handle_key("s").intent.args == ("plugin", "scan", "pg-b", "--connector", "codex")
+
+
 def test_catalog_apply_merged_tags_connector_and_adds_column() -> None:
     """8.13 pass 2: merging connectors tags each row with its origin and
     prepends a CONNECTOR column to the rendered table."""

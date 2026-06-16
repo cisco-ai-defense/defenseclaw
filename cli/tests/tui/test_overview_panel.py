@@ -401,6 +401,12 @@ def test_connector_labels_cover_hook_surface_connectors() -> None:
     assert ".codeium/windsurf/hooks.json" in connector_source_label("windsurf", "config")
     assert ".gemini/extensions" in connector_source_label("geminicli", "plugins")
     assert ".github/mcp.json" in connector_source_label("copilot", "mcps")
+    # opencode MCP is now managed by DefenseClaw (read+write via the bridge
+    # path layer), so the source label points at its real config and no longer
+    # advertises "unmanaged in v1".
+    opencode_mcps = connector_source_label("opencode", "mcps")
+    assert ".config/opencode/opencode.json" in opencode_mcps
+    assert "unmanaged" not in opencode_mcps
 
     health = HealthSnapshot(connector=ConnectorHealth(name="codex"))
     assert active_connector_name(health, "openclaw") == "codex"
