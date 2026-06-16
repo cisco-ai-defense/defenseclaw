@@ -54,6 +54,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_SETUP_OBSERVABILITY
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
+from defenseclaw.config import locked_config_yaml, write_config_yaml_secure
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.observability import (
     PRESETS,
@@ -65,6 +66,25 @@ from defenseclaw.observability import (
     remove_destination,
     resolve_preset,
     set_destination_enabled,
+)
+from defenseclaw.observability.writer import _NAME_RE as _SINK_NAME_RE
+
+# Per-connector (D5b) sink writes reuse the writer's preset-resolution,
+# sink-entry builder, and secret writer so the per-connector path never
+# drifts from the global ``apply_preset`` path. They are imported (not
+# re-implemented) because the writer module is outside this lane's edit
+# surface; the per-connector routing target is the only difference.
+from defenseclaw.observability.writer import (
+    CONFIG_FILE_NAME as _OBS_CONFIG_FILE_NAME,
+)
+from defenseclaw.observability.writer import (
+    _apply_secret,
+    _build_sink_entry,
+    _destination_name,
+    _resolve_inputs,
+    _resolve_target,
+    _sink_endpoint,
+    _sink_preset_id,
 )
 
 # All prompt keys across all presets. Exposed as Click options so the
@@ -114,6 +134,12 @@ def observability() -> None:
               help="Secret value to persist under the preset's token_env in ~/.defenseclaw/.env")
 @click.option("--enabled/--disabled", "enabled", default=True,
               help="Mark destination enabled (default) or disabled")
+@click.option("--connector", default=None,
+              help="Scope this sink to a connector (omit = global). A connector's "
+                   "events route to its per-connector audit_sinks when set, "
+                   "falling back to the global audit_sinks otherwise. Applies to "
+                   "audit_sinks only (the OTel gateway exporter is a single "
+                   "global block).")
 @click.option("--dry-run", is_flag=True, help="Preview YAML/dotenv changes without writing")
 @click.option("--non-interactive", is_flag=True, help="Skip prompts; use flags only")
 # Prompt flags — shared across all presets; writer resolves per-preset.
@@ -141,6 +167,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     signals: str | None,
     token_value: str | None,
     enabled: bool,
+    connector: str | None,
     dry_run: bool,
     non_interactive: bool,
     realm, site, region, dataset,
@@ -189,23 +216,37 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             raise SystemExit(2)
         signal_tuple = parsed  # type: ignore[assignment]
 
+    connector_name = (connector or "").strip()
     try:
-        result = apply_preset(
-            preset.id,
-            inputs,
-            app.cfg.data_dir,
-            name=name,
-            enabled=enabled,
-            signals=signal_tuple,
-            secret_value=token_value,
-            target_override=target,
-            dry_run=dry_run,
-        )
+        if connector_name:
+            result = _apply_sink_to_connector(
+                preset,
+                inputs,
+                app.cfg.data_dir,
+                connector_name,
+                name=name,
+                enabled=enabled,
+                secret_value=token_value,
+                target_override=target,
+                dry_run=dry_run,
+            )
+        else:
+            result = apply_preset(
+                preset.id,
+                inputs,
+                app.cfg.data_dir,
+                name=name,
+                enabled=enabled,
+                signals=signal_tuple,
+                secret_value=token_value,
+                target_override=target,
+                dry_run=dry_run,
+            )
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
 
-    _print_write_result(result, dry_run=dry_run)
+    _print_write_result(result, dry_run=dry_run, connector=connector_name)
     print_redaction_status_hint(app.cfg)
     click.echo()
 
@@ -213,7 +254,8 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         app.logger.log_action(
             ACTION_SETUP_OBSERVABILITY,
             "config",
-            f"action=add preset={preset.id} name={result.name} target={result.target}",
+            f"action=add preset={preset.id} name={result.name} target={result.target}"
+            + (f" connector={connector_name}" if connector_name else ""),
         )
 
 
@@ -224,9 +266,45 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
 
 @observability.command("list")
 @click.option("--json", "emit_json", is_flag=True, help="Emit machine-readable JSON")
+@click.option("--connector", default=None,
+              help="List a connector's per-connector audit_sinks (omit = global). "
+                   "When the connector has no per-connector sinks it inherits the "
+                   "global audit_sinks.")
 @pass_ctx
-def list_cmd(app: AppContext, emit_json: bool) -> None:
+def list_cmd(app: AppContext, emit_json: bool, connector: str | None) -> None:
     """List configured observability destinations."""
+    connector_name = (connector or "").strip()
+    if connector_name:
+        dests = _connector_destinations(app.cfg.data_dir, connector_name)
+        if dests is None:
+            if emit_json:
+                click.echo("[]")
+                return
+            ux.subhead(
+                f"No per-connector audit_sinks for {connector_name!r} — "
+                "inherits the global audit_sinks."
+            )
+            return
+        if emit_json:
+            click.echo(_json.dumps([_dest_to_dict(d) for d in dests], indent=2))
+            return
+        if not dests:
+            ux.subhead(f"Connector {connector_name!r} has an explicit empty sink set.")
+            return
+        click.echo()
+        ux.section(f"Observability destinations — connector {connector_name}")
+        click.echo(f"  {'NAME':<40} {'KIND':<12} {'ENABLED':<8} {'PRESET':<18} ENDPOINT")
+        click.echo(f"  {'-' * 40} {'-' * 12} {'-' * 8} {'-' * 18} {'-' * 40}")
+        for d in dests:
+            endpoint = d.endpoint or "(none)"
+            if len(endpoint) > 60:
+                endpoint = endpoint[:57] + "..."
+            click.echo(
+                f"  {ux.bold(f'{d.name:<40}')} {d.kind:<12} {('yes' if d.enabled else 'no'):<8} "
+                f"{(d.preset_id or '-'):<18} {endpoint}",
+            )
+        click.echo()
+        return
     dests = list_destinations(app.cfg.data_dir)
     if emit_json:
         click.echo(_json.dumps([_dest_to_dict(d) for d in dests], indent=2))
@@ -257,28 +335,38 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
 
 @observability.command("enable")
 @click.argument("name")
+@click.option("--connector", default=None, help="Target a connector's per-connector sink")
 @pass_ctx
-def enable_cmd(app: AppContext, name: str) -> None:
+def enable_cmd(app: AppContext, name: str, connector: str | None) -> None:
     """Enable a destination (``name=otel`` targets the gateway exporter)."""
+    connector_name = (connector or "").strip()
     try:
-        result = set_destination_enabled(name, True, app.cfg.data_dir)
+        if connector_name:
+            result = _set_connector_sink_enabled(app.cfg.data_dir, connector_name, name, True)
+        else:
+            result = set_destination_enabled(name, True, app.cfg.data_dir)
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result, dry_run=False)
+    _print_write_result(result, dry_run=False, connector=connector_name)
 
 
 @observability.command("disable")
 @click.argument("name")
+@click.option("--connector", default=None, help="Target a connector's per-connector sink")
 @pass_ctx
-def disable_cmd(app: AppContext, name: str) -> None:
+def disable_cmd(app: AppContext, name: str, connector: str | None) -> None:
     """Disable a destination."""
+    connector_name = (connector or "").strip()
     try:
-        result = set_destination_enabled(name, False, app.cfg.data_dir)
+        if connector_name:
+            result = _set_connector_sink_enabled(app.cfg.data_dir, connector_name, name, False)
+        else:
+            result = set_destination_enabled(name, False, app.cfg.data_dir)
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result, dry_run=False)
+    _print_write_result(result, dry_run=False, connector=connector_name)
 
 
 # ---------------------------------------------------------------------------
@@ -288,19 +376,25 @@ def disable_cmd(app: AppContext, name: str) -> None:
 
 @observability.command("remove")
 @click.argument("name")
+@click.option("--connector", default=None, help="Target a connector's per-connector sink")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @pass_ctx
-def remove_cmd(app: AppContext, name: str, yes: bool) -> None:
+def remove_cmd(app: AppContext, name: str, connector: str | None, yes: bool) -> None:
     """Delete a destination (``name=otel`` disables but preserves the block)."""
-    if not yes and not click.confirm(f"  Remove destination {name!r}?", default=False):
+    connector_name = (connector or "").strip()
+    label = f"{name!r}" + (f" (connector {connector_name})" if connector_name else "")
+    if not yes and not click.confirm(f"  Remove destination {label}?", default=False):
         click.echo("  Aborted.")
         return
     try:
-        result = remove_destination(name, app.cfg.data_dir)
+        if connector_name:
+            result = _remove_connector_sink(app.cfg.data_dir, connector_name, name)
+        else:
+            result = remove_destination(name, app.cfg.data_dir)
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result, dry_run=False)
+    _print_write_result(result, dry_run=False, connector=connector_name)
 
 
 # ---------------------------------------------------------------------------
@@ -755,12 +849,13 @@ def _tcp_probe(endpoint: str, protocol: str, *, timeout: float) -> tuple[bool, s
 # ---------------------------------------------------------------------------
 
 
-def _print_write_result(result: WriteResult, *, dry_run: bool) -> None:
+def _print_write_result(result: WriteResult, *, dry_run: bool, connector: str = "") -> None:
     click.echo()
     mode_tag = f"{ux.dim('[dry-run]')} " if dry_run else ""
+    scope = f" {ux.dim('@' + connector)}" if connector else ""
     click.echo(
         f"  {mode_tag}{ux.bold(result.target)}:{ux.bold(result.name)} "
-        f"(preset={result.preset_id})"
+        f"(preset={result.preset_id}){scope}"
     )
     line_indent = "      " if dry_run else "    "
     for line in result.yaml_changes:
@@ -784,6 +879,251 @@ def _dest_to_dict(d: Destination) -> dict[str, Any]:
         "endpoint": d.endpoint,
         "signals": d.signals,
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-connector audit_sinks (D5b)
+#
+# These write a SURGICAL slice of ``config.yaml`` —
+# ``observability.connectors[<name>].audit_sinks`` — under the shared config
+# lock, mirroring the sibling ``defenseclaw.observability.writer`` (which
+# writes the top-level ``audit_sinks:`` list). They deliberately do NOT route
+# through ``Config.save()``: that would re-serialize the whole (possibly
+# stale) dataclass and could clobber a concurrently-written global block. The
+# ``observability.connectors`` schema is round-tripped by
+# ``config.ObservabilityConfig`` so any *fully-loaded* ``cfg.save()`` (a setup
+# wizard, the TUI) preserves these entries.
+#
+# Preset resolution, the sink-entry builder, and the secret writer are reused
+# from the writer module so the per-connector path never drifts from the
+# global ``apply_preset`` path — only the routing target differs.
+# ---------------------------------------------------------------------------
+
+
+def _obs_load_raw(path: str) -> dict[str, Any]:
+    import yaml
+
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a mapping at top level")
+    return data
+
+
+def _connector_audit_sinks_list(
+    raw: dict[str, Any], connector: str, *, create: bool,
+) -> list[Any] | None:
+    """Return ``observability.connectors[connector].audit_sinks``.
+
+    ``create=True`` materialises the nested path; ``create=False`` returns
+    ``None`` for a missing path ("inherit the global audit_sinks").
+    """
+    obs = raw.get("observability")
+    if not isinstance(obs, dict):
+        if not create:
+            return None
+        obs = {}
+        raw["observability"] = obs
+    conns = obs.get("connectors")
+    if not isinstance(conns, dict):
+        if not create:
+            return None
+        conns = {}
+        obs["connectors"] = conns
+    entry = conns.get(connector)
+    if not isinstance(entry, dict):
+        if not create:
+            return None
+        entry = {}
+        conns[connector] = entry
+    sinks = entry.get("audit_sinks")
+    if not isinstance(sinks, list):
+        if not create:
+            return None
+        sinks = []
+        entry["audit_sinks"] = sinks
+    return sinks
+
+
+def _prune_observability(raw: dict[str, Any], connector: str) -> None:
+    """Drop now-empty per-connector dimensions / connector / block."""
+    obs = raw.get("observability")
+    if not isinstance(obs, dict):
+        return
+    conns = obs.get("connectors")
+    if not isinstance(conns, dict):
+        return
+    entry = conns.get(connector)
+    if isinstance(entry, dict):
+        if entry.get("audit_sinks") == []:
+            entry.pop("audit_sinks", None)
+        if entry.get("webhooks") == []:
+            entry.pop("webhooks", None)
+        if not entry:
+            conns.pop(connector, None)
+    if not conns:
+        obs.pop("connectors", None)
+    if not obs:
+        raw.pop("observability", None)
+
+
+def _apply_sink_to_connector(
+    preset,
+    inputs: dict[str, str],
+    data_dir: str,
+    connector: str,
+    *,
+    name: str | None,
+    enabled: bool,
+    secret_value: str | None,
+    target_override: str | None,
+    dry_run: bool,
+) -> WriteResult:
+    """Write an audit-sink preset under observability.connectors[connector]."""
+    effective_target = _resolve_target(preset, target_override)
+    if effective_target != "audit_sinks":
+        raise ValueError(
+            "--connector applies to audit_sinks only; the OTel gateway exporter "
+            f"(preset {preset.id!r}) is a single global block. Re-run without "
+            "--connector, or use a sink preset / --target audit_sinks."
+        )
+    resolved_inputs = _resolve_inputs(preset, inputs)
+    dest_name = _destination_name(preset, name, resolved_inputs)
+    if not _SINK_NAME_RE.match(dest_name):
+        raise ValueError(
+            f"destination name {dest_name!r} must match {_SINK_NAME_RE.pattern}"
+        )
+    entry = _build_sink_entry(preset, resolved_inputs, name=dest_name, enabled=enabled)
+
+    warnings: list[str] = []
+    # Secrets land in ~/.defenseclaw/.env (shared per token_env across
+    # connectors, exactly like the global path) — reused verbatim.
+    dotenv_changes = _apply_secret(data_dir, preset, secret_value, dry_run=dry_run)
+
+    if not dry_run:
+        cfg_path = os.path.join(data_dir, _OBS_CONFIG_FILE_NAME)
+        with locked_config_yaml(cfg_path):
+            raw = _obs_load_raw(cfg_path)
+            sinks = _connector_audit_sinks_list(raw, connector, create=True)
+            idx = next(
+                (i for i, s in enumerate(sinks)
+                 if isinstance(s, dict) and s.get("name") == dest_name),
+                -1,
+            )
+            if idx >= 0:
+                warnings.append(
+                    f"observability.connectors[{connector}].audit_sinks[{dest_name}] "
+                    "already existed — fields overwritten (other keys preserved)",
+                )
+                merged = dict(sinks[idx]) if isinstance(sinks[idx], dict) else {}
+                merged.update(entry)
+                sinks[idx] = merged
+            else:
+                sinks.append(entry)
+            write_config_yaml_secure(cfg_path, raw)
+
+    return WriteResult(
+        name=dest_name,
+        target="audit_sinks",
+        preset_id=preset.id,
+        yaml_changes=[
+            f"observability.connectors[{connector}].audit_sinks[{dest_name}] "
+            f"kind={entry.get('kind')} enabled={entry.get('enabled')}",
+        ],
+        dotenv_changes=dotenv_changes,
+        warnings=warnings,
+        dry_run=dry_run,
+    )
+
+
+def _connector_destinations(data_dir: str, connector: str) -> list[Destination] | None:
+    """Return a connector's per-connector audit sinks, or None if unset."""
+    raw = _obs_load_raw(os.path.join(data_dir, _OBS_CONFIG_FILE_NAME))
+    sinks = _connector_audit_sinks_list(raw, connector, create=False)
+    if sinks is None:
+        return None
+    out: list[Destination] = []
+    for sink in sinks:
+        if not isinstance(sink, dict):
+            continue
+        kind = str(sink.get("kind", "") or "")
+        name = str(sink.get("name", "") or "")
+        if not name or not kind:
+            continue
+        out.append(
+            Destination(
+                name=name,
+                target="audit_sinks",
+                kind=kind,
+                enabled=bool(sink.get("enabled", False)),
+                preset_id=_sink_preset_id(sink),
+                endpoint=_sink_endpoint(sink),
+                signals={},
+            ),
+        )
+    return out
+
+
+def _set_connector_sink_enabled(
+    data_dir: str, connector: str, name: str, enabled: bool,
+) -> WriteResult:
+    cfg_path = os.path.join(data_dir, _OBS_CONFIG_FILE_NAME)
+    with locked_config_yaml(cfg_path):
+        raw = _obs_load_raw(cfg_path)
+        sinks = _connector_audit_sinks_list(raw, connector, create=False)
+        idx = next(
+            (i for i, s in enumerate(sinks or [])
+             if isinstance(s, dict) and s.get("name") == name),
+            -1,
+        )
+        if idx < 0:
+            raise ValueError(
+                f"no per-connector audit sink named {name!r} for connector {connector!r}"
+            )
+        sinks[idx]["enabled"] = bool(enabled)
+        write_config_yaml_secure(cfg_path, raw)
+    return WriteResult(
+        name=name,
+        target="audit_sinks",
+        preset_id="",
+        yaml_changes=[
+            f"observability.connectors[{connector}].audit_sinks[{name}].enabled = {bool(enabled)}",
+        ],
+        dotenv_changes=[],
+        warnings=[],
+        dry_run=False,
+    )
+
+
+def _remove_connector_sink(data_dir: str, connector: str, name: str) -> WriteResult:
+    cfg_path = os.path.join(data_dir, _OBS_CONFIG_FILE_NAME)
+    with locked_config_yaml(cfg_path):
+        raw = _obs_load_raw(cfg_path)
+        sinks = _connector_audit_sinks_list(raw, connector, create=False)
+        if sinks is None:
+            raise ValueError(
+                f"no per-connector audit sinks for connector {connector!r}"
+            )
+        new = [s for s in sinks if isinstance(s, dict) and s.get("name") != name]
+        if len(new) == len(sinks):
+            raise ValueError(
+                f"no per-connector audit sink named {name!r} for connector {connector!r}"
+            )
+        sinks[:] = new
+        _prune_observability(raw, connector)
+        write_config_yaml_secure(cfg_path, raw)
+    return WriteResult(
+        name=name,
+        target="audit_sinks",
+        preset_id="",
+        yaml_changes=[f"observability.connectors[{connector}].audit_sinks[{name}] removed"],
+        dotenv_changes=[],
+        warnings=[],
+        dry_run=False,
+    )
 
 
 def _slug(value: str) -> str:
