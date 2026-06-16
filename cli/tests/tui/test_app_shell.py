@@ -26,6 +26,7 @@ from defenseclaw.tui.app import (
     _enforcement_label,
     _event_histogram,
     _fetch_ai_usage,
+    _overview_config,
     _policy_posture,
 )
 from defenseclaw.tui.executor import CommandEvent
@@ -3940,3 +3941,106 @@ def test_connectors_health_array_parsed() -> None:
     names = [c.name for c in snap.connectors]
     assert names == ["codex", "cursor"]
     assert snap.connectors[0].requests == 5
+
+
+# --- A2: _overview_config roster build is defensive -------------------------
+
+
+class _RosterGuardrail:
+    """Guardrail stub with per-connector ``effective_*`` for roster tests."""
+
+    enabled = True
+    connector = ""
+    mode = "observe"
+    hilt = SimpleNamespace(enabled=False, min_severity="")
+
+    def __init__(self, modes=None, disabled=(), raise_on=()):
+        self._modes = modes or {}
+        self._disabled = set(disabled)
+        self._raise_on = set(raise_on)
+
+    def effective_enabled(self, connector):
+        return connector not in self._disabled
+
+    def effective_mode(self, connector):
+        if connector in self._raise_on:
+            raise RuntimeError(f"boom:{connector}")
+        return self._modes.get(connector, "observe")
+
+    def effective_rule_pack_dir(self, connector):
+        if connector in self._raise_on:
+            raise RuntimeError(f"boom:{connector}")
+        return ""
+
+
+def _roster_config(active_connectors, guardrail) -> SimpleNamespace:
+    """Minimal config stub exercising :func:`_overview_config`."""
+
+    return SimpleNamespace(
+        data_dir="/tmp/dc",
+        environment="dev",
+        policy_dir="",
+        claw=SimpleNamespace(mode="codex"),
+        guardrail=guardrail,
+        llm=SimpleNamespace(provider="", model=""),
+        inspect_llm=SimpleNamespace(provider="", model=""),
+        cisco_ai_defense=SimpleNamespace(endpoint=""),
+        privacy=SimpleNamespace(disable_redaction=False),
+        active_connectors=active_connectors,
+    )
+
+
+def test_overview_config_degrades_when_active_connectors_raises() -> None:
+    """A2: a throwing connector enumeration degrades to a single-connector
+    view (empty roster) instead of crashing or blanking the whole overview."""
+
+    def boom():
+        raise RuntimeError("malformed connector key")
+
+    cfg = _roster_config(boom, _RosterGuardrail())
+    overview = _overview_config(cfg)
+    assert overview is not None
+    assert overview.connector_modes == ()
+    # The rest of the config still resolves — only the roster is degraded.
+    assert overview.claw_mode == "codex"
+
+
+def test_overview_config_keeps_other_connectors_when_one_lookup_throws() -> None:
+    """A2: one connector whose guardrail lookups raise must not zero the
+    roster; the partial roster (all connectors) survives, the bad one blank."""
+
+    guardrail = _RosterGuardrail(
+        modes={"codex": "action", "cursor": "observe"}, raise_on={"cursor"}
+    )
+    cfg = _roster_config(lambda: ["codex", "cursor"], guardrail)
+    overview = _overview_config(cfg)
+    modes = dict(overview.connector_modes)
+    assert list(modes) == ["codex", "cursor"]
+    assert modes["codex"] == "action"
+    assert modes["cursor"] == ""  # fell back, not dropped
+
+
+def test_overview_config_skips_malformed_connector_key() -> None:
+    """A2: a single malformed (non-string) key is skipped while the valid
+    connectors still populate the roster — it is no longer swallowed together
+    with the entire roster by one broad ``except``."""
+
+    guardrail = _RosterGuardrail(modes={"codex": "action", "cursor": "observe"})
+    cfg = _roster_config(lambda: ["codex", 123, "cursor"], guardrail)
+    overview = _overview_config(cfg)
+    names = [connector for connector, _mode in overview.connector_modes]
+    assert names == ["codex", "cursor"]
+
+
+def test_overview_config_marks_disabled_connector_in_roster() -> None:
+    """A2 (regression baseline): a per-connector kill switch still flags the
+    connector as disabled while keeping it in the filterable roster."""
+
+    guardrail = _RosterGuardrail(
+        modes={"codex": "action", "cursor": "observe"}, disabled={"cursor"}
+    )
+    cfg = _roster_config(lambda: ["codex", "cursor"], guardrail)
+    overview = _overview_config(cfg)
+    names = [connector for connector, _mode in overview.connector_modes]
+    assert names == ["codex", "cursor"]
+    assert overview.connector_disabled == ("cursor",)

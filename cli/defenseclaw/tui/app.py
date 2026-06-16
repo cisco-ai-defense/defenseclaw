@@ -8325,31 +8325,47 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     connector_modes: tuple[tuple[str, str], ...] = ()
     connector_packs: tuple[tuple[str, str], ...] = ()
     connector_disabled: tuple[str, ...] = ()
+    # A2: resolve the active set in its own guarded step. `active_connectors()`
+    # normalizes every key, so a single malformed/alias key can raise — and the
+    # previous single broad `except` then collapsed the whole roster to (),
+    # silently dropping the connector chip, stopping `m` cycling, and hiding
+    # every per-connector tile. Guard the enumeration here; if it fails we
+    # degrade to a single-connector view instead of swallowing the roster
+    # together with any later error. (A *visible* status-line diagnostic can't
+    # be raised from this module-level builder without an OverviewConfig error
+    # field / caller plumbing — see fix-plan A2; deferred, as the TUI subtree
+    # has no stderr logger.)
     try:
         actives = config.active_connectors() if hasattr(config, "active_connectors") else []
         actives = [c for c in actives if c]
-        if len(actives) > 1:
-            pairs: list[tuple[str, str]] = []
-            packs: list[tuple[str, str]] = []
-            disabled: list[str] = []
-            for conn in actives:
+    except Exception:  # noqa: BLE001 - a bad connector key must not blank the roster.
+        actives = []
+    if len(actives) > 1:
+        pairs: list[tuple[str, str]] = []
+        packs: list[tuple[str, str]] = []
+        disabled: list[str] = []
+        # Build the roster incrementally: each connector is processed in its
+        # own guard so one bad connector is skipped, not fatal to the rest
+        # (the partial roster survives instead of zeroing).
+        for conn in actives:
+            try:
+                norm = conn.strip().lower()
                 # A connector turned off via `guardrail disable --connector X`
                 # stays in the roster (so its history is filterable) but is
                 # marked DISABLED. effective_enabled honors the per-connector
                 # kill switch; unset/True means enforcing.
+                is_disabled = False
                 if guardrail is not None and hasattr(guardrail, "effective_enabled"):
                     try:
-                        if not guardrail.effective_enabled(conn):
-                            disabled.append(conn.strip().lower())
+                        is_disabled = not guardrail.effective_enabled(conn)
                     except Exception:
-                        pass
+                        is_disabled = False
                 mode = ""
                 if guardrail is not None and hasattr(guardrail, "effective_mode"):
                     try:
                         mode = (guardrail.effective_mode(conn) or "").strip()
                     except Exception:
                         mode = ""
-                pairs.append((conn, mode))
                 # Effective rule-pack label = basename of the per-connector
                 # rule_pack_dir (falling back to the global one), so the
                 # roster shows "strict"/"permissive"/"default" per connector.
@@ -8360,14 +8376,16 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
                     except Exception:
                         pack_dir = ""
                     pack = os.path.basename(pack_dir.rstrip("/")) if pack_dir else "default"
-                packs.append((conn, pack))
-            connector_modes = tuple(pairs)
-            connector_packs = tuple(packs)
-            connector_disabled = tuple(disabled)
-    except Exception:
-        connector_modes = ()
-        connector_packs = ()
-        connector_disabled = ()
+            except Exception:  # noqa: BLE001 - skip one bad connector, keep the rest.
+                continue
+            # Append together so connector_modes/packs/disabled stay aligned.
+            pairs.append((conn, mode))
+            packs.append((conn, pack))
+            if is_disabled:
+                disabled.append(norm)
+        connector_modes = tuple(pairs)
+        connector_packs = tuple(packs)
+        connector_disabled = tuple(disabled)
     return OverviewConfig(
         data_dir=str(getattr(config, "data_dir", "") or ""),
         environment=str(getattr(config, "environment", "") or ""),
