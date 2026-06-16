@@ -214,6 +214,49 @@ func TestPolicyEngineConnectorScope(t *testing.T) {
 		}
 	})
 
+	t.Run("connector_disable_isolated", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := store.SetActionFieldForConnector("skill", "demo", "codex", "runtime", "disable", "scoped"); err != nil {
+			t.Fatalf("seed disable: %v", err)
+		}
+
+		if d, _ := pe.IsDisabledForConnector("skill", "demo", "codex"); !d {
+			t.Error("expected disabled for the scoped connector codex")
+		}
+		if d, _ := pe.IsDisabledForConnector("skill", "demo", "opencode"); d {
+			t.Error("connector-scoped disable must not affect a different connector")
+		}
+		if d, _ := pe.IsDisabledForConnector("skill", "demo", ""); d {
+			t.Error("connector-scoped disable must not apply globally")
+		}
+	})
+
+	t.Run("global_disable_hits_all_connectors", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := store.SetActionField("plugin", "demo", "runtime", "disable", "global"); err != nil {
+			t.Fatalf("seed global disable: %v", err)
+		}
+		for _, c := range []string{"", "codex", "opencode"} {
+			if d, _ := pe.IsDisabledForConnector("plugin", "demo", c); !d {
+				t.Errorf("global disable must apply to connector %q", c)
+			}
+		}
+	})
+
+	t.Run("disable_lookup_error_surfaces_error", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+		store.Close()
+
+		if disabled, err := pe.IsDisabledForConnector("skill", "demo", "codex"); err == nil || disabled {
+			t.Fatalf("IsDisabledForConnector on closed store = disabled=%v err=%v, want error and disabled=false", disabled, err)
+		}
+	})
+
 	t.Run("connector_allow_isolated", func(t *testing.T) {
 		store := testStore(t)
 		pe := NewPolicyEngine(store)

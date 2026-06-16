@@ -252,7 +252,7 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredSkillUserPromptExpansion(t *te
 		HookEventName: "UserPromptExpansion",
 		ExpansionType: "slash_command",
 		CommandName:   "rogue-skill",
-		CommandSource: "plugin",
+		CommandSource: "skill",
 		Prompt:        "/rogue-skill check",
 	}
 	resp := api.evaluateClaudeCodeHook(context.Background(), req)
@@ -392,7 +392,7 @@ func TestEvaluateClaudeCodeHook_UserPromptExpansionRegistryRequiredEmptyDeniesBy
 		HookEventName: "UserPromptExpansion",
 		ExpansionType: "slash_command",
 		CommandName:   "rogue-skill",
-		CommandSource: "plugin",
+		CommandSource: "skill",
 		Prompt:        "/rogue-skill check",
 	}
 	resp := api.evaluateClaudeCodeHook(context.Background(), req)
@@ -424,7 +424,7 @@ func TestEvaluateClaudeCodeHook_UserPromptExpansionRegistryRequiredEmptyAllowOpt
 		HookEventName: "UserPromptExpansion",
 		ExpansionType: "slash_command",
 		CommandName:   "rogue-skill",
-		CommandSource: "plugin",
+		CommandSource: "skill",
 		Prompt:        "/rogue-skill check",
 	}
 	resp := api.evaluateClaudeCodeHook(context.Background(), req)

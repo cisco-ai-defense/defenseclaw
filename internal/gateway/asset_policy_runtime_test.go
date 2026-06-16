@@ -22,6 +22,10 @@ func enableSkillRuntimeDetection(cfg *config.Config) {
 	cfg.AssetPolicy.Skill.RuntimeDetection.Enabled = true
 }
 
+func enablePluginRuntimeDetection(cfg *config.Config) {
+	cfg.AssetPolicy.Plugin.RuntimeDetection.Enabled = true
+}
+
 func TestEvaluateRuntimeSkillAssetPolicyRespectsRuntimeDetectionDisabled(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.AssetPolicy.Enabled = true
@@ -38,6 +42,119 @@ func TestEvaluateRuntimeSkillAssetPolicyRespectsRuntimeDetectionDisabled(t *test
 
 	if matched {
 		t.Fatalf("matched=%v decision=%+v, want runtime detection disabled to skip skill policy", matched, decision)
+	}
+}
+
+func TestEvaluateRuntimeSkillAssetPolicyRuntimeDisableWinsOverAllow(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "disabled-skill"}}
+	store, _ := testStoreAndLogger(t)
+	if err := store.SetActionFieldForConnector("skill", "disabled-skill", "codex", "runtime", "disable", "manual"); err != nil {
+		t.Fatalf("seed disable: %v", err)
+	}
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	decision, matched := api.evaluateRuntimeSkillAssetPolicy(context.Background(), "codex", "PermissionRequest", skillRuntimeProbe{
+		SkillName: "disabled-skill",
+		ToolName:  "Skill",
+		Surface:   "hook",
+		Matched:   true,
+	})
+
+	if !matched {
+		t.Fatalf("matched=false decision=%+v, want runtime-disable block", decision)
+	}
+	if decision.Action != "block" || decision.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", decision.Action, decision.RawAction)
+	}
+	if !decision.WouldBlock {
+		t.Fatal("runtime-disable decision should carry WouldBlock=true for telemetry")
+	}
+	if decision.Source != "runtime-disable" {
+		t.Fatalf("source=%q, want runtime-disable", decision.Source)
+	}
+}
+
+func TestEvaluateRuntimeSkillAssetPolicyRuntimeDisableScope(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	store, _ := testStoreAndLogger(t)
+	if err := store.SetActionFieldForConnector("skill", "scoped-skill", "codex", "runtime", "disable", "manual"); err != nil {
+		t.Fatalf("seed scoped disable: %v", err)
+	}
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	decision, matched := api.evaluateRuntimeSkillAssetPolicy(context.Background(), "claudecode", "PermissionRequest", skillRuntimeProbe{
+		SkillName: "scoped-skill",
+		ToolName:  "Skill",
+		Surface:   "hook",
+		Matched:   true,
+	})
+	if matched {
+		t.Fatalf("matched=%v decision=%+v, connector-scoped disable leaked to another connector", matched, decision)
+	}
+
+	if err := store.SetActionField("skill", "global-skill", "runtime", "disable", "manual"); err != nil {
+		t.Fatalf("seed global disable: %v", err)
+	}
+	decision, matched = api.evaluateRuntimeSkillAssetPolicy(context.Background(), "claudecode", "PermissionRequest", skillRuntimeProbe{
+		SkillName: "global-skill",
+		ToolName:  "Skill",
+		Surface:   "hook",
+		Matched:   true,
+	})
+	if !matched || decision.Action != "block" {
+		t.Fatalf("global disable decision=%+v matched=%v, want block", decision, matched)
+	}
+}
+
+func TestEvaluateRuntimeSkillAssetPolicyDisableLookupErrorFailsClosed(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	store, _ := testStoreAndLogger(t)
+	store.Close()
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	decision, matched := api.evaluateRuntimeSkillAssetPolicy(context.Background(), "codex", "PermissionRequest", skillRuntimeProbe{
+		SkillName: "maybe-disabled",
+		ToolName:  "Skill",
+		Surface:   "hook",
+		Matched:   true,
+	})
+
+	if !matched {
+		t.Fatal("lookup error should fail closed with a matched block decision")
+	}
+	if decision.Action != "block" || decision.Source != "runtime-disable-error" {
+		t.Fatalf("decision=%+v, want runtime-disable-error block", decision)
+	}
+}
+
+func TestClaudeCodeSlashCommandPluginRuntimeDisable(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	enablePluginRuntimeDetection(cfg)
+	store, _ := testStoreAndLogger(t)
+	if err := store.SetActionFieldForConnector("plugin", "disabled-plugin", "claudecode", "runtime", "disable", "manual"); err != nil {
+		t.Fatalf("seed plugin disable: %v", err)
+	}
+	api := &APIServer{scannerCfg: cfg, store: store}
+
+	decisions := api.claudeCodeSlashCommandAssetDecisions(context.Background(), claudeCodeHookRequest{
+		HookEventName: "UserPromptExpansion",
+		ExpansionType: "slash_command",
+		CommandName:   "disabled-plugin",
+		CommandSource: "plugin",
+	})
+
+	if len(decisions) != 1 {
+		t.Fatalf("decisions=%v, want one plugin runtime-disable decision", decisions)
+	}
+	got := decisions[0]
+	if got.targetType != "plugin" {
+		t.Fatalf("targetType=%q, want plugin", got.targetType)
+	}
+	if got.decision.TargetType != "plugin" || got.decision.Action != "block" || got.decision.Source != "runtime-disable" {
+		t.Fatalf("decision=%+v, want plugin runtime-disable block", got.decision)
 	}
 }
 

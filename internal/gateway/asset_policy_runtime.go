@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
@@ -32,8 +33,11 @@ type mcpRuntimeProbe struct {
 }
 
 type skillRuntimeProbe struct {
-	SkillName string
-	ToolName  string
+	// TargetType is "skill" by default; Claude Code prompt expansion can
+	// surface plugin slash commands through the same shape.
+	TargetType string
+	SkillName  string
+	ToolName   string
 	// SourcePath is the raw, agent-supplied skill path (when present).
 	// It is preserved verbatim — including any path traversal segments —
 	// so audit telemetry can show the difference between "trusted-skill"
@@ -82,7 +86,8 @@ func (a *APIServer) claudeCodePromptExpansionAssetDecisions(ctx context.Context,
 }
 
 func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, req claudeCodeHookRequest) []runtimeAssetDecision {
-	if !slashCommandLooksSkill(req.CommandSource) {
+	targetType := slashCommandAssetType(req.CommandSource)
+	if targetType == "" {
 		return nil
 	}
 	name := normalizeSkillRuntimeName(req.CommandName)
@@ -90,6 +95,7 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 		return nil
 	}
 	probe := skillRuntimeProbe{
+		TargetType: targetType,
 		SkillName:  name,
 		ToolName:   strings.TrimSpace(req.CommandName),
 		SourcePath: strings.TrimSpace(req.CommandSource),
@@ -97,7 +103,7 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 		Matched:    true,
 	}
 	if decision, matched := a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe); matched {
-		return []runtimeAssetDecision{{targetType: "skill", decision: decision}}
+		return []runtimeAssetDecision{{targetType: targetType, decision: decision}}
 	}
 	return nil
 }
@@ -189,10 +195,19 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 }
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {
-	if a.scannerCfg == nil || !probe.Matched {
+	if !probe.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
-	runtimeDetection, _ := a.scannerCfg.AssetRuntimeDetectionFor("skill")
+	targetType := runtimeSkillAssetTargetType(probe)
+	runtimeSurface := coalesceRuntimeSurface(probe.Surface, "hook")
+	if decision, disabled := a.runtimeAssetDisableDecision(targetType, probe.SkillName, connector, runtimeSurface); disabled {
+		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
+		return decision, true
+	}
+	if a.scannerCfg == nil {
+		return config.AssetPolicyDecision{}, false
+	}
+	runtimeDetection, _ := a.scannerCfg.AssetRuntimeDetectionFor(targetType)
 	if !runtimeDetection.Enabled {
 		return config.AssetPolicyDecision{}, false
 	}
@@ -200,11 +215,11 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 		return config.AssetPolicyDecision{}, false
 	}
 	decision := a.scannerCfg.EvaluateAssetPolicy(config.AssetPolicyInput{
-		TargetType:     "skill",
+		TargetType:     targetType,
 		Name:           probe.SkillName,
 		Connector:      connector,
 		SourcePath:     probe.SourcePath,
-		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
+		RuntimeSurface: runtimeSurface,
 	})
 	// a Claude Code agent can pass a crafted
 	// skill_name like "/tmp/attacker/trusted-skill/SKILL.md" and
@@ -217,7 +232,7 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 	// when normalization changed it). This makes the decision
 	// fall through the registry-required guard the operator
 	// already configured.
-	if probe.RawName != "" && strings.ContainsAny(probe.RawName, `/\`) {
+	if targetType == "skill" && probe.RawName != "" && strings.ContainsAny(probe.RawName, `/\`) {
 		// Mark unregistered so registry-required policy denies.
 		decision.RegistryStatus = "unregistered"
 		// If the operator runs registry_required=true and the
@@ -241,6 +256,62 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 	if !decision.Enabled || decision.RawAction != "block" {
 		return decision, false
 	}
+	a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
+	return decision, true
+}
+
+func runtimeSkillAssetTargetType(probe skillRuntimeProbe) string {
+	switch strings.ToLower(strings.TrimSpace(probe.TargetType)) {
+	case "plugin":
+		return "plugin"
+	default:
+		return "skill"
+	}
+}
+
+func (a *APIServer) runtimeAssetDisableDecision(targetType, name, connector, runtimeSurface string) (config.AssetPolicyDecision, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return config.AssetPolicyDecision{}, false
+	}
+	pe := enforce.NewPolicyEngine(nil)
+	if a != nil {
+		pe = enforce.NewPolicyEngine(a.store)
+	}
+	disabled, err := pe.IsDisabledForConnector(targetType, name, connector)
+	if err != nil {
+		return runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurface,
+			fmt.Sprintf("%s %q runtime-disable check failed - failing closed: %v", targetType, name, err),
+			"runtime-disable-error"), true
+	}
+	if !disabled {
+		return config.AssetPolicyDecision{}, false
+	}
+	return runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurface,
+		fmt.Sprintf("%s %q is runtime-disabled for connector %q", targetType, name, connector),
+		"runtime-disable"), true
+}
+
+func runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurface, reason, source string) config.AssetPolicyDecision {
+	return config.AssetPolicyDecision{
+		Enabled:            true,
+		Mode:               config.AssetPolicyModeAction,
+		Action:             "block",
+		RawAction:          "block",
+		WouldBlock:         true,
+		Reason:             reason,
+		Source:             source,
+		RegistryStatus:     "disabled",
+		RegistryConfigured: false,
+		TargetType:         targetType,
+		TargetName:         name,
+		Connector:          connector,
+		RuntimeSurface:     runtimeSurface,
+	}
+}
+
+func (a *APIServer) emitRuntimeSkillAssetPolicyDecision(ctx context.Context, decision config.AssetPolicyDecision, connector, hookEvent string, probe skillRuntimeProbe) {
+	targetType := runtimeSkillAssetTargetType(probe)
 	if a.otel != nil {
 		attrs := map[string]string{
 			"source":              decision.Source,
@@ -249,7 +320,7 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 			"runtime_surface":     coalesceRuntimeSurface(probe.Surface, "hook"),
 			"hook_event_name":     hookEvent,
 			"tool_name":           probe.ToolName,
-			"skill_name":          probe.SkillName,
+			targetType + "_name":  probe.SkillName,
 			"would_block":         fmt.Sprintf("%t", decision.WouldBlock),
 		}
 		// Surface raw inputs whenever path-stripping or other
@@ -258,22 +329,21 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 		// signal for "agent passed /tmp/x/<approved>/SKILL.md to
 		// match an approved name" attempts.
 		if probe.RawName != "" {
-			attrs["skill_name_raw"] = probe.RawName
+			attrs[targetType+"_name_raw"] = probe.RawName
 		}
 		if probe.SourcePath != "" {
-			attrs["skill_source_path"] = probe.SourcePath
+			attrs[targetType+"_source_path"] = probe.SourcePath
 		}
-		a.otel.EmitPolicyDecision("asset-policy", decision.Action, decision.TargetName, "skill", decision.Reason, attrs)
+		a.otel.EmitPolicyDecision("asset-policy", decision.Action, decision.TargetName, targetType, decision.Reason, attrs)
 	}
-	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, "skill", connector, hookEvent)
+	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, targetType, connector, hookEvent)
 	if a.logger != nil {
-		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s skill_name_raw=%q source_path=%q would_block=%v reason=%s",
+		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s name_raw=%q source_path=%q would_block=%v reason=%s",
 			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason)
 		details = appendHookEvaluationDetails(details, evalCtx)
-		a.logAssetPolicyAudit(ctx, connector, "skill:"+decision.TargetName, details)
+		a.logAssetPolicyAudit(ctx, connector, targetType+":"+decision.TargetName, details)
 	}
-	a.dispatchAssetPolicyNotification(decision, "skill", connector, hookEvent, evalCtx)
-	return decision, true
+	a.dispatchAssetPolicyNotification(decision, targetType, connector, hookEvent, evalCtx)
 }
 
 func hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets string, assetDecisions []runtimeAssetDecision) bool {
@@ -387,12 +457,12 @@ func mcpProbeFromFields(serverName, toolName string, toolInput map[string]interf
 	return mcpRuntimeProbe{ToolName: toolName}
 }
 
-func slashCommandLooksSkill(commandSource string) bool {
+func slashCommandAssetType(commandSource string) string {
 	switch strings.ToLower(strings.TrimSpace(commandSource)) {
 	case "skill", "plugin":
-		return true
+		return strings.ToLower(strings.TrimSpace(commandSource))
 	default:
-		return false
+		return ""
 	}
 }
 

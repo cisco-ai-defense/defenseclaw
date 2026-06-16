@@ -520,34 +520,72 @@ class TestPluginDisableEnable(PluginCommandTestBase):
 
 
 class TestPluginRuntimeToggleConnectorGuard(PluginCommandTestBase):
-    """N5: runtime disable/enable is OpenClaw-only. On a non-OpenClaw active
-    connector the CLI must fail loudly instead of silently patching the
-    OpenClaw plugins schema through the gateway and reporting a false success.
-    The real hook-connector runtime toggle is a deferred gateway-side
-    follow-up (plugins.md N5)."""
+    """N5: hook connectors store runtime-disable policy rows. Connectors
+    without a plugin runtime probe must get an explicit advisory warning."""
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    def test_disable_unsupported_on_non_openclaw_connector(self, mock_cls):
+    def test_disable_on_non_openclaw_active_connector_records_advisory(self, mock_cls):
         self.app.cfg.guardrail.connector = "hermes"
         result = self.invoke(["disable", "any-plugin"])
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("unsupported", result.output)
-        self.assertIn("hermes", result.output)
-        # The gateway must never be contacted on an unsupported peer.
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("runtime disable recorded globally", result.output)
+        self.assertIn("advisory", result.output)
+        self.assertIn("quarantine", result.output)
         mock_cls.return_value.disable_plugin.assert_not_called()
-        # And no runtime-disable policy row should be written.
+        self.assertTrue(
+            self.app.store.has_action("plugin", "any-plugin", "runtime", "disable")
+        )
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_enable_on_non_openclaw_active_connector_clears_without_gateway(self, mock_cls):
+        self.app.cfg.guardrail.connector = "hermes"
+        PolicyEngine(self.app.store).disable("plugin", "any-plugin", "manual")
+        result = self.invoke(["enable", "any-plugin"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("global runtime disable cleared", result.output)
+        mock_cls.return_value.enable_plugin.assert_not_called()
         self.assertFalse(
             self.app.store.has_action("plugin", "any-plugin", "runtime", "disable")
         )
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    def test_enable_unsupported_on_non_openclaw_connector(self, mock_cls):
-        self.app.cfg.guardrail.connector = "hermes"
-        result = self.invoke(["enable", "any-plugin"])
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("unsupported", result.output)
-        self.assertIn("hermes", result.output)
+    def test_disable_connector_without_probe_records_scoped_advisory(self, mock_cls):
+        self.app.cfg.active_connectors = lambda: ["openclaw", "codex", "claudecode"]  # type: ignore[method-assign]
+        result = self.invoke(["disable", "any-plugin", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertIn("advisory", result.output)
+        mock_cls.return_value.disable_plugin.assert_not_called()
+        self.assertTrue(
+            self.app.store.has_action("plugin", "any-plugin", "runtime", "disable", "codex")
+        )
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_disable_connector_with_probe_records_scoped_enforced(self, mock_cls):
+        self.app.cfg.active_connectors = lambda: ["openclaw", "codex", "claudecode"]  # type: ignore[method-assign]
+        result = self.invoke(["disable", "any-plugin", "--connector", "claudecode"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=claudecode", result.output)
+        self.assertIn("Enforced by hook runtime gate", result.output)
+        self.assertNotIn("advisory", result.output)
+        mock_cls.return_value.disable_plugin.assert_not_called()
+        self.assertTrue(
+            self.app.store.has_action("plugin", "any-plugin", "runtime", "disable", "claudecode")
+        )
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_enable_connector_clears_scoped_disable_without_gateway(self, mock_cls):
+        self.app.cfg.active_connectors = lambda: ["openclaw", "codex", "claudecode"]  # type: ignore[method-assign]
+        PolicyEngine(self.app.store).disable_for_connector(
+            "plugin", "any-plugin", "codex", "manual",
+        )
+        result = self.invoke(["enable", "any-plugin", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("runtime disable cleared", result.output)
         mock_cls.return_value.enable_plugin.assert_not_called()
+        self.assertFalse(
+            self.app.store.has_action("plugin", "any-plugin", "runtime", "disable", "codex")
+        )
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     @patch("defenseclaw.gateway.OrchestratorClient")
