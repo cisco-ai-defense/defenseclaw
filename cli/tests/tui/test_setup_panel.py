@@ -304,6 +304,69 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
     }
 
 
+def _wizard_options(fields: Sequence, label: str) -> tuple[str, ...]:
+    for field in fields:
+        if field.label == label:
+            return tuple(field.options)
+    raise AssertionError(f"field not found: {label}")
+
+
+def test_connector_choices_are_os_filtered_for_windows() -> None:
+    # B6: Windows is hook-only, so the proxy connectors (openclaw/zeptoclaw)
+    # must not be offered in the connector wizard and the seeded default must
+    # not be one of them.
+    win_fields = connector_setup_wizard_fields({}, os_name="windows")
+    win_options = _wizard_options(win_fields, "Connector")
+    assert "openclaw" not in win_options
+    assert "zeptoclaw" not in win_options
+    assert "codex" in win_options and "claudecode" in win_options
+    assert wizard_field_value(win_fields, "Connector") not in {"openclaw", "zeptoclaw"}
+
+    # A stored proxy ``claw.mode`` (e.g. a config copied from macOS) is
+    # rewritten to the first supported connector rather than seeding an
+    # unusable default the operator would have to notice and change.
+    proxy_cfg = {"claw": {"mode": "openclaw"}}
+    seeded = wizard_field_value(connector_setup_wizard_fields(proxy_cfg, os_name="windows"), "Connector")
+    assert seeded == win_options[0]
+
+    # macOS/Linux keep the full connector roster.
+    mac_options = _wizard_options(connector_setup_wizard_fields({}, os_name="darwin"), "Connector")
+    assert set(mac_options) == set(CONNECTORS)
+
+    # The config-editor "Mode" choice is filtered the same way.
+    win_mode = _field_by_key(build_setup_sections({}, os_name="windows"), "claw.mode")
+    assert "openclaw" not in win_mode.options and "zeptoclaw" not in win_mode.options
+    assert "codex" in win_mode.options
+    linux_mode = _field_by_key(build_setup_sections({}, os_name="linux"), "claw.mode")
+    assert set(linux_mode.options) == set(CONNECTORS)
+
+
+def test_guardrail_wizard_promotes_strategy_when_judge_model_configured() -> None:
+    # B9: a configured dedicated judge model means the judge actually runs,
+    # so the wizard must surface ``regex_judge`` rather than leaving a stale
+    # ``regex_only`` that silently keeps the judge off. Mirrors the CLI's
+    # server-side promotion.
+    cfg = {
+        "guardrail": {"detection_strategy": "regex_only", "judge": {"model": "bedrock/claude-judge"}},
+    }
+    fields = _guardrail_wizard_fields_for({}, cfg)
+    assert wizard_field_value(fields, "Strategy") == "regex_judge"
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
+    assert "--detection-strategy" in argv
+    assert argv[argv.index("--detection-strategy") + 1] == "regex_judge"
+
+    # An explicit non-regex_only strategy is respected (judge_first wins).
+    cfg_first = {
+        "guardrail": {"detection_strategy": "judge_first", "judge": {"model": "bedrock/claude-judge"}},
+    }
+    assert wizard_field_value(_guardrail_wizard_fields_for({}, cfg_first), "Strategy") == "judge_first"
+
+    # No dedicated judge model -> no promotion, even when a main LLM model
+    # exists (it is inherited but never emitted as --judge-model).
+    cfg_inherit = {"llm": {"provider": "openai", "model": "gpt-5"}, "guardrail": {"judge": {}}}
+    assert wizard_field_value(_guardrail_wizard_fields_for({}, cfg_inherit), "Strategy") == "regex_only"
+
+
 def test_credentials_matrix_actions_are_data_only_and_validate_required_fields() -> None:
     fields = wizard_form_defs(SetupWizard.CREDENTIALS)
 

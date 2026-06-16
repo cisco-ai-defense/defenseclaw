@@ -34,6 +34,7 @@ from defenseclaw.tui.services.cli_choices import (
     LLM_ROLES,
     REGIONAL_PROVIDERS,
     VERTEX_AUTH_MODES,
+    supported_connector_choices,
 )
 from defenseclaw.tui.services.cli_choices import (
     CONNECTORS as _CHOICE_CONNECTORS,
@@ -1222,8 +1223,16 @@ class SetupPanelModel:
         )
 
 
-def build_setup_sections(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigSection, ...]:
-    """Return the Go Setup config section/field catalog."""
+def build_setup_sections(
+    cfg: object | Mapping[str, Any] | None, os_name: str | None = None
+) -> tuple[ConfigSection, ...]:
+    """Return the Go Setup config section/field catalog.
+
+    ``os_name`` (defaulting to the host OS) drops connectors the platform
+    can't run from the editable "Mode" choice, so a Windows operator is
+    never offered the proxy connectors (openclaw/zeptoclaw) that only
+    exist on macOS/Linux.
+    """
 
     sections: list[ConfigSection] = [
         ConfigSection(
@@ -1333,7 +1342,14 @@ def build_setup_sections(cfg: object | Mapping[str, Any] | None) -> tuple[Config
         ConfigSection(
             "Claw",
             (
-                _field(cfg, "Mode", "claw.mode", "choice", CONNECTORS, "Active agent framework."),
+                _field(
+                    cfg,
+                    "Mode",
+                    "claw.mode",
+                    "choice",
+                    supported_connector_choices(os_name),
+                    "Active agent framework.",
+                ),
                 _field(cfg, "Home Dir", "claw.home_dir", hint="Override for connector home directory."),
                 _field(cfg, "Config File", "claw.config_file", hint="Connector primary config file."),
             ),
@@ -3257,12 +3273,20 @@ def uninstall_intent(option: UninstallOption) -> SetupCommandIntent:
     )
 
 
-def connector_setup_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:
+def connector_setup_wizard_fields(
+    cfg: object | Mapping[str, Any] | None = None, os_name: str | None = None
+) -> tuple[WizardFormField, ...]:
+    choices = supported_connector_choices(os_name)
     connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw").strip() or "openclaw"
+    # The stored ``claw.mode`` can name a proxy connector that this OS can't
+    # run (e.g. a config copied from macOS opened on Windows); fall back to
+    # the first supported connector rather than offering an unusable default.
+    if connector not in choices:
+        connector = choices[0] if choices else connector
     mode = str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     return (
-        WizardFormField("Connector", "choice", value=connector, default=connector, options=CONNECTORS, required=True),
+        WizardFormField("Connector", "choice", value=connector, default=connector, options=choices, required=True),
         WizardFormField("Guardrail Mode", "choice", value=mode, default=mode, options=("observe", "action")),
         WizardFormField(
             "Scanner Mode", "choice", value=scanner_mode, default=scanner_mode, options=("local", "remote", "both")
@@ -3689,6 +3713,15 @@ def _guardrail_wizard_fields_for(
         if provider := str(get_config_value(cfg, "llm.provider", "") or ""):
             judge_provider = provider
             judge_provider_default = provider
+    # Mirror the CLI's server-side promotion (cmd_setup ``_apply...`` ~ the
+    # ``gc.judge.enabled`` branch): once a dedicated judge model is set the
+    # judge actually runs, so leaving the wizard on ``regex_only`` would
+    # silently keep it off. Surface ``regex_judge`` so the displayed strategy
+    # matches what saving the form will write. Only a dedicated
+    # ``guardrail.judge.model`` triggers this — a value merely inherited from
+    # ``llm.model`` is not emitted as ``--judge-model`` and must not promote.
+    if judge and strategy in ("", "regex_only"):
+        strategy = "regex_judge"
     # A live provider change (driver) wins so the conditional Bedrock /
     # Vertex / Azure judge groups re-derive against the new selection.
     judge_provider = (overrides.get("@Provider") or judge_provider).strip().lower() or judge_provider
