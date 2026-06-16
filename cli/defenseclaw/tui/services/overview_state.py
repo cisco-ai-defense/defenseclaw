@@ -990,7 +990,7 @@ def connector_source_label(connector: str, category: str) -> str:
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
         ("openhands", "mcps"): ("~/.openhands/mcp.json",),
         ("antigravity", "mcps"): ("unsupported/hooks-only surface",),
-        ("opencode", "mcps"): ("opencode.json (unmanaged by DefenseClaw in v1)",),
+        ("opencode", "mcps"): ("~/.config/opencode/opencode.json (mcp)", "./opencode.json (mcp)"),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("claudecode", "plugins"): ("~/.claude/plugins",),
         ("codex", "plugins"): ("~/.codex/plugins",),

@@ -340,6 +340,21 @@ class CatalogListModel(Generic[RowT]):
             return connector
         return ""
 
+    def action_connector(self, row: object | None) -> str:
+        """Connector a per-row action should target.
+
+        R5 (A3/E2/E3): under the merged "All" view ``focus_connector()`` is
+        ``""`` even though every row is tagged with its owning connector, so
+        scan/info/install/unset would silently hit the active/primary
+        connector instead of the row's owner ("could not resolve skill" /
+        "No MCP servers configured"). Prefer the selected row's owner; fall
+        back to the focused connector, and ultimately ``""`` (CLI active) for
+        untagged single-connector rows so existing behaviour is unchanged.
+        The intent builders still gate ``--connector`` per verb, so global
+        block/allow/unblock stay connector-agnostic regardless of this value.
+        """
+        return self.row_connector(row) or self.focus_connector()
+
     def _connector_focus_args(self) -> tuple[str, ...]:
         """Return ``("--connector", <name>)`` when multi-connector focus is
         active, else ``()``. Subclasses that carry a ``connector`` append
@@ -579,7 +594,7 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
         row = self.selected()
         if row is None:
             return None
-        return skill_action_intent(key, row, origin=origin, connector=self.focus_connector())
+        return skill_action_intent(key, row, origin=origin, connector=self.action_connector(row))
 
     def registry_focus(self) -> RegistryFocus | None:
         row = self.selected()
@@ -674,7 +689,7 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         row = self.selected()
         if row is None:
             return None
-        return mcp_action_intent(key, row, origin=origin, connector=self.focus_connector())
+        return mcp_action_intent(key, row, origin=origin, connector=self.action_connector(row))
 
     def registry_focus(self) -> RegistryFocus | None:
         row = self.selected()
@@ -770,7 +785,7 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
         row = self.selected()
         if row is None:
             return None
-        return plugin_action_intent(key, row, origin=origin, connector=self.focus_connector())
+        return plugin_action_intent(key, row, origin=origin, connector=self.action_connector(row))
 
     def list_height(self) -> int:
         height = self.height - 1 - self.detail_height()
@@ -795,7 +810,7 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
             row = self.selected()
             if row is None:
                 return CatalogPanelAction(True)
-            return CatalogPanelAction(True, plugin_direct_scan_intent(row, self.focus_connector()))
+            return CatalogPanelAction(True, plugin_direct_scan_intent(row, self.action_connector(row)))
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key == "r":
