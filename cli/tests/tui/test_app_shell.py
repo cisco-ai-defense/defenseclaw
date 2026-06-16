@@ -546,7 +546,10 @@ async def test_overview_redaction_notifications_and_uninstall_open_go_style_moda
         assert app.screen_stack[-1].__class__.__name__ == "RedactionToggleScreen"
         assert app.screen_stack[-1].model.title == "Redaction kill-switch"
 
-        await pilot.press("enter")
+        await pilot.press("enter")  # redaction-off is a danger action -> arms only
+        await pilot.pause()
+        assert not seen  # not run yet; the gate requires a second confirm
+        await pilot.press("enter")  # confirms
         await pilot.pause()
         assert seen[-1] == ("defenseclaw", ("setup", "redaction", "off", "--yes"))
         assert config.privacy.disable_redaction is True
@@ -568,8 +571,9 @@ async def test_overview_redaction_notifications_and_uninstall_open_go_style_moda
         await pilot.pause()
         assert app.screen_stack[-1].__class__.__name__ == "UninstallScreen"
 
-        await pilot.press("a")
-        await pilot.press("enter")
+        await pilot.press("a")  # select the wipe row (danger)
+        await pilot.press("enter")  # arms only
+        await pilot.press("enter")  # confirms
         await pilot.pause()
         assert seen[-1] == ("defenseclaw", ("uninstall", "--all", "--yes"))
 

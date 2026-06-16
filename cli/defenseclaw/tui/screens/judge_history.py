@@ -16,12 +16,12 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 from rich.markup import escape as rich_escape
-from textual import events
+from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Static
+from textual.widgets import Button, Static
 
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
@@ -53,9 +53,15 @@ class JudgeHistoryScreen(ModalScreen[None]):
     }}
 
     #judge-history-body {{
-        height: 26;
+        height: 23;
         overflow-y: auto;
         color: {TOKENS.text_secondary};
+    }}
+
+    #judge-history-close {{
+        width: 100%;
+        height: 3;
+        margin-top: 1;
     }}
 
     #judge-history-footer {{
@@ -82,6 +88,9 @@ class JudgeHistoryScreen(ModalScreen[None]):
         with Vertical(id="judge-history-dialog"):
             yield Static(title, id="judge-history-title")
             yield Static(self._body(), id="judge-history-body", markup=True)
+            # A clickable Close button so mouse users aren't forced to click
+            # the backdrop (the only previous non-keyboard way out).
+            yield Button("Close", id="judge-history-close", variant="default")
             # Escape the bracketed key labels so Rich treats them as
             # literal text. ``[Enter]`` / ``[Esc]`` are not Rich style
             # names, so without the backslashes the modal crashes on open.
@@ -89,6 +98,11 @@ class JudgeHistoryScreen(ModalScreen[None]):
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+    @on(Button.Pressed, "#judge-history-close")
+    def _on_close_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_close()
 
     def on_click(self, event: events.Click) -> None:
         if event.widget is self:
@@ -138,7 +152,10 @@ def judge_response_detail_pairs(rows: Sequence[object]) -> tuple[tuple[str, str]
         _append_optional(pairs, prefix + "Run ID", _string_value(row, "run_id"))
         _append_optional(pairs, prefix + "Input hash", _string_value(row, "input_hash"))
         confidence = _value(row, "confidence")
-        if confidence not in {"", None, 0, 0.0}:
+        # A 0.0 confidence verdict is a meaningful signal, not "missing":
+        # only drop genuinely-absent values ("" / None) so 0.0 renders as
+        # 0.000 instead of vanishing the whole row's confidence line.
+        if confidence not in {"", None}:
             try:
                 pairs.append((prefix + "Confidence", f"{float(confidence):.3f}"))
             except (TypeError, ValueError):

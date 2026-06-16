@@ -136,6 +136,42 @@ async def test_down_then_enter_commits_next_theme() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rows_render_click_action_links() -> None:
+    """Each theme row carries a ``@click=screen.pick(i)`` action link so the
+    rows are mouse-selectable (they used to be inert text)."""
+
+    from textual.widgets import Static
+
+    app = _HarnessApp(current_theme="ansi-dark")
+    async with app.run_test(size=(80, 40)) as pilot:
+        await pilot.pause()
+        content = str(app.screen.query_one("#theme-picker-list", Static).content)
+
+    for index in range(len(THEME_CHOICES)):
+        assert f"@click=screen.pick({index})" in content
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_row_selects_and_previews_it() -> None:
+    """Clicking a theme row selects it and live-previews it; Enter then
+    applies that theme."""
+
+    app = _HarnessApp(current_theme="ansi-dark")
+    async with app.run_test(size=(80, 40)) as pilot:
+        await pilot.pause()
+        # List lines: 0 "── ANSI ──", 1 ansi-dark(0), 2 ansi-light(1),
+        # 3 "── Dark ──", 4 textual-dark(2), 5 tokyo-night(3).
+        await pilot.click("#theme-picker-list", offset=(3, 5))
+        await pilot.pause()
+        assert app.screen.selected_index == 3
+        assert app.theme == THEME_CHOICES[3].name  # previewed live
+
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.dismissed == THEME_CHOICES[3].name
+
+
+@pytest.mark.asyncio
 async def test_unknown_initial_theme_starts_at_index_zero() -> None:
     """A persisted theme id Textual no longer ships falls back to index 0."""
 

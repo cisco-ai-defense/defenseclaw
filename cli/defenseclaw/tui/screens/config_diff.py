@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
@@ -101,14 +101,20 @@ class ConfigDiffScreen(ModalScreen[ConfigDiffResult | None]):
         text-style: bold;
     }}
 
+    #config-diff-scroll {{
+        height: auto;
+        max-height: 18;
+        margin-bottom: 1;
+    }}
+
     #config-diff-preview,
     #config-diff-status {{
         height: auto;
-        margin-bottom: 1;
         color: {DEFAULT_TOKENS.text_secondary};
     }}
 
     #config-diff-status {{
+        margin-bottom: 1;
         color: {DEFAULT_TOKENS.accent_amber};
     }}
 
@@ -137,7 +143,14 @@ class ConfigDiffScreen(ModalScreen[ConfigDiffResult | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="config-diff-dialog"):
             yield Static("Review Config Changes", id="config-diff-title")
-            yield Static(self.model.preview_text(), id="config-diff-preview")
+            # Render EVERY change inside a bounded scroll region: an operator
+            # confirming "Save and queue restart" must be able to inspect
+            # changes 9..N, which the old 8-entry truncation hid.
+            with VerticalScroll(id="config-diff-scroll"):
+                yield Static(
+                    self.model.preview_text(max_entries=len(self.model.entries)),
+                    id="config-diff-preview",
+                )
             yield Static("", id="config-diff-status")
             with Horizontal(id="config-diff-buttons"):
                 yield Button("Cancel", id="config-diff-cancel", variant="default")

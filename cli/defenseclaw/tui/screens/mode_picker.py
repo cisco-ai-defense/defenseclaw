@@ -100,12 +100,28 @@ class ModePickerScreen(ModalScreen[str | None]):
         Binding("escape,q", "cancel", "Cancel", show=False),
     ]
 
-    def __init__(self, current_wire: str = "openclaw") -> None:
+    def __init__(self, current_wire: str = "", *, os_name: str | None = None) -> None:
         super().__init__()
-        self.current_wire = normalize_connector(current_wire)
         # Hide proxy connectors on Windows; no-op on macOS/Linux. Resolve
         # once so compose() and _sync_preview() share the same row order.
-        self.choices = visible_mode_picker_choices()
+        self.choices = visible_mode_picker_choices(os_name)
+        self.current_wire = self._resolve_current_wire(current_wire)
+
+    def _resolve_current_wire(self, wire: str) -> str:
+        """Pick the row to land on, never fabricating a hidden connector.
+
+        ``normalize_connector`` collapses an empty/unknown wire to the
+        ``"openclaw"`` sentinel; honoring that would surface a connector the
+        picker isn't even showing (openclaw on Windows, or a hook-only/empty
+        state). So resolve against the *visible* rows and fall back to the
+        first one instead of the hardcoded openclaw default.
+        """
+        candidate = wire.strip().lower().replace("_", "-")
+        if candidate in {"claude-code", "claudecode"}:
+            candidate = "claudecode"
+        if any(choice.wire == candidate for choice in self.choices):
+            return candidate
+        return self.choices[0].wire if self.choices else candidate
 
     def compose(self) -> ComposeResult:
         current = choice_for_wire(self.current_wire)
@@ -118,12 +134,28 @@ class ModePickerScreen(ModalScreen[str | None]):
             yield Static("Switch active claw connector", id="mode-picker-title")
             yield ActionMenu(actions, selected_index=selected, id="mode-picker-menu")
             yield Static(preview_for_switch(self.current_wire, current.wire), id="mode-picker-preview")
-            yield Static("up/down move  o/z/k/c/h/u/w/g/p/n jump  enter confirm  esc close", id="mode-picker-hint")
+            yield Static(self._hint_text(), id="mode-picker-hint")
+
+    def _hint_text(self) -> str:
+        # Built from the visible rows so the advertised jump keys match what
+        # the picker actually shows (drops o/z on Windows; always includes
+        # e/a, which the old hardcoded literal omitted).
+        jump_keys = "/".join(choice.hotkey for choice in self.choices)
+        return f"up/down move  {jump_keys} jump  enter confirm  esc close"
+
+    def _visible_choice_for_hotkey(self, hotkey: str) -> ModeChoice | None:
+        for choice in self.choices:
+            if choice.hotkey == hotkey:
+                return choice
+        return None
 
     def on_key(self, event: events.Key) -> None:
         if not event.character:
             return
-        choice = choice_for_hotkey(event.character.lower())
+        # Resolve against the *visible* rows so a hidden connector's hotkey
+        # (e.g. ``o``/``z`` on Windows) is a no-op instead of selecting a
+        # connector that can't run here.
+        choice = self._visible_choice_for_hotkey(event.character.lower())
         if choice is None:
             return
         event.stop()

@@ -107,8 +107,27 @@ def test_uninstall_model_defaults_to_dry_run_and_maps_all_argv() -> None:
 
 
 @pytest.mark.asyncio
-async def test_redaction_modal_enter_confirms_cli_argv() -> None:
+async def test_redaction_modal_off_requires_second_confirm() -> None:
+    # Disabling redaction is a danger action: the first Enter only arms it.
     app = ModalHarness(RedactionToggleScreen(currently_disabled=False))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result is None  # armed, not yet confirmed
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.result is not None
+        assert app.result.command is not None
+        assert app.result.command.args == ("setup", "redaction", "off", "--yes")
+
+
+@pytest.mark.asyncio
+async def test_redaction_modal_on_confirms_in_one_step() -> None:
+    # Re-enabling redaction is benign (danger=False) -> single Enter confirms.
+    app = ModalHarness(RedactionToggleScreen(currently_disabled=True))
 
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.press("enter")
@@ -116,7 +135,20 @@ async def test_redaction_modal_enter_confirms_cli_argv() -> None:
 
         assert app.result is not None
         assert app.result.command is not None
-        assert app.result.command.args == ("setup", "redaction", "off", "--yes")
+        assert app.result.command.args == ("setup", "redaction", "on", "--yes")
+
+
+@pytest.mark.asyncio
+async def test_uninstall_modal_renders_red_danger_border() -> None:
+    from textual.containers import Vertical
+
+    from defenseclaw.tui.theme import DEFAULT_TOKENS
+
+    app = ModalHarness(UninstallScreen())
+    async with app.run_test(size=(110, 34)) as pilot:
+        await pilot.pause()
+        dialog = app.screen.query_one("#consequence-dialog", Vertical)
+        assert dialog.styles.border.top[1].hex.lower() == DEFAULT_TOKENS.accent_red.lower()
 
 
 @pytest.mark.asyncio
@@ -133,12 +165,16 @@ async def test_notifications_modal_click_confirms_cli_argv() -> None:
 
 
 @pytest.mark.asyncio
-async def test_uninstall_modal_hotkey_then_enter_confirms_wipe_argv() -> None:
+async def test_uninstall_modal_hotkey_then_double_enter_confirms_wipe_argv() -> None:
     app = ModalHarness(UninstallScreen())
 
     async with app.run_test(size=(110, 34)) as pilot:
-        await pilot.press("a")
-        await pilot.press("enter")
+        await pilot.press("a")  # select the wipe row (danger)
+        await pilot.press("enter")  # arms only
+        await pilot.pause()
+        assert app.result is None
+
+        await pilot.press("enter")  # confirms
         await pilot.pause()
 
         assert app.result is not None
@@ -148,14 +184,32 @@ async def test_uninstall_modal_hotkey_then_enter_confirms_wipe_argv() -> None:
 
 
 @pytest.mark.asyncio
-async def test_uninstall_modal_click_confirms_keep_data_argv() -> None:
+async def test_uninstall_modal_double_click_confirms_keep_data_argv() -> None:
     app = ModalHarness(UninstallScreen())
 
     async with app.run_test(size=(110, 34)) as pilot:
-        await pilot.click("#consequence-action-1")
+        await pilot.click("#consequence-action-1")  # arms only (danger)
+        await pilot.pause()
+        assert app.result is None
+
+        await pilot.click("#consequence-action-1")  # confirms
         await pilot.pause()
 
         assert app.result is not None
         assert app.result.action_id == UninstallOption.KEEP_DATA.value
         assert app.result.command is not None
         assert app.result.command.args == ("uninstall", "--yes")
+
+
+@pytest.mark.asyncio
+async def test_uninstall_modal_dry_run_default_confirms_in_one_step() -> None:
+    # The default dry-run row is benign (danger=False) -> single Enter runs it.
+    app = ModalHarness(UninstallScreen())
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.result is not None
+        assert app.result.action_id == UninstallOption.DRY_RUN.value
+        assert app.result.command.args == ("uninstall", "--dry-run")
