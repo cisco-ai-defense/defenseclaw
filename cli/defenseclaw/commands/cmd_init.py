@@ -1511,9 +1511,13 @@ def _resolve_gateway_for_connector(cfg) -> dict[str, str | int]:
     OpenClaw: reads from openclaw.json.
     Others: return loopback defaults (no token — rely on device key auth).
     """
-    connector = (cfg.guardrail.connector or "openclaw").lower()
-
-    if connector == "openclaw":
+    # SU-03: resolve the OpenClaw gateway only when openclaw is a genuinely
+    # active connector. A hook-only install leaves guardrail.connector empty and
+    # would otherwise phantom-default to "openclaw" here, inheriting OpenClaw's
+    # gateway endpoint and (worse) its token. active_connectors() returns [] for
+    # an unconfigured install and the real connector set otherwise, so the
+    # phantom can never sneak in.
+    if "openclaw" in cfg.active_connectors():
         return _resolve_openclaw_gateway(cfg.claw.config_file)
 
     return {
@@ -1549,14 +1553,18 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     Only applies connector values (host/port/token) when creating a new config.
     Existing configs preserve user-customized gateway settings.
     """
-    connector = (cfg.guardrail.connector or "openclaw").lower()
+    # SU-03: display the real primary connector (active_connector()), and gate
+    # the OpenClaw token-env on openclaw actually being active — never the
+    # phantom default of an empty guardrail.connector.
+    connector = cfg.active_connector()
+    openclaw_active = "openclaw" in cfg.active_connectors()
     gw_info = _resolve_gateway_for_connector(cfg)
     token_configured = False
     if is_new_config:
         cfg.gateway.host = gw_info["host"]
         cfg.gateway.port = gw_info["port"]
 
-    if connector == "openclaw" and gw_info["token"]:
+    if openclaw_active and gw_info["token"]:
         from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
         # The OpenClaw gateway token is read from the connector-controlled
@@ -1570,23 +1578,16 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
         cfg.gateway.token = ""
         cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
         token_configured = True
-    elif gw_info["token"]:
-        from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
-
-        env_name = f"{connector.upper()}_GATEWAY_TOKEN"
-        _validate_gateway_token(env_name, gw_info["token"])
-        _save_secret_to_dotenv(env_name, gw_info["token"], cfg.data_dir)
-        cfg.gateway.token = ""
-        cfg.gateway.token_env = env_name
-        token_configured = True
     else:
-        # Default token_env to the canonical DEFENSECLAW_ name (the
-        # Go gateway auto-generates it on first boot and writes it to
-        # ~/.defenseclaw/.env). Preserve any operator-set value to
-        # respect explicit overrides from `defenseclaw setup gateway`.
-        # `resolved_token()` falls back to OPENCLAW_GATEWAY_TOKEN
-        # automatically, so upgraders with only the legacy var still
-        # authenticate without any manual remediation.
+        # Hook-only / non-openclaw install (or openclaw with no token):
+        # default token_env to the canonical DEFENSECLAW_ name (the Go gateway
+        # auto-generates it on first boot and writes ~/.defenseclaw/.env).
+        # Preserve any operator-set value to respect explicit overrides from
+        # `defenseclaw setup gateway`. `resolved_token()` still falls back to a
+        # legacy OPENCLAW_GATEWAY_TOKEN already in .env, so upgraders keep
+        # authenticating without manual remediation. (_resolve_gateway_for_
+        # connector only ever returns a token for openclaw, so the prior
+        # per-connector-name token branch was unreachable and is dropped.)
         cfg.gateway.token_env = cfg.gateway.token_env or "DEFENSECLAW_GATEWAY_TOKEN"
         token_configured = bool(cfg.gateway.resolved_token())
 

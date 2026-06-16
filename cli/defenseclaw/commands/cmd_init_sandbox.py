@@ -118,11 +118,18 @@ def sandbox_init_cmd(app: AppContext) -> None:
     cfg = app.cfg or load()
     app.cfg = cfg
 
-    connector = (cfg.guardrail.connector or "openclaw").lower()
-    if connector != "openclaw":
+    # SU-03 (sandbox gate): require openclaw to be a genuinely active connector,
+    # not merely the phantom default of an empty guardrail.connector. The old
+    # `(cfg.guardrail.connector or "openclaw")` floored to "openclaw" and let
+    # sandbox init proceed against a hook-only install that never set the
+    # singular field. active_connectors() is [] when unconfigured and the real
+    # connector set otherwise, so the phantom can no longer pass the gate.
+    if "openclaw" not in cfg.active_connectors():
+        actives = cfg.active_connectors()
+        active_desc = ", ".join(actives) if actives else "none configured"
         click.echo(
             f"  ERROR: Sandbox init currently requires the OpenClaw connector.\n"
-            f"  Active connector: {connector}\n"
+            f"  Active connector(s): {active_desc}\n"
             f"  Change with: defenseclaw setup guardrail --connector openclaw",
             err=True,
         )
