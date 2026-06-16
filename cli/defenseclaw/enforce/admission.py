@@ -219,9 +219,26 @@ def evaluate_asset_policy(
     if not getattr(asset_policy, "enabled", False):
         return AdmissionDecision("allowed", "asset policy disabled", source="asset-policy-disabled")
 
-    policy = getattr(asset_policy, target_type, None)
+    # Per-connector resolution (OTHER-7): prefer the AssetPolicyConfig
+    # resolvers so a connector with an override gets its own scalar settings
+    # (default / registry_required / registry_empty_action) and mode. Stay
+    # duck-typed — callers/tests that pass a bare object without the resolvers
+    # fall back to the global per-type policy and global mode, which is the
+    # legacy behavior and also exactly what the resolvers return when no
+    # per-connector override is configured.
+    type_resolver = getattr(asset_policy, "effective_asset_type_policy", None)
+    if callable(type_resolver):
+        policy = type_resolver(connector, target_type)
+    else:
+        policy = getattr(asset_policy, target_type, None)
     if policy is None:
         return AdmissionDecision("allowed", "asset policy unsupported target", source="asset-policy-unsupported")
+
+    mode_resolver = getattr(asset_policy, "effective_mode", None)
+    if callable(mode_resolver):
+        mode = mode_resolver(connector)
+    else:
+        mode = getattr(asset_policy, "mode", "observe")
 
     rule_args = args or []
     if rule := _find_asset_rule(
@@ -235,7 +252,7 @@ def evaluate_asset_policy(
         transport,
     ):
         reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
-        return _asset_policy_block_or_observe(asset_policy, reason, "asset-policy-deny")
+        return _asset_policy_block_or_observe(mode, reason, "asset-policy-deny")
 
     if rule := _find_asset_rule(
         getattr(policy, "allowed", []),
@@ -271,20 +288,19 @@ def evaluate_asset_policy(
         # not list this asset is always a hard "not approved" block.
         if registry:
             return _asset_policy_block_or_observe(
-                asset_policy,
+                mode,
                 f"{target_type} {name!r} is not in the approved registry",
                 "asset-policy-registry-required",
             )
         # Registry required but empty → governed by registry_empty_action.
         # Only "deny" blocks; "warn"/"allow" fall through to the default check
-        # below. Per the OTHER-6 ruling this is intentionally looser than the
-        # Go gateway, which treats "warn" as "deny" (see
-        # _normalize_registry_empty_action).
+        # below. The Go gateway now resolves "warn" the same way (warn → allow),
+        # so this matches the runtime (see _normalize_registry_empty_action).
         if _normalize_registry_empty_action(
             getattr(policy, "registry_empty_action", "deny")
         ) == "deny":
             return _asset_policy_block_or_observe(
-                asset_policy,
+                mode,
                 f"{target_type} {name!r} is blocked because asset policy "
                 f"requires a registry but none is configured",
                 "asset-policy-registry-required-empty",
@@ -292,7 +308,7 @@ def evaluate_asset_policy(
 
     if str(getattr(policy, "default", "allow")).strip().lower() in {"deny", "block"}:
         return _asset_policy_block_or_observe(
-            asset_policy,
+            mode,
             f"{target_type} {name!r} is denied by default asset policy",
             "asset-policy-default-deny",
         )
@@ -304,8 +320,15 @@ def evaluate_asset_policy(
     )
 
 
-def _asset_policy_block_or_observe(asset_policy: Any, reason: str, source: str) -> AdmissionDecision:
-    if str(getattr(asset_policy, "mode", "observe")).strip().lower() == "action":
+def _asset_policy_block_or_observe(mode: Any, reason: str, source: str) -> AdmissionDecision:
+    """Block in action mode, observe (allow + ``-observe`` source) otherwise.
+
+    ``mode`` is the already-resolved effective mode for the connector (see
+    OTHER-7 per-connector resolution in :func:`evaluate_asset_policy`), not
+    the AssetPolicyConfig object — so a connector overriding ``mode: action``
+    blocks while one inheriting ``observe`` only flags would-block.
+    """
+    if str(mode).strip().lower() == "action":
         return AdmissionDecision("blocked", reason, source=source)
     return AdmissionDecision("allowed", reason, source=source + "-observe")
 
@@ -319,11 +342,11 @@ def _normalize_registry_empty_action(value: Any) -> str:
     default check. ``"deny"``/``"block"``/``""`` and any unrecognised value
     stay fail-closed as ``"deny"``.
 
-    NOTE: this is an *intentional, ruled divergence* from the Go gateway, whose
-    ``normalizeRegistryEmptyAction`` collapses ``"warn"`` into ``"deny"``. The
-    OTHER-6 ruling chose the looser CLI-preview semantics (warn ⇒ fall through)
-    even though it means the Python preview and the Go runtime disagree on
-    ``"warn"`` until/unless the Go side is changed (config.go — not owned here).
+    Python↔Go parity: the Go gateway's ``normalizeRegistryEmptyAction``
+    (internal/config/asset_policy.go) now also treats ``"warn"`` as
+    fall-through (warn → allow), so both sides agree that ``"warn"`` is
+    "log-but-don't-block at the empty-registry gate". The earlier divergence
+    (Go collapsing ``"warn"`` into ``"deny"``) is closed.
     """
     v = str(value).strip().lower()
     if v == "allow":

@@ -22,14 +22,49 @@ const (
 )
 
 // AssetPolicyConfig is the operator-controlled allow/deny/registry gate for
-// install-time and runtime assets. It is intentionally connector-agnostic so
-// MCP servers, skills, and plugins all share the same decision ordering.
+// install-time and runtime assets. The global per-type policies share the same
+// decision ordering across MCP servers, skills, and plugins; per-connector
+// scalar overrides (mode + default / registry_required / registry_empty_action)
+// live in Connectors so a multi-connector install can, e.g., enforce on codex
+// while only observing on hermes.
 type AssetPolicyConfig struct {
 	Enabled bool            `mapstructure:"enabled" yaml:"enabled"`
 	Mode    string          `mapstructure:"mode"    yaml:"mode"`
 	MCP     AssetTypePolicy `mapstructure:"mcp"     yaml:"mcp"`
 	Skill   AssetTypePolicy `mapstructure:"skill"   yaml:"skill"`
 	Plugin  AssetTypePolicy `mapstructure:"plugin"  yaml:"plugin"`
+	// Connectors holds per-connector asset_policy overrides keyed by
+	// connector name (OTHER-7). An empty/absent map preserves the legacy
+	// global-only behavior. Only the scalar settings are per-connector;
+	// the rule lists (registry/allowed/denied) and runtime_detection stay
+	// on the global per-type policy and are filtered by AssetPolicyRule.Connector
+	// at match time. Resolution goes through EffectiveMode / EffectiveAssetTypePolicy,
+	// never by reading the map directly. Mirrors AssetPolicyConfig.connectors in
+	// cli/defenseclaw/config.py and the guardrail.connectors pattern.
+	Connectors map[string]PerConnectorAssetPolicy `mapstructure:"connectors" yaml:"connectors,omitempty"`
+}
+
+// PerConnectorAssetPolicy carries the subset of asset_policy that an operator
+// may override on a single connector. Every field is optional: an empty Mode
+// inherits the global AssetPolicyConfig.Mode, and a nil per-type block inherits
+// the global per-type policy entirely. Resolution goes through the Effective*
+// methods. Mirrors PerConnectorAssetPolicy in cli/defenseclaw/config.py.
+type PerConnectorAssetPolicy struct {
+	Mode   string                       `mapstructure:"mode"   yaml:"mode,omitempty"`
+	MCP    *PerConnectorAssetTypePolicy `mapstructure:"mcp"    yaml:"mcp,omitempty"`
+	Skill  *PerConnectorAssetTypePolicy `mapstructure:"skill"  yaml:"skill,omitempty"`
+	Plugin *PerConnectorAssetTypePolicy `mapstructure:"plugin" yaml:"plugin,omitempty"`
+}
+
+// PerConnectorAssetTypePolicy holds the per-connector scalar overrides for one
+// asset type. Scalars only: an empty Default / RegistryEmptyAction or a nil
+// RegistryRequired pointer inherits the global AssetTypePolicy value (the
+// pointer mirrors guardrail's *bool inherit-on-nil semantics). Rule lists and
+// runtime_detection are never per-connector.
+type PerConnectorAssetTypePolicy struct {
+	Default             string `mapstructure:"default"               yaml:"default,omitempty"`
+	RegistryRequired    *bool  `mapstructure:"registry_required"     yaml:"registry_required,omitempty"`
+	RegistryEmptyAction string `mapstructure:"registry_empty_action" yaml:"registry_empty_action,omitempty"`
 }
 
 type AssetTypePolicy struct {
@@ -153,14 +188,14 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 		return out
 	}
 
-	p, ok := c.assetPolicyFor(targetType)
+	p, ok := c.assetPolicyFor(in.Connector, targetType)
 	if !ok {
 		out.Enabled = true
 		out.Source = "asset-policy-unsupported"
 		return out
 	}
 
-	mode := normalizeAssetMode(c.AssetPolicy.Mode)
+	mode := normalizeAssetMode(c.AssetPolicy.EffectiveMode(in.Connector))
 	registryConfigured := assetRegistryConfigured(p.Registry)
 	out.Enabled = true
 	out.Mode = mode
@@ -216,24 +251,128 @@ func assetRegistryConfigured(rules []AssetPolicyRule) bool {
 	return len(rules) > 0
 }
 
-func (c *Config) assetPolicyFor(targetType string) (AssetTypePolicy, bool) {
+// assetPolicyFor resolves the effective per-type policy for a connector.
+// It starts from the global per-type policy (withDefaults applied) and then
+// overlays the connector's scalar overrides (default / registry_required /
+// registry_empty_action) when a per-connector entry is present. Rule lists and
+// runtime_detection are always the global policy's. An empty connector resolves
+// to the global policy unchanged (single-connector / legacy behavior).
+func (c *Config) assetPolicyFor(connector, targetType string) (AssetTypePolicy, bool) {
 	if c == nil {
 		return AssetTypePolicy{}, false
 	}
-	switch normalizeAssetToken(targetType) {
+	token := normalizeAssetToken(targetType)
+	var p AssetTypePolicy
+	switch token {
 	case "mcp":
-		return c.AssetPolicy.MCP.withDefaults(true), true
+		p = c.AssetPolicy.MCP.withDefaults(true)
 	case "skill":
-		return c.AssetPolicy.Skill.withDefaults(false), true
+		p = c.AssetPolicy.Skill.withDefaults(false)
 	case "plugin":
-		return c.AssetPolicy.Plugin.withDefaults(false), true
+		p = c.AssetPolicy.Plugin.withDefaults(false)
 	default:
 		return AssetTypePolicy{}, false
 	}
+	if override, ok := c.AssetPolicy.connectorTypeOverride(connector, token); ok {
+		p = applyAssetTypeOverride(p, override)
+	}
+	return p, true
+}
+
+// EffectiveAssetTypePolicy is the exported resolver the gateway runtime (a
+// different package) uses to read a connector's effective per-type policy — for
+// example the per-connector MCP.Default consulted by the unknown-terminal-mcp
+// downgrade guard.
+func (c *Config) EffectiveAssetTypePolicy(connector, targetType string) (AssetTypePolicy, bool) {
+	return c.assetPolicyFor(connector, targetType)
+}
+
+// connectorOverride returns the per-connector override block for the named
+// connector, if configured. Mirrors GuardrailConfig.connectorOverride: an empty
+// connector / nil receiver / empty map yields (zero, false); lookup is
+// connector-name-insensitive (exact key first, then normalizeConnectorKey).
+func (c *AssetPolicyConfig) connectorOverride(connector string) (PerConnectorAssetPolicy, bool) {
+	if c == nil || connector == "" || len(c.Connectors) == 0 {
+		return PerConnectorAssetPolicy{}, false
+	}
+	if pc, ok := c.Connectors[connector]; ok {
+		return pc, true
+	}
+	want := normalizeConnectorKey(connector)
+	if want == "" {
+		return PerConnectorAssetPolicy{}, false
+	}
+	for name, pc := range c.Connectors {
+		if normalizeConnectorKey(name) == want {
+			return pc, true
+		}
+	}
+	return PerConnectorAssetPolicy{}, false
+}
+
+// connectorTypeOverride returns the per-connector scalar block for one asset
+// type, or (nil, false) when the connector has no override or no block for that
+// type (inherit the global per-type policy entirely).
+func (c *AssetPolicyConfig) connectorTypeOverride(connector, targetType string) (*PerConnectorAssetTypePolicy, bool) {
+	pc, ok := c.connectorOverride(connector)
+	if !ok {
+		return nil, false
+	}
+	var o *PerConnectorAssetTypePolicy
+	switch targetType {
+	case "mcp":
+		o = pc.MCP
+	case "skill":
+		o = pc.Skill
+	case "plugin":
+		o = pc.Plugin
+	}
+	if o == nil {
+		return nil, false
+	}
+	return o, true
+}
+
+// EffectiveMode resolves the asset_policy mode for a connector:
+// per-connector override (when non-empty) > global Mode > "observe".
+func (c *AssetPolicyConfig) EffectiveMode(connector string) string {
+	if c == nil {
+		return AssetPolicyModeObserve
+	}
+	if pc, ok := c.connectorOverride(connector); ok {
+		if m := strings.TrimSpace(pc.Mode); m != "" {
+			return m
+		}
+	}
+	if m := strings.TrimSpace(c.Mode); m != "" {
+		return m
+	}
+	return AssetPolicyModeObserve
+}
+
+// applyAssetTypeOverride overlays the three per-connector scalars onto a copy of
+// the global per-type policy. Only non-empty / non-nil fields override; the rule
+// lists and runtime_detection on base are left untouched.
+func applyAssetTypeOverride(base AssetTypePolicy, o *PerConnectorAssetTypePolicy) AssetTypePolicy {
+	if o == nil {
+		return base
+	}
+	if d := strings.TrimSpace(o.Default); d != "" {
+		base.Default = d
+	}
+	if o.RegistryRequired != nil {
+		base.RegistryRequired = *o.RegistryRequired
+	}
+	if a := strings.TrimSpace(o.RegistryEmptyAction); a != "" {
+		base.RegistryEmptyAction = a
+	}
+	return base
 }
 
 func (c *Config) AssetRuntimeDetectionFor(targetType string) (AssetRuntimeDetection, bool) {
-	p, ok := c.assetPolicyFor(targetType)
+	// runtime_detection is always global (never per-connector), so resolve
+	// with an empty connector.
+	p, ok := c.assetPolicyFor("", targetType)
 	if !ok {
 		return AssetRuntimeDetection{}, false
 	}
@@ -386,9 +525,15 @@ func normalizeAssetDefault(value string) string {
 // (fail-closed): an unconfigured allowlist is treated as "no asset is
 // approved" rather than silently relaxing the requirement. Operators
 // must explicitly opt into "allow" to get fall-through-to-default.
+//
+// "warn" resolves to allow (fall-through-to-default), matching the Python
+// admission preview (cli/defenseclaw/enforce/admission.py
+// _normalize_registry_empty_action). This closes the prior Python↔Go
+// divergence where the gateway collapsed "warn" into "deny" — both sides now
+// treat "warn" as "log-but-don't-block at the empty-registry gate".
 func normalizeRegistryEmptyAction(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "allow":
+	case "allow", "warn":
 		return registryEmptyActionAllow
 	case "deny", "block", "":
 		return registryEmptyActionDeny
