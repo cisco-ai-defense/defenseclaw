@@ -392,3 +392,99 @@ func TestManager_Forward_CoalescesImmediateFlushes(t *testing.T) {
 		t.Fatalf("flush coalescing failed: 1000 Forwards produced %d flushes", flushes)
 	}
 }
+
+// helper: names of events a sink received, for terse assertions.
+func receivedActions(s *fakeSink) []string {
+	evs := s.snapshot()
+	out := make([]string, len(evs))
+	for i, e := range evs {
+		out[i] = e.Action
+	}
+	return out
+}
+
+// TestManager_PerConnectorRouting_Override asserts a connector with its own
+// registered sinks receives ONLY its events and the global sinks stop seeing
+// that connector's events (override semantics), while other connectors still
+// inherit the global sinks (no silent drop).
+func TestManager_PerConnectorRouting_Override(t *testing.T) {
+	m := NewManager()
+	global := newFakeSink("global")
+	codexSink := newFakeSink("codex-only")
+	m.Register(global)
+	m.RegisterForConnector("codex", codexSink)
+
+	// codex event → only codexSink
+	m.Forward(context.Background(), Event{Action: "guardrail-verdict", Connector: "codex"})
+	// hermes event (no override) → inherits global
+	m.Forward(context.Background(), Event{Action: "scan", Connector: "hermes"})
+	// connector-agnostic event → global
+	m.Forward(context.Background(), Event{Action: "sidecar-start"})
+
+	if got := receivedActions(codexSink); len(got) != 1 || got[0] != "guardrail-verdict" {
+		t.Fatalf("codex sink received %v, want [guardrail-verdict]", got)
+	}
+	gActions := receivedActions(global)
+	if len(gActions) != 2 {
+		t.Fatalf("global received %v, want 2 (hermes scan + agnostic), codex must NOT leak to global", gActions)
+	}
+	for _, a := range gActions {
+		if a == "guardrail-verdict" {
+			t.Fatalf("global sink received codex's guardrail-verdict — override leaked to global")
+		}
+	}
+}
+
+// TestManager_PerConnectorRouting_Suppress asserts the tri-state empty-list
+// case: a connector marked as override with NO registered sinks suppresses
+// global routing for its events (they go nowhere), while unrelated connectors
+// keep inheriting global.
+func TestManager_PerConnectorRouting_Suppress(t *testing.T) {
+	m := NewManager()
+	global := newFakeSink("global")
+	m.Register(global)
+	m.MarkConnectorOverride("claudecode") // explicit empty list = suppress
+
+	m.Forward(context.Background(), Event{Action: "guardrail-verdict", Connector: "claudecode"})
+	m.Forward(context.Background(), Event{Action: "scan", Connector: "codex"}) // inherit
+
+	if got := receivedActions(global); len(got) != 1 || got[0] != "scan" {
+		t.Fatalf("global received %v, want [scan] only (claudecode suppressed)", got)
+	}
+}
+
+// TestManager_PerConnectorRouting_AliasInsensitive asserts routing folds the
+// hyphen/underscore connector aliases so a sink registered under "open-hands"
+// receives events stamped with the canonical "openhands".
+func TestManager_PerConnectorRouting_AliasInsensitive(t *testing.T) {
+	m := NewManager()
+	ohSink := newFakeSink("oh")
+	m.RegisterForConnector("open-hands", ohSink)
+
+	m.Forward(context.Background(), Event{Action: "scan", Connector: "openhands"})
+	if got := receivedActions(ohSink); len(got) != 1 {
+		t.Fatalf("openhands event did not route to open-hands sink: %v", got)
+	}
+}
+
+// TestManager_PerConnectorRouting_LenAndClose asserts per-connector sinks are
+// counted by Len (so the boot path installs a global-empty manager that only
+// routes per-connector) and drained by Close.
+func TestManager_PerConnectorRouting_LenAndClose(t *testing.T) {
+	m := NewManager()
+	codexSink := newFakeSink("codex-only")
+	m.RegisterForConnector("codex", codexSink)
+
+	if m.Len() != 1 {
+		t.Fatalf("Len()=%d, want 1 (per-connector sink counts)", m.Len())
+	}
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	codexSink.mu.Lock()
+	closed := codexSink.closed
+	codexSink.mu.Unlock()
+	if !closed {
+		t.Fatal("per-connector sink was not closed by Manager.Close")
+	}
+}
