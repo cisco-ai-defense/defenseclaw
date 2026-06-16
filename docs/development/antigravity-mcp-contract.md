@@ -45,7 +45,7 @@ MCP files are JSON documents with one top-level `mcpServers` object.
       "command": "/opt/defenseclaw/bin/defenseclaw",
       "args": ["mcp", "serve"],
       "env": {
-        "DEFENSECLAW_PROFILE": "default"
+        "AGY_PROFILE": "default"
       },
       "cwd": "/workspace/project",
       "disabled": false,
@@ -72,7 +72,7 @@ Local schema contract:
     "defenseclaw-remote": {
       "serverUrl": "https://mcp.example.com/mcp/",
       "headers": {
-        "Authorization": "Bearer ${DEFENSECLAW_MCP_TOKEN}"
+        "Authorization": "Bearer ${AGY_MCP_TOKEN}"
       },
       "disabled": false
     }

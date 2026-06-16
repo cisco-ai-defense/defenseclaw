@@ -290,7 +290,7 @@ class TestAntigravityWrites:
             {
                 "url": "https://new.example/mcp",
                 "transport": "sse",
-                "headers": {"Authorization": "Bearer ${DEFENSECLAW_MCP_TOKEN}"},
+                "headers": {"Authorization": "Bearer ${AGY_MCP_TOKEN}"},
                 "authProviderType": "oauth",
                 "oauth": {"issuer": "https://accounts.example.com"},
                 "futureField": {"enabled": True},
@@ -305,7 +305,7 @@ class TestAntigravityWrites:
         assert "url" not in demo
         assert "httpUrl" not in demo
         assert "transport" not in demo
-        assert demo["headers"] == {"Authorization": "Bearer ${DEFENSECLAW_MCP_TOKEN}"}
+        assert demo["headers"] == {"Authorization": "Bearer ${AGY_MCP_TOKEN}"}
         assert demo["authProviderType"] == "oauth"
         assert demo["oauth"] == {"issuer": "https://accounts.example.com"}
         assert demo["x-antigravity"] == {"keep": True}
@@ -319,7 +319,7 @@ class TestAntigravityWrites:
             {
                 "command": "/opt/defenseclaw/bin/defenseclaw",
                 "args": ["mcp", "serve"],
-                "env": {"DEFENSECLAW_PROFILE": "default"},
+                "env": {"AGY_PROFILE": "default"},
                 "cwd": "/workspace/project",
                 "disabled": True,
                 "disabledTools": ["unsafe_tool"],
@@ -330,7 +330,7 @@ class TestAntigravityWrites:
         assert data["mcpServers"]["local"] == {
             "command": "/opt/defenseclaw/bin/defenseclaw",
             "args": ["mcp", "serve"],
-            "env": {"DEFENSECLAW_PROFILE": "default"},
+            "env": {"AGY_PROFILE": "default"},
             "cwd": "/workspace/project",
             "disabled": True,
             "disabledTools": ["unsafe_tool"],
