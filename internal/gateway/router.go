@@ -218,6 +218,21 @@ func (r *EventRouter) SetDefaultPolicyID(id string) {
 	r.defaultPolicyID = id
 }
 
+// connectorName returns the connector this sidecar process is configured for,
+// mirroring configuredConnectorName(cfg): the guardrail connector wins, else
+// the Claw mode (captured as defaultAgentName at bootstrap). Empty ⇒ only the
+// global tool tier is consulted on this lane. Unlike the hook lane (which reads
+// a per-request connector), the sidecar is single-connector per process, so
+// the connector comes from config rather than the event payload.
+func (r *EventRouter) connectorName() string {
+	if r.guardrailCfg != nil {
+		if name := strings.TrimSpace(r.guardrailCfg.Connector); name != "" {
+			return strings.ToLower(name)
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(r.defaultAgentName))
+}
+
 // agentNameForStream picks the most specific agent name available.
 // Stream-provided hints win over the router default (claw mode) so
 // that multi-agent deployments can still distinguish per-agent events.
@@ -1170,9 +1185,12 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	meta.ToolName = payload.Tool
 	emitToolInvocationEvent(context.Background(), meta, "call", payload.Tool, stringFromJSONRaw(payload.Args), "", nil)
 
-	// Static block list — checked before any pattern scanning.
+	// Static block/allow list — checked before any pattern scanning.
+	// Connector-scoped (@C/T) entries resolve before the bare global entry;
+	// the connector is this sidecar's configured connector (see connectorName).
 	if r.policy != nil {
-		if blocked, _ := r.policy.IsBlocked("tool", payload.Tool); blocked {
+		conn := r.connectorName()
+		if blocked, _ := r.policy.IsToolBlockedForConnector(payload.Tool, conn); blocked {
 			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED tool call: %q is on the static block list\n", payload.Tool)
 			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-blocked", payload.Tool, payload.ID, "reason=static-block-list")
 			vctx := r.streamContext(payload.SessionID, audit.CorrelationEnvelope{
@@ -1185,6 +1203,16 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				gatewaylog.SeverityHigh, []string{"policy:block", "surface:tool_call"}, 0)
 			if r.otel != nil {
 				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
+			}
+			return
+		}
+		// An explicit allow skips the scan gate: no rule scan, no judge. This
+		// lane runs no CodeGuard, so the allow is a full bypass here — the
+		// CodeGuard-on-write guarantee (D2) lives on the hook/inspect lane.
+		if allowed, _ := r.policy.IsToolAllowedForConnector(payload.Tool, conn); allowed {
+			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-allowed", payload.Tool, payload.ID, "reason=allow-list")
+			if r.otel != nil {
+				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "allow", "NONE")
 			}
 			return
 		}
