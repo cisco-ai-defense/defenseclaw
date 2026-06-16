@@ -129,7 +129,13 @@ class TestSetupCodexAlias(unittest.TestCase):
         self.assertTrue(gc.enabled)
         self.assertEqual(gc.mode, "observe")
         self.assertEqual(gc.scanner_mode, "local")
-        self.assertEqual(gc.detection_strategy, "regex_only")
+        # SU-02/ND-1: hook setup no longer clobbers detection_strategy down to
+        # regex_only — it preserves the documented dataclass default
+        # (regex_judge), so a later `guardrail judge add` survives a setup
+        # re-run. The per-direction completion strategy is still seeded
+        # (regex_only) only when unset.
+        self.assertEqual(gc.detection_strategy, "regex_judge")
+        self.assertEqual(gc.detection_strategy_completion, "regex_only")
         self.assertFalse(gc.judge.enabled)
 
     def test_writes_picked_connector_hint(self):

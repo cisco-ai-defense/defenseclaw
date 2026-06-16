@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import sys
 import unittest
@@ -33,8 +34,12 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from click.testing import CliRunner
 from defenseclaw.commands import cmd_status
 from defenseclaw.commands.cmd_status import _print_agents
+from defenseclaw.commands.cmd_status import status as status_cmd
+
+from tests.helpers import cleanup_app, make_app_context
 
 
 def _cfg(actives, *, modes=None, disabled=None):
@@ -155,6 +160,87 @@ class TestPrintAgentsLiveCounters(unittest.TestCase):
         cfg = _cfg(["codex", "cursor"])
         out = _render_live(cfg, health)
         self.assertIn("requests: 7", out)
+
+
+class TestStatusDbErrorSurfacing(unittest.TestCase):
+    """SU-05: an audit-DB read error must surface in the Enforcement + Activity
+    sections, never silently drop them."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _invoke(self):
+        runner = CliRunner()
+        with patch("defenseclaw.gateway.OrchestratorClient.is_running", return_value=False):
+            return runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+    def test_db_error_surfaces_and_stays_exit_zero(self):
+        self.app.store.get_counts = MagicMock(side_effect=RuntimeError("disk I/O error"))
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # Section headers still render, with a visible error instead of nothing.
+        self.assertIn("Enforcement", result.output)
+        self.assertIn("Activity", result.output)
+        self.assertIn("unavailable", result.output)
+        self.assertIn("disk I/O error", result.output)
+
+    def test_healthy_db_shows_counts(self):
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Enforcement", result.output)
+        self.assertIn("Blocked skills", result.output)
+        self.assertNotIn("unavailable", result.output)
+
+
+class TestStatusJson(unittest.TestCase):
+    """SU-13: ``status --json`` emits a machine-readable document."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        gc = self.app.cfg.guardrail
+        gc.connector = "codex"
+        gc.connectors = {
+            "codex": PerConnectorGuardrailConfig(mode="action"),
+            "hermes": PerConnectorGuardrailConfig(mode="observe"),
+        }
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _invoke_json(self):
+        runner = CliRunner()
+        with patch("defenseclaw.gateway.OrchestratorClient.is_running", return_value=False):
+            return runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+    def test_json_is_valid_and_has_core_keys(self):
+        result = self._invoke_json()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        doc = json.loads(result.output)
+        for key in ("environment", "scanners", "enforcement", "activity", "connectors", "sidecar"):
+            self.assertIn(key, doc)
+        self.assertFalse(doc["sidecar"]["running"])
+
+    def test_json_roster_has_per_connector_mode(self):
+        result = self._invoke_json()
+        doc = json.loads(result.output)
+        by_name = {c["name"]: c for c in doc["connectors"]}
+        self.assertEqual(by_name["codex"]["mode"], "action")
+        self.assertEqual(by_name["hermes"]["mode"], "observe")
+        self.assertTrue(by_name["codex"]["enabled"])
+
+    def test_json_db_error_is_explicit_null_not_dropped(self):
+        self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
+        result = self._invoke_json()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        doc = json.loads(result.output)
+        self.assertIsNone(doc["enforcement"])
+        self.assertIsNone(doc["activity"])
+        self.assertEqual(doc["audit_db_error"], "locked")
 
 
 if __name__ == "__main__":
