@@ -209,8 +209,17 @@ type Config struct {
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
 	// detected at Load() and emit a hard migration error.
-	AuditSinks    []AuditSink         `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
-	Webhooks      []WebhookConfig     `mapstructure:"webhooks"         yaml:"webhooks"`
+	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
+	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
+	// Observability carries the per-connector audit-sink / webhook routing
+	// overrides (D5b). An empty/absent block preserves the legacy
+	// global-only behavior. A connector's events route to its
+	// observability.connectors[<name>].{audit_sinks,webhooks} when set,
+	// falling back to the global AuditSinks / Webhooks otherwise; resolution
+	// goes through the ObservabilityConfig.Effective* resolvers. Mirrors the
+	// Python `observability:` block written by `defenseclaw setup
+	// observability/webhook --connector`.
+	Observability ObservabilityConfig `mapstructure:"observability"    yaml:"observability,omitempty"`
 	Privacy       PrivacyConfig       `mapstructure:"privacy"          yaml:"privacy,omitempty"`
 	AIDiscovery   AIDiscoveryConfig   `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
 	Notifications NotificationsConfig `mapstructure:"notifications"    yaml:"notifications,omitempty"`
@@ -2049,6 +2058,35 @@ func Load() (*Config, error) {
 				ReportConfigLoadError(context.Background(), "audit_sink_invalid")
 			}
 			return nil, fmt.Errorf("config: audit_sinks[%d]: %w", i, err)
+		}
+	}
+
+	// Per-connector observability (D5b): reject empty / alias-duplicate
+	// connector names, then validate each connector's override audit sinks
+	// exactly like the global list above so a hand-edited
+	// observability.connectors[...] block fails loud at startup rather than
+	// silently mis-routing a connector's events. Webhooks are validated at
+	// dispatcher build time (URL/SSRF checks), matching the top-level
+	// webhooks: handling.
+	if err := cfg.Observability.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "observability_invalid")
+		}
+		return nil, fmt.Errorf("config: observability: %w", err)
+	}
+	for _, name := range cfg.Observability.ConnectorNames() {
+		pc := cfg.Observability.Connectors[name]
+		if pc.AuditSinks == nil {
+			continue
+		}
+		for i := range *pc.AuditSinks {
+			if err := (*pc.AuditSinks)[i].Validate(); err != nil {
+				if ReportConfigLoadError != nil {
+					ReportConfigLoadError(context.Background(), "audit_sink_invalid")
+				}
+				return nil, fmt.Errorf(
+					"config: observability.connectors[%q].audit_sinks[%d]: %w", name, i, err)
+			}
 		}
 	}
 

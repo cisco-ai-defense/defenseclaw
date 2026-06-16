@@ -1491,3 +1491,105 @@ func TestWebhookRevealFlagDoesNotUnmaskPayloads(t *testing.T) {
 		t.Fatalf("webhook unmasked under reveal flag: %s", body)
 	}
 }
+
+// TestWebhookDispatch_PerConnectorRouting exercises the D5b tri-state at the
+// dispatcher: a connector with its own webhook override fires only at that
+// endpoint (override), a connector with an explicit empty override fires
+// nowhere (suppress), and any other connector inherits the global endpoint
+// (the no-silent-drop default).
+func TestWebhookDispatch_PerConnectorRouting(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+
+	var globalHits, codexHits atomic.Int32
+	globalSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		globalHits.Add(1)
+		w.WriteHeader(200)
+	}))
+	defer globalSrv.Close()
+	codexSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		codexHits.Add(1)
+		w.WriteHeader(200)
+	}))
+	defer codexSrv.Close()
+
+	zero := 0 // disable cooldown so repeat (target,action) pairs all deliver
+	obs := config.ObservabilityConfig{
+		Connectors: map[string]config.PerConnectorObservability{
+			"codex": {Webhooks: &[]config.WebhookConfig{
+				{URL: codexSrv.URL, Type: "generic", Enabled: true, CooldownSeconds: &zero},
+			}},
+			"claudecode": {Webhooks: &[]config.WebhookConfig{}}, // explicit empty = suppress
+		},
+	}
+	d := NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: globalSrv.URL, Type: "generic", Enabled: true, CooldownSeconds: &zero},
+	}, obs)
+	if d == nil {
+		t.Fatal("dispatcher is nil")
+	}
+
+	// codex → only the codex endpoint
+	ev := testEvent()
+	ev.Connector = "codex"
+	d.Dispatch(ev)
+
+	// claudecode → suppressed (no endpoint)
+	ev2 := testEvent()
+	ev2.Connector = "claudecode"
+	d.Dispatch(ev2)
+
+	// hermes (no override) → inherits global
+	ev3 := testEvent()
+	ev3.Connector = "hermes"
+	d.Dispatch(ev3)
+
+	// connector-agnostic → global
+	ev4 := testEvent()
+	ev4.Connector = ""
+	d.Dispatch(ev4)
+
+	d.Close() // drains in-flight sends
+
+	if got := codexHits.Load(); got != 1 {
+		t.Errorf("codex endpoint hits = %d, want 1 (codex event only)", got)
+	}
+	// global should receive hermes + agnostic = 2, and NOT codex or claudecode.
+	if got := globalHits.Load(); got != 2 {
+		t.Errorf("global endpoint hits = %d, want 2 (hermes + agnostic; codex override + claudecode suppress must not leak)", got)
+	}
+}
+
+// TestWebhookDispatch_GlobalEmptyPerConnectorOnly asserts a global-empty
+// install still yields a live dispatcher when a connector has its own webhook,
+// and routes that connector's events to it.
+func TestWebhookDispatch_GlobalEmptyPerConnectorOnly(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+
+	var codexHits atomic.Int32
+	codexSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		codexHits.Add(1)
+		w.WriteHeader(200)
+	}))
+	defer codexSrv.Close()
+
+	zero := 0
+	obs := config.ObservabilityConfig{
+		Connectors: map[string]config.PerConnectorObservability{
+			"codex": {Webhooks: &[]config.WebhookConfig{
+				{URL: codexSrv.URL, Type: "generic", Enabled: true, CooldownSeconds: &zero},
+			}},
+		},
+	}
+	d := NewWebhookDispatcher(nil, obs)
+	if d == nil {
+		t.Fatal("dispatcher must be non-nil when a connector has its own webhook even with empty global")
+	}
+	ev := testEvent()
+	ev.Connector = "codex"
+	d.Dispatch(ev)
+	d.Close()
+
+	if got := codexHits.Load(); got != 1 {
+		t.Errorf("codex endpoint hits = %d, want 1", got)
+	}
+}

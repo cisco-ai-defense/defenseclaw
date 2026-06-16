@@ -46,7 +46,22 @@ import (
 // WebhookDispatcher sends structured JSON payloads to configured webhook
 // endpoints when enforcement events occur. Modeled after the SplunkForwarder.
 type WebhookDispatcher struct {
-	endpoints    []webhookEndpoint
+	endpoints []webhookEndpoint
+
+	// connectorEndpoints holds per-connector webhook endpoints (D5b). An
+	// event whose Connector has an override (see connectorOverride) is
+	// dispatched only to these, never to the global endpoints above; events
+	// for connectors absent here inherit the global endpoints. Keyed by
+	// normalized connector name.
+	connectorEndpoints map[string][]webhookEndpoint
+
+	// connectorOverride records connectors with an explicit per-connector
+	// webhooks dimension (a present list, possibly empty). A connector
+	// present here with no connectorEndpoints SUPPRESSES global dispatch for
+	// its events (the tri-state's empty-list case); a connector absent here
+	// INHERITS the global endpoints (the safety default — no silent drop).
+	connectorOverride map[string]bool
+
 	client       *http.Client
 	retryBackoff time.Duration
 	sem          chan struct{} // bounded concurrency
@@ -91,10 +106,74 @@ var (
 	webhookCircuitOpenDuration     = 60 * time.Second
 )
 
-// NewWebhookDispatcher creates a dispatcher from the config slice.
-// Endpoints with enabled=false, empty URL, or unsafe URLs are skipped.
-func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
+// NewWebhookDispatcher creates a dispatcher from the global webhook config
+// slice. Endpoints with enabled=false, empty URL, or unsafe URLs are skipped.
+//
+// The optional obs argument carries the per-connector observability routing
+// overrides (D5b): for each connector whose webhooks dimension is set, its
+// endpoints are built so that connector's events dispatch only to them
+// (override), and an explicit empty list suppresses the global endpoints for
+// that connector. A connector with no override inherits the global endpoints.
+// obs is variadic so existing call sites that route everything globally keep
+// compiling; pass cfg.Observability to activate per-connector routing.
+//
+// Returns nil only when there are no global endpoints AND no per-connector
+// endpoints — a global-empty install that routes a connector to its own
+// webhook still yields a live dispatcher.
+func NewWebhookDispatcher(cfgs []config.WebhookConfig, obs ...config.ObservabilityConfig) *WebhookDispatcher {
 	logger := log.New(os.Stderr, "[webhook] ", 0)
+	endpoints := buildWebhookEndpoints(cfgs, logger)
+
+	var connectorEndpoints map[string][]webhookEndpoint
+	var connectorOverride map[string]bool
+	connEndpointCount := 0
+	if len(obs) > 0 {
+		o := obs[0]
+		for _, name := range o.ConnectorNames() {
+			if !o.HasConnectorWebhooksOverride(name) {
+				continue // webhooks dimension unset → inherit global.
+			}
+			key := normalizeWebhookConnector(name)
+			if key == "" {
+				continue
+			}
+			if connectorOverride == nil {
+				connectorOverride = make(map[string]bool)
+				connectorEndpoints = make(map[string][]webhookEndpoint)
+			}
+			// Mark the override first so the empty-list suppress case holds
+			// even when the override builds zero endpoints.
+			connectorOverride[key] = true
+			eps := buildWebhookEndpoints(o.EffectiveWebhooks(name, nil), logger)
+			if len(eps) > 0 {
+				connectorEndpoints[key] = eps
+				connEndpointCount += len(eps)
+			}
+		}
+	}
+
+	if len(endpoints) == 0 && connEndpointCount == 0 {
+		return nil
+	}
+	allowLoopback := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
+	return &WebhookDispatcher{
+		endpoints:          endpoints,
+		connectorEndpoints: connectorEndpoints,
+		connectorOverride:  connectorOverride,
+		client:             newWebhookHTTPClient(allowLoopback, logger),
+		retryBackoff:       webhookRetryBackoff,
+		sem:                make(chan struct{}, webhookMaxConcurrency),
+		logger:             logger,
+		debug:              os.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
+		done:               make(chan struct{}),
+	}
+}
+
+// buildWebhookEndpoints translates a webhook config slice into the runtime
+// endpoint structs, skipping disabled / empty-URL / SSRF-unsafe entries.
+// Shared by the global and per-connector (D5b) construction paths so both
+// apply identical validation, cooldown, and severity handling.
+func buildWebhookEndpoints(cfgs []config.WebhookConfig, logger *log.Logger) []webhookEndpoint {
 	var endpoints []webhookEndpoint
 	for _, c := range cfgs {
 		if !c.Enabled || c.URL == "" {
@@ -133,19 +212,38 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 			lastSent:    make(map[string]time.Time),
 		})
 	}
-	if len(endpoints) == 0 {
-		return nil
+	return endpoints
+}
+
+// normalizeWebhookConnector canonicalizes a connector name for per-connector
+// webhook routing (trim + lowercase + hyphen/underscore alias fold). Mirrors
+// config.normalizeConnectorKey and sinks.normalizeConnector — kept local so
+// the routing key matches whether the operator wrote the canonical name or an
+// alias under observability.connectors.
+func normalizeWebhookConnector(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "open-hands", "open_hands":
+		return "openhands"
+	default:
+		return n
 	}
-	allowLoopback := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
-	return &WebhookDispatcher{
-		endpoints:    endpoints,
-		client:       newWebhookHTTPClient(allowLoopback, logger),
-		retryBackoff: webhookRetryBackoff,
-		sem:          make(chan struct{}, webhookMaxConcurrency),
-		logger:       logger,
-		debug:        os.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
-		done:         make(chan struct{}),
+}
+
+// endpointsForConnector returns the endpoint slice an event with the given
+// connector dispatches to, honoring the per-connector tri-state: the global
+// endpoints when the connector has no override (inherit), or the connector's
+// own endpoints (possibly empty = suppress) when it does. The returned slice
+// shares its backing array with the dispatcher's stored endpoints — callers
+// index it by pointer (&eps[i]) exactly like the global path, never copy it.
+func (d *WebhookDispatcher) endpointsForConnector(connector string) []webhookEndpoint {
+	if connector != "" && len(d.connectorOverride) > 0 {
+		key := normalizeWebhookConnector(connector)
+		if d.connectorOverride[key] {
+			return d.connectorEndpoints[key]
+		}
 	}
+	return d.endpoints
 }
 
 // newWebhookHTTPClient builds the http.Client used to deliver webhooks. It
@@ -250,8 +348,13 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 	action := strings.ToLower(event.Action)
 	eventCategory := categorizeAction(action)
 
-	for i := range d.endpoints {
-		ep := &d.endpoints[i]
+	// Per-connector routing (D5b): an event whose connector has an explicit
+	// webhooks override fires only at that connector's endpoints (empty =
+	// suppress); every other event inherits the global endpoints. Keys off
+	// event.Connector, stamped by the proxy guardrail path / connector glue.
+	endpoints := d.endpointsForConnector(event.Connector)
+	for i := range endpoints {
+		ep := &endpoints[i]
 		if rank < ep.minSeverity {
 			continue
 		}

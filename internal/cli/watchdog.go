@@ -121,8 +121,10 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	healthURL := watchdogHealthURL(cfg)
 
 	var webhooks *gateway.WebhookDispatcher
-	if len(cfg.Webhooks) > 0 {
-		webhooks = gateway.NewWebhookDispatcher(cfg.Webhooks)
+	// Include per-connector webhook overrides (D5b) so a global-empty install
+	// that routes a connector to its own webhook still gets a dispatcher.
+	if len(cfg.Webhooks) > 0 || len(cfg.Observability.Connectors) > 0 {
+		webhooks = gateway.NewWebhookDispatcher(cfg.Webhooks, cfg.Observability)
 	}
 
 	fmt.Fprintf(os.Stderr, "[watchdog] starting: poll=%s debounce=%d url=%s\n",
