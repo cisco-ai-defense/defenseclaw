@@ -4048,3 +4048,171 @@ def test_overview_config_marks_disabled_connector_in_roster() -> None:
     names = [connector for connector, _mode in overview.connector_modes]
     assert names == ["codex", "cursor"]
     assert overview.connector_disabled == ("cursor",)
+
+
+def test_overview_config_no_connectors_yields_empty_claw_mode() -> None:
+    """A1 (Root R1, display-only): a genuinely-zero-connector config resolves
+    the display connector to "" — never a phantom "openclaw". The adapter passes
+    the real (empty) claw.mode so active_connector_name() falls through to ""."""
+
+    cfg = _roster_config(lambda: [], _RosterGuardrail())
+    cfg.claw = SimpleNamespace(mode="")
+    overview = _overview_config(cfg)
+    assert overview.claw_mode == ""
+    assert OverviewPanelModel(overview, version="test").active_connector_name() == ""
+
+
+def test_overview_config_sets_roster_error_when_enumeration_raises() -> None:
+    """A2: a throwing active_connectors() stashes a visible diagnostic in
+    roster_error (surfaced by the Overview notices) instead of degrading
+    silently."""
+
+    def boom():
+        raise RuntimeError("malformed connector key")
+
+    cfg = _roster_config(boom, _RosterGuardrail())
+    overview = _overview_config(cfg)
+    assert "malformed connector key" in overview.roster_error
+    # The model turns it into a visible error notice.
+    notices = OverviewPanelModel(overview, version="test").build_notices()
+    assert any(n.level == "error" for n in notices)
+
+
+def test_flatten_scanner_overrides_skips_malformed() -> None:
+    """N3: a malformed scanner_overrides branch is skipped, not fatal."""
+
+    from defenseclaw.tui.app import _flatten_scanner_overrides
+
+    flat = _flatten_scanner_overrides(
+        {
+            "mcp": {"LOW": {"runtime": "block", "file": "none"}},
+            "bad": "not-a-dict",
+            "plugin": {"HIGH": "also-bad"},
+        }
+    )
+    assert ("mcp", "LOW", "runtime", "block") in flat
+    assert all(entry[0] != "plugin" for entry in flat)
+    assert _flatten_scanner_overrides("nope") == ()
+
+
+def test_overview_config_reads_scanner_overrides_from_active_policy(tmp_path) -> None:
+    """N3: the adapter flattens the active policy's data.json scanner_overrides
+    into OverviewConfig so the Overview/status can surface them."""
+
+    rego = tmp_path / "rego"
+    rego.mkdir()
+    (rego / "data.json").write_text(
+        json.dumps(
+            {
+                "scanner_overrides": {
+                    "secrets": {"HIGH": {"file": "block", "install": "warn"}}
+                }
+            }
+        )
+    )
+    cfg = _roster_config(lambda: ["codex"], _RosterGuardrail())
+    cfg.policy_dir = str(tmp_path)
+    overview = _overview_config(cfg)
+    assert ("secrets", "HIGH", "file", "block") in overview.scanner_overrides
+    assert ("secrets", "HIGH", "install", "warn") in overview.scanner_overrides
+    assert "secrets" in OverviewPanelModel(overview, version="test").scanner_overrides_summary()
+
+
+def _multi_connector_app() -> DefenseClawTUI:
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    return DefenseClawTUI(overview_model=OverviewPanelModel(cfg, version="test"))
+
+
+@pytest.mark.asyncio
+async def test_connector_chip_click_sets_and_clears_filter() -> None:
+    """E1: a mouse click on a connector-chip segment applies that filter (the
+    coordinate-mapped path that replaces the crash-prone @click action links),
+    and clicking the All segment clears it."""
+
+    app = _multi_connector_app()
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        # Render the chip (line 0 of a chip-bearing body) and its click-map.
+        app.body_text = app._connector_chip_text() + "list body\nmore body"
+        cursor = next(s for s in app._chip_click_segments if s[2] == "cursor")
+        assert app._handle_body_chip_click((cursor[0] + cursor[1]) // 2, 0) is True
+        assert app._connector_filter() == "cursor"
+
+        # Clicking a non-chip line is ignored regardless of x.
+        app.body_text = app._connector_chip_text() + "list body\nmore body"
+        assert app._handle_body_chip_click(0, 1) is False
+
+        all_seg = next(s for s in app._chip_click_segments if s[2] == "")
+        assert app._handle_body_chip_click((all_seg[0] + all_seg[1]) // 2, 0) is True
+        assert app._connector_filter() == ""
+
+
+@pytest.mark.asyncio
+async def test_setup_m_key_opens_connector_filter_picker() -> None:
+    """B5: in a multi-connector install, `m` on the Setup panel opens the shared
+    connector-filter picker like every other multi-connector pane."""
+
+    app = _multi_connector_app()
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel("setup")
+        await pilot.pause()
+        await pilot.press("m")
+        await pilot.pause()
+        assert app.screen_stack[-1].__class__.__name__ == "ActionMenuScreen"
+
+
+def test_destructive_intent_modal_is_danger_gated() -> None:
+    """N1: a destructive catalog intent builds a red-bordered consequence modal
+    whose only action is danger-gated (requires the explicit second confirm)."""
+
+    from defenseclaw.tui.app import TOKENS
+    from defenseclaw.tui.services.catalog_state import CatalogCommandIntent
+
+    app = DefenseClawTUI()
+    intent = CatalogCommandIntent(
+        label="remove plugin foo",
+        args=("plugin", "remove", "foo"),
+        origin="plugins",
+        risk="destructive",
+    )
+    model = app._destructive_intent_modal(intent)
+    assert len(model.actions) == 1
+    assert model.default_action().danger is True
+    assert model.border_color == TOKENS.accent_red
+    assert "plugin remove foo" in model.details[0]
+
+
+@pytest.mark.asyncio
+async def test_destructive_intent_routes_through_consequence_modal() -> None:
+    """N1: dispatching a destructive catalog intent opens the consequence
+    danger-modal (not the one-step command preview), and a single Enter only
+    arms it — the command can't run on one keypress."""
+
+    from defenseclaw.tui.services.catalog_state import CatalogCommandIntent
+
+    app = DefenseClawTUI()
+    intent = CatalogCommandIntent(
+        label="remove plugin foo",
+        args=("plugin", "remove", "foo"),
+        origin="plugins",
+        risk="destructive",
+    )
+    async with app.run_test(size=(150, 44)) as pilot:
+        await pilot.pause()
+        app.run_worker(app._confirm_and_run_intent(intent), exclusive=False, thread=False)
+        await pilot.pause()
+        assert app.screen_stack[-1].__class__.__name__ == "ConsequenceModalScreen"
+        # First Enter only arms the danger action; the modal stays open.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.screen_stack[-1].__class__.__name__ == "ConsequenceModalScreen"
+        # Cancel out without running the command.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.command_running
