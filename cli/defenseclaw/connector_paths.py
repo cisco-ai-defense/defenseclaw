@@ -132,8 +132,14 @@ class MCPServerEntry:
     command: str = ""
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    cwd: str = ""
     url: str = ""
     transport: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+    auth_provider_type: str = ""
+    oauth: dict[str, Any] = field(default_factory=dict)
+    disabled: bool = False
+    disabled_tools: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -328,19 +334,15 @@ def connector_config_files(
             _workspace_path(workspace_dir, ".openhands", "hooks.json"),
         ]
     elif name == "antigravity":
-        # Global only — agy merges hooks files from all discovered
-        # locations, so listing the workspace path here would
-        # mislead operators into thinking DefenseClaw might patch it.
-        #
-        # The canonical path is ~/.gemini/config/hooks.json — that
-        # is the only path agy v1.0.x actually evaluates at
-        # runtime, even though `agy --help` still advertises
-        # ~/.gemini/antigravity-cli/ as the install location. The
-        # legacy path is also listed (best-effort) so doctor /
-        # inventory can surface stale defenseclaw-managed entries
-        # left behind from pre-v0.5.0 installs that wrote to the
-        # wrong file.
+        # Antigravity has two independently documented surfaces under
+        # ~/.gemini/config/: hooks.json for lifecycle hooks and
+        # mcp_config.json for MCP servers. Workspace MCP lives in
+        # <workspace>/.agents/mcp_config.json when an explicit workspace
+        # is pinned. The legacy antigravity-cli hooks path is discovery-only
+        # so doctor/inventory can surface stale pre-v0.5.0 entries.
         paths = [
+            os.path.join(home, ".gemini", "config", "mcp_config.json"),
+            _workspace_path(workspace_dir, ".agents", "mcp_config.json"),
             os.path.join(home, ".gemini", "config", "hooks.json"),
             os.path.join(home, ".gemini", "antigravity-cli", "hooks.json"),
         ]
@@ -488,6 +490,8 @@ def mcp_servers(
     * Claude Code: ``~/.claude/settings.json`` then explicit workspace ``.mcp.json``
     * Codex:       ``~/.codex/config.toml`` then explicit workspace ``.mcp.json``
     * ZeptoClaw:   ``~/.zeptoclaw/config.json`` then explicit workspace ``.mcp.json``
+    * Antigravity: ``~/.gemini/config/mcp_config.json`` then explicit workspace
+                    ``.agents/mcp_config.json``
     * OpenClaw:    ``openclaw config get mcp.servers`` (preferred)
                     falling back to direct ``openclaw.json`` parse
 
@@ -516,9 +520,7 @@ def mcp_servers(
     if name == "openhands":
         return _openhands_mcp_servers()
     if name == "antigravity":
-        # Antigravity does not expose a documented MCP install
-        # surface; nothing to discover.
-        return []
+        return _antigravity_mcp_servers(workspace_dir)
     if name == "opencode":
         # opencode manages MCP servers in its own opencode.json (full
         # read/write parity with codex/claudecode — mcp.md M2/M5), under
@@ -866,6 +868,35 @@ def _openhands_mcp_servers() -> list[MCPServerEntry]:
     return _read_dotmcp_json(os.path.join(str(Path.home()), ".openhands", "mcp.json"))
 
 
+def _antigravity_global_mcp_path() -> str:
+    return os.path.join(str(Path.home()), ".gemini", "config", "mcp_config.json")
+
+
+def _antigravity_workspace_mcp_path(workspace_dir: str | None) -> str:
+    return _workspace_path(workspace_dir, ".agents", "mcp_config.json")
+
+
+def _antigravity_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+    """Return Antigravity MCP registrations from native mcp_config.json files.
+
+    The contract pins the global path to ``~/.gemini/config/mcp_config.json``.
+    When an explicit workspace is supplied, Antigravity also reads
+    ``<workspace>/.agents/mcp_config.json``. Both files use a top-level
+    ``mcpServers`` object and remote entries may spell the URL as either the
+    canonical ``serverUrl`` or compatibility alias ``url``.
+    """
+    entries: list[MCPServerEntry] = []
+    entries.extend(_read_antigravity_mcp_config(_antigravity_global_mcp_path()))
+    workspace_mcp = _antigravity_workspace_mcp_path(workspace_dir)
+    if workspace_mcp:
+        entries.extend(_read_antigravity_mcp_config(workspace_mcp))
+    return _dedup_mcp_entries(entries)
+
+
+def _read_antigravity_mcp_config(path: str) -> list[MCPServerEntry]:
+    return _read_mcp_settings_block(path, keys=("mcpServers",))
+
+
 def _opencode_config_paths(workspace_dir: str | None) -> list[str]:
     """Return opencode's MCP config search paths, global-first.
 
@@ -1148,14 +1179,21 @@ def _parse_mcp_servers_dict(servers: dict[str, Any]) -> list[MCPServerEntry]:
     for name, cfg in servers.items():
         if not isinstance(cfg, dict):
             continue
+        disabled = cfg.get("disabled", False)
         out.append(
             MCPServerEntry(
                 name=name,
                 command=cfg.get("command", "") or "",
                 args=list(cfg.get("args", []) or []),
                 env=dict(cfg.get("env", {}) or {}),
-                url=cfg.get("url", "") or "",
+                cwd=cfg.get("cwd", "") or "",
+                url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
                 transport=cfg.get("transport", "") or "",
+                headers=dict(cfg.get("headers", {}) or {}),
+                auth_provider_type=cfg.get("authProviderType", "") or "",
+                oauth=dict(cfg.get("oauth", {}) or {}),
+                disabled=disabled if isinstance(disabled, bool) else False,
+                disabled_tools=list(cfg.get("disabledTools", []) or []),
             )
         )
     return out
@@ -1169,14 +1207,21 @@ def _parse_mcp_servers_list(servers: list[Any]) -> list[MCPServerEntry]:
         name = str(cfg.get("name", "") or "")
         if not name:
             continue
+        disabled = cfg.get("disabled", False)
         out.append(
             MCPServerEntry(
                 name=name,
                 command=cfg.get("command", "") or "",
                 args=list(cfg.get("args", []) or []),
                 env=dict(cfg.get("env", {}) or {}),
-                url=cfg.get("url", "") or "",
+                cwd=cfg.get("cwd", "") or "",
+                url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
                 transport=cfg.get("transport", "") or "",
+                headers=dict(cfg.get("headers", {}) or {}),
+                auth_provider_type=cfg.get("authProviderType", "") or "",
+                oauth=dict(cfg.get("oauth", {}) or {}),
+                disabled=disabled if isinstance(disabled, bool) else False,
+                disabled_tools=list(cfg.get("disabledTools", []) or []),
             )
         )
     return out
@@ -1242,6 +1287,10 @@ def set_mcp_server(
                      by default, or ``<workspace>/opencode.json`` when
                      *workspace_dir* is explicit, mapping the entry into
                      opencode's ``mcp`` schema.
+    * Antigravity  — global ``~/.gemini/config/mcp_config.json[mcpServers][name]``
+                     by default, or ``<workspace>/.agents/mcp_config.json``
+                     when *workspace_dir* is explicit. Remote generic ``url``
+                     entries are written canonically as ``serverUrl``.
     * ZeptoClaw    — :class:`MCPWriteUnsupportedError`.
     * Hook-backed  — connector-owned JSON/YAML config when documented
                      (for example OpenHands writes ``~/.openhands/mcp.json``).
@@ -1308,11 +1357,8 @@ def set_mcp_server(
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "antigravity":
-        raise MCPWriteUnsupportedError(
-            "antigravity does not publish a documented MCP install "
-            "surface in agy v1.0.0. DefenseClaw will pick this up via "
-            "a contract bump once Google ships an MCP install path.",
-        )
+        _set_antigravity_mcp_server(name, entry, workspace_dir=workspace_dir)
+        return
     if name_n == "opencode":
         _set_opencode_mcp_server(name, entry, workspace_dir=workspace_dir)
         return
@@ -1403,10 +1449,8 @@ def unset_mcp_server(
         _atomic_json_delete(path, ("mcpServers", name))
         return
     if name_n == "antigravity":
-        raise MCPWriteUnsupportedError(
-            "antigravity does not publish a documented MCP install "
-            "surface in agy v1.0.0; nothing to remove.",
-        )
+        _unset_antigravity_mcp_server(name, workspace_dir=workspace_dir)
+        return
     if name_n == "opencode":
         _unset_opencode_mcp_server(name, workspace_dir=workspace_dir)
         return
@@ -1512,6 +1556,184 @@ def _unset_codex_global_mcp_server(name: str) -> bool:
         return False
     _capture_managed_mcp_backup(path)
     _atomic_write_text(path, updated)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Antigravity JSON MCP writer
+# ---------------------------------------------------------------------------
+
+
+def _antigravity_mcp_write_path(workspace_dir: str | None) -> str:
+    workspace = _workspace_dir(workspace_dir)
+    if workspace:
+        return os.path.join(workspace, ".agents", "mcp_config.json")
+    return _antigravity_global_mcp_path()
+
+
+def _read_antigravity_doc_for_write(path: str) -> dict[str, Any]:
+    """Read an Antigravity MCP config for read-modify-write.
+
+    Missing or empty files start from ``{}``. Existing non-empty files must be
+    JSON objects so DefenseClaw can preserve unknown top-level and per-server
+    fields instead of clobbering hand-authored Antigravity settings.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return {}
+    if not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"refusing to write Antigravity MCP config {path}: existing file "
+            "is not valid JSON; fix it by hand so DefenseClaw does not "
+            "clobber unrelated configuration.",
+        ) from exc
+    if isinstance(data, dict):
+        return data
+    raise ValueError(
+        f"refusing to write Antigravity MCP config {path}: existing file is "
+        "not a JSON object; fix it by hand so DefenseClaw does not clobber "
+        "unrelated configuration.",
+    )
+
+
+def _antigravity_mcp_entry_from_generic(
+    entry: dict[str, Any],
+    *,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Map a generic MCP entry dict into Antigravity's native schema.
+
+    ``defenseclaw mcp set`` passes remote URLs as ``url``; Antigravity accepts
+    that spelling for reads but DefenseClaw writes the canonical ``serverUrl``.
+    Known native fields are overlaid onto the existing server object while
+    unrelated keys are kept so future Antigravity fields survive updates.
+    """
+    out: dict[str, Any] = dict(existing or {})
+    handled = {
+        "command",
+        "args",
+        "env",
+        "cwd",
+        "disabled",
+        "disabledTools",
+        "serverUrl",
+        "url",
+        "httpUrl",
+        "headers",
+        "authProviderType",
+        "oauth",
+        "transport",
+    }
+    for key in ("command", "cwd", "authProviderType"):
+        if key in entry:
+            value = entry.get(key)
+            if value is None:
+                out.pop(key, None)
+            else:
+                out[key] = str(value)
+    for key in ("args", "disabledTools"):
+        if key in entry:
+            value = entry.get(key)
+            if value is None:
+                out.pop(key, None)
+            else:
+                out[key] = [str(v) for v in (value or [])]
+    for key in ("env", "headers"):
+        if key in entry:
+            value = entry.get(key)
+            if value is None:
+                out.pop(key, None)
+            elif isinstance(value, dict):
+                out[key] = {str(k): str(v) for k, v in value.items()}
+    if "oauth" in entry:
+        value = entry.get("oauth")
+        if value is None:
+            out.pop("oauth", None)
+        elif isinstance(value, dict):
+            out["oauth"] = value
+    if "disabled" in entry:
+        value = entry.get("disabled")
+        if value is None:
+            out.pop("disabled", None)
+        elif isinstance(value, bool):
+            out["disabled"] = value
+
+    remote_url = (
+        entry.get("serverUrl")
+        or entry.get("url")
+        or entry.get("httpUrl")
+        or out.get("serverUrl")
+        or out.get("url")
+        or out.get("httpUrl")
+    )
+    if remote_url:
+        out["serverUrl"] = str(remote_url)
+        # `url` is read-compatible but not DefenseClaw's canonical write
+        # spelling; `httpUrl` is legacy migration input only.
+        out.pop("url", None)
+        out.pop("httpUrl", None)
+        out.pop("transport", None)
+
+    for key, value in entry.items():
+        if key not in handled:
+            out[key] = value
+    return out
+
+
+def _set_antigravity_mcp_server(
+    name: str,
+    entry: dict[str, Any],
+    *,
+    workspace_dir: str | None = None,
+) -> None:
+    path = _antigravity_mcp_write_path(workspace_dir)
+    _reject_symlink_config(path)
+    parent = os.path.dirname(path)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    data = _read_antigravity_doc_for_write(path)
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+    existing = servers.get(name)
+    servers[name] = _antigravity_mcp_entry_from_generic(
+        entry,
+        existing=existing if isinstance(existing, dict) else None,
+    )
+    data["mcpServers"] = servers
+    _capture_managed_mcp_backup(path)
+    _atomic_write_json(path, data)
+
+
+def _unset_antigravity_mcp_server(
+    name: str,
+    *,
+    workspace_dir: str | None = None,
+) -> bool:
+    path = _antigravity_mcp_write_path(workspace_dir)
+    if not os.path.lexists(path):
+        return False
+    _reject_symlink_config(path)
+    try:
+        with open(path, encoding="utf-8") as f:
+            loaded = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    servers = loaded.get("mcpServers")
+    if not isinstance(servers, dict) or name not in servers:
+        return False
+    del servers[name]
+    loaded["mcpServers"] = servers
+    _capture_managed_mcp_backup(path)
+    _atomic_write_json(path, loaded)
     return True
 
 

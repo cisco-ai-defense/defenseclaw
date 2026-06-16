@@ -74,24 +74,17 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 		codeGuardTargets []string
 		nativeOTLP       bool
 		pluginsSupported bool
-		// mcpSupported is true for connectors that expose a
-		// documented MCP install surface. Antigravity v1 publishes
-		// only the hooks surface, so MCP is unsupported there until
-		// Google ships an install contract.
+		// mcpSupported is true for connectors that expose a documented
+		// MCP install surface.
 		mcpSupported bool
 	}{
-		// Plugins.Supported is FALSE on every hook-only connector
-		// because DefenseClaw plugins are an OpenClaw-only concept
-		// (G4). The TUI Plugins panel hides itself for these
-		// connectors and `defenseclaw plugin list` prints an
-		// OpenClaw-only notice.
 		{NewHermesConnector(), []string{"skill"}, false, false, true},
 		{NewCursorConnector(), []string{"skill", "rule"}, false, false, true},
 		{NewWindsurfConnector(), []string{"rule"}, false, false, true},
 		{NewGeminiCLIConnector(), []string{"skill"}, true, false, true},
 		{NewCopilotConnector(), []string{"skill", "rule"}, true, false, true},
 		{NewOpenHandsConnector(), []string{"skill"}, false, false, true},
-		{NewAntigravityConnector(), nil, false, false, false},
+		{NewAntigravityConnector(), nil, false, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.conn.Name(), func(t *testing.T) {
@@ -115,6 +108,89 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 				t.Fatalf("Plugins.Supported = %v, want %v", caps.Plugins.Supported, tc.pluginsSupported)
 			}
 		})
+	}
+}
+
+func TestAntigravityConnector_CapabilityContract(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	workspace := filepath.Join(dir, "repo")
+	t.Setenv("HOME", home)
+
+	conn := NewAntigravityConnector()
+	opts := SetupOpts{
+		DataDir:      filepath.Join(dir, "dc"),
+		WorkspaceDir: workspace,
+		APIAddr:      "127.0.0.1:18970",
+	}
+	caps := conn.Capabilities(opts)
+
+	if caps.Hooks.ConfigPath != filepath.Join(home, ".gemini", "config", "hooks.json") {
+		t.Fatalf("Antigravity hook ConfigPath=%q", caps.Hooks.ConfigPath)
+	}
+	if caps.Hooks.Scope != "user" {
+		t.Fatalf("Antigravity hook scope=%q want user", caps.Hooks.Scope)
+	}
+	if caps.Hooks.ConfigPath == filepath.Join(workspace, ".agents", "hooks.json") {
+		t.Fatalf("Antigravity hook config must remain global-write only: %q", caps.Hooks.ConfigPath)
+	}
+
+	wantMCP := []string{
+		filepath.Join(home, ".gemini", "config", "mcp_config.json"),
+		filepath.Join(workspace, ".agents", "mcp_config.json"),
+	}
+	if !caps.MCP.Supported {
+		t.Fatal("Antigravity MCP must be supported")
+	}
+	if !sameStrings(caps.MCP.ConfigPaths, wantMCP) || !sameStrings(caps.MCP.ReadPaths, wantMCP) || !sameStrings(caps.MCP.WritePaths, wantMCP) {
+		t.Fatalf("Antigravity MCP paths drifted: config=%v read=%v write=%v want %v", caps.MCP.ConfigPaths, caps.MCP.ReadPaths, caps.MCP.WritePaths, wantMCP)
+	}
+	for _, path := range append(append([]string{}, caps.MCP.ConfigPaths...), append(caps.MCP.ReadPaths, caps.MCP.WritePaths...)...) {
+		if strings.Contains(path, ".openclaw") || strings.Contains(path, "antigravity-cli") {
+			t.Fatalf("Antigravity MCP path is not the contracted agy config path: %q", path)
+		}
+	}
+
+	wantSkillWrites := []string{
+		filepath.Join(home, ".gemini", "config", "skills"),
+		filepath.Join(workspace, ".agents", "skills"),
+	}
+	if !caps.Skills.Supported || !sameStrings(caps.Skills.WritePaths, wantSkillWrites) {
+		t.Fatalf("Antigravity skill write paths=%v supported=%v", caps.Skills.WritePaths, caps.Skills.Supported)
+	}
+	for _, want := range []string{
+		filepath.Join(home, ".gemini", "antigravity-cli", "skills"),
+		filepath.Join(workspace, ".agent", "skills"),
+	} {
+		if !stringInSlice(caps.Skills.ReadPaths, want) {
+			t.Fatalf("Antigravity skill read paths missing discovery-only %q: %v", want, caps.Skills.ReadPaths)
+		}
+		if stringInSlice(caps.Skills.WritePaths, want) {
+			t.Fatalf("Antigravity discovery-only skill path appeared as write target %q: %v", want, caps.Skills.WritePaths)
+		}
+	}
+
+	if !caps.Rules.Supported || !caps.Rules.DiscoveryOnly || len(caps.Rules.WritePaths) != 0 {
+		t.Fatalf("Antigravity rules should be discovery-only with no write paths: %+v", caps.Rules)
+	}
+	if !caps.Plugins.Supported || !caps.Plugins.DiscoveryOnly || len(caps.Plugins.WritePaths) != 0 {
+		t.Fatalf("Antigravity plugins should be discovery-only with no write paths: %+v", caps.Plugins)
+	}
+	if !caps.Agents.Supported || !caps.Agents.DiscoveryOnly || len(caps.Agents.WritePaths) != 0 {
+		t.Fatalf("Antigravity plugin-contained agents should be discovery-only with no write paths: %+v", caps.Agents)
+	}
+	for _, want := range []string{
+		filepath.Join(home, ".gemini", "config", "plugins"),
+		filepath.Join(home, ".gemini", "antigravity-cli", "plugins"),
+		filepath.Join(workspace, ".agents", "plugins"),
+		filepath.Join(workspace, "_agents", "plugins"),
+	} {
+		if !stringInSlice(caps.Plugins.ReadPaths, want) {
+			t.Fatalf("Antigravity plugin read paths missing %q: %v", want, caps.Plugins.ReadPaths)
+		}
+		if !stringInSlice(caps.Agents.ReadPaths, want) {
+			t.Fatalf("Antigravity agent read paths missing plugin root %q: %v", want, caps.Agents.ReadPaths)
+		}
 	}
 }
 

@@ -321,6 +321,80 @@ class TestMCPServers:
         openhands.write_text(json.dumps({"mcpServers": {"o": {"command": "openhands-mcp"}}}))
         assert connector_paths.mcp_servers("openhands")[0].command == "openhands-mcp"
 
+    def test_antigravity_reads_global_and_workspace_mcp_config(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+
+        global_mcp = fake_home / ".gemini" / "config" / "mcp_config.json"
+        global_mcp.parent.mkdir(parents=True)
+        global_mcp.write_text(json.dumps({
+            "mcpServers": {
+                "local": {
+                    "command": "/opt/defenseclaw/bin/defenseclaw",
+                    "args": ["mcp", "serve"],
+                    "env": {"DEFENSECLAW_PROFILE": "default"},
+                    "cwd": "/workspace/project",
+                    "disabled": True,
+                    "disabledTools": ["unsafe_tool"],
+                },
+                "remote": {
+                    "serverUrl": "https://mcp.example.com/mcp/",
+                    "headers": {"Authorization": "Bearer ${DEFENSECLAW_MCP_TOKEN}"},
+                    "authProviderType": "oauth",
+                    "oauth": {"issuer": "https://accounts.example.com"},
+                },
+            }
+        }))
+        workspace_mcp = workspace / ".agents" / "mcp_config.json"
+        workspace_mcp.parent.mkdir()
+        workspace_mcp.write_text(json.dumps({
+            "mcpServers": {
+                "workspace-remote": {"url": "https://workspace.example.com/mcp"},
+            }
+        }))
+
+        entries = connector_paths.mcp_servers("antigravity", workspace_dir=str(workspace))
+        names = [e.name for e in entries]
+        assert names == ["local", "remote", "workspace-remote"]
+        local = entries[0]
+        assert local.command == "/opt/defenseclaw/bin/defenseclaw"
+        assert local.args == ["mcp", "serve"]
+        assert local.env == {"DEFENSECLAW_PROFILE": "default"}
+        assert local.cwd == "/workspace/project"
+        assert local.disabled is True
+        assert local.disabled_tools == ["unsafe_tool"]
+        remote = entries[1]
+        assert remote.url == "https://mcp.example.com/mcp/"
+        assert remote.headers == {"Authorization": "Bearer ${DEFENSECLAW_MCP_TOKEN}"}
+        assert remote.auth_provider_type == "oauth"
+        assert remote.oauth == {"issuer": "https://accounts.example.com"}
+        assert entries[2].url == "https://workspace.example.com/mcp"
+
+    def test_antigravity_ignores_workspace_mcp_without_explicit_workspace(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        workspace_mcp = workspace / ".agents" / "mcp_config.json"
+        workspace_mcp.parent.mkdir()
+        workspace_mcp.write_text(json.dumps({
+            "mcpServers": {"workspace": {"command": "workspace-mcp"}},
+        }))
+
+        assert connector_paths.mcp_servers("antigravity") == []
+
     def test_codex_reads_global_config_toml(self, tmp_path, monkeypatch):
         """Bug fix regression: pre-S5.x ``defenseclaw mcp list`` only
         consulted ``./.mcp.json`` for Codex, dropping every server
@@ -667,6 +741,20 @@ class TestConnectorConfigFiles:
         )
         assert os.path.join(str(tmp_path), ".hermes", "config.yaml") in files
         assert not any(p.endswith("config.json") for p in files)
+
+    def test_antigravity_lists_mcp_config_paths(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: fake_home)
+
+        files = connector_paths.connector_config_files(
+            "antigravity",
+            workspace_dir=str(tmp_path),
+        )
+        assert os.path.join(
+            str(fake_home), ".gemini", "config", "mcp_config.json"
+        ) in files
+        assert os.path.join(str(tmp_path), ".agents", "mcp_config.json") in files
 
 
 class TestConfigDispatch:

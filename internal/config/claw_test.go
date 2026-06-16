@@ -328,6 +328,14 @@ func hasMCPEntry(entries []MCPServerEntry, name string) bool {
 	return false
 }
 
+func mcpEntriesByName(entries []MCPServerEntry) map[string]MCPServerEntry {
+	out := make(map[string]MCPServerEntry, len(entries))
+	for _, entry := range entries {
+		out[entry.Name] = entry
+	}
+	return out
+}
+
 // containsPath is intentionally local — strings.Contains over a slice.
 // Keeps this file independent of unexported helpers in claw.go.
 func containsPath(paths []string, want string) bool {
@@ -419,9 +427,105 @@ func TestReadMCPServersForConnector_OpenCodeNeverReadsOpenClaw(t *testing.T) {
 	}
 }
 
-// TestReadMCPServersForConnector_AntigravityReturnsNil pins N1: Go must
-// give antigravity nil (like Python), not OpenClaw's servers.
-func TestReadMCPServersForConnector_AntigravityReturnsNil(t *testing.T) {
+func TestReadMCPServersForConnector_AntigravityReadsNativeMCP(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workspace := filepath.Join(home, "repo")
+	if err := os.MkdirAll(filepath.Join(home, ".gemini", "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, ".agents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	global := `{
+	  "mcpServers": {
+	    "remote-server-url": {
+	      "serverUrl": "https://mcp.example.com/mcp/",
+	      "headers": {"Authorization": "Bearer ${TOKEN}"},
+	      "authProviderType": "oauth",
+	      "oauth": {"scopes": ["repo"]},
+	      "disabled": true,
+	      "disabledTools": ["unsafe_tool"]
+	    },
+	    "remote-url": {"url": "https://compat.example.com/mcp/"},
+	    "local": {
+	      "command": "node",
+	      "args": ["server.js", "--stdio"],
+	      "env": {"TOKEN": "redacted"},
+	      "cwd": "/workspace/project"
+	    }
+	  }
+	}`
+	if err := os.WriteFile(filepath.Join(home, ".gemini", "config", "mcp_config.json"), []byte(global), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceMCP := `{"mcpServers":{"workspace-local":{"command":"python","args":["-m","mcp_server"]}}}`
+	if err := os.WriteFile(filepath.Join(workspace, ".agents", "mcp_config.json"), []byte(workspaceMCP), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Config{}
+	c.Claw.WorkspaceDir = workspace
+	entries, err := c.ReadMCPServersForConnector("antigravity")
+	if err != nil {
+		t.Fatalf("ReadMCPServersForConnector(antigravity): %v", err)
+	}
+	byName := mcpEntriesByName(entries)
+
+	if got := byName["remote-server-url"].URL; got != "https://mcp.example.com/mcp/" {
+		t.Fatalf("remote-server-url URL=%q", got)
+	}
+	remote := byName["remote-server-url"]
+	if remote.Headers["Authorization"] != "Bearer ${TOKEN}" || remote.AuthProviderType != "oauth" || !remote.Disabled {
+		t.Fatalf("remote-server-url metadata = %+v", remote)
+	}
+	if len(remote.DisabledTools) != 1 || remote.DisabledTools[0] != "unsafe_tool" {
+		t.Fatalf("remote-server-url disabled tools = %v", remote.DisabledTools)
+	}
+	if scopes, _ := remote.OAuth["scopes"].([]any); len(scopes) != 1 || scopes[0] != "repo" {
+		t.Fatalf("remote-server-url oauth = %#v", remote.OAuth)
+	}
+	if got := byName["remote-url"].URL; got != "https://compat.example.com/mcp/" {
+		t.Fatalf("remote-url URL=%q", got)
+	}
+	local := byName["local"]
+	if local.Command != "node" || len(local.Args) != 2 || local.Args[0] != "server.js" || local.Args[1] != "--stdio" {
+		t.Fatalf("local entry = %+v, want command node args [server.js --stdio]", local)
+	}
+	if local.Env["TOKEN"] != "redacted" {
+		t.Fatalf("local env = %v", local.Env)
+	}
+	if local.CWD != "/workspace/project" {
+		t.Fatalf("local cwd = %q", local.CWD)
+	}
+	if got := byName["workspace-local"].Command; got != "python" {
+		t.Fatalf("workspace-local command=%q; entries=%+v", got, entries)
+	}
+}
+
+func TestReadMCPServersForConnector_AntigravityRequiresPinnedWorkspace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workspace := filepath.Join(home, "repo")
+	if err := os.MkdirAll(filepath.Join(workspace, ".agents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".agents", "mcp_config.json"), []byte(`{"mcpServers":{"workspace-only":{"command":"x"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Config{}
+	entries, err := c.ReadMCPServersForConnector("antigravity")
+	if err != nil {
+		t.Fatalf("ReadMCPServersForConnector(antigravity): %v", err)
+	}
+	if hasMCPEntry(entries, "workspace-only") {
+		t.Fatalf("antigravity read workspace MCP without a pinned workspace: %+v", entries)
+	}
+}
+
+func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClawFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	clawDir := filepath.Join(home, ".openclaw")
@@ -433,30 +537,78 @@ func TestReadMCPServersForConnector_AntigravityReturnsNil(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := &Config{}
-	c.Claw.ConfigFile = clawPath
-	entries, err := c.ReadMCPServersForConnector("antigravity")
+	cfg := &Config{}
+	cfg.Claw.ConfigFile = clawPath
+	entries, err := cfg.ReadMCPServersForConnector("antigravity")
 	if err != nil {
-		t.Fatalf("err: %v", err)
+		t.Fatalf("missing antigravity config returned error: %v", err)
 	}
 	if len(entries) != 0 {
-		t.Fatalf("antigravity entries = %+v, want nil (never OpenClaw)", entries)
+		t.Fatalf("missing antigravity config entries = %+v, want empty without OpenClaw fallback", entries)
+	}
+
+	agyDir := filepath.Join(home, ".gemini", "config")
+	if err := os.MkdirAll(agyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agyDir, "mcp_config.json"), []byte(`{"mcpServers":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = cfg.ReadMCPServersForConnector("antigravity")
+	if err != nil {
+		t.Fatalf("malformed antigravity config returned error: %v", err)
+	}
+	if hasMCPEntry(entries, "leaked") || len(entries) != 0 {
+		t.Fatalf("malformed antigravity config entries = %+v, want empty without OpenClaw fallback", entries)
 	}
 }
 
-// TestSkillPluginDirs_OpenCodeAntigravityEmpty pins that the skill and
-// plugin dispatchers give opencode/antigravity an empty set rather than
-// falling through to the OpenClaw layout (claw.go:515/577 root).
-func TestSkillPluginDirs_OpenCodeAntigravityEmpty(t *testing.T) {
+// TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths pins that
+// opencode remains bridge-plugin-only while Antigravity exposes its own
+// documented skill and plugin discovery roots. Neither connector may fall
+// through to OpenClaw paths.
+func TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workspace := filepath.Join(home, "repo")
 	cfg := &Config{}
 	cfg.Claw.HomeDir = "/tmp/should-not-appear"
 	cfg.Claw.ConfigFile = "/tmp/should-not-appear/openclaw.json"
-	for _, conn := range []string{"opencode", "antigravity"} {
-		if dirs := cfg.SkillDirsForConnector(conn); len(dirs) != 0 {
-			t.Errorf("SkillDirsForConnector(%s) = %v, want empty", conn, dirs)
+	cfg.Claw.WorkspaceDir = workspace
+
+	if dirs := cfg.SkillDirsForConnector("opencode"); len(dirs) != 0 {
+		t.Errorf("SkillDirsForConnector(opencode) = %v, want empty", dirs)
+	}
+	if dirs := cfg.PluginDirsForConnector("opencode"); len(dirs) != 0 {
+		t.Errorf("PluginDirsForConnector(opencode) = %v, want empty", dirs)
+	}
+
+	skillDirs := cfg.SkillDirsForConnector("antigravity")
+	for _, want := range []string{
+		filepath.Join(home, ".gemini", "config", "skills"),
+		filepath.Join(workspace, ".agents", "skills"),
+		filepath.Join(workspace, ".agent", "skills"),
+	} {
+		if !containsPath(skillDirs, want) {
+			t.Errorf("SkillDirsForConnector(antigravity) missing %q; got %v", want, skillDirs)
 		}
-		if dirs := cfg.PluginDirsForConnector(conn); len(dirs) != 0 {
-			t.Errorf("PluginDirsForConnector(%s) = %v, want empty", conn, dirs)
+	}
+	pluginDirs := cfg.PluginDirsForConnector("antigravity")
+	for _, want := range []string{
+		filepath.Join(home, ".gemini", "config", "plugins"),
+		filepath.Join(home, ".gemini", "antigravity-cli", "plugins"),
+		filepath.Join(workspace, ".agents", "plugins"),
+		filepath.Join(workspace, "_agents", "plugins"),
+	} {
+		if !containsPath(pluginDirs, want) {
+			t.Errorf("PluginDirsForConnector(antigravity) missing %q; got %v", want, pluginDirs)
+		}
+	}
+	for _, dirs := range [][]string{skillDirs, pluginDirs} {
+		for _, dir := range dirs {
+			if strings.Contains(dir, "should-not-appear") {
+				t.Fatalf("antigravity path leaked OpenClaw home: %v", dirs)
+			}
 		}
 	}
 }

@@ -517,15 +517,15 @@ class TestMCPScan(MCPCommandTestBase):
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     def test_set_skips_unsupported_connector_and_applies_to_rest(self, mock_set):
         # Fan-out resilience: a connector with no MCP write surface
-        # (antigravity, which sorts FIRST) must be skipped, not abort the
-        # whole command — the writable connectors still get the server.
+        # must be skipped, not abort the whole command — the writable
+        # connectors still get the server.
         from defenseclaw.connector_paths import MCPWriteUnsupportedError
 
-        self.app.cfg.active_connectors = lambda: ["antigravity", "claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex", "zeptoclaw"]  # type: ignore[method-assign]
 
         def _side_effect(cfg, name, entry, connector=None):
-            if connector == "antigravity":
-                raise MCPWriteUnsupportedError("antigravity does not publish a documented MCP install surface")
+            if connector == "zeptoclaw":
+                raise MCPWriteUnsupportedError("zeptoclaw has no MCP write surface")
 
         mock_set.side_effect = _side_effect
 
@@ -537,9 +537,9 @@ class TestMCPScan(MCPCommandTestBase):
             for c in mock_set.call_args_list
         }
         # write was attempted on all three, but only claudecode/codex succeeded
-        self.assertEqual(applied, {"antigravity", "claudecode", "codex"})
+        self.assertEqual(applied, {"claudecode", "codex", "zeptoclaw"})
         self.assertIn("skipped", result.output)
-        self.assertIn("antigravity", result.output)
+        self.assertIn("zeptoclaw", result.output)
         self.assertIn("claudecode", result.output)
         self.assertIn("codex", result.output)
 
@@ -547,7 +547,7 @@ class TestMCPScan(MCPCommandTestBase):
     def test_set_errors_only_when_no_connector_supports_writes(self, mock_set):
         from defenseclaw.connector_paths import MCPWriteUnsupportedError
 
-        self.app.cfg.active_connectors = lambda: ["antigravity", "zeptoclaw"]  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["windsurf", "zeptoclaw"]  # type: ignore[method-assign]
         mock_set.side_effect = MCPWriteUnsupportedError("no MCP write surface")
 
         result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
@@ -614,11 +614,11 @@ class TestMCPScan(MCPCommandTestBase):
         # of only reporting "Added ... to 2 connectors" and hiding the gap.
         from defenseclaw.connector_paths import MCPWriteUnsupportedError
 
-        self.app.cfg.active_connectors = lambda: ["antigravity", "claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex", "zeptoclaw"]  # type: ignore[method-assign]
 
         def _side_effect(cfg, name, entry, connector=None):
-            if connector == "antigravity":
-                raise MCPWriteUnsupportedError("antigravity does not publish a documented MCP install surface")
+            if connector == "zeptoclaw":
+                raise MCPWriteUnsupportedError("zeptoclaw has no MCP write surface")
 
         mock_set.side_effect = _side_effect
 
@@ -626,7 +626,7 @@ class TestMCPScan(MCPCommandTestBase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Added MCP server: ctx7 to 2 connectors", result.output)
-        self.assertIn("not applied: antigravity", result.output)
+        self.assertIn("not applied: zeptoclaw", result.output)
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     def test_set_isolates_unexpected_write_failure_and_exits_nonzero(self, mock_set):
