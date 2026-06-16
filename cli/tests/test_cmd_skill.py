@@ -807,10 +807,47 @@ class TestSkillList(SkillCommandTestBase):
 
 class TestSkillInfo(SkillCommandTestBase):
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
-    def test_info_unknown_skill(self, _mock):
-        result = self.invoke(["info", "unknown-skill"])
+    def test_info_unknown_skill_errors(self, _mock):
+        # SK-2: a true miss errors (exit 1) instead of rendering a blank card
+        # that implies the skill exists.
+        result = self.invoke(["info", "definitely-not-a-skill"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("not found", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    def test_info_renders_scan_history_phantom(self, _mock):
+        # SK-2 open decision: a name present only in scan history stays
+        # inspectable (a removed-but-scanned skill), not an error.
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", "/path/to/ghost-skill",
+            datetime.now(timezone.utc), 400, 3, "HIGH", "{}",
+        )
+        result = self.invoke(["info", "ghost-skill"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("unknown-skill", result.output)
+        self.assertIn("ghost-skill", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    def test_info_renders_enforcement_phantom(self, _mock):
+        # A name present only as an enforcement action also stays inspectable.
+        PolicyEngine(self.app.store).block("skill", "blocked-ghost", "test")
+        result = self.invoke(["info", "blocked-ghost"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("blocked-ghost", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
+    def test_info_severity_labels_max_not_count(self, mock_info):
+        # SK-3: the count is labelled plainly and the *severity word* carries
+        # the colour — no "{n} CRITICAL findings" conflation.
+        mock_info.return_value = {"name": "mixed-skill", "eligible": True}
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", "/path/to/mixed-skill",
+            datetime.now(timezone.utc), 500, 5, "CRITICAL", "{}",
+        )
+        result = self.invoke(["info", "mixed-skill"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("5 findings", result.output)
+        self.assertIn("max severity:", result.output)
+        self.assertNotIn("5 CRITICAL findings", result.output)
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
     def test_info_known_skill(self, mock_info):
@@ -1397,6 +1434,166 @@ class TestSkillListMultiConnectorDefault(SkillCommandTestBase):
         self.assertIsInstance(data, list)
         self.assertEqual(data[0]["name"], "claudecode-skill")
         self.assertNotIn("connector", data[0])
+
+
+class TestSkillListOpencodeEmpty(SkillCommandTestBase):
+    """SK-1 (re-scope): opencode exposes no skills surface — listing it must
+    say so and never fall back to OpenClaw's skill directories. The path arm
+    itself lives in connector_paths (already returns []); this guards the
+    CLI-visible behaviour from regressing."""
+
+    def test_opencode_lists_no_skills_not_openclaw_paths(self):
+        self.app.cfg.active_connector = lambda: "opencode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["opencode"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--connector", "opencode"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No skills found for connector='opencode'", result.output)
+        self.assertNotIn(".openclaw", result.output)
+
+
+class TestSkillDisableHonesty(SkillCommandTestBase):
+    """SK-5a: runtime disable is OpenClaw-only; on a hook connector it must
+    fail fast with an actionable message instead of a raw 502."""
+
+    def test_disable_on_hook_connector_fails_fast(self):
+        self.app.cfg.active_connector = lambda: "hermes"  # type: ignore[method-assign]
+
+        with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
+            result = self.invoke(["disable", "some-skill"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("OpenClaw-only", result.output)
+        self.assertIn("quarantine", result.output)
+        mock_client.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
+    def test_disable_on_openclaw_still_calls_gateway(self, mock_client):
+        self.app.cfg.active_connector = lambda: "openclaw"  # type: ignore[method-assign]
+        mock_client.return_value.disable_skill.return_value = {"status": "disabled"}
+
+        result = self.invoke(["disable", "some-skill"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_client.return_value.disable_skill.assert_called_once_with("some-skill")
+
+
+class TestSkillScannerLLMDefault(SkillCommandTestBase):
+    """SK-6: the unified LLM lane defaults on whenever a model resolves, with
+    --use-llm/--no-use-llm overriding the auto behaviour."""
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    @patch("defenseclaw.scanner._llm_env.litellm_model", return_value="bedrock/anthropic.claude-3-5-haiku")
+    def test_auto_on_when_model_resolves(self, _mock_model, mock_wrapper):
+        from defenseclaw.commands.cmd_skill import _build_skill_scanner
+        _build_skill_scanner(self.app, None)
+        cfg = mock_wrapper.call_args.args[0]
+        self.assertTrue(cfg.use_llm)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    @patch("defenseclaw.scanner._llm_env.litellm_model", return_value="")
+    def test_auto_off_when_no_model(self, _mock_model, mock_wrapper):
+        from defenseclaw.commands.cmd_skill import _build_skill_scanner
+        _build_skill_scanner(self.app, None)
+        cfg = mock_wrapper.call_args.args[0]
+        self.assertFalse(cfg.use_llm)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    @patch("defenseclaw.scanner._llm_env.litellm_model", return_value="some/model")
+    def test_no_use_llm_forces_off_despite_model(self, _mock_model, mock_wrapper):
+        from defenseclaw.commands.cmd_skill import _build_skill_scanner
+        _build_skill_scanner(self.app, False)
+        cfg = mock_wrapper.call_args.args[0]
+        self.assertFalse(cfg.use_llm)
+
+    @patch("defenseclaw.commands.cmd_skill._scan_all")
+    @patch("defenseclaw.commands.cmd_skill._build_skill_scanner")
+    def test_scan_threads_no_use_llm_flag(self, mock_build, _mock_scan_all):
+        mock_build.return_value = MagicMock()
+        result = self.invoke(["scan", "--all", "--no-use-llm"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIs(mock_build.call_args.args[1], False)
+
+
+class TestSkillSearchUX(SkillCommandTestBase):
+    """SK-7: search is a remote ClawHub registry query (labelled as such), and
+    a broken/missing clawhub package degrades to a concise hint."""
+
+    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
+    def test_clawhub_broken_gives_concise_error(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "node:internal/modules/esm/resolve:1\n"
+                "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'chalk'"
+            ),
+        )
+        result = self.invoke(["search", "wiki"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("skill registry unavailable", result.output)
+        self.assertNotIn("ERR_MODULE_NOT_FOUND", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
+    def test_results_labelled_as_registry(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="wiki  Wiki  (3.5)\n", stderr="")
+        result = self.invoke(["search", "wiki"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("registry", result.output.lower())
+
+
+class TestSkillBareNameResolution(SkillCommandTestBase):
+    """ND-1: a bare ``skill scan <name>`` resolves across every active
+    connector, and refuses (asking for --connector) when a name is ambiguous."""
+
+    def _fake_dirs(self, mapping: dict, active: str):
+        def skill_dirs(connector=None):
+            return list(mapping.get(connector if connector else active, []))
+        return skill_dirs
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    def test_bare_name_resolves_non_active_peer(self, mock_scan, _mock_info):
+        active_root = os.path.join(self.tmp_dir, "codex", "skills")
+        hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")
+        os.makedirs(active_root)
+        os.makedirs(os.path.join(hermes_root, "lone-skill"))
+
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = self._fake_dirs(  # type: ignore[method-assign]
+            {"codex": [active_root], "hermes": [hermes_root]}, "codex",
+        )
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner", target="lone-skill",
+            timestamp=datetime.now(timezone.utc), findings=[],
+            duration=timedelta(seconds=0.1),
+        )
+
+        result = self.invoke(["scan", "lone-skill"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("hermes", str(mock_scan.call_args.args[0]))
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    def test_bare_name_ambiguous_refuses(self, _mock_info):
+        a_root = os.path.join(self.tmp_dir, "codex", "skills")
+        b_root = os.path.join(self.tmp_dir, "hermes", "skills")
+        os.makedirs(os.path.join(a_root, "dup"))
+        os.makedirs(os.path.join(b_root, "dup"))
+
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = self._fake_dirs(  # type: ignore[method-assign]
+            {"codex": [a_root], "hermes": [b_root]}, "codex",
+        )
+
+        result = self.invoke(["scan", "dup"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("multiple connectors", result.output)
+        self.assertIn("--connector", result.output)
 
 
 if __name__ == "__main__":

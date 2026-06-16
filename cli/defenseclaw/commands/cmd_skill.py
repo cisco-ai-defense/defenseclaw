@@ -89,6 +89,24 @@ def _resolve_clawhub_search_argv(query: str, allow_remote_fetch: bool) -> list[s
     return ["npx", "--no-install", "clawhub", "search", query]
 
 
+def _clawhub_unavailable(stderr: str) -> bool:
+    """Heuristic: did ``npx clawhub`` fail because the clawhub package itself
+    is missing or mispackaged, rather than because the search errored?
+
+    The external clawhub npm package has shipped broken builds whose own
+    Node entrypoint dies with ``ERR_MODULE_NOT_FOUND`` / ``Cannot find
+    module`` before it ever runs the query. That is a packaging fault in
+    clawhub, not a DefenseClaw bug, so we want to surface a concise hint
+    instead of echoing the raw Node stack trace at the operator.
+    """
+    s = stderr.lower()
+    return (
+        "err_module_not_found" in s
+        or "cannot find module" in s
+        or "cannot find package" in s
+    )
+
+
 @skill.command()
 @click.argument("query")
 @click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
@@ -99,10 +117,12 @@ def _resolve_clawhub_search_argv(query: str, allow_remote_fetch: bool) -> list[s
 )
 @pass_ctx
 def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool) -> None:
-    """Search the ClawHub skill registry.
+    """Search the ClawHub skill registry (not local connector skills).
 
     Delegates to a locally-installed ``clawhub`` binary (or a cached
-    ``npx clawhub``) and displays results.
+    ``npx clawhub``). This queries the remote ClawHub registry of
+    installable skills — it does NOT list or search the skills already
+    installed under a connector (use ``skill list`` for that).
 
     \b
     F-1481: by default this refuses to let ``npx`` fetch+execute the clawhub
@@ -134,6 +154,14 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
+        if _clawhub_unavailable(stderr):
+            click.echo(
+                "error: skill registry unavailable — the 'clawhub' CLI failed to "
+                "load (it may be broken or not installed).\n"
+                "  Try: npx clawhub --version",
+                err=True,
+            )
+            raise SystemExit(1)
         hint = ""
         # F-1481: with --no-install, npx fails (rather than fetching) when the
         # clawhub package is not already cached. Point the operator at the
@@ -151,7 +179,7 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
 
     output = result.stdout.strip()
     if not output:
-        click.echo(f"No skills found matching {query!r}")
+        click.echo(f"No skills found matching {query!r} in the ClawHub registry")
         return
 
     if as_json:
@@ -172,6 +200,7 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
         click.echo(json.dumps(rows, indent=2))
         return
 
+    click.echo(ux.dim("ClawHub registry results (remote — not your installed skills):"))
     click.echo(output)
 
 
@@ -702,6 +731,42 @@ def _print_skill_list_table(
 # skill scan
 # ---------------------------------------------------------------------------
 
+def _build_skill_scanner(app: AppContext, use_llm: bool | None = None):
+    """Construct a :class:`SkillScannerWrapper` with the unified LLM lane
+    defaulted on whenever a model resolves (SK-6).
+
+    ``use_llm`` tri-states the ``--use-llm/--no-use-llm`` option:
+
+    * ``None``  → auto: enable the LLM analyzer iff a unified model resolves
+      for ``scanners.skill``. The scanner itself still fails safe — if the
+      model later can't be built it logs-and-skips the LLM analyzer.
+    * ``True``  → force the LLM lane on.
+    * ``False`` → force it off (local analyzers only).
+
+    The resolved value overrides ``SkillScannerConfig.use_llm`` for this run
+    only via a ``dataclasses.replace`` copy — the shared config object is
+    never mutated.
+    """
+    import dataclasses
+
+    from defenseclaw.scanner._llm_env import litellm_model
+    from defenseclaw.scanner.skill import SkillScannerWrapper
+
+    llm = app.cfg.resolve_llm("scanners.skill")
+    effective = bool(litellm_model(llm)) if use_llm is None else use_llm
+
+    cfg = app.cfg.scanners.skill_scanner
+    if cfg.use_llm != effective:
+        cfg = dataclasses.replace(cfg, use_llm=effective)
+
+    return SkillScannerWrapper(
+        cfg,
+        app.cfg.effective_inspect_llm(),
+        app.cfg.cisco_ai_defense,
+        llm=llm,
+    )
+
+
 @skill.command()
 @click.argument("target", required=False)
 @click.option("--json", "as_json", is_flag=True, help="Output scan results as JSON")
@@ -720,6 +785,14 @@ def _print_skill_list_table(
     "--action", is_flag=True, default=False,
     help="Apply enforcement actions (quarantine/block/disable) based on findings",
 )
+@click.option(
+    "--use-llm/--no-use-llm", "use_llm", default=None,
+    help=(
+        "Run the unified LLM analyzer in addition to the local scanner. "
+        "Default (auto): on whenever a model is configured for scanners.skill, "
+        "off otherwise. The LLM lane fails safe if no model can be resolved."
+    ),
+)
 @pass_ctx
 def scan(
     app: AppContext,
@@ -730,6 +803,7 @@ def scan(
     scan_all: bool,
     connector_flag: str,
     action: bool,
+    use_llm: bool | None,
 ) -> None:
     """Scan a skill by name, path, URL, or 'all' for all configured skills.
 
@@ -750,7 +824,6 @@ def scan(
         defenseclaw skill scan clawhub://my-skill@1.2.3
     """
     from defenseclaw.enforce import PolicyEngine
-    from defenseclaw.scanner.skill import SkillScannerWrapper
 
     if action and remote:
         click.echo(
@@ -776,12 +849,7 @@ def scan(
         _scan_from_url(app, target, as_json)
         return
 
-    scanner = SkillScannerWrapper(
-        app.cfg.scanners.skill_scanner,
-        app.cfg.effective_inspect_llm(),
-        app.cfg.cisco_ai_defense,
-        llm=app.cfg.resolve_llm("scanners.skill"),
-    )
+    scanner = _build_skill_scanner(app, use_llm)
 
     if scan_all or target == "all":
         # Resolve which connector(s) `--all` should fan out across — for BOTH
@@ -816,9 +884,21 @@ def scan(
         if info and _skill_info_path(info):
             scan_dir = _skill_info_path(info) or ""
         else:
-            resolved = _resolve_path(app, target)
-            if resolved:
-                scan_dir = resolved
+            # ND-1: resolve a bare name across every active connector (not
+            # just the active one). If the name exists under more than one
+            # peer, refuse and ask for --connector rather than silently
+            # scanning whichever copy happened to sort first.
+            matches = _skill_match_dirs(app, target, connector_flag)
+            if len(matches) > 1:
+                click.echo(
+                    f"error: skill {target!r} exists under multiple connectors:\n"
+                    + "\n".join(f"  - {m}" for m in matches)
+                    + "\n  Pass --connector <name> to choose which one.",
+                    err=True,
+                )
+                raise SystemExit(1)
+            if matches:
+                scan_dir = _resolve_path(app, target, connector_flag) or ""
 
         # F-0501: ``scan_dir`` here came from a connector-reported
         # ``baseDir``/``path`` (an UNTRUSTED connector home / sidecar
@@ -1191,19 +1271,69 @@ def _scan_all(
             hint("Scan MCP servers:  defenseclaw mcp scan --all")
 
 
-def _resolve_path(app: AppContext, target: str) -> str | None:
+def _skill_basename(target: str) -> str:
+    """Normalise a skill reference to its bare directory name.
+
+    Mirrors ``Config.installed_skill_candidates``: drop any leading path
+    component and a leading ``@`` scope marker.
+    """
+    name = target
+    if "/" in name:
+        name = name.rsplit("/", 1)[-1]
+    return name.lstrip("@")
+
+
+def _skill_search_dirs(app: AppContext, connector: str = "") -> list[str]:
+    """Skill directories to resolve a bare name against (ND-1).
+
+    With ``connector`` set, scope to that one peer's dirs. Otherwise search
+    the union of **every active connector's** skill dirs — active-connector
+    dirs FIRST so a name present on the active peer keeps resolving exactly
+    as before, while a skill that only lives on a NON-active peer becomes
+    reachable by bare name too. Order-preserving and de-duplicated.
+    """
+    if connector:
+        from defenseclaw.commands import resolve_list_connector
+        return list(app.cfg.skill_dirs(resolve_list_connector(app, connector)))
+    dirs: list[str] = list(app.cfg.skill_dirs())  # active connector, first
+    for d in _all_active_skill_dirs(app):
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _skill_match_dirs(app: AppContext, target: str, connector: str = "") -> list[str]:
+    """Every on-disk skill directory that contains ``target`` (ND-1).
+
+    One path per connector dir that holds a ``<target>`` subdirectory,
+    active-connector matches first. Empty when nothing matches. Callers that
+    must refuse an ambiguous bare name (e.g. ``skill scan``) inspect the
+    length; :func:`_resolve_path` just takes the first (active-wins) match.
+    """
+    name = _skill_basename(target)
+    matches: list[str] = []
+    for d in _skill_search_dirs(app, connector):
+        candidate = os.path.join(d, name)
+        if os.path.isdir(candidate) and candidate not in matches:
+            matches.append(candidate)
+    return matches
+
+
+def _resolve_path(app: AppContext, target: str, connector: str = "") -> str | None:
     """Resolve a skill name or path to an actual directory.
+
+    A bare name resolves across **every active connector** (ND-1), not just
+    the active one, so a skill living on a non-active peer is findable
+    without ``--connector``. When the same name exists under more than one
+    connector the active-connector copy wins here; verbs that must reject the
+    ambiguity instead use :func:`_skill_match_dirs`.
 
     F-0503: the resolved path is stored as the pinned ``source_path`` of an
     allow/block entry (``skill allow``/``skill block`` → ``pe.set_source_path``)
-    and is later compared against a presented asset's path during admission
-    (F-0282/F-0401). If we pinned an attacker-influenceable symlink without
-    freezing it, a local user could retarget that symlink afterwards so the
-    pinned allow entry now points at — and waves through — a different
-    on-disk skill (a swap that defeats the path-pinned allow check). We
-    therefore (a) refuse to resolve a symlinked candidate and (b) return the
-    canonical realpath so the stored allow entry is frozen to a concrete
-    directory that cannot be swapped under it.
+    and is later compared against a presented asset's path during admission.
+    Refuse symlinked candidates and return a canonical realpath so the stored
+    allow entry is frozen to a concrete directory that cannot be swapped under
+    it.
     """
     from defenseclaw.safety import is_symlink
 
@@ -1212,13 +1342,13 @@ def _resolve_path(app: AppContext, target: str) -> str | None:
             return None
         return os.path.realpath(candidate)
 
-    if os.path.isdir(target) and not is_symlink(target):
+    if os.path.isdir(target):
         return _freeze(target)
-    for candidate in app.cfg.installed_skill_candidates(target):
-        if os.path.isdir(candidate) and not is_symlink(candidate):
-            frozen = _freeze(candidate)
-            if frozen:
-                return frozen
+    matches = _skill_match_dirs(app, target, connector)
+    for candidate in matches:
+        frozen = _freeze(candidate)
+        if frozen:
+            return frozen
     return None
 
 
@@ -1401,7 +1531,6 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
         IngestError,
         http_get,
     )
-    from defenseclaw.scanner.skill import SkillScannerWrapper
 
     name, _version = _parse_clawhub_uri(uri)
     if not name:
@@ -1480,13 +1609,7 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
         if not as_json:
             click.echo(f"[scan] skill-scanner -> {skill_dir}")
 
-        scanner = SkillScannerWrapper(
-            app.cfg.scanners.skill_scanner,
-            app.cfg.effective_inspect_llm(),
-            app.cfg.cisco_ai_defense,
-            llm=app.cfg.resolve_llm("scanners.skill"),
-        )
-        result = scanner.scan(skill_dir)
+        result = _build_skill_scanner(app).scan(skill_dir)
 
         if app.logger:
             app.logger.log_scan(result)
@@ -1528,7 +1651,6 @@ def _scan_from_http(
         IngestError,
         http_get,
     )
-    from defenseclaw.scanner.skill import SkillScannerWrapper
 
     if not as_json:
         click.echo(f"[scan] fetching skill from {url}")
@@ -1613,13 +1735,7 @@ def _scan_from_http(
         if not as_json:
             click.echo(f"[scan] skill-scanner -> {skill_dir} (fetched)")
 
-        scanner = SkillScannerWrapper(
-            app.cfg.scanners.skill_scanner,
-            app.cfg.effective_inspect_llm(),
-            app.cfg.cisco_ai_defense,
-            llm=app.cfg.resolve_llm("scanners.skill"),
-        )
-        result = scanner.scan(skill_dir)
+        result = _build_skill_scanner(app).scan(skill_dir)
 
         if app.logger:
             app.logger.log_scan(result)
@@ -2065,6 +2181,20 @@ def disable(app: AppContext, name: str, reason: str) -> None:
     from defenseclaw.enforce import PolicyEngine
     skill_name = os.path.basename(name)
 
+    # SK-5a: runtime disable is wired only for the OpenClaw gateway lane. On a
+    # hook connector the RPC has no backend and returns a raw "502 Bad Gateway".
+    # Fail fast with an actionable message instead, pointing at the mechanism
+    # that does work cross-connector (quarantine).
+    active = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+    if active != "openclaw":
+        click.echo(
+            f"error: runtime disable is OpenClaw-only, but the active connector is {active!r}.\n"
+            f"  Use 'defenseclaw skill quarantine {skill_name}' to make the skill "
+            f"unusable on hook connectors.",
+            err=True,
+        )
+        raise SystemExit(1)
+
     client = _sidecar_client(app)
     try:
         client.disable_skill(skill_name)
@@ -2320,14 +2450,23 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
     connector = resolve_list_connector(app, connector_flag)
 
     info_map = _get_openclaw_skill_info(skill_name, app, connector=connector)
+    scan_map = _build_scan_map(app.store)
+    actions_map = _build_actions_map(app.store)
+
     if info_map is None:
+        # SK-2: a true miss must error rather than render a blank
+        # "Eligible: False / Bundled: False" card that implies the skill
+        # exists. Keep rendering when a scan-history or enforcement record
+        # carries the name, so a quarantined/removed-but-enforced skill stays
+        # inspectable.
+        if skill_name not in scan_map and skill_name not in actions_map:
+            click.echo(f"error: skill {skill_name!r} not found", err=True)
+            raise SystemExit(1)
         info_map = {"name": skill_name}
 
-    scan_map = _build_scan_map(app.store)
     if skill_name in scan_map:
         info_map["scan"] = scan_map[skill_name]
 
-    actions_map = _build_actions_map(app.store)
     if skill_name in actions_map:
         ae = actions_map[skill_name]
         if not ae.actions.is_empty():
@@ -2359,10 +2498,17 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
         if scan_data.get("clean"):
             ux.ok("Verdict:  CLEAN", indent="  ")
         else:
+            # SK-3: label the count plainly and stamp the *severity word* with
+            # the matching colour (was: "{n} CRITICAL findings" always in
+            # yellow, conflating the total count with the max severity).
             n = scan_data.get("total_findings", 0)
             sev = scan_data.get("max_severity", "INFO")
+            sev_color = {
+                "CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan",
+            }.get(sev, "white")
             click.echo(
-                f"  {ux.bold('Verdict:')}  {n} {ux._style(sev, fg='yellow', bold=True)} findings"
+                f"  {ux.bold('Verdict:')}  {n} findings "
+                f"(max severity: {ux._style(sev, fg=sev_color, bold=True)})"
             )
         click.echo(f"  {ux.bold('Target:')}   {scan_data.get('target', '')}")
 
@@ -2401,7 +2547,6 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.admission import evaluate_admission
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
-    from defenseclaw.scanner.skill import SkillScannerWrapper
 
     skill_name = os.path.basename(name)
     connector = resolve_list_connector(app, connector_flag)
@@ -2478,12 +2623,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
         raise SystemExit(1)
 
     click.echo(f"[install] scanning {skill_path}...")
-    scanner = SkillScannerWrapper(
-        app.cfg.scanners.skill_scanner,
-        app.cfg.effective_inspect_llm(),
-        app.cfg.cisco_ai_defense,
-        llm=app.cfg.resolve_llm("scanners.skill"),
-    )
+    scanner = _build_skill_scanner(app)
     try:
         result = scanner.scan(skill_path)
     except Exception as exc:
