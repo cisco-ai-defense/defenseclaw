@@ -20,7 +20,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -1290,15 +1290,23 @@ class DoctorFixDryRunTests(unittest.TestCase):
             fix_drift.assert_not_called()
             fix_dotenv.assert_not_called()
             fix_pristine.assert_not_called()
+            # D7: the connector-teardown fixer was removed from --fix entirely,
+            # so it is never invoked even though it remains importable.
             fix_residue.assert_not_called()
 
-        # Each fixer should have produced a "skip" record so the TUI
-        # can list every step the real run would touch.
+        # Each remaining fixer should have produced a "skip" record so the TUI
+        # can list every step the real run would touch. The teardown fixer was
+        # removed (D7), leaving six.
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        self.assertEqual(len(fix_records), 7)
+        self.assertEqual(len(fix_records), 6)
         for record in fix_records:
             self.assertEqual(record["status"], "skip")
             self.assertIn("dry-run", record["detail"])
+        # Doctor must NEVER offer connector teardown from --fix (D7).
+        self.assertNotIn(
+            "fix: connector residue",
+            [c["label"] for c in fix_records],
+        )
 
     def test_real_fix_invokes_each_fixer_when_dry_run_false(self):
         from defenseclaw.commands import cmd_doctor
@@ -1312,16 +1320,24 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_gateway_token_drift", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_dotenv_perms", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_pristine_backup", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_connector_residue", return_value=("pass", "ok")),
+            # _fix_connector_residue is intentionally NOT wired into --fix (D7);
+            # patch it so a regression that re-adds it would surface as a 7th row.
+            patch.object(cmd_doctor, "_fix_connector_residue", return_value=("pass", "ok")) as fix_residue,
         ):
             cmd_doctor._run_fixers(
                 cfg, result, assume_yes=True, json_out=True, dry_run=False,
             )
 
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        self.assertEqual(len(fix_records), 7)
+        # Six fixers run; the connector-teardown fixer was removed (D7).
+        self.assertEqual(len(fix_records), 6)
         for record in fix_records:
             self.assertEqual(record["status"], "pass")
+        fix_residue.assert_not_called()
+        self.assertNotIn(
+            "fix: connector residue",
+            [c["label"] for c in fix_records],
+        )
 
     def test_dry_run_flag_is_exposed_on_click_command(self):
         from defenseclaw.commands.cmd_doctor import doctor
@@ -1441,6 +1457,89 @@ class CustomProviderOverlayChecksTests(unittest.TestCase):
                 if c["status"] == "warn" and "not covered by domains" in c["detail"]
             ]
             self.assertEqual(warn_checks, [], r.checks)
+
+
+class GuardrailProxyMultiConnectorTests(unittest.TestCase):
+    """D6: whether the proxy port is 'intentionally closed' is decided over the
+    FULL active set. A proxy peer (openclaw/zeptoclaw) that binds port 4000
+    forces the real liveliness probe even when the primary is hook-enforced.
+    """
+
+    def _cfg(self, connectors, mode="observe"):
+        cfg = MagicMock()
+        cfg.active_connectors.return_value = connectors
+        cfg.guardrail = SimpleNamespace(mode=mode)
+        return cfg
+
+    def test_all_hook_enforced_reports_closed(self):
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
+        )
+
+        detail = _guardrail_proxy_intentionally_closed(self._cfg(["hermes", "codex"]))
+        self.assertIn("proxy port intentionally closed", detail)
+        self.assertIn("codex", detail)
+        self.assertIn("hermes", detail)
+
+    def test_proxy_peer_forces_real_probe(self):
+        """hermes (hook) + openclaw (proxy): openclaw needs port 4000, so the
+        helper returns '' and _check_guardrail_proxy runs the real probe — the
+        exact case the singular-primary scoping masked."""
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
+        )
+
+        self.assertEqual(
+            _guardrail_proxy_intentionally_closed(self._cfg(["hermes", "openclaw"])),
+            "",
+        )
+
+    def test_zeptoclaw_peer_forces_real_probe(self):
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
+        )
+
+        self.assertEqual(
+            _guardrail_proxy_intentionally_closed(self._cfg(["codex", "zeptoclaw"])),
+            "",
+        )
+
+    def test_empty_active_set_runs_probe(self):
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
+        )
+
+        self.assertEqual(_guardrail_proxy_intentionally_closed(self._cfg([])), "")
+
+    def test_single_connector_message_unchanged(self):
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
+        )
+
+        detail = _guardrail_proxy_intentionally_closed(self._cfg(["geminicli"]))
+        self.assertIn("hook-driven for geminicli", detail)
+        self.assertIn("mode=observe", detail)
+        self.assertIn("proxy port intentionally closed", detail)
+
+
+class DoctorFixHelpTextTests(unittest.TestCase):
+    """D8: ``--fix`` help + docstring must disclose the gateway-sidecar restart
+    blast radius and must no longer advertise connector teardown."""
+
+    def test_fix_help_mentions_restart_and_dry_run(self):
+        from defenseclaw.commands.cmd_doctor import doctor
+
+        opts = {p.name: p for p in doctor.params}
+        help_text = " ".join((opts["do_fix"].help or "").split()).lower()
+        self.assertIn("restart", help_text)
+        self.assertIn("--dry-run", help_text)
+
+    def test_fix_docstring_discloses_restart_and_drops_teardown(self):
+        from defenseclaw.commands.cmd_doctor import doctor
+
+        doc = " ".join((doctor.help or "").split()).lower()
+        self.assertIn("restart the gateway sidecar", doc)
+        self.assertIn("no longer tears connectors down", doc)
 
 
 if __name__ == "__main__":

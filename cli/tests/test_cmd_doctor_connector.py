@@ -51,7 +51,9 @@ from defenseclaw.commands.cmd_doctor import (
     _check_connector_hooks,
     _check_connector_inventory,
     _check_hook_contract_lock,
+    _check_hook_health,
     _check_scan_coverage,
+    _doctor_active_connectors,
     _doctor_label_suffix,
     _DoctorResult,
 )
@@ -401,6 +403,127 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
         _check_connector_inventory(self._cfg(rule_pack_dir=""), "codex", r)
         rp = next(c for c in r.checks if c["label"] == "Rule pack")
         self.assertEqual(rp["status"], "skip")
+
+
+class TestDoctorActiveConnectors(unittest.TestCase):
+    """``_doctor_active_connectors`` is the phantom-openclaw gate (D3): it must
+    honor ``active_connectors()``'s empty signal instead of flooring to the
+    singular ``openclaw`` path default the way doctor's old inventory/Services
+    loops did.
+    """
+
+    def test_uses_active_connectors_when_present(self) -> None:
+        cfg = MagicMock()
+        cfg.active_connectors.return_value = ["Hermes", "codex"]
+        self.assertEqual(_doctor_active_connectors(cfg), ["hermes", "codex"])
+
+    def test_empty_active_connectors_returns_empty_not_phantom(self) -> None:
+        """The D3 core: a configured-then-removed install reports ``[]`` and
+        doctor must NOT fabricate ``["openclaw"]``."""
+        cfg = MagicMock()
+        cfg.active_connectors.return_value = []
+        self.assertEqual(_doctor_active_connectors(cfg), [])
+
+    def test_dedupes_and_lowercases_in_order(self) -> None:
+        cfg = MagicMock()
+        cfg.active_connectors.return_value = ["Codex", "codex", "Hermes"]
+        self.assertEqual(_doctor_active_connectors(cfg), ["codex", "hermes"])
+
+    def test_falls_back_to_primary_for_legacy_config(self) -> None:
+        """A config predating ``active_connectors()`` falls back to the
+        singular primary so legacy single-connector installs are unaffected."""
+        cfg = MagicMock(spec=["guardrail"])  # no active_connectors/active_connector
+        cfg.guardrail = MagicMock()
+        cfg.guardrail.connector = "codex"
+        self.assertEqual(_doctor_active_connectors(cfg), ["codex"])
+
+    def test_swallows_active_connectors_exception(self) -> None:
+        cfg = MagicMock()
+        cfg.active_connectors.side_effect = RuntimeError("boom")
+        cfg.active_connector.return_value = "openclaw"
+        self.assertEqual(_doctor_active_connectors(cfg), ["openclaw"])
+
+
+class TestCheckHookHealth(unittest.TestCase):
+    """D4: generic hook-health rows for connectors that previously had no
+    Services check (hermes/cursor/windsurf/geminicli/opencode). The check
+    prefers the gateway's recorded ``hook_contract_lock.json`` paths and is
+    format-agnostic (YAML for hermes, flat ``.js`` for opencode).
+    """
+
+    def _cfg(self, data_dir: str, connector: str, paths: list[str]) -> MagicMock:
+        cfg = MagicMock()
+        cfg.data_dir = data_dir
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {"connectors": {connector: {"locations": {"hook_config_paths": paths}}}},
+                fh,
+            )
+        return cfg
+
+    def test_lock_path_with_marker_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "config.yaml")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write("hooks:\n  - command: /x/hooks/hermes-hook.sh\n")
+            r = _DoctorResult()
+            _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+        self.assertEqual(r.checks[-1]["status"], "pass")
+        self.assertEqual(r.checks[-1]["label"], "Hermes hooks")
+        self.assertIn(hook, r.checks[-1]["detail"])
+
+    def test_lock_path_without_marker_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "config.yaml")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write("hooks: []\n")
+            r = _DoctorResult()
+            _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("does not reference", r.checks[-1]["detail"])
+
+    def test_missing_hook_file_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            r = _DoctorResult()
+            _check_hook_health(
+                self._cfg(tmp, "hermes", [os.path.join(tmp, "nope.yaml")]), "hermes", r,
+            )
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("not found", r.checks[-1]["detail"])
+
+    def test_opencode_flat_js_plugin_passes(self) -> None:
+        """opencode's hook is a flat ``.js`` file (not JSON) keyed on the
+        bare ``defenseclaw`` marker — the format-agnostic check must accept it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "defenseclaw.js")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write("export const plugin = () => fetch('http://127.0.0.1:4000');  // defenseclaw bridge\n")
+            r = _DoctorResult()
+            _check_hook_health(self._cfg(tmp, "opencode", [hook]), "opencode", r)
+        self.assertEqual(r.checks[-1]["status"], "pass")
+        self.assertEqual(r.checks[-1]["label"], "OpenCode hooks")
+
+    def test_unknown_connector_is_noop(self) -> None:
+        r = _DoctorResult()
+        _check_hook_health(MagicMock(), "totallymadeupclaw", r)
+        self.assertEqual(r.checks, [])
+
+    def test_dispatch_routes_all_five_connectors(self) -> None:
+        """``_check_connector_hooks`` must dispatch each of the five formerly
+        unhandled connectors to the generic hook-health row."""
+        for connector, label in (
+            ("hermes", "Hermes hooks"),
+            ("cursor", "Cursor hooks"),
+            ("windsurf", "Windsurf hooks"),
+            ("geminicli", "Gemini CLI hooks"),
+            ("opencode", "OpenCode hooks"),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = self._cfg(tmp, connector, [os.path.join(tmp, "missing")])
+                r = _DoctorResult()
+                _check_connector_hooks(cfg, connector, r)
+            self.assertTrue(r.checks, msg=connector)
+            self.assertEqual(r.checks[-1]["label"], label, msg=connector)
 
 
 if __name__ == "__main__":
