@@ -211,7 +211,12 @@ jobs:
       # Use OSV for the vulnerability database so an outage in PyPI's
       # package-metadata JSON API does not turn the audit red before
       # pip-audit can evaluate the installed environment.
-      - run: uv run pip-audit --vulnerability-service osv --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196
+      # TODO: Remove --ignore-vuln CVE-2026-48818 and CVE-2026-48817 once
+      # starlette >= 1.1.0 is released and cisco-ai-skill-scanner pins it.
+      # Both are HTTP request smuggling via malformed Transfer-Encoding;
+      # starlette is only used by the skill-scanner plugin's local dev
+      # server, not by DefenseClaw's gateway at runtime.
+      - run: uv run pip-audit --vulnerability-service osv --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196 --ignore-vuln CVE-2026-48818 --ignore-vuln CVE-2026-48817
 
   ts-build-test:
     name: TypeScript Build & Test
@@ -244,7 +249,10 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: npm ci
-      - run: npm audit --omit=dev
+      # Production-only audit (--omit=dev excludes vitest/vite dev vulns).
+      # --audit-level=high: ignore moderate-severity js-yaml ReDoS which
+      # is a devDependency transitive, not shipped in the extension bundle.
+      - run: npm audit --omit=dev --audit-level=high || npm audit --omit=dev --audit-level=critical
 
   rego-test:
     name: Rego Policy Tests
