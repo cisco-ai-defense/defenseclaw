@@ -312,6 +312,31 @@ def _get_openclaw_skill_info(
 # Scan map / actions map builders (mirror Go buildSkillScanMap / buildSkillActionsMap)
 # ---------------------------------------------------------------------------
 
+_SEVERITY_BUCKETS = ("critical", "high", "medium", "low", "info")
+
+
+def _severity_counts_from_raw(raw_json: str) -> dict[str, int]:
+    """E4i: bucket a scan's findings into critical/high/medium/low/info.
+
+    Parses the stored ``raw_json`` (``ScanResult.to_json()``) so no extra DB
+    round-trip is needed. Returns a dict with all five buckets present (0 when
+    absent) so consumers (skill list --json, skill info, and the TUI render
+    half) get a stable shape. Unknown/blank severities are ignored.
+    """
+    counts = {b: 0 for b in _SEVERITY_BUCKETS}
+    if not raw_json:
+        return counts
+    try:
+        data = json.loads(raw_json)
+    except (ValueError, TypeError):
+        return counts
+    for f in data.get("findings", []) or []:
+        sev = str(f.get("severity", "")).strip().lower()
+        if sev in counts:
+            counts[sev] += 1
+    return counts
+
+
 def _build_scan_map(store) -> dict[str, dict[str, Any]]:
     """Build a map of skill-name -> latest scan entry from the DB."""
     scan_map: dict[str, dict[str, Any]] = {}
@@ -329,12 +354,20 @@ def _build_scan_map(store) -> dict[str, dict[str, Any]]:
             "clean": finding_count == 0,
             "max_severity": ls["max_severity"] if finding_count > 0 else "CLEAN",
             "total_findings": finding_count,
+            # E4i: per-severity breakdown alongside the existing max+total.
+            "severity_counts": _severity_counts_from_raw(ls.get("raw_json", "")),
         }
     return scan_map
 
 
-def _build_actions_map(store) -> dict[str, Any]:
-    """Build a map of skill-name -> ActionEntry from the DB."""
+def _build_actions_map(store, connector: str = "") -> dict[str, Any]:
+    """Build a map of skill-name -> effective ActionEntry from the DB.
+
+    Resolves most-specific-wins per name (SK-4): the connector-scoped row
+    overrides the global row when ``connector`` is given, so each connector's
+    table/card shows that connector's effective actions. ``connector=""``
+    returns only the global rows (today's behavior).
+    """
     from defenseclaw.models import ActionEntry
     actions_map: dict[str, ActionEntry] = {}
     if store is None:
@@ -344,7 +377,12 @@ def _build_actions_map(store) -> dict[str, Any]:
     except Exception:
         return actions_map
     for e in entries:
-        actions_map[e.target_name] = e
+        if e.connector == "":
+            actions_map[e.target_name] = e
+    if connector:
+        for e in entries:
+            if e.connector == connector:
+                actions_map[e.target_name] = e
     return actions_map
 
 
@@ -434,23 +472,25 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
     connectors = resolve_list_connectors(app, connector_flag)
 
     scan_map = _build_scan_map(app.store)
-    actions_map = _build_actions_map(app.store)
+    # SK-4: resolve the effective actions per connector (connector-scoped row
+    # overrides global) so each connector's table/card shows its own actions.
 
     if as_json:
         if len(connectors) > 1:
-            groups = [
-                {
+            groups = []
+            for c in connectors:
+                actions_map = _build_actions_map(app.store, c)
+                groups.append({
                     "connector": c,
                     "skills": _skill_list_json_items(
                         _collect_skills_for_connector(app, c, scan_map, actions_map),
                         scan_map,
                         actions_map,
                     ),
-                }
-                for c in connectors
-            ]
+                })
             click.echo(json.dumps(groups, indent=2, default=str))
         else:
+            actions_map = _build_actions_map(app.store, connectors[0])
             skills = _collect_skills_for_connector(app, connectors[0], scan_map, actions_map)
             if not skills:
                 click.echo("[]")
@@ -460,6 +500,7 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
 
     shown_any = False
     for connector in connectors:
+        actions_map = _build_actions_map(app.store, connector)
         skills = _collect_skills_for_connector(app, connector, scan_map, actions_map)
         if not skills:
             if connector == "openclaw":
@@ -1871,19 +1912,37 @@ def _print_result(name: str, result) -> None:
 
 
 # ---------------------------------------------------------------------------
-# skill block
+# skill block / allow / unblock / disable / enable
+#
+# SK-4: these accept ``--connector`` to scope policy. Bare verb writes a
+# **GLOBAL** entry (every connector); ``--connector <name>`` **narrows** it to
+# one peer. The connector dimension lives in the audit store's per-connector
+# column via PolicyEngine ``*_for_connector``; reads resolve most-specific-wins
+# (connector entry, then global). Runtime honoring is at the admission gate
+# (enforce/admission.py threads the connector). Mirrors the ``mcp`` N2 / plugin
+# P-A commands.
 # ---------------------------------------------------------------------------
+
+_CONNECTOR_SCOPE_HELP = (
+    "Scope to one connector (default: GLOBAL — applies to every connector). "
+    "Pass --connector <name> to narrow to that peer."
+)
+
 
 @skill.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for blocking")
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
-def block(app: AppContext, name: str, reason: str) -> None:
+def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a skill to the install block list.
 
     Blocked skills are rejected by 'skill install' before any scan.
     Does not affect already-running skills — use 'skill disable' or
     'skill quarantine' for that.
+
+    Bare ``skill block <name>`` blocks the skill GLOBALLY (every connector);
+    ``--connector <name>`` narrows the block to one peer.
     """
     from defenseclaw.enforce import PolicyEngine
 
@@ -1893,14 +1952,34 @@ def block(app: AppContext, name: str, reason: str) -> None:
     if not reason:
         reason = "manual block via CLI"
 
-    pe.block("skill", skill_name, reason)
-    skill_path = _resolve_path(app, skill_name)
-    if skill_path:
-        pe.set_source_path("skill", skill_name, skill_path)
-    click.secho(f"[skill] {skill_name!r} added to block list", fg="red")
+    if connector_flag:
+        if pe.is_blocked_for_connector("skill", skill_name, connector_flag):
+            if app.store and app.store.has_action(
+                "skill", skill_name, "install", "block", connector_flag,
+            ):
+                click.echo(f"Already blocked for {connector_flag}: {skill_name}")
+            else:
+                click.echo(f"Already blocked globally (covers {connector_flag}): {skill_name}")
+            return
+        pe.block_for_connector("skill", skill_name, connector_flag, reason)
+        skill_path = _resolve_path(app, skill_name)
+        if skill_path:
+            pe.set_source_path("skill", skill_name, skill_path, connector_flag)
+        click.secho(
+            f"[skill] {skill_name!r} added to block list (connector={connector_flag})",
+            fg="red",
+        )
+    else:
+        pe.block("skill", skill_name, reason)
+        skill_path = _resolve_path(app, skill_name)
+        if skill_path:
+            pe.set_source_path("skill", skill_name, skill_path)
+        click.secho(f"[skill] {skill_name!r} added to block list", fg="red")
 
     if app.logger:
-        app.logger.log_action("skill-block", skill_name, f"reason={reason}")
+        app.logger.log_action(
+            "skill-block", skill_name, f"reason={reason} connector={connector_flag}",
+        )
 
     from defenseclaw.commands import hint
     hint(f"Unblock later:  defenseclaw skill unblock {skill_name}")
@@ -1912,12 +1991,24 @@ def block(app: AppContext, name: str, reason: str) -> None:
 
 @skill.command()
 @click.argument("name")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help=(
+        "Scope to one connector (default: clears the GLOBAL enforcement state). "
+        "Pass --connector <name> to clear only that peer's per-connector state; "
+        "a global block stays in force."
+    ),
+)
 @pass_ctx
-def unblock(app: AppContext, name: str) -> None:
+def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     """Remove a skill from the block list and clear all enforcement state.
 
     Clears block, quarantine, and disable actions without adding to the
     allow list — the skill will go through normal scanning on next install.
+
+    Bare clears the GLOBAL state; ``--connector <name>`` clears only that
+    peer's per-connector state (a global block stays in force — unblock it
+    without --connector to lift it).
 
     To also restore quarantined files, run 'skill restore' after unblocking.
     """
@@ -1925,6 +2016,31 @@ def unblock(app: AppContext, name: str) -> None:
 
     skill_name = os.path.basename(name)
     pe = PolicyEngine(app.store)
+
+    # SK-4 connector-scoped unblock: EXACT-match on the targeted peer so a
+    # connector unblock never falsely reports (or clears) the global block.
+    if connector_flag:
+        has_state = bool(app.store) and (
+            app.store.has_action("skill", skill_name, "install", "block", connector_flag)
+            or app.store.has_action("skill", skill_name, "file", "quarantine", connector_flag)
+            or app.store.has_action("skill", skill_name, "runtime", "disable", connector_flag)
+        )
+        if not has_state:
+            click.echo(
+                f"[skill] {skill_name!r} has no enforcement state to clear for {connector_flag}"
+            )
+            return
+        pe.remove_action_for_connector("skill", skill_name, connector_flag)
+        click.secho(
+            f"[skill] {skill_name!r} all enforcement state cleared "
+            f"(connector={connector_flag}) (block/quarantine/disable)",
+            fg="green",
+        )
+        if app.logger:
+            app.logger.log_action(
+                "skill-unblock", skill_name, f"manual unblock via CLI connector={connector_flag}",
+            )
+        return
 
     has_state = (
         pe.is_blocked("skill", skill_name)
@@ -1974,12 +2090,17 @@ def unblock(app: AppContext, name: str) -> None:
 @skill.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for allowing")
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
-def allow(app: AppContext, name: str, reason: str) -> None:
+def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a skill to the install allow list.
 
     Allow-listed skills skip the scan gate during install.
     Adding a skill also removes it from the block list.
+
+    Bare ``skill allow <name>`` allows the skill GLOBALLY (every connector);
+    ``--connector <name>`` narrows the allow to one peer. A global block still
+    wins over a connector-scoped allow.
     """
     from defenseclaw.enforce import PolicyEngine
 
@@ -1988,6 +2109,32 @@ def allow(app: AppContext, name: str, reason: str) -> None:
 
     if not reason:
         reason = "manual allow via CLI"
+
+    # SK-4 connector-scoped allow: write the narrowed entry and clear residual
+    # file/runtime state for that peer. The gateway runtime-enable dance below
+    # is for the global/OpenClaw runtime lane and stays on the bare path.
+    if connector_flag:
+        if pe.is_allowed_for_connector("skill", skill_name, connector_flag):
+            if app.store and app.store.has_action(
+                "skill", skill_name, "install", "allow", connector_flag,
+            ):
+                click.echo(f"Already allowed for {connector_flag}: {skill_name}")
+            else:
+                click.echo(f"Already allowed globally (covers {connector_flag}): {skill_name}")
+            return
+        pe.allow_for_connector("skill", skill_name, connector_flag, reason)
+        skill_path = _resolve_path(app, skill_name)
+        if skill_path:
+            pe.set_source_path("skill", skill_name, skill_path, connector_flag)
+        click.secho(
+            f"[skill] {skill_name!r} added to allow list (connector={connector_flag})",
+            fg="green",
+        )
+        if app.logger:
+            app.logger.log_action(
+                "skill-allow", skill_name, f"reason={reason} connector={connector_flag}",
+            )
+        return
 
     entry = pe.get_action("skill", skill_name)
     runtime_disabled = bool(entry and entry.actions.runtime == "disable")
@@ -2022,15 +2169,18 @@ def allow(app: AppContext, name: str, reason: str) -> None:
 @skill.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for disabling")
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
-def disable(app: AppContext, name: str, reason: str) -> None:
+def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Disable a skill at runtime via the OpenClaw gateway.
 
     Sends a skills.update RPC to prevent the agent from using the skill's
     tools until re-enabled. This is runtime-only — it does not block install
     or quarantine files.
 
-    Requires the gateway to be running.
+    Requires the gateway to be running. Runtime disable is OpenClaw-only;
+    bare records the disable GLOBALLY, ``--connector <name>`` narrows the
+    audit record to that peer.
     """
     from defenseclaw.enforce import PolicyEngine
     skill_name = os.path.basename(name)
@@ -2048,6 +2198,17 @@ def disable(app: AppContext, name: str, reason: str) -> None:
             err=True,
         )
         raise SystemExit(1)
+    # The runtime RPC only acts on OpenClaw, so a non-OpenClaw --connector can't
+    # be honored — fail loudly rather than tagging a record the gateway never
+    # enforces on that peer.
+    if connector_flag and connector_flag != "openclaw":
+        click.echo(
+            f"error: runtime disable is OpenClaw-only — cannot scope to "
+            f"{connector_flag!r}. Use 'defenseclaw skill quarantine {skill_name} "
+            f"--connector {connector_flag}' to neutralize it on that peer.",
+            err=True,
+        )
+        raise SystemExit(1)
 
     client = _sidecar_client(app)
     try:
@@ -2062,10 +2223,15 @@ def disable(app: AppContext, name: str, reason: str) -> None:
         reason = "manual disable via CLI"
 
     pe = PolicyEngine(app.store)
-    pe.disable("skill", skill_name, reason)
+    if connector_flag:
+        pe.disable_for_connector("skill", skill_name, connector_flag, reason)
+    else:
+        pe.disable("skill", skill_name, reason)
 
     if app.logger:
-        app.logger.log_action("skill-disable", skill_name, f"reason={reason}")
+        app.logger.log_action(
+            "skill-disable", skill_name, f"reason={reason} connector={connector_flag}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2074,11 +2240,13 @@ def disable(app: AppContext, name: str, reason: str) -> None:
 
 @skill.command()
 @click.argument("name")
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
-def enable(app: AppContext, name: str) -> None:
+def enable(app: AppContext, name: str, connector_flag: str) -> None:
     """Enable a previously disabled skill via the OpenClaw gateway.
 
-    This is a runtime-only action.
+    This is a runtime-only action. ``--connector <name>`` clears only that
+    peer's runtime-disable record (bare clears the global record).
     """
     from defenseclaw.enforce import PolicyEngine
 
@@ -2094,10 +2262,15 @@ def enable(app: AppContext, name: str) -> None:
     click.echo(f'[skill] {skill_name!r} enabled via gateway RPC')
 
     pe = PolicyEngine(app.store)
-    pe.enable("skill", skill_name)
+    if connector_flag:
+        pe.enable_for_connector("skill", skill_name, connector_flag)
+    else:
+        pe.enable("skill", skill_name)
 
     if app.logger:
-        app.logger.log_action("skill-enable", skill_name, "re-enabled via CLI")
+        app.logger.log_action(
+            "skill-enable", skill_name, f"re-enabled via CLI connector={connector_flag}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2305,7 +2478,7 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
 
     info_map = _get_openclaw_skill_info(skill_name, app, connector=connector)
     scan_map = _build_scan_map(app.store)
-    actions_map = _build_actions_map(app.store)
+    actions_map = _build_actions_map(app.store, connector)
 
     if info_map is None:
         # SK-2: a true miss must error rather than render a blank
