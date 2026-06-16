@@ -273,6 +273,18 @@ class RegistriesPanelModel:
             if row is None:
                 return RegistryPanelAction(True, hint="(no entry selected)")
             return RegistryPanelAction(True, reject_entry_intent(row))
+        if key == "R":
+            # E4h: toggle asset_policy.<type>.registry_required for the
+            # selected entry's asset type (parity with `registry require`).
+            row = self.selected_entry()
+            if row is None:
+                return RegistryPanelAction(True, hint="(no entry selected)")
+            if row.type not in {"skill", "mcp"}:
+                return RegistryPanelAction(True, hint="(registry require supports skill/mcp only)")
+            return RegistryPanelAction(
+                True,
+                require_entry_intent(row, currently_required=self._registry_required(row.type)),
+            )
         if key == "d":
             if self.current_tab != RegistriesTab.SOURCES:
                 return RegistryPanelAction(False)
@@ -346,6 +358,17 @@ class RegistriesPanelModel:
             rows = [row for row in rows if row.type == entry_type and row.name == name]
         return tuple(rows)
 
+    def _registry_required(self, asset_type: str) -> bool:
+        """Read ``asset_policy.<type>.registry_required`` from the cached config.
+
+        Tolerant of a missing/partial config (None → False) so the require
+        toggle still produces a sensible ``--enabled`` intent on a fresh
+        install where the asset-policy block hasn't been materialized yet.
+        """
+        asset_policy = _get_attr(self.config, "asset_policy", "AssetPolicy", default=None)
+        target = _get_attr(asset_policy, asset_type, asset_type.capitalize(), default=None)
+        return bool(_get_attr(target, "registry_required", "RegistryRequired", default=False))
+
     def _cursor_source_id(self) -> str:
         if self.current_tab == RegistriesTab.SOURCES:
             source = self.selected_source()
@@ -408,6 +431,27 @@ def remove_source_intent(source_id: str) -> RegistryCommandIntent:
         label=f"registry remove {source_id}",
         args=("registry", "remove", source_id, "--non-interactive", "--json"),
         hint=f"Removing {source_id}",
+    )
+
+
+def require_entry_intent(row: RegistryEntryRow, *, currently_required: bool) -> RegistryCommandIntent:
+    """Toggle ``asset_policy.<type>.registry_required`` for the row's asset type (E4h).
+
+    Parity with the ``registry require`` CLI (``cmd_registry.py``): the TUI
+    already exposes approve (``a``) / reject (``x``) but had no way to arm or
+    relax the registry-required default-deny — a security-relevant lever. The
+    flag mirrors the row's current state so the key acts as a toggle:
+    ``--disabled`` when the requirement is already armed, ``--enabled``
+    otherwise. ``registry require`` only supports skill/mcp (the sync/promote
+    pipeline never populates the plugin registry), so the caller gates on the
+    asset type before building this intent.
+    """
+    flag = "--disabled" if currently_required else "--enabled"
+    state = "optional" if currently_required else "required"
+    return RegistryCommandIntent(
+        label=f"registry require --type {row.type} {flag}",
+        args=("registry", "require", "--type", row.type, flag, "--json"),
+        hint=f"Marking {row.type} registry {state}",
     )
 
 

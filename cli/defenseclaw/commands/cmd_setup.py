@@ -3016,7 +3016,22 @@ def _resolve_rule_pack_dir(
         # anchored to an absolute location so the gateway's LoadRulePack
         # reads exactly where the operator pointed regardless of the
         # sidecar's working directory at boot.
-        return os.path.abspath(os.path.expanduser(raw)) if raw else ""
+        if not raw:
+            return ""
+        resolved = os.path.abspath(os.path.expanduser(raw))
+        # R5: validate the pack dir on set. We WARN rather than reject: the
+        # gateway resolves the rule pack at boot, possibly on a different host,
+        # so a directory that's absent on this machine can still be valid (and
+        # the free-text --rule-pack-dir contract, mirrored from the TUI, has
+        # always accepted not-yet-created paths). But silently accepting a
+        # missing path hides the common typo, so flag it loudly here.
+        if not os.path.isdir(resolved):
+            ux.warn(
+                f"rule-pack dir {resolved!r} does not exist (or is not a "
+                "directory) on this host — saved anyway; the gateway resolves "
+                "it at boot. Double-check the path if this is unexpected."
+            )
+        return resolved
     return None
 
 
@@ -3068,6 +3083,60 @@ def _apply_guardrail_extra_options(
         gc.hilt.min_severity = "HIGH"
     if disable_redaction is not None:
         app.cfg.privacy.disable_redaction = bool(disable_redaction)
+
+
+def _resolve_judge_hook_gate(
+    value: str | None,
+    *,
+    judge_just_enabled: bool,
+    current: list[str],
+) -> list[str] | None:
+    """Resolve ``--judge-hook-connectors`` into a new ``judge.hook_connectors`` gate (B2).
+
+    The hook-lane judge is opt-in per connector via
+    ``guardrail.judge.hook_connectors``; the interactive wizard prompts for it
+    (``_prompt_judge_hook_connectors``) but the non-interactive path — which the
+    TUI guardrail wizard drives as a subprocess — had no surface, so a
+    "complete" judge setup left the gate empty and the judge inspected zero hook
+    connectors. This maps the CLI flag onto the same gate the interactive prompt
+    and ``guardrail judge add/list`` speak.
+
+    Accepted values:
+      * ``all`` / ``*``  → ``["*"]`` (the all-hook-connectors sentinel)
+      * ``none`` / ``""``→ ``[]`` (judge proxy lane only)
+      * a comma-separated list of hook-enforced connector names
+
+    Returns the new gate list, or ``None`` to leave the existing gate
+    untouched. When the flag is omitted and the judge is being turned on for the
+    first time this run with no gate yet, default to ALL active hook connectors
+    (``["*"]``) — the agreed product default (tui.md §10.2) so enabling the
+    judge never silently no-ops on the hook lane. A deliberate empty gate on a
+    re-run (judge already enabled) is preserved, not re-armed.
+    """
+    if value is not None:
+        low = value.strip().lower()
+        if low in ("all", "*"):
+            return ["*"]
+        if low in ("", "none"):
+            return []
+        names: list[str] = []
+        for token in value.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            norm = normalize_connector(token)
+            if norm not in _HOOK_ENFORCED_CONNECTORS:
+                raise click.UsageError(
+                    f"--judge-hook-connectors: {token!r} is not a hook-enforced "
+                    f"connector. Choose from {sorted(_HOOK_ENFORCED_CONNECTORS)}, "
+                    "or pass 'all' / 'none'."
+                )
+            if norm not in names:
+                names.append(norm)
+        return names
+    if judge_just_enabled and not current:
+        return ["*"]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -3146,6 +3215,17 @@ def _apply_guardrail_extra_options(
               help="Judge regional provider region (Bedrock/Vertex). Persisted to guardrail.judge.llm.region.")
 @click.option("--judge-instance-name", default=None,
               help="Custom-provider instance for the judge. Persisted to guardrail.judge.llm.instance_name.")
+@click.option(
+    "--judge-hook-connectors",
+    default=None,
+    help=(
+        "Hook-lane judge gate (guardrail.judge.hook_connectors). The judge "
+        "always covers the proxy lane; hook connectors are opt-in. Pass 'all' "
+        "(or '*'), 'none', or a comma-separated list of hook-enforced "
+        "connectors (e.g. hermes,codex). When omitted and the judge is being "
+        "enabled for the first time, defaults to all active hook connectors."
+    ),
+)
 @click.option(
     "--llm-role",
     type=click.Choice(["judge_only", "judge_and_agent"]),
@@ -3286,6 +3366,7 @@ def setup_guardrail(
     judge_provider: str | None,
     judge_region: str | None,
     judge_instance_name: str | None,
+    judge_hook_connectors: str | None,
     llm_role: str | None,
     judge_inherit_from: str | None,
     judge_inherit_llm: bool | None,
@@ -3348,6 +3429,10 @@ def setup_guardrail(
     aid = app.cfg.cisco_ai_defense
 
     if non_interactive:
+        # B2: snapshot the judge gate state BEFORE the judge config below can
+        # flip ``gc.judge.enabled`` on, so the hook-gate default only fires when
+        # this run actually turns the judge on (not on every re-run).
+        was_judge_enabled = bool(gc.judge.enabled)
         # Connector resolution order in non-interactive mode:
         #   1. explicit --connector / --agent flag (operator intent always wins)
         #   2. existing gc.connector if already set to a non-default value
@@ -3487,6 +3572,18 @@ def setup_guardrail(
                 gc.detection_strategy = "regex_judge"
             if not getattr(gc, "detection_strategy_completion", None):
                 gc.detection_strategy_completion = "regex_only"
+
+        # B2: hook-lane judge gate. Honor an explicit --judge-hook-connectors,
+        # else default to ALL active hook connectors when the judge is turned on
+        # for the first time (tui.md §10.2), so a non-interactive / TUI-driven
+        # judge setup never leaves the hook lane silently un-judged.
+        new_gate = _resolve_judge_hook_gate(
+            judge_hook_connectors,
+            judge_just_enabled=(gc.judge.enabled and not was_judge_enabled),
+            current=list(gc.judge.hook_connectors or []),
+        )
+        if new_gate is not None:
+            gc.judge.hook_connectors = new_gate
 
         if gc.scanner_mode in ("remote", "both"):
             key_env = aid.api_key_env or "CISCO_AI_DEFENSE_API_KEY"
