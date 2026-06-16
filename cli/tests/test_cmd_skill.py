@@ -1259,18 +1259,60 @@ class TestSkillListOpencodeEmpty(SkillCommandTestBase):
 
 
 class TestSkillDisableHonesty(SkillCommandTestBase):
-    """SK-5a: runtime disable is OpenClaw-only; on a hook connector it must
-    fail fast with an actionable message instead of a raw 502."""
+    """SK-5b: hook connectors store runtime-disable policy rows. Connectors
+    without a skill runtime probe must get an explicit advisory warning."""
 
-    def test_disable_on_hook_connector_fails_fast(self):
+    def test_disable_on_hook_connector_records_global_advisory(self):
         self.app.cfg.active_connector = lambda: "hermes"  # type: ignore[method-assign]
 
         with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
             result = self.invoke(["disable", "some-skill"])
 
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("OpenClaw-only", result.output)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("runtime disable recorded globally", result.output)
+        self.assertIn("advisory", result.output)
         self.assertIn("quarantine", result.output)
+        self.assertTrue(self.app.store.has_action("skill", "some-skill", "runtime", "disable"))
+        mock_client.assert_not_called()
+
+    def test_disable_connector_without_probe_records_scoped_advisory(self):
+        with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
+            result = self.invoke(["disable", "some-skill", "--connector", "hermes"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=hermes", result.output)
+        self.assertIn("advisory", result.output)
+        self.assertTrue(
+            self.app.store.has_action("skill", "some-skill", "runtime", "disable", "hermes")
+        )
+        mock_client.assert_not_called()
+
+    def test_disable_connector_with_probe_records_scoped_enforced(self):
+        with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
+            result = self.invoke(["disable", "some-skill", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertIn("Enforced by hook runtime gate", result.output)
+        self.assertNotIn("advisory", result.output)
+        self.assertTrue(
+            self.app.store.has_action("skill", "some-skill", "runtime", "disable", "codex")
+        )
+        mock_client.assert_not_called()
+
+    def test_enable_connector_clears_scoped_disable_without_gateway(self):
+        PolicyEngine(self.app.store).disable_for_connector(
+            "skill", "some-skill", "hermes", "manual",
+        )
+
+        with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
+            result = self.invoke(["enable", "some-skill", "--connector", "hermes"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("runtime disable cleared", result.output)
+        self.assertFalse(
+            self.app.store.has_action("skill", "some-skill", "runtime", "disable", "hermes")
+        )
         mock_client.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_skill._sidecar_client")

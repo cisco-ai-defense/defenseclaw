@@ -254,6 +254,25 @@ func (e *PolicyEngine) IsQuarantinedForConnector(targetType, name, connector str
 	return e.store.HasAction(targetType, name, "file", "quarantine")
 }
 
+// IsDisabledForConnector reports whether name is runtime-disabled for
+// connector, checking the connector-scoped entry first and then the bare global
+// entry.
+func (e *PolicyEngine) IsDisabledForConnector(targetType, name, connector string) (bool, error) {
+	if e.store == nil {
+		return false, nil
+	}
+	if connector != "" {
+		disabled, err := e.store.HasActionForConnector(targetType, name, connector, "runtime", "disable")
+		if err != nil {
+			return false, err
+		}
+		if disabled {
+			return true, nil
+		}
+	}
+	return e.store.HasAction(targetType, name, "runtime", "disable")
+}
+
 // BlockForConnector blocks name for connector (exact-match; connector="" = global).
 func (e *PolicyEngine) BlockForConnector(targetType, name, connector, reason string) error {
 	if e.store == nil {

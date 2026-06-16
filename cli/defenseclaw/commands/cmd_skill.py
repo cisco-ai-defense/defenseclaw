@@ -2166,65 +2166,93 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 # skill disable (runtime, via gateway RPC)
 # ---------------------------------------------------------------------------
 
+_SKILL_RUNTIME_PROBE_CONNECTORS = {"codex", "claudecode"}
+
+
+def _normalize_runtime_connector(connector: str) -> str:
+    from defenseclaw import connector_paths
+    return connector_paths.normalize(connector or "openclaw")
+
+
+def _active_connector_name(app: AppContext) -> str:
+    if hasattr(app.cfg, "active_connector"):
+        return _normalize_runtime_connector(app.cfg.active_connector() or "openclaw")
+    return "openclaw"
+
+
+def _skill_runtime_probe_enforced(connector: str) -> bool:
+    return _normalize_runtime_connector(connector) in _SKILL_RUNTIME_PROBE_CONNECTORS
+
+
+def _warn_skill_runtime_disable_advisory(skill_name: str, connector: str, scoped: bool) -> None:
+    scope = f"connector={connector}" if scoped else f"active connector={connector}"
+    click.secho(
+        f"warning: skill runtime disable is advisory for {scope}; that connector "
+        "does not emit skill runtime events DefenseClaw can gate. Use "
+        f"'defenseclaw skill quarantine {skill_name}"
+        + (f" --connector {connector}" if scoped else "")
+        + "' for hard enforcement on that peer.",
+        fg="yellow",
+    )
+
+
 @skill.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for disabling")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
 def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
-    """Disable a skill at runtime via the OpenClaw gateway.
+    """Disable a skill at runtime.
 
-    Sends a skills.update RPC to prevent the agent from using the skill's
-    tools until re-enabled. This is runtime-only — it does not block install
-    or quarantine files.
+    OpenClaw uses the gateway RPC. Hook connectors store a runtime-disable
+    policy row that the hook runtime gate enforces when that connector emits
+    skill runtime events. This is runtime-only — it does not block install or
+    quarantine files.
 
-    Requires the gateway to be running. Runtime disable is OpenClaw-only;
-    bare records the disable GLOBALLY, ``--connector <name>`` narrows the
-    audit record to that peer.
+    Bare records the disable GLOBALLY, ``--connector <name>`` narrows the
+    runtime-disable record to that peer.
     """
     from defenseclaw.enforce import PolicyEngine
     skill_name = os.path.basename(name)
 
-    # SK-5a: runtime disable is wired only for the OpenClaw gateway lane. On a
-    # hook connector the RPC has no backend and returns a raw "502 Bad Gateway".
-    # Fail fast with an actionable message instead, pointing at the mechanism
-    # that does work cross-connector (quarantine).
-    active = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
-    if active != "openclaw":
-        click.echo(
-            f"error: runtime disable is OpenClaw-only, but the active connector is {active!r}.\n"
-            f"  Use 'defenseclaw skill quarantine {skill_name}' to make the skill "
-            f"unusable on hook connectors.",
-            err=True,
-        )
-        raise SystemExit(1)
-    # The runtime RPC only acts on OpenClaw, so a non-OpenClaw --connector can't
-    # be honored — fail loudly rather than tagging a record the gateway never
-    # enforces on that peer.
-    if connector_flag and connector_flag != "openclaw":
-        click.echo(
-            f"error: runtime disable is OpenClaw-only — cannot scope to "
-            f"{connector_flag!r}. Use 'defenseclaw skill quarantine {skill_name} "
-            f"--connector {connector_flag}' to neutralize it on that peer.",
-            err=True,
-        )
-        raise SystemExit(1)
-
-    client = _sidecar_client(app)
-    try:
-        client.disable_skill(skill_name)
-    except Exception as exc:
-        click.echo(f"error: gateway disable failed: {exc}", err=True)
-        raise SystemExit(1)
-
-    click.echo(f'[skill] {skill_name!r} disabled via gateway RPC')
+    active = _active_connector_name(app)
+    target_connector = _normalize_runtime_connector(connector_flag or active)
 
     if not reason:
         reason = "manual disable via CLI"
 
     pe = PolicyEngine(app.store)
+    if target_connector == "openclaw":
+        client = _sidecar_client(app)
+        try:
+            client.disable_skill(skill_name)
+        except Exception as exc:
+            click.echo(f"error: gateway disable failed: {exc}", err=True)
+            raise SystemExit(1)
+
+        click.echo(f'[skill] {skill_name!r} disabled via gateway RPC')
+    elif connector_flag:
+        click.echo(
+            f"[skill] {skill_name!r} runtime disable recorded "
+            f"(connector={target_connector})"
+        )
+        if _skill_runtime_probe_enforced(target_connector):
+            click.echo(
+                f"  Enforced by hook runtime gate for connector={target_connector}."
+            )
+        else:
+            _warn_skill_runtime_disable_advisory(skill_name, target_connector, True)
+    else:
+        click.echo(f"[skill] {skill_name!r} runtime disable recorded globally")
+        if _skill_runtime_probe_enforced(target_connector):
+            click.echo(
+                "  Enforced by hook runtime gates for connectors that emit skill events."
+            )
+        else:
+            _warn_skill_runtime_disable_advisory(skill_name, target_connector, False)
+
     if connector_flag:
-        pe.disable_for_connector("skill", skill_name, connector_flag, reason)
+        pe.disable_for_connector("skill", skill_name, target_connector, reason)
     else:
         pe.disable("skill", skill_name, reason)
 
@@ -2243,7 +2271,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
 def enable(app: AppContext, name: str, connector_flag: str) -> None:
-    """Enable a previously disabled skill via the OpenClaw gateway.
+    """Enable a previously disabled skill.
 
     This is a runtime-only action. ``--connector <name>`` clears only that
     peer's runtime-disable record (bare clears the global record).
@@ -2251,19 +2279,28 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
     from defenseclaw.enforce import PolicyEngine
 
     skill_name = os.path.basename(name)
+    active = _active_connector_name(app)
+    target_connector = _normalize_runtime_connector(connector_flag or active)
 
-    client = _sidecar_client(app)
-    try:
-        client.enable_skill(skill_name)
-    except Exception as exc:
-        click.echo(f"error: gateway enable failed: {exc}", err=True)
-        raise SystemExit(1)
-
-    click.echo(f'[skill] {skill_name!r} enabled via gateway RPC')
+    if target_connector == "openclaw":
+        client = _sidecar_client(app)
+        try:
+            client.enable_skill(skill_name)
+        except Exception as exc:
+            click.echo(f"error: gateway enable failed: {exc}", err=True)
+            raise SystemExit(1)
+        click.echo(f'[skill] {skill_name!r} enabled via gateway RPC')
+    elif connector_flag:
+        click.echo(
+            f"[skill] {skill_name!r} runtime disable cleared "
+            f"(connector={target_connector})"
+        )
+    else:
+        click.echo(f"[skill] {skill_name!r} global runtime disable cleared")
 
     pe = PolicyEngine(app.store)
     if connector_flag:
-        pe.enable_for_connector("skill", skill_name, connector_flag)
+        pe.enable_for_connector("skill", skill_name, target_connector)
     else:
         pe.enable("skill", skill_name)
 
