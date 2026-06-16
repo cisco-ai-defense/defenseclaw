@@ -603,18 +603,46 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			Notes:            []string{"DefenseClaw reports the required environment variables but does not mutate shell rc files."},
 		}
 	case "antigravity":
-		// Antigravity v1 publishes only the hooks surface in its
-		// documented configuration files; MCP / skills / rules /
-		// plugins / agents are not exposed as documented local
-		// install surfaces, so DefenseClaw treats those as
-		// unsupported until Google publishes contracts. This matches
-		// the conservative posture taken for Windsurf at first
-		// integration.
-		caps.MCP = unsupportedSurface("Antigravity MCP install surface is not documented; DefenseClaw v1 manages hooks only.")
-		caps.Skills = unsupportedSurface("Antigravity skills are not exposed as a documented local install surface.")
-		caps.Rules = unsupportedSurface("Antigravity rule install surface is not documented.")
-		caps.Plugins = pluginsAreOpenClawOnly()
-		caps.Agents = unsupportedSurface("Antigravity agent / subagent asset installation is not supported.")
+		caps.MCP = SurfaceCapability{
+			Supported:       true,
+			Scope:           "workspace,user",
+			ConfigPaths:     antigravityMCPPaths(opts),
+			ReadPaths:       antigravityMCPPaths(opts),
+			WritePaths:      antigravityMCPPaths(opts),
+			SupportsBackup:  true,
+			SupportsRestore: true,
+			Notes:           []string{"Antigravity MCP uses ~/.gemini/config/mcp_config.json and <workspace>/.agents/mcp_config.json. DefenseClaw writes remote servers with serverUrl and reads url as a compatibility alias."},
+		}
+		caps.Skills = SurfaceCapability{
+			Supported:      true,
+			Scope:          "workspace,user",
+			ReadPaths:      antigravitySkillReadPaths(opts),
+			WritePaths:     antigravitySkillWritePaths(opts),
+			InstallTargets: []string{"skill"},
+			RequiresOptIn:  true,
+			Notes:          []string{"AgentSkills folder form is supported for read/write. CLI direct markdown skills under ~/.gemini/antigravity-cli/skills are discovery-only until Google reconciles the skill shape conflict."},
+		}
+		caps.Rules = SurfaceCapability{
+			Supported:     true,
+			Scope:         "workspace,user",
+			ReadPaths:     antigravityRuleReadPaths(opts),
+			DiscoveryOnly: true,
+			Notes:         []string{"Antigravity rules are discovery-only; DefenseClaw does not write rules until activation metadata and file naming are documented."},
+		}
+		caps.Plugins = SurfaceCapability{
+			Supported:     true,
+			Scope:         "workspace,user",
+			ReadPaths:     antigravityPluginPaths(opts),
+			DiscoveryOnly: true,
+			Notes:         []string{"Antigravity plugins are scan/discovery-only; DefenseClaw does not install or disable agy plugins in PR #365."},
+		}
+		caps.Agents = SurfaceCapability{
+			Supported:     true,
+			Scope:         "plugin",
+			ReadPaths:     antigravityPluginPaths(opts),
+			DiscoveryOnly: true,
+			Notes:         []string{"No standalone Antigravity agent path is documented. Plugin-contained agents under <plugin>/agents are discovered through Antigravity plugin roots only."},
+		}
 		caps.CodeGuard.Supported = false
 	case "openhands":
 		caps.MCP = SurfaceCapability{
@@ -1006,27 +1034,14 @@ func openhandsHooksPath(opts SetupOpts) string {
 
 // antigravityHooksPath returns the global Antigravity hook config path.
 //
-// Antigravity (`agy` v1.0.x) reads PreToolUse hooks from
-// ~/.gemini/config/hooks.json. This was determined empirically during
-// the v0.5.0 smoke test: an earlier draft of this connector wrote to
-// ~/.gemini/antigravity-cli/hooks.json (the marketing-facing path
-// printed by `agy --help`), but agy never evaluated entries from that
-// file. Tracer hooks installed at ~/.gemini/config/hooks.json fired
-// reliably; the same entries at ~/.gemini/antigravity-cli/hooks.json
-// were silently ignored. agy's binary `strings` confirmed only the
-// `config/hooks.json` suffix is referenced at runtime.
-//
-// agy still merges every hooks.json it discovers (global config,
-// project-local under <workspace>/.antigravitycli/hooks.json, and the
-// legacy ~/.gemini/hooks.json) which causes a single hook to fire
-// once per discovered file. To keep the audit trail clean and prevent
-// double-billing of policy evaluations, DefenseClaw writes only the
-// global config file. Operators who must scope hooks to a single
-// workspace can override at runtime via AntigravityHooksPathOverride;
-// doctor surfaces a warning when more than one merged path holds a
-// defenseclaw-managed entry, and a separate migration warning when
-// the legacy ~/.gemini/antigravity-cli/hooks.json still contains
-// defenseclaw-managed entries from a pre-v0.5.0 install.
+// Antigravity (`agy`) reads hooks from ~/.gemini/config/hooks.json.
+// The Antigravity contract also documents workspace hooks at
+// <workspace>/.agents/hooks.json and plugin-contained hooks at
+// <plugin>/hooks.json, but DefenseClaw writes only the global config
+// file. Current PR evidence says agy merges global and workspace hook
+// files, so writing the same DefenseClaw hook to more than one path
+// would duplicate-fire policy evaluations. Workspace and plugin hook
+// files remain discovery-only surfaces.
 func antigravityHooksPath(SetupOpts) string {
 	if AntigravityHooksPathOverride != "" {
 		return AntigravityHooksPathOverride
@@ -1158,6 +1173,52 @@ func openhandsSkillPaths(opts SetupOpts) []string {
 		homePath(".openhands", "cache", "skills", "public-skills", "skills"),
 	)
 	return uniqueNonEmptyStrings(paths)
+}
+
+func antigravityMCPPaths(opts SetupOpts) []string {
+	return uniqueNonEmptyStrings([]string{
+		homePath(".gemini", "config", "mcp_config.json"),
+		antigravityWorkspacePath(opts, ".agents", "mcp_config.json"),
+	})
+}
+
+func antigravitySkillReadPaths(opts SetupOpts) []string {
+	return uniqueNonEmptyStrings(append(antigravitySkillWritePaths(opts),
+		homePath(".gemini", "antigravity-cli", "skills"),
+		antigravityWorkspacePath(opts, ".agent", "skills"),
+	))
+}
+
+func antigravitySkillWritePaths(opts SetupOpts) []string {
+	return uniqueNonEmptyStrings([]string{
+		homePath(".gemini", "config", "skills"),
+		antigravityWorkspacePath(opts, ".agents", "skills"),
+	})
+}
+
+func antigravityRuleReadPaths(opts SetupOpts) []string {
+	return uniqueNonEmptyStrings([]string{
+		homePath(".gemini", "GEMINI.md"),
+		antigravityWorkspacePath(opts, ".agents", "rules"),
+	})
+}
+
+func antigravityPluginPaths(opts SetupOpts) []string {
+	return uniqueNonEmptyStrings([]string{
+		homePath(".gemini", "config", "plugins"),
+		homePath(".gemini", "antigravity-cli", "plugins"),
+		antigravityWorkspacePath(opts, ".agents", "plugins"),
+		antigravityWorkspacePath(opts, "_agents", "plugins"),
+	})
+}
+
+func antigravityWorkspacePath(opts SetupOpts, parts ...string) string {
+	root := strings.TrimSpace(opts.WorkspaceDir)
+	if root == "" {
+		return ""
+	}
+	all := append([]string{root}, parts...)
+	return filepath.Join(all...)
 }
 
 func windsurfMCPPaths() []string {
@@ -1592,9 +1653,8 @@ var antigravityLifecycleEvents = []string{
 //
 // This shape was determined empirically for PreToolUse:
 //   - During the v0.5.0 smoke test, an earlier flat schema
-//     ({event, matcher, command, description}) was written to
-//     ~/.gemini/antigravity-cli/hooks.json. agy ignored it
-//     entirely — no tracer fires, no agy log lines, nothing.
+//     ({event, matcher, command, description}) was ignored entirely
+//     by agy — no tracer fires, no agy log lines, nothing.
 //   - Replacing the file with a Claude-Code-nested schema at
 //     ~/.gemini/config/hooks.json caused agy to invoke the
 //     configured command on every tool call, with the canonical

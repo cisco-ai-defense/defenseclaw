@@ -52,12 +52,18 @@ type openclawConfig struct {
 
 // MCPServerEntry represents a single MCP server from openclaw.json mcp.servers.
 type MCPServerEntry struct {
-	Name      string            `json:"name"`
-	Command   string            `json:"command,omitempty"`
-	Args      []string          `json:"args,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	URL       string            `json:"url,omitempty"`
-	Transport string            `json:"transport,omitempty"`
+	Name             string            `json:"name"`
+	Command          string            `json:"command,omitempty"`
+	Args             []string          `json:"args,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+	CWD              string            `json:"cwd,omitempty"`
+	URL              string            `json:"url,omitempty"`
+	Transport        string            `json:"transport,omitempty"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	AuthProviderType string            `json:"authProviderType,omitempty"`
+	OAuth            map[string]any    `json:"oauth,omitempty"`
+	Disabled         bool              `json:"disabled,omitempty"`
+	DisabledTools    []string          `json:"disabledTools,omitempty"`
 }
 
 // expandPath expands ~ to home directory.
@@ -206,10 +212,7 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 	case "opencode":
 		return readMCPServersOpenCode(workspaceDir)
 	case "antigravity":
-		// agy v1 documents no MCP install surface; never fall through to
-		// OpenClaw's config. Mirrors connector_paths.mcp_servers(
-		// "antigravity") == [] on the Python side (N1).
-		return nil, nil
+		return readMCPServersAntigravity(workspaceDir)
 	default:
 		return readMCPServersOpenClaw(c.Claw.ConfigFile)
 	}
@@ -271,11 +274,18 @@ func parseMCPServersJSON(data []byte) ([]MCPServerEntry, error) {
 	}
 
 	var servers map[string]struct {
-		Command   string            `json:"command"`
-		Args      []string          `json:"args"`
-		Env       map[string]string `json:"env"`
-		URL       string            `json:"url"`
-		Transport string            `json:"transport"`
+		Command          string            `json:"command"`
+		Args             []string          `json:"args"`
+		Env              map[string]string `json:"env"`
+		CWD              string            `json:"cwd"`
+		ServerURL        string            `json:"serverUrl"`
+		URL              string            `json:"url"`
+		Transport        string            `json:"transport"`
+		Headers          map[string]string `json:"headers"`
+		AuthProviderType string            `json:"authProviderType"`
+		OAuth            map[string]any    `json:"oauth"`
+		Disabled         bool              `json:"disabled"`
+		DisabledTools    []string          `json:"disabledTools"`
 	}
 	if err := json.Unmarshal(trimmed, &servers); err != nil {
 		return nil, fmt.Errorf("config: parse mcp servers: %w", err)
@@ -283,13 +293,23 @@ func parseMCPServersJSON(data []byte) ([]MCPServerEntry, error) {
 
 	entries := make([]MCPServerEntry, 0, len(servers))
 	for name, s := range servers {
+		url := s.ServerURL
+		if url == "" {
+			url = s.URL
+		}
 		entries = append(entries, MCPServerEntry{
-			Name:      name,
-			Command:   s.Command,
-			Args:      s.Args,
-			Env:       s.Env,
-			URL:       s.URL,
-			Transport: s.Transport,
+			Name:             name,
+			Command:          s.Command,
+			Args:             s.Args,
+			Env:              s.Env,
+			CWD:              s.CWD,
+			URL:              url,
+			Transport:        s.Transport,
+			Headers:          s.Headers,
+			AuthProviderType: s.AuthProviderType,
+			OAuth:            s.OAuth,
+			Disabled:         s.Disabled,
+			DisabledTools:    s.DisabledTools,
 		})
 	}
 	return entries, nil
@@ -302,12 +322,19 @@ func parseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
 	}
 
 	var servers []struct {
-		Name      string            `json:"name"`
-		Command   string            `json:"command"`
-		Args      []string          `json:"args"`
-		Env       map[string]string `json:"env"`
-		URL       string            `json:"url"`
-		Transport string            `json:"transport"`
+		Name             string            `json:"name"`
+		Command          string            `json:"command"`
+		Args             []string          `json:"args"`
+		Env              map[string]string `json:"env"`
+		CWD              string            `json:"cwd"`
+		ServerURL        string            `json:"serverUrl"`
+		URL              string            `json:"url"`
+		Transport        string            `json:"transport"`
+		Headers          map[string]string `json:"headers"`
+		AuthProviderType string            `json:"authProviderType"`
+		OAuth            map[string]any    `json:"oauth"`
+		Disabled         bool              `json:"disabled"`
+		DisabledTools    []string          `json:"disabledTools"`
 	}
 	if err := json.Unmarshal(trimmed, &servers); err != nil {
 		return nil, fmt.Errorf("config: parse mcp servers: %w", err)
@@ -318,13 +345,23 @@ func parseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
 		if strings.TrimSpace(s.Name) == "" {
 			continue
 		}
+		url := s.ServerURL
+		if url == "" {
+			url = s.URL
+		}
 		entries = append(entries, MCPServerEntry{
-			Name:      s.Name,
-			Command:   s.Command,
-			Args:      s.Args,
-			Env:       s.Env,
-			URL:       s.URL,
-			Transport: s.Transport,
+			Name:             s.Name,
+			Command:          s.Command,
+			Args:             s.Args,
+			Env:              s.Env,
+			CWD:              s.CWD,
+			URL:              url,
+			Transport:        s.Transport,
+			Headers:          s.Headers,
+			AuthProviderType: s.AuthProviderType,
+			OAuth:            s.OAuth,
+			Disabled:         s.Disabled,
+			DisabledTools:    s.DisabledTools,
 		})
 	}
 	return entries, nil
@@ -581,12 +618,17 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".cursor", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		})
-	case "windsurf", "opencode", "antigravity":
+	case "windsurf", "opencode":
 		// No documented skills install/discovery surface. Return nil so
 		// these never fall through to OpenClaw's skill dirs — parity with
-		// connector_paths.skill_dirs() == [] on the Python side (opencode
-		// is bridge-plugin-only; agy v1 ships only the hooks surface).
+		// connector_paths.skill_dirs() == [] on the Python side.
 		return nil
+	case "antigravity":
+		return dedupNonEmpty([]string{
+			filepath.Join(home, ".gemini", "config", "skills"),
+			workspaceJoin(cwd, ".agents", "skills"),
+			workspaceJoin(cwd, ".agent", "skills"),
+		})
 	case "geminicli":
 		return dedupNonEmpty([]string{
 			filepath.Join(home, ".gemini", "skills"),
@@ -645,7 +687,14 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			filepath.Join(home, ".gemini", "extensions"),
 			workspaceJoin(cwd, ".gemini", "extensions"),
 		})
-	case "cursor", "windsurf", "copilot", "openhands", "antigravity", "opencode":
+	case "antigravity":
+		return dedupNonEmpty([]string{
+			filepath.Join(home, ".gemini", "config", "plugins"),
+			filepath.Join(home, ".gemini", "antigravity-cli", "plugins"),
+			workspaceJoin(cwd, ".agents", "plugins"),
+			workspaceJoin(cwd, "_agents", "plugins"),
+		})
+	case "cursor", "windsurf", "copilot", "openhands", "opencode":
 		return nil
 	default:
 		return c.pluginDirsOpenClaw()
@@ -831,6 +880,31 @@ func readMCPServersCopilot(workspaceDir string) ([]MCPServerEntry, error) {
 func readMCPServersOpenHands() ([]MCPServerEntry, error) {
 	home, _ := os.UserHomeDir()
 	return readMCPFromDotMCPJSON(filepath.Join(home, ".openhands", "mcp.json"))
+}
+
+// readMCPServersAntigravity reads Antigravity-native MCP config. agy
+// documents global MCP at ~/.gemini/config/mcp_config.json and
+// workspace MCP at <workspace>/.agents/mcp_config.json. The workspace
+// file is consulted only when DefenseClaw has an explicitly pinned
+// connector workspace; the daemon cwd is never inferred. Missing or
+// malformed Antigravity files are soft failures and never fall back to
+// OpenClaw's openclaw.json.
+func readMCPServersAntigravity(workspaceDir string) ([]MCPServerEntry, error) {
+	home, _ := os.UserHomeDir()
+	cwd := strings.TrimSpace(workspaceDir)
+
+	var entries []MCPServerEntry
+	if home != "" {
+		if e, err := readMCPFromJSONPath(filepath.Join(home, ".gemini", "config", "mcp_config.json"), []string{"mcpServers"}); err == nil {
+			entries = append(entries, e...)
+		}
+	}
+	if cwd != "" {
+		if e, err := readMCPFromJSONPath(filepath.Join(cwd, ".agents", "mcp_config.json"), []string{"mcpServers"}); err == nil {
+			entries = append(entries, e...)
+		}
+	}
+	return dedupMCPEntries(entries), nil
 }
 
 // readMCPServersOpenCode reads opencode's MCP registrations. opencode
