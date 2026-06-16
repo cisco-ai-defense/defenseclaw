@@ -624,7 +624,61 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
     if key.startswith("connector_hooks."):
         _apply_connector_hook_field(cfg, key, value)
         return
+    if key.startswith("guardrail.connectors."):
+        _apply_per_connector_guardrail_field(cfg, key, value)
+        return
     _apply_typed_field(cfg, key, value)
+
+
+# B4: the config editor exposes per-connector guardrail overrides only for the
+# fields whose per-connector WRITE-surface has already landed (``mode`` and
+# ``rule_pack_dir`` — see cmd_setup). The remaining per-connector fields
+# (``hook_fail_mode``/``block_message``/``hilt``/judge) are still being wired by
+# the ``fu/setup`` lane and a per-connector judge field does not exist in the
+# config schema at all, so they are intentionally NOT editable here yet.
+_PER_CONNECTOR_GUARDRAIL_FIELDS = frozenset({"mode", "rule_pack_dir"})
+
+
+def _apply_per_connector_guardrail_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
+    """Write one ``guardrail.connectors.<c>.<field>`` override (B4).
+
+    The naive ``set_config_value`` traversal would replace a typed
+    :class:`PerConnectorGuardrailConfig` entry with a plain ``dict`` (or create
+    one for a missing connector), which breaks the ``effective_*`` resolvers the
+    boot loop reads. So construct/locate the typed entry and ``setattr`` the
+    field, preserving any sibling overrides. Dict-backed configs (test fixtures)
+    round-trip fine through the nested-dict fallback.
+    """
+
+    parts = key.split(".")
+    if len(parts) != 4 or parts[1] != "connectors":
+        return
+    connector = parts[2].strip()
+    field_name = parts[3]
+    if not connector or field_name not in _PER_CONNECTOR_GUARDRAIL_FIELDS:
+        return
+    guardrail = getattr(cfg, "guardrail", None)
+    connectors = getattr(guardrail, "connectors", None) if guardrail is not None else None
+    if guardrail is None or isinstance(guardrail, Mapping) or not isinstance(connectors, dict):
+        # Dict-backed config (or an unexpected shape): nested-dict creation
+        # round-trips cleanly and never strips a typed sibling.
+        set_config_value(cfg, key, value)
+        return
+    try:
+        from defenseclaw.config import PerConnectorGuardrailConfig  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - degrade to the dict fallback.
+        set_config_value(cfg, key, value)
+        return
+    entry = connectors.get(connector)
+    if not isinstance(entry, PerConnectorGuardrailConfig):
+        replacement = PerConnectorGuardrailConfig()
+        if isinstance(entry, Mapping):
+            for sib_key, sib_val in entry.items():
+                if hasattr(replacement, sib_key):
+                    setattr(replacement, sib_key, sib_val)
+        connectors[connector] = replacement
+        entry = replacement
+    setattr(entry, field_name, value)
 
 
 def split_csv(value: str) -> list[str]:
