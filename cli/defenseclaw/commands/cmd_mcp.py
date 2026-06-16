@@ -485,7 +485,10 @@ def _scan_all_mcp(
     scan_targets = []
     for s in servers:
         scan_target = s.url or s.name
-        if pe.is_blocked("mcp", s.name) or pe.is_blocked("mcp", scan_target):
+        # N2: honor a per-connector block — resolve most-specific-wins for the
+        # connector being scanned (connector-scoped entry, else global), so a
+        # block scoped to a different peer doesn't skip this connector's scan.
+        if pe.is_blocked_for_connector("mcp", s.name, connector) or pe.is_blocked_for_connector("mcp", scan_target, connector):
             if not as_json:
                 click.echo(
                     f"BLOCKED: {s.name} — skipping (remove from block list first)",
@@ -619,9 +622,11 @@ def _scan_one_resolved(
     resolved, entry = _resolve_scan_target(app, target, connector)
 
     # F-0323: a server may be blocked by its NAME or by its resolved URL —
-    # check both keys so neither path bypasses the block list.
+    # check both keys so neither path bypasses the block list. N2: resolve
+    # most-specific-wins for this connector (connector-scoped entry, else
+    # global) so a peer-scoped block only skips the scan for that peer.
     for blocked_key in {target, resolved}:
-        if pe.is_blocked("mcp", blocked_key):
+        if pe.is_blocked_for_connector("mcp", blocked_key, connector):
             click.echo(
                 f"BLOCKED: {blocked_key} — remove from block list first",
                 err=True,
@@ -841,80 +846,177 @@ def scan(
 
 
 # ---------------------------------------------------------------------------
-# block / allow  (unchanged semantics, accept name or url)
+# block / allow / unblock  (accept name or url)
 #
-# N2 (deferred): these write GLOBAL PolicyEngine state — there is no
-# ``--connector`` scope yet. Adding one needs a connector dimension on
-# PolicyEngine.block/allow/is_blocked/remove_action + the audit store (mirrored
-# in Go internal/enforce/policy.go), which is out of this lane; tracked for the
-# coordinating enforce/db lane. Until then a block/allow applies to every
-# connector (the admission layer is already connector-aware via rule.connector).
+# N2: these accept ``--connector`` to scope the action. Bare
+# ``mcp block <name>`` writes a **GLOBAL** entry (blocks the server on every
+# connector); ``--connector <name>`` **narrows** the entry to one peer. The
+# connector dimension lives in the audit store's per-connector column (f/dbmig
+# SK-4 foundation) via PolicyEngine.{block,allow,unblock,remove_action,
+# is_blocked,is_allowed}_for_connector (mirrored in Go
+# internal/enforce/policy.go). Reads resolve most-specific-wins (connector
+# entry, then global), so a global block still applies to every connector while
+# a connector-scoped block applies only to its peer. The bare path keeps the
+# pre-N2 global calls so its semantics (and callers/tests) are unchanged.
+#
+# Runtime honoring: the Python admission gate (enforce/admission.py) threads the
+# connector into its block/allow check, so ``mcp set --connector X`` honors a
+# per-connector block. NOTE (cross-lane gap, flagged): there is no Go runtime
+# enforcement point that reads the MCP block list — the install-watcher excludes
+# MCP and the gateway gates tools/assets, not the mcp block list — so even a
+# GLOBAL ``mcp block`` is not honored by a Go runtime gate today. Wiring that is
+# a separate Go-gate follow-up (out of this lane).
 # ---------------------------------------------------------------------------
+
+_CONNECTOR_BLOCK_HELP = (
+    "Scope to one connector (default: GLOBAL — applies to every connector). "
+    "Pass --connector <name> to narrow to that peer."
+)
+
 
 @mcp.command()
 @click.argument("target")
 @click.option("--reason", default="", help="Reason for blocking")
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_BLOCK_HELP)
 @pass_ctx
-def block(app: AppContext, target: str, reason: str) -> None:
-    """Block an MCP server (by name or URL)."""
+def block(app: AppContext, target: str, reason: str, connector_flag: str) -> None:
+    """Block an MCP server (by name or URL).
+
+    Bare ``mcp block <name>`` blocks the server GLOBALLY (every connector);
+    ``--connector <name>`` narrows the block to one peer.
+    """
     from defenseclaw.enforce import PolicyEngine
 
     pe = PolicyEngine(app.store)
-    if pe.is_blocked("mcp", target):
-        click.echo(f"Already blocked: {target}")
-        return
-    pe.block("mcp", target, reason or "manually blocked via CLI")
-    click.secho(f"Blocked: {target}", fg="red")
+    # Most-specific-wins guard so we never write a redundant connector row when
+    # a global block already covers this peer. The bare path keeps the pre-N2
+    # global calls.
+    if connector_flag:
+        if pe.is_blocked_for_connector("mcp", target, connector_flag):
+            if app.store and app.store.has_action(
+                "mcp", target, "install", "block", connector_flag,
+            ):
+                click.echo(f"Already blocked for {connector_flag}: {target}")
+            else:
+                click.echo(f"Already blocked globally (covers {connector_flag}): {target}")
+            return
+        pe.block_for_connector(
+            "mcp", target, connector_flag, reason or "manually blocked via CLI",
+        )
+        click.secho(f"Blocked: {target} (connector={connector_flag})", fg="red")
+    else:
+        if pe.is_blocked("mcp", target):
+            click.echo(f"Already blocked: {target}")
+            return
+        pe.block("mcp", target, reason or "manually blocked via CLI")
+        click.secho(f"Blocked: {target}", fg="red")
 
     if app.logger:
-        app.logger.log_action("block-mcp", target, f"reason={reason}")
+        app.logger.log_action(
+            "block-mcp", target, f"reason={reason} connector={connector_flag}",
+        )
 
 
 @mcp.command()
 @click.argument("target")
 @click.option("--reason", default="", help="Reason for allowing")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help=(
+        "Scope to one connector (default: GLOBAL — allows on every connector). "
+        "Pass --connector <name> to narrow to that peer."
+    ),
+)
 @pass_ctx
-def allow(app: AppContext, target: str, reason: str) -> None:
-    """Allow an MCP server (by name or URL)."""
+def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> None:
+    """Allow an MCP server (by name or URL).
+
+    Bare ``mcp allow <name>`` allows the server GLOBALLY (every connector);
+    ``--connector <name>`` narrows the allow to one peer. A global block still
+    wins over a connector-scoped allow.
+    """
     from defenseclaw.enforce import PolicyEngine
 
     pe = PolicyEngine(app.store)
-    if pe.is_allowed("mcp", target):
-        click.echo(f"Already allowed: {target}")
-        return
-    pe.allow("mcp", target, reason or "manually allowed via CLI")
-    click.secho(f"Allowed: {target}", fg="green")
+    if connector_flag:
+        if pe.is_allowed_for_connector("mcp", target, connector_flag):
+            if app.store and app.store.has_action(
+                "mcp", target, "install", "allow", connector_flag,
+            ):
+                click.echo(f"Already allowed for {connector_flag}: {target}")
+            else:
+                click.echo(f"Already allowed globally (covers {connector_flag}): {target}")
+            return
+        pe.allow_for_connector(
+            "mcp", target, connector_flag, reason or "manually allowed via CLI",
+        )
+        click.secho(f"Allowed: {target} (connector={connector_flag})", fg="green")
+    else:
+        if pe.is_allowed("mcp", target):
+            click.echo(f"Already allowed: {target}")
+            return
+        pe.allow("mcp", target, reason or "manually allowed via CLI")
+        click.secho(f"Allowed: {target}", fg="green")
 
     if app.logger:
-        app.logger.log_action("allow-mcp", target, f"reason={reason}")
+        app.logger.log_action(
+            "allow-mcp", target, f"reason={reason} connector={connector_flag}",
+        )
 
 
 @mcp.command()
 @click.argument("target")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help=(
+        "Scope to one connector (default: clears the GLOBAL enforcement state). "
+        "Pass --connector <name> to clear only that peer's per-connector state; "
+        "a global block stays in force."
+    ),
+)
 @pass_ctx
-def unblock(app: AppContext, target: str) -> None:
+def unblock(app: AppContext, target: str, connector_flag: str) -> None:
     """Remove an MCP server from the block list and clear enforcement state.
 
     Unlike 'allow', this does not add the server to the allow list — it
     simply removes the block so the server goes through normal scanning
     on the next check.
+
+    Bare ``mcp unblock <name>`` clears the GLOBAL enforcement state;
+    ``--connector <name>`` clears only that peer's per-connector state (a
+    global block stays in force — unblock it without --connector to lift it).
     """
     from defenseclaw.enforce import PolicyEngine
 
     pe = PolicyEngine(app.store)
 
-    has_state = (
-        pe.is_blocked("mcp", target)
-        or pe.is_quarantined("mcp", target)
-        or app.store.has_action("mcp", target, "runtime", "disable")
-    )
+    # State check is EXACT-match on the targeted scope (global when no
+    # --connector), so a connector-scoped unblock never falsely reports a
+    # global block as clearable and remove_action stays exact-match.
+    if connector_flag:
+        has_state = bool(app.store) and (
+            app.store.has_action("mcp", target, "install", "block", connector_flag)
+            or app.store.has_action("mcp", target, "file", "quarantine", connector_flag)
+            or app.store.has_action("mcp", target, "runtime", "disable", connector_flag)
+        )
+    else:
+        has_state = (
+            pe.is_blocked("mcp", target)
+            or pe.is_quarantined("mcp", target)
+            or app.store.has_action("mcp", target, "runtime", "disable")
+        )
     if not has_state:
-        click.echo(f"[mcp] {target!r} has no enforcement state to clear")
+        scope = f" for {connector_flag}" if connector_flag else ""
+        click.echo(f"[mcp] {target!r} has no enforcement state to clear{scope}")
         return
 
-    pe.remove_action("mcp", target)
+    if connector_flag:
+        pe.remove_action_for_connector("mcp", target, connector_flag)
+    else:
+        pe.remove_action("mcp", target)
+    scope = f" (connector={connector_flag})" if connector_flag else ""
     click.secho(
-        f"[mcp] {target!r} all enforcement state cleared "
+        f"[mcp] {target!r} all enforcement state cleared{scope} "
         f"(block/quarantine/disable)",
         fg="green",
     )
@@ -923,7 +1025,9 @@ def unblock(app: AppContext, target: str) -> None:
     )
 
     if app.logger:
-        app.logger.log_action("mcp-unblock", target, "manual unblock via CLI")
+        app.logger.log_action(
+            "mcp-unblock", target, f"manual unblock via CLI connector={connector_flag}",
+        )
 
 
 # ---------------------------------------------------------------------------

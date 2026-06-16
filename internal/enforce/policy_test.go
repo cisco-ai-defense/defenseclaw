@@ -176,6 +176,97 @@ func TestPolicyEngineAllowCleansUpEnforcement(t *testing.T) {
 
 // TestToolConnectorTarget pins the "@<connector>/<tool>" encoding so the read
 // gate and any write surface (CLI) can rely on the same key shape.
+func TestPolicyEngineConnectorScope(t *testing.T) {
+	t.Run("connector_block_isolated", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := pe.BlockForConnector("mcp", "demo", "codex", "scoped"); err != nil {
+			t.Fatalf("BlockForConnector: %v", err)
+		}
+
+		if b, _ := pe.IsBlockedForConnector("mcp", "demo", "codex"); !b {
+			t.Error("expected blocked for the scoped connector codex")
+		}
+		if b, _ := pe.IsBlockedForConnector("mcp", "demo", "opencode"); b {
+			t.Error("connector-scoped block must not affect a different connector")
+		}
+		if b, _ := pe.IsBlockedForConnector("mcp", "demo", ""); b {
+			t.Error("connector-scoped block must not apply globally")
+		}
+		// The plain (global-only) IsBlocked must not see the scoped row either.
+		if b, _ := pe.IsBlocked("mcp", "demo"); b {
+			t.Error("connector-scoped block must not register as a global block")
+		}
+	})
+
+	t.Run("global_block_hits_all_connectors", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := pe.Block("mcp", "demo", "global"); err != nil {
+			t.Fatalf("Block: %v", err)
+		}
+		for _, c := range []string{"", "codex", "opencode"} {
+			if b, _ := pe.IsBlockedForConnector("mcp", "demo", c); !b {
+				t.Errorf("global block must apply to connector %q", c)
+			}
+		}
+	})
+
+	t.Run("connector_allow_isolated", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := pe.AllowForConnector("mcp", "demo", "codex", "scoped"); err != nil {
+			t.Fatalf("AllowForConnector: %v", err)
+		}
+		if a, _ := pe.IsAllowedForConnector("mcp", "demo", "codex"); !a {
+			t.Error("expected allowed for the scoped connector codex")
+		}
+		if a, _ := pe.IsAllowedForConnector("mcp", "demo", "opencode"); a {
+			t.Error("connector-scoped allow must not affect a different connector")
+		}
+	})
+
+	t.Run("global_block_wins_over_connector_allow", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := pe.Block("mcp", "demo", "global block"); err != nil {
+			t.Fatalf("Block: %v", err)
+		}
+		if err := pe.AllowForConnector("mcp", "demo", "codex", "scoped allow"); err != nil {
+			t.Fatalf("AllowForConnector: %v", err)
+		}
+		// The gate checks blocked before allowed, so the global block wins.
+		if b, _ := pe.IsBlockedForConnector("mcp", "demo", "codex"); !b {
+			t.Error("global block must win over a connector-scoped allow")
+		}
+	})
+
+	t.Run("connector_unblock_isolated", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := pe.BlockForConnector("mcp", "demo", "codex", "x"); err != nil {
+			t.Fatalf("BlockForConnector(codex): %v", err)
+		}
+		if err := pe.BlockForConnector("mcp", "demo", "opencode", "x"); err != nil {
+			t.Fatalf("BlockForConnector(opencode): %v", err)
+		}
+		if err := pe.RemoveActionForConnector("mcp", "demo", "codex"); err != nil {
+			t.Fatalf("RemoveActionForConnector: %v", err)
+		}
+		if b, _ := pe.IsBlockedForConnector("mcp", "demo", "codex"); b {
+			t.Error("codex block should be cleared")
+		}
+		if b, _ := pe.IsBlockedForConnector("mcp", "demo", "opencode"); !b {
+			t.Error("opencode block must survive a codex-scoped unblock")
+		}
+	})
+}
+
 func TestToolConnectorTarget(t *testing.T) {
 	if got := toolConnectorTarget("delete_file", "hermes"); got != "@hermes/delete_file" {
 		t.Errorf("toolConnectorTarget scoped = %q, want @hermes/delete_file", got)

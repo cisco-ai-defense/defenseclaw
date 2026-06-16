@@ -128,6 +128,119 @@ class TestMCPUnblock(MCPCommandTestBase):
         self.assertEqual(len(actions), 1)
 
 
+class TestMCPConnectorScope(MCPCommandTestBase):
+    """N2: per-connector mcp block/allow/unblock — bare = GLOBAL, --connector narrows."""
+
+    def setUp(self):
+        super().setUp()
+        # Two configured connectors so `scan --connector <name>` validates.
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+    def test_block_connector_scopes_to_peer(self):
+        result = self.invoke(["block", "http://demo.example.com", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+
+        pe = PolicyEngine(self.app.store)
+        self.assertTrue(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "codex"))
+        self.assertFalse(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "claudecode"))
+        # Bare/global check is untouched — no global row was written.
+        self.assertFalse(pe.is_blocked("mcp", "http://demo.example.com"))
+
+    def test_global_block_applies_to_every_connector(self):
+        result = self.invoke(["block", "http://demo.example.com"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        pe = PolicyEngine(self.app.store)
+        self.assertTrue(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "codex"))
+        self.assertTrue(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "claudecode"))
+        self.assertTrue(pe.is_blocked("mcp", "http://demo.example.com"))
+
+    def test_block_connector_redundant_when_globally_blocked(self):
+        pe = PolicyEngine(self.app.store)
+        pe.block("mcp", "http://demo.example.com", "global")
+        result = self.invoke(["block", "http://demo.example.com", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("globally", result.output)
+        # No redundant codex-scoped row is created.
+        self.assertFalse(
+            self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "codex")
+        )
+
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_scan_honors_per_connector_block(self, mock_scan):
+        # Fix-plan verification: block --connector codex → scanning codex is
+        # blocked, scanning a different connector still scans.
+        mock_scan.return_value = ScanResult(
+            scanner="mcp-scanner", target="http://demo.example.com",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.invoke(["block", "http://demo.example.com", "--connector", "codex"])
+
+        blocked = self.invoke(["scan", "http://demo.example.com", "--connector", "codex"])
+        self.assertEqual(blocked.exit_code, 2, blocked.output)
+        self.assertIn("BLOCKED", blocked.output)
+
+        ok = self.invoke(["scan", "http://demo.example.com", "--connector", "claudecode"])
+        self.assertEqual(ok.exit_code, 0, ok.output)
+        self.assertIn("clean=1", ok.output)
+        mock_scan.assert_called_once()
+
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_scan_honors_global_block_on_every_connector(self, mock_scan):
+        self.invoke(["block", "http://demo.example.com"])  # global
+        for connector in ("codex", "claudecode"):
+            r = self.invoke(["scan", "http://demo.example.com", "--connector", connector])
+            self.assertEqual(r.exit_code, 2, r.output)
+            self.assertIn("BLOCKED", r.output)
+        mock_scan.assert_not_called()
+
+    def test_allow_connector_scopes_to_peer(self):
+        result = self.invoke(["allow", "http://demo.example.com", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        pe = PolicyEngine(self.app.store)
+        self.assertTrue(pe.is_allowed_for_connector("mcp", "http://demo.example.com", "codex"))
+        self.assertFalse(pe.is_allowed_for_connector("mcp", "http://demo.example.com", "claudecode"))
+
+    def test_unblock_connector_scopes_to_peer(self):
+        pe = PolicyEngine(self.app.store)
+        pe.block_for_connector("mcp", "http://demo.example.com", "codex", "x")
+        pe.block_for_connector("mcp", "http://demo.example.com", "claudecode", "x")
+
+        result = self.invoke(["unblock", "http://demo.example.com", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("cleared", result.output)
+        self.assertFalse(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "codex"))
+        # claudecode's scoped block survives the codex-scoped unblock.
+        self.assertTrue(
+            self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "claudecode")
+        )
+
+    def test_bare_unblock_does_not_clear_connector_scoped_block(self):
+        pe = PolicyEngine(self.app.store)
+        pe.block_for_connector("mcp", "http://demo.example.com", "codex", "x")
+        # No GLOBAL state → a bare unblock reports nothing to clear and leaves
+        # the codex-scoped block untouched.
+        result = self.invoke(["unblock", "http://demo.example.com"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("no enforcement state", result.output)
+        self.assertTrue(
+            self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "codex")
+        )
+
+    def test_global_unblock_does_not_clear_connector_block(self):
+        pe = PolicyEngine(self.app.store)
+        pe.block("mcp", "http://demo.example.com", "global")
+        pe.block_for_connector("mcp", "http://demo.example.com", "codex", "scoped")
+        result = self.invoke(["unblock", "http://demo.example.com"])  # clears global only
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(pe.is_blocked("mcp", "http://demo.example.com"))  # global gone
+        self.assertTrue(  # codex-scoped block survives
+            self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "codex")
+        )
+
+
 class TestMCPScan(MCPCommandTestBase):
     @patch("defenseclaw.commands.cmd_mcp._run_scan")
     def test_scan_all_flag_without_target(self, mock_run_scan):
