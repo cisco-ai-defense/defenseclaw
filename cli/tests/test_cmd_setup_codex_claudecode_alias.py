@@ -670,6 +670,158 @@ class TestConnectorRulePackFlag(unittest.TestCase):
         self.assertEqual(gc.rule_pack_dir, "")
         self.assertEqual(gc.connectors, {})
 
+    # ------------------------------------------------------------------
+    # R1 — free-text --rule-pack-dir (CLI parity with the TUI's free-text
+    # field). The directory follows the SAME global-vs-per-connector
+    # scoping as the preset --rule-pack.
+    # ------------------------------------------------------------------
+
+    def test_rule_pack_dir_sets_global_on_sole_connector(self):
+        # Codex is the only (hook) connector -> replace -> the free-text
+        # dir lands on the GLOBAL rule_pack_dir, anchored absolute.
+        custom = os.path.join(self.tmp_dir, "my-pack")
+        result = self._run(
+            "codex", "--yes", "--no-restart", "--rule-pack-dir", custom
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.rule_pack_dir, os.path.abspath(custom))
+        self.assertEqual(gc.connectors, {})
+
+    def test_rule_pack_dir_per_connector_override(self):
+        # codex (sole -> global preset), then claude-code with a free-text
+        # dir (now a peer -> per-connector override). codex inherits the
+        # global strict pack; claudecode runs the custom dir.
+        custom = os.path.join(self.tmp_dir, "cc-pack")
+        r1 = self._run("codex", "--yes", "--no-restart", "--rule-pack", "strict")
+        self.assertEqual(r1.exit_code, 0, msg=r1.output)
+        r2 = self._run(
+            "claude-code", "--yes", "--no-restart", "--rule-pack-dir", custom
+        )
+        self.assertEqual(r2.exit_code, 0, msg=r2.output)
+
+        gc = self.app.cfg.guardrail
+        self.assertEqual(set(gc.connectors), {"codex", "claudecode"})
+        # codex has no override -> inherits the global strict pack.
+        self.assertEqual(gc.connectors["codex"].rule_pack_dir, "")
+        # claudecode carries its own free-text dir override (absolute).
+        self.assertEqual(
+            gc.connectors["claudecode"].rule_pack_dir, os.path.abspath(custom)
+        )
+        # The resolver the gateway uses at boot reflects both.
+        self.assertTrue(
+            gc.effective_rule_pack_dir("codex").endswith(
+                os.path.join("guardrail", "strict")
+            )
+        )
+        self.assertEqual(
+            gc.effective_rule_pack_dir("claudecode"), os.path.abspath(custom)
+        )
+
+    def test_rule_pack_and_rule_pack_dir_are_mutually_exclusive(self):
+        # Naming a pack two ways in one invocation is the one-input-two-
+        # meanings ambiguity R3 removes — reject it loudly, write nothing.
+        result = self._run(
+            "codex",
+            "--yes",
+            "--no-restart",
+            "--rule-pack",
+            "strict",
+            "--rule-pack-dir",
+            os.path.join(self.tmp_dir, "x"),
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("mutually exclusive", result.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.rule_pack_dir, "")
+        self.assertEqual(gc.connectors, {})
+
+    def test_rule_pack_dir_empty_string_clears_global(self):
+        # Seed a global pack, then `--rule-pack-dir ""` explicitly clears
+        # the override back to the inherited/built-in default.
+        r1 = self._run("codex", "--yes", "--no-restart", "--rule-pack", "strict")
+        self.assertEqual(r1.exit_code, 0, msg=r1.output)
+        self.assertTrue(self.app.cfg.guardrail.rule_pack_dir)
+        r2 = self._run("codex", "--yes", "--no-restart", "--rule-pack-dir", "")
+        self.assertEqual(r2.exit_code, 0, msg=r2.output)
+        self.assertEqual(self.app.cfg.guardrail.rule_pack_dir, "")
+
+
+class TestGuardrailRulePackScoping(unittest.TestCase):
+    """R3 — ``setup guardrail --connector X --rule-pack`` scopes per-connector.
+
+    The hook aliases (``setup codex`` etc.) already write a per-connector
+    override when the connector is a multi-install peer. R3 makes the proxy/
+    global ``setup guardrail`` command agree: a named connector that owns an
+    override block gets the pack written there, not silently onto the global
+    field. Tested at the shared ``_apply_guardrail_extra_options`` helper so
+    the scoping rule is pinned independent of the heavy command machinery.
+    """
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _apply(self, **kwargs):
+        from defenseclaw.commands.cmd_setup import _apply_guardrail_extra_options
+
+        _apply_guardrail_extra_options(
+            self.app,
+            self.app.cfg.guardrail,
+            human_approval=None,
+            hilt_min_severity=None,
+            disable_redaction=None,
+            **kwargs,
+        )
+
+    def test_named_peer_with_block_scopes_per_connector(self):
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        gc = self.app.cfg.guardrail
+        # Simulate a multi-install where hermes owns an override block.
+        gc.connectors = {"hermes": PerConnectorGuardrailConfig()}
+        self._apply(rule_pack="strict", connector="hermes")
+        # Pack went to the per-connector block, NOT the global field (R3).
+        self.assertEqual(gc.rule_pack_dir, "")
+        self.assertTrue(
+            gc.connectors["hermes"].rule_pack_dir.endswith(
+                os.path.join("guardrail", "strict")
+            )
+        )
+
+    def test_named_connector_without_block_falls_back_to_global(self):
+        gc = self.app.cfg.guardrail
+        # No per-connector block (single-connector / proxy shape) -> global,
+        # matching the pre-R3 behavior so single installs are unchanged.
+        self._apply(rule_pack="permissive", connector="openclaw")
+        self.assertEqual(gc.connectors, {})
+        self.assertTrue(
+            gc.rule_pack_dir.endswith(os.path.join("guardrail", "permissive"))
+        )
+
+    def test_rule_pack_dir_scopes_like_preset(self):
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        gc = self.app.cfg.guardrail
+        gc.connectors = {"hermes": PerConnectorGuardrailConfig()}
+        custom = os.path.join(self.tmp_dir, "hermes-pack")
+        self._apply(rule_pack=None, rule_pack_dir=custom, connector="hermes")
+        self.assertEqual(gc.rule_pack_dir, "")
+        self.assertEqual(
+            gc.connectors["hermes"].rule_pack_dir, os.path.abspath(custom)
+        )
+
+    def test_no_connector_keeps_global_scope(self):
+        # Callers that don't pass a connector (e.g. the TUI wizard) keep the
+        # historical global write — the new param is opt-in.
+        gc = self.app.cfg.guardrail
+        self._apply(rule_pack="default")
+        self.assertTrue(
+            gc.rule_pack_dir.endswith(os.path.join("guardrail", "default"))
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
