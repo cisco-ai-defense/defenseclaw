@@ -343,13 +343,15 @@ func assetMCPModeFor(a *APIServer, decision config.AssetPolicyDecision) (string,
 	if a == nil || a.scannerCfg == nil {
 		return decision.Mode, false
 	}
-	mode := strings.TrimSpace(a.scannerCfg.AssetPolicy.Mode)
+	// Resolve mode + MCP.Default per-connector (OTHER-7) so a connector with
+	// an override gets its own posture rather than the global one. The
+	// connector travels on the decision (set from AssetPolicyInput.Connector).
+	mode := strings.TrimSpace(a.scannerCfg.AssetPolicy.EffectiveMode(decision.Connector))
 	if mode == "" {
 		mode = decision.Mode
 	}
-	defaultDeny := strings.EqualFold(
-		strings.TrimSpace(a.scannerCfg.AssetPolicy.MCP.Default),
-		"deny")
+	mcpPolicy, _ := a.scannerCfg.EffectiveAssetTypePolicy(decision.Connector, "mcp")
+	defaultDeny := strings.EqualFold(strings.TrimSpace(mcpPolicy.Default), "deny")
 	return mode, defaultDeny
 }
 

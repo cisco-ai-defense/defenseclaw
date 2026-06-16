@@ -28,7 +28,12 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw.config import SeverityAction
+from defenseclaw.config import (
+    AssetPolicyConfig,
+    PerConnectorAssetPolicy,
+    PerConnectorAssetTypePolicy,
+    SeverityAction,
+)
 from defenseclaw.enforce.admission import (
     AdmissionPolicyData,
     effective_action_for,
@@ -212,9 +217,9 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
         self.assertEqual(d.source, "asset-policy-default-deny")
 
     def test_empty_required_registry_warn_falls_through_to_default(self):
-        # OTHER-6 ruling: on the Python admission preview "warn" is treated like
-        # "allow" — it falls through to the default check (intentionally looser
-        # than the Go gateway, which collapses "warn" into "deny").
+        # "warn" is treated like "allow" — it falls through to the default
+        # check. The Go gateway now resolves "warn" the same way (warn-Go
+        # ruling), so the Python preview and the runtime agree.
         policy = self._asset_policy(
             registry_required=True, registry=[], registry_empty_action="warn",
         )
@@ -551,6 +556,130 @@ class TestBundledPolicyProvenance(unittest.TestCase):
         )
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "policy-allow")
+
+
+class TestEvaluateAssetPolicyPerConnector(unittest.TestCase):
+    """OTHER-7: per-connector asset_policy resolution through the real
+    :class:`AssetPolicyConfig` resolvers (not a duck-typed namespace), so the
+    ``effective_mode`` / ``effective_asset_type_policy`` overlay is exercised
+    end to end and stays in lockstep with the Go ``assetPolicyFor`` overlay.
+    """
+
+    def test_per_connector_mode_action_blocks_while_inheritor_observes(self):
+        # codex overrides mode=action; hermes inherits the global observe.
+        # Same denied rule, different connector → different verdict.
+        policy = AssetPolicyConfig(
+            enabled=True,
+            mode="observe",
+            connectors={"codex": PerConnectorAssetPolicy(mode="action")},
+        )
+        policy.mcp.denied = [SimpleNamespace(name="rogue")]
+
+        codex = evaluate_asset_policy(
+            policy, target_type="mcp", name="rogue", connector="codex",
+        )
+        self.assertEqual(codex.verdict, "blocked")
+        self.assertEqual(codex.source, "asset-policy-deny")
+
+        hermes = evaluate_asset_policy(
+            policy, target_type="mcp", name="rogue", connector="hermes",
+        )
+        self.assertEqual(hermes.verdict, "allowed")
+        self.assertEqual(hermes.source, "asset-policy-deny-observe")
+
+    def test_per_connector_registry_required_overlay(self):
+        # codex requires a registry (empty → fail-closed deny); hermes
+        # inherits the global registry_required=False and is allowed.
+        policy = AssetPolicyConfig(
+            enabled=True,
+            mode="action",
+            connectors={
+                "codex": PerConnectorAssetPolicy(
+                    mcp=PerConnectorAssetTypePolicy(registry_required=True),
+                ),
+            },
+        )
+
+        codex = evaluate_asset_policy(
+            policy, target_type="mcp", name="demo", connector="codex",
+        )
+        self.assertEqual(codex.verdict, "blocked")
+        self.assertEqual(codex.source, "asset-policy-registry-required-empty")
+
+        hermes = evaluate_asset_policy(
+            policy, target_type="mcp", name="demo", connector="hermes",
+        )
+        self.assertEqual(hermes.verdict, "allowed")
+        self.assertEqual(hermes.source, "asset-policy-default-allow")
+
+    def test_per_connector_registry_empty_action_overlay(self):
+        # codex requires a registry but opts into allow-on-empty, so it falls
+        # through to the (allow) default — composing OTHER-6 with OTHER-7.
+        policy = AssetPolicyConfig(
+            enabled=True,
+            mode="action",
+            connectors={
+                "codex": PerConnectorAssetPolicy(
+                    mcp=PerConnectorAssetTypePolicy(
+                        registry_required=True, registry_empty_action="allow",
+                    ),
+                ),
+            },
+        )
+        d = evaluate_asset_policy(
+            policy, target_type="mcp", name="demo", connector="codex",
+        )
+        self.assertEqual(d.verdict, "allowed")
+        self.assertEqual(d.source, "asset-policy-default-allow")
+
+    def test_per_connector_default_overlay_blocks(self):
+        # codex overrides default=deny on skills; the global default stays allow.
+        policy = AssetPolicyConfig(
+            enabled=True,
+            mode="action",
+            connectors={
+                "codex": PerConnectorAssetPolicy(
+                    skill=PerConnectorAssetTypePolicy(default="deny"),
+                ),
+            },
+        )
+        codex = evaluate_asset_policy(
+            policy, target_type="skill", name="x", connector="codex",
+        )
+        self.assertEqual(codex.verdict, "blocked")
+        self.assertEqual(codex.source, "asset-policy-default-deny")
+
+        hermes = evaluate_asset_policy(
+            policy, target_type="skill", name="x", connector="hermes",
+        )
+        self.assertEqual(hermes.verdict, "allowed")
+        self.assertEqual(hermes.source, "asset-policy-default-allow")
+
+    def test_global_only_config_unaffected(self):
+        # No connectors map → behaves exactly like the global policy for any
+        # connector (single-connector / legacy parity).
+        policy = AssetPolicyConfig(enabled=True, mode="action")
+        policy.mcp.default = "deny"
+        d = evaluate_asset_policy(
+            policy, target_type="mcp", name="x", connector="codex",
+        )
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-default-deny")
+
+    def test_alias_keyed_override_resolves(self):
+        # An override keyed on the documented alias "open-hands" applies to the
+        # registry-canonical connector "openhands" (normalize parity with Go).
+        policy = AssetPolicyConfig(
+            enabled=True,
+            mode="observe",
+            connectors={"open-hands": PerConnectorAssetPolicy(mode="action")},
+        )
+        policy.mcp.denied = [SimpleNamespace(name="rogue")]
+        d = evaluate_asset_policy(
+            policy, target_type="mcp", name="rogue", connector="openhands",
+        )
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-deny")
 
 
 class TestEvaluateAdmissionFirstPartyNoBypass(_StoreTestBase):
