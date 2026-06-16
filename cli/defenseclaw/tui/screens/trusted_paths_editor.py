@@ -20,6 +20,7 @@ exact command (and therefore the security implication) before it runs.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -35,6 +36,7 @@ from defenseclaw.tui.screens.setup_resource_editor import SetupResourceResult
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 TOKENS = DEFAULT_TOKENS
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,10 @@ class TrustedPathRow:
     source: str
     status: str
     removable: bool
+    # Set on a synthetic sentinel row when the allow-list could not be read.
+    # The editor surfaces it as an explicit error instead of a (deceptive)
+    # empty allow-list that looks like "no trusted paths".
+    error: bool = False
 
 
 class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
@@ -112,7 +118,10 @@ class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
         data_dir: str | None = None,
     ) -> None:
         super().__init__()
-        self.rows = tuple(rows)
+        # Split out a load-error sentinel (if the builder couldn't read the
+        # allow-list) so it never becomes a selectable/removable data row.
+        self.rows = tuple(row for row in rows if not row.error)
+        self._load_error = next((row for row in rows if row.error), None)
         self.cursor = 0
         # When the editor is opened by routing an untrusted-binary setup into
         # it, ``prefill`` seeds the add field with the offending directory and
@@ -153,7 +162,16 @@ class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
         add_input = self.query_one("#trusted-editor-add", Input)
         if self._prefill:
             add_input.value = self._prefill
-        if self._context_text:
+        if self._load_error is not None:
+            # Loading the allow-list FAILED. Surface it loudly and show a
+            # visible error row so an empty table can't be mistaken for
+            # "no trusted paths" — a security-relevant distinction.
+            table.add_row("<error>", "load failed", "—", self._load_error.resolved)
+            self._set_status(
+                "⚠ Could not read the trusted-path allow-list: "
+                f"{self._load_error.resolved} — treat as UNKNOWN, not empty."
+            )
+        elif self._context_text:
             # Routed here for one specific connector — that message wins.
             self._set_status(self._context_text)
         else:
@@ -173,9 +191,10 @@ class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
             return ""
         if not pairs:
             return ""
-        names = ", ".join(f"{name} ({directory})" for name, directory in pairs[:3])
-        if len(pairs) > 3:
-            names += f", +{len(pairs) - 3} more"
+        # Name EVERY untrusted connector (was capped at 3 + "+N more"); the
+        # operator needs to see all affected connectors, and the set is
+        # bounded by the connector roster.
+        names = ", ".join(f"{name} ({directory})" for name, directory in pairs)
         noun = "connector" if len(pairs) == 1 else "connectors"
         return f"⚠ {len(pairs)} {noun} in untrusted dirs: {names} — add the dir to trust it."
 
@@ -287,8 +306,20 @@ def trusted_paths_rows_from_config(config: object | Mapping[str, Any] | None) ->
     data_dir = _resolve_data_dir(config)
     try:
         raw = _collect_trusted_prefixes(data_dir)
-    except Exception:
-        raw = []
+    except Exception as exc:
+        # A load failure is NOT an empty allow-list. Log it and return a
+        # single error sentinel so the editor renders an explicit error
+        # instead of a clean (deceptive) empty table.
+        _LOGGER.warning("failed to load trusted-path allow-list: %s", exc, exc_info=True)
+        return (
+            TrustedPathRow(
+                resolved=str(exc) or exc.__class__.__name__,
+                source="<error>",
+                status="load failed",
+                removable=False,
+                error=True,
+            ),
+        )
     return tuple(
         TrustedPathRow(
             resolved=str(item.get("resolved", "")),

@@ -167,6 +167,35 @@ async def test_mcp_set_form_ctrl_s_returns_cli_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_set_form_enter_in_field_submits() -> None:
+    app = MCPSetHarness(initial_name="context7")
+
+    async with app.run_test(size=(120, 44)) as pilot:
+        screen = app.screen
+        assert isinstance(screen, MCPSetFormScreen)
+        screen.query_one("#mcp-command", Input).value = "uvx"
+        # on_mount focuses #mcp-name; Enter in a field submits via Input.Submitted.
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.result is not None
+        assert app.result.argv == ("mcp", "set", "context7", "--command", "uvx")
+
+
+@pytest.mark.asyncio
+async def test_mcp_set_form_enter_with_invalid_input_keeps_modal_open() -> None:
+    app = MCPSetHarness()  # empty name -> invalid
+
+    async with app.run_test(size=(120, 44)) as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.result is None
+        assert isinstance(app.screen, MCPSetFormScreen)
+        assert "name is required" in app.screen.query_one("#mcp-set-status", Static).content
+
+
+@pytest.mark.asyncio
 async def test_mcp_set_form_invalid_submit_keeps_modal_open_with_status() -> None:
     app = MCPSetHarness()
 

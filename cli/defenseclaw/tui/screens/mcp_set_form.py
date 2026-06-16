@@ -214,6 +214,13 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
             return
         self.dismiss(result)
 
+    @on(Input.Submitted)
+    def _on_input_submitted(self, event: Input.Submitted) -> None:
+        # Pressing Enter in any field submits the form (matching the Go form
+        # and operator expectation), not just the button or the hidden ctrl+s.
+        event.stop()
+        self.action_submit()
+
     def on_click(self, event: events.Click) -> None:
         if event.widget is self:
             event.stop()

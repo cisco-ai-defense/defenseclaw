@@ -186,6 +186,19 @@ class ThemePickerScreen(ModalScreen[str | None]):
         choice = THEME_CHOICES[self.selected_index]
         self.dismiss(choice.name)
 
+    def action_pick(self, index: int) -> None:
+        """Select + live-preview a clicked theme row.
+
+        Bound to the per-row ``[@click=screen.pick(i)]`` markup so mouse
+        users can select a theme (Enter still applies, Esc still cancels) —
+        previously the list was a single Static and clicking a name did
+        nothing.
+        """
+        if 0 <= index < len(THEME_CHOICES):
+            self.selected_index = index
+            self._apply_preview()
+            self._refresh_list()
+
     def action_cancel(self) -> None:
         # Roll back to whatever the app had before the modal opened so
         # cancelling visually reverts the preview. Best-effort: a theme
@@ -235,13 +248,12 @@ class ThemePickerScreen(ModalScreen[str | None]):
                 last_group = choice.group
             marker = ">" if index == self.selected_index else " "
             if index == self.selected_index:
-                row = (
-                    f"{marker} [#22D3EE bold]{choice.label}[/]"
-                    f"  [#475569]({choice.name})[/]"
-                )
+                inner = f"[#22D3EE bold]{choice.label}[/]  [#475569]({choice.name})[/]"
             else:
-                row = f"{marker} {choice.label}  [#475569]({choice.name})[/]"
-            lines.append(row)
+                inner = f"{choice.label}  [#475569]({choice.name})[/]"
+            # Wrap each row in a click action link so clicking it selects +
+            # previews that theme (handled by ``action_pick``).
+            lines.append(f"{marker} [@click=screen.pick({index})]{inner}[/]")
         target.update("\n".join(lines))
 
 
