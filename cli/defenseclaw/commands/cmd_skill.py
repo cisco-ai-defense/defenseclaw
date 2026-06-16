@@ -750,6 +750,7 @@ def _build_skill_scanner(app: AppContext, use_llm: bool | None = None):
     import dataclasses
 
     from defenseclaw.scanner._llm_env import litellm_model
+    from defenseclaw.scanner.rulepack import maybe_wrap
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
     llm = app.cfg.resolve_llm("scanners.skill")
@@ -759,12 +760,15 @@ def _build_skill_scanner(app: AppContext, use_llm: bool | None = None):
     if cfg.use_llm != effective:
         cfg = dataclasses.replace(cfg, use_llm=effective)
 
-    return SkillScannerWrapper(
+    scanner = SkillScannerWrapper(
         cfg,
         app.cfg.effective_inspect_llm(),
         app.cfg.cisco_ai_defense,
         llm=llm,
     )
+    # R4: overlay the configured guardrail rule pack so `skill scan` flags what
+    # the gateway's rule lanes would catch. No-op when no rule_pack_dir is set.
+    return maybe_wrap(scanner, app.cfg)
 
 
 @skill.command()

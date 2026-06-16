@@ -397,6 +397,11 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
         app.cfg.cisco_ai_defense,
         llm=resolved_llm,
     )
+    # R4: overlay the configured guardrail rule pack onto the server definition
+    # (command/args/env/url). No-op when no rule_pack_dir is set.
+    from defenseclaw.scanner.rulepack import maybe_wrap
+
+    scanner = maybe_wrap(scanner, app.cfg)
     # NOTE: pre-S6.4 this printed "Scanning MCP server: <target>"; the
     # new shared scan UX renders that information once via
     # ``_scan_ui.render_preamble`` + a per-target glyph line, so we

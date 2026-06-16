@@ -138,6 +138,11 @@ def scan(
     # ``scanners.plugin.llm:`` overrides) into the wrapper. The
     # wrapper layers per-call CLI flags on top before dispatching.
     scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+    # R4: overlay the configured guardrail rule pack over the plugin source.
+    # No-op when no rule_pack_dir is set.
+    from defenseclaw.scanner.rulepack import maybe_wrap
+
+    scanner = maybe_wrap(scanner, app.cfg)
 
     # S6.2 — surface the connector and the concrete category list
     # before kicking off the scan, so operators see what's being
@@ -475,6 +480,10 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
         if not allowed:
             click.echo(f"[install] scanning {source_path}...")
             scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+            # R4: overlay the configured guardrail rule pack (no-op when unset).
+            from defenseclaw.scanner.rulepack import maybe_wrap
+
+            scanner = maybe_wrap(scanner, app.cfg)
             try:
                 result = scanner.scan(source_path)
             except Exception as exc:
