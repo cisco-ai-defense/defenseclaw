@@ -28,6 +28,9 @@ fans out to every active connector.
 from __future__ import annotations
 
 import json
+import os
+import re
+import shutil
 import subprocess
 
 import click
@@ -553,6 +556,124 @@ def _scan_all_mcp(
             hint("Scan skills:  defenseclaw skill scan all")
 
 
+def _connector_has_server(app: AppContext, connector: str, name: str) -> bool:
+    """True when *connector*'s MCP config registers a server called *name*."""
+    return any(s.name == name for s in app.cfg.mcp_servers(connector))
+
+
+def _scan_name_not_found_msg(
+    app: AppContext, target: str, connectors: list[str],
+) -> str:
+    """Build the 'not found on any active connector' message for a bare name.
+
+    Names the connectors actually searched (each reads its own per-connector
+    source) and lists what *is* available, rather than the legacy hardcoded
+    'openclaw.json' mental model.
+    """
+    available = sorted({
+        s.name for c in connectors for s in app.cfg.mcp_servers(c)
+    })
+    avail = (
+        f"  Available: {', '.join(available)}"
+        if available
+        else "  No MCP servers configured on any active connector."
+    )
+    return (
+        f"MCP server {target!r} not found on any active connector "
+        f"({', '.join(connectors)}).\n{avail}"
+    )
+
+
+def _scan_one_resolved(
+    app: AppContext,
+    connector: str,
+    target: str,
+    *,
+    analyzers: str,
+    scan_prompts: bool,
+    scan_resources: bool,
+    scan_instructions: bool,
+    as_json: bool,
+    allow_private: bool,
+    pe,
+    emit_hints: bool,
+) -> str:
+    """Resolve, block-check, and scan a single name/URL within one connector.
+
+    Renders the shared scan UX (preamble + per-target glyph + summary) and
+    returns one of ``"clean"`` / ``"findings"`` / ``"policy-blocked"`` /
+    ``"error"`` so the caller maps it to an exit code. Factored out of
+    ``scan`` so a bare-name fan-out across several owning connectors (M3) can
+    reuse the exact single-target rendering. ``emit_hints`` is suppressed in
+    the multi-owner loop so the next-step hints print once, not per connector.
+    """
+    import time
+
+    from defenseclaw.commands import _scan_ui, hint
+
+    resolved, entry = _resolve_scan_target(app, target, connector)
+
+    # F-0323: a server may be blocked by its NAME or by its resolved URL —
+    # check both keys so neither path bypasses the block list.
+    for blocked_key in {target, resolved}:
+        if pe.is_blocked("mcp", blocked_key):
+            click.echo(
+                f"BLOCKED: {blocked_key} — remove from block list first",
+                err=True,
+            )
+            return "policy-blocked"
+
+    ctx = _scan_ui.ScanContext.for_mcp(
+        connector=connector, paths=[resolved], as_json=as_json,
+    )
+    _scan_ui.render_preamble(ctx, target_count=1)
+
+    started = time.monotonic()
+    result = _run_scan(
+        app, resolved, analyzers, scan_prompts, scan_resources,
+        scan_instructions, server_entry=entry, quiet=as_json,
+        allow_private=allow_private,
+    )
+    if result is None:
+        return "error"
+
+    if as_json:
+        _print_scan_result(result, as_json)
+        return "clean" if result.is_clean() else "findings"
+
+    if result.is_clean():
+        _scan_ui.render_per_target_status(
+            ctx, target=target, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+        )
+    else:
+        _scan_ui.render_per_target_status(
+            ctx,
+            target=target,
+            verdict=_scan_ui.VERDICT_BLOCKED,
+            detail=f"max severity: {result.max_severity()}",
+            findings=len(result.findings),
+        )
+    _print_scan_result(result, as_json)
+    duration_ms = int((time.monotonic() - started) * 1000)
+    _scan_ui.render_summary(
+        ctx,
+        clean=1 if result.is_clean() else 0,
+        blocked=0 if result.is_clean() else 1,
+        errored=0,
+        total=1,
+        duration_ms=duration_ms,
+    )
+    if emit_hints:
+        if result.is_clean():
+            hint("Scan skills:  defenseclaw skill scan all")
+        else:
+            hint(
+                f"Block server:  defenseclaw mcp block {target}",
+                "View alerts:   defenseclaw alerts",
+            )
+    return "clean" if result.is_clean() else "findings"
+
+
 @mcp.command()
 @click.argument("target", required=False)
 @click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
@@ -560,13 +681,19 @@ def _scan_all_mcp(
 @click.option("--scan-prompts", is_flag=True, help="Also scan MCP prompts")
 @click.option("--scan-resources", is_flag=True, help="Also scan MCP resources")
 @click.option("--scan-instructions", is_flag=True, help="Also scan server instructions")
-@click.option("--all", "scan_all", is_flag=True, help="Scan every server in openclaw.json")
+@click.option(
+    "--all", "scan_all", is_flag=True,
+    help=(
+        "Scan every configured server across active connectors "
+        "(use --connector <name> to scope to one)."
+    ),
+)
 @click.option(
     "--connector", "connector_flag", default="",
     help=(
-        "Scan a specific connector's MCP servers. Default for 'mcp scan "
-        "--all' on multi-connector installs: every active connector (use "
-        "--connector <name> to narrow to one)."
+        "Scope scanning to one connector: narrows a bare-name lookup to it, "
+        "scans just that connector when no TARGET is given, or limits --all "
+        "to it. Default: search/scan every active connector."
     ),
 )
 @click.option(
@@ -592,12 +719,23 @@ def scan(
 ) -> None:
     """Scan an MCP server by name or URL.
 
-    TARGET can be a server name from openclaw.json or a direct URL.
-    Use --all to scan every configured server.
-    """
-    import time
+    \b
+    Modes:
+      mcp scan <name>            scan a server by name — searched across every
+                                 active connector's MCP config (use --connector
+                                 <name> to scope the lookup to one peer)
+      mcp scan <url>             scan a direct URL
+      mcp scan --connector <c>   scan every server configured on connector <c>
+      mcp scan --all             scan every server on every active connector
 
-    from defenseclaw.commands import _scan_ui, resolve_list_connector
+    TARGET resolves against the active connector(s)' own MCP config (not a
+    single shared file); on a multi-connector install a bare name is found
+    wherever it lives.
+    """
+    from defenseclaw.commands import (
+        resolve_list_connector,
+        resolve_list_connectors,
+    )
     from defenseclaw.enforce import PolicyEngine
 
     connector = resolve_list_connector(app, connector_flag)
@@ -622,80 +760,90 @@ def scan(
         return
 
     if not target:
-        raise click.UsageError("Missing argument 'TARGET'.")
+        # M4: a discoverable single-connector scan — `mcp scan --connector X`
+        # (no --all, no target) scans every server on that one connector.
+        if connector_flag:
+            _scan_all_mcp(
+                app, connector, analyzers, scan_prompts, scan_resources,
+                scan_instructions, as_json, allow_private=allow_private,
+            )
+            return
+        raise click.UsageError(
+            "Specify what to scan:\n"
+            "  defenseclaw mcp scan <name>            one server (searched across "
+            "active connectors)\n"
+            "  defenseclaw mcp scan <url>             a direct URL\n"
+            "  defenseclaw mcp scan --connector <c>   every server on connector <c>\n"
+            "  defenseclaw mcp scan --all             every server on every active "
+            "connector"
+        )
 
     pe = PolicyEngine(app.store)
-    # Resolve the named target against the chosen connector's MCP config
-    # (``--connector``), not just the active connector's. ``connector`` is
-    # the active connector when no flag was passed, so single-connector
-    # behaviour is unchanged.
-    resolved, entry = _resolve_scan_target(app, target, connector)
-
-    # F-0323: a server may be blocked by its NAME or by its resolved
-    # URL. Checking only the user-supplied ``target`` lets a URL-blocked
-    # server be scanned via its alias (and a name-blocked server via its
-    # URL). Check both keys so neither path bypasses the block list.
-    for blocked_key in {target, resolved}:
-        if pe.is_blocked("mcp", blocked_key):
-            click.echo(
-                f"BLOCKED: {blocked_key} — remove from block list first",
-                err=True,
-            )
-            raise SystemExit(2)
-
-    ctx = _scan_ui.ScanContext.for_mcp(
-        connector=connector,
-        paths=[resolved],
+    common = dict(
+        analyzers=analyzers,
+        scan_prompts=scan_prompts,
+        scan_resources=scan_resources,
+        scan_instructions=scan_instructions,
         as_json=as_json,
+        allow_private=allow_private,
+        pe=pe,
     )
-    _scan_ui.render_preamble(ctx, target_count=1)
 
-    started = time.monotonic()
-    result = _run_scan(app, resolved, analyzers,
-                       scan_prompts, scan_resources, scan_instructions,
-                       server_entry=entry, quiet=as_json,
-                       allow_private=allow_private)
-    if result:
-        if as_json:
-            _print_scan_result(result, as_json)
-        else:
-            if result.is_clean():
-                _scan_ui.render_per_target_status(
-                    ctx, target=target, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
-                )
-            else:
-                _scan_ui.render_per_target_status(
-                    ctx,
-                    target=target,
-                    verdict=_scan_ui.VERDICT_BLOCKED,
-                    detail=f"max severity: {result.max_severity()}",
-                    findings=len(result.findings),
-                )
-            _print_scan_result(result, as_json)
-            duration_ms = int((time.monotonic() - started) * 1000)
-            _scan_ui.render_summary(
-                ctx,
-                clean=1 if result.is_clean() else 0,
-                blocked=0 if result.is_clean() else 1,
-                errored=0,
-                total=1,
-                duration_ms=duration_ms,
-            )
+    # An explicit --connector or a direct URL keeps the single-resolution
+    # contract: resolve against the chosen connector (the active one when no
+    # flag was passed) and scan exactly that target.
+    if connector_flag or "://" in target:
+        status = _scan_one_resolved(app, connector, target, emit_hints=True, **common)
+        if status == "policy-blocked":
+            raise SystemExit(2)
+        if status == "error":
+            raise SystemExit(1)
+        return
+
+    # M3: a bare name with no --connector is searched across EVERY active
+    # connector's MCP config — a server registered on a non-active peer is
+    # still found instead of erroring "not found for connector <active>".
+    # Decision (locked): scan ALL connectors that own the name.
+    connectors = resolve_list_connectors(app, "")
+    owners = [c for c in connectors if _connector_has_server(app, c, target)]
+    if not owners:
+        raise click.ClickException(_scan_name_not_found_msg(app, target, connectors))
+
+    if len(owners) == 1:
+        # Single owner → identical UX/exit semantics to an explicit target.
+        status = _scan_one_resolved(app, owners[0], target, emit_hints=True, **common)
+        if status == "policy-blocked":
+            raise SystemExit(2)
+        if status == "error":
+            raise SystemExit(1)
+        return
+
+    # Multiple owners → scan each, labeled per connector (mirrors `--all`). A
+    # block-listed (or neither-url-nor-command) owner is noted and skipped so
+    # one peer never aborts the rest; a hard scan error still exits non-zero.
+    errored = False
+    for c in owners:
         if not as_json:
-            from defenseclaw.commands import hint
-            if result.is_clean():
-                hint("Scan skills:  defenseclaw skill scan all")
-            else:
-                hint(
-                    f"Block server:  defenseclaw mcp block {target}",
-                    "View alerts:   defenseclaw alerts",
-                )
-    else:
+            click.secho(f"\n── connector: {c} ──", fg="cyan")
+        try:
+            if _scan_one_resolved(app, c, target, emit_hints=False, **common) == "error":
+                errored = True
+        except click.ClickException as exc:
+            errored = True
+            click.echo(f"error [{c}]: {exc.format_message()}", err=True)
+    if errored:
         raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------
 # block / allow  (unchanged semantics, accept name or url)
+#
+# N2 (deferred): these write GLOBAL PolicyEngine state — there is no
+# ``--connector`` scope yet. Adding one needs a connector dimension on
+# PolicyEngine.block/allow/is_blocked/remove_action + the audit store (mirrored
+# in Go internal/enforce/policy.go), which is out of this lane; tracked for the
+# coordinating enforce/db lane. Until then a block/allow applies to every
+# connector (the admission layer is already connector-aware via rule.connector).
 # ---------------------------------------------------------------------------
 
 @mcp.command()
@@ -843,6 +991,76 @@ def _unset_mcp_via_connector(cfg, name: str, connector: str | None = None) -> No
     )
 
 
+# ---------------------------------------------------------------------------
+# opencode write gate (M5) — opencode EXECUTES the command[] it stores in
+# opencode.json, so a `mcp set --connector opencode` write needs input
+# validation ON TOP OF admission: sanitise the server name + command and warn
+# when the command resolves outside a trusted install prefix. Scoped to
+# opencode because it is the connector that runs an argv DefenseClaw writes
+# into a config file from the CLI (other connectors are owned by their lanes).
+# ---------------------------------------------------------------------------
+
+# The name becomes a JSON key under opencode's top-level ``mcp`` map pointing
+# at an executed server, so reject anything that isn't a plain identifier (no
+# path separators, spaces, or shell metacharacters).
+_OPENCODE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _validate_opencode_write(name: str, cmd: str, url: str) -> str | None:
+    """Hard input validation for an opencode MCP write.
+
+    Returns a human-readable refusal reason, or ``None`` when the inputs are
+    safe to write. Admission has already run; this is the extra sanitisation a
+    write of an executable into a file opencode RUNS requires.
+    """
+    if not _OPENCODE_NAME_RE.match((name or "").strip()):
+        return (
+            f"invalid opencode server name {name!r}: use letters, digits, "
+            "'.', '-', '_' (no path separators, spaces, or shell characters)"
+        )
+    # A local (command) server must carry a real executable; a remote server
+    # carries a url instead. ``set`` already requires one of the two upstream.
+    if not url:
+        if not (cmd or "").strip():
+            return "opencode local server needs a non-empty --command"
+        if any(ch in cmd for ch in ("\x00", "\n", "\r")):
+            return "opencode command contains control characters"
+    return None
+
+
+def _warn_untrusted_opencode_command(cmd: str) -> None:
+    """Warn (non-blocking) when an opencode command resolves outside a trusted
+    install prefix — opencode will execute it.
+
+    Per the locked decision this is a WARNING, not a block: typical MCP
+    commands (npx/uvx/node via Homebrew/nvm/pyenv) legitimately resolve outside
+    the default trusted prefixes, so a hard block would refuse normal servers.
+    Operators who want to silence it extend ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``.
+    Reuses the SAME allow-list the passive discovery exec-gate uses so the trust
+    rule can't drift.
+    """
+    c = (cmd or "").strip()
+    if not c:
+        return
+    # ``_is_trusted_binary_path`` needs an absolute path; resolve a bare
+    # command via PATH the way opencode would at launch.
+    from defenseclaw.inventory.agent_discovery import _is_trusted_binary_path
+
+    resolved = c if os.path.isabs(c) else shutil.which(c)
+    if resolved is None:
+        ux.warn(
+            f"opencode command {c!r} was not found on PATH — opencode will fail "
+            "to launch this server until it is installed/resolvable."
+        )
+        return
+    if not _is_trusted_binary_path(resolved):
+        ux.warn(
+            f"opencode will EXECUTE {c!r} (resolved {resolved!r}), which is not "
+            "in a trusted install prefix. Proceeding — extend "
+            "DEFENSECLAW_TRUSTED_BIN_PREFIXES to trust this location."
+        )
+
+
 @mcp.command("set")
 @click.argument("name")
 @click.option("--command", "cmd", default="", help="Server command (e.g. npx, uvx)")
@@ -867,7 +1085,10 @@ def set_server(
     skip_scan: bool,
     connector_flag: str,
 ) -> None:
-    """Add or update an MCP server in OpenClaw config.
+    """Add or update an MCP server in the active connector(s)' MCP config.
+
+    Writes go to each active connector's own config file (or one peer with
+    --connector) — not a single shared config.
 
     Scans the server before adding unless --skip-scan is set.
     Rejects servers with HIGH/CRITICAL findings.
@@ -985,6 +1206,7 @@ def set_server(
     skipped: list[str] = []          # connector has no writable MCP surface
     policy_blocked: list[str] = []   # rejected by block list / asset rule
     scan_rejected: list[str] = []    # rejected by scan-findings policy
+    invalid_input: list[str] = []    # opencode name/command failed validation
     write_failed: list[tuple[str, Exception]] = []  # unexpected write error
     for c in connectors:
         pre_c = pre[c]
@@ -992,6 +1214,17 @@ def set_server(
             click.secho(f"  blocked [{c}]: {pre_c.reason}", fg="red")
             policy_blocked.append(c)
             continue
+        # M5 security gate (opencode only): opencode EXECUTES the command[] it
+        # stores, so validate/sanitise the server name + command and warn on an
+        # untrusted command prefix before writing. Admission already ran above;
+        # an invalid input refuses just this connector (the fan-out continues).
+        if connector_paths.normalize(c) == "opencode":
+            gate_err = _validate_opencode_write(name, cmd, url)
+            if gate_err:
+                click.secho(f"  refused [{c}]: {gate_err}", fg="red")
+                invalid_input.append(c)
+                continue
+            _warn_untrusted_opencode_command(cmd)
         allow_record = False
         if pre_c.verdict == "allowed":
             note = (
@@ -1051,13 +1284,18 @@ def set_server(
             reasons.append(f"scan-rejected: {', '.join(scan_rejected)}")
         if skipped:
             reasons.append(f"no MCP write surface: {', '.join(skipped)}")
+        if invalid_input:
+            reasons.append(f"invalid input: {', '.join(invalid_input)}")
         if write_failed:
             reasons.append(f"write failed: {', '.join(c for c, _ in write_failed)}")
         raise click.ClickException(
             f"MCP set failed: no connector accepted {name!r} ({'; '.join(reasons)})."
         )
 
-    not_applied = policy_blocked + scan_rejected + skipped + [c for c, _ in write_failed]
+    not_applied = (
+        policy_blocked + scan_rejected + skipped + invalid_input
+        + [c for c, _ in write_failed]
+    )
     # Always name the connectors that did NOT receive the server, even when the
     # server landed on 2+ connectors — otherwise a partial fan-out (e.g. 2
     # applied, 1 policy-blocked) prints a green "Added to 2 connectors" line
