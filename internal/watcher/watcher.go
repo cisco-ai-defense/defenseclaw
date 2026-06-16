@@ -51,9 +51,15 @@ func (t InstallType) String() string { return string(t) }
 
 // InstallEvent is emitted when the watcher detects a new skill or MCP server.
 type InstallEvent struct {
-	Type      InstallType
-	Name      string
-	Path      string
+	Type InstallType
+	Name string
+	Path string
+	// Connector is the owning connector for this install, used to scope
+	// per-connector enforcement on the admit path (most-specific-wins:
+	// connector-scoped state, then the bare global state). Empty ⇒ resolve the
+	// connector from the watcher config (watcherConnectorName) — preserves the
+	// pre-existing global behavior for events that do not tag a connector.
+	Connector string
 	Timestamp time.Time
 }
 
@@ -293,8 +299,21 @@ func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 		Type:      installType,
 		Name:      filepath.Base(path),
 		Path:      path,
+		Connector: watcherConnectorName(w.cfg),
 		Timestamp: time.Now().UTC(),
 	}
+}
+
+// eventConnector resolves the connector that owns an install event: the
+// connector tagged on the event when present, otherwise the watcher's own
+// connector (watcherConnectorName). This keeps the admit path correct for
+// events that do not carry a Connector (e.g. the rescan enumerator), which
+// previously always resolved via watcherConnectorName.
+func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
+	if c := strings.TrimSpace(evt.Connector); c != "" {
+		return c
+	}
+	return watcherConnectorName(w.cfg)
 }
 
 // runAdmission applies the full admission gate: block → allow → scan.
@@ -357,7 +376,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	assetDecision := w.cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           evt.Name,
-		Connector:      watcherConnectorName(w.cfg),
+		Connector:      w.eventConnector(evt),
 		SourcePath:     evt.Path,
 		RuntimeSurface: "watcher",
 	})
