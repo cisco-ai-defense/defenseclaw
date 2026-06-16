@@ -40,7 +40,7 @@ from typing import Any
 
 import click
 
-from defenseclaw import ux
+from defenseclaw import connector_paths, ux
 from defenseclaw.config import (
     REGISTRY_CONTENT_TYPES,
     REGISTRY_KINDS,
@@ -1372,6 +1372,47 @@ def _do_manual_verdict(
 # require — toggle asset_policy.{type}.registry_required
 # ---------------------------------------------------------------------------
 
+def _resolve_per_connector_asset_block(
+    cfg: Config, connector: str, asset_type: str,
+):
+    """Resolve (creating if absent) the per-connector per-type scalar block
+    ``asset_policy.connectors[connector].<asset_type>`` (OTHER-7).
+
+    Returns ``(storage_key, block)``. An existing alias-equivalent key (via
+    ``connector_paths.normalize``) is reused rather than minting a second
+    entry, so the save round-trip never trips
+    :meth:`AssetPolicyConfig.validate`'s alias-collision guard. Mirrors the
+    lookup in :meth:`AssetPolicyConfig._connector_override`. Connector identity
+    is deliberately NOT validated here — matching ``validate()`` and the
+    guardrail per-connector writers, an unknown connector is left to the
+    gateway boot loop. Only the ``registry_required`` scalar is touched; any
+    existing per-connector ``mode`` / ``default`` / ``registry_empty_action``
+    and the other per-type blocks are preserved untouched.
+    """
+    from defenseclaw.config import (
+        PerConnectorAssetPolicy,
+        PerConnectorAssetTypePolicy,
+    )
+
+    conns = cfg.asset_policy.connectors
+    key = connector
+    if connector not in conns:
+        want = connector_paths.normalize(connector)
+        for name in conns:
+            if connector_paths.normalize(name) == want:
+                key = name
+                break
+    pc = conns.get(key)
+    if pc is None:
+        pc = PerConnectorAssetPolicy()
+        conns[key] = pc
+    block = getattr(pc, asset_type)
+    if block is None:
+        block = PerConnectorAssetTypePolicy()
+        setattr(pc, asset_type, block)
+    return key, block
+
+
 @registry.command("require")
 @click.option("--type", "asset_type",
               # OTHER-5: 'plugin' is intentionally NOT offered. The sync /
@@ -1386,12 +1427,19 @@ def _do_manual_verdict(
               required=True)
 @click.option("--enabled/--disabled", required=True,
               help="Flip asset_policy.<type>.registry_required")
+@click.option(
+    "--connector", "connector", default="", metavar="C",
+    help="Scope the toggle to asset_policy.connectors[C].<type>."
+         "registry_required (per-connector override, OTHER-7). Omit for the "
+         "global asset_policy.<type>.registry_required.",
+)
 @click.option("--json", "emit_json", is_flag=True)
 @pass_ctx
 def require_cmd(
     app: AppContext,
     asset_type: str,
     enabled: bool,
+    connector: str,
     emit_json: bool,
 ) -> None:
     """Toggle ``asset_policy.<type>.registry_required``.
@@ -1401,26 +1449,52 @@ def require_cmd(
     ``default`` action applies. The flag is fail-closed by default at
     the gateway: an empty registry list with require=on means "no
     asset is approved".
+
+    With ``--connector C`` the toggle is written to the per-connector
+    override ``asset_policy.connectors[C].<type>.registry_required``
+    (OTHER-7) instead of the global scalar, so one connector can require
+    a registry match while others inherit the global value. The registry
+    rule list itself stays global (rules are filtered by ``rule.connector``
+    at match time); only the scalar is per-connector.
     """
     cfg = _require_cfg(app)
-    target = getattr(cfg.asset_policy, asset_type.lower())
-    target.registry_required = bool(enabled)
-    cfg.save()
     asset = asset_type.lower()
-    empty_registry = len(target.registry) == 0
-    empty_action = getattr(target, "registry_empty_action", "deny")
+    connector = (connector or "").strip()
+
+    if connector:
+        key, block = _resolve_per_connector_asset_block(cfg, connector, asset)
+        block.registry_required = bool(enabled)
+        scope_label = f"asset_policy.connectors.{key}.{asset}"
+    else:
+        key = ""
+        target = getattr(cfg.asset_policy, asset)
+        target.registry_required = bool(enabled)
+        scope_label = f"asset_policy.{asset}"
+    cfg.save()
+
+    # Messaging reads the *effective* per-type policy for the scope: rule
+    # lists stay global, so the empty-list check sees the global registry;
+    # the empty-action is the per-connector-resolved value when --connector
+    # is in play (falls back to the global one when unset).
+    if connector:
+        effective = cfg.asset_policy.effective_asset_type_policy(connector, asset)
+    else:
+        effective = getattr(cfg.asset_policy, asset)
+    empty_registry = len(effective.registry) == 0
+    empty_action = getattr(effective, "registry_empty_action", "deny") or "deny"
 
     if emit_json:
         _emit_json({
             "asset_type": asset,
-            "registry_required": target.registry_required,
-            "registry_size": len(target.registry),
+            "connector": key or None,
+            "registry_required": bool(enabled),
+            "registry_size": len(effective.registry),
             "registry_empty_action": empty_action,
         })
         return
 
     state = "required" if enabled else "optional"
-    ux.ok(f"asset_policy.{asset}.registry is now {state}.")
+    ux.ok(f"{scope_label}.registry is now {state}.")
     if not enabled:
         return
 
@@ -1453,7 +1527,7 @@ def require_cmd(
             )
     else:
         ux.subhead(
-            f"registry has {len(target.registry)} entries; "
+            f"registry has {len(effective.registry)} entries; "
             f"registry_empty_action={empty_action!r} (only matters when "
             "the list is empty).",
         )
