@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -281,9 +282,13 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 // inspectToolPolicy runs all rule categories against the tool args.
 // No tool-name gating — every pattern fires on every tool.
 func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdict {
-	// Static block list takes priority — checked before any rule scanning.
+	// Static block/allow list takes priority — checked before any rule
+	// scanning. Connector-scoped (@C/T) entries resolve before the bare
+	// global entry, mirroring the sidecar lane and the PolicyEngine helpers:
+	//   block @C/T → block T → allow @C/T → allow T → scan
 	if a.store != nil {
-		if blocked, _ := a.store.HasAction("tool", req.Tool, "install", "block"); blocked {
+		pe := enforce.NewPolicyEngine(a.store)
+		if blocked, _ := pe.IsToolBlockedForConnector(req.Tool, req.Connector); blocked {
 			return &ToolInspectVerdict{
 				Action:     "block",
 				Severity:   "HIGH",
@@ -291,6 +296,18 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 				Reason:     fmt.Sprintf("tool %q is on the static block list", req.Tool),
 				Findings:   []string{"STATIC-BLOCK"},
 			}
+		}
+		// An explicit allow skips rule/pattern/AID/judge scanning. Write tools
+		// still run CodeGuard on their content (D2): the allow bypasses the
+		// scan gate, not code-content inspection.
+		if allowed, _ := pe.IsToolAllowedForConnector(req.Tool, req.Connector); allowed {
+			if !isWriteToolName(strings.ToLower(req.Tool)) {
+				return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
+			}
+			if cg := a.runCodeGuardOnArgs(req); len(cg) > 0 {
+				return a.codeGuardOnlyVerdict(req, cg)
+			}
+			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 		}
 	}
 
@@ -465,6 +482,35 @@ func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Findin
 	}
 	cg := scanner.NewCodeGuardScanner(rulesDir)
 	return cg.ScanContent(filePath, content)
+}
+
+// codeGuardOnlyVerdict builds a verdict from CodeGuard findings alone, for an
+// allow-listed WRITE tool whose content CodeGuard flagged. The allow skipped
+// rule/AID/judge scanning, but CodeGuard is retained (D2); severity and action
+// mirror the main inspectToolPolicy path with no rule findings.
+func (a *APIServer) codeGuardOnlyVerdict(req *ToolInspectRequest, cgFindings []scanner.Finding) *ToolInspectVerdict {
+	severity := "NONE"
+	for _, cf := range cgFindings {
+		if cf.Severity == scanner.SeverityCritical {
+			severity = "CRITICAL"
+			break
+		}
+		if cf.Severity == scanner.SeverityHigh && severity != "CRITICAL" {
+			severity = "HIGH"
+		}
+	}
+	action := guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, severity, true)
+	findingStrs := make([]string, 0, len(cgFindings))
+	for _, cf := range cgFindings {
+		findingStrs = append(findingStrs, fmt.Sprintf("codeguard:%s:%s", cf.ID, cf.Title))
+	}
+	return &ToolInspectVerdict{
+		Action:     action,
+		Severity:   severity,
+		Confidence: 1.0,
+		Reason:     fmt.Sprintf("allow-listed tool %q: CodeGuard retained on write", req.Tool),
+		Findings:   findingStrs,
+	}
 }
 
 // inspectMessageContent scans outbound message content for secrets, PII,

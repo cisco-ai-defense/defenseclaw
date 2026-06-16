@@ -228,21 +228,58 @@ class TestToolStatus(ToolCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("block", result.output)
 
-    def test_status_scoped_wins_over_global_allow(self):
+    def test_status_source_block_does_not_decide_effective(self):
+        """T4: a --source block is audit-only — the runtime never reads it, so
+        it must NOT flip the Effective verdict. A global allow stands; the
+        source 'block' row is displayed but Effective stays 'allow', matching
+        the gateway's real resolution order."""
         self.pe().allow_tool("write_file", "", "global allow")
-        self.pe().block_tool("write_file", "filesystem", "scoped block")
+        self.pe().block_tool("write_file", "filesystem", "scoped block")  # S/T audit row
 
         result = self.invoke(["status", "write_file", "--source", "filesystem"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        # The source audit row is still shown (it reads 'block')…
+        self.assertIn("filesystem", result.output)
         self.assertIn("block", result.output)
-        self.assertIn("Effective", result.output)
+        # …but Effective mirrors the runtime: the global allow wins.
+        self.assertRegex(result.output, r"Effective:\s+allow")
+
+    def test_status_connector_block_wins_over_global_allow(self):
+        """Runtime-aligned: a connector-scoped block resolves before the global
+        allow for that connector (block @C/T → ... → allow T)."""
+        self.pe().allow_tool("write_file", "", "global allow")
+        self.pe().block_tool_for_connector("write_file", "hermes", "scoped block")
+
+        result = self.invoke(["status", "write_file", "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertRegex(result.output, r"Effective:\s+block")
+
+    def test_status_write_tool_allow_notes_codeguard(self):
+        """An allowed WRITE tool still runs CodeGuard (D2) — status says so."""
+        self.pe().allow_tool("write_file", "", "vetted")
+        result = self.invoke(["status", "write_file"])
+        self.assertRegex(result.output, r"Effective:\s+allow")
+        self.assertIn("CodeGuard", result.output)
 
     def test_status_json(self):
         self.pe().block_tool("exec_cmd", "", "dangerous")
         result = self.invoke(["status", "exec_cmd", "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.output)
-        self.assertEqual(data["tool"], "exec_cmd")
+        self.assertEqual(data["name"], "exec_cmd")  # unified key (was "tool")
+        self.assertIsNone(data["connector"])
         self.assertEqual(data["global"]["status"], "block")
+        self.assertEqual(data["effective"], "block")
+
+    def test_status_json_connector_scoped(self):
+        self.pe().block_tool_for_connector("exec_cmd", "hermes", "scoped")
+        result = self.invoke(["status", "exec_cmd", "--connector", "hermes", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.output)
+        self.assertEqual(data["name"], "exec_cmd")
+        self.assertEqual(data["connector"], "hermes")
+        self.assertEqual(data["connector_scoped"]["status"], "block")
+        self.assertEqual(data["effective"], "block")
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +296,86 @@ class TestToolBlockIsolation(ToolCommandTestBase):
         """Allowing a tool must not register as an MCP allow."""
         self.pe().allow_tool("search", "", "vetted")
         self.assertFalse(self.pe().is_allowed("mcp", "search"))
+
+
+# ---------------------------------------------------------------------------
+# --connector scoping (T1) wired to the merged @C/T PolicyEngine gate (T2)
+# ---------------------------------------------------------------------------
+
+class TestToolConnectorScoping(ToolCommandTestBase):
+    def test_block_connector_scoped_isolated(self):
+        result = self.invoke(["block", "delete_file", "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("hermes", result.output)
+        self.assertTrue(self.pe().is_tool_blocked_for_connector("delete_file", "hermes"))
+        # Isolated: a different connector and the global tier are untouched.
+        self.assertFalse(self.pe().is_tool_blocked_for_connector("delete_file", "codex"))
+        self.assertFalse(self.pe().is_tool_blocked("delete_file"))
+
+    def test_block_global_hits_all_connectors(self):
+        self.invoke(["block", "delete_file"])
+        for conn in ("hermes", "codex", "claudecode"):
+            self.assertTrue(self.pe().is_tool_blocked_for_connector("delete_file", conn))
+
+    def test_allow_connector_scoped_isolated(self):
+        result = self.invoke(["allow", "search", "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(self.pe().is_tool_allowed_for_connector("search", "hermes"))
+        self.assertFalse(self.pe().is_tool_allowed_for_connector("search", "codex"))
+        self.assertFalse(self.pe().is_tool_allowed("search"))
+
+    def test_unblock_connector_scoped(self):
+        self.pe().block_tool_for_connector("delete_file", "hermes", "test")
+        self.assertTrue(self.pe().is_tool_blocked_for_connector("delete_file", "hermes"))
+
+        result = self.invoke(["unblock", "delete_file", "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(self.pe().is_tool_blocked_for_connector("delete_file", "hermes"))
+
+    def test_connector_normalized(self):
+        """A connector value is canonicalized (e.g. 'Hermes' → 'hermes') so the
+        CLI write surface matches the runtime's lowercase connector keys."""
+        self.invoke(["block", "delete_file", "--connector", "Hermes"])
+        self.assertTrue(self.pe().is_tool_blocked_for_connector("delete_file", "hermes"))
+
+    def test_invalid_connector_rejected(self):
+        result = self.invoke(["block", "delete_file", "--connector", "bogus"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("unknown connector", result.output.lower())
+
+    def test_connector_and_source_mutually_exclusive(self):
+        result = self.invoke(
+            ["block", "delete_file", "--connector", "hermes", "--source", "fs"]
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("cannot be combined", result.output.lower())
+
+    def test_list_connector_column_and_filter(self):
+        self.pe().block_tool_for_connector("delete_file", "hermes", "scoped")
+        self.pe().block_tool("exec_cmd", "", "global")
+        self.pe().block_tool_for_connector("other_tool", "codex", "x")
+
+        # Default list: CONNECTOR column present, @C/T shown by its bare name.
+        result = self.invoke(["list"])
+        self.assertIn("CONNECTOR", result.output)
+        self.assertIn("hermes", result.output)
+        self.assertIn("delete_file", result.output)
+        self.assertNotIn("@hermes/delete_file", result.output)
+
+        # --connector hermes: its own rows + global, never another connector's.
+        result = self.invoke(["list", "--connector", "hermes"])
+        self.assertIn("delete_file", result.output)   # @hermes/ row
+        self.assertIn("exec_cmd", result.output)       # global applies to hermes
+        self.assertNotIn("other_tool", result.output)  # @codex/ row excluded
+
+    def test_list_json_has_connector_field(self):
+        self.pe().block_tool_for_connector("delete_file", "hermes", "scoped")
+        result = self.invoke(["list", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.output)
+        row = next(r for r in data if r["name"] == "delete_file")
+        self.assertEqual(row["connector"], "hermes")
+        self.assertEqual(row["status"], "block")
 
 
 if __name__ == "__main__":
