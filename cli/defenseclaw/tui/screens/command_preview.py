@@ -235,7 +235,11 @@ class CommandPreviewScreen(ModalScreen[bool]):
                 yield Button("Run", id="preview-run", variant="success")
 
     def on_mount(self) -> None:
-        self.query_one("#preview-run", Button).focus()
+        # For destructive / secret-bearing commands, focus Cancel so a
+        # reflexive Enter cancels instead of running the command. Benign
+        # commands keep Run focused for fast confirmation.
+        target = "#preview-cancel" if self.preview.risk in {"destructive", "secret"} else "#preview-run"
+        self.query_one(target, Button).focus()
 
     def action_cancel(self) -> None:
         self.dismiss(False)

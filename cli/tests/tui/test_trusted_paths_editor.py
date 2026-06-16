@@ -242,6 +242,53 @@ def test_untrusted_connector_dirs_empty_when_all_trusted() -> None:
         assert untrusted_connector_dirs() == []
 
 
+def test_untrusted_summary_names_every_connector_no_cap() -> None:
+    # >3 untrusted connectors: the summary must name them all (the old code
+    # capped at 3 and collapsed the rest into "+N more").
+    agents = {
+        f"c{i}": _agent(f"c{i}", f"/home/u/.local/bin/c{i}", ad.UNTRUSTED_PREFIX_ERROR)
+        for i in range(5)
+    }
+    with patch.object(ad, "discover_agents", return_value=_multi_disc(agents)):
+        summary = TrustedPathsEditorScreen((_DEFAULT_ROW,))._untrusted_summary()
+    assert "more" not in summary
+    for i in range(5):
+        assert f"c{i}" in summary
+
+
+# ---- fix (a): a load failure must not look like an empty allow-list --------
+
+
+def test_rows_from_config_surfaces_load_error_as_sentinel() -> None:
+    from defenseclaw.commands import cmd_setup
+
+    with patch.object(cmd_setup, "_collect_trusted_prefixes", side_effect=OSError("disk boom")):
+        rows = trusted_paths_rows_from_config(SimpleNamespace(data_dir="/x"))
+
+    assert len(rows) == 1
+    assert rows[0].error is True
+    assert "disk boom" in rows[0].resolved
+
+
+@pytest.mark.asyncio
+async def test_editor_surfaces_load_error_instead_of_empty_list() -> None:
+    from textual.widgets import DataTable
+
+    err_row = TrustedPathRow("disk read failed", "<error>", "load failed", False, error=True)
+    app = _Harness((err_row,))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        # The sentinel is NOT a selectable/removable data row.
+        assert screen.rows == ()
+        assert screen._selected_row() is None
+        # The failure is surfaced loudly (not a clean empty allow-list).
+        assert "Could not read" in screen._status_message
+        assert "UNKNOWN" in screen._status_message
+        # And a visible error row is shown in the table.
+        assert screen.query_one("#trusted-editor-table", DataTable).row_count == 1
+
+
 @pytest.mark.asyncio
 async def test_editor_shows_untrusted_summary_when_browsed() -> None:
     """Opened directly (no routing context) the editor surfaces a one-line

@@ -23,6 +23,11 @@ from textual.widgets import Button, Static
 
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
+# Footer hint text. The armed variant is shown once a ``danger`` action has
+# been chosen a first time and is waiting for the explicit second confirm.
+_HINT_DEFAULT = "up/down choose  enter confirm  esc cancel"
+_HINT_ARMED = "⚠ danger — press enter / click again to confirm  ·  esc cancel"
+
 
 @dataclass(frozen=True)
 class CommandSpec:
@@ -122,6 +127,13 @@ class ConsequenceModalModel:
 class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
     """Rounded modal that returns the selected consequence action."""
 
+    # Don't auto-focus an action button. With a button focused, Textual's
+    # button binding swallows a *second* Enter (the button stays ``-active``
+    # for its effect window), which would defeat the danger re-press confirm.
+    # With nothing focused, Enter routes through the screen ``enter`` binding
+    # every time; selection stays a purely visual ``-selected`` class.
+    AUTO_FOCUS = ""
+
     CSS = f"""
     ConsequenceModalScreen {{
         align: center middle;
@@ -194,6 +206,13 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
         super().__init__()
         self.model = model
         self.selected_index = model.default_index()
+        # Index of a ``danger`` action that has been chosen once and is
+        # awaiting its explicit second confirmation. ``None`` means nothing
+        # is armed; moving the selection, pressing a hotkey, or cancelling
+        # clears it. This is the gate that the destructive flows (uninstall
+        # wipe, redaction-off) inherit so a single keypress/click can't run
+        # them.
+        self._armed_index: int | None = None
 
     def compose(self) -> ComposeResult:
         details = "\n".join(self.model.details)
@@ -208,17 +227,40 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
                 label = action.display_label
                 if action.description:
                     label = f"{label}\n{action.description}"
-                yield Button(
+                button = Button(
                     label,
                     id=f"consequence-action-{index}",
                     classes="consequence-action-row",
                     variant=action.variant,
                 )
+                # Drop the transient ``-active`` click flash: it suppresses a
+                # second click within its window, which would swallow the
+                # confirming second click of a danger action.
+                button.active_effect_duration = 0
+                yield button
             yield Button("Cancel", id="consequence-cancel", variant="default")
-            yield Static("up/down choose  enter confirm  esc cancel", id="consequence-hint")
+            yield Static(_HINT_DEFAULT, id="consequence-hint")
 
     def on_mount(self) -> None:
         self._sync_selection()
+        self._apply_border()
+        self._update_hint()
+
+    def _apply_border(self) -> None:
+        # The dialog border color is baked into the class-level CSS f-string,
+        # which can't see the per-instance model, so paint the model's
+        # border_color on at mount. This is what makes the destructive
+        # modals (uninstall-wipe, redaction-off) render with the red frame.
+        dialog = self.query_one("#consequence-dialog", Vertical)
+        dialog.styles.border = ("round", self.model.border_color)
+
+    def _update_hint(self) -> None:
+        hint = _HINT_ARMED if self._armed_index is not None else _HINT_DEFAULT
+        self.query_one("#consequence-hint", Static).update(hint)
+
+    def _disarm(self) -> None:
+        self._armed_index = None
+        self._update_hint()
 
     def on_key(self, event: events.Key) -> None:
         if not event.character:
@@ -231,18 +273,34 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
             return
         event.stop()
         self.selected_index = index
+        self._disarm()
         self._sync_selection()
 
     def action_cursor_up(self) -> None:
         self.selected_index = (self.selected_index - 1) % len(self.model.actions)
+        self._disarm()
         self._sync_selection()
 
     def action_cursor_down(self) -> None:
         self.selected_index = (self.selected_index + 1) % len(self.model.actions)
+        self._disarm()
         self._sync_selection()
 
     def action_choose(self) -> None:
-        self.dismiss(self.model.actions[self.selected_index])
+        self._choose_index(self.selected_index)
+
+    def _choose_index(self, index: int) -> None:
+        action = self.model.actions[index]
+        if action.danger and self._armed_index != index:
+            # First commit on a danger action only arms it; require an
+            # explicit second confirm (Enter again, or a second click on the
+            # same row) before dismissing.
+            self._armed_index = index
+            self.selected_index = index
+            self._sync_selection()
+            self._update_hint()
+            return
+        self.dismiss(action)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -260,7 +318,7 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
             return
         self.selected_index = index
         self._sync_selection()
-        self.action_choose()
+        self._choose_index(index)
 
     @on(Button.Pressed, "#consequence-cancel")
     def _on_cancel_pressed(self, event: Button.Pressed) -> None:
@@ -268,13 +326,13 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
         self.action_cancel()
 
     def _sync_selection(self) -> None:
+        # Selection is shown via the ``-selected`` class only; we deliberately
+        # do NOT focus the button (see AUTO_FOCUS) so Enter keeps routing
+        # through the screen binding and the danger re-press confirm works.
         for index, button in enumerate(self.query(Button)):
             if "consequence-action-row" not in button.classes:
                 continue
-            selected = index == self.selected_index
-            button.set_class(selected, "-selected")
-            if selected:
-                button.focus()
+            button.set_class(index == self.selected_index, "-selected")
 
 
 def _button_index(button_id: str | None) -> int | None:

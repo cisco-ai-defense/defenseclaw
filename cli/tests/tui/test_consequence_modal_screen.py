@@ -105,12 +105,19 @@ async def test_consequence_modal_enter_confirms_default_action() -> None:
 
 
 @pytest.mark.asyncio
-async def test_consequence_modal_hotkey_selects_then_enter_confirms() -> None:
+async def test_consequence_modal_hotkey_selects_then_double_enter_confirms() -> None:
+    """A danger action needs a second confirm: hotkey selects, the first
+    Enter only arms, the second Enter actually dismisses."""
+
     app = ConsequenceHarness(_model())
 
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.press("u")
-        await pilot.press("enter")
+        await pilot.press("enter")  # arms only — "run" is danger=True
+        await pilot.pause()
+        assert app.result is None  # still armed, not dismissed
+
+        await pilot.press("enter")  # confirms
         await pilot.pause()
 
         assert app.result is not None
@@ -120,15 +127,83 @@ async def test_consequence_modal_hotkey_selects_then_enter_confirms() -> None:
 
 
 @pytest.mark.asyncio
-async def test_consequence_modal_click_confirms_selected_row() -> None:
+async def test_consequence_modal_danger_disarms_when_selection_moves() -> None:
+    """Arming a danger action and then moving the selection clears the arm,
+    so a later Enter on the same row needs to arm again before confirming."""
+
     app = ConsequenceHarness(_model())
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.click("#consequence-action-1")
+        await pilot.press("u")
+        await pilot.press("enter")  # arm "run"
+        await pilot.press("up")  # move selection -> disarm
+        await pilot.press("down")  # back onto "run", but disarmed
+        await pilot.press("enter")  # arms again only
+        await pilot.pause()
+        assert app.result is None
+
+        await pilot.press("enter")  # now confirms
+        await pilot.pause()
+        assert app.result is not None
+        assert app.result.action_id == "run"
+
+
+@pytest.mark.asyncio
+async def test_consequence_modal_double_click_confirms_danger_row() -> None:
+    """A single click on a danger row only arms it; a second click on the
+    same row confirms."""
+
+    app = ConsequenceHarness(_model())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.click("#consequence-action-1")  # arms only
+        await pilot.pause()
+        assert app.result is None
+
+        await pilot.click("#consequence-action-1")  # confirms
         await pilot.pause()
 
         assert app.result is not None
         assert app.result.action_id == "run"
+
+
+@pytest.mark.asyncio
+async def test_consequence_modal_non_danger_confirms_in_one_step() -> None:
+    """A non-danger action (the default "preview") confirms on the first
+    Enter without an arm step."""
+
+    app = ConsequenceHarness(_model())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.result is not None
+        assert app.result.action_id == "preview"
+
+
+@pytest.mark.asyncio
+async def test_consequence_modal_applies_model_border_color() -> None:
+    """The model's border_color is painted onto the dialog at mount (the
+    class-level CSS can't see the per-instance model)."""
+
+    from textual.containers import Vertical
+
+    model = ConsequenceModalModel(
+        title="Danger",
+        summary="s",
+        details=(),
+        actions=(ConsequenceAction(action_id="go", label="Go", description=""),),
+        default_action_id="go",
+        border_color="#ff0000",
+    )
+    app = ConsequenceHarness(model)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        dialog = app.screen.query_one("#consequence-dialog", Vertical)
+        # Color renders to the same value regardless of how it was supplied.
+        assert dialog.styles.border.top[1].hex.lower().startswith("#ff0000")
 
 
 @pytest.mark.asyncio
