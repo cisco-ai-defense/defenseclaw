@@ -359,9 +359,16 @@ def connector_config_files(
     elif name == "windsurf":
         paths = list(_windsurf_mcp_paths(home))
     elif name == "hermes":
+        # Hermes' real config file is YAML, not JSON — the Go source of
+        # truth resolves it to ~/.hermes/config.yaml (hermesConfigPath in
+        # internal/gateway/connector/hook_only.go and the hook-contract
+        # template in hook_contract.go). The setup adapter merges MCP
+        # servers into that file and the hook contract is registered
+        # against it, so inventory/doctor/aibom must point operators at
+        # the .yaml path, not a phantom .json that is never written. (N2)
         paths = [
-            os.path.join(home, ".hermes", "config.json"),
-            _workspace_path(workspace_dir, ".hermes", "config.json"),
+            os.path.join(home, ".hermes", "config.yaml"),
+            _workspace_path(workspace_dir, ".hermes", "config.yaml"),
         ]
     elif name == "openclaw":
         if openclaw_config:
