@@ -1278,6 +1278,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_gateway_token_drift") as fix_drift,
             patch.object(cmd_doctor, "_fix_dotenv_perms") as fix_dotenv,
             patch.object(cmd_doctor, "_fix_pristine_backup") as fix_pristine,
+            patch.object(cmd_doctor, "_fix_plugin_registry_required") as fix_plugin_reg,
             patch.object(cmd_doctor, "_fix_connector_residue") as fix_residue,
         ):
             cmd_doctor._run_fixers(
@@ -1290,15 +1291,19 @@ class DoctorFixDryRunTests(unittest.TestCase):
             fix_drift.assert_not_called()
             fix_dotenv.assert_not_called()
             fix_pristine.assert_not_called()
+            # OTHER-5: the plugin-registry dead-end fixer is wired into --fix
+            # but, like the rest, must not run under --dry-run.
+            fix_plugin_reg.assert_not_called()
             # D7: the connector-teardown fixer was removed from --fix entirely,
             # so it is never invoked even though it remains importable.
             fix_residue.assert_not_called()
 
         # Each remaining fixer should have produced a "skip" record so the TUI
         # can list every step the real run would touch. The teardown fixer was
-        # removed (D7), leaving six.
+        # removed (D7); the plugin-registry dead-end fixer was added (OTHER-5),
+        # leaving seven.
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        self.assertEqual(len(fix_records), 6)
+        self.assertEqual(len(fix_records), 7)
         for record in fix_records:
             self.assertEqual(record["status"], "skip")
             self.assertIn("dry-run", record["detail"])
@@ -1320,8 +1325,9 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_gateway_token_drift", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_dotenv_perms", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_pristine_backup", return_value=("pass", "ok")),
+            patch.object(cmd_doctor, "_fix_plugin_registry_required", return_value=("pass", "ok")),
             # _fix_connector_residue is intentionally NOT wired into --fix (D7);
-            # patch it so a regression that re-adds it would surface as a 7th row.
+            # patch it so a regression that re-adds it would surface as an extra row.
             patch.object(cmd_doctor, "_fix_connector_residue", return_value=("pass", "ok")) as fix_residue,
         ):
             cmd_doctor._run_fixers(
@@ -1329,8 +1335,9 @@ class DoctorFixDryRunTests(unittest.TestCase):
             )
 
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        # Six fixers run; the connector-teardown fixer was removed (D7).
-        self.assertEqual(len(fix_records), 6)
+        # Seven fixers run: the connector-teardown fixer was removed (D7) and
+        # the plugin-registry dead-end fixer was added (OTHER-5).
+        self.assertEqual(len(fix_records), 7)
         for record in fix_records:
             self.assertEqual(record["status"], "pass")
         fix_residue.assert_not_called()

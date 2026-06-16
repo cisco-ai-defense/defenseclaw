@@ -2700,6 +2700,22 @@ def doctor(
             r=r,
         )
     for _c in inventory_connectors:
+        if not _connector_enabled(cfg, _c):
+            # Operator-disabled (guardrail disable --connector X): the Go boot
+            # loop drops it from the active set and tears its hooks down, so
+            # the inventory/contract probes below would read as active and the
+            # missing hook artifacts would FAIL spuriously. Surface it once,
+            # explicitly disabled, and skip the active-enforcement checks
+            # (mirrors cmd_status's DISABLED row). (N1)
+            with _doctor_label_suffix(f"[{_c}]"):
+                _emit(
+                    "skip",
+                    "Connector",
+                    f"{_CONNECTOR_LABELS.get(_c, _c)} — operator-disabled "
+                    f"(guardrail disable --connector {_c}); hooks torn down",
+                    r=r,
+                )
+            continue
         with _doctor_label_suffix(f"[{_c}]"):
             _check_connector_inventory(cfg, _c, r)
             _check_hook_contract_lock(cfg, _c, r)
@@ -2710,6 +2726,10 @@ def doctor(
     # config patches are still on disk. This is a global filesystem sweep
     # (not per-active-connector), so it runs once against the install.
     _check_connector_residue(cfg, active_connector, r)
+    # Surface a dead-end asset_policy.plugin.registry_required flag, which can
+    # only ever deny (no plugin-registry pipeline exists in v1) and silently
+    # blocks all plugins under enforcement. (OTHER-5)
+    _check_plugin_registry_required(cfg, r)
 
     if not json_out:
         _doctor_subsection("Scanners")
@@ -2730,8 +2750,26 @@ def doctor(
     # which case the loop emits no hook rows rather than probing a phantom
     # "openclaw" gateway (D3).
     hook_connectors = _doctor_active_connectors(cfg)
-    _multi_hooks = len(hook_connectors) > 1
+    # Single-vs-multi label suffix is decided over the ENABLED set: an
+    # operator-disabled connector is reported separately (below) and must not
+    # flip a genuinely single-connector install into multi-connector "[name]"
+    # labeling. (N1)
+    _enabled_hook_connectors = [c for c in hook_connectors if _connector_enabled(cfg, c)]
+    _multi_hooks = len(_enabled_hook_connectors) > 1
     for _conn in hook_connectors:
+        if not _connector_enabled(cfg, _conn):
+            # Disabled connector: hooks were torn down, so probing hook health
+            # / HILT would FAIL spuriously. Mark it disabled and move on,
+            # mirroring the inventory loop and cmd_status. (N1)
+            with _doctor_label_suffix(f"[{_conn}]"):
+                _emit(
+                    "skip",
+                    "Connector hooks",
+                    f"{_CONNECTOR_LABELS.get(_conn, _conn)} — operator-disabled; "
+                    "hooks torn down",
+                    r=r,
+                )
+            continue
         with _doctor_label_suffix(f"[{_conn}]" if _multi_hooks else ""):
             _check_connector_hooks(cfg, _conn, r)
             # Human-approval (HILT) support is per-connector: each connector
@@ -2908,6 +2946,7 @@ def _run_fixers(
         ("gateway token drift", _fix_gateway_token_drift),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
         ("pristine config backup", _fix_pristine_backup),
+        ("plugin registry dead-end", _fix_plugin_registry_required),
     ]
 
     for title, fn in fixers:
@@ -2975,6 +3014,31 @@ def _doctor_active_connectors(cfg) -> list[str]:
     return [primary] if primary else []
 
 
+def _connector_enabled(cfg, connector: str) -> bool:
+    """Whether *connector* is effectively enabled (not operator-disabled).
+
+    ``Config.active_connectors()`` returns every key in
+    ``guardrail.connectors`` regardless of its ``enabled`` flag, so a
+    connector turned off via ``guardrail disable --connector X`` still shows
+    up in :func:`_doctor_active_connectors`. The Go boot loop drops a
+    ``enabled: false`` connector from the active set and tears its hooks down,
+    so doctor must not render it as active — its inventory/contract/hook rows
+    would read as live enforcement and its (intentionally) missing hook
+    artifacts would FAIL spuriously.
+
+    Mirrors ``cmd_status._is_enabled`` (the sibling fix): default ``True`` so
+    single-connector installs and any never-disabled connector keep reading as
+    active; only an explicit ``enabled: false`` resolves to ``False``. (N1)
+    """
+    gc = getattr(cfg, "guardrail", None)
+    if gc is None or not hasattr(gc, "effective_enabled"):
+        return True
+    try:
+        return bool(gc.effective_enabled(connector))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 _CONNECTOR_LABELS = {
     "openclaw": "OpenClaw",
     "claudecode": "Claude Code",
@@ -2989,6 +3053,41 @@ _CONNECTOR_LABELS = {
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
 }
+
+
+def _emit_rule_pack_row(path: str, kind: str, r: _DoctorResult) -> None:
+    """Validate a resolved rule-pack directory and emit one doctor row.
+
+    *kind* is a human label for the source of the path (``"configured
+    rule_pack_dir"`` or ``"built-in default rule pack"``). A directory that is
+    missing — or present but empty — silently degrades guardrail enforcement
+    because the gateway loads zero rule packs from it, so both cases WARN; a
+    populated directory passes. (D9)
+    """
+    if not os.path.isdir(path):
+        _emit(
+            "warn",
+            "Rule pack",
+            f"{kind} not found on disk: {path} — guardrail enforcement would "
+            "run with no rule packs",
+            r=r,
+        )
+        return
+    try:
+        with os.scandir(path) as entries:
+            has_contents = any(True for _ in entries)
+    except OSError:
+        has_contents = False
+    if not has_contents:
+        _emit(
+            "warn",
+            "Rule pack",
+            f"{kind} is empty: {path} — guardrail enforcement would run with "
+            "no rule packs",
+            r=r,
+        )
+        return
+    _emit("pass", "Rule pack", f"{path} ({kind})", r=r)
 
 
 def _check_connector_inventory(
@@ -3085,25 +3184,76 @@ def _check_connector_inventory(
         _emit("skip", "MCP servers", "no MCP servers registered", r=r)
 
     # Effective rule pack for this connector (falls back to built-in
-    # defaults when no rule_pack_dir is configured). Warn when a configured
-    # directory is missing on disk — that silently degrades enforcement.
+    # defaults when no rule_pack_dir is configured). Warn when the resolved
+    # directory is missing/empty on disk — that silently degrades enforcement.
     if gc is not None and hasattr(gc, "effective_rule_pack_dir"):
         try:
             rule_pack_dir = (gc.effective_rule_pack_dir(connector) or "").strip()
         except Exception:  # noqa: BLE001
             rule_pack_dir = ""
         if rule_pack_dir:
-            if os.path.isdir(rule_pack_dir):
-                _emit("pass", "Rule pack", rule_pack_dir, r=r)
+            _emit_rule_pack_row(rule_pack_dir, "configured rule_pack_dir", r)
+        else:
+            # No explicit rule_pack_dir → the gateway resolves the built-in
+            # default to <data_dir>/policies/guardrail/default and loads packs
+            # from there (Go: config.go cfg.Guardrail.RulePackDir fallback +
+            # the viper default). Validate THAT resolved path rather than
+            # emitting a benign "no dir set" skip: if it is unseeded or has
+            # been deleted, enforcement silently runs with no rule packs while
+            # doctor would otherwise show green. (D9)
+            data_dir = getattr(cfg, "data_dir", "") or ""
+            if data_dir:
+                default_dir = os.path.join(
+                    data_dir, "policies", "guardrail", "default"
+                )
+                _emit_rule_pack_row(
+                    default_dir, "built-in default rule pack", r
+                )
             else:
                 _emit(
-                    "warn",
+                    "skip",
                     "Rule pack",
-                    f"configured rule_pack_dir not found on disk: {rule_pack_dir}",
+                    "built-in defaults (data_dir unresolved)",
                     r=r,
                 )
+
+    # Detection strategy + judge gating for this connector (read-only). This
+    # is root #4 in the doctor fix-plan made visible: the judge can be
+    # configured globally yet silently NOT run for a given connector, so
+    # surface what actually fires rather than what's merely configured.
+    # ``detection_strategy`` is a global guardrail field
+    # (regex_only | regex_judge | judge_first); the judge ADDITIONALLY has to
+    # be enabled, and — for hook-enforced connectors — this connector must be
+    # listed in ``guardrail.judge.hook_connectors`` (or "*") for the hook lane
+    # to forward content to the LLM judge (Go: JudgeConfig.HookConnectorEnabled).
+    # Proxy connectors (openclaw/zeptoclaw) run the judge via the proxy lane
+    # whenever it is enabled. Report-only: this does NOT touch the judge
+    # wiring. (N3)
+    if gc is not None:
+        strategy = (getattr(gc, "detection_strategy", "") or "").strip() or "regex_judge"
+        judge = getattr(gc, "judge", None)
+        judge_enabled = bool(getattr(judge, "enabled", False)) if judge is not None else False
+        detail = f"strategy={strategy}"
+        if not judge_enabled:
+            detail += "; judge disabled (regex/Cisco-AID lanes only)"
+        elif connector not in _HOOK_ENFORCED_CONNECTORS:
+            # Proxy connector: the judge runs in the proxy lane.
+            detail += "; judge active (proxy lane)"
         else:
-            _emit("skip", "Rule pack", "built-in defaults (no rule_pack_dir set)", r=r)
+            hook_conns = list(getattr(judge, "hook_connectors", []) or [])
+            gated_on = any(
+                entry.strip() == "*" or entry.strip().lower() == connector.lower()
+                for entry in hook_conns
+            )
+            if gated_on:
+                detail += "; judge active (hook lane)"
+            else:
+                detail += (
+                    "; judge enabled but NOT gated for this connector's hook "
+                    "lane (regex/Cisco-AID lanes only) — add it to "
+                    "guardrail.judge.hook_connectors to forward content to the judge"
+                )
+        _emit("pass", "Detection", detail, r=r)
 
 
 def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
@@ -3227,6 +3377,75 @@ def _residue_active_set(cfg, active: str) -> set[str]:
             pass
     out.discard("")
     return out
+
+
+def _plugin_registry_required_offenders(cfg) -> list[str]:
+    """Return where ``asset_policy.plugin.registry_required`` is explicitly on.
+
+    Labels are ``"global"`` for the top-level per-type policy and
+    ``"connector:<name>"`` for each per-connector override that sets it to a
+    literal ``True`` (the per-connector field is tri-state — ``None`` means
+    inherit, so only an explicit ``True`` is an offender; an inherited-from-
+    global require is already covered by the ``"global"`` label). Shared by the
+    OTHER-5 check and fixer.
+    """
+    ap = getattr(cfg, "asset_policy", None)
+    if ap is None:
+        return []
+    offenders: list[str] = []
+    plugin = getattr(ap, "plugin", None)
+    if plugin is not None and bool(getattr(plugin, "registry_required", False)):
+        offenders.append("global")
+    connectors = getattr(ap, "connectors", None) or {}
+    for name, pc in connectors.items():
+        pc_plugin = getattr(pc, "plugin", None) if pc is not None else None
+        if pc_plugin is not None and getattr(pc_plugin, "registry_required", None) is True:
+            offenders.append(f"connector:{name}")
+    return offenders
+
+
+def _check_plugin_registry_required(cfg, r: _DoctorResult) -> None:
+    """Flag a dead-end ``asset_policy.plugin.registry_required=true``.
+
+    There is no plugin-registry pipeline in v1 — nothing can populate
+    ``asset_policy.plugin.registry`` (``registry sync``/``promote``/``approve``
+    are skill+mcp only, and ``registry require --type`` no longer offers
+    ``plugin``). So a leftover ``plugin.registry_required: true`` is a
+    dead-end: with the default ``registry_empty_action: deny`` and asset-policy
+    enforcement on, the gateway blocks EVERY plugin (``required + empty
+    registry + default-deny`` → ``registry-required-empty``) with no operator
+    recovery path but hand-editing config.
+
+    Surfaces it (WARN) so ``doctor --fix`` can clear it. Checks the global
+    per-type policy AND every per-connector override. Report-only here; the
+    matching fixer does the clearing. (OTHER-5, doctor half)
+    """
+    ap = getattr(cfg, "asset_policy", None)
+    if ap is None:
+        return
+    offenders = _plugin_registry_required_offenders(cfg)
+    if not offenders:
+        _emit(
+            "pass",
+            "Plugin registry policy",
+            "no dead-end plugin.registry_required flag set",
+            r=r,
+        )
+        return
+    enforcing = bool(getattr(ap, "enabled", False))
+    where = ", ".join(offenders)
+    impact = (
+        "blocks ALL plugins (the plugin registry can never be populated in v1)"
+        if enforcing
+        else "would block ALL plugins once asset-policy enforcement is enabled"
+    )
+    _emit(
+        "warn",
+        "Plugin registry policy",
+        f"plugin.registry_required=true [{where}] is a dead-end — {impact}; "
+        "run 'doctor --fix' to clear it",
+        r=r,
+    )
 
 
 def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
@@ -3626,6 +3845,47 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
         if os.path.isfile(backup_path):
             return ("skip", f"backup exists at {backup_path}")
     return ("skip", "no backup found — run `defenseclaw setup guardrail` to create one")
+
+
+def _fix_plugin_registry_required(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Clear a dead-end ``asset_policy.plugin.registry_required=true``.
+
+    Companion to :func:`_check_plugin_registry_required`. Resets the flag to
+    ``False`` (global) / ``None`` (per-connector inherit) everywhere it is
+    explicitly on, then saves config.yaml. No plugin-registry pipeline exists
+    in v1, so the flag can only ever deny — clearing it is always safe and
+    non-disruptive (config write only; no sidecar restart).
+
+    Returns ``("skip", …)`` when nothing is set, ``("pass", …)`` on a
+    successful rewrite, ``("fail", …)`` on write error. (OTHER-5)
+    """
+    offenders = _plugin_registry_required_offenders(cfg)
+    if not offenders:
+        return ("skip", "no plugin.registry_required flag set")
+
+    if not assume_yes and not click.confirm(
+        f"    Clear the dead-end plugin.registry_required flag for "
+        f"[{', '.join(offenders)}] in config.yaml?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    ap = getattr(cfg, "asset_policy", None)
+    try:
+        plugin = getattr(ap, "plugin", None)
+        if plugin is not None and bool(getattr(plugin, "registry_required", False)):
+            plugin.registry_required = False
+        for pc in (getattr(ap, "connectors", None) or {}).values():
+            pc_plugin = getattr(pc, "plugin", None) if pc is not None else None
+            if pc_plugin is not None and getattr(pc_plugin, "registry_required", None) is True:
+                # Tri-state per-connector field: None = inherit the (now
+                # cleared) global value, so reset to None rather than False.
+                pc_plugin.registry_required = None
+        cfg.save()
+    except (OSError, AttributeError) as exc:
+        return ("fail", f"could not save config: {type(exc).__name__}: {exc}")
+
+    return ("pass", f"cleared plugin.registry_required [{', '.join(offenders)}]")
 
 
 def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
