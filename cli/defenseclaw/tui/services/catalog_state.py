@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
@@ -59,6 +59,36 @@ class CatalogActionState:
         return ", ".join(parts) if parts else "-"
 
 
+SEVERITY_BUCKETS: tuple[str, ...] = ("critical", "high", "medium", "low", "info")
+
+
+def _parse_severity_counts(raw: Any) -> dict[str, int]:
+    """Normalize a ``{severity: count}`` payload into the canonical buckets.
+
+    E4i: ``skill/mcp/plugin list --json`` carries a per-severity breakdown
+    (emitted by the CLI lane). The scanner stores severities upper-cased
+    (``CRITICAL``/``HIGH``/...) while the TUI buckets are lower-cased, so
+    fold case and drop anything outside the five known buckets. A missing
+    or malformed payload yields ``{}`` so callers degrade to the legacy
+    ``max_severity``-only line.
+    """
+
+    if not isinstance(raw, Mapping):
+        return {}
+    counts: dict[str, int] = {}
+    for key, value in raw.items():
+        bucket = str(key or "").strip().lower()
+        if bucket not in SEVERITY_BUCKETS:
+            continue
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            counts[bucket] = counts.get(bucket, 0) + count
+    return counts
+
+
 @dataclass(frozen=True)
 class CatalogScanSummary:
     """Small scan summary projected into Skills/MCP rows."""
@@ -67,6 +97,11 @@ class CatalogScanSummary:
     clean: bool = True
     max_severity: str = ""
     total_findings: int = 0
+    # E4i: per-severity finding counts ({"critical": 1, "high": 2, ...}).
+    # Empty when the CLI payload predates the severity breakdown (the
+    # ``_build_scan_map`` emit is a separate CLI lane), so the detail line
+    # falls back to the ``max_severity`` summary alone.
+    severity_counts: Mapping[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> CatalogScanSummary | None:
@@ -77,6 +112,7 @@ class CatalogScanSummary:
             clean=bool(raw.get("clean")),
             max_severity=str(raw.get("max_severity") or ""),
             total_findings=int(raw.get("total_findings") or 0),
+            severity_counts=_parse_severity_counts(raw.get("severity_counts")),
         )
 
 
@@ -87,6 +123,8 @@ class PluginScanSummary:
     clean: bool = True
     max_severity: str = ""
     total_findings: int = 0
+    # E4i: per-severity breakdown (see CatalogScanSummary.severity_counts).
+    severity_counts: Mapping[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> PluginScanSummary | None:
@@ -96,6 +134,7 @@ class PluginScanSummary:
             clean=bool(raw.get("clean")),
             max_severity=str(raw.get("max_severity") or ""),
             total_findings=int(raw.get("total_findings") or 0),
+            severity_counts=_parse_severity_counts(raw.get("severity_counts")),
         )
 
 
@@ -177,6 +216,9 @@ class SkillRow:
     total_findings: int = 0
     scan_clean: bool = True
     scan_target: str = ""
+    # E4i: per-severity finding counts denormalized from the scan summary so
+    # the detail pane can show the breakdown without re-parsing the payload.
+    severity_counts: Mapping[str, int] = field(default_factory=dict)
     file_action: str = ""
     install_action: str = ""
     runtime_action: str = ""
@@ -208,6 +250,8 @@ class MCPRow:
     total_findings: int = 0
     scan_clean: bool = True
     scan_target: str = ""
+    # E4i: per-severity finding counts (see SkillRow.severity_counts).
+    severity_counts: Mapping[str, int] = field(default_factory=dict)
     file_action: str = ""
     install_action: str = ""
     runtime_action: str = ""
@@ -972,6 +1016,7 @@ def skill_list_to_row(raw: Mapping[str, Any]) -> SkillRow:
         total_findings=scan.total_findings if scan is not None else 0,
         scan_clean=scan.clean if scan is not None else True,
         scan_target=scan.target if scan is not None else "",
+        severity_counts=scan.severity_counts if scan is not None else {},
         file_action=actions.file,
         install_action=actions.install,
         runtime_action=actions.runtime,
@@ -1007,6 +1052,7 @@ def mcp_list_to_row(raw: Mapping[str, Any]) -> MCPRow:
         total_findings=scan.total_findings if scan is not None else 0,
         scan_clean=scan.clean if scan is not None else True,
         scan_target=scan.target if scan is not None else "",
+        severity_counts=scan.severity_counts if scan is not None else {},
         file_action=actions.file,
         install_action=actions.install,
         runtime_action=actions.runtime,
@@ -1549,12 +1595,53 @@ def _format_decisions(file_action: str, install_action: str, runtime_action: str
     )
 
 
-def _scan_line(severity: str, total_findings: int, clean: bool, target: str) -> str:
-    """Render the scan posture as ``<severity> · N findings · target=…``.
+_SEVERITY_BUCKET_LABEL: Mapping[str, str] = {
+    "critical": "crit",
+    "high": "high",
+    "medium": "med",
+    "low": "low",
+    "info": "info",
+}
+
+
+def _format_severity_breakdown(counts: Mapping[str, int] | None) -> str:
+    """Render a per-severity breakdown like ``crit 1 · high 2 · low 3``.
+
+    E4i: only non-zero buckets are shown, in descending-severity order, each
+    colored by its severity so a CRITICAL count pops the same way the
+    ``max_severity`` badge does. Returns ``""`` when no counts are available
+    (older CLI payloads) so ``_scan_line`` keeps its legacy shape.
+    """
+
+    if not counts:
+        return ""
+    segments: list[str] = []
+    for bucket in SEVERITY_BUCKETS:
+        count = int(counts.get(bucket, 0) or 0)
+        if count <= 0:
+            continue
+        label = _SEVERITY_BUCKET_LABEL[bucket]
+        color = _SEVERITY_COLOR.get(bucket.upper(), "")
+        text = f"{label} {count}"
+        segments.append(f"[{color}]{text}[/]" if color else text)
+    return " ".join(segments)
+
+
+def _scan_line(
+    severity: str,
+    total_findings: int,
+    clean: bool,
+    target: str,
+    counts: Mapping[str, int] | None = None,
+) -> str:
+    """Render the scan posture as ``<severity> · N findings · <breakdown> · target=…``.
 
     ``CLEAN`` skips the findings count because there's nothing to
     surface; a dirty scan with zero findings (defensive) shows
-    ``0 findings`` so the operator notices the inconsistency.
+    ``0 findings`` so the operator notices the inconsistency. When the
+    payload carries a per-severity breakdown (E4i) it is rendered between
+    the total and the target so the operator sees the severity mix at a
+    glance instead of just the worst finding.
     """
 
     sev = (severity or "").upper() or ("CLEAN" if clean else "UNKNOWN")
@@ -1562,6 +1649,9 @@ def _scan_line(severity: str, total_findings: int, clean: bool, target: str) -> 
     if not clean or total_findings > 0:
         suffix = "finding" if total_findings == 1 else "findings"
         parts.append(f"{total_findings} {suffix}")
+    breakdown = _format_severity_breakdown(counts)
+    if breakdown:
+        parts.append(breakdown)
     if target:
         parts.append(f"target={target}")
     return " · ".join(parts)
@@ -1572,7 +1662,7 @@ def _format_skill_detail(row: SkillRow) -> str:
         f"[bold #22D3EE]Skill[/] {row.name}",
         f"  Status     {_format_status(row.status)}    Actions  {row.actions}",
         f"  Decisions  {_format_decisions(row.file_action, row.install_action, row.runtime_action)}",
-        f"  Scan       {_scan_line(row.severity, row.total_findings, row.scan_clean, row.scan_target)}",
+        f"  Scan       {_scan_line(row.severity, row.total_findings, row.scan_clean, row.scan_target, row.severity_counts)}",
     ]
     if row.source:
         lines.append(f"  Source     {row.source}")
@@ -1603,7 +1693,7 @@ def _format_mcp_detail(row: MCPRow) -> str:
         lines.append(f"  Command    {row.command}")
     if row.total_findings > 0 or row.severity or row.scan_target:
         lines.append(
-            f"  Scan       {_scan_line(row.severity, row.total_findings, row.scan_clean, row.scan_target)}"
+            f"  Scan       {_scan_line(row.severity, row.total_findings, row.scan_clean, row.scan_target, row.severity_counts)}"
         )
     if row.registry_badge:
         lines.append(f"  Registry   {row.registry_badge}")
@@ -1628,12 +1718,19 @@ def _format_plugin_detail(row: PluginRow) -> str:
     if row.origin:
         lines.append(f"  Origin     {row.origin}")
     if row.scan is not None:
-        sev = row.scan.max_severity or ("CLEAN" if row.scan.clean else "UNKNOWN")
-        parts = [_format_severity(sev)]
-        if row.scan.total_findings > 0 or not row.scan.clean:
-            suffix = "finding" if row.scan.total_findings == 1 else "findings"
-            parts.append(f"{row.scan.total_findings} {suffix}")
-        lines.append(f"  Scan       {' · '.join(parts)}")
+        # E4i: plugin scans carry the same per-severity breakdown; reuse
+        # ``_scan_line`` (no target for plugins) so the rendering matches
+        # skills/MCPs and surfaces the severity mix.
+        lines.append(
+            "  Scan       "
+            + _scan_line(
+                row.scan.max_severity,
+                row.scan.total_findings,
+                row.scan.clean,
+                "",
+                row.scan.severity_counts,
+            )
+        )
     if row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
         lines.append(f"  Verdict    {row.verdict}")
     if row.description:

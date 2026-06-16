@@ -86,6 +86,57 @@ def test_mcp_set_form_builds_cli_argv_shape() -> None:
     assert result.env == (("API_KEY", "xxx"), ("REGION", "us-east-1"))
 
 
+def test_mcp_set_form_threads_connector_into_argv() -> None:
+    # B10: an MCP added from a filtered connector view must write to that
+    # connector's config via ``--connector``, not the default/primary one.
+    result = MCPSetFormValues(
+        name="context7",
+        command="uvx",
+        connector="hermes",
+    ).build_result()
+    assert result.argv == (
+        "mcp",
+        "set",
+        "context7",
+        "--command",
+        "uvx",
+        "--connector",
+        "hermes",
+    )
+
+
+def test_mcp_set_form_omits_connector_when_unfocused() -> None:
+    # Empty connector (single-connector install / merged "All" view) keeps the
+    # legacy argv shape so the active connector is targeted exactly as before.
+    result = MCPSetFormValues(name="context7", command="uvx").build_result()
+    assert "--connector" not in result.argv
+
+
+@pytest.mark.asyncio
+async def test_mcp_set_form_screen_carries_connector() -> None:
+    app = MCPSetHarness(initial_name="context7")
+    app._connector = "codex"
+
+    async with app.run_test(size=(120, 44)) as pilot:
+        screen = app.screen
+        assert isinstance(screen, MCPSetFormScreen)
+        screen.connector = "codex"
+        screen.query_one("#mcp-command", Input).value = "uvx"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert app.result is not None
+        assert app.result.argv == (
+            "mcp",
+            "set",
+            "context7",
+            "--command",
+            "uvx",
+            "--connector",
+            "codex",
+        )
+
+
 def test_mcp_set_form_validates_required_fields_and_env_pairs() -> None:
     with pytest.raises(MCPSetValidationError, match="name is required"):
         MCPSetFormValues(command="uvx").build_result()

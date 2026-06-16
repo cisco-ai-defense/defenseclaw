@@ -410,6 +410,60 @@ def test_skill_list_to_row_preserves_scan_and_decision_details() -> None:
     assert row.file_action == ""
 
 
+def test_skill_list_to_row_parses_severity_counts() -> None:
+    """E4i: ``skill list --json`` carries a per-severity breakdown that the
+    row parser denormalizes (folding case, dropping zero/unknown buckets).
+    """
+
+    row = skill_list_to_row(
+        {
+            "name": "alpha",
+            "eligible": True,
+            "scan": {
+                "clean": False,
+                "max_severity": "HIGH",
+                "total_findings": 6,
+                "severity_counts": {"CRITICAL": 1, "HIGH": 2, "LOW": 3, "INFO": 0, "bogus": 9},
+            },
+        }
+    )
+
+    assert row.severity_counts == {"critical": 1, "high": 2, "low": 3}
+
+
+def test_skill_list_to_row_without_severity_counts_is_empty() -> None:
+    # Older CLI payloads predate the breakdown — the field degrades to {}.
+    row = skill_list_to_row(
+        {"name": "alpha", "eligible": True, "scan": {"clean": False, "max_severity": "HIGH", "total_findings": 3}}
+    )
+    assert row.severity_counts == {}
+
+
+def test_skill_detail_pane_renders_severity_breakdown() -> None:
+    """E4i: the detail Scan line surfaces the per-severity mix between the
+    total and the target, colored by severity, non-zero buckets only.
+    """
+
+    from defenseclaw.tui.services.catalog_state import catalog_detail_text
+
+    row = SkillRow(
+        name="alpha",
+        status="rejected",
+        severity="CRITICAL",
+        total_findings=6,
+        scan_clean=False,
+        scan_target="/skills/alpha/SKILL.md",
+        severity_counts={"critical": 1, "high": 2, "low": 3},
+    )
+    out = catalog_detail_text(row)
+
+    assert (
+        "Scan       [#F87171]CRITICAL[/] · 6 findings · "
+        "[#F87171]crit 1[/] [#F87171]high 2[/] [#22D3EE]low 3[/] · "
+        "target=/skills/alpha/SKILL.md"
+    ) in out
+
+
 def test_skill_detail_pane_renders_decisions_scan_and_action_legend() -> None:
     """Skills detail pane shows Status / Decisions / Scan / Source /
     Registry / a one-line action legend. The legend replaces the
