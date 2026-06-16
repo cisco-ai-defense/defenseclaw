@@ -270,7 +270,12 @@ def _build_scan_options(
 @click.option("--action", "take_action", is_flag=True, help="Apply plugin_actions policy based on scan severity")
 @click.option(
     "--connector", "connector_flag", default="",
-    help="Attribute install/enforcement to a specific connector (multi-connector installs)",
+    help=(
+        "Connector whose admission/policy scope this install is attributed to "
+        "(multi-connector installs). This governs which connector's allow/block "
+        "policy is consulted, NOT the install location — files always land in "
+        "the DefenseClaw-managed plugin_dir."
+    ),
 )
 @pass_ctx
 def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, connector_flag: str) -> None:
@@ -287,6 +292,10 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
     After downloading, the plugin is scanned for security issues. Pass --action
     to apply the configured plugin_actions policy (quarantine, disable, block)
     based on scan severity. Use --force to overwrite an existing plugin.
+
+    ``--connector`` scopes admission/policy (which peer's allow/block list is
+    consulted), not placement: the plugin is always copied into the
+    DefenseClaw-managed plugin_dir regardless of the connector named.
     """
     import tempfile
 
@@ -1140,6 +1149,13 @@ def _scan_plugin_dir(host_dir: str, connector: str) -> list[dict[str, Any]]:
     except OSError:
         return []
     for entry in entries:
+        # N6: host plugin dirs carry non-plugin siblings — a ``cache``
+        # working dir (codex/zeptoclaw register ``…/plugins/cache``) and
+        # dot-prefixed dirs (``.git`` and editor/OS cruft). Skip both so they
+        # never surface as phantom plugin rows. The manifest stays optional
+        # below, so genuinely manifest-less host plugins still list.
+        if entry == "cache" or entry.startswith("."):
+            continue
         plugin_path = os.path.join(host_dir, entry)
         if not os.path.isdir(plugin_path):
             continue
@@ -1451,9 +1467,28 @@ def disable(app: AppContext, name: str, reason: str) -> None:
 
     Requires the gateway to be running.
     """
+    from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
-    connector = app.cfg.guardrail.connector.lower() or "openclaw"
+    # N5: runtime disable is OpenClaw-only. The gateway RPC patches
+    # OpenClaw's plugins.allow / plugins.entries schema (see Go
+    # internal/gateway/rpc.go:pluginConfigRaw); no hook connector exposes an
+    # equivalent runtime toggle. Resolve the active connector canonically
+    # (guardrail.connector -> claw.mode -> openclaw) and fail loudly on a
+    # non-OpenClaw peer rather than silently patching the wrong schema and
+    # reporting a false success. A real hook-connector runtime-disable
+    # mechanism is a gateway-side follow-up (plugins.md N5(c)).
+    connector = resolve_list_connector(app, "")
+    if connector != "openclaw":
+        click.echo(
+            f"error: runtime disable is unsupported for {connector!r} — only "
+            f"OpenClaw exposes a runtime plugin toggle. Use "
+            f"'defenseclaw plugin quarantine {name}' to neutralize its files "
+            f"instead.",
+            err=True,
+        )
+        raise SystemExit(1)
+
     plugin_name = _resolve_openclaw_plugin_id(name, connector)
 
     client = _sidecar_client(app)
@@ -1491,9 +1526,22 @@ def enable(app: AppContext, name: str) -> None:
 
     This is a runtime-only action.
     """
+    from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
-    connector = app.cfg.guardrail.connector.lower() or "openclaw"
+    # N5: runtime enable is OpenClaw-only — mirror of disable(). The gateway
+    # RPC speaks OpenClaw's plugins schema only, so fail loudly on a
+    # non-OpenClaw peer rather than misfiring a config patch.
+    connector = resolve_list_connector(app, "")
+    if connector != "openclaw":
+        click.echo(
+            f"error: runtime enable is unsupported for {connector!r} — only "
+            f"OpenClaw exposes a runtime plugin toggle. Use "
+            f"'defenseclaw plugin restore {name}' if you quarantined its files.",
+            err=True,
+        )
+        raise SystemExit(1)
+
     plugin_name = _resolve_openclaw_plugin_id(name, connector)
 
     client = _sidecar_client(app)
