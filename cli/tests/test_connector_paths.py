@@ -641,6 +641,34 @@ class TestConnectorHome:
 # ---------------------------------------------------------------------------
 
 
+class TestConnectorConfigFiles:
+    """N2 — ``connector_config_files`` must point at the file the connector
+    actually writes, not a phantom path."""
+
+    def test_hermes_lists_yaml_not_json(self, tmp_path, monkeypatch):
+        # The Go source of truth (hermesConfigPath / the hook-contract
+        # template) resolves hermes' config to ~/.hermes/config.yaml; the old
+        # ~/.hermes/config.json is never written. (N2)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: fake_home)
+
+        files = connector_paths.connector_config_files("hermes")
+        assert os.path.join(str(fake_home), ".hermes", "config.yaml") in files
+        assert not any(p.endswith(os.path.join(".hermes", "config.json")) for p in files)
+
+    def test_hermes_workspace_path_is_yaml(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: fake_home)
+
+        files = connector_paths.connector_config_files(
+            "hermes", workspace_dir=str(tmp_path)
+        )
+        assert os.path.join(str(tmp_path), ".hermes", "config.yaml") in files
+        assert not any(p.endswith("config.json") for p in files)
+
+
 class TestConfigDispatch:
     def test_config_skill_dirs_uses_active_connector(self):
         from defenseclaw import config
