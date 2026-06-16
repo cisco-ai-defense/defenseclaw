@@ -132,6 +132,18 @@ class OverviewConfig:
     # DISABLED rather than hiding them; a *fully removed* connector simply
     # leaves ``active_connectors()`` and never reaches the roster at all.
     connector_disabled: tuple[str, ...] = ()
+    # N3: scanner action overrides from the *active* policy's synced
+    # ``data.json`` (``scanner_overrides`` → scanner_type → severity →
+    # ``{install,file,runtime}`` → action). These live only in the active
+    # policy YAML / ``data.json``; today only ``policy show`` surfaces them, so
+    # ``defenseclaw status`` and the Overview guardrail summary are blind to a
+    # policy that, say, downgrades a scanner surface to ``warn``/``allow``.
+    # Stored flattened as ``(scanner_type, severity, surface, action)`` so the
+    # frozen dataclass stays hashable; empty for the default config → no
+    # Overview change. Populated by the adapter (which reads ``data.json``);
+    # rendered via :func:`format_scanner_overrides_summary` /
+    # :meth:`OverviewPanelModel.scanner_overrides_summary`.
+    scanner_overrides: tuple[tuple[str, str, str, str], ...] = ()
 
     def connector_is_disabled(self, name: str) -> bool:
         """True when ``name`` is in the roster but enforcement is disabled."""
@@ -699,6 +711,20 @@ class OverviewPanelModel:
             return self.cfg.claw_mode.strip().lower()
         return "openclaw"
 
+    def scanner_overrides_summary(self) -> str:
+        """One-line summary of the active policy's scanner action overrides,
+        or ``""`` when there are none (N3).
+
+        Surfaces overrides that today live only in ``policy show`` /
+        ``data.json``. Empty (the default config) renders nothing, so the
+        Overview is unchanged until the adapter populates
+        :attr:`OverviewConfig.scanner_overrides`. See
+        :func:`format_scanner_overrides_summary`.
+        """
+        if self.cfg is None:
+            return ""
+        return format_scanner_overrides_summary(self.cfg.scanner_overrides)
+
     def multi_connector_rows(self) -> list[tuple[str, str]]:
         """Per-connector ``(label, detail)`` rows for the Overview.
 
@@ -1027,6 +1053,42 @@ def active_connector_name(health: HealthSnapshot | None, mode: str) -> str:
     return "openclaw"
 
 
+def format_scanner_overrides_summary(
+    overrides: tuple[tuple[str, str, str, str], ...],
+) -> str:
+    """One-line summary of active-policy scanner action overrides (N3).
+
+    ``overrides`` is the flattened ``(scanner_type, severity, surface, action)``
+    view of the active policy's ``scanner_overrides`` (synced into
+    ``data.json``; only ``policy show`` surfaces these today). Returns ``""``
+    when empty, so the Overview / ``defenseclaw status`` render nothing for the
+    common default config. Groups by scanner then severity, e.g.::
+
+        secrets: HIGH file=block, install=warn | pii: MEDIUM runtime=allow
+
+    Malformed entries (not 4 fields, or missing scanner/surface) are skipped so
+    a bad adapter payload degrades to a partial line rather than raising.
+    """
+    grouped: dict[str, dict[str, list[str]]] = {}
+    for entry in overrides:
+        if len(entry) != 4:
+            continue
+        scanner, severity, surface, action = (str(part).strip() for part in entry)
+        if not scanner or not surface:
+            continue
+        grouped.setdefault(scanner, {}).setdefault(severity.upper(), []).append(
+            f"{surface}={action}"
+        )
+    parts: list[str] = []
+    for scanner, sevs in grouped.items():
+        sev_parts = [
+            f"{severity + ' ' if severity else ''}{', '.join(surfaces)}"
+            for severity, surfaces in sevs.items()
+        ]
+        parts.append(f"{scanner}: {'; '.join(sev_parts)}")
+    return " | ".join(parts)
+
+
 def sort_ai_discovery_signals_for_overview(signals: tuple[AIUsageSignal, ...]) -> tuple[AIUsageSignal, ...]:
     def rank(signal: AIUsageSignal) -> tuple[int, float, float, str]:
         state_rank = {
@@ -1156,6 +1218,7 @@ __all__ = [
     "format_age",
     "format_duration",
     "format_scan_age",
+    "format_scanner_overrides_summary",
     "friendly_connector_name",
     "gateway_health_is_broken",
     "keys_overflow_suffix",
