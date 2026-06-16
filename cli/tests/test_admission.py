@@ -116,8 +116,8 @@ class TestEvaluateAdmissionConnectorScope(_StoreTestBase):
     """N2: the admission gate honors a per-connector block/allow.
 
     A block scoped to connector A blocks at A's gate but not B's; a global
-    (connector="") block blocks at every connector's gate; the block check
-    precedes the allow check, so a global block wins over a connector allow.
+    (connector="") block blocks at connectors with no scoped install action;
+    scoped install actions are authoritative for their connector.
     """
 
     def test_per_connector_block_only_blocks_that_connector(self):
@@ -159,14 +159,34 @@ class TestEvaluateAdmissionConnectorScope(_StoreTestBase):
         )
         self.assertEqual(other.verdict, "scan")
 
-    def test_global_block_wins_over_connector_allow(self):
+    def test_connector_allow_overrides_global_block_for_that_connector(self):
         self.pe.block("mcp", "demo", "global block")
         self.pe.allow_for_connector("mcp", "demo", "codex", "scoped allow")
         d = evaluate_admission(
             self.pe, policy_dir=self.policy_dir,
             target_type="mcp", name="demo", connector="codex",
         )
+        self.assertEqual(d.verdict, "allowed")
+        self.assertEqual(d.source, "manual-allow")
+        other = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="demo", connector="opencode",
+        )
+        self.assertEqual(other.verdict, "blocked")
+
+    def test_connector_block_wins_over_global_allow_for_that_connector(self):
+        self.pe.allow("mcp", "demo", "global allow")
+        self.pe.block_for_connector("mcp", "demo", "codex", "scoped block")
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="demo", connector="codex",
+        )
         self.assertEqual(d.verdict, "blocked")
+        other = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="demo", connector="opencode",
+        )
+        self.assertEqual(other.verdict, "allowed")
 
 
 class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
@@ -226,6 +246,45 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
             target_type="mcp", name="risky",
             connector="openhands",
             asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-deny")
+
+    def test_connector_allowed_rule_overrides_global_denied_rule(self):
+        policy = self._asset_policy(
+            denied=[SimpleNamespace(name="tool")],
+            allowed=[SimpleNamespace(name="tool", connector="codex")],
+        )
+        codex = evaluate_asset_policy(
+            policy, target_type="mcp", name="tool", connector="codex",
+        )
+        self.assertEqual(codex.verdict, "allowed")
+        self.assertEqual(codex.source, "asset-policy-allow")
+
+        hermes = evaluate_asset_policy(
+            policy, target_type="mcp", name="tool", connector="hermes",
+        )
+        self.assertEqual(hermes.verdict, "blocked")
+        self.assertEqual(hermes.source, "asset-policy-deny")
+
+    def test_connector_denied_rule_overrides_global_allowed_rule(self):
+        policy = self._asset_policy(
+            allowed=[SimpleNamespace(name="tool")],
+            denied=[SimpleNamespace(name="tool", connector="codex")],
+        )
+        d = evaluate_asset_policy(
+            policy, target_type="mcp", name="tool", connector="codex",
+        )
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-deny")
+
+    def test_connector_denied_rule_wins_over_connector_allowed_rule(self):
+        policy = self._asset_policy(
+            allowed=[SimpleNamespace(name="tool", connector="codex")],
+            denied=[SimpleNamespace(name="tool", connector="codex")],
+        )
+        d = evaluate_asset_policy(
+            policy, target_type="mcp", name="tool", connector="codex",
         )
         self.assertEqual(d.verdict, "blocked")
         self.assertEqual(d.source, "asset-policy-deny")

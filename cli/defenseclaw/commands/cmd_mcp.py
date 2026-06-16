@@ -748,18 +748,11 @@ def scan(
     )
     from defenseclaw.enforce import PolicyEngine
 
-    connector = resolve_list_connector(app, connector_flag)
-
     if scan_all:
         # An explicit --connector targets exactly one connector; otherwise a
-        # multi-connector install scans every active connector's servers so
-        # "--all" means every connector, not just the primary (parity).
-        if connector_flag:
-            connectors: list[str] = [connector]
-        elif hasattr(app.cfg, "active_connectors") and len(app.cfg.active_connectors()) > 1:
-            connectors = list(app.cfg.active_connectors())
-        else:
-            connectors = [connector]
+        # no-flag scan uses the plural resolver so a zero-connector config exits
+        # with guidance instead of falling back through active_connector().
+        connectors = resolve_list_connectors(app, connector_flag)
         for c in connectors:
             if len(connectors) > 1 and not as_json:
                 click.secho(f"\n── connector: {c} ──", fg="cyan")
@@ -773,6 +766,7 @@ def scan(
         # M4: a discoverable single-connector scan — `mcp scan --connector X`
         # (no --all, no target) scans every server on that one connector.
         if connector_flag:
+            connector = resolve_list_connector(app, connector_flag)
             _scan_all_mcp(
                 app, connector, analyzers, scan_prompts, scan_resources,
                 scan_instructions, as_json, allow_private=allow_private,
@@ -787,6 +781,8 @@ def scan(
             "  defenseclaw mcp scan --all             every server on every active "
             "connector"
         )
+
+    connector = resolve_list_connector(app, connector_flag)
 
     pe = PolicyEngine(app.store)
     common = dict(

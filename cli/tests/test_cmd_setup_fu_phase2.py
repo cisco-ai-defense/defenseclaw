@@ -138,6 +138,50 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertEqual(gc.block_message, "g")
         self.assertEqual(gc.hook_fail_mode, "closed")
 
+    def test_setup_guardrail_connector_flag_writes_existing_override_fields(self):
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.mode = "observe"
+        gc.block_message = ""
+        with _stub_side_effects():
+            res = _invoke(
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--no-restart",
+                    "--no-verify",
+                    "--connector",
+                    "codex",
+                    "--mode",
+                    "action",
+                    "--block-message",
+                    "codex-only",
+                    "--human-approval",
+                    "--hilt-min-severity",
+                    "CRITICAL",
+                    "--rule-pack",
+                    "strict",
+                ],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(gc.mode, "observe")
+        self.assertEqual(gc.block_message, "")
+        self.assertFalse(gc.hilt.enabled)
+
+        codex = gc.connectors["codex"]
+        hermes = gc.connectors["hermes"]
+        self.assertEqual(codex.mode, "action")
+        self.assertEqual(codex.block_message, "codex-only")
+        self.assertTrue(codex.rule_pack_dir.endswith(os.path.join("policies", "guardrail", "strict")))
+        self.assertIsNotNone(codex.hilt)
+        self.assertTrue(codex.hilt.enabled)
+        self.assertEqual(codex.hilt.min_severity, "CRITICAL")
+        self.assertEqual(hermes.mode, "")
+        self.assertEqual(hermes.block_message, "")
+        self.assertEqual(hermes.rule_pack_dir, "")
+        self.assertIsNone(hermes.hilt)
+
     def test_omitting_flags_preserves_existing(self):
         # SU-02/J1 preserve-don't-clobber: a re-run without flags keeps judge.
         self._seed_map("codex", "hermes")

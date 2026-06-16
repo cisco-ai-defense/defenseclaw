@@ -1618,8 +1618,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     Adding a plugin also removes it from the block list.
 
     Bare ``plugin allow <name>`` allows the plugin GLOBALLY (every connector);
-    ``--connector <name>`` narrows the allow to one peer. A global block still
-    wins over a connector-scoped allow.
+    ``--connector <name>`` narrows the allow to one peer.
     """
     from defenseclaw.enforce import PolicyEngine
 
@@ -1659,7 +1658,12 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 
     entry = pe.get_action("plugin", plugin_name)
     runtime_entry = entry
-    connector = app.cfg.guardrail.connector.lower() or "openclaw"
+    connector = (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else getattr(getattr(app.cfg, "guardrail", None), "connector", "")
+    )
+    connector = _normalize_runtime_connector(connector)
     for candidate in _plugin_runtime_candidates(name, connector):
         resolved_entry = pe.get_action("plugin", candidate)
         if resolved_entry is not None and resolved_entry.actions.runtime == "disable":

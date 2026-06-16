@@ -3193,11 +3193,17 @@ def _apply_guardrail_extra_options(
     pack_dir = _resolve_rule_pack_dir(app, rule_pack=rule_pack, rule_pack_dir=rule_pack_dir)
     if pack_dir is not None:
         _apply_rule_pack_selection(gc, pack_dir, connector=connector)
-    if human_approval is not None:
-        gc.hilt.enabled = bool(human_approval)
-    if hilt_min_severity is not None:
-        gc.hilt.min_severity = str(hilt_min_severity or "HIGH").upper()
-    elif not gc.hilt.min_severity:
+    per_connector = bool(
+        connector and getattr(gc, "connectors", None) and connector in gc.connectors
+    )
+    _apply_hilt_setup(
+        gc,
+        connector=connector or "",
+        per_connector=per_connector,
+        hilt=human_approval,
+        hilt_min_severity=hilt_min_severity,
+    )
+    if not per_connector and not gc.hilt.min_severity:
         gc.hilt.min_severity = "HIGH"
     if disable_redaction is not None:
         app.cfg.privacy.disable_redaction = bool(disable_redaction)
@@ -3600,13 +3606,28 @@ def setup_guardrail(
         # back during scripted installs. Filesystem detection is only
         # used in the interactive picker where the operator can see and
         # confirm the suggested default.
+        target_connector = agent_name or ""
         if agent_name:
-            gc.connector = agent_name
+            target_connector = normalize_connector(agent_name)
+            if not (getattr(gc, "connectors", None) and target_connector in gc.connectors):
+                gc.connector = target_connector
         elif not gc.connector or gc.connector == "openclaw":
             picked = _read_picked_connector(getattr(app.cfg, "data_dir", None))
             if picked:
                 gc.connector = picked
-        gc.mode = guard_mode or gc.mode or "observe"
+        target_connector = target_connector or gc.connector
+        per_connector_target = bool(
+            target_connector
+            and getattr(gc, "connectors", None)
+            and target_connector in gc.connectors
+        )
+        if per_connector_target:
+            if guard_mode:
+                gc.connectors[target_connector].mode = guard_mode
+            elif not gc.mode:
+                gc.mode = "observe"
+        else:
+            gc.mode = guard_mode or gc.mode or "observe"
         gc.scanner_mode = scanner_mode or gc.scanner_mode or "local"
         if cisco_endpoint is not None:
             aid.endpoint = cisco_endpoint
@@ -3615,7 +3636,9 @@ def setup_guardrail(
         if cisco_timeout_ms is not None:
             aid.timeout_ms = cisco_timeout_ms
         gc.port = guard_port or gc.port or 4000
-        if block_message is not None:
+        if block_message is not None and per_connector_target:
+            gc.connectors[target_connector].block_message = block_message
+        elif block_message is not None:
             gc.block_message = block_message
         if detection_strategy is not None:
             gc.detection_strategy = detection_strategy
@@ -3624,7 +3647,7 @@ def setup_guardrail(
             gc,
             rule_pack=rule_pack,
             rule_pack_dir=rule_pack_dir,
-            connector=gc.connector,
+            connector=target_connector,
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
             disable_redaction=disable_redaction,
@@ -3714,7 +3737,7 @@ def setup_guardrail(
             # supply --llm-role explicitly.
             gc.llm_role = (
                 "judge_and_agent"
-                if (gc.connector or "openclaw") in _PROXY_BACKED_CONNECTORS
+                if (target_connector or gc.connector or "openclaw") in _PROXY_BACKED_CONNECTORS
                 else "judge_only"
             )
         gc.enabled = True
@@ -3778,9 +3801,15 @@ def setup_guardrail(
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
         return
 
+    setup_connector = target_connector if non_interactive else gc.connector
+    setup_mode = (
+        gc.effective_mode(setup_connector)
+        if setup_connector and hasattr(gc, "effective_mode")
+        else (gc.mode or "observe")
+    )
     if not _check_connector_version_supported_for_setup(
-        gc.connector or "openclaw",
-        mode=gc.mode or "observe",
+        setup_connector or gc.connector or "openclaw",
+        mode=setup_mode or "observe",
         data_dir=getattr(app.cfg, "data_dir", None),
     ):
         return

@@ -890,9 +890,15 @@ def scan(
         _scan_via_sidecar(app, target=scan_dir or target, name=name, as_json=as_json)
         return
 
+    from defenseclaw.commands import _scan_ui, resolve_list_connector
+
+    # Resolve before policy checks so --connector X reads that connector's
+    # scoped allow/block rows instead of the global row only.
+    connector = resolve_list_connector(app, connector_flag)
+
     pe = PolicyEngine(app.store)
 
-    if pe.is_blocked("skill", name):
+    if pe.is_blocked_for_connector("skill", name, connector):
         click.echo(f"BLOCKED: {name} — remove from block list first", err=True)
         raise SystemExit(2)
 
@@ -912,17 +918,12 @@ def scan(
         target_type="skill",
         name=name,
         source_path=scan_dir or "",
+        connector=connector,
     )
     if allow_decision.verdict == "allowed" and allow_decision.source == "manual-allow":
         click.echo(ux._style(f"ALLOWED (skip scan): {name}", fg="green"))
         return
 
-    from defenseclaw.commands import _scan_ui, resolve_list_connector
-
-    # resolve_list_connector validates --connector against the active set
-    # and falls back to the active connector when unset (single-connector
-    # behaviour unchanged).
-    connector = resolve_list_connector(app, connector_flag)
     ctx = _scan_ui.ScanContext.for_skill(
         connector=connector,
         paths=[scan_dir],
@@ -977,7 +978,7 @@ def scan(
             )
 
     if not result.is_clean() and action:
-        _apply_scan_enforcement(app, pe, name, scan_dir, result)
+        _apply_scan_enforcement(app, pe, name, scan_dir, result, connector=connector)
 
 
 def _apply_scan_enforcement(
@@ -993,13 +994,13 @@ def _apply_scan_enforcement(
     Allow-listed skills are exempt from auto-enforcement — only a manual
     ``skill block`` can override an allow entry.
 
-    ``connector`` attributes the enforcement to a specific connector during
-    multi-connector ``--all``/``--connector`` scans; defaults to the active
-    connector so single-connector behaviour is unchanged.
+    ``connector`` attributes persisted enforcement to a specific connector
+    during multi-connector ``--all``/``--connector`` scans. A bare ``None`` keeps
+    legacy global writes for direct internal callers.
     """
     from defenseclaw.enforce.admission import evaluate_admission
 
-    resolved_connector = connector or (
+    eval_connector = connector or (
         app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else ""
     )
     decision = evaluate_admission(
@@ -1010,7 +1011,7 @@ def _apply_scan_enforcement(
         source_path=skill_path,
         scan_result=result,
         fallback_actions=app.cfg.skill_actions,
-        connector=resolved_connector,
+        connector=eval_connector,
         asset_policy=app.cfg.asset_policy,
     )
 
@@ -1030,12 +1031,18 @@ def _apply_scan_enforcement(
     applied_actions: list[str] = []
 
     if action_cfg.file == "quarantine":
-        pe.set_source_path("skill", skill_name, skill_path)
+        if connector:
+            pe.set_source_path("skill", skill_name, skill_path, connector)
+        else:
+            pe.set_source_path("skill", skill_name, skill_path)
         se = SkillEnforcer(app.cfg.quarantine_dir)
         dest = se.quarantine(skill_name, skill_path)
         if dest:
             applied_actions.append(f"quarantined to {dest}")
-            pe.quarantine("skill", skill_name, enforcement_reason)
+            if connector:
+                pe.quarantine_for_connector("skill", skill_name, connector, enforcement_reason)
+            else:
+                pe.quarantine("skill", skill_name, enforcement_reason)
         else:
             click.echo(f"[scan] quarantine failed for {skill_name!r}", err=True)
 
@@ -1044,12 +1051,18 @@ def _apply_scan_enforcement(
             client = _sidecar_client(app)
             client.disable_skill(skill_name)
             applied_actions.append("disabled via gateway")
-            pe.disable("skill", skill_name, enforcement_reason)
+            if connector:
+                pe.disable_for_connector("skill", skill_name, connector, enforcement_reason)
+            else:
+                pe.disable("skill", skill_name, enforcement_reason)
         except Exception:
             click.echo(f"[scan] gateway disable failed for {skill_name!r} — skipping runtime disable", err=True)
 
     if action_cfg.install == "block":
-        pe.block("skill", skill_name, enforcement_reason)
+        if connector:
+            pe.block_for_connector("skill", skill_name, connector, enforcement_reason)
+        else:
+            pe.block("skill", skill_name, enforcement_reason)
         applied_actions.append("added to block list")
 
     if applied_actions:
@@ -2346,9 +2359,11 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
 
     # Search scope: one connector (--connector) or the union of every active
     # connector's skill dirs, so a non-primary connector's skill is reachable.
+    resolved_connector = ""
     if connector_flag:
         from defenseclaw.commands import resolve_list_connector
-        scope_dirs = app.cfg.skill_dirs(resolve_list_connector(app, connector_flag))
+        resolved_connector = resolve_list_connector(app, connector_flag)
+        scope_dirs = app.cfg.skill_dirs(resolved_connector)
     else:
         scope_dirs = _all_active_skill_dirs(app)
 
@@ -2404,8 +2419,12 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
         reason = "manual quarantine via CLI"
 
     pe = PolicyEngine(app.store)
-    pe.quarantine("skill", skill_name, reason)
-    pe.set_source_path("skill", skill_name, skill_path)
+    if resolved_connector:
+        pe.quarantine_for_connector("skill", skill_name, resolved_connector, reason)
+        pe.set_source_path("skill", skill_name, skill_path, resolved_connector)
+    else:
+        pe.quarantine("skill", skill_name, reason)
+        pe.set_source_path("skill", skill_name, skill_path)
 
     if app.logger:
         app.logger.log_action("skill-quarantine", skill_name, f"reason={reason}, dest={dest}")

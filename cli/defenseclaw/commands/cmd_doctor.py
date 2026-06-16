@@ -3440,11 +3440,10 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
     (or the gateway crashes mid-handoff), we end up with the *prior*
     connector's residue on disk.
 
-    This check walks every known connector that isn't the active one
-    and emits a WARN listing any artifact still present. The matching
-    fixer (``fix: connector residue``) calls
-    ``defenseclaw-gateway connector teardown --connector <name>`` for
-    each residual connector to clean it up via the canonical sentinel.
+    This check walks every known connector that isn't the active one and emits
+    a WARN listing any artifact still present. Operators should clean each
+    residual connector directly with
+    ``defenseclaw-gateway connector teardown --connector <name>``.
     """
     data_dir = getattr(cfg, "data_dir", "") or ""
     if not data_dir:
@@ -3499,8 +3498,9 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
         paths = ", ".join(by_conn[name])
         parts.append(f"{name}: {paths}")
     detail = (
-        "found residue from inactive connectors — " + "; ".join(parts) + ". Run 'defenseclaw doctor --fix' to invoke "
-        "'defenseclaw-gateway connector teardown' for each, or "
+        "found residue from inactive connectors — " + "; ".join(parts)
+        + ". Run 'defenseclaw-gateway connector teardown --connector <name>' "
+        "for each residual connector, or "
         "'defenseclaw uninstall --keep-openclaw' for a manual sweep."
     )
     _emit("warn", "Connector residue", detail, r=r)
