@@ -1696,9 +1696,21 @@ def test_guardrail_section_renders_per_connector_override_groups() -> None:
     assert fields["guardrail.connectors.hermes.mode"].value == "observe"
     assert fields["guardrail.connectors.hermes.rule_pack_dir"].value == "/global/pack"
 
-    # Only the two landed write-surfaces are exposed — no fail-mode/hilt/judge.
-    per_connector = {k for k in fields if k.startswith("guardrail.connectors.")}
-    assert all(k.endswith((".mode", ".rule_pack_dir")) for k in per_connector)
+    # B4/E4c/E4d: every per-connector guardrail control is now exposed.
+    for connector in ("codex", "hermes"):
+        for leaf in (
+            "mode",
+            "rule_pack_dir",
+            "enabled",
+            "hook_fail_mode",
+            "hilt.enabled",
+            "hilt.min_severity",
+            "block_message",
+        ):
+            assert f"guardrail.connectors.{connector}.{leaf}" in fields
+        # Judge is membership in guardrail.judge.hook_connectors, not a
+        # PerConnectorGuardrailConfig field — exposed under the judge key.
+        assert f"guardrail.judge.hook_connectors.{connector}" in fields
 
 
 def test_per_connector_guardrail_field_writes_typed_override() -> None:
@@ -1737,3 +1749,171 @@ def test_guardrail_section_single_connector_omits_per_connector_groups() -> None
     section = _section(build_setup_sections(cfg), "Guardrail")
     per_connector = [f.key for f in section.fields if f.key.startswith("guardrail.connectors.")]
     assert per_connector == []
+
+
+# --- B4/E4c/E4d: the remaining per-connector guardrail controls ---------------
+
+
+def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
+    from defenseclaw.config import (
+        Config,
+        GuardrailConfig,
+        HILTConfig,
+        JudgeConfig,
+        PerConnectorGuardrailConfig,
+    )
+
+    cfg = Config(
+        guardrail=GuardrailConfig(
+            enabled=True,
+            mode="observe",
+            hook_fail_mode="open",
+            block_message="global blocked",
+            hilt=HILTConfig(enabled=False, min_severity="HIGH"),
+            judge=JudgeConfig(hook_connectors=["codex"]),
+            connectors={
+                "codex": PerConnectorGuardrailConfig(
+                    enabled=False,
+                    hook_fail_mode="closed",
+                    block_message="codex blocked",
+                    hilt=HILTConfig(enabled=True, min_severity="LOW"),
+                ),
+                "hermes": PerConnectorGuardrailConfig(),
+            },
+        )
+    )
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+
+    # codex pins its own overrides — the editor shows the *effective* value.
+    assert fields["guardrail.connectors.codex.enabled"].value == "false"
+    assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "closed"
+    assert fields["guardrail.connectors.codex.block_message"].value == "codex blocked"
+    assert fields["guardrail.connectors.codex.hilt.enabled"].value == "true"
+    assert fields["guardrail.connectors.codex.hilt.min_severity"].value == "LOW"
+    # codex is in the judge gate; hermes is not.
+    assert fields["guardrail.judge.hook_connectors.codex"].value == "true"
+    assert fields["guardrail.judge.hook_connectors.hermes"].value == "false"
+
+    # hermes has no override → inherits the global effective values.
+    assert fields["guardrail.connectors.hermes.enabled"].value == "true"
+    assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "open"
+    assert fields["guardrail.connectors.hermes.block_message"].value == "global blocked"
+    assert fields["guardrail.connectors.hermes.hilt.enabled"].value == "false"
+    assert fields["guardrail.connectors.hermes.hilt.min_severity"].value == "HIGH"
+
+
+def test_guardrail_section_judge_gate_star_marks_every_connector() -> None:
+    from defenseclaw.config import (
+        Config,
+        GuardrailConfig,
+        JudgeConfig,
+        PerConnectorGuardrailConfig,
+    )
+
+    cfg = Config(
+        guardrail=GuardrailConfig(
+            enabled=True,
+            judge=JudgeConfig(hook_connectors=["*"]),
+            connectors={
+                "codex": PerConnectorGuardrailConfig(),
+                "hermes": PerConnectorGuardrailConfig(),
+            },
+        )
+    )
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+    assert fields["guardrail.judge.hook_connectors.codex"].value == "true"
+    assert fields["guardrail.judge.hook_connectors.hermes"].value == "true"
+
+
+def test_per_connector_enabled_writes_typed_bool() -> None:
+    from defenseclaw.config import PerConnectorGuardrailConfig
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    apply_config_field(cfg, "guardrail.connectors.hermes.enabled", "false")
+
+    entry = cfg.guardrail.connectors["hermes"]
+    assert isinstance(entry, PerConnectorGuardrailConfig)
+    assert entry.enabled is False  # a real bool, not the string "false".
+    assert cfg.guardrail.effective_enabled("hermes") is False
+    # codex (the sibling) is untouched → still inherits the default (enabled).
+    assert cfg.guardrail.effective_enabled("codex") is True
+
+
+def test_per_connector_hook_fail_mode_normalizes() -> None:
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "closed")
+    assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "closed"
+    assert cfg.guardrail.effective_hook_fail_mode("hermes") == "closed"
+    # Anything that is not "closed" normalizes to "open".
+    apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "open")
+    assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_per_connector_block_message_writes_string() -> None:
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    apply_config_field(cfg, "guardrail.connectors.hermes.block_message", "hermes denied")
+    assert cfg.guardrail.connectors["hermes"].block_message == "hermes denied"
+    assert cfg.guardrail.effective_block_message("hermes") == "hermes denied"
+    # The global + peer message are untouched (round-trip safe).
+    assert cfg.guardrail.effective_block_message("codex") == cfg.guardrail.block_message
+
+
+def test_per_connector_hilt_materializes_typed_block() -> None:
+    from defenseclaw.config import HILTConfig
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    # hermes starts with hilt=None (inherits global) — first write materializes
+    # a typed HILTConfig that explicitly overrides the global block.
+    apply_config_field(cfg, "guardrail.connectors.hermes.hilt.enabled", "true")
+    apply_config_field(cfg, "guardrail.connectors.hermes.hilt.min_severity", "low")
+
+    block = cfg.guardrail.connectors["hermes"].hilt
+    assert isinstance(block, HILTConfig)
+    assert block.enabled is True
+    assert block.min_severity == "LOW"  # upper-cased like the global path.
+    resolved = cfg.guardrail.effective_hilt("hermes")
+    assert resolved is block
+    # codex never grew a hilt block → still inherits the global one.
+    assert cfg.guardrail.connectors["codex"].hilt is None
+
+
+def test_judge_toggle_adds_connector_to_gate() -> None:
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    cfg.guardrail.judge.hook_connectors = []
+    apply_config_field(cfg, "guardrail.judge.hook_connectors.codex", "true")
+    assert cfg.guardrail.judge.hook_connectors == ["codex"]
+    # Idempotent: a second add does not duplicate.
+    apply_config_field(cfg, "guardrail.judge.hook_connectors.codex", "true")
+    assert cfg.guardrail.judge.hook_connectors == ["codex"]
+
+
+def test_judge_toggle_removes_connector_surgically() -> None:
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    cfg.guardrail.judge.hook_connectors = ["codex", "hermes"]
+    apply_config_field(cfg, "guardrail.judge.hook_connectors.codex", "false")
+    # Only codex is removed; hermes (the peer entry) is preserved.
+    assert cfg.guardrail.judge.hook_connectors == ["hermes"]
+
+
+def test_judge_toggle_star_gate_enable_is_noop_disable_left_intact() -> None:
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    cfg.guardrail.judge.hook_connectors = ["*"]
+    # Enable on a "*" gate: already covered → no change.
+    apply_config_field(cfg, "guardrail.judge.hook_connectors.codex", "true")
+    assert cfg.guardrail.judge.hook_connectors == ["*"]
+    # Disable on a "*" gate: leave "*" intact (J6 — never expand-then-subtract).
+    apply_config_field(cfg, "guardrail.judge.hook_connectors.codex", "false")
+    assert cfg.guardrail.judge.hook_connectors == ["*"]
