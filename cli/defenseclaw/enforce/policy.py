@@ -85,9 +85,11 @@ class PolicyEngine:
         if self.store:
             self.store.clear_action_field(target_type, name, "runtime")
 
-    def set_source_path(self, target_type: str, name: str, path: str) -> None:
+    def set_source_path(
+        self, target_type: str, name: str, path: str, connector: str = "",
+    ) -> None:
         if self.store:
-            self.store.set_source_path(target_type, name, path)
+            self.store.set_source_path(target_type, name, path, connector)
 
     def set_action(
         self, target_type: str, name: str, source_path: str,
@@ -96,10 +98,12 @@ class PolicyEngine:
         if self.store:
             self.store.set_action(target_type, name, source_path, state, reason)
 
-    def get_action(self, target_type: str, name: str) -> ActionEntry | None:
+    def get_action(
+        self, target_type: str, name: str, connector: str = "",
+    ) -> ActionEntry | None:
         if not self.store:
             return None
-        return self.store.get_action(target_type, name)
+        return self.store.get_action(target_type, name, connector)
 
     def list_blocked(self) -> list[ActionEntry]:
         if not self.store:
@@ -215,6 +219,42 @@ class PolicyEngine:
         """Clear the install action for ``connector`` (exact-match; ""=global)."""
         if self.store:
             self.store.clear_action_field(target_type, name, "install", connector)
+
+    def quarantine_for_connector(
+        self, target_type: str, name: str, connector: str, reason: str,
+    ) -> None:
+        """Quarantine ``name`` for ``connector`` (file dimension; exact-match;
+        connector="" = global). Mirrors :meth:`quarantine`."""
+        if self.store:
+            self.store.set_action_field(
+                target_type, name, "file", "quarantine", reason, connector,
+            )
+
+    def clear_quarantine_for_connector(
+        self, target_type: str, name: str, connector: str = "",
+    ) -> None:
+        """Clear the file (quarantine) action for ``connector`` (exact-match;
+        ""=global). Mirrors :meth:`clear_quarantine`."""
+        if self.store:
+            self.store.clear_action_field(target_type, name, "file", connector)
+
+    def disable_for_connector(
+        self, target_type: str, name: str, connector: str, reason: str,
+    ) -> None:
+        """Disable ``name`` at runtime for ``connector`` (runtime dimension;
+        exact-match; connector="" = global). Mirrors :meth:`disable`."""
+        if self.store:
+            self.store.set_action_field(
+                target_type, name, "runtime", "disable", reason, connector,
+            )
+
+    def enable_for_connector(
+        self, target_type: str, name: str, connector: str = "",
+    ) -> None:
+        """Clear the runtime (disable) action for ``connector`` (exact-match;
+        ""=global). Mirrors :meth:`enable`."""
+        if self.store:
+            self.store.clear_action_field(target_type, name, "runtime", connector)
 
     def remove_action_for_connector(
         self, target_type: str, name: str, connector: str = "",
