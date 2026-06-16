@@ -180,6 +180,129 @@ func (e *PolicyEngine) RemoveAction(targetType, name string) error {
 }
 
 // ----------------------------------------------------------------------------
+// Connector-scoped enforcement helpers (N2 — per-connector mcp
+// block/allow/unblock)
+//
+// The connector dimension lives in the audit store's per-connector "connector"
+// column (the SK-4 foundation), which is distinct from the
+// "@<connector>/<tool>" name-encoding the tool gate uses below. A bare entry
+// (connector="") is GLOBAL — it applies to every connector; a non-empty
+// connector NARROWS the entry to that peer.
+//
+// Reads resolve most-specific-wins: the connector-scoped entry is checked
+// first, then the global entry falls through — so a global block still applies
+// to every connector while a connector-scoped block applies only to its peer.
+// Because the block check precedes the allow check at the gate, a global (or
+// connector-scoped) block wins over a connector-scoped allow. Writes are
+// exact-match on connector (the actions table is unique on
+// (target_type, target_name, connector)). Mirrors the *_for_connector methods
+// in cli/defenseclaw/enforce/policy.py.
+// ----------------------------------------------------------------------------
+
+// IsBlockedForConnector reports whether name is blocked for connector, checking
+// the connector-scoped entry first and then the bare global entry.
+func (e *PolicyEngine) IsBlockedForConnector(targetType, name, connector string) (bool, error) {
+	if e.store == nil {
+		return false, nil
+	}
+	if connector != "" {
+		blocked, err := e.store.HasActionForConnector(targetType, name, connector, "install", "block")
+		if err != nil {
+			return false, err
+		}
+		if blocked {
+			return true, nil
+		}
+	}
+	return e.store.HasAction(targetType, name, "install", "block")
+}
+
+// IsAllowedForConnector reports whether name is allowed for connector, checking
+// the connector-scoped entry first and then the bare global entry. Callers must
+// consult IsBlockedForConnector first so a block wins over an allow.
+func (e *PolicyEngine) IsAllowedForConnector(targetType, name, connector string) (bool, error) {
+	if e.store == nil {
+		return false, nil
+	}
+	if connector != "" {
+		allowed, err := e.store.HasActionForConnector(targetType, name, connector, "install", "allow")
+		if err != nil {
+			return false, err
+		}
+		if allowed {
+			return true, nil
+		}
+	}
+	return e.store.HasAction(targetType, name, "install", "allow")
+}
+
+// IsQuarantinedForConnector reports whether name is quarantined for connector,
+// checking the connector-scoped entry first and then the bare global entry.
+func (e *PolicyEngine) IsQuarantinedForConnector(targetType, name, connector string) (bool, error) {
+	if e.store == nil {
+		return false, nil
+	}
+	if connector != "" {
+		q, err := e.store.HasActionForConnector(targetType, name, connector, "file", "quarantine")
+		if err != nil {
+			return false, err
+		}
+		if q {
+			return true, nil
+		}
+	}
+	return e.store.HasAction(targetType, name, "file", "quarantine")
+}
+
+// BlockForConnector blocks name for connector (exact-match; connector="" = global).
+func (e *PolicyEngine) BlockForConnector(targetType, name, connector, reason string) error {
+	if e.store == nil {
+		return nil
+	}
+	return e.store.SetActionFieldForConnector(targetType, name, connector, "install", "block", reason)
+}
+
+// AllowForConnector allows name for connector and clears residual file/runtime
+// enforcement (exact-match; connector="" = global). Mirrors Allow().
+func (e *PolicyEngine) AllowForConnector(targetType, name, connector, reason string) error {
+	if e.store == nil {
+		return nil
+	}
+	if err := e.store.SetActionFieldForConnector(targetType, name, connector, "install", "allow", reason); err != nil {
+		return err
+	}
+	var errs []error
+	if err := e.store.ClearActionFieldForConnector(targetType, name, connector, "file"); err != nil {
+		errs = append(errs, fmt.Errorf("clear file action: %w", err))
+	}
+	if err := e.store.ClearActionFieldForConnector(targetType, name, connector, "runtime"); err != nil {
+		errs = append(errs, fmt.Errorf("clear runtime action: %w", err))
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("enforce: allow %s %q connector %q: partial cleanup: %v", targetType, name, connector, errs)
+	}
+	return nil
+}
+
+// UnblockForConnector clears the install action for connector (exact-match;
+// connector="" = global).
+func (e *PolicyEngine) UnblockForConnector(targetType, name, connector string) error {
+	if e.store == nil {
+		return nil
+	}
+	return e.store.ClearActionFieldForConnector(targetType, name, connector, "install")
+}
+
+// RemoveActionForConnector removes all enforcement for connector (exact-match;
+// connector="" = global).
+func (e *PolicyEngine) RemoveActionForConnector(targetType, name, connector string) error {
+	if e.store == nil {
+		return nil
+	}
+	return e.store.RemoveActionForConnector(targetType, name, connector)
+}
+
+// ----------------------------------------------------------------------------
 // Connector-scoped tool helpers (targetType="tool", key "@<connector>/<tool>")
 //
 // The "@" sigil keeps connector scoping distinct from the orthogonal

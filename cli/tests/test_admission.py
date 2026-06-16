@@ -112,6 +112,63 @@ class TestEvaluateAdmissionAllowed(_StoreTestBase):
         self.assertEqual(d.source, "policy-allow")
 
 
+class TestEvaluateAdmissionConnectorScope(_StoreTestBase):
+    """N2: the admission gate honors a per-connector block/allow.
+
+    A block scoped to connector A blocks at A's gate but not B's; a global
+    (connector="") block blocks at every connector's gate; the block check
+    precedes the allow check, so a global block wins over a connector allow.
+    """
+
+    def test_per_connector_block_only_blocks_that_connector(self):
+        self.pe.block_for_connector("mcp", "demo", "codex", "scoped block")
+        blocked = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="demo", connector="codex",
+        )
+        self.assertEqual(blocked.verdict, "blocked")
+        self.assertEqual(blocked.source, "manual-block")
+        # A different connector is NOT blocked by the codex-scoped entry.
+        other = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="demo", connector="opencode",
+        )
+        self.assertNotEqual(other.verdict, "blocked")
+
+    def test_global_block_blocks_every_connector(self):
+        self.pe.block("mcp", "demo", "global block")
+        for connector in ("codex", "opencode", ""):
+            d = evaluate_admission(
+                self.pe, policy_dir=self.policy_dir,
+                target_type="mcp", name="demo", connector=connector,
+            )
+            self.assertEqual(d.verdict, "blocked", connector)
+
+    def test_per_connector_allow_only_allows_that_connector(self):
+        self.pe.allow_for_connector("mcp", "demo", "codex", "scoped allow")
+        allowed = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="demo", connector="codex",
+        )
+        self.assertEqual(allowed.verdict, "allowed")
+        self.assertEqual(allowed.source, "manual-allow")
+        # Another connector falls through to scan (no scoped/global allow).
+        other = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="demo", connector="opencode",
+        )
+        self.assertEqual(other.verdict, "scan")
+
+    def test_global_block_wins_over_connector_allow(self):
+        self.pe.block("mcp", "demo", "global block")
+        self.pe.allow_for_connector("mcp", "demo", "codex", "scoped allow")
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="demo", connector="codex",
+        )
+        self.assertEqual(d.verdict, "blocked")
+
+
 class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
     def _asset_policy(self, *, mode="action", default="allow", registry_required=False,
                       registry=None, allowed=None, denied=None,
