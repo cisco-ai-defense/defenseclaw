@@ -112,14 +112,6 @@ def _find_policy(app: AppContext, name: str) -> str | None:
     return None
 
 
-def _find_active_policy_path(app: AppContext) -> str | None:
-    """Find the path to the currently active policy."""
-    name = _get_active_policy_name(app)
-    if name:
-        return _find_policy(app, name)
-    return None
-
-
 @click.group()
 def policy() -> None:
     """Manage DefenseClaw security policies — create, list, show, activate, validate, test, edit."""
@@ -134,10 +126,10 @@ def policy() -> None:
 @click.option("--description", "-d", default="", help="Policy description")
 @click.option("--from-preset", type=click.Choice(["default", "strict", "permissive"]),
               help="Start from a built-in preset and customize")
-@click.option("--scan-on-install/--no-scan-on-install", default=True,
-              help="Scan on install (default: true)")
-@click.option("--allow-list-bypass/--no-allow-list-bypass", default=True,
-              help="Allow-listed items skip scan (default: true)")
+@click.option("--scan-on-install/--no-scan-on-install", "scan_on_install", default=None,
+              help="Scan on install (default: true; with --from-preset, keep the preset's value)")
+@click.option("--allow-list-bypass/--no-allow-list-bypass", "allow_list_bypass", default=None,
+              help="Allow-listed items skip scan (default: true; with --from-preset, keep the preset's value)")
 @click.option("--critical-action", type=click.Choice(["block", "warn", "allow"]), default=None,
               help="Action for CRITICAL findings")
 @click.option("--high-action", type=click.Choice(["block", "warn", "allow"]), default=None,
@@ -152,8 +144,8 @@ def create(
     name: str,
     description: str,
     from_preset: str | None,
-    scan_on_install: bool,
-    allow_list_bypass: bool,
+    scan_on_install: bool | None,
+    allow_list_bypass: bool | None,
     critical_action: str | None,
     high_action: str | None,
     medium_action: str | None,
@@ -205,9 +197,24 @@ def create(
     elif "description" not in data:
         data["description"] = f"Custom policy: {name}"
 
-    data.setdefault("admission", {})
-    data["admission"]["scan_on_install"] = scan_on_install
-    data["admission"]["allow_list_bypass_scan"] = allow_list_bypass
+    # Tri-state admission flags (OTHER-3): the boolean flags default to
+    # None when the operator doesn't pass them. Only override when set,
+    # so `create --from-preset P` keeps P's admission values instead of
+    # silently resetting them to the CLI defaults. When a flag is omitted
+    # and the loaded data (preset or _default_policy_data) doesn't carry
+    # the key, fall back to the default-policy admission block — this
+    # preserves the historical bare-`create` behaviour (scan_on_install
+    # true / allow_list_bypass_scan true).
+    admission = data.setdefault("admission", {})
+    default_admission = _default_policy_data()["admission"]
+    if scan_on_install is not None:
+        admission["scan_on_install"] = scan_on_install
+    elif "scan_on_install" not in admission:
+        admission["scan_on_install"] = default_admission["scan_on_install"]
+    if allow_list_bypass is not None:
+        admission["allow_list_bypass_scan"] = allow_list_bypass
+    elif "allow_list_bypass_scan" not in admission:
+        admission["allow_list_bypass_scan"] = default_admission["allow_list_bypass_scan"]
 
     actions = data.setdefault("skill_actions", {})
     severity_overrides = {
@@ -406,6 +413,21 @@ def show(app: AppContext, name: str) -> None:
 @pass_ctx
 def activate(app: AppContext, name: str) -> None:
     """Activate a policy — applies it to config.yaml and syncs OPA data.json."""
+    path = _activate_policy(app, name)
+    ux.ok(f"Policy '{name}' activated.")
+    if app.logger:
+        app.logger.log_action("policy-activate", name, f"source={path}")
+
+
+def _activate_policy(app: AppContext, name: str) -> str:
+    """Apply the named policy to config.yaml and sync OPA data.json.
+
+    Returns the resolved source path. Raises ``SystemExit(1)`` when the
+    policy can't be found. Shared by the ``activate`` command and the N1
+    ``delete --force`` fallback, which re-activates ``default`` after
+    removing the policy that was live so the gateway never keeps
+    enforcing a deleted policy.
+    """
     path = _find_policy(app, name)
     if not path:
         click.echo(f"error: policy '{name}' not found", err=True)
@@ -496,10 +518,7 @@ def activate(app: AppContext, name: str) -> None:
     click.echo(f"Config updated with policy '{name}'.")
 
     _sync_opa_data(app, data)
-
-    ux.ok(f"Policy '{name}' activated.")
-    if app.logger:
-        app.logger.log_action("policy-activate", name, f"source={path}")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -508,9 +527,19 @@ def activate(app: AppContext, name: str) -> None:
 
 @policy.command()
 @click.argument("name")
+@click.option("--force", is_flag=True,
+              help="Delete even if active; re-activates 'default' afterward")
 @pass_ctx
-def delete(app: AppContext, name: str) -> None:
-    """Delete a custom policy."""
+def delete(app: AppContext, name: str, force: bool) -> None:
+    """Delete a custom policy.
+
+    Deleting the policy that is currently active is refused unless
+    ``--force`` is given (N1): otherwise the gateway's live data.json
+    keeps pointing at — and enforcing — a policy whose YAML no longer
+    exists, and ``policy list`` still marks it ``[active]``. With
+    ``--force`` the policy is removed and ``default`` is re-activated so
+    the live pointer is never left dangling.
+    """
     name = _sanitize_policy_name(name)
 
     if name in BUILTIN_POLICIES:
@@ -534,10 +563,28 @@ def delete(app: AppContext, name: str) -> None:
         click.echo(f"error: policy '{name}' not found in {user_dir}", err=True)
         raise SystemExit(1)
 
+    is_active = name == _get_active_policy_name(app)
+    if is_active and not force:
+        click.echo(
+            f"error: policy '{name}' is active — refusing to delete. "
+            "Activate another policy first, or pass --force to delete it "
+            "and re-activate 'default'.",
+            err=True,
+        )
+        raise SystemExit(1)
+
     os.remove(real_path)
     ux.ok(f"Policy '{name}' deleted.")
     if app.logger:
         app.logger.log_action("policy-delete", name, "")
+
+    # N1: the live data.json still names the just-deleted policy. Re-point
+    # it at the default built-in so the gateway never keeps enforcing a
+    # policy whose source is gone. Only reachable with --force (the guard
+    # above blocks the implicit case).
+    if is_active:
+        ux.warn(f"'{name}' was the active policy — re-activating 'default'.")
+        _activate_policy(app, "default")
 
 
 # ---------------------------------------------------------------------------
@@ -693,7 +740,7 @@ def edit() -> None:
 def edit_actions(app: AppContext, severity: str, runtime: str | None, file_action: str | None,
                  install: str | None, policy_name: str | None) -> None:
     """Edit severity actions for the global policy."""
-    path, data = _resolve_editable_policy(app, policy_name)
+    path, data, name = _resolve_editable_policy(app, policy_name)
 
     actions = data.setdefault("skill_actions", {})
     entry = actions.setdefault(severity, {})
@@ -713,8 +760,7 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
         click.echo("No changes specified.")
         return
 
-    _save_policy(path, data)
-    _sync_opa_data(app, data)
+    _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Updated {severity.upper()}: {', '.join(changed)}")
 
 
@@ -733,7 +779,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
                  file_action: str | None, install: str | None, remove: bool,
                  policy_name: str | None) -> None:
     """Edit per-scanner-type severity overrides."""
-    path, data = _resolve_editable_policy(app, policy_name)
+    path, data, name = _resolve_editable_policy(app, policy_name)
 
     overrides = data.setdefault("scanner_overrides", {})
 
@@ -743,8 +789,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
             del scanner_ovr[severity]
             if not scanner_ovr:
                 del overrides[scanner_type]
-            _save_policy(path, data)
-            _sync_opa_data(app, data)
+            _save_and_maybe_sync(app, path, data, name)
             ux.ok(f"Removed {scanner_type}/{severity.upper()} override.")
         else:
             click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
@@ -768,8 +813,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
         click.echo("No changes specified. Use --runtime, --file, and/or --install.")
         return
 
-    _save_policy(path, data)
-    _sync_opa_data(app, data)
+    _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Updated scanner override {scanner_type}/{severity.upper()}: {', '.join(changed)}")
 
 
@@ -791,7 +835,7 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
                    cisco_trust_level: str | None, add_pattern: tuple, remove_pattern: tuple,
                    set_severity_mapping: tuple, policy_name: str | None) -> None:
     """Edit guardrail thresholds, patterns, and severity mappings."""
-    path, data = _resolve_editable_policy(app, policy_name)
+    path, data, name = _resolve_editable_policy(app, policy_name)
 
     guardrail = data.setdefault("guardrail", {})
     changed = []
@@ -832,8 +876,7 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
         click.echo("No changes specified.")
         return
 
-    _save_policy(path, data)
-    _sync_opa_data(app, data)
+    _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Guardrail updated: {', '.join(changed)}")
 
 
@@ -851,7 +894,7 @@ def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple
                   remove_domain: tuple, add_blocked: tuple, remove_blocked: tuple,
                   add_port: tuple, remove_port: tuple, policy_name: str | None) -> None:
     """Edit egress firewall rules (domains, ports, blocked destinations)."""
-    path, data = _resolve_editable_policy(app, policy_name)
+    path, data, name = _resolve_editable_policy(app, policy_name)
 
     fw = data.setdefault("firewall", {})
     changed = []
@@ -894,8 +937,7 @@ def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple
         click.echo("No changes specified.")
         return
 
-    _save_policy(path, data)
-    _sync_opa_data(app, data)
+    _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Firewall updated: {', '.join(changed)}")
 
 
@@ -977,25 +1019,100 @@ def _get_active_policy_name(app: AppContext) -> str | None:
     return None
 
 
-def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[str, dict]:
-    """Resolve the policy to edit. Returns (path, data). Raises SystemExit if not found."""
+def _is_bundled_path(path: str) -> bool:
+    """True when ``path`` resolves inside the bundled (wheel/repo) policies dir."""
+    bundled = _bundled_policies_dir()
+    try:
+        real_path = os.path.realpath(path)
+        real_bundled = os.path.realpath(bundled)
+    except OSError:
+        return False
+    return real_path == real_bundled or real_path.startswith(real_bundled + os.sep)
+
+
+def _user_policy_dest(app: AppContext, name: str) -> str:
+    """Return the guarded user-dir destination path for a policy ``name``.
+
+    Mirrors the symlink / path-escape guards used by ``create`` and
+    ``delete`` so copy-on-write can never be tricked into writing outside
+    the user policy directory.
+    """
+    name = _sanitize_policy_name(name)
+    policies_dir = _ensure_policies_dir(app)
+    dest = os.path.join(policies_dir, f"{name}.yaml")
+
+    if os.path.islink(dest):
+        click.echo(f"error: policy '{name}' is a symbolic link — refusing to write", err=True)
+        raise SystemExit(1)
+
+    real_dest = os.path.realpath(dest)
+    real_dir = os.path.realpath(policies_dir)
+    if not real_dest.startswith(real_dir + os.sep):
+        click.echo("error: resolved path escapes policy directory", err=True)
+        raise SystemExit(1)
+    return dest
+
+
+def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[str, dict, str]:
+    """Resolve the policy to edit. Returns ``(path, data, name)``.
+
+    ``path`` is always a writable location under the user policy dir:
+    editing a built-in copies it out of the bundled wheel dir first
+    (copy-on-write, OTHER-4) so we never write back into site-packages,
+    which is lost on upgrade and may be read-only. ``name`` is the
+    resolved policy name so callers can gate the live OPA sync on whether
+    the edited policy is the active one (OTHER-2). Raises ``SystemExit(1)``
+    when the policy can't be found.
+    """
     if policy_name:
-        path = _find_policy(app, policy_name)
+        name = _sanitize_policy_name(policy_name)
+        path = _find_policy(app, name)
         if not path:
             click.echo(f"error: policy '{policy_name}' not found", err=True)
             raise SystemExit(1)
-        if policy_name in BUILTIN_POLICIES and path.startswith(_bundled_policies_dir()):
-            click.echo(f"warning: editing built-in policy '{policy_name}' in-place", err=True)
     else:
-        path = _find_active_policy_path(app)
+        name = _get_active_policy_name(app)
+        path = _find_policy(app, name) if name else None
         if not path:
             click.echo(
-                "error: no active policy found. Activate one first: defenseclaw policy activate <name>",
+                "error: no active policy found. Activate one first: "
+                "defenseclaw policy activate <name>",
                 err=True,
             )
             raise SystemExit(1)
 
-    return path, _load_policy(path)
+    data = _load_policy(path)
+
+    # Copy-on-write (OTHER-4): editing a built-in must not mutate the
+    # bundled copy in the wheel/repo. Redirect the write to the user
+    # policy dir; the full policy data is saved there, shadowing the
+    # built-in (list/show already prefer the user dir).
+    if _is_bundled_path(path):
+        dest = _user_policy_dest(app, name)
+        click.echo(ux.dim(f"Editing built-in '{name}' as a user copy at {dest}"))
+        path = dest
+
+    return path, data, name
+
+
+def _save_and_maybe_sync(app: AppContext, path: str, data: dict, name: str) -> None:
+    """Persist the edited policy YAML, syncing the live OPA data.json only
+    when the edited policy is the active one (OTHER-2).
+
+    Editing a non-active draft must not overwrite the gateway's live
+    data.json nor silently stamp the draft as active (a "tweak a draft"
+    action becoming a live policy swap). When the edited policy isn't
+    active we save the YAML and tell the operator how to apply it.
+    """
+    _save_policy(path, data)
+    active = _get_active_policy_name(app)
+    if active is not None and name == active:
+        _sync_opa_data(app, data)
+    else:
+        click.echo(
+            f"  {ux.dim('Saved draft. Activate with:')} "
+            f"defenseclaw policy activate {name}"
+        )
 
 
 def _opa_runtime_action(runtime: str) -> str:
