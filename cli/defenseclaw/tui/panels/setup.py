@@ -4460,17 +4460,90 @@ def _effective_guardrail_value(
     return str(get_config_value(cfg, fallback_path, "") or "")
 
 
+def _effective_guardrail_bool(
+    cfg: object | Mapping[str, Any] | None,
+    connector: str,
+    method_name: str,
+    fallback_path: str,
+    *,
+    default: bool,
+) -> str:
+    """Resolve a connector's effective *boolean* guardrail value for display (B4).
+
+    The boolean sibling of :func:`_effective_guardrail_value`: calls the matching
+    ``GuardrailConfig.effective_*(connector)`` resolver and returns the canonical
+    ``"true"``/``"false"`` string the ``bool`` :class:`ConfigField` renders, so a
+    connector shows what it actually uses (its override, or the inherited
+    default). Falls back to the raw global path (then *default*) for dict-backed
+    configs that don't expose the resolver.
+    """
+
+    guardrail = getattr(cfg, "guardrail", None)
+    resolver = getattr(guardrail, method_name, None) if guardrail is not None else None
+    if callable(resolver):
+        try:
+            return "true" if resolver(connector) else "false"
+        except Exception:  # noqa: BLE001 - degrade to the raw global value.
+            pass
+    if fallback_path:
+        return "true" if get_config_value(cfg, fallback_path, default) else "false"
+    return "true" if default else "false"
+
+
+def _effective_hilt_block(cfg: object | Mapping[str, Any] | None, connector: str) -> object | None:
+    """Resolve a connector's effective HILT (human-approval) block (B4/E4d).
+
+    Returns the connector's override block when present, else the inherited
+    global block, via ``GuardrailConfig.effective_hilt(connector)`` — so the
+    editor shows the approval state the connector actually uses. Degrades to the
+    raw global ``guardrail.hilt`` (then ``None``) for dict-backed configs.
+    """
+
+    guardrail = getattr(cfg, "guardrail", None)
+    resolver = getattr(guardrail, "effective_hilt", None) if guardrail is not None else None
+    if callable(resolver):
+        try:
+            return resolver(connector)
+        except Exception:  # noqa: BLE001 - degrade to the raw global block.
+            pass
+    return getattr(guardrail, "hilt", None) if guardrail is not None else None
+
+
+def _effective_judge_hook_state(cfg: object | Mapping[str, Any] | None, connector: str) -> str:
+    """Effective hook-lane judge state for *connector* (B4 — Flag #2 judge half).
+
+    Per-connector judge is membership in the ``guardrail.judge.hook_connectors``
+    gate list, not a :class:`PerConnectorGuardrailConfig` field. Returns
+    ``"true"`` when the gate covers this connector — either via the ``"*"``
+    every-connector sentinel or an explicit (fold/whitespace-tolerant) entry,
+    matching the Go gate (``JudgeConfig.HookConnectorEnabled``) the gateway
+    enforces and the CLI's ``_gate_is_all``/``_gate_contains``.
+    """
+
+    gate = get_config_value(cfg, "guardrail.judge.hook_connectors", None)
+    if not isinstance(gate, (list, tuple)):
+        return "false"
+    name = connector.strip().lower()
+    for entry in gate:
+        token = str(entry or "").strip()
+        if token == "*" or token.lower() == name:
+            return "true"
+    return "false"
+
+
 def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> list[ConfigField]:
     """Build per-connector guardrail override groups for the config editor (B4).
 
-    One header + editable rows per active connector. Only ``mode`` and
-    ``rule_pack_dir`` are exposed — the per-connector WRITE-surface for the
-    remaining fields (hook_fail_mode / block_message / hilt / judge) is still
-    being wired by the ``fu/setup`` lane (and a per-connector judge field does
-    not exist in the config schema), so they are deliberately omitted here to
-    avoid racing that surface. Each row displays the *effective* value (the
-    connector's override, or the inherited global) and is wired to the raw
-    per-connector path so editing it pins an override for that connector only.
+    One header + editable rows per active connector covering every per-connector
+    guardrail control: ``mode``, ``rule_pack_dir``, ``enabled`` (E4c),
+    ``hook_fail_mode``, ``hilt`` enable + min-severity, ``block_message`` (E4d),
+    and the hook-lane judge toggle (membership in
+    ``guardrail.judge.hook_connectors``). Each row displays the *effective* value
+    (the connector's override, or the inherited global) and is wired to the raw
+    per-connector path so editing it pins an override for that connector only —
+    the apply path (``setup_state._apply_per_connector_guardrail_field`` /
+    ``_apply_judge_hook_connector_toggle``) writes a typed override so the
+    boot-loop ``effective_*`` resolvers keep working.
     """
 
     keys = _guardrail_connector_keys(cfg)
@@ -4511,6 +4584,99 @@ def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> l
             _field_with_original(
                 pack_field,
                 _effective_guardrail_value(cfg, connector, "effective_rule_pack_dir", "guardrail.rule_pack_dir"),
+            )
+        )
+        # E4c: per-connector guardrail enable/disable. ``effective_enabled``
+        # defaults to True (an unset override inherits "enabled"), so there is
+        # no global path to fall back to — the default IS enabled.
+        enabled_field = _field(
+            cfg,
+            "Enabled",
+            f"guardrail.connectors.{connector}.enabled",
+            "bool",
+            hint=f"Per-connector guardrail switch for {connector} (off tears down its hooks; on by default).",
+        )
+        rows.append(
+            _field_with_original(
+                enabled_field,
+                _effective_guardrail_bool(cfg, connector, "effective_enabled", "", default=True),
+            )
+        )
+        # E4d: hook-response fail mode (open=allow on failure, closed=block).
+        fail_field = _field(
+            cfg,
+            "Hook Fail Mode",
+            f"guardrail.connectors.{connector}.hook_fail_mode",
+            "choice",
+            ("open", "closed"),
+            f"Per-connector hook fail mode for {connector} (inherits the global mode when unset).",
+        )
+        rows.append(
+            _field_with_original(
+                fail_field,
+                _effective_guardrail_value(cfg, connector, "effective_hook_fail_mode", "guardrail.hook_fail_mode"),
+            )
+        )
+        # E4d: human-in-the-loop approval. A per-connector hilt block fully
+        # replaces the global one (see GuardrailConfig.effective_hilt), so show
+        # the effective block's enable + min-severity.
+        hilt_block = _effective_hilt_block(cfg, connector)
+        hilt_field = _field(
+            cfg,
+            "Human Approval",
+            f"guardrail.connectors.{connector}.hilt.enabled",
+            "bool",
+            hint=f"Ask before supported high-risk actions for {connector}.",
+        )
+        rows.append(
+            _field_with_original(
+                hilt_field,
+                "true" if getattr(hilt_block, "enabled", False) else "false",
+            )
+        )
+        sev_field = _field(
+            cfg,
+            "Approval Min Severity",
+            f"guardrail.connectors.{connector}.hilt.min_severity",
+            "choice",
+            ("HIGH", "MEDIUM", "LOW", "CRITICAL"),
+            f"Minimum severity for {connector} approval prompts.",
+        )
+        rows.append(
+            _field_with_original(
+                sev_field,
+                str(getattr(hilt_block, "min_severity", "") or ""),
+            )
+        )
+        # E4d: per-connector block message returned when a request is blocked.
+        block_field = _field(
+            cfg,
+            "Block Message",
+            f"guardrail.connectors.{connector}.block_message",
+            hint=f"Per-connector block message for {connector} (blank inherits the global message).",
+        )
+        rows.append(
+            _field_with_original(
+                block_field,
+                _effective_guardrail_value(cfg, connector, "effective_block_message", "guardrail.block_message"),
+            )
+        )
+        # Flag #2 (judge half): per-connector judge is membership in the
+        # guardrail.judge.hook_connectors LIST, not a PerConnectorGuardrailConfig
+        # field. The synthetic ``guardrail.judge.hook_connectors.<c>`` key routes
+        # to _apply_judge_hook_connector_toggle, which adds/removes this one name
+        # surgically (mirrors the CLI --judge-hook-connectors).
+        judge_field = _field(
+            cfg,
+            "LLM Judge (hook lane)",
+            f"guardrail.judge.hook_connectors.{connector}",
+            "bool",
+            hint=f"Add/remove {connector} from the hook-lane judge gate (guardrail.judge.hook_connectors).",
+        )
+        rows.append(
+            _field_with_original(
+                judge_field,
+                _effective_judge_hook_state(cfg, connector),
             )
         )
     return rows
@@ -4636,9 +4802,10 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             cfg, "Tool Injection", "guardrail.judge.tool_injection", "bool", hint="Detect payloads in tool-call args."
         ),
     ]
-    # B4: per-connector override groups (mode + rule-pack) so the connectors[...]
-    # map the boot loop actually reads is visible + editable, not just the
-    # singular/global fields above.
+    # B4: per-connector override groups (mode, rule-pack, enabled, fail-mode,
+    # hilt, block-message, judge) so the connectors[...] map the boot loop
+    # actually reads is fully visible + editable, not just the singular/global
+    # fields above.
     fields.extend(_per_connector_guardrail_fields(cfg))
     return ConfigSection("Guardrail", tuple(fields), "LLM-egress proxy and judge settings.")
 

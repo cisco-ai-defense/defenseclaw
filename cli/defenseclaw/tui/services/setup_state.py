@@ -627,45 +627,86 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
     if key.startswith("guardrail.connectors."):
         _apply_per_connector_guardrail_field(cfg, key, value)
         return
+    if key.startswith("guardrail.judge.hook_connectors."):
+        _apply_judge_hook_connector_toggle(cfg, key, value)
+        return
     _apply_typed_field(cfg, key, value)
 
 
-# B4: the config editor exposes per-connector guardrail overrides only for the
-# fields whose per-connector WRITE-surface has already landed (``mode`` and
-# ``rule_pack_dir`` — see cmd_setup). The remaining per-connector fields
-# (``hook_fail_mode``/``block_message``/``hilt``/judge) are still being wired by
-# the ``fu/setup`` lane and a per-connector judge field does not exist in the
-# config schema at all, so they are intentionally NOT editable here yet.
-_PER_CONNECTOR_GUARDRAIL_FIELDS = frozenset({"mode", "rule_pack_dir"})
+# B4/E4c/E4d: the config editor exposes every per-connector guardrail override.
+# Top-level ``PerConnectorGuardrailConfig`` fields editable via the 4-part
+# ``guardrail.connectors.<c>.<field>`` key; the nested HILT block is edited via
+# the 5-part ``guardrail.connectors.<c>.hilt.<field>`` key. ``rule_pack_dir`` /
+# ``block_message`` are free-text strings; ``mode`` is an enum string;
+# ``hook_fail_mode`` normalizes to open/closed; ``enabled`` is a bool. The
+# per-connector judge state is NOT here — it is membership in the
+# ``guardrail.judge.hook_connectors`` list (see _apply_judge_hook_connector_toggle).
+_PER_CONNECTOR_GUARDRAIL_STR_FIELDS = frozenset({"mode", "rule_pack_dir", "block_message"})
+_PER_CONNECTOR_GUARDRAIL_BOOL_FIELDS = frozenset({"enabled"})
+_PER_CONNECTOR_GUARDRAIL_FAIL_MODE_FIELDS = frozenset({"hook_fail_mode"})
+_PER_CONNECTOR_GUARDRAIL_FIELDS = (
+    _PER_CONNECTOR_GUARDRAIL_STR_FIELDS
+    | _PER_CONNECTOR_GUARDRAIL_BOOL_FIELDS
+    | _PER_CONNECTOR_GUARDRAIL_FAIL_MODE_FIELDS
+)
+_PER_CONNECTOR_HILT_FIELDS = frozenset({"enabled", "min_severity"})
+
+
+def _coerce_per_connector_value(field_name: str, value: str) -> Any:
+    """Coerce a TUI string value to the type ``PerConnectorGuardrailConfig`` expects.
+
+    Bool fields (``enabled``) parse ``"true"``/``"false"``; ``hook_fail_mode``
+    normalizes to the ``open``/``closed`` enum (mirroring cmd_setup's
+    ``_apply_hook_connector_setup`` and the global guardrail apply path);
+    everything else is a free-text / enum string written verbatim.
+    """
+
+    if field_name in _PER_CONNECTOR_GUARDRAIL_BOOL_FIELDS:
+        return value.strip().lower() == "true"
+    if field_name in _PER_CONNECTOR_GUARDRAIL_FAIL_MODE_FIELDS:
+        return "closed" if value.strip().lower() == "closed" else "open"
+    return value
 
 
 def _apply_per_connector_guardrail_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
-    """Write one ``guardrail.connectors.<c>.<field>`` override (B4).
+    """Write one ``guardrail.connectors.<c>.<field>`` override (B4/E4c/E4d).
 
     The naive ``set_config_value`` traversal would replace a typed
     :class:`PerConnectorGuardrailConfig` entry with a plain ``dict`` (or create
     one for a missing connector), which breaks the ``effective_*`` resolvers the
     boot loop reads. So construct/locate the typed entry and ``setattr`` the
-    field, preserving any sibling overrides. Dict-backed configs (test fixtures)
+    field (type-coerced), preserving any sibling overrides. The nested HILT block
+    (``guardrail.connectors.<c>.hilt.<field>``, 5 parts) is materialized on first
+    write so a present block explicitly overrides the global one (see
+    ``GuardrailConfig.effective_hilt``). Dict-backed configs (test fixtures)
     round-trip fine through the nested-dict fallback.
     """
 
     parts = key.split(".")
-    if len(parts) != 4 or parts[1] != "connectors":
+    # guardrail.connectors.<c>.<field>        -> 4 parts (top-level override)
+    # guardrail.connectors.<c>.hilt.<field>   -> 5 parts (nested HILT block)
+    if len(parts) not in (4, 5) or parts[1] != "connectors":
         return
     connector = parts[2].strip()
+    if not connector:
+        return
     field_name = parts[3]
-    if not connector or field_name not in _PER_CONNECTOR_GUARDRAIL_FIELDS:
+    is_hilt = len(parts) == 5
+    if is_hilt:
+        if field_name != "hilt" or parts[4] not in _PER_CONNECTOR_HILT_FIELDS:
+            return
+    elif field_name not in _PER_CONNECTOR_GUARDRAIL_FIELDS:
         return
     guardrail = getattr(cfg, "guardrail", None)
     connectors = getattr(guardrail, "connectors", None) if guardrail is not None else None
     if guardrail is None or isinstance(guardrail, Mapping) or not isinstance(connectors, dict):
         # Dict-backed config (or an unexpected shape): nested-dict creation
         # round-trips cleanly and never strips a typed sibling.
-        set_config_value(cfg, key, value)
+        leaf = parts[4] if is_hilt else field_name
+        set_config_value(cfg, key, _coerce_per_connector_value(leaf, value))
         return
     try:
-        from defenseclaw.config import PerConnectorGuardrailConfig  # noqa: PLC0415
+        from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig  # noqa: PLC0415
     except Exception:  # noqa: BLE001 - degrade to the dict fallback.
         set_config_value(cfg, key, value)
         return
@@ -678,7 +719,69 @@ def _apply_per_connector_guardrail_field(cfg: object | dict[str, Any], key: str,
                     setattr(replacement, sib_key, sib_val)
         connectors[connector] = replacement
         entry = replacement
-    setattr(entry, field_name, value)
+    if is_hilt:
+        # A present hilt block (even partial) explicitly overrides the global
+        # one — materialize it on first touch, then set just the named leaf.
+        block = entry.hilt if isinstance(entry.hilt, HILTConfig) else HILTConfig()
+        entry.hilt = block
+        sub_field = parts[4]
+        if sub_field == "enabled":
+            block.enabled = value.strip().lower() == "true"
+        else:  # min_severity
+            block.min_severity = value.strip().upper()
+        return
+    setattr(entry, field_name, _coerce_per_connector_value(field_name, value))
+
+
+def _apply_judge_hook_connector_toggle(cfg: object | dict[str, Any], key: str, value: str) -> None:
+    """Add/remove one connector from ``guardrail.judge.hook_connectors`` (B4 judge half).
+
+    The per-connector hook-lane judge state is NOT a
+    :class:`PerConnectorGuardrailConfig` field — it is membership in the
+    ``guardrail.judge.hook_connectors`` gate list. The synthetic
+    ``guardrail.judge.hook_connectors.<c>`` key from the editor toggles that
+    membership *surgically* (mirrors the CLI ``--judge-hook-connectors`` opt-in /
+    opt-out): a ``true`` write adds the connector, a ``false`` write removes it.
+    The rest of the judge block is never touched. The ``"*"`` every-connector
+    sentinel is honored like the CLI's ``_apply_judge_enablement`` opt-out: a
+    ``true`` write is a no-op (already covered) and a ``false`` write leaves
+    ``"*"`` intact rather than expanding-then-subtracting (the ambiguous case the
+    CLI deliberately refuses, J6).
+    """
+
+    parts = key.split(".")
+    if len(parts) != 4 or parts[:3] != ["guardrail", "judge", "hook_connectors"]:
+        return
+    connector = parts[3].strip()
+    if not connector:
+        return
+    enable = value.strip().lower() == "true"
+    name = connector.lower()
+
+    gate_raw = _get_path(cfg, "guardrail.judge.hook_connectors", None)
+    gate = [str(entry) for entry in gate_raw] if isinstance(gate_raw, (list, tuple)) else []
+    is_all = any((entry or "").strip() == "*" for entry in gate)
+    contains = any((entry or "").strip().lower() == name for entry in gate)
+
+    if enable:
+        if is_all or contains:
+            return  # already covered — nothing to change.
+        new_gate = [*gate, connector]
+    else:
+        if is_all or not contains:
+            # "*" covers everything (leave it intact, J6); or the connector
+            # was never listed — either way there is nothing to remove.
+            return
+        new_gate = [entry for entry in gate if (entry or "").strip().lower() != name]
+
+    # Write the list back, preserving a typed JudgeConfig (never a dict that
+    # would shadow the dataclass) — set_config_value handles the dict fixture.
+    guardrail = getattr(cfg, "guardrail", None)
+    judge = getattr(guardrail, "judge", None) if guardrail is not None else None
+    if judge is not None and not isinstance(judge, Mapping):
+        judge.hook_connectors = new_gate
+    else:
+        set_config_value(cfg, "guardrail.judge.hook_connectors", new_gate)
 
 
 def split_csv(value: str) -> list[str]:
