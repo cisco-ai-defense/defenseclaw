@@ -1190,6 +1190,27 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	// the connector is this sidecar's configured connector (see connectorName).
 	if r.policy != nil {
 		conn := r.connectorName()
+		// MCP-server runtime block: a blocked MCP server (global or
+		// --connector scoped) denies all of its tools at runtime. Checked
+		// before the per-tool block/allow so a server-level block wins over a
+		// tool-level allow; fails closed + loud on a store lookup error.
+		if deny, server, reason := mcpServerRuntimeBlock(r.policy, payload.Tool, conn); deny {
+			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED mcp tool call: %s\n", reason)
+			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-blocked", payload.Tool, payload.ID,
+				"reason=mcp-server-block server="+server)
+			vctx := r.streamContext(payload.SessionID, audit.CorrelationEnvelope{
+				DestinationApp: "builtin",
+				ToolName:       payload.Tool,
+				ToolID:         payload.ID,
+			})
+			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
+				"block", reason,
+				gatewaylog.SeverityHigh, []string{"policy:block", "surface:mcp_server_block"}, 0)
+			if r.otel != nil {
+				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
+			}
+			return
+		}
 		if blocked, _ := r.policy.IsToolBlockedForConnector(payload.Tool, conn); blocked {
 			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED tool call: %q is on the static block list\n", payload.Tool)
 			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-blocked", payload.Tool, payload.ID, "reason=static-block-list")

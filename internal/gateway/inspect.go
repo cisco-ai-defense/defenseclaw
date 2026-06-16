@@ -288,6 +288,28 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 	//   block @C/T → block T → allow @C/T → allow T → scan
 	if a.store != nil {
 		pe := enforce.NewPolicyEngine(a.store)
+		// MCP-server runtime block: a blocked MCP server denies ALL of its
+		// tools, regardless of any per-tool allow. This is the Go-side runtime
+		// enforcement of `defenseclaw mcp block <server>` (global or
+		// --connector scoped); it is checked before the per-tool block/allow so
+		// a server-level block wins over a tool-level allow, and it fails closed
+		// + loud on a store lookup error.
+		if deny, server, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector); deny {
+			if a.otel != nil {
+				a.otel.EmitPolicyDecision("admission", "blocked", req.Tool, "mcp", reason, map[string]string{
+					"mcp_server_name": server,
+					"connector":       req.Connector,
+					"runtime_surface": "inspect-tool",
+				})
+			}
+			return &ToolInspectVerdict{
+				Action:     "block",
+				Severity:   "HIGH",
+				Confidence: 1.0,
+				Reason:     reason,
+				Findings:   []string{"MCP-BLOCK"},
+			}
+		}
 		if blocked, _ := pe.IsToolBlockedForConnector(req.Tool, req.Connector); blocked {
 			return &ToolInspectVerdict{
 				Action:     "block",
