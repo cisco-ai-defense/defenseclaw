@@ -1374,7 +1374,15 @@ def _do_manual_verdict(
 
 @registry.command("require")
 @click.option("--type", "asset_type",
-              type=click.Choice(["skill", "mcp", "plugin"], case_sensitive=False),
+              # OTHER-5: 'plugin' is intentionally NOT offered. The sync /
+              # promote / approve pipeline is skill+mcp only, so nothing can
+              # ever populate asset_policy.plugin.registry; allowing
+              # `require --type plugin --enabled` here would arm a
+              # default-deny that blocks every plugin with no CLI recovery
+              # path. A pre-existing plugin.registry_required still
+              # round-trips through the loader; clearing it is the doctor
+              # command's job (cmd_doctor.py), not this toggle.
+              type=click.Choice(["skill", "mcp"], case_sensitive=False),
               required=True)
 @click.option("--enabled/--disabled", required=True,
               help="Flip asset_policy.<type>.registry_required")

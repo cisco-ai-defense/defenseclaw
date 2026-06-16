@@ -441,6 +441,18 @@ class TestRegistryRequire(RegistryCommandTestBase):
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(self.app.cfg.asset_policy.mcp.registry_required)
 
+    def test_require_plugin_rejected(self):
+        # OTHER-5: --type plugin is no longer a valid choice. Nothing can
+        # populate asset_policy.plugin.registry, so arming require here
+        # would default-deny every plugin with no CLI recovery path.
+        result = self.invoke([
+            "require", "--type", "plugin", "--enabled",
+        ])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not one of", result.output)
+        # The command body never ran, so the flag stays untouched.
+        self.assertFalse(self.app.cfg.asset_policy.plugin.registry_required)
+
 
 class TestFileAdapterPathValidation(RegistryCommandTestBase):
     """``kind=file`` requires an absolute path so ``manifest.yaml`` is
