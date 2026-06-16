@@ -453,6 +453,113 @@ class TestRegistryRequire(RegistryCommandTestBase):
         # The command body never ran, so the flag stays untouched.
         self.assertFalse(self.app.cfg.asset_policy.plugin.registry_required)
 
+    # -- OTHER-7: per-connector --connector write surface ------------------
+
+    def _reload_cfg(self):
+        """Save-and-reload the config from disk to assert the YAML round-trip
+        (mirrors test_config's _save_and_reload)."""
+        import defenseclaw.config as config_mod
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}):
+            return config_mod.load()
+
+    def test_require_per_connector_write(self):
+        # --connector writes the per-connector override, NOT the global scalar.
+        result = self.invoke([
+            "require", "--type", "mcp", "--enabled",
+            "--connector", "codex", "--json",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        ap = self.app.cfg.asset_policy
+        self.assertIn("codex", ap.connectors)
+        self.assertTrue(ap.connectors["codex"].mcp.registry_required)
+        # Global scalar untouched — back-compat path is independent.
+        self.assertFalse(ap.mcp.registry_required)
+        out = json.loads(result.output)
+        self.assertEqual(out["connector"], "codex")
+        self.assertTrue(out["registry_required"])
+
+    def test_require_global_reports_null_connector(self):
+        # The bare (global) path keeps emitting connector=None.
+        result = self.invoke([
+            "require", "--type", "mcp", "--enabled", "--json",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        out = json.loads(result.output)
+        self.assertIsNone(out["connector"])
+        self.assertTrue(self.app.cfg.asset_policy.mcp.registry_required)
+        self.assertEqual(self.app.cfg.asset_policy.connectors, {})
+
+    def test_require_per_connector_roundtrip_preserves_global_and_peers(self):
+        # A per-connector write must survive a save/reload AND leave the
+        # global block + every other connector untouched.
+        from defenseclaw.config import (
+            PerConnectorAssetPolicy,
+            PerConnectorAssetTypePolicy,
+        )
+        ap = self.app.cfg.asset_policy
+        ap.enabled = True
+        ap.skill.registry_required = True  # global scalar pre-armed
+        ap.connectors["hermes"] = PerConnectorAssetPolicy(
+            mode="observe",
+            mcp=PerConnectorAssetTypePolicy(registry_required=False),
+        )
+        self.app.cfg.save()
+
+        result = self.invoke([
+            "require", "--type", "mcp", "--enabled", "--connector", "codex",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        reloaded = self._reload_cfg().asset_policy
+        # New write survived the YAML round-trip.
+        self.assertTrue(reloaded.connectors["codex"].mcp.registry_required)
+        # Global scalar preserved.
+        self.assertTrue(reloaded.skill.registry_required)
+        # Peer connector preserved, not clobbered.
+        self.assertIn("hermes", reloaded.connectors)
+        self.assertEqual(reloaded.connectors["hermes"].mode, "observe")
+        self.assertFalse(reloaded.connectors["hermes"].mcp.registry_required)
+        # Config still validates (no alias collisions introduced).
+        reloaded.validate()
+
+    def test_require_per_connector_alias_reuse(self):
+        # Writing via an alias-cased connector name must REUSE the existing
+        # normalized key, not mint a colliding second entry that validate()
+        # would reject on the next load.
+        from defenseclaw.config import PerConnectorAssetPolicy
+        self.app.cfg.asset_policy.connectors["codex"] = PerConnectorAssetPolicy(
+            mode="action",
+        )
+        self.app.cfg.save()
+
+        result = self.invoke([
+            "require", "--type", "mcp", "--enabled", "--connector", "Codex",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        ap = self.app.cfg.asset_policy
+        self.assertEqual(list(ap.connectors), ["codex"])  # no duplicate key
+        self.assertEqual(ap.connectors["codex"].mode, "action")  # mode kept
+        self.assertTrue(ap.connectors["codex"].mcp.registry_required)
+        ap.validate()  # no alias collision raised
+
+    def test_require_per_connector_disable(self):
+        from defenseclaw.config import (
+            PerConnectorAssetPolicy,
+            PerConnectorAssetTypePolicy,
+        )
+        self.app.cfg.asset_policy.connectors["codex"] = PerConnectorAssetPolicy(
+            mcp=PerConnectorAssetTypePolicy(registry_required=True),
+        )
+        self.app.cfg.save()
+        result = self.invoke([
+            "require", "--type", "mcp", "--disabled",
+            "--connector", "codex", "--json",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(
+            self.app.cfg.asset_policy.connectors["codex"].mcp.registry_required
+        )
+
 
 class TestFileAdapterPathValidation(RegistryCommandTestBase):
     """``kind=file`` requires an absolute path so ``manifest.yaml`` is
