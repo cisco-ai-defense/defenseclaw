@@ -183,6 +183,56 @@ def _gate_label(gate: list[str]) -> str:
     return str(gate)
 
 
+#: Detection-strategy values under which the judge actually runs. Mirrors
+#: the Go hook lane (``hookJudgeInspect`` in
+#: ``internal/gateway/inspect.go``): ``judge_first`` and ``regex_judge``
+#: reach the judge, while everything else — ``regex_only``, unset, or an
+#: unrecognized value — hits the ``default`` branch and returns early, so
+#: the judge never runs for that direction.
+_JUDGE_RUNNING_STRATEGIES = frozenset({"regex_judge", "judge_first"})
+
+#: Hook-lane message directions the judge can cover. ``tool_call`` is a
+#: separate (currently inert) lane, not part of the message lane that
+#: ``judge list`` describes, so it is intentionally omitted.
+_HOOK_JUDGE_DIRECTIONS = ("prompt", "completion")
+
+
+def _effective_strategy(gc, direction: str) -> str:
+    """Detection strategy in force for ``direction`` on this config.
+
+    Mirrors Go ``GuardrailConfig.EffectiveStrategy``
+    (``internal/config/config.go``): a non-empty per-direction override
+    wins, else the global ``detection_strategy``, else the ``regex_judge``
+    default — so the CLI agrees with the gateway about whether the judge
+    actually runs. ``getattr`` keeps the resolver working against
+    pre-strategy configs (same defensive posture as the
+    ``active_connectors`` guards below).
+    """
+    override = ""
+    if direction == "prompt":
+        override = getattr(gc, "detection_strategy_prompt", "") or ""
+    elif direction == "completion":
+        override = getattr(gc, "detection_strategy_completion", "") or ""
+    elif direction == "tool_call":
+        override = getattr(gc, "detection_strategy_tool_call", "") or ""
+    if override:
+        return override
+    return getattr(gc, "detection_strategy", "") or "regex_judge"
+
+
+def _judged_directions(gc) -> list[str]:
+    """Hook-lane directions whose effective strategy actually runs the judge.
+
+    Empty means the judge never runs for this connector even when gated
+    and enabled — the case ``judge list`` must not paper over as "judged".
+    """
+    return [
+        d
+        for d in _HOOK_JUDGE_DIRECTIONS
+        if _effective_strategy(gc, d) in _JUDGE_RUNNING_STRATEGIES
+    ]
+
+
 def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str) -> None:
     try:
         app.cfg.save()
@@ -469,8 +519,34 @@ def judge_list(app: AppContext) -> None:
                 state = "unknown connector"
                 note = ""
             elif judged_prereqs and gated:
-                state = "judged (hook lane)"
-                note = ""
+                # Gate + prereqs are necessary but not sufficient: the
+                # judge only runs in a direction whose effective detection
+                # strategy isn't regex_only (mirrors hookJudgeInspect's
+                # regex_only early return). Reporting a gated connector as
+                # "judged (hook lane)" while its strategy keeps the judge
+                # from ever running is the overstatement J5 fixes.
+                judged_dirs = _judged_directions(gc)
+                if not judged_dirs:
+                    state = "regex + AID only"
+                    note = (
+                        " — gated, but the judge never runs under this "
+                        f"strategy (prompt: {_effective_strategy(gc, 'prompt')}"
+                        f", completion: {_effective_strategy(gc, 'completion')})"
+                    )
+                elif len(judged_dirs) == len(_HOOK_JUDGE_DIRECTIONS):
+                    state = "judged (hook lane)"
+                    note = ""
+                else:
+                    # Partial coverage — by default completion is
+                    # regex_only, so a gated connector is usually judged on
+                    # prompts only. Name the covered direction and surface
+                    # the skipped direction's strategy so the gap is honest.
+                    covered = judged_dirs[0]
+                    skipped = next(
+                        d for d in _HOOK_JUDGE_DIRECTIONS if d not in judged_dirs
+                    )
+                    state = f"judged (hook lane: {covered})"
+                    note = f" — {skipped}: {_effective_strategy(gc, skipped)}"
             elif gated:
                 state = "gated on, judge inactive"
                 note = (

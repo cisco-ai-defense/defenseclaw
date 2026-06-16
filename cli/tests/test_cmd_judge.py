@@ -43,12 +43,21 @@ def make_ctx(
     hook_connectors: list[str] | None = None,
     hook_timeout: float = 0.0,
     connectors: list[str] | None = None,
+    detection_strategy: str = "",
+    detection_strategy_prompt: str = "",
+    detection_strategy_completion: str = "",
+    detection_strategy_tool_call: str = "",
 ):
     """Minimal AppContext for the judge gate commands.
 
     ``connectors`` is the active multi-connector set (defaults to a
     hermes + opencode hook install, matching the scenario the command
     exists for).
+
+    The ``detection_strategy*`` fields default to empty (which the
+    resolver treats as the ``regex_judge`` default — judge runs), so
+    callers that don't care about strategy keep the fully-judged scenario
+    they had before ``judge list`` started honoring strategy (J5).
     """
     actives = connectors if connectors is not None else ["hermes", "opencode"]
     judge_cfg = SimpleNamespace(
@@ -60,6 +69,10 @@ def make_ctx(
         enabled=guardrail_enabled,
         connector=actives[0] if actives else "openclaw",
         judge=judge_cfg,
+        detection_strategy=detection_strategy,
+        detection_strategy_prompt=detection_strategy_prompt,
+        detection_strategy_completion=detection_strategy_completion,
+        detection_strategy_tool_call=detection_strategy_tool_call,
     )
     cfg = SimpleNamespace(
         guardrail=guardrail_cfg,
@@ -480,6 +493,46 @@ class JudgeListTests(unittest.TestCase):
         app = make_ctx(hook_timeout=8.0)
         result = invoke(app, ["list"])
         self.assertIn("8s", result.output)
+
+    def test_list_regex_only_strategy_not_overstated(self):
+        # J5: detection_strategy=regex_only keeps the judge from ever
+        # running on any hook direction (hookJudgeInspect early-returns),
+        # so a gated, judge-enabled connector must NOT read as "judged".
+        app = make_ctx(hook_connectors=["hermes"], detection_strategy="regex_only")
+        result = invoke(app, ["list"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("hermes: judged", result.output)
+        self.assertIn("hermes: regex + AID only", result.output)
+        self.assertIn("the judge never runs", result.output)
+        self.assertIn("prompt: regex_only", result.output)
+        self.assertIn("completion: regex_only", result.output)
+
+    def test_list_completion_regex_only_shows_prompt_only(self):
+        # Post-setup default: completion is pinned regex_only while prompt
+        # inherits regex_judge — the judge covers prompts only, and the
+        # display must say so rather than claim full hook-lane coverage.
+        app = make_ctx(
+            hook_connectors=["hermes"],
+            detection_strategy="regex_judge",
+            detection_strategy_completion="regex_only",
+        )
+        result = invoke(app, ["list"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("hermes: judged (hook lane: prompt)", result.output)
+        self.assertIn("completion: regex_only", result.output)
+
+    def test_list_both_directions_judged_no_qualifier(self):
+        # When both directions reach the judge, the honest state is the
+        # unqualified "judged (hook lane)" with no per-direction note.
+        app = make_ctx(
+            hook_connectors=["hermes"],
+            detection_strategy="regex_judge",
+            detection_strategy_completion="judge_first",
+        )
+        result = invoke(app, ["list"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("hermes: judged (hook lane)", result.output)
+        self.assertNotIn("judged (hook lane:", result.output)
 
 
 class WizardHookPromptTests(unittest.TestCase):
