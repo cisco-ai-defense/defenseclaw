@@ -1010,12 +1010,188 @@ class CommandRegistrationTests(unittest.TestCase):
         # the custom block message) without hand-editing config.yaml.
         # judge gates the hook-lane LLM judge per connector
         # (guardrail.judge.hook_connectors) — registered from cmd_judge.
+        # list-packs is the read-only listing surface for guardrail rule
+        # packs (built-in presets + the dir each connector enforces) — the
+        # day-to-day counterpart to `setup <connector> --rule-pack` (R2).
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
             names,
-            {"enable", "disable", "status", "fail-mode", "hilt", "block-message", "judge"},
+            {
+                "enable",
+                "disable",
+                "status",
+                "fail-mode",
+                "hilt",
+                "block-message",
+                "judge",
+                "list-packs",
+            },
         )
+
+
+class StatusStrategyJudgeTests(unittest.TestCase):
+    """G3 / J5 — status surfaces scan strategy + per-connector judge state."""
+
+    def _rich(self, *, enabled=True, connector="hermes", judge_enabled=True,
+              gate=None, strategy="regex_judge", prompt="", completion=""):
+        app = make_ctx(enabled=enabled, connector=connector)
+        gc = app.cfg.guardrail
+        gc.detection_strategy = strategy
+        gc.detection_strategy_prompt = prompt
+        gc.detection_strategy_completion = completion
+        gc.judge = SimpleNamespace(enabled=judge_enabled, hook_connectors=list(gate or []))
+        return app, gc
+
+    def test_status_shows_scan_strategy_line(self):
+        # The global strategy (with per-direction overrides) is surfaced so an
+        # operator can see whether the judge can run at all. completion is the
+        # force-pinned regex_only default in the wild.
+        app, _ = self._rich(strategy="regex_judge", completion="regex_only")
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("scan strategy: regex_judge", result.output)
+        self.assertIn("completion: regex_only", result.output)
+
+    def test_status_judge_enabled_and_gate_label(self):
+        app, _ = self._rich(judge_enabled=True, gate=["hermes"])
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("hook gate: hermes", result.output)
+        # gated + enabled + strategy ok → this connector reports judge=on.
+        self.assertIn("judge=on", result.output)
+
+    def test_status_judge_off_when_disabled(self):
+        app, _ = self._rich(judge_enabled=False, gate=["hermes"])
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertIn("judge=off", result.output)
+        self.assertNotIn("judge=on", result.output)
+
+    def test_status_judge_off_when_not_gated(self):
+        # Judge enabled globally but this connector isn't in the gate.
+        app, _ = self._rich(judge_enabled=True, gate=[])
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertIn("hook gate: none", result.output)
+        self.assertIn("judge=off", result.output)
+
+    def test_status_all_gate_judges_every_connector(self):
+        app, _ = self._rich(judge_enabled=True, gate=["*"])
+        app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertIn("hook gate: all", result.output)
+        # Both connectors judged — token appears once per roster block.
+        self.assertEqual(result.output.count("judge=on"), 2)
+
+    def test_status_regex_only_does_not_overstate_and_warns(self):
+        # J5 anti-overstatement: judge enabled AND gated, but the global
+        # prompt strategy is regex_only → the judge never runs. The token must
+        # NOT say "on", and status warns explicitly.
+        app, _ = self._rich(judge_enabled=True, gate=["*"], strategy="regex_only")
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("judge=off (regex_only)", result.output)
+        self.assertNotIn("judge=on", result.output)
+        self.assertIn("will not run", result.output)
+
+
+class StatusConnectorScopeTests(unittest.TestCase):
+    """G3 — `guardrail status --connector X` narrows the roster."""
+
+    def _multi(self):
+        app = make_ctx(enabled=True, connector="codex")
+        gc = app.cfg.guardrail
+        gc.effective_mode = lambda name="": {"codex": "action"}.get(name, "observe")
+        app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+        return app
+
+    def test_scopes_to_named_connector(self):
+        app = self._multi()
+        result = CliRunner().invoke(
+            cmd_guardrail.status_cmd, ["--connector", "hermes"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Hermes (hermes):", result.output)
+        self.assertNotIn("Codex (codex):", result.output)
+
+    def test_scopes_case_insensitively(self):
+        app = self._multi()
+        result = CliRunner().invoke(
+            cmd_guardrail.status_cmd, ["--connector", "HERMES"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Hermes (hermes):", result.output)
+
+    def test_unknown_connector_errors(self):
+        app = make_ctx(enabled=True, connector="codex")
+        app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        result = CliRunner().invoke(
+            cmd_guardrail.status_cmd, ["--connector", "hermes"], obj=app
+        )
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("not active", result.output)
+
+
+class StatusPhantomTests(unittest.TestCase):
+    """G5 — no phantom openclaw row when nothing is configured."""
+
+    def test_no_connector_configured_shows_empty_state(self):
+        app = make_ctx(enabled=False, connector="openclaw")
+        # Simulate "all connectors removed": active_connectors() empty AND
+        # has_connector_configured() false (the post-`setup remove` state).
+        app.cfg.active_connectors = lambda: []  # type: ignore[method-assign]
+        app.cfg.has_connector_configured = lambda: False  # type: ignore[method-assign]
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("none configured", result.output)
+        # The phantom openclaw roster row must NOT appear.
+        self.assertNotIn("OpenClaw (openclaw):", result.output)
+        self.assertNotIn("- OpenClaw", result.output)
+
+    def test_configured_install_still_renders_roster(self):
+        # Guard against over-correction: a real single-connector install
+        # (has_connector_configured true) must still render its block.
+        app = make_ctx(enabled=True, connector="openclaw")
+        app.cfg.active_connectors = lambda: ["openclaw"]  # type: ignore[method-assign]
+        app.cfg.has_connector_configured = lambda: True  # type: ignore[method-assign]
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("OpenClaw (openclaw):", result.output)
+        self.assertNotIn("none configured", result.output)
+
+
+class ListPacksTests(unittest.TestCase):
+    """R2 — `guardrail list-packs` lists presets + per-connector dirs."""
+
+    def test_lists_presets_and_per_connector_dirs(self):
+        app = make_ctx(enabled=True, connector="codex")
+        gc = app.cfg.guardrail
+        gc.rule_pack_dir = ""
+        gc.effective_rule_pack_dir = lambda name="": {"codex": "/etc/dc/strict"}.get(name, "")
+        app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        result = CliRunner().invoke(cmd_guardrail.list_packs_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        for preset in ("default", "strict", "permissive"):
+            self.assertIn(preset, result.output)
+        self.assertIn("Codex (codex):", result.output)
+        self.assertIn("/etc/dc/strict", result.output)
+
+    def test_global_dir_default_when_unset(self):
+        app = make_ctx(enabled=True, connector="codex")
+        gc = app.cfg.guardrail
+        gc.rule_pack_dir = ""
+        gc.effective_rule_pack_dir = lambda name="": ""
+        app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        result = CliRunner().invoke(cmd_guardrail.list_packs_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("built-in default", result.output)
+
+    def test_no_connector_configured(self):
+        app = make_ctx(enabled=False, connector="openclaw")
+        app.cfg.active_connectors = lambda: []  # type: ignore[method-assign]
+        app.cfg.has_connector_configured = lambda: False  # type: ignore[method-assign]
+        result = CliRunner().invoke(cmd_guardrail.list_packs_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("none configured", result.output)
 
 
 if __name__ == "__main__":
