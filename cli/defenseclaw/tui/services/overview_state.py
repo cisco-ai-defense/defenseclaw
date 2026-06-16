@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+from defenseclaw.tui.services import connector_filter
 from defenseclaw.tui.services.ai_discovery_state import AIUsageSignal, AIUsageSnapshot
 
 NoticeLevel = Literal["info", "warn", "error"]
@@ -144,6 +145,16 @@ class OverviewConfig:
     # rendered via :func:`format_scanner_overrides_summary` /
     # :meth:`OverviewPanelModel.scanner_overrides_summary`.
     scanner_overrides: tuple[tuple[str, str, str, str], ...] = ()
+    # A2: a non-empty diagnostic when the connector roster could not be fully
+    # built — e.g. ``Config.active_connectors()`` raised on a malformed/alias
+    # key, so the adapter degraded to a single-connector (or empty) view
+    # instead of the full roster. The module-level builder in ``app.py`` can't
+    # emit a status-line message itself (the TUI subtree has no stderr logger),
+    # so it stuffs the reason here and the Overview surfaces it as a visible
+    # error notice via :meth:`OverviewPanelModel.build_notices`, rather than the
+    # roster silently collapsing (chip vanishes, ``m`` stops cycling, tiles
+    # disappear). Empty (the common case) renders nothing.
+    roster_error: str = ""
 
     def connector_is_disabled(self, name: str) -> bool:
         """True when ``name`` is in the roster but enforcement is disabled."""
@@ -399,6 +410,15 @@ class OverviewPanelModel:
             hint = self.gateway_standalone_hint()
             if hint:
                 notices.append(OverviewNotice("info", hint))
+        if self.cfg is not None and self.cfg.roster_error.strip():
+            notices.append(
+                OverviewNotice(
+                    "error",
+                    "Connector roster degraded: "
+                    f"{self.cfg.roster_error.strip()} - showing a reduced view; "
+                    "check your connector config",
+                )
+            )
         if self.cfg is not None and guardrail_off:
             notices.append(OverviewNotice("warn", "LLM guardrail not configured - press [g] to set up"))
         if not self.skill_scanner_available:
@@ -703,13 +723,34 @@ class OverviewPanelModel:
         )
 
     def active_connector_name(self) -> str:
+        """Primary connector name, or ``""`` when none is configured.
+
+        A1 (Root R1, TUI-display-only per fix-plan §10.1): never fabricate
+        ``"openclaw"`` for an empty / hook-only state. Precedence: explicit
+        singular override (``guardrail.connector``) → the active *set*'s
+        primary (``connector_modes`` — the multi-connector roster that the
+        singular ``config.active_connector()`` ignores, which is why a
+        ``[codex, openclaw]`` map used to surface a phantom ``openclaw``) →
+        the singular ``claw.mode`` → ``""`` (none configured). The Go-parity
+        ``config.active_connector()`` contract is deliberately left untouched;
+        this distinguishes "none configured" at the display layer only.
+        Callers treat ``""`` as "no connector present" (e.g. the app's
+        ``connector_present`` gate / merged-catalog fallback).
+
+        The genuinely-zero-connector case additionally depends on the adapter
+        passing an empty ``claw_mode`` rather than the collapsed ``"openclaw"``
+        default — that adapter half lives in ``app.py`` (the ``tui/app`` lane).
+        """
         if self.cfg is None:
-            return "openclaw"
+            return ""
         if self.cfg.guardrail_connector.strip():
             return self.cfg.guardrail_connector.strip().lower()
+        primary = connector_filter.active_connector_name(self.cfg.connector_modes)
+        if primary:
+            return primary.strip().lower()
         if self.cfg.claw_mode.strip():
             return self.cfg.claw_mode.strip().lower()
-        return "openclaw"
+        return ""
 
     def scanner_overrides_summary(self) -> str:
         """One-line summary of the active policy's scanner action overrides,
