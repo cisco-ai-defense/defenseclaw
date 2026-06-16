@@ -541,7 +541,7 @@ class TestInitShowsScannerDefaults(unittest.TestCase):
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("mcp-scanner:", result.output)
-        self.assertIn("analyzers=yara", result.output)
+        self.assertIn("analyzers=auto", result.output)
 
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
@@ -583,7 +583,7 @@ class TestInitShowsScannerDefaults(unittest.TestCase):
         self.assertFalse(sc.get("use_llm"))
 
         mc = raw.get("scanners", {}).get("mcp_scanner", {})
-        self.assertEqual(mc.get("analyzers"), "yara")
+        self.assertEqual(mc.get("analyzers"), "auto")
         self.assertFalse(mc.get("scan_prompts"))
 
 

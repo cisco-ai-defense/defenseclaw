@@ -1161,8 +1161,8 @@ func TestMCPScannerConfigNoLLMFields(t *testing.T) {
 	if mc.Binary != "mcp-scanner" {
 		t.Errorf("expected 'mcp-scanner', got %q", mc.Binary)
 	}
-	if mc.Analyzers != "yara" {
-		t.Errorf("expected default analyzers 'yara', got %q", mc.Analyzers)
+	if mc.Analyzers != "auto" {
+		t.Errorf("expected default analyzers 'auto', got %q", mc.Analyzers)
 	}
 	if mc.ScanPrompts {
 		t.Error("expected default scan_prompts=false")

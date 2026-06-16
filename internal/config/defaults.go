@@ -143,7 +143,7 @@ func DefaultConfig() *Config {
 			},
 			MCPScanner: MCPScannerConfig{
 				Binary:    "mcp-scanner",
-				Analyzers: "yara",
+				Analyzers: "auto",
 			},
 			PluginScanner: "defenseclaw",
 			CodeGuard:     filepath.Join(dataDir, "codeguard-rules"),

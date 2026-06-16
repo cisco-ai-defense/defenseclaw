@@ -416,7 +416,7 @@ class TestDefaultConfig(unittest.TestCase):
     def test_default_mcp_scanner_config(self):
         cfg = default_config()
         mc = cfg.scanners.mcp_scanner
-        self.assertEqual(mc.analyzers, "yara")
+        self.assertEqual(mc.analyzers, "auto")
         self.assertFalse(mc.scan_prompts)
         self.assertFalse(mc.scan_resources)
         self.assertFalse(mc.scan_instructions)
