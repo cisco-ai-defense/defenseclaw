@@ -1347,6 +1347,126 @@ class WebhookConfig:
 
 
 @dataclass
+class PerConnectorObservability:
+    """Per-connector observability override (D5b) keyed by connector name.
+
+    A connector's events route to *its* configured sinks/webhooks,
+    falling back to the GLOBAL list (top-level ``audit_sinks:`` /
+    ``webhooks:``) when a dimension is unset. Each dimension is
+    independently tri-state, mirroring the Go ``*[]T`` / nil-vs-empty
+    pointer semantics used elsewhere in this file:
+
+    * ``None``       — key absent; INHERIT the global list. This is the
+                       default and the safety fallback: a connector with
+                       no per-connector config still emits to the global
+                       sinks (no silent drop).
+    * present list   — OVERRIDE: route this connector's events to exactly
+                       these entries. An explicit empty list ``[]``
+                       suppresses the global list for that connector.
+
+    ``audit_sinks`` is kept as raw mappings rather than a typed dataclass
+    so it round-trips verbatim alongside the unmodelled top-level
+    ``audit_sinks:`` list (whose schema is owned by the Go gateway and
+    ``defenseclaw.observability.writer``). ``webhooks`` reuses the modeled
+    :class:`WebhookConfig`, parity with the top-level ``webhooks:`` list.
+    """
+
+    audit_sinks: list[dict[str, Any]] | None = None
+    webhooks: list[WebhookConfig] | None = None
+
+
+@dataclass
+class ObservabilityConfig:
+    """Per-connector observability routing (D5b).
+
+    ``connectors`` maps a connector name to its
+    :class:`PerConnectorObservability` override. Empty/absent preserves the
+    legacy global-only behavior. Resolution goes through
+    :meth:`effective_audit_sinks` / :meth:`effective_webhooks` (which take
+    the global list and fall back to it), never by reading the map
+    directly — mirroring :class:`AssetPolicyConfig` and
+    ``guardrail.connectors``.
+
+    NOTE (lane boundary): the runtime event-emit dispatch lives in the Go
+    gateway (``internal/gateway/webhook.go`` for webhooks,
+    ``internal/audit/sinks`` for audit sinks). This Python structure is the
+    config + resolution surface so ``Config.save()`` round-trips the block
+    and Python consumers can resolve it; HONORING the resolution at emit
+    time additionally requires the matching Go change (flagged separately —
+    those files are outside this lane).
+    """
+
+    connectors: dict[str, PerConnectorObservability] = field(default_factory=dict)
+
+    def _connector_override(self, connector: str) -> PerConnectorObservability | None:
+        """Return the override block for ``connector`` if configured.
+
+        Lookup is connector-name-insensitive (exact key first, then via
+        ``connector_paths.normalize``), mirroring
+        :meth:`AssetPolicyConfig._connector_override`.
+        """
+        if not connector or not self.connectors:
+            return None
+        pc = self.connectors.get(connector)
+        if pc is not None:
+            return pc
+        want = connector_paths.normalize(connector)
+        for name, entry in self.connectors.items():
+            if connector_paths.normalize(name) == want:
+                return entry
+        return None
+
+    def effective_audit_sinks(
+        self, connector: str, global_sinks: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """Resolve the audit sinks a connector's events route to.
+
+        Per-connector override (when the ``audit_sinks`` dimension is set)
+        wins; otherwise inherit ``global_sinks``. ``global_sinks`` is passed
+        in because the global ``audit_sinks:`` list is unmodelled (read from
+        raw YAML), not a :class:`Config` field.
+        """
+        pc = self._connector_override(connector)
+        if pc is not None and pc.audit_sinks is not None:
+            return list(pc.audit_sinks)
+        return list(global_sinks or [])
+
+    def effective_webhooks(
+        self, connector: str, global_webhooks: list[WebhookConfig] | None,
+    ) -> list[WebhookConfig]:
+        """Resolve the webhooks a connector's events route to.
+
+        Per-connector override (when the ``webhooks`` dimension is set)
+        wins; otherwise inherit ``global_webhooks`` (``cfg.webhooks``).
+        """
+        pc = self._connector_override(connector)
+        if pc is not None and pc.webhooks is not None:
+            return list(pc.webhooks)
+        return list(global_webhooks or [])
+
+    def validate(self) -> None:
+        """Reject empty / alias-duplicate connector names.
+
+        Value-only check mirroring :meth:`AssetPolicyConfig.validate` —
+        never touches the connector registry. Raises :class:`ValueError`
+        on the first violation.
+        """
+        seen: dict[str, str] = {}
+        for name in sorted(self.connectors):
+            if not name.strip():
+                raise ValueError(
+                    "observability.connectors: empty connector name is not allowed"
+                )
+            norm = connector_paths.normalize(name)
+            if norm in seen:
+                raise ValueError(
+                    f"observability.connectors: {seen[norm]!r} and {name!r} refer "
+                    f"to the same connector {norm!r}; keep only one"
+                )
+            seen[norm] = name
+
+
+@dataclass
 class HILTConfig:
     enabled: bool = False
     min_severity: str = "HIGH"
@@ -1764,6 +1884,10 @@ class Config:
     asset_policy: AssetPolicyConfig = field(default_factory=AssetPolicyConfig)
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
     webhooks: list[WebhookConfig] = field(default_factory=list)
+    # Per-connector observability routing (D5b). Empty/absent preserves the
+    # legacy global-only behavior; resolution goes through
+    # :class:`ObservabilityConfig` resolvers, never by reading the map directly.
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     privacy: PrivacyConfig = field(default_factory=lambda: PrivacyConfig())
     _loaded_authoritative_dicts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     # Loaded raw values of _OWNED_NESTED_KEYS paths (absent = key not in
@@ -1810,6 +1934,18 @@ class Config:
         if self.claw.mode.strip():
             return connector_paths.normalize(self.claw.mode)
         return "openclaw"
+
+    def effective_webhooks(self, connector: str = "") -> list[WebhookConfig]:
+        """Resolve which webhooks ``connector``'s events route to (D5b).
+
+        Per-connector override (``observability.connectors[connector].webhooks``)
+        wins; otherwise inherit the global ``webhooks:`` list. Convenience
+        wrapper around :meth:`ObservabilityConfig.effective_webhooks` that
+        supplies ``self.webhooks`` as the global fallback. The matching audit
+        sink resolver lives on :class:`ObservabilityConfig` because the global
+        ``audit_sinks:`` list is unmodelled (raw YAML), not a Config field.
+        """
+        return self.observability.effective_webhooks(connector, self.webhooks)
 
     def has_connector_configured(self) -> bool:
         """Return True when the operator has explicitly configured a connector.
@@ -2360,15 +2496,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     # ``webhookDefaultCooldown``. An explicit ``0`` or positive int is
     # kept verbatim.
     for wh in d.get("webhooks") or []:
-        if not isinstance(wh, dict):
-            continue
-        if wh.get("cooldown_seconds", None) is None:
-            wh.pop("cooldown_seconds", None)
-        # Mirror Go's ``yaml:"name,omitempty"`` — drop empty-string names
-        # so legacy files that never set ``name:`` stay byte-identical
-        # after a load/save cycle.
-        if wh.get("name", "") == "":
-            wh.pop("name", None)
+        _strip_webhook_omitempty(wh)
     # Mirror Go's ``yaml:"privacy,omitempty"`` — drop the block
     # entirely when it carries only defaults so existing configs
     # without a ``privacy:`` block stay byte-identical after a
@@ -2393,6 +2521,10 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         d.pop("asset_policy", None)
     else:
         _serialize_asset_policy_connectors(cfg, d.get("asset_policy"))
+    # Per-connector observability (D5b): drop the empty block (omitempty),
+    # or serialize it with inherited (None) dimensions + webhook omitempty
+    # stripped. Mirrors the asset_policy.connectors handling.
+    _serialize_observability(cfg, d.get("observability"), d)
     # Drop the registries: block when no sources are configured so an
     # operator-untouched config stays byte-identical after a load/save
     # round-trip. The block reappears the moment any source is added.
@@ -2538,6 +2670,12 @@ _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset({
     # saving must propagate to disk rather than being rescued by the
     # non-authoritative merge from the prior file.
     "asset_policy.connectors",
+    # Per-connector observability overrides map (D5b). Same rationale: the
+    # dataclass is the single source of truth for the configured per-connector
+    # routing set, so clearing a connector's sinks/webhooks override in-memory
+    # and saving must propagate to disk rather than being rescued by the
+    # non-authoritative merge from the prior file.
+    "observability.connectors",
 })
 
 # Nested NON-dict keys the dataclass owns and may intentionally omit.
@@ -2771,6 +2909,74 @@ def _serialize_asset_policy_connectors(cfg: Config, asset_policy: Any) -> None:
                     block.pop("registry_required", None)
                 if not block.get("registry_empty_action"):
                     block.pop("registry_empty_action", None)
+
+
+def _strip_webhook_omitempty(wh: Any) -> None:
+    """Drop omitempty webhook keys in place (cooldown_seconds None, name "").
+
+    Mirrors Go's ``yaml:"cooldown_seconds,omitempty"`` / ``yaml:"name,omitempty"``
+    so a webhook that never set those stays byte-identical after a load/save
+    cycle. Shared by the top-level ``webhooks:`` serialization and the
+    per-connector ``observability.connectors[*].webhooks`` serialization.
+    """
+    if not isinstance(wh, dict):
+        return
+    # Tri-state cooldown_seconds: None means "use the Go dispatcher default";
+    # drop the key so the YAML stays minimal. An explicit 0 / positive int is
+    # kept verbatim.
+    if wh.get("cooldown_seconds", None) is None:
+        wh.pop("cooldown_seconds", None)
+    if wh.get("name", "") == "":
+        wh.pop("name", None)
+
+
+def _serialize_observability(cfg: Config, observability: Any, d: dict[str, Any]) -> None:
+    """In-place YAML cleanup for the ``observability:`` block (D5b).
+
+    Mirrors the ``asset_policy.connectors`` serialization handling:
+
+    * Empty/absent connectors + never loaded with connectors → drop the
+      whole ``observability:`` key so a global-only config stays
+      byte-identical after a load/save round-trip.
+    * Empty connectors + WAS loaded with connectors → emit an explicit
+      ``observability: {connectors: {}}`` so the authoritative atomic-replace
+      in :func:`_deep_merge_nested` clears the on-disk block (the map is in
+      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS`).
+    * Non-empty connectors → drop the ``None`` (inherit-global) dimensions and
+      strip webhook omitempty keys so a populated map round-trips without
+      ``audit_sinks: null`` / ``webhooks: null`` noise.
+    """
+    if not isinstance(observability, dict):
+        d.pop("observability", None)
+        return
+    connectors = observability.get("connectors")
+    if not connectors:
+        had_connectors = bool(
+            (getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get(
+                "observability.connectors"
+            )
+        )
+        if had_connectors:
+            d["observability"] = {"connectors": {}}
+        else:
+            d.pop("observability", None)
+        return
+    if not isinstance(connectors, dict):
+        d.pop("observability", None)
+        return
+    for entry in connectors.values():
+        if not isinstance(entry, dict):
+            continue
+        # None dimension = "inherit global"; drop the key (a present list,
+        # including [], is an explicit override and is kept).
+        if entry.get("audit_sinks") is None:
+            entry.pop("audit_sinks", None)
+        webhooks = entry.get("webhooks")
+        if webhooks is None:
+            entry.pop("webhooks", None)
+        elif isinstance(webhooks, list):
+            for wh in webhooks:
+                _strip_webhook_omitempty(wh)
 
 
 def _disabled_ai_discovery_dict() -> dict[str, Any]:
@@ -3549,6 +3755,48 @@ def _merge_webhooks(raw: list[dict[str, Any]] | None) -> list[WebhookConfig]:
     return webhooks
 
 
+def _merge_observability(raw: Any) -> ObservabilityConfig:
+    """Parse the optional ``observability:`` block (D5b)."""
+    if not isinstance(raw, dict):
+        return ObservabilityConfig()
+    return ObservabilityConfig(
+        connectors=_merge_observability_connectors(raw.get("connectors")),
+    )
+
+
+def _merge_observability_connectors(
+    raw: Any,
+) -> dict[str, PerConnectorObservability]:
+    """Parse the optional ``observability.connectors`` map (D5b).
+
+    Mirrors :func:`_merge_asset_policy_connectors`. A non-mapping / empty
+    value yields an empty dict (legacy global-only behavior). For each
+    dimension, an absent key parses to ``None`` ("inherit global"); a
+    present list (including an explicit empty list) parses to a list
+    ("override", and ``[]`` suppresses global for that connector).
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    out: dict[str, PerConnectorObservability] = {}
+    for name, entry in raw.items():
+        entry = entry if isinstance(entry, dict) else {}
+        sinks = entry.get("audit_sinks")
+        webhooks_raw = entry.get("webhooks")
+        out[str(name)] = PerConnectorObservability(
+            audit_sinks=(
+                [dict(s) for s in sinks if isinstance(s, dict)]
+                if isinstance(sinks, list)
+                else None
+            ),
+            webhooks=(
+                _merge_webhooks(webhooks_raw)
+                if isinstance(webhooks_raw, list)
+                else None
+            ),
+        )
+    return out
+
+
 def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
     if not raw:
         return OpenShellConfig()
@@ -3902,6 +4150,7 @@ def load() -> Config:
         asset_policy=_merge_asset_policy(raw.get("asset_policy")),
         registries=_merge_registries(raw.get("registries")),
         webhooks=_merge_webhooks(raw.get("webhooks")),
+        observability=_merge_observability(raw.get("observability")),
         privacy=_merge_privacy(raw.get("privacy")),
         ai_discovery=_merge_ai_discovery(raw.get("ai_discovery")),
         notifications=_merge_notifications(raw.get("notifications")),
@@ -3919,6 +4168,10 @@ def load() -> Config:
     # (OTHER-7) — empty/duplicate connector names + bad scalar enums. The
     # global asset_policy fields are intentionally not re-validated here.
     cfg.asset_policy.validate()
+    # Same value-only guard for per-connector observability overrides (D5b):
+    # empty / alias-duplicate connector names. The sink/webhook payloads are
+    # validated by their respective writers at write time.
+    cfg.observability.validate()
     return cfg
 
 
