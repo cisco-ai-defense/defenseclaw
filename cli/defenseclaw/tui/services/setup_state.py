@@ -230,9 +230,20 @@ def build_readiness_checks(
 
     checks: list[ReadinessCheck] = []
 
-    connector = str(_get_path(cfg, "claw.mode", "") or "").strip()
-    if connector:
-        checks.append(ReadinessCheck("Active Connector", f"{connector} configured", "pass"))
+    # B1: route readiness through the full active connector SET, not the
+    # singular ``claw.mode``. A multi-connector install (e.g. hermes + codex
+    # via ``guardrail.connectors``) previously showed only the primary
+    # connector here — or, after the last connector was removed, a phantom
+    # "openclaw". ``active_connectors()`` is R1-clean (empty when nothing is
+    # configured) so this both surfaces every active connector and stops
+    # fabricating one when the install is genuinely empty.
+    connectors = _active_connector_names(cfg)
+    if connectors:
+        if len(connectors) == 1:
+            detail = f"{connectors[0]} configured"
+        else:
+            detail = f"{len(connectors)} connectors configured: " + ", ".join(connectors)
+        checks.append(ReadinessCheck("Active Connector", detail, "pass"))
     else:
         checks.append(
             ReadinessCheck(
@@ -653,6 +664,37 @@ def _doctor_missing_credentials(doctor: object | Mapping[str, Any] | None) -> tu
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
         return ()
     return tuple(str(item) for item in raw if str(item).strip())
+
+
+def _active_connector_names(cfg: object | Mapping[str, Any] | None) -> list[str]:
+    """Resolve the active connector set for the readiness panel (B1).
+
+    Prefers the live ``Config.active_connectors()`` (multi-connector aware and
+    R1-clean: empty when nothing is configured, never a phantom "openclaw").
+    Falls back to reading the config shape directly when given a plain mapping
+    (the test fixtures pass dicts): the ``guardrail.connectors`` map keys, then
+    the singular ``guardrail.connector`` / ``claw.mode`` markers. An empty
+    result means "no connector configured" and drives the fail row.
+    """
+    method = getattr(cfg, "active_connectors", None)
+    if callable(method):
+        try:
+            names = method()
+        except Exception:  # noqa: BLE001 — never let a config quirk blank readiness.
+            names = None
+        if isinstance(names, (list, tuple)):
+            return [str(name).strip() for name in names if str(name).strip()]
+
+    connectors_map = _get_path(cfg, "guardrail.connectors", None)
+    if isinstance(connectors_map, Mapping):
+        keys = [str(key).strip() for key in connectors_map if str(key).strip()]
+        if keys:
+            return sorted(set(keys))
+    singular = (
+        str(_get_path(cfg, "guardrail.connector", "") or "").strip()
+        or str(_get_path(cfg, "claw.mode", "") or "").strip()
+    )
+    return [singular] if singular else []
 
 
 def _registry_required_but_empty(cfg: object | Mapping[str, Any] | None) -> bool:
