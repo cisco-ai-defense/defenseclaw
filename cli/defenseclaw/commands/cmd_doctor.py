@@ -539,6 +539,20 @@ def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
         _emit("fail", "OpenClaw gateway", f"not reachable at {cfg.gateway.host}:{cfg.gateway.port}", r=r)
 
 
+def _openclaw_active(cfg) -> bool:
+    """True only when OpenClaw is positively among the active connectors.
+
+    Drives the connector-aware token-env messaging (D1): the legacy
+    ``OPENCLAW_GATEWAY_TOKEN`` var is "the configured var" only on a genuine
+    OpenClaw install; on a hook install it is stale drift. Reuses
+    :func:`_doctor_active_connectors`, so an ambiguous/legacy config that
+    floors to the singular ``openclaw`` path default still reads as active —
+    conservative on purpose: we treat OpenClaw as *inactive* only when we can
+    see a real, OpenClaw-free active set.
+    """
+    return "openclaw" in _doctor_active_connectors(cfg)
+
+
 def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
     """Detect the OPENCLAW_/DEFENSECLAW_ token-env drift the user hit.
 
@@ -605,9 +619,28 @@ def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
         )
         return
 
-    # Both vars empty — no token configured anywhere. Other checks
-    # (sidecar /health probe) will catch the downstream effect; we
-    # just report the local config state.
+    # Both vars empty — no token configured anywhere. When token_env still
+    # carries the legacy ``OPENCLAW_GATEWAY_TOKEN`` default on an install that
+    # is NOT running OpenClaw, don't present that var as the one the operator
+    # must set (D1): the gateway auto-generates the canonical
+    # ``DEFENSECLAW_GATEWAY_TOKEN`` on first boot, so the only real action is
+    # to repoint the stale token_env. Only when OpenClaw is genuinely active is
+    # ``OPENCLAW_GATEWAY_TOKEN`` the legitimate var to set.
+    if configured_env == "OPENCLAW_GATEWAY_TOKEN" and not _openclaw_active(cfg):
+        _emit(
+            "warn",
+            "Gateway token env",
+            "the gateway auto-generates DEFENSECLAW_GATEWAY_TOKEN on first "
+            "boot, but cfg.gateway.token_env still points at legacy "
+            "OPENCLAW_GATEWAY_TOKEN on a non-OpenClaw install — run "
+            "`defenseclaw doctor --fix` to repoint it.",
+            r=r,
+        )
+        return
+
+    # Generic "no token anywhere" state (custom token_env, or OpenClaw is
+    # genuinely active). Other checks (sidecar /health probe) catch the
+    # downstream effect; we just report the local config state.
     _emit(
         "warn",
         "Gateway token env",
@@ -879,6 +912,132 @@ def _check_codex_hooks(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Codex hooks", f"hook script not found at {hook_script}", r=r)
 
 
+# ---------------------------------------------------------------------------
+# Generic per-connector hook-health (D4)
+# ---------------------------------------------------------------------------
+
+# Connectors whose hooks live in an agent config file but that lack a bespoke
+# Services check above. Each maps to (home-relative fallback path(s), marker
+# substrings). The fallback paths mirror the Go source of truth in
+# ``internal/gateway/connector/hook_only.go`` (hermesConfigPath / cursorHooksPath
+# / windsurfHooksPath / geminiSettingsPath / opencodePluginPath); the gateway's
+# hook_contract_lock.json is consulted first and these are only the offline
+# fallback. Markers are matched as raw substrings (see _file_references_marker)
+# so the check stays format-agnostic: hermes is YAML, cursor/windsurf/geminicli
+# are JSON, opencode is a flat ``.js`` plugin (existence + substring).
+_HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "hermes": (
+        (os.path.join(".hermes", "config.yaml"),),
+        ("hermes-hook.sh", "hook --connector hermes", "defenseclaw"),
+    ),
+    "cursor": (
+        (os.path.join(".cursor", "hooks.json"),),
+        ("cursor-hook.sh", "hook --connector cursor", "defenseclaw"),
+    ),
+    "windsurf": (
+        (os.path.join(".codeium", "windsurf", "hooks.json"),),
+        ("windsurf-hook.sh", "hook --connector windsurf", "defenseclaw"),
+    ),
+    "geminicli": (
+        (os.path.join(".gemini", "settings.json"),),
+        ("geminicli-hook.sh", "hook --connector geminicli", "defenseclaw"),
+    ),
+    "opencode": (
+        (os.path.join(".config", "opencode", "plugins", "defenseclaw.js"),),
+        ("defenseclaw",),
+    ),
+}
+
+_HOOK_HEALTH_LABELS = {
+    "hermes": "Hermes hooks",
+    "cursor": "Cursor hooks",
+    "windsurf": "Windsurf hooks",
+    "geminicli": "Gemini CLI hooks",
+    "opencode": "OpenCode hooks",
+}
+
+
+def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
+    """Report whether the file at ``path`` contains any ``markers`` substring.
+
+    Deliberately format-agnostic — no JSON/YAML parse — because the five
+    connectors this serves store hook entries in different shapes (hermes
+    YAML, cursor/windsurf/geminicli JSON, opencode a flat ``.js`` plugin).
+    Mirrors the Go self-heal guard's ``configFileReferencesHook`` (raw-bytes
+    substring match) so doctor and the guard agree on what "the hook is
+    installed" means. A missing/unreadable file reports ``False``.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            data = fh.read()
+    except OSError:
+        return False
+    return any(m and m in data for m in markers)
+
+
+def _hook_health_paths_from_lock(cfg, connector: str) -> list[str]:
+    """Return the hook config path(s) the gateway actually wrote for
+    ``connector``, read from ``hook_contract_lock.json``.
+
+    This is the authoritative source — exactly what Setup patched, captured
+    from ``HookConfigPathsForConnector`` / ``ResolvedConnectorLocations`` on
+    the Go side — so doctor watches the real files rather than guessing.
+    Returns ``[]`` when the lock file is absent/unreadable or carries no path
+    for the connector; the caller then falls back to the static map.
+    """
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        return []
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as fh:
+            lock = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return []
+    entry = (lock.get("connectors") or {}).get(connector) or {}
+    locations = entry.get("locations") or {}
+    if not isinstance(locations, dict):
+        return []
+    return [str(p) for p in (locations.get("hook_config_paths") or []) if p]
+
+
+def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
+    """Generic "is this connector's hook installed and reachable?" row.
+
+    Covers hermes / cursor / windsurf / geminicli / opencode — active
+    connectors that previously got NO Services hook row at all, so an operator
+    could not tell from doctor whether their hooks were installed (D4).
+    Resolves the hook file from ``hook_contract_lock.json`` first (what the
+    gateway actually wrote), then the static fallback map, and
+    raw-substring-checks it for a DefenseClaw marker. (The Connectors section's
+    ``_check_hook_contract_lock`` validates contract/version drift — a
+    different concern from "does the hook file exist and reference us".)
+    """
+    fallback = _HOOK_HEALTH_FALLBACK.get(connector)
+    if fallback is None:
+        return  # not a generic-hook connector — nothing to check
+    rel_candidates, markers = fallback
+    label = _HOOK_HEALTH_LABELS.get(connector, f"{connector} hooks")
+    home = os.path.expanduser("~")
+    # Prefer the lock-file's recorded paths; fall back to the static map.
+    candidates = _hook_health_paths_from_lock(cfg, connector) or [
+        os.path.join(home, rel) for rel in rel_candidates
+    ]
+    present = [p for p in candidates if os.path.isfile(p)]
+    if not present:
+        _emit("fail", label, "hook file not found: " + ", ".join(candidates), r=r)
+        return
+    for path in present:
+        if _file_references_marker(path, markers):
+            _emit("pass", label, f"reachable at {path}", r=r)
+            return
+    _emit(
+        "fail",
+        label,
+        "hook file exists but does not reference DefenseClaw: " + ", ".join(present),
+        r=r,
+    )
+
+
 def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
     """Run the Services hook/health check matching *connector*.
 
@@ -900,6 +1059,10 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
         _check_openhands_hooks(cfg, r)
     elif connector == "antigravity":
         _check_antigravity_hooks(cfg, r)
+    elif connector in _HOOK_HEALTH_FALLBACK:
+        # hermes / cursor / windsurf / geminicli / opencode — generic
+        # lock-file-driven hook-health row (D4).
+        _check_hook_health(cfg, connector, r)
 
 
 def _workspace_dir(cfg) -> str:
@@ -1156,20 +1319,13 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
 
 
-def _guardrail_proxy_intentionally_closed(cfg) -> str:
-    """Return a detail string when the proxy port is expected to be closed.
-
-    Hook-enforced connectors feed DefenseClaw through the agent's
-    native hook bus (PreToolUse / UserPromptSubmit / PostToolUse)
-    while the agent talks directly to its upstream provider. Port
-    4000 is deliberately unbound in that topology, so doctor must
-    not report a hard proxy failure. Action mode IS supported on
-    this surface — enforcement happens via the PreToolUse deny
-    verdict, not the proxy.
-    """
-    connector = _active_connector(cfg)
-    gc = cfg.guardrail
-    if connector in {
+# Connectors that enforce in-process via the agent's native hook bus
+# (PreToolUse / UserPromptSubmit / PostToolUse) and talk directly to their
+# upstream provider — they do NOT bind the guardrail proxy listener on port
+# 4000. Proxy connectors (openclaw, zeptoclaw) are deliberately absent: they
+# DO bind 4000, so a real liveliness probe must run for them.
+_HOOK_ENFORCED_CONNECTORS = frozenset(
+    {
         "codex",
         "claudecode",
         "hermes",
@@ -1180,12 +1336,43 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
         "openhands",
         "antigravity",
         "opencode",
-    }:
-        mode = (getattr(gc, "mode", "") or "observe").strip().lower()
-        if mode == "action":
-            return f"hook-enforced for {connector} (mode=action via PreToolUse deny) — proxy port intentionally closed"
-        return f"hook-driven for {connector} (mode=observe) — proxy port intentionally closed"
-    return ""
+    }
+)
+
+
+def _guardrail_proxy_intentionally_closed(cfg) -> str:
+    """Return a detail string when the proxy port is expected to be closed.
+
+    Hook-enforced connectors feed DefenseClaw through the agent's
+    native hook bus (PreToolUse / UserPromptSubmit / PostToolUse)
+    while the agent talks directly to its upstream provider. Port
+    4000 is deliberately unbound in that topology, so doctor must
+    not report a hard proxy failure. Action mode IS supported on
+    this surface — enforcement happens via the PreToolUse deny
+    verdict, not the proxy.
+
+    Evaluated over the FULL active set, not just the primary connector
+    (D6): the port is only "intentionally closed" when EVERY active
+    connector is hook-enforced. If ANY active connector is a proxy type
+    (openclaw/zeptoclaw) — or an unknown connector that may bind the
+    listener — this returns ``""`` so :func:`_check_guardrail_proxy` runs
+    the real ``/health/liveliness`` probe. Previously the singular primary
+    decided this alone, so a hook-enforced primary masked a proxy peer that
+    genuinely needed port 4000 up and the probe was wrongly skipped.
+    """
+    gc = cfg.guardrail
+    connectors = _doctor_active_connectors(cfg)
+    if not connectors:
+        return ""
+    if any(c not in _HOOK_ENFORCED_CONNECTORS for c in connectors):
+        return ""
+    mode = (getattr(gc, "mode", "") or "observe").strip().lower()
+    # Preserve the exact single-connector wording; aggregate (sorted, stable)
+    # for a multi-connector all-hook-enforced fan-out.
+    label = connectors[0] if len(connectors) == 1 else ", ".join(sorted(connectors))
+    if mode == "action":
+        return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
+    return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
 
 
 def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
@@ -2425,7 +2612,16 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
 
 @click.command()
 @click.option("--json-output", "json_out", is_flag=True, help="Output results as JSON")
-@click.option("--fix", "do_fix", is_flag=True, help="Auto-repair safe issues (stale PIDs, OpenClaw token drift, etc.)")
+@click.option(
+    "--fix",
+    "do_fix",
+    is_flag=True,
+    help=(
+        "Auto-repair safe issues (stale PID files, token-env drift, dotenv "
+        "perms). NOTE: the token-drift fixer may RESTART the gateway sidecar "
+        "to reconcile a stale token — preview the full set with --dry-run."
+    ),
+)
 @click.option("--yes", "assume_yes", is_flag=True, help="When used with --fix, apply fixes without prompting")
 @click.option(
     "--dry-run",
@@ -2453,10 +2649,14 @@ def doctor(
     connector (each row tagged ``[<connector>]``), not just the primary.
 
     Use ``--fix`` to auto-repair safe issues (stale sidecar PID files,
-    OpenClaw gateway token drift, missing .env file, and unpatched
-    openclaw.json when the guardrail is enabled). Destructive or
-    ambiguous fixes still require the operator to run the relevant
-    setup command explicitly.
+    gateway token-env drift, dotenv permissions, pristine config backups).
+    One fixer — gateway token *drift* — may **restart the gateway sidecar**
+    to reconcile a stale in-memory token, which briefly interrupts in-flight
+    requests; preview the full set first with ``--fix --dry-run``. Doctor no
+    longer tears connectors down as part of ``--fix`` (it only *reports*
+    inactive-connector residue); run ``defenseclaw-gateway connector teardown
+    --connector <name>`` to remove a specific connector. Other destructive or
+    ambiguous fixes still require the relevant setup command explicitly.
 
     Exit codes: 0 = all pass, 1 = any failure.
     """
@@ -2483,21 +2683,23 @@ def doctor(
         _doctor_subsection("Connectors")
     active_connector = _active_connector(cfg)
     # Inventory EVERY active connector uniformly — there is no separate
-    # "single" vs "multi" rendering. ``active_connectors()`` returns one
+    # "single" vs "multi" rendering. ``_doctor_active_connectors`` returns one
     # name on a single-connector install and N on a fan-out install, so the
     # same loop covers both: each connector gets its own block tagged
     # "[<connector>]" carrying its paths, effective policy, rule pack, and
-    # hook contract. The operator never has to reason about connector count
-    # — they just read down the list of whatever is active.
-    try:
-        _actives = cfg.active_connectors() if hasattr(cfg, "active_connectors") else [active_connector]
-    except Exception:  # noqa: BLE001 — fall back to the primary connector.
-        _actives = [active_connector]
-    _inventory_order: list[str] = []
-    for _c in [active_connector, *_actives]:
-        if _c and _c not in _inventory_order:
-            _inventory_order.append(_c)
-    for _c in _inventory_order:
+    # hook contract. On a genuinely unconfigured install it returns ``[]`` and
+    # we render an explicit empty state instead of fabricating a phantom
+    # "openclaw" row (D3) — the operator should read "nothing is set up", not a
+    # never-configured OpenClaw install reported as broken.
+    inventory_connectors = _doctor_active_connectors(cfg)
+    if not inventory_connectors:
+        _emit(
+            "skip",
+            "Connectors",
+            "no connector configured — run 'defenseclaw setup <connector>'",
+            r=r,
+        )
+    for _c in inventory_connectors:
         with _doctor_label_suffix(f"[{_c}]"):
             _check_connector_inventory(cfg, _c, r)
             _check_hook_contract_lock(cfg, _c, r)
@@ -2520,23 +2722,16 @@ def doctor(
     _check_gateway_token_env_alignment(cfg, r)
     _check_gateway_token_drift(cfg, r)
     # Run the per-connector hook/health check for EVERY active connector,
-    # not just the primary. active_connectors() returns [active_connector]
-    # on single-connector installs, so their Services output is unchanged
-    # (no label suffix is applied when only one connector is active). On
-    # multi-connector installs each row is tagged "[<connector>]" so the
-    # codex/claudecode/antigravity rows are individually attributable.
-    try:
-        _hook_connectors = (
-            list(cfg.active_connectors())
-            if hasattr(cfg, "active_connectors")
-            else []
-        )
-    except Exception:
-        _hook_connectors = []
-    if not _hook_connectors:
-        _hook_connectors = [active_connector]
-    _multi_hooks = len(_hook_connectors) > 1
-    for _conn in _hook_connectors:
+    # not just the primary. ``_doctor_active_connectors`` returns the single
+    # active connector on single-connector installs (no label suffix applied,
+    # so their Services output is unchanged), N on a fan-out install (each row
+    # tagged "[<connector>]" so the codex/claudecode/antigravity rows are
+    # individually attributable), and ``[]`` when nothing is configured — in
+    # which case the loop emits no hook rows rather than probing a phantom
+    # "openclaw" gateway (D3).
+    hook_connectors = _doctor_active_connectors(cfg)
+    _multi_hooks = len(hook_connectors) > 1
+    for _conn in hook_connectors:
         with _doctor_label_suffix(f"[{_conn}]" if _multi_hooks else ""):
             _check_connector_hooks(cfg, _conn, r)
             # Human-approval (HILT) support is per-connector: each connector
@@ -2572,6 +2767,17 @@ def doctor(
     if do_fix:
         if not json_out:
             _doctor_subsection("Auto-fix" + (" (dry-run)" if dry_run else ""))
+            # Blast-radius banner (D8): one fixer restarts the sidecar, so make
+            # the cost of a real --fix run explicit before it runs, and point
+            # at --dry-run as the safe preview.
+            if dry_run:
+                _emit_hint("dry-run: previewing fixers; nothing on disk changes.")
+            else:
+                _emit_hint(
+                    "blast radius: the token-drift fixer may RESTART the gateway "
+                    "sidecar (interrupts in-flight requests); teardown is never "
+                    "run. Re-run with --dry-run to preview without mutating."
+                )
         _run_fixers(
             cfg,
             r,
@@ -2671,16 +2877,30 @@ def _run_fixers(
 ) -> None:
     """Run each fixer in sequence, narrating what changed.
 
-    Fixers are intentionally *small* and independent — none of them
-    restart the sidecar or mutate connector configs beyond what setup
-    already would. Anything that needs a full re-patch is deferred to
-    the human.
+    Fixers are intentionally *small* and independent. All but one are
+    non-disruptive; the lone exception is ``gateway token drift``, which may
+    **restart the gateway sidecar** to reconcile a stale in-memory token (it
+    prompts first unless ``--yes``, and briefly interrupts in-flight
+    requests). That blast radius is surfaced to the operator by the banner at
+    the Auto-fix section and the ``--fix`` help text (D8). Anything that needs
+    a full re-patch — or that would tear a connector down — is deferred to the
+    human.
 
     With ``dry_run=True`` we *list* each fixer instead of invoking it.
     The reported tag is always ``"skip"`` and the detail explains the
     fixer would run; this lets a TUI / CI caller render a preview
     before granting an explicit ``--yes`` to mutate anything.
     """
+    # NOTE (D7): the connector-teardown fixer was deliberately REMOVED from
+    # this list. Doctor is a diagnostic — it *reports* inactive-connector
+    # residue (a WARN from _check_connector_residue) but must never run
+    # ``connector teardown`` as a side effect of ``--fix``, which on a
+    # multi-connector install could destroy a live connector. The
+    # _fix_connector_residue helper is retained (and still excludes the full
+    # active set) for the tracked follow-up that promotes teardown to a
+    # first-class ``defenseclaw connector teardown`` CLI surface; until then,
+    # operators run ``defenseclaw-gateway connector teardown --connector
+    # <name>`` explicitly.
     fixers = [
         ("stale gateway PID file", _fix_stale_pid),
         ("gateway token", _fix_gateway_token),
@@ -2688,7 +2908,6 @@ def _run_fixers(
         ("gateway token drift", _fix_gateway_token_drift),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
         ("pristine config backup", _fix_pristine_backup),
-        ("connector residue", _fix_connector_residue),
     ]
 
     for title, fn in fixers:
@@ -2722,6 +2941,38 @@ def _active_connector(cfg) -> str:
         except Exception:
             pass
     return (getattr(getattr(cfg, "guardrail", None), "connector", "") or "openclaw").lower()
+
+
+def _doctor_active_connectors(cfg) -> list[str]:
+    """Return the connectors doctor should inventory / probe, in stable order.
+
+    Prefers ``Config.active_connectors()`` — the authoritative set that the
+    rest of the CLI fans out over. Crucially that resolver returns ``[]`` on a
+    genuinely unconfigured install (every connector marker cleared, e.g. after
+    ``setup remove`` drops the last one); doctor must honor that empty signal
+    and render an explicit "no connector configured" state rather than
+    flooring to the singular :func:`_active_connector`, whose ``"openclaw"``
+    path-resolution default would fabricate a phantom OpenClaw connector on an
+    install that never used OpenClaw (D3).
+
+    Only legacy configs that predate ``active_connectors()`` fall back to the
+    singular primary, preserving their single-connector behavior. Names are
+    lowercased and de-duplicated; the empty list is returned verbatim so
+    callers can distinguish "nothing configured" from "one connector".
+    """
+    getter = getattr(cfg, "active_connectors", None)
+    if callable(getter):
+        try:
+            ordered: list[str] = []
+            for c in getter():
+                name = str(c).strip().lower()
+                if name and name not in ordered:
+                    ordered.append(name)
+            return ordered
+        except Exception:  # noqa: BLE001 — fall back to the singular primary.
+            pass
+    primary = _active_connector(cfg)
+    return [primary] if primary else []
 
 
 _CONNECTOR_LABELS = {
@@ -2950,6 +3201,34 @@ _CONNECTOR_RESIDUE_ARTIFACTS: dict[str, tuple[str, ...]] = {
 _OPENCLAW_RESIDUE_ARTIFACTS: tuple[str, ...] = (os.path.join("connector_backups", "openclaw", "openclaw.json.json"),)
 
 
+def _residue_active_set(cfg, active: str) -> set[str]:
+    """Return every connector that is genuinely active (never residue).
+
+    On a multi-connector install each active connector's backups are
+    legitimate state, so the residue sweep must exclude the FULL
+    ``active_connectors()`` set — not just the singular primary. Scoping to
+    the primary alone made all-but-one connector look like residue, which
+    raised a false WARN and (through the fixer) shelled
+    ``connector teardown`` against a live connector (D7).
+
+    The singular ``active`` argument is unioned in so older configs / tests
+    that pass a primary but expose no ``active_connectors()`` keep their
+    exact single-connector behavior.
+    """
+    out = {(active or "").strip().lower()}
+    getter = getattr(cfg, "active_connectors", None)
+    if callable(getter):
+        try:
+            for c in getter():
+                name = str(c).strip().lower()
+                if name:
+                    out.add(name)
+        except Exception:  # noqa: BLE001 — keep the singular primary.
+            pass
+    out.discard("")
+    return out
+
+
 def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
     """Detect leftover artifacts from connectors that aren't active.
 
@@ -2971,9 +3250,12 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
         _emit("skip", "Connector residue", "no data dir configured", r=r)
         return
 
-    # Build the inactive set explicitly so unknown active connectors
-    # (plugins) don't accidentally suppress residue detection.
-    inactive = [name for name in _CONNECTOR_RESIDUE_ARTIFACTS if name != active.lower()]
+    # Exclude the FULL active set, not just the singular primary (D7): an
+    # active connector can never be its own residue. Build the inactive set
+    # explicitly so unknown active connectors (plugins) don't accidentally
+    # suppress residue detection.
+    active_set = _residue_active_set(cfg, active)
+    inactive = [name for name in _CONNECTOR_RESIDUE_ARTIFACTS if name not in active_set]
 
     found: list[tuple[str, str]] = []  # (connector_name, full_path)
     for name in inactive:
@@ -2984,8 +3266,8 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
 
     # OpenClaw's pristine backup is its only residue marker and lives
     # next to openclaw.json, not under data_dir. Only flag it when
-    # OpenClaw is *not* the active connector.
-    if active.lower() != "openclaw":
+    # OpenClaw is *not* among the active connectors.
+    if "openclaw" not in active_set:
         for filename in _OPENCLAW_RESIDUE_ARTIFACTS:
             full = os.path.join(data_dir, filename)
             if os.path.isfile(full):
@@ -3363,15 +3645,17 @@ def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if not data_dir:
         return ("skip", "no data dir configured")
 
-    active = _active_connector(cfg)
+    # Exclude the FULL active set so the teardown sentinel can never fire
+    # against a live connector (D7) — the same rule the residue *check* uses.
+    active_set = _residue_active_set(cfg, _active_connector(cfg))
     inactive_residue: list[str] = []
     for name, artifacts in _CONNECTOR_RESIDUE_ARTIFACTS.items():
-        if name == active:
+        if name in active_set:
             continue
         if any(os.path.isfile(os.path.join(data_dir, f)) for f in artifacts):
             inactive_residue.append(name)
 
-    if active != "openclaw":
+    if "openclaw" not in active_set:
         if any(os.path.isfile(os.path.join(data_dir, f)) for f in _OPENCLAW_RESIDUE_ARTIFACTS):
             inactive_residue.append("openclaw")
         oc_path = getattr(getattr(cfg, "claw", None), "config_file", "") or ""
