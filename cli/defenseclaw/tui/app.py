@@ -84,6 +84,11 @@ from defenseclaw.tui.panels.tools import ToolsPanelModel
 from defenseclaw.tui.registry import CmdEntry, build_registry
 from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, mask_argv
 from defenseclaw.tui.screens.config_diff import ConfigDiffScreen
+from defenseclaw.tui.screens.consequence import (
+    ConsequenceAction,
+    ConsequenceModalModel,
+    ConsequenceModalScreen,
+)
 from defenseclaw.tui.screens.detail import DetailScreen
 from defenseclaw.tui.screens.judge_history import JudgeHistoryScreen
 from defenseclaw.tui.screens.mcp_set_form import MCPSetFormScreen
@@ -185,6 +190,24 @@ PANELS = (
 )
 
 PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS}
+
+
+class _BodyStatic(Static):
+    """The shared ``#body`` Static, made mouse-aware for the connector chip.
+
+    E1: the connector-filter chip is rendered as a line of this Static, and
+    Textual's ``@click`` action-link markup crashes the compositor when it is
+    painted into this shared body (``Style.meta`` ``UnpicklingError`` — see the
+    project memory note). So instead of action links, clicks are mapped from
+    coordinates here and handed to :meth:`DefenseClawTUI._handle_body_chip_click`,
+    which resolves the click to a chip segment (or opens the filter picker).
+    """
+
+    def on_click(self, event: events.Click) -> None:
+        handler = getattr(self.app, "_handle_body_chip_click", None)
+        if handler is not None and handler(event.x, event.y):
+            event.stop()
+
 
 class DefenseClawTUI(App[None]):
     """Textual TUI foundation.
@@ -650,6 +673,12 @@ class DefenseClawTUI(App[None]):
         self.help_open = False
         self.activity_lines: list[str] = []
         self.body_text = ""
+        # E1: per-render map of clickable connector-chip segments,
+        # ``[(col_start, col_end, connector)]`` in visible columns of the chip
+        # line (``connector == ""`` is the All segment). Rebuilt by
+        # :meth:`_connector_chip_text` and consumed by
+        # :meth:`_handle_body_chip_click`; empty when no chip is shown.
+        self._chip_click_segments: list[tuple[int, int, str]] = []
         self.detail_text = ""
         self.status_text = ""
         self.hint_text = ""
@@ -781,7 +810,7 @@ class DefenseClawTUI(App[None]):
             with Vertical(id="body-panel"):
                 yield OverviewMetrics(self._overview_metric_data(), id="overview-metrics", classes="hidden")
                 with VerticalScroll(id="body-scroll"):
-                    yield Static("", id="body")
+                    yield _BodyStatic("", id="body")
                 with Horizontal(id="overview-controls", classes="panel-controls hidden"):
                     # Click-first quick-actions that mirror the broken
                     # state of the overview. Each button is shown only
@@ -1419,18 +1448,43 @@ class DefenseClawTUI(App[None]):
         any other connector would yield an empty list and operator
         confusion.
 
-        E3: in a multi-connector install the gate follows the connector
-        filter so the tab tracks whatever catalog the operator is
-        looking at (Plugins body + ``set_class`` already follow it via
-        ``plugins_model.connector``). ``_connector_filter`` returns ""
-        for single-connector installs and the All state, so this falls back
-        to the active connector and behaviour is unchanged there.
+        E3/A4: in a multi-connector install the gate follows the connector
+        filter so the tab tracks whatever catalog the operator is looking at,
+        and under the merged "All" view it shows whenever OpenClaw is anywhere
+        in the active set — not just when it is the primary. Both the tab gate
+        (here) and the body/bar render gate route through
+        :meth:`_plugins_visible_for_connector` so they always agree.
         """
 
         if panel != "plugins":
             return False
-        gate_connector = self._connector_filter() or _active_connector(self.config)
-        return gate_connector.lower() != "openclaw"
+        return not self._plugins_visible_for_connector()
+
+    def _plugins_visible_for_connector(self) -> bool:
+        """Whether the Plugins panel is reachable for the current filter (A4).
+
+        Plugins are an OpenClaw-only concept, so the panel is shown only while
+        the operator is looking at OpenClaw's catalog:
+
+        * an explicit filter shows Plugins only when it is OpenClaw;
+        * under "All" (or a single-connector install) it shows when OpenClaw
+          is the resolved connector, or — in a multi-connector install — when
+          OpenClaw is *anywhere* in the active set.
+
+        The last clause is the A4 fix: the singular
+        ``PluginsPanelModel.is_visible_for_connector`` gate (fed the primary
+        connector under "All") hid Plugins whenever OpenClaw was
+        active-but-not-primary (e.g. roster ``[codex, openclaw]``). Resolving
+        from the active set here closes that without touching the catalog
+        state layer.
+        """
+
+        filt = self._connector_filter()
+        if filt:
+            return filt.lower() == "openclaw"
+        if "openclaw" in self._active_connector_names():
+            return True
+        return _active_connector(self.config).lower() == "openclaw"
 
     def _visible_panels(self) -> list[str]:
         """Ordered list of panel names that should currently be visible.
@@ -2598,6 +2652,9 @@ class DefenseClawTUI(App[None]):
     def _body_text(self) -> str:
         self._table_columns = ()
         self._table_rows = ()
+        # E1: clear last render's chip click-map; panels that draw the chip
+        # repopulate it via :meth:`_connector_chip_text`.
+        self._chip_click_segments = []
         if self.help_open:
             self.body_text = self._render_help_body()
             return self.body_text
@@ -2659,7 +2716,7 @@ class DefenseClawTUI(App[None]):
             return self.body_text
         if self.active_panel in self.catalog_models:
             model = self.catalog_models[self.active_panel]
-            if self.active_panel == "plugins" and not self.plugins_model.is_visible_for_connector():
+            if self.active_panel == "plugins" and not self._plugins_visible_for_connector():
                 self.body_text = f"[bold #22D3EE]Plugins[/]\n\n{self.plugins_model.openclaw_only_notice()}"
                 return self.body_text
             self._sync_catalog_connector_filters()
@@ -2758,7 +2815,7 @@ class DefenseClawTUI(App[None]):
         plugins_visible = (
             self.active_panel == "plugins"
             and not self.help_open
-            and self.plugins_model.is_visible_for_connector()
+            and self._plugins_visible_for_connector()
         )
         plugins.set_class(not plugins_visible, "hidden")
         tools.set_class(self.active_panel != "tools" or self.help_open, "hidden")
@@ -4263,6 +4320,12 @@ class DefenseClawTUI(App[None]):
             self.mcps_model,
             self.plugins_model,
             self.inventory_model,
+            # B5: Setup joins the shared-filter fan-out so the connector
+            # selection reaches it like every other multi-connector panel.
+            # The setters are hasattr/AttributeError-guarded, so this is inert
+            # until SetupPanelModel grows the filter interface (panels/setup.py,
+            # B1) — at which point the wiring is already in place.
+            self.setup_model,
         ):
             try:
                 # Keep action intents (scan/info/install) pointed at the
@@ -4298,6 +4361,9 @@ class DefenseClawTUI(App[None]):
             self.mcps_model,
             self.plugins_model,
             self.inventory_model,
+            # B5: Setup tracks the shared filter too (hasattr-guarded — inert
+            # until panels/setup.py honours it; see B1).
+            self.setup_model,
         ):
             if hasattr(model, "show_connector_column"):
                 model.show_connector_column = multi
@@ -4311,8 +4377,16 @@ class DefenseClawTUI(App[None]):
         segment highlighted, plus a hint that ``m`` cycles the filter. Shown
         at the top of every filterable pane so the operator always knows the
         current scope and how to change it.
+
+        E1: as it builds the markup it also records each segment's visible
+        column span in ``self._chip_click_segments`` so a mouse click on the
+        chip can be resolved back to a connector (see
+        :meth:`_handle_body_chip_click`) without the crash-prone ``@click``
+        action-link markup. Labels are plain ASCII and the style tags are
+        zero-width, so the visible column == character offset.
         """
 
+        self._chip_click_segments = []
         segments = connector_filter_svc.chip_segments(
             self._connector_filter(), self._active_connector_names()
         )
@@ -4320,22 +4394,66 @@ class DefenseClawTUI(App[None]):
             return ""
         cfg = self.overview_model.cfg
         rendered: list[str] = []
-        for label, is_active in segments:
+        click_segments: list[tuple[int, int, str]] = []
+        # The chip line starts with the literal "Connector: " label.
+        col = len("Connector: ")
+        for index, (label, is_active) in enumerate(segments):
+            if index > 0:
+                col += 2  # the "  " join between rendered segments
             disabled = cfg is not None and cfg.connector_is_disabled(label)
             text = f"{label} (off)" if disabled else label
             if is_active:
                 rendered.append(
                     f"[{TOKENS.surface_base} on {TOKENS.accent_cyan}] {text} [/]"
                 )
+                visible = f" {text} "
             elif disabled:
                 rendered.append(f"[{TOKENS.text_muted}]{text}[/]")
+                visible = text
             else:
                 rendered.append(f"[{TOKENS.text_secondary}]{text}[/]")
+                visible = text
+            value = "" if label == connector_filter_svc.ALL_LABEL else label
+            click_segments.append((col, col + len(visible), value))
+            col += len(visible)
+        self._chip_click_segments = click_segments
         chip = "  ".join(rendered)
         return (
             f"[{TOKENS.text_secondary}]Connector:[/] {chip}  "
             f"[{TOKENS.text_muted}](press [bold]m[/] to filter)[/]\n\n"
         )
+
+    def _handle_body_chip_click(self, x: int, y: int) -> bool:
+        """Resolve a click on the ``#body`` Static to a connector chip action.
+
+        E1: returns True (and applies the filter) when ``(x, y)`` lands on a
+        chip segment of the connector chip. The clicked line is validated by
+        content — its plain text must begin with ``Connector:`` — so a click on
+        any other body line is ignored regardless of the chip's line offset
+        (it is line 0 on catalog/signal panes but follows a header elsewhere,
+        e.g. Inventory). A click on the chip line but outside a labelled
+        segment (the trailing hint) opens the filter picker as a fallback.
+        """
+
+        segments = self._chip_click_segments
+        if not segments:
+            return False
+        lines = self.body_text.split("\n")
+        if y < 0 or y >= len(lines):
+            return False
+        plain = re.sub(r"\[/?[^\[\]]*\]", "", lines[y])
+        if not plain.startswith("Connector:"):
+            return False
+        for start, end, value in segments:
+            if start <= x < end:
+                self._set_connector_filter(value)
+                return True
+        # On the chip line but between/after segments — offer the picker so the
+        # click is never a dead no-op.
+        if len(self._active_connector_names()) > 1:
+            self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
+            return True
+        return False
 
     def _sync_signal_connector_filters(self) -> None:
         """Push the shared connector filter + column flag to the signal panes.
@@ -6223,6 +6341,18 @@ class DefenseClawTUI(App[None]):
             if self.first_run_model.active:
                 action = self.first_run_model.handle_key(_vim_key(key))
                 return self._apply_first_run_action(action)
+            # B5: Setup honours the shared connector filter like every other
+            # multi-connector pane — ``m`` opens the picker. Gated to the
+            # browse states (not a wizard goal/form) so ``m`` is never stolen
+            # from text-entry while editing a field.
+            if (
+                key == "m"
+                and len(self._active_connector_names()) > 1
+                and not self.setup_model.form_active
+                and not self.setup_model.goal_active
+            ):
+                self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
+                return True
             action = self._handle_setup_key(_vim_key(key))
             return self._apply_setup_action(action)
         return False
@@ -7582,6 +7712,16 @@ class DefenseClawTUI(App[None]):
         self._render_chrome()
 
     async def _confirm_and_run_intent(self, intent: Any) -> None:
+        # N1: a catalog intent that flags itself ``risk="destructive"`` (today
+        # only plugin remove, which deletes files from disk) is confirmed
+        # through the C1 consequence danger-modal — red border + an explicit
+        # second confirm (re-press) — instead of the one-step command preview,
+        # so a single keypress/click can't delete. Typed/palette destructive
+        # commands keep the standard preview path (they reach
+        # ``_confirm_and_run_parsed`` directly, not through here).
+        if getattr(intent, "risk", "read-only") == "destructive":
+            await self._confirm_and_run_destructive_intent(intent)
+            return
         parsed = ParsedCommand(
             binary=intent.binary,
             args=tuple(intent.args),
@@ -7596,6 +7736,61 @@ class DefenseClawTUI(App[None]):
         # command finishes. The follow-ups themselves are queued through
         # the same confirm-and-run path so the user still sees the
         # preview screen and live output.
+        for follow_up in getattr(intent, "follow_up", ()) or ():
+            await self._confirm_and_run_intent(follow_up)
+
+    def _destructive_intent_modal(self, intent: Any) -> ConsequenceModalModel:
+        """Build the C1 consequence modal for a destructive catalog intent (N1).
+
+        A single ``danger`` action carries the command; the consequence modal
+        paints a red border and requires the danger re-press before it
+        dismisses with the action, so the dispatch only fires on an explicit
+        second confirm.
+        """
+
+        command_line = " ".join((intent.binary, *intent.args))
+        return ConsequenceModalModel(
+            title=f"Confirm: {intent.label}",
+            summary="This is a destructive action and cannot be undone.",
+            details=(f"Will run: {command_line}",),
+            consequence="This deletes files from disk.",
+            actions=(
+                ConsequenceAction(
+                    action_id="run",
+                    hotkey="d",
+                    label=intent.label,
+                    description="Runs the command and deletes the files from disk.",
+                    variant="error",
+                    danger=True,
+                ),
+            ),
+            default_action_id="run",
+            border_color=TOKENS.accent_red,
+        )
+
+    async def _confirm_and_run_destructive_intent(self, intent: Any) -> None:
+        chosen = await self.push_screen_wait(
+            ConsequenceModalScreen(self._destructive_intent_modal(intent))
+        )
+        if chosen is None:
+            self._write_activity(f"[#FBBF24]Cancelled:[/] {intent.label}")
+            self._set_status("Command cancelled.")
+            return
+        # Confirmed (and danger-re-pressed): jump to Activity where the live
+        # output is visible, record the alias in the palette MRU, then run.
+        if self.active_panel != "activity":
+            self.action_switch_panel("activity")
+        try:
+            self.state_store.record_command(intent.label)
+            self.state = self.state_store.state
+            self.state_store.save()
+        except Exception:  # noqa: BLE001 - palette MRU is cosmetic
+            pass
+        self.run_worker(
+            self._run_command(intent.binary, tuple(intent.args), display_name=intent.label),
+            exclusive=False,
+            thread=False,
+        )
         for follow_up in getattr(intent, "follow_up", ()) or ():
             await self._confirm_and_run_intent(follow_up)
 
@@ -8308,6 +8503,55 @@ def _audit_store(config: object | None) -> object | None:
         return None
 
 
+def _flatten_scanner_overrides(
+    overrides: object,
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Flatten a ``data.json`` ``scanner_overrides`` block (N3).
+
+    Input shape: ``{scanner_type: {severity: {install|file|runtime: action}}}``
+    (what ``policy show`` reads). Output: ``(scanner_type, severity, surface,
+    action)`` tuples for :func:`format_scanner_overrides_summary`. Malformed
+    branches are skipped so a bad payload degrades to a partial list, never a
+    raise.
+    """
+
+    flat: list[tuple[str, str, str, str]] = []
+    if not isinstance(overrides, dict):
+        return ()
+    for scanner_type, sevs in overrides.items():
+        if not isinstance(sevs, dict):
+            continue
+        for severity, surface_actions in sevs.items():
+            if not isinstance(surface_actions, dict):
+                continue
+            for surface in ("install", "file", "runtime"):
+                action = surface_actions.get(surface)
+                if action:
+                    flat.append((str(scanner_type), str(severity), surface, str(action)))
+    return tuple(flat)
+
+
+def _active_policy_scanner_overrides(
+    policy_dir: str,
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Read the active policy's synced ``data.json`` scanner overrides (N3).
+
+    Uses the same reader as the enforcement lane (``rego/data.json``, with the
+    flat ``data.json`` fallback). Any read/parse failure degrades to an empty
+    tuple so the Overview simply renders nothing.
+    """
+
+    try:
+        from defenseclaw.enforce.admission import _read_policy_data
+
+        data = _read_policy_data(policy_dir or "")
+    except Exception:  # noqa: BLE001 - the override summary is purely informational.
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    return _flatten_scanner_overrides(data.get("scanner_overrides", {}))
+
+
 def _overview_config(config: object | None) -> OverviewConfig | None:
     if config is None:
         return None
@@ -8331,15 +8575,16 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     # silently dropping the connector chip, stopping `m` cycling, and hiding
     # every per-connector tile. Guard the enumeration here; if it fails we
     # degrade to a single-connector view instead of swallowing the roster
-    # together with any later error. (A *visible* status-line diagnostic can't
-    # be raised from this module-level builder without an OverviewConfig error
-    # field / caller plumbing — see fix-plan A2; deferred, as the TUI subtree
-    # has no stderr logger.)
+    # together with any later error. The TUI subtree has no stderr logger, so
+    # rather than fail silently we stash the reason in `OverviewConfig.roster_error`
+    # and the Overview surfaces it as a visible error notice (build_notices).
+    roster_error = ""
     try:
         actives = config.active_connectors() if hasattr(config, "active_connectors") else []
         actives = [c for c in actives if c]
-    except Exception:  # noqa: BLE001 - a bad connector key must not blank the roster.
+    except Exception as exc:  # noqa: BLE001 - a bad connector key must not blank the roster.
         actives = []
+        roster_error = f"Connector roster unavailable: {exc}"
     if len(actives) > 1:
         pairs: list[tuple[str, str]] = []
         packs: list[tuple[str, str]] = []
@@ -8390,7 +8635,12 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         data_dir=str(getattr(config, "data_dir", "") or ""),
         environment=str(getattr(config, "environment", "") or ""),
         policy_dir=str(getattr(config, "policy_dir", "") or ""),
-        claw_mode=str(getattr(claw, "mode", "") or "openclaw"),
+        # A1 (display-only, Root R1): pass the real `claw.mode` through — do NOT
+        # collapse an empty mode to "openclaw". OverviewPanelModel.active_connector_name()
+        # then resolves the genuinely-zero-connector case to "" (no phantom
+        # connector) instead of fabricating "openclaw". The Go-parity
+        # config.active_connector() contract is deliberately left untouched.
+        claw_mode=str(getattr(claw, "mode", "") or ""),
         guardrail_enabled=bool(getattr(guardrail, "enabled", False)),
         guardrail_connector=str(getattr(guardrail, "connector", "") or ""),
         guardrail_mode=str(getattr(guardrail, "mode", "") or "observe"),
@@ -8411,6 +8661,13 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         connector_modes=connector_modes,
         connector_packs=connector_packs,
         connector_disabled=connector_disabled,
+        # A2: visible diagnostic when the roster enumeration failed.
+        roster_error=roster_error,
+        # N3: active-policy scanner action overrides (data.json), so the
+        # Overview/status surface a policy that downgrades a scanner surface.
+        scanner_overrides=_active_policy_scanner_overrides(
+            str(getattr(config, "policy_dir", "") or "")
+        ),
     )
 
 
