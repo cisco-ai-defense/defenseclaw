@@ -339,14 +339,14 @@ class TestMCPServers:
                 "local": {
                     "command": "/opt/defenseclaw/bin/defenseclaw",
                     "args": ["mcp", "serve"],
-                    "env": {"DEFENSECLAW_PROFILE": "default"},
+                    "env": {"AGY_PROFILE": "default"},
                     "cwd": "/workspace/project",
                     "disabled": True,
                     "disabledTools": ["unsafe_tool"],
                 },
                 "remote": {
                     "serverUrl": "https://mcp.example.com/mcp/",
-                    "headers": {"Authorization": "Bearer ${DEFENSECLAW_MCP_TOKEN}"},
+                    "headers": {"Authorization": "Bearer ${AGY_MCP_TOKEN}"},
                     "authProviderType": "oauth",
                     "oauth": {"issuer": "https://accounts.example.com"},
                 },
@@ -366,13 +366,13 @@ class TestMCPServers:
         local = entries[0]
         assert local.command == "/opt/defenseclaw/bin/defenseclaw"
         assert local.args == ["mcp", "serve"]
-        assert local.env == {"DEFENSECLAW_PROFILE": "default"}
+        assert local.env == {"AGY_PROFILE": "default"}
         assert local.cwd == "/workspace/project"
         assert local.disabled is True
         assert local.disabled_tools == ["unsafe_tool"]
         remote = entries[1]
         assert remote.url == "https://mcp.example.com/mcp/"
-        assert remote.headers == {"Authorization": "Bearer ${DEFENSECLAW_MCP_TOKEN}"}
+        assert remote.headers == {"Authorization": "Bearer ${AGY_MCP_TOKEN}"}
         assert remote.auth_provider_type == "oauth"
         assert remote.oauth == {"issuer": "https://accounts.example.com"}
         assert entries[2].url == "https://workspace.example.com/mcp"

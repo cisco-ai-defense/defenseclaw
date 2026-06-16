@@ -2809,15 +2809,10 @@ class DefenseClawTUI(App[None]):
         ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
         skills.set_class(self.active_panel != "skills" or self.help_open, "hidden")
         mcps.set_class(self.active_panel != "mcps" or self.help_open, "hidden")
-        # ``plugins`` is hidden when the connector doesn't expose
-        # plugins (Codex / Claude). The body shows an explanatory
-        # "openclaw-only" notice; the bar would just dangle.
-        plugins_visible = (
-            self.active_panel == "plugins"
-            and not self.help_open
-            and self._plugins_visible_for_connector()
-        )
-        plugins.set_class(not plugins_visible, "hidden")
+        # Keep the plugins bar panel-scoped. When a connector cannot
+        # load plugins, the body renders an explanatory notice and the
+        # buttons naturally disable because no row is selected.
+        plugins.set_class(self.active_panel != "plugins" or self.help_open, "hidden")
         tools.set_class(self.active_panel != "tools" or self.help_open, "hidden")
         # Stdin pipe is panel-scoped to Activity but command-state-scoped
         # to "executor is busy" — handle it after the per-panel sync so

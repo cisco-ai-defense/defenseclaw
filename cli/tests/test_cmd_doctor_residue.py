@@ -62,7 +62,7 @@ class CheckConnectorResidueTests(unittest.TestCase):
         check = r.checks[0]
         self.assertEqual(check["status"], "warn")
         self.assertIn("codex", check["detail"])
-        self.assertIn("doctor --fix", check["detail"])
+        self.assertIn("defenseclaw-gateway connector teardown --connector <name>", check["detail"])
 
     def test_warns_when_managed_codex_backup_present_with_openclaw_active(self):
         with tempfile.TemporaryDirectory() as data_dir:
