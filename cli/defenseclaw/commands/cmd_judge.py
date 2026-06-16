@@ -246,19 +246,35 @@ def judge() -> None:
     ),
 )
 @click.option(
+    "--enable",
+    is_flag=True,
+    default=False,
+    help=(
+        "Also set guardrail.judge.enabled=true. By default 'judge add' only "
+        "edits the hook gate and warns when the judge is off — the gate has "
+        "no effect until the judge is enabled (via 'setup guardrail' or this "
+        "flag)."
+    ),
+)
+@click.option(
     "--restart/--no-restart",
     default=True,
     help="Restart the gateway so the gate takes effect (default: on).",
 )
 @pass_ctx
 def judge_add(
-    app: AppContext, connector: str, hook_timeout: float | None, restart: bool
+    app: AppContext,
+    connector: str,
+    hook_timeout: float | None,
+    enable: bool,
+    restart: bool,
 ) -> None:
     """Opt CONNECTOR into the hook-lane LLM judge ('all' = every hook connector).
 
     \b
     Examples:
       defenseclaw guardrail judge add hermes
+      defenseclaw guardrail judge add hermes --enable
       defenseclaw guardrail judge add all
       defenseclaw guardrail judge add opencode --timeout 8
     """
@@ -284,6 +300,18 @@ def judge_add(
             gc.judge.hook_timeout = hook_timeout
             timeout_changed = True
 
+    # --enable is the J1 convenience opt-in: `judge add` populates the hook
+    # gate but, by design, never flips judge.enabled — so a connector can be
+    # "added" while the judge stays globally off and the gate sits inert.
+    # Operators who want the add to also turn the judge on pass --enable
+    # instead of running a separate `setup guardrail`. Idempotent: only a
+    # real off→on transition counts as a change, so re-passing --enable on an
+    # already-enabled judge never forces a needless save+restart.
+    enable_changed = False
+    if enable and not gc.judge.enabled:
+        gc.judge.enabled = True
+        enable_changed = True
+
     # Gate update: compute the change and stash the no-op reason instead
     # of echoing it inline — "nothing to do" must only print when the
     # WHOLE command is a no-op. A gate no-op combined with a --timeout
@@ -292,6 +320,8 @@ def judge_add(
     gate_changed = False
     noop_reason = None
     click.echo()
+    if enable_changed:
+        click.echo("  " + ux.dim("enabling guardrail.judge.enabled (was off)."))
     if name == ALL_CONNECTORS:
         if _gate_is_all(gate):
             noop_reason = "hook_connectors is already all"
@@ -315,13 +345,18 @@ def judge_add(
         gc.judge.hook_connectors = gate
         gate_changed = True
 
-    if not gate_changed and not timeout_changed:
+    if not gate_changed and not timeout_changed and not enable_changed:
         click.echo("  " + ux.dim(f"{noop_reason} — nothing to do."))
         _warn_if_inert(app, gc)
         click.echo()
         return
     if not gate_changed and noop_reason:
-        click.echo("  " + ux.dim(f"{noop_reason} — saving hook_timeout only."))
+        saved = []
+        if enable_changed:
+            saved.append("judge.enabled")
+        if timeout_changed:
+            saved.append("hook_timeout")
+        click.echo("  " + ux.dim(f"{noop_reason} — saving {' + '.join(saved)} only."))
 
     _warn_if_unconfigured(app, name)
     _save_and_restart(app, gc, restart=restart, action=f"add {name}")
@@ -363,12 +398,23 @@ def judge_remove(app: AppContext, connector: str, restart: bool) -> None:
             return
         gc.judge.hook_connectors = []
     elif _gate_is_all(gate):
-        raise click.ClickException(
-            f"hook_connectors is all — removing '{name}' "
-            f"alone is ambiguous. Either turn the lane off with "
-            f"`defenseclaw guardrail judge remove all` or replace it "
-            f"with an explicit list via `guardrail judge add <connector>` "
-            f"per connector you want to keep."
+        # Auto-expand the every-connector sentinel (J6): removing one
+        # connector from `*` means "every hook connector except this one".
+        # Materialize `*` into the canonical hook-enforced roster minus the
+        # removed connector rather than erroring. We expand to the full
+        # roster (not just the active connectors) so coverage still matches
+        # what `*` meant — connectors set up later stay judged; only the
+        # named one is dropped. `name` passed _validate_connector above, so
+        # it is guaranteed a member of the roster.
+        hook_enforced, _ = _connector_sets()
+        gate = sorted(hook_enforced - {name})
+        gc.judge.hook_connectors = gate
+        click.echo(
+            "  "
+            + ux.dim(
+                f"hook_connectors was all — expanded to every hook "
+                f"connector except '{name}': {gate}."
+            )
         )
     elif _gate_contains(gate, name):
         gate = _gate_without(gate, name)

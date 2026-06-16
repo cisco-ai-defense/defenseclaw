@@ -245,6 +245,55 @@ class JudgeAddTests(unittest.TestCase):
         self.assertIn("not a configured connector", result.output)
         self.assertEqual(app.cfg.guardrail.judge.hook_connectors, ["codex"])
 
+    @patch.object(cmd_setup, "_restart_services")
+    def test_add_enable_flips_judge_enabled(self, restart):
+        # J1: --enable turns the judge on as part of the add, so a freshly
+        # gated connector isn't left inert behind judge.enabled=false.
+        app = make_ctx(judge_enabled=False)
+        result = invoke(app, ["add", "hermes", "--enable"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(app.cfg.guardrail.judge.enabled)
+        self.assertEqual(app.cfg.guardrail.judge.hook_connectors, ["hermes"])
+        app.cfg.save.assert_called_once()
+        restart.assert_called_once()
+        # With the judge now on, the inert "no effect" warning must not fire.
+        self.assertNotIn("no effect", result.output)
+
+    @patch.object(cmd_setup, "_restart_services")
+    def test_add_without_enable_leaves_judge_disabled(self, restart):
+        # Default is preserved: add never flips judge.enabled, and the inert
+        # warning still fires so the operator knows the gate is dormant.
+        app = make_ctx(judge_enabled=False)
+        result = invoke(app, ["add", "hermes"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.guardrail.judge.enabled)
+        self.assertIn("no effect", result.output)
+
+    @patch.object(cmd_setup, "_restart_services")
+    def test_add_enable_when_already_enabled_is_idempotent(self, restart):
+        # --enable on an already-enabled judge is not itself a change: with
+        # the gate also a no-op there is nothing to save or restart.
+        app = make_ctx(judge_enabled=True, hook_connectors=["hermes"])
+        result = invoke(app, ["add", "hermes", "--enable"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(app.cfg.guardrail.judge.enabled)
+        app.cfg.save.assert_not_called()
+        restart.assert_not_called()
+        self.assertIn("nothing to do", result.output)
+
+    @patch.object(cmd_setup, "_restart_services")
+    def test_add_enable_alone_persists_without_gate_change(self, restart):
+        # Gate no-op (already gated) but judge was off + --enable: a real
+        # change (judge.enabled off→on), so it saves and reports the enable,
+        # never "nothing to do" right before a save+restart.
+        app = make_ctx(judge_enabled=False, hook_connectors=["hermes"])
+        result = invoke(app, ["add", "hermes", "--enable"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(app.cfg.guardrail.judge.enabled)
+        app.cfg.save.assert_called_once()
+        self.assertNotIn("nothing to do", result.output)
+        self.assertIn("judge.enabled", result.output)
+
 
 class JudgeRemoveTests(unittest.TestCase):
     @patch.object(cmd_setup, "_restart_services")
@@ -279,13 +328,31 @@ class JudgeRemoveTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(app.cfg.guardrail.judge.hook_connectors, [])
 
-    def test_remove_name_under_star_is_ambiguous_error(self):
+    @patch.object(cmd_setup, "_restart_services")
+    def test_remove_name_under_star_expands_minus_removed(self, restart):
+        # J6: removing one connector from `*` materializes the wildcard into
+        # the canonical hook roster minus that connector rather than
+        # erroring, so "every hook connector except hermes" stays
+        # expressible from the CLI.
         app = make_ctx(hook_connectors=["*"])
         result = invoke(app, ["remove", "hermes"])
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("ambiguous", result.output)
-        self.assertEqual(app.cfg.guardrail.judge.hook_connectors, ["*"])
-        app.cfg.save.assert_not_called()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        expected = sorted(cmd_setup._HOOK_ENFORCED_CONNECTORS - {"hermes"})
+        self.assertEqual(app.cfg.guardrail.judge.hook_connectors, expected)
+        self.assertNotIn("hermes", app.cfg.guardrail.judge.hook_connectors)
+        self.assertIn("expanded", result.output)
+        app.cfg.save.assert_called_once()
+        restart.assert_called_once()
+
+    @patch.object(cmd_setup, "_restart_services")
+    def test_remove_padded_star_expands(self, restart):
+        # Hand-edited ' * ' is live on the Go gate (TrimSpace + EqualFold),
+        # so removing a member from it must expand too, not no-op.
+        app = make_ctx(hook_connectors=[" * "])
+        result = invoke(app, ["remove", "opencode"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        expected = sorted(cmd_setup._HOOK_ENFORCED_CONNECTORS - {"opencode"})
+        self.assertEqual(app.cfg.guardrail.judge.hook_connectors, expected)
 
     @patch.object(cmd_setup, "_restart_services")
     def test_remove_nonmember_is_noop(self, restart):
