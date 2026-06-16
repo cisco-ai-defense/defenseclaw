@@ -108,7 +108,16 @@ def evaluate_admission(
     still subject to the policy's ``allow_list_bypass_scan`` setting.
     """
     blocked_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the block list")
-    if pe.is_blocked(target_type, name):
+    # N2: honor a per-connector block at the admission gate. When a connector is
+    # in play, resolve most-specific-wins (connector-scoped entry, else global)
+    # via the *_for_connector engine method; the bare (global) path keeps the
+    # pre-N2 call so duck-typed callers/fakes without the connector dimension are
+    # unaffected (connector="" is equivalent to the global check anyway).
+    if (
+        pe.is_blocked_for_connector(target_type, name, connector)
+        if connector
+        else pe.is_blocked(target_type, name)
+    ):
         return AdmissionDecision("blocked", blocked_reason, source="manual-block")
 
     asset_decision = evaluate_asset_policy(
@@ -127,7 +136,11 @@ def evaluate_admission(
         return asset_decision
 
     allowed_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the allow list — scan skipped")
-    if pe.is_allowed(target_type, name):
+    if (
+        pe.is_allowed_for_connector(target_type, name, connector)
+        if connector
+        else pe.is_allowed(target_type, name)
+    ):
         # an explicit operator allow that
         # was registered with a source_path MUST NOT auto-allow a
         # different on-disk asset just because it shares the
@@ -160,7 +173,12 @@ def evaluate_admission(
             )
         return AdmissionDecision("allowed", allowed_reason, source="manual-allow")
 
-    if include_quarantine and pe.is_quarantined(target_type, name):
+    quarantined = (
+        pe.is_quarantined_for_connector(target_type, name, connector)
+        if connector
+        else pe.is_quarantined(target_type, name)
+    )
+    if include_quarantine and quarantined:
         reason = _action_reason(action_entry, default="quarantined")
         return AdmissionDecision("rejected", f"quarantined: {reason}", source="quarantine")
 
