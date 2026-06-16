@@ -44,6 +44,8 @@ from defenseclaw.config import (
     InspectLLMConfig,
     MCPScannerConfig,
     OpenShellConfig,
+    PerConnectorAssetPolicy,
+    PerConnectorAssetTypePolicy,
     PluginActionsConfig,
     SeverityAction,
     SkillActionsConfig,
@@ -543,6 +545,108 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertTrue(loaded.asset_policy.mcp.registry_required)
             self.assertEqual(loaded.asset_policy.mcp.registry[0].connector, "codex")
             self.assertEqual(loaded.asset_policy.skill.default, "deny")
+
+    def test_asset_policy_connectors_roundtrip(self):
+        # OTHER-7: per-connector overrides survive a save/load cycle, and the
+        # serialized YAML drops None per-type blocks + inherited scalars.
+        import yaml
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                environment="linux",
+                asset_policy=AssetPolicyConfig(enabled=True, mode="observe"),
+            )
+            cfg.asset_policy.connectors = {
+                "codex": PerConnectorAssetPolicy(
+                    mode="action",
+                    mcp=PerConnectorAssetTypePolicy(
+                        registry_required=True, registry_empty_action="deny",
+                    ),
+                ),
+                "hermes": PerConnectorAssetPolicy(mode="observe"),
+            }
+            cfg.save()
+
+            config_file = os.path.join(tmpdir, "config.yaml")
+            with open(config_file) as f:
+                raw = yaml.safe_load(f)
+
+            conns = raw["asset_policy"]["connectors"]
+            self.assertEqual(conns["codex"]["mode"], "action")
+            self.assertTrue(conns["codex"]["mcp"]["registry_required"])
+            self.assertEqual(conns["codex"]["mcp"]["registry_empty_action"], "deny")
+            # None per-type blocks + inherited scalars are not serialized.
+            self.assertNotIn("skill", conns["codex"])
+            self.assertNotIn("plugin", conns["codex"])
+            self.assertNotIn("default", conns["codex"]["mcp"])
+            self.assertEqual(conns["hermes"], {"mode": "observe"})
+
+            with patch("defenseclaw.config.default_data_path") as mock_dp:
+                mock_dp.return_value = Path(tmpdir)
+                loaded = load()
+
+            pc = loaded.asset_policy.connectors["codex"]
+            self.assertEqual(pc.mode, "action")
+            self.assertTrue(pc.mcp.registry_required)
+            self.assertEqual(pc.mcp.registry_empty_action, "deny")
+            self.assertIsNone(pc.skill)
+            self.assertEqual(loaded.asset_policy.effective_mode("codex"), "action")
+            self.assertEqual(loaded.asset_policy.effective_mode("hermes"), "observe")
+
+    def test_global_only_asset_policy_omits_connectors_key(self):
+        # An enabled-but-global-only config must NOT emit `connectors:` so it
+        # stays byte-identical to a pre-OTHER-7 config (omitempty mirror).
+        import yaml
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                environment="linux",
+                asset_policy=AssetPolicyConfig(enabled=True, mode="action"),
+            )
+            cfg.save()
+            with open(os.path.join(tmpdir, "config.yaml")) as f:
+                raw = yaml.safe_load(f)
+            self.assertIn("asset_policy", raw)
+            self.assertNotIn("connectors", raw["asset_policy"])
+
+    def test_asset_policy_validate_rejects_duplicate_connector_alias(self):
+        cfg = AssetPolicyConfig(
+            enabled=True,
+            connectors={
+                "open-hands": PerConnectorAssetPolicy(mode="action"),
+                "openhands": PerConnectorAssetPolicy(mode="observe"),
+            },
+        )
+        with self.assertRaises(ValueError):
+            cfg.validate()
+
+    def test_asset_policy_validate_rejects_bad_mode(self):
+        cfg = AssetPolicyConfig(
+            enabled=True,
+            connectors={"codex": PerConnectorAssetPolicy(mode="enforce")},
+        )
+        with self.assertRaises(ValueError):
+            cfg.validate()
+
+    def test_asset_policy_validate_rejects_bad_empty_action(self):
+        cfg = AssetPolicyConfig(
+            enabled=True,
+            connectors={
+                "codex": PerConnectorAssetPolicy(
+                    mcp=PerConnectorAssetTypePolicy(registry_empty_action="nope"),
+                ),
+            },
+        )
+        with self.assertRaises(ValueError):
+            cfg.validate()
 
 
 class TestClawPaths(unittest.TestCase):

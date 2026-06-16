@@ -998,12 +998,179 @@ def _default_nonruntime_asset_type_policy() -> AssetTypePolicy:
 
 
 @dataclass
+class PerConnectorAssetTypePolicy:
+    """Per-connector scalar overrides for one asset type (OTHER-7).
+
+    Scalars-only, mirroring :class:`PerConnectorGuardrailConfig`: an empty
+    ``default`` / ``registry_empty_action`` or a ``None``
+    ``registry_required`` inherits the global :class:`AssetTypePolicy`
+    value (the ``None`` pointer mirrors the Go ``*bool`` inherit-on-nil
+    semantics). Rule lists (``registry`` / ``allowed`` / ``denied``) and
+    ``runtime_detection`` are deliberately NOT per-connector — they stay on
+    the global per-type policy and are filtered by ``rule.connector`` at
+    match time. Mirrors ``PerConnectorAssetTypePolicy`` in
+    ``internal/config/asset_policy.go``.
+    """
+
+    default: str = ""
+    registry_required: bool | None = None
+    registry_empty_action: str = ""
+
+
+@dataclass
+class PerConnectorAssetPolicy:
+    """Per-connector ``asset_policy`` overrides keyed by connector name.
+
+    Mirrors ``PerConnectorAssetPolicy`` in
+    ``internal/config/asset_policy.go``. ``mode`` empty inherits the global
+    ``asset_policy.mode``; each per-type block, when present, overrides only
+    the scalars it sets and inherits the rest. A ``None`` per-type block
+    means "inherit the global per-type policy entirely".
+    """
+
+    mode: str = ""
+    mcp: PerConnectorAssetTypePolicy | None = None
+    skill: PerConnectorAssetTypePolicy | None = None
+    plugin: PerConnectorAssetTypePolicy | None = None
+
+
+@dataclass
 class AssetPolicyConfig:
     enabled: bool = False
     mode: str = "observe"
     mcp: AssetTypePolicy = field(default_factory=_default_runtime_asset_type_policy)
     skill: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
     plugin: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
+    # Per-connector overrides keyed by connector name (OTHER-7). Empty/absent
+    # preserves the legacy global-only behavior. Only the scalar settings are
+    # per-connector; rule lists + runtime_detection stay on the global per-type
+    # policy. Resolution goes through the ``effective_*`` methods, never by
+    # reading the map directly. Mirrors ``AssetPolicyConfig.Connectors`` in
+    # ``internal/config/asset_policy.go`` and the ``guardrail.connectors`` shape.
+    connectors: dict[str, PerConnectorAssetPolicy] = field(default_factory=dict)
+
+    def _connector_override(self, connector: str) -> PerConnectorAssetPolicy | None:
+        """Return the override block for ``connector`` if configured.
+
+        An empty connector name or empty map yields ``None`` so callers fall
+        through to the global value. Lookup is connector-name-insensitive
+        (exact key first, then via ``connector_paths.normalize``), mirroring
+        :meth:`GuardrailConfig._connector_override` and the Go
+        ``connectorOverride``.
+        """
+        if not connector or not self.connectors:
+            return None
+        pc = self.connectors.get(connector)
+        if pc is not None:
+            return pc
+        want = connector_paths.normalize(connector)
+        for name, entry in self.connectors.items():
+            if connector_paths.normalize(name) == want:
+                return entry
+        return None
+
+    def effective_mode(self, connector: str = "") -> str:
+        """Per-connector override > global mode > ``"observe"``."""
+        pc = self._connector_override(connector)
+        if pc is not None and pc.mode.strip():
+            return pc.mode.strip()
+        if self.mode.strip():
+            return self.mode.strip()
+        return "observe"
+
+    def effective_asset_type_policy(
+        self, connector: str, target_type: str
+    ) -> AssetTypePolicy | None:
+        """Resolve the effective per-type policy for a connector.
+
+        Returns a copy of the global per-type :class:`AssetTypePolicy` with
+        only the three scalars (``default`` / ``registry_required`` /
+        ``registry_empty_action``) overridden where the per-connector entry
+        sets them; the rule lists and ``runtime_detection`` stay the global
+        policy's. Returns ``None`` for an unsupported target type so the
+        caller can fall through to its allow-unsupported path. Mirrors the Go
+        ``assetPolicyFor(connector, targetType)`` overlay.
+        """
+        if target_type not in ("mcp", "skill", "plugin"):
+            return None
+        base: AssetTypePolicy = getattr(self, target_type)
+        pc = self._connector_override(connector)
+        override = getattr(pc, target_type, None) if pc is not None else None
+        if override is None:
+            return base
+        changes: dict[str, Any] = {}
+        if override.default.strip():
+            changes["default"] = override.default.strip()
+        if override.registry_required is not None:
+            changes["registry_required"] = override.registry_required
+        if override.registry_empty_action.strip():
+            changes["registry_empty_action"] = (
+                override.registry_empty_action.strip().lower()
+            )
+        if not changes:
+            return base
+        return replace(base, **changes)
+
+    def validate(self) -> None:
+        """Validate per-connector asset_policy VALUE invariants only.
+
+        Mirrors :meth:`GuardrailConfig.validate` over the NEW
+        ``asset_policy.connectors`` map: rejects empty / alias-duplicate
+        connector names and checks each override's enum values (``mode`` and
+        the per-type ``default`` / ``registry_empty_action`` scalars). It
+        deliberately does NOT re-validate the global asset_policy fields
+        (those predate per-connector support and were never gated by
+        ``load()``) and never touches the connector registry — unknown
+        connector identity is left to the gateway boot loop, exactly like
+        guardrail. Raises :class:`ValueError` on the first violation.
+        """
+        seen: dict[str, str] = {}
+        for name in sorted(self.connectors):
+            if not name.strip():
+                raise ValueError(
+                    "asset_policy.connectors: empty connector name is not allowed"
+                )
+            norm = connector_paths.normalize(name)
+            if norm in seen:
+                raise ValueError(
+                    f"asset_policy.connectors: {seen[norm]!r} and {name!r} refer "
+                    f"to the same connector {norm!r}; keep only one"
+                )
+            seen[norm] = name
+            pc = self.connectors[name]
+            try:
+                _validate_asset_policy_mode(pc.mode)
+                for ttype in ("mcp", "skill", "plugin"):
+                    block = getattr(pc, ttype, None)
+                    if block is not None:
+                        _validate_asset_type_default(block.default)
+                        _validate_registry_empty_action(block.registry_empty_action)
+            except ValueError as exc:
+                raise ValueError(
+                    f"asset_policy.connectors[{name!r}]: {exc}"
+                ) from exc
+
+
+def _validate_asset_policy_mode(mode: str) -> None:
+    if (mode or "").strip().lower() not in {"", "observe", "action"}:
+        raise ValueError(
+            f'invalid asset_policy mode {mode!r} (want "observe" or "action")'
+        )
+
+
+def _validate_asset_type_default(value: str) -> None:
+    if (value or "").strip().lower() not in {"", "allow", "deny", "block"}:
+        raise ValueError(
+            f'invalid asset_policy default {value!r} (want "allow" or "deny")'
+        )
+
+
+def _validate_registry_empty_action(value: str) -> None:
+    if (value or "").strip().lower() not in {"", "deny", "warn", "allow", "block"}:
+        raise ValueError(
+            f"invalid registry_empty_action {value!r} "
+            '(want "deny", "warn", or "allow")'
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2224,6 +2391,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         d.pop("notifications", None)
     if d.get("asset_policy") == _default_asset_policy_dict():
         d.pop("asset_policy", None)
+    else:
+        _serialize_asset_policy_connectors(cfg, d.get("asset_policy"))
     # Drop the registries: block when no sources are configured so an
     # operator-untouched config stays byte-identical after a load/save
     # round-trip. The block reappears the moment any source is added.
@@ -2363,6 +2532,12 @@ _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset({
     # deleted/cleared connector propagate to disk, which is the whole
     # point of the removal.
     "guardrail.connectors",
+    # Per-connector asset_policy overrides map (OTHER-7). Same rationale as
+    # guardrail.connectors: the dataclass is the single source of truth for
+    # the configured per-connector set, so clearing an override in-memory and
+    # saving must propagate to disk rather than being rescued by the
+    # non-authoritative merge from the prior file.
+    "asset_policy.connectors",
 })
 
 # Nested NON-dict keys the dataclass owns and may intentionally omit.
@@ -2540,6 +2715,62 @@ def _default_notifications_dict() -> dict[str, Any]:
 def _default_asset_policy_dict() -> dict[str, Any]:
     from dataclasses import asdict
     return asdict(AssetPolicyConfig())
+
+
+def _serialize_asset_policy_connectors(cfg: Config, asset_policy: Any) -> None:
+    """In-place YAML cleanup for ``asset_policy.connectors`` (OTHER-7).
+
+    Mirrors Go's ``yaml:",omitempty"`` tags and the ``guardrail.connectors``
+    serialization handling:
+
+    * Empty map + never loaded with connectors → drop the key so a
+      global-only config stays byte-identical after a load/save round-trip.
+    * Empty map + WAS loaded with connectors → emit an explicit
+      ``connectors: {}`` so the authoritative atomic-replace in
+      :func:`_deep_merge_nested` clears the on-disk block (the map is in
+      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS`).
+    * Non-empty map → drop ``None`` per-type blocks, an unset (``None``)
+      ``registry_required``, and empty-string scalars so a populated map
+      round-trips without ``mcp: null`` / ``registry_required: null`` noise.
+
+    This runs only on a non-default ``asset_policy`` block (the all-default
+    strip already removed the default case, which still carries the
+    ``connectors: {}`` key needed for that equality check).
+    """
+    if not isinstance(asset_policy, dict):
+        return
+    connectors = asset_policy.get("connectors")
+    if not connectors:
+        had_connectors = bool(
+            (getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get(
+                "asset_policy.connectors"
+            )
+        )
+        if had_connectors:
+            asset_policy["connectors"] = {}
+        else:
+            asset_policy.pop("connectors", None)
+        return
+    if not isinstance(connectors, dict):
+        asset_policy.pop("connectors", None)
+        return
+    for entry in connectors.values():
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("mode"):
+            entry.pop("mode", None)
+        for ttype in ("mcp", "skill", "plugin"):
+            block = entry.get(ttype)
+            if block is None:
+                entry.pop(ttype, None)
+                continue
+            if isinstance(block, dict):
+                if not block.get("default"):
+                    block.pop("default", None)
+                if block.get("registry_required") is None:
+                    block.pop("registry_required", None)
+                if not block.get("registry_empty_action"):
+                    block.pop("registry_empty_action", None)
 
 
 def _disabled_ai_discovery_dict() -> dict[str, Any]:
@@ -2846,6 +3077,52 @@ def _merge_asset_policy(raw: dict[str, Any] | None) -> AssetPolicyConfig:
         mcp=_merge_asset_type_policy(raw.get("mcp"), runtime=True),
         skill=_merge_asset_type_policy(raw.get("skill"), runtime=False),
         plugin=_merge_asset_type_policy(raw.get("plugin"), runtime=False),
+        connectors=_merge_asset_policy_connectors(raw.get("connectors")),
+    )
+
+
+def _merge_asset_policy_connectors(
+    raw: Any,
+) -> dict[str, PerConnectorAssetPolicy]:
+    """Parse the optional ``asset_policy.connectors`` map (OTHER-7).
+
+    Mirrors the Go unmarshal of ``map[string]PerConnectorAssetPolicy`` and
+    :func:`_merge_guardrail_connectors`. A non-mapping or empty value yields
+    an empty dict (legacy global-only behavior). Per-type blocks are parsed
+    only when present so ``None`` means "inherit the global per-type policy".
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    out: dict[str, PerConnectorAssetPolicy] = {}
+    for name, entry in raw.items():
+        entry = entry if isinstance(entry, dict) else {}
+        out[str(name)] = PerConnectorAssetPolicy(
+            mode=str(entry.get("mode", "") or ""),
+            mcp=_merge_per_connector_asset_type_policy(entry.get("mcp")),
+            skill=_merge_per_connector_asset_type_policy(entry.get("skill")),
+            plugin=_merge_per_connector_asset_type_policy(entry.get("plugin")),
+        )
+    return out
+
+
+def _merge_per_connector_asset_type_policy(
+    raw: Any,
+) -> PerConnectorAssetTypePolicy | None:
+    """Parse one per-connector per-type scalar block.
+
+    Returns ``None`` for an absent / non-mapping / empty block so the
+    resolver inherits the global per-type policy entirely.
+    ``registry_required`` is parsed only when an explicit bool is present
+    (mirrors the Go ``*bool`` inherit-on-nil); any non-bool value (including
+    ``null``) is treated as unset.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    rr = raw.get("registry_required")
+    return PerConnectorAssetTypePolicy(
+        default=str(raw.get("default", "") or ""),
+        registry_required=rr if isinstance(rr, bool) else None,
+        registry_empty_action=str(raw.get("registry_empty_action", "") or ""),
     )
 
 
@@ -3638,6 +3915,10 @@ def load() -> Config:
     # gateway's Load() which rejects the same shapes. Value-only check —
     # no registry access (see GuardrailConfig.validate).
     cfg.guardrail.validate()
+    # Same value-only guard for the per-connector asset_policy overrides
+    # (OTHER-7) — empty/duplicate connector names + bad scalar enums. The
+    # global asset_policy fields are intentionally not re-validated here.
+    cfg.asset_policy.validate()
     return cfg
 
 
