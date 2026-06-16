@@ -5771,6 +5771,10 @@ class DefenseClawTUI(App[None]):
             keys_line = keys.label or "all required set"
         else:
             keys_line = "not checked yet - press 0 for Setup, then r to refresh credentials"
+        scanner_override_summary = self.overview_model.scanner_overrides_summary()
+        scanner_override_line = (
+            f"  overrides      {rich_escape(scanner_override_summary)}\n" if scanner_override_summary else ""
+        )
         # Escape the lowercase hotkey labels: Rich parses ``[s]`` /
         # ``[d]`` / ``[i]`` / ``[g]`` / ``[m]`` / ``[l]`` as opening
         # style tags and silently drops the bracketed text from the
@@ -5798,6 +5802,7 @@ class DefenseClawTUI(App[None]):
                 if enf_selected and self._connector_policy_label(enf_selected)
                 else ""
             )
+            + scanner_override_line
             + f"  skill-scanner  {'installed' if self.overview_model.skill_scanner_available else 'missing'}\n"
             f"  credentials    {keys_line}\n\n"
             f"[bold {TOKENS.accent_pink}]DOCTOR[/]  {doctor_summary}\n" + "\n".join(doctor_lines) + "\n\n"
@@ -6634,7 +6639,15 @@ class DefenseClawTUI(App[None]):
         return ("Wizard", "Status", "Command", "Description"), tuple(rows)
 
     def _setup_body_text(self) -> str:
+        if len(self._active_connector_names()) > 1:
+            self._sync_catalog_connector_filters()
+        connector_chip = self._connector_chip_text()
+        setup_scope = ""
+        if hasattr(self.setup_model, "connector_scope_summary"):
+            setup_scope = self.setup_model.connector_scope_summary()
+        scope_line = f"{setup_scope}\n" if setup_scope else ""
         if self.first_run_model.active:
+            self._chip_click_segments = []
             return (
                 "[bold #22D3EE]DefenseClaw first-run setup[/]\n"
                 f"{self.first_run_model.empty_state()}\n\n"
@@ -6648,6 +6661,7 @@ class DefenseClawTUI(App[None]):
             summary_line = f"[{TOKENS.text_secondary}]{rich_escape(summary)}[/]\n" if summary else ""
             return (
                 f"[bold #22D3EE]Setup[/] · [bold]{wizard}[/] · What do you want to do?\n"
+                f"{connector_chip}{scope_line}"
                 f"{summary_line}"
                 f"[{TOKENS.text_muted}]Enter choose · ↑/↓ move · Esc back · "
                 f"Advanced opens the full form[/]"
@@ -6677,6 +6691,7 @@ class DefenseClawTUI(App[None]):
             return (
                 f"[bold #22D3EE]Setup Wizard[/]  [bold]{wizard}[/]   "
                 f"[{TOKENS.text_muted}]{description}[/]\n"
+                f"{connector_chip}{scope_line}"
                 f"[{TOKENS.text_secondary}]{how_to}[/]\n"
                 f"[bold]Will run:[/] [{TOKENS.accent_green}]$ {preview}[/]\n"
                 f"{focused_line}{focused_action}\n"
@@ -6703,6 +6718,7 @@ class DefenseClawTUI(App[None]):
             )
             return (
                 f"[bold #22D3EE]Setup Config[/]  {section.name if section else 'No sections'}\n"
+                f"{connector_chip}{scope_line}"
                 f"{sections}\n"
                 f"Focused: {focused.label}  Key: {focused.key or '-'}  "
                 f"Validation: {focused.validation.severity}"
@@ -6715,15 +6731,19 @@ class DefenseClawTUI(App[None]):
                 "Keys: tab/shift+tab section, up/down field, enter/space cycle, type/backspace edit, "
                 "S save, R revert, w wizards."
             ).strip()
-        readiness = "\n".join(
-            f"{check.status.upper()}: {check.title} - {check.detail}" for check in self.setup_model.readiness_checks[:8]
+        readiness_rows = (
+            self.setup_model.filtered_readiness_checks()
+            if hasattr(self.setup_model, "filtered_readiness_checks")
+            else self.setup_model.readiness_checks
         )
+        readiness = "\n".join(f"{check.status.upper()}: {check.title} - {check.detail}" for check in readiness_rows[:8])
         credentials = self.setup_model.credential_empty_state()
         suffix = f"\n\n{credentials}" if credentials else ""
         info = self.setup_model.active_wizard_info()
         focused = self.setup_model.focused_row_metadata()
         return (
             "[bold #22D3EE]Setup Wizards[/]\n"
+            f"{connector_chip}{scope_line}"
             f"Active: {info.name} - {info.description}\n"
             f"{info.how_to}\n"
             f"Focused action: {focused.action.hotkey if focused.action else 'Enter'} "
@@ -8270,7 +8290,7 @@ def _resolve_active_connector(snapshot: HealthSnapshot | None, mode: str) -> str
             return name
     if mode and mode.strip():
         return mode.strip()
-    return "openclaw"
+    return ""
 
 
 def _registry_attribution_from_config(config: object | None, kind: str) -> dict[str, str] | None:
@@ -8439,19 +8459,19 @@ def _parse_timestamp(value: object) -> datetime | None:
 
 def _active_connector(config: object | None) -> str:
     if config is None:
-        return "openclaw"
+        return ""
     active = getattr(config, "active_connector", None)
     if callable(active):
         try:
-            return str(active())
+            return str(active() or "").strip()
         except Exception:  # noqa: BLE001 - connector name is cosmetic in the shell.
-            return "openclaw"
+            return ""
     guardrail = getattr(config, "guardrail", None)
     connector = str(getattr(guardrail, "connector", "") or "").strip()
     if connector:
         return connector
     claw = getattr(config, "claw", None)
-    return str(getattr(claw, "mode", "") or "openclaw").strip() or "openclaw"
+    return str(getattr(claw, "mode", "") or "").strip()
 
 
 def _redaction_currently_disabled(config: object | None) -> bool:
@@ -9110,8 +9130,10 @@ def _enforcement_label(cfg: OverviewConfig | None) -> str:
     if len(cfg.connector_modes) > 1:
         n = len(cfg.connector_modes)
         return f"{n} connectors (hook observability)"
-    connector = cfg.guardrail_connector or cfg.claw_mode or "openclaw"
+    connector = cfg.guardrail_connector or cfg.claw_mode
     mode = cfg.guardrail_mode or "observe"
+    if not connector:
+        return f"not configured ({mode})"
     if connector in {"openclaw", "zeptoclaw"}:
         return f"{connector} proxy guardrail ({mode})"
     return f"{connector} hook observability ({mode})"

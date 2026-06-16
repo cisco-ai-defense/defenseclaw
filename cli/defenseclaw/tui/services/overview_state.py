@@ -1002,7 +1002,7 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
 
 
 def friendly_connector_name(connector: str) -> str:
-    match (connector or "openclaw").strip().lower() or "openclaw":
+    match (connector or "").strip().lower():
         case "openclaw":
             return "OpenClaw"
         case "zeptoclaw":
@@ -1028,11 +1028,11 @@ def friendly_connector_name(connector: str) -> str:
         case "opencode":
             return "OpenCode"
         case value:
-            return value[:1].upper() + value[1:] if value else "OpenClaw"
+            return value[:1].upper() + value[1:] if value else "No connector"
 
 
 def connector_source_label(connector: str, category: str) -> str:
-    connector = (connector or "openclaw").strip().lower() or "openclaw"
+    connector = (connector or "").strip().lower()
     sources = {
         ("openclaw", "skills"): ("./skills", "~/.openclaw/skills"),
         ("claudecode", "skills"): ("~/.claude/skills", "./.claude/skills"),
@@ -1044,7 +1044,11 @@ def connector_source_label(connector: str, category: str) -> str:
         ("geminicli", "skills"): ("./.gemini/skills", "./.agents/skills"),
         ("copilot", "skills"): ("./.github/skills", "./.agents/skills", "~/.copilot/skills"),
         ("openhands", "skills"): ("~/.openhands/skills", "~/.openhands/microagents", "~/.agents/skills"),
-        ("antigravity", "skills"): ("unsupported/hooks-only surface",),
+        ("antigravity", "skills"): (
+            "~/.gemini/config/skills/<skill>/SKILL.md",
+            "<workspace>/.agents/skills/<skill>/SKILL.md",
+            "~/.gemini/antigravity-cli/skills/*.md (discovery-only)",
+        ),
         ("opencode", "skills"): ("unsupported/hooks-only surface",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): ("~/.claude/settings.json (mcpServers)", "./.mcp.json"),
@@ -1056,7 +1060,11 @@ def connector_source_label(connector: str, category: str) -> str:
         ("geminicli", "mcps"): ("~/.gemini/settings.json (mcpServers)", "./.mcp.json"),
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
         ("openhands", "mcps"): ("~/.openhands/mcp.json",),
-        ("antigravity", "mcps"): ("unsupported/hooks-only surface",),
+        ("antigravity", "mcps"): (
+            "~/.gemini/config/mcp_config.json",
+            "<workspace>/.agents/mcp_config.json",
+            "<plugin>/mcp_config.json (discovery-only)",
+        ),
         ("opencode", "mcps"): ("~/.config/opencode/opencode.json (mcp)", "./opencode.json (mcp)"),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("claudecode", "plugins"): ("~/.claude/plugins",),
@@ -1068,7 +1076,11 @@ def connector_source_label(connector: str, category: str) -> str:
         ("geminicli", "plugins"): ("./.gemini/extensions",),
         ("copilot", "plugins"): ("copilot plugin list",),
         ("openhands", "plugins"): ("unsupported",),
-        ("antigravity", "plugins"): ("unsupported",),
+        ("antigravity", "plugins"): (
+            "~/.gemini/config/plugins/<plugin>/ (discovery-only)",
+            "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
+            "<workspace>/.agents/plugins/<plugin>/ (discovery-only)",
+        ),
         ("opencode", "plugins"): ("~/.config/opencode/plugins/defenseclaw.js (DefenseClaw bridge)",),
         ("openclaw", "config"): ("~/.openclaw/openclaw.json",),
         ("claudecode", "config"): ("~/.claude/settings.json",),
@@ -1091,7 +1103,7 @@ def active_connector_name(health: HealthSnapshot | None, mode: str) -> str:
         return health.connector.name.strip()
     if mode.strip():
         return mode.strip()
-    return "openclaw"
+    return ""
 
 
 def format_scanner_overrides_summary(

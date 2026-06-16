@@ -30,6 +30,12 @@ deleted.
 
 ### Behaviour changes (no flag)
 
+- **Antigravity local surfaces now match the PR #365 contract**:
+  MCP reads/writes `~/.gemini/config/mcp_config.json` and
+  `<workspace>/.agents/mcp_config.json`; hooks remain global-only at
+  `~/.gemini/config/hooks.json`; AgentSkills folder form is supported
+  while rules/plugins/plugin-contained agents remain discovery-only
+  unless Google documents a write contract.
 - **W3C trace propagation is enabled for trusted hook routes**
   (`/api/v1/<connector>/hook`, `/api/v1/codex/notify`) when the
   caller is loopback and the connector route is registered. The

@@ -57,6 +57,7 @@ from defenseclaw.tui.services.setup_state import (
     ConfigSection,
     CredentialRow,
     CredentialSnapshot,
+    ReadinessCheck,
     RestartQueue,
     SetupCommandIntent,
     ValidationResult,
@@ -477,6 +478,10 @@ class SetupPanelModel:
         self.active_line = 0
         self.config_scroll = 0
         self.credential_cursor = 0
+        self.connector = ""
+        self.show_connector_column = False
+        self.connector_filter = ""
+        self.connector_focus_enabled = False
         self.credential_snapshot = CredentialSnapshot()
         self.restart_queue = RestartQueue()
         self.last_saved_at: datetime | None = None
@@ -514,6 +519,42 @@ class SetupPanelModel:
         # changes; otherwise we keep showing rows derived from the
         # snapshot captured at __init__ time even after `setup` runs.
         self.rebuild_readiness_checks()
+
+    def set_connector(self, connector: str) -> None:
+        self.connector = (connector or "").strip().lower()
+
+    def set_connector_filter(self, connector: str) -> None:
+        self.connector_filter = (connector or "").strip().lower()
+
+    def connector_scope_summary(self) -> str:
+        if not self.show_connector_column:
+            return ""
+        if self.connector_filter:
+            label = friendly_connector_name(self.connector_filter)
+            return f"Setup scope: {label} ({self.connector_filter})"
+        return "Setup scope: all connectors"
+
+    def filtered_readiness_checks(self) -> tuple[ReadinessCheck, ...]:
+        if not self.connector_filter:
+            return self.readiness_checks
+        rows: list[ReadinessCheck] = []
+        label = friendly_connector_name(self.connector_filter)
+        for check in self.readiness_checks:
+            if check.title.startswith("Active Connector:"):
+                connector = check.title.split(":", 1)[1].strip().lower()
+                if connector != self.connector_filter:
+                    continue
+                rows.append(
+                    ReadinessCheck(
+                        check.title,
+                        f"{label} selected ({self.connector_filter})",
+                        check.status,
+                        check.fix,
+                    )
+                )
+            else:
+                rows.append(check)
+        return tuple(rows)
 
     def rebuild_readiness_checks(
         self,
@@ -3694,7 +3735,7 @@ def _guardrail_wizard_fields_for(
     overrides = overrides or {}
     connector = str(get_config_value(cfg, "guardrail.connector", "") or "")
     if not connector:
-        connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw")
+        connector = str(get_config_value(cfg, "claw.mode", "") or "")
     mode = str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     strategy = str(get_config_value(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only")
@@ -3811,6 +3852,14 @@ def _guardrail_wizard_fields_for(
             default="judge_only",
             options=GUARDRAIL_JUDGE_LLM_ROLES,
             hint="judge_only=hook connectors; judge_and_agent=proxy connectors.",
+        ),
+        WizardFormField(
+            "Hook Connectors",
+            "string",
+            "--judge-hook-connectors",
+            value=_judge_hook_connectors_wizard_value(cfg),
+            default=_judge_hook_connectors_wizard_value(cfg),
+            hint="'all', 'none', or comma-separated hook connectors for hook-lane judge coverage.",
         ),
         WizardFormField(
             "Inherit From",
@@ -4529,6 +4578,16 @@ def _effective_judge_hook_state(cfg: object | Mapping[str, Any] | None, connecto
         if token == "*" or token.lower() == name:
             return "true"
     return "false"
+
+
+def _judge_hook_connectors_wizard_value(cfg: object | Mapping[str, Any] | None) -> str:
+    gate = get_config_value(cfg, "guardrail.judge.hook_connectors", None)
+    if not isinstance(gate, (list, tuple)):
+        return ""
+    tokens = [str(entry or "").strip() for entry in gate if str(entry or "").strip()]
+    if tokens == ["*"]:
+        return "all"
+    return ",".join(tokens)
 
 
 def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> list[ConfigField]:

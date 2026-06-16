@@ -54,6 +54,20 @@ def test_packaged_catalog_matches_go_catalog():
     assert py_catalog == go_catalog
 
 
+def test_antigravity_signature_tracks_mcp_and_customization_paths():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    antigravity = signatures["antigravity"]
+
+    assert "~/.gemini/config/hooks.json" in antigravity.config_paths
+    assert "~/.gemini/antigravity-cli/hooks.json" not in antigravity.config_paths
+    assert ".antigravitycli/hooks.json" not in antigravity.config_paths
+    assert "~/.gemini/config/mcp_config.json" in antigravity.mcp_paths
+    assert ".agents/mcp_config.json" in antigravity.mcp_paths
+    assert "~/.gemini/config/skills" in antigravity.config_paths
+    assert ".agents/rules" in antigravity.config_paths
+    assert "~/.gemini/config/plugins" in antigravity.config_paths
+
+
 def test_custom_signature_pack_loads_from_managed_dir(tmp_path):
     pack_dir = tmp_path / "signature-packs"
     pack_dir.mkdir()

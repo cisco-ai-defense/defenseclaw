@@ -44,6 +44,7 @@ The default sources include:
 - `~/Library/Application Support/Claude/claude_desktop_config.json` → `mcpServers`
 - `~/.cursor/mcp.json` → `mcpServers`
 - `~/.codeium/windsurf/mcp_config.json` → `mcpServers`
+- `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json` → `mcpServers` (Antigravity)
 - Connector-specific paths registered by `defenseclaw setup guardrail`.
 
 Each server is scanned independently and findings are tagged with the connector that discovered them.
@@ -81,7 +82,7 @@ Extends the scan beyond the tool list to also evaluate the server's prompts, res
   </Tab>
 </Tabs>
 
-Other real flags: `--analyzers <list>` to constrain which analyzer plugins run, `--json` for machine output.
+Other real flags: `--analyzers <list>` to constrain which analyzer plugins run, `--json` for machine output. The default analyzer setting is `auto`, which lets DefenseClaw select the scanner plugins available in the installed `cisco-ai-mcp-scanner` version and enabled by your credentials. To opt out of a plugin, pass an explicit comma-separated list that omits it; explicit lists are honored as-is rather than being expanded back to `auto`.
 
 ## Continuous protection
 

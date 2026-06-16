@@ -22,7 +22,13 @@ from defenseclaw.tui.panels.mcps import MCPsPanelModel, mcp_actions, mcp_unset_t
 from defenseclaw.tui.panels.plugins import PluginsPanelModel, plugin_actions
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel, registry_attribution_from_rules, skill_actions
 from defenseclaw.tui.panels.tools import ToolRow, ToolsPanelModel, split_tool_target, tool_actions
-from defenseclaw.tui.services.catalog_state import parse_mcp_list_json, parse_plugin_list_json, skill_list_to_row
+from defenseclaw.tui.services.catalog_state import (
+    connector_source_label,
+    friendly_connector_name,
+    parse_mcp_list_json,
+    parse_plugin_list_json,
+    skill_list_to_row,
+)
 
 
 def action_keys(actions: tuple[object, ...]) -> list[str]:
@@ -208,6 +214,7 @@ def test_mcp_actions_name_connector_specific_unset_targets() -> None:
         "windsurf": "~/.codeium/windsurf/mcp_config.json",
         "geminicli": "~/.gemini/settings.json",
         "copilot": "./.github/mcp.json",
+        "antigravity": "~/.gemini/config/mcp_config.json / <workspace>/.agents/mcp_config.json",
     }
     for connector, want in cases.items():
         assert mcp_unset_target_for_connector(connector) == want
@@ -219,6 +226,17 @@ def test_mcp_actions_name_connector_specific_unset_targets() -> None:
     assert action_keys(mcp_actions("blocked", "openclaw")) == ["s", "i", "u", "x"]
     assert action_keys(mcp_actions("allowed", "openclaw")) == ["s", "i", "b", "x"]
     assert action_keys(mcp_actions("active", "openclaw")) == ["s", "i", "b", "a"]
+
+
+def test_catalog_empty_connector_stays_unowned_and_antigravity_labels_contract_paths() -> None:
+    assert friendly_connector_name("") == "No connector"
+    assert PluginsPanelModel(connector="").is_visible_for_connector() is False
+
+    assert ".gemini/config/mcp_config.json" in connector_source_label("antigravity", "mcps")
+    assert ".agents/mcp_config.json" in connector_source_label("antigravity", "mcps")
+    assert "hooks-only" not in connector_source_label("antigravity", "mcps")
+    assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
+    assert "discovery-only" in connector_source_label("antigravity", "plugins")
 
 
 def test_plugin_parse_connector_gate_actions_and_intents() -> None:

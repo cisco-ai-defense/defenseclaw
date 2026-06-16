@@ -4118,6 +4118,21 @@ def test_overview_config_reads_scanner_overrides_from_active_policy(tmp_path) ->
     assert "secrets" in OverviewPanelModel(overview, version="test").scanner_overrides_summary()
 
 
+def test_overview_body_renders_scanner_override_summary() -> None:
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        scanner_overrides=(("secrets", "HIGH", "file", "block"),),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    body = app._overview_body_text(overview.service_cards())  # noqa: SLF001 - render regression surface.
+
+    assert "overrides" in body
+    assert "secrets: HIGH file=block" in body
+
+
 def _multi_connector_app() -> DefenseClawTUI:
     cfg = OverviewConfig(
         data_dir="/tmp/dc",

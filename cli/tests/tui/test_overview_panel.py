@@ -408,10 +408,18 @@ def test_connector_labels_cover_hook_surface_connectors() -> None:
     opencode_mcps = connector_source_label("opencode", "mcps")
     assert ".config/opencode/opencode.json" in opencode_mcps
     assert "unmanaged" not in opencode_mcps
+    antigravity_mcps = connector_source_label("antigravity", "mcps")
+    assert ".gemini/config/mcp_config.json" in antigravity_mcps
+    assert ".agents/mcp_config.json" in antigravity_mcps
+    assert "hooks-only" not in antigravity_mcps
+    assert "unsupported" not in antigravity_mcps
+    assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
+    assert "discovery-only" in connector_source_label("antigravity", "plugins")
 
     health = HealthSnapshot(connector=ConnectorHealth(name="codex"))
     assert active_connector_name(health, "openclaw") == "codex"
     assert active_connector_name(None, "claudecode") == "claudecode"
+    assert active_connector_name(None, "") == ""
 
 
 def test_multi_connector_rows_lists_each_connector_with_mode() -> None:
