@@ -1106,17 +1106,24 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
     """
     from defenseclaw.commands.cmd_init import (
         _ensure_device_key,
-        _resolve_openclaw_gateway,
+        _resolve_gateway_for_connector,
     )
     from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
-    oc_gw = _resolve_openclaw_gateway(cfg.claw.config_file)
+    # SU-03/ND-2: this used to read openclaw.json unconditionally and pin
+    # OPENCLAW_GATEWAY_TOKEN whenever a token was reachable — with NO connector
+    # gate at all — leaking a proxy secret (and OpenClaw's gateway endpoint)
+    # onto hook-only installs that never touch the proxy. Route through the
+    # shared _resolve_gateway_for_connector, which resolves the OpenClaw gateway
+    # (host/port/token) only when openclaw is a genuinely active connector and
+    # returns loopback defaults with no token otherwise.
+    gw = _resolve_gateway_for_connector(cfg)
     if is_new_config:
-        cfg.gateway.host = oc_gw["host"]
-        cfg.gateway.port = oc_gw["port"]
+        cfg.gateway.host = gw["host"]
+        cfg.gateway.port = gw["port"]
 
     token_configured = False
-    token = oc_gw.get("token", "")
+    token = gw.get("token", "")
     if token:
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)
         cfg.gateway.token = ""

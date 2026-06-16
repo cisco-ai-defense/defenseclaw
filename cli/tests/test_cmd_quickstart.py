@@ -132,6 +132,43 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         raw = cfg["guardrail"].get("hook_fail_mode", "")
         self.assertEqual(_normalize_hook_fail_mode(raw), "closed")
 
+    # --- SU-12: never silently default to codex ------------------------
+    def test_no_connector_no_detection_errors_not_codex(self):
+        # No --connector, no installer hint, nothing installed (empty HOME):
+        # quickstart must error rather than silently configuring codex.
+        result = self._invoke(["--skip-gateway", "--json-summary"])
+        self.assertNotEqual(result.exit_code, 0)
+        # No connector was configured, so no JSON summary is emitted at all.
+        self.assertNotIn('"connector": "codex"', result.output)
+        self.assertIn("Could not detect", result.output + (result.stderr or ""))
+
+    def test_single_detected_connector_is_used(self):
+        # Exactly one agent installed -> quickstart uses it, no flag needed.
+        os.makedirs(os.path.join(self.home_dir, ".codex"), exist_ok=True)
+        result = self._invoke(["--skip-gateway", "--json-summary"])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["connector"], "codex")
+
+    def test_ambiguous_detection_errors(self):
+        # Two agents installed -> ambiguous -> explicit error, never a guess.
+        os.makedirs(os.path.join(self.home_dir, ".codex"), exist_ok=True)
+        os.makedirs(os.path.join(self.home_dir, ".claude"), exist_ok=True)
+        result = self._invoke(["--skip-gateway", "--json-summary"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Multiple agent frameworks", result.output + (result.stderr or ""))
+
+    def test_picked_hint_wins_over_detection(self):
+        # The installer's picked_connector hint resolves the connector even
+        # when another agent dir is present (no ambiguity error).
+        os.makedirs(os.path.join(self.home_dir, ".claude"), exist_ok=True)
+        with open(os.path.join(self.tmp_dir, "picked_connector"), "w", encoding="utf-8") as fh:
+            fh.write("codex")
+        result = self._invoke(["--skip-gateway", "--json-summary"])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["connector"], "codex")
+
 
 if __name__ == "__main__":
     unittest.main()

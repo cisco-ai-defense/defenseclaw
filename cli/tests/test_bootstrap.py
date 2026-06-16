@@ -535,5 +535,67 @@ class RunningConnectorFromStateFileTests(unittest.TestCase):
         self.assertIsNone(_running_connector_from_state_file(self._tmp.name))
 
 
+class ApplyGatewayDefaultsTokenGateTests(unittest.TestCase):
+    """SU-03 / ND-2: the OpenClaw gateway token must only be adopted when
+    openclaw is a genuinely active connector — never leaked onto a hook-only
+    install that merely has a stray ``openclaw.json`` reachable on disk."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._prev_home = os.environ.get("DEFENSECLAW_HOME")
+        os.environ["DEFENSECLAW_HOME"] = self._tmp.name
+        self.addCleanup(self._restore_home)
+
+    def _restore_home(self) -> None:
+        if self._prev_home is None:
+            os.environ.pop("DEFENSECLAW_HOME", None)
+        else:
+            os.environ["DEFENSECLAW_HOME"] = self._prev_home
+
+    def _stray_openclaw_json(self, token: str) -> str:
+        import json
+
+        path = os.path.join(self._tmp.name, "openclaw.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"gateway": {"model": "local", "port": 19000, "auth": {"token": token}}},
+                fh,
+            )
+        return path
+
+    def test_hook_only_install_does_not_pin_openclaw_token(self):
+        from defenseclaw.bootstrap import _apply_gateway_defaults
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        os.makedirs(cfg.data_dir, exist_ok=True)
+        # Hook-only: codex is the active connector, openclaw is NOT.
+        cfg.claw.mode = "codex"
+        cfg.guardrail.connector = "codex"
+        cfg.claw.config_file = self._stray_openclaw_json("stray-proxy-secret")
+
+        _apply_gateway_defaults(cfg, is_new_config=True)
+
+        self.assertEqual(cfg.gateway.token_env, "DEFENSECLAW_GATEWAY_TOKEN")
+        # The stray proxy secret must never be copied into the dotenv.
+        env_path = os.path.join(cfg.data_dir, ".env")
+        if os.path.exists(env_path):
+            with open(env_path, encoding="utf-8") as fh:
+                self.assertNotIn("stray-proxy-secret", fh.read())
+
+    def test_openclaw_install_still_pins_openclaw_token(self):
+        from defenseclaw.bootstrap import _apply_gateway_defaults
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        os.makedirs(cfg.data_dir, exist_ok=True)
+        cfg.claw.mode = "openclaw"
+        cfg.guardrail.connector = "openclaw"
+        cfg.claw.config_file = self._stray_openclaw_json("legit-openclaw-secret")
+
+        _apply_gateway_defaults(cfg, is_new_config=True)
+
+        self.assertEqual(cfg.gateway.token_env, "OPENCLAW_GATEWAY_TOKEN")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2627,6 +2627,49 @@ def _read_picked_connector(data_dir: str | None) -> str | None:
     return None
 
 
+def _detect_installed_connectors() -> list[str]:
+    """Return every agent framework with on-disk install markers, in priority order.
+
+    Pure filesystem detection over each agent's own state directories — no
+    ``picked_connector`` install hint, so callers can layer the hint on top
+    (``_detect_connector``) or reason about *all* installed agents
+    (``quickstart``'s ambiguity check, SU-12). Order matches the historical
+    first-match precedence of ``_detect_connector`` so its contract is
+    unchanged.
+    """
+    home = os.path.expanduser("~")
+    found: list[str] = []
+
+    def _mark(name: str, present: bool) -> None:
+        if present and name not in found:
+            found.append(name)
+
+    _mark("claudecode", os.path.isdir(os.path.join(home, ".claude")))
+    _mark("codex", os.path.isdir(os.path.join(home, ".codex")))
+    _mark("zeptoclaw", os.path.isfile(os.path.join(home, ".zeptoclaw", "config.json")))
+    _mark("hermes", os.path.isfile(os.path.join(home, ".hermes", "config.yaml")))
+    _mark("cursor", os.path.isfile(os.path.join(home, ".cursor", "hooks.json")))
+    _mark("windsurf", os.path.isfile(os.path.join(home, ".codeium", "windsurf", "hooks.json")))
+    _mark("geminicli", os.path.isfile(os.path.join(home, ".gemini", "settings.json")))
+    _mark(
+        "openhands",
+        os.path.isfile(os.path.join(home, ".openhands", "hooks.json"))
+        or os.path.isdir(os.path.join(home, ".openhands")),
+    )
+    # Antigravity auto-detection: agy v1.0.x evaluates hooks from
+    # ~/.gemini/config/hooks.json (the empirical path), but the legacy
+    # ~/.gemini/antigravity-cli/ dir may still exist on machines installed
+    # via pre-v0.5.0 DefenseClaw or simply created by `agy --help`. Either
+    # signal counts as "agy is installed on this host".
+    _mark(
+        "antigravity",
+        os.path.isfile(os.path.join(home, ".gemini", "config", "hooks.json"))
+        or os.path.isfile(os.path.join(home, ".gemini", "antigravity-cli", "hooks.json"))
+        or os.path.isdir(os.path.join(home, ".gemini", "antigravity-cli")),
+    )
+    return found
+
+
 def _detect_connector(data_dir: str | None = None) -> str | None:
     """Guess the active agent framework, preferring the install-time hint.
 
@@ -2635,7 +2678,8 @@ def _detect_connector(data_dir: str | None = None) -> str | None:
          --connector ...``) — the operator's explicit choice at install
          time.
       2. Filesystem heuristics over the agent's own state directories
-         (``~/.claude``, ``~/.codex``, ``~/.zeptoclaw/config.json``).
+         (``~/.claude``, ``~/.codex``, ``~/.zeptoclaw/config.json`` …) — the
+         highest-priority installed agent (see ``_detect_installed_connectors``).
 
     Returns ``None`` when neither source is conclusive so the caller
     can fall back to ``"openclaw"``.
@@ -2643,38 +2687,8 @@ def _detect_connector(data_dir: str | None = None) -> str | None:
     picked = _read_picked_connector(data_dir)
     if picked:
         return picked
-    home = os.path.expanduser("~")
-    if os.path.isdir(os.path.join(home, ".claude")):
-        return "claudecode"
-    if os.path.isdir(os.path.join(home, ".codex")):
-        return "codex"
-    if os.path.isfile(os.path.join(home, ".zeptoclaw", "config.json")):
-        return "zeptoclaw"
-    if os.path.isfile(os.path.join(home, ".hermes", "config.yaml")):
-        return "hermes"
-    if os.path.isfile(os.path.join(home, ".cursor", "hooks.json")):
-        return "cursor"
-    if os.path.isfile(os.path.join(home, ".codeium", "windsurf", "hooks.json")):
-        return "windsurf"
-    if os.path.isfile(os.path.join(home, ".gemini", "settings.json")):
-        return "geminicli"
-    if os.path.isfile(os.path.join(home, ".openhands", "hooks.json")) or os.path.isdir(
-        os.path.join(home, ".openhands")
-    ):
-        return "openhands"
-    # Antigravity auto-detection: agy v1.0.x evaluates hooks from
-    # ~/.gemini/config/hooks.json (the empirical path), but the
-    # legacy ~/.gemini/antigravity-cli/ dir may still exist on
-    # machines installed via pre-v0.5.0 DefenseClaw or simply
-    # created by `agy --help`. Either signal counts as "agy is
-    # installed on this host".
-    if (
-        os.path.isfile(os.path.join(home, ".gemini", "config", "hooks.json"))
-        or os.path.isfile(os.path.join(home, ".gemini", "antigravity-cli", "hooks.json"))
-        or os.path.isdir(os.path.join(home, ".gemini", "antigravity-cli"))
-    ):
-        return "antigravity"
-    return None
+    installed = _detect_installed_connectors()
+    return installed[0] if installed else None
 
 
 def _select_connector_interactive(current: str, data_dir: str | None = None) -> str:
@@ -3831,12 +3845,34 @@ def _apply_hook_connector_setup(
             gc.rule_pack_dir = pack_dir
             click.echo(f"  ✓ rule pack: {rule_pack} (global)")
     gc.enabled = True
-    gc.mode = desired_mode
+    # SU-01/G1: write the guardrail mode PER-CONNECTOR when this connector owns
+    # an override block (the multi/add shape), so flipping one connector to
+    # action no longer silently switches every peer via the shared global
+    # field. Mirrors the per-connector rule-pack scoping just above and the
+    # per-connector write `init` already does (cmd_init.py). The sole-connector
+    # / replace shape (no map entry) keeps writing the global gc.mode, which
+    # effective_mode() resolves as the inherited default — so single-connector
+    # installs are unchanged and an existing global mode is still honored.
+    if write_mode == "add" and connector in gc.connectors:
+        gc.connectors[connector].mode = desired_mode
+    else:
+        gc.mode = desired_mode
     gc.scanner_mode = "local"
     gc.port = gc.port or 4000
-    gc.detection_strategy = "regex_only"
-    gc.detection_strategy_completion = "regex_only"
-    gc.judge.enabled = False
+    # SU-02/J1/J2: preserve the operator's detection strategy + judge state
+    # across re-runs. setup used to unconditionally re-pin detection_strategy =
+    # "regex_only" and force gc.judge.enabled = False on EVERY invocation,
+    # silently undoing a prior `guardrail judge add` / `setup guardrail` the
+    # next time the operator re-ran `setup <connector>` for any reason. Only
+    # seed the per-direction completion strategy when unset (mirrors the
+    # connector-switch path's `if not gc.detection_strategy_completion` guard at
+    # the `setup mode` site); never clobber an existing non-regex_only strategy
+    # or an enabled judge. The dataclass default (regex_judge) now survives a
+    # hook setup, aligning with the documented default (ND-1).
+    if not gc.detection_strategy:
+        gc.detection_strategy = "regex_only"
+    if not gc.detection_strategy_completion:
+        gc.detection_strategy_completion = "regex_only"
     cfg.ai_discovery.enabled = True
     cfg.ai_discovery.mode = cfg.ai_discovery.mode or "enhanced"
     cfg.ai_discovery.include_shell_history = True
@@ -3867,7 +3903,12 @@ def _apply_hook_connector_setup(
         click.echo(f"  ✓ Workspace root pinned to {workspace}")
     else:
         click.echo("  ✓ Scope: global user config (no workspace pinned)")
-    click.echo(f"  ✓ guardrail.mode={desired_mode}")
+    # SU-01: echo where the mode actually landed — per-connector override vs the
+    # shared global field — so the summary matches what was written.
+    if write_mode == "add" and connector in gc.connectors:
+        click.echo(f"  ✓ {connector} mode={desired_mode} (per-connector)")
+    else:
+        click.echo(f"  ✓ guardrail.mode={desired_mode}")
 
     _write_guardrail_runtime(cfg.data_dir, gc)
 

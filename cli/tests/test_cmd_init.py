@@ -2241,5 +2241,68 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         subhead.assert_not_called()
 
 
+class TestResolveGatewayForConnectorGate(unittest.TestCase):
+    """SU-03: _resolve_gateway_for_connector must resolve the OpenClaw gateway
+    (and its token) only when openclaw is genuinely active — not when
+    guardrail.connector is merely empty (the phantom default)."""
+
+    def _stray_openclaw_json(self, tmp: str, token: str) -> str:
+        path = os.path.join(tmp, "openclaw.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"gateway": {"model": "local", "port": 19000, "auth": {"token": token}}},
+                fh,
+            )
+        return path
+
+    def test_hook_only_returns_loopback_no_token(self):
+        from defenseclaw.commands.cmd_init import _resolve_gateway_for_connector
+        from defenseclaw.config import default_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = default_config()
+            cfg.guardrail.connector = "codex"  # hook-only; openclaw NOT active
+            cfg.claw.mode = "codex"
+            cfg.claw.config_file = self._stray_openclaw_json(tmp, "stray-secret")
+
+            gw = _resolve_gateway_for_connector(cfg)
+
+            self.assertEqual(gw["host"], "127.0.0.1")
+            self.assertEqual(gw["port"], 18789)
+            self.assertEqual(gw["token"], "", "stray openclaw token must not leak")
+
+    def test_phantom_empty_connector_does_not_resolve_openclaw(self):
+        from defenseclaw.commands.cmd_init import _resolve_gateway_for_connector
+        from defenseclaw.config import PerConnectorGuardrailConfig, default_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = default_config()
+            # Singular field empty but a hook connector configured in the map:
+            # the old `(connector or "openclaw")` floored to openclaw here.
+            cfg.guardrail.connector = ""
+            cfg.claw.mode = ""
+            cfg.guardrail.connectors = {"hermes": PerConnectorGuardrailConfig()}
+            cfg.claw.config_file = self._stray_openclaw_json(tmp, "stray-secret")
+
+            gw = _resolve_gateway_for_connector(cfg)
+
+            self.assertEqual(gw["token"], "", "phantom openclaw must not resolve a token")
+
+    def test_openclaw_active_resolves_token(self):
+        from defenseclaw.commands.cmd_init import _resolve_gateway_for_connector
+        from defenseclaw.config import default_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = default_config()
+            cfg.guardrail.connector = "openclaw"
+            cfg.claw.mode = "openclaw"
+            cfg.claw.config_file = self._stray_openclaw_json(tmp, "legit-secret")
+
+            gw = _resolve_gateway_for_connector(cfg)
+
+            self.assertEqual(gw["token"], "legit-secret")
+            self.assertEqual(gw["port"], 19000)
+
+
 if __name__ == "__main__":
     unittest.main()

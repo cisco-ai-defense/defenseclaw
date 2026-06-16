@@ -125,7 +125,8 @@ import click
     default=None,
     help="Agent framework connector (alias: --agent). "
     "Defaults to <data_dir>/picked_connector when set by the installer, "
-    "else codex.",
+    "else the single auto-detected agent. Quickstart errors (no silent "
+    "default) when no agent is detected or several are present.",
 )
 @click.option(
     "--skip-gateway",
@@ -157,14 +158,43 @@ def quickstart_cmd(
     from defenseclaw import config as cfg_mod
     from defenseclaw.bootstrap import FirstRunOptions, run_first_run
     from defenseclaw.commands.cmd_init import _render_first_run_report
-    from defenseclaw.commands.cmd_setup import _read_picked_connector
+    from defenseclaw.commands.cmd_setup import (
+        _detect_installed_connectors,
+        _read_picked_connector,
+    )
     from defenseclaw.ux import CLIRenderer
 
     if agent_name:
         connector = agent_name
     else:
         data_dir = str(cfg_mod.default_data_path())
-        connector = _read_picked_connector(data_dir) or "codex"
+        # SU-12: never silently configure "codex". Resolve from the installer
+        # hint first, then auto-detect installed agents. Stop with an
+        # actionable error when nothing is detected or when several agents are
+        # present (ambiguous) instead of guessing — the operator disambiguates
+        # with --connector/--agent. Quickstart configures a single connector.
+        connector = _read_picked_connector(data_dir)
+        if not connector:
+            detected = _detect_installed_connectors()
+            if len(detected) == 1:
+                connector = detected[0]
+            elif not detected:
+                click.echo(
+                    "  ✗ Could not detect an agent framework on this host.\n"
+                    "    Re-run with an explicit connector, e.g. "
+                    "`defenseclaw quickstart --connector hermes`.",
+                    err=True,
+                )
+                sys.exit(2)
+            else:
+                click.echo(
+                    "  ✗ Multiple agent frameworks detected "
+                    f"({', '.join(detected)}); quickstart configures one.\n"
+                    "    Pick one explicitly, e.g. "
+                    f"`defenseclaw quickstart --connector {detected[0]}`.",
+                    err=True,
+                )
+                sys.exit(2)
 
     profile = mode or "observe"
 
