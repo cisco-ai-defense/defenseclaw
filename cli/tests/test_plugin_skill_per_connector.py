@@ -67,6 +67,19 @@ class PolicyEngineForConnectorTests(unittest.TestCase):
         # most-specific-wins: no codex row, so the global one applies.
         self.assertTrue(self.pe.is_quarantined_for_connector("plugin", "p", "codex"))
 
+    def test_connector_install_action_overrides_global_install_action(self):
+        self.pe.block("plugin", "p", "global block")
+        self.pe.allow_for_connector("plugin", "p", "codex", "scoped allow")
+        self.assertFalse(self.pe.is_blocked_for_connector("plugin", "p", "codex"))
+        self.assertTrue(self.pe.is_allowed_for_connector("plugin", "p", "codex"))
+        self.assertTrue(self.pe.is_blocked_for_connector("plugin", "p", "hermes"))
+
+        self.pe.allow("skill", "s", "global allow")
+        self.pe.block_for_connector("skill", "s", "codex", "scoped block")
+        self.assertTrue(self.pe.is_blocked_for_connector("skill", "s", "codex"))
+        self.assertFalse(self.pe.is_allowed_for_connector("skill", "s", "codex"))
+        self.assertTrue(self.pe.is_allowed_for_connector("skill", "s", "hermes"))
+
 
 class PluginPerConnectorCLITests(unittest.TestCase):
     """plugin block/allow --connector resolve independently per peer."""

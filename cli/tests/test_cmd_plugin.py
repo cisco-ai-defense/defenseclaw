@@ -370,6 +370,17 @@ class TestPluginAllow(PluginCommandTestBase):
         events = [e for e in self.app.store.list_events(10) if e.action == "plugin-allow"]
         self.assertEqual(len(events), 1)
 
+    @patch("defenseclaw.commands.cmd_plugin._plugin_runtime_candidates", return_value=[])
+    def test_allow_uses_active_connector_for_runtime_candidate_lookup(self, mock_candidates):
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.claw.mode = "claudecode"
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+
+        result = self.invoke(["allow", "allowed-one"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(mock_candidates.call_args.args[1], "claudecode")
+
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_allow_reenables_runtime_disable_before_clearing_db(self, mock_cls):
         pe = PolicyEngine(self.app.store)

@@ -272,7 +272,7 @@ func TestPolicyEngineConnectorScope(t *testing.T) {
 		}
 	})
 
-	t.Run("global_block_wins_over_connector_allow", func(t *testing.T) {
+	t.Run("connector_allow_overrides_global_block", func(t *testing.T) {
 		store := testStore(t)
 		pe := NewPolicyEngine(store)
 
@@ -282,9 +282,38 @@ func TestPolicyEngineConnectorScope(t *testing.T) {
 		if err := pe.AllowForConnector("mcp", "demo", "codex", "scoped allow"); err != nil {
 			t.Fatalf("AllowForConnector: %v", err)
 		}
-		// The gate checks blocked before allowed, so the global block wins.
+		if b, _ := pe.IsBlockedForConnector("mcp", "demo", "codex"); b {
+			t.Error("connector-scoped allow must override the global block for codex")
+		}
+		if a, _ := pe.IsAllowedForConnector("mcp", "demo", "codex"); !a {
+			t.Error("expected connector-scoped allow for codex")
+		}
+		if b, _ := pe.IsBlockedForConnector("mcp", "demo", "opencode"); !b {
+			t.Error("global block must still apply when no connector-scoped action exists")
+		}
+		if b, _ := pe.IsBlockedForConnector("mcp", "demo", ""); !b {
+			t.Error("global block must still apply globally")
+		}
+	})
+
+	t.Run("connector_block_overrides_global_allow", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := pe.Allow("mcp", "demo", "global allow"); err != nil {
+			t.Fatalf("Allow: %v", err)
+		}
+		if err := pe.BlockForConnector("mcp", "demo", "codex", "scoped block"); err != nil {
+			t.Fatalf("BlockForConnector: %v", err)
+		}
 		if b, _ := pe.IsBlockedForConnector("mcp", "demo", "codex"); !b {
-			t.Error("global block must win over a connector-scoped allow")
+			t.Error("connector-scoped block must win for codex")
+		}
+		if a, _ := pe.IsAllowedForConnector("mcp", "demo", "codex"); a {
+			t.Error("global allow must not apply when codex has a connector-scoped block")
+		}
+		if a, _ := pe.IsAllowedForConnector("mcp", "demo", "opencode"); !a {
+			t.Error("global allow must still apply when no connector-scoped action exists")
 		}
 	})
 
@@ -371,24 +400,45 @@ func TestPolicyEngineToolConnectorScope(t *testing.T) {
 		}
 	})
 
-	t.Run("global_block_and_connector_allow_coexist", func(t *testing.T) {
+	t.Run("connector_allow_overrides_global_block", func(t *testing.T) {
 		store := testStore(t)
 		pe := NewPolicyEngine(store)
 
-		// Resolution order is block-first (block @C/T → block T → allow @C/T →
-		// allow T → scan); both rows are independently visible to the helpers,
-		// and the gateway lane picks block because it checks block first.
 		if err := pe.BlockToolForConnector("write_file", "", "global block"); err != nil {
 			t.Fatalf("BlockToolForConnector: %v", err)
 		}
 		if err := pe.AllowToolForConnector("write_file", "hermes", "scoped allow"); err != nil {
 			t.Fatalf("AllowToolForConnector: %v", err)
 		}
-		if b, _ := pe.IsToolBlockedForConnector("write_file", "hermes"); !b {
-			t.Error("global block must be visible to the connector block check")
+		if b, _ := pe.IsToolBlockedForConnector("write_file", "hermes"); b {
+			t.Error("connector-scoped allow must override the global block for hermes")
 		}
 		if a, _ := pe.IsToolAllowedForConnector("write_file", "hermes"); !a {
-			t.Error("connector-scoped allow row must remain visible to the allow check")
+			t.Error("expected connector-scoped allow for hermes")
+		}
+		if b, _ := pe.IsToolBlockedForConnector("write_file", "codex"); !b {
+			t.Error("global block must still apply when no connector-scoped action exists")
+		}
+	})
+
+	t.Run("connector_block_overrides_global_allow", func(t *testing.T) {
+		store := testStore(t)
+		pe := NewPolicyEngine(store)
+
+		if err := pe.AllowToolForConnector("shell", "", "global allow"); err != nil {
+			t.Fatalf("AllowToolForConnector(global): %v", err)
+		}
+		if err := pe.BlockToolForConnector("shell", "hermes", "scoped block"); err != nil {
+			t.Fatalf("BlockToolForConnector: %v", err)
+		}
+		if b, _ := pe.IsToolBlockedForConnector("shell", "hermes"); !b {
+			t.Error("connector-scoped block must win for hermes")
+		}
+		if a, _ := pe.IsToolAllowedForConnector("shell", "hermes"); a {
+			t.Error("global allow must not apply when hermes has a connector-scoped block")
+		}
+		if a, _ := pe.IsToolAllowedForConnector("shell", "codex"); !a {
+			t.Error("global allow must still apply when no connector-scoped action exists")
 		}
 	})
 

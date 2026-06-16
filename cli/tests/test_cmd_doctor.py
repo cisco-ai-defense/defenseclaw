@@ -36,6 +36,7 @@ from defenseclaw.commands.cmd_doctor import (
     _check_hilt_support,
     _check_llm_api_key,
     _check_openhands_hooks,
+    _check_connector_residue,
     _check_sidecar,
     _DoctorResult,
     _probe_splunk_hec,
@@ -1659,6 +1660,26 @@ class DoctorFixHelpTextTests(unittest.TestCase):
         doc = " ".join((doctor.help or "").split()).lower()
         self.assertIn("restart the gateway sidecar", doc)
         self.assertIn("no longer tears connectors down", doc)
+
+    def test_connector_residue_warning_points_to_gateway_teardown_directly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "codex_backup.json"), "w").close()
+            cfg = SimpleNamespace(
+                data_dir=tmp,
+                claw=SimpleNamespace(config_file=""),
+                active_connectors=lambda: ["hermes"],
+            )
+            result = _DoctorResult()
+
+            _check_connector_residue(cfg, "hermes", result)
+
+        warn = next(c for c in result.checks if c["label"] == "Connector residue")
+        self.assertEqual(warn["status"], "warn")
+        self.assertIn(
+            "defenseclaw-gateway connector teardown --connector <name>",
+            warn["detail"],
+        )
+        self.assertNotIn("doctor --fix", warn["detail"])
 
 
 if __name__ == "__main__":

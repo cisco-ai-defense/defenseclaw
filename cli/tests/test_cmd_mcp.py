@@ -271,6 +271,18 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertEqual(fanned, {"claudecode", "codex"})
 
     @patch("defenseclaw.commands.cmd_mcp._scan_all_mcp")
+    def test_scan_all_no_configured_connectors_exits_without_openclaw_fallback(self, mock_scan_all):
+        self.app.cfg.has_connector_configured = lambda: False  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: []  # type: ignore[method-assign]
+        self.app.cfg.active_connector = MagicMock(side_effect=AssertionError("must not resolve active connector"))
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("no connector configured", result.output)
+        mock_scan_all.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_mcp._scan_all_mcp")
     def test_scan_all_connector_flag_targets_one(self, mock_scan_all):
         self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
 

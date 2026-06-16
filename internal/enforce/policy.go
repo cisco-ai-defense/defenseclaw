@@ -189,11 +189,10 @@ func (e *PolicyEngine) RemoveAction(targetType, name string) error {
 // (connector="") is GLOBAL — it applies to every connector; a non-empty
 // connector NARROWS the entry to that peer.
 //
-// Reads resolve most-specific-wins: the connector-scoped entry is checked
-// first, then the global entry falls through — so a global block still applies
-// to every connector while a connector-scoped block applies only to its peer.
-// Because the block check precedes the allow check at the gate, a global (or
-// connector-scoped) block wins over a connector-scoped allow. Writes are
+// Reads resolve most-specific-wins: a connector-scoped install action decides
+// for that connector, then the global entry falls through only when no scoped
+// install action exists. That means a global block still applies broadly, while
+// a connector-scoped allow can override it for that connector. Writes are
 // exact-match on connector (the actions table is unique on
 // (target_type, target_name, connector)). Mirrors the *_for_connector methods
 // in cli/defenseclaw/enforce/policy.py.
@@ -206,31 +205,32 @@ func (e *PolicyEngine) IsBlockedForConnector(targetType, name, connector string)
 		return false, nil
 	}
 	if connector != "" {
-		blocked, err := e.store.HasActionForConnector(targetType, name, connector, "install", "block")
+		action, ok, err := e.actionFieldForConnector(targetType, name, connector, "install")
 		if err != nil {
 			return false, err
 		}
-		if blocked {
-			return true, nil
+		if ok {
+			return action == "block", nil
 		}
 	}
 	return e.store.HasAction(targetType, name, "install", "block")
 }
 
 // IsAllowedForConnector reports whether name is allowed for connector, checking
-// the connector-scoped entry first and then the bare global entry. Callers must
-// consult IsBlockedForConnector first so a block wins over an allow.
+// the connector-scoped entry first and then the bare global entry. A
+// connector-scoped block is authoritative for that connector, so callers that
+// check IsBlockedForConnector first will still block it before consulting allow.
 func (e *PolicyEngine) IsAllowedForConnector(targetType, name, connector string) (bool, error) {
 	if e.store == nil {
 		return false, nil
 	}
 	if connector != "" {
-		allowed, err := e.store.HasActionForConnector(targetType, name, connector, "install", "allow")
+		action, ok, err := e.actionFieldForConnector(targetType, name, connector, "install")
 		if err != nil {
 			return false, err
 		}
-		if allowed {
-			return true, nil
+		if ok {
+			return action == "allow", nil
 		}
 	}
 	return e.store.HasAction(targetType, name, "install", "allow")
@@ -243,12 +243,12 @@ func (e *PolicyEngine) IsQuarantinedForConnector(targetType, name, connector str
 		return false, nil
 	}
 	if connector != "" {
-		q, err := e.store.HasActionForConnector(targetType, name, connector, "file", "quarantine")
+		action, ok, err := e.actionFieldForConnector(targetType, name, connector, "file")
 		if err != nil {
 			return false, err
 		}
-		if q {
-			return true, nil
+		if ok {
+			return action == "quarantine", nil
 		}
 	}
 	return e.store.HasAction(targetType, name, "file", "quarantine")
@@ -262,15 +262,39 @@ func (e *PolicyEngine) IsDisabledForConnector(targetType, name, connector string
 		return false, nil
 	}
 	if connector != "" {
-		disabled, err := e.store.HasActionForConnector(targetType, name, connector, "runtime", "disable")
+		action, ok, err := e.actionFieldForConnector(targetType, name, connector, "runtime")
 		if err != nil {
 			return false, err
 		}
-		if disabled {
-			return true, nil
+		if ok {
+			return action == "disable", nil
 		}
 	}
 	return e.store.HasAction(targetType, name, "runtime", "disable")
+}
+
+func (e *PolicyEngine) actionFieldForConnector(targetType, name, connector, field string) (string, bool, error) {
+	entry, err := e.store.GetActionForConnector(targetType, name, connector)
+	if err != nil {
+		return "", false, err
+	}
+	if entry == nil {
+		return "", false, nil
+	}
+	return actionFieldValue(entry.Actions, field)
+}
+
+func actionFieldValue(actions audit.ActionState, field string) (string, bool, error) {
+	switch field {
+	case "install":
+		return actions.Install, actions.Install != "", nil
+	case "file":
+		return actions.File, actions.File != "", nil
+	case "runtime":
+		return actions.Runtime, actions.Runtime != "", nil
+	default:
+		return "", false, fmt.Errorf("enforce: unknown action field %q", field)
+	}
 }
 
 // BlockForConnector blocks name for connector (exact-match; connector="" = global).
@@ -328,12 +352,12 @@ func (e *PolicyEngine) RemoveActionForConnector(targetType, name, connector stri
 // "<source>/<tool>" source scoping used by the CLI. Runtime resolution order,
 // for request connector C and tool T, is:
 //
-//	block @C/T → block T → allow @C/T → allow T → scan
+//	action @C/T → action T → scan
 //
-// i.e. a global block still wins over a connector-scoped allow, because the
-// gateway lanes consult IsToolBlockedForConnector before
-// IsToolAllowedForConnector. Mirrors the Python PolicyEngine methods of the
-// same name in cli/defenseclaw/enforce/policy.py.
+// i.e. the connector-scoped install action decides for that connector, then the
+// bare global install action is used only when there is no scoped install
+// action. Mirrors the Python PolicyEngine methods of the same name in
+// cli/defenseclaw/enforce/policy.py.
 // ----------------------------------------------------------------------------
 
 // toolConnectorTarget builds the connector-scoped tool key "@<connector>/<tool>".
@@ -353,36 +377,48 @@ func (e *PolicyEngine) IsToolBlockedForConnector(toolName, connector string) (bo
 	}
 	if connector != "" {
 		scoped := toolConnectorTarget(toolName, connector)
-		blocked, err := e.store.HasAction("tool", scoped, "install", "block")
+		action, ok, err := e.actionField("tool", scoped, "install")
 		if err != nil {
 			return false, err
 		}
-		if blocked {
-			return true, nil
+		if ok {
+			return action == "block", nil
 		}
 	}
 	return e.store.HasAction("tool", toolName, "install", "block")
 }
 
 // IsToolAllowedForConnector reports whether toolName is allowed for connector,
-// checking the connector-scoped entry first and then the bare global entry.
-// Callers must consult IsToolBlockedForConnector first so a global block wins
-// over a connector-scoped allow.
+// checking the connector-scoped entry first and then the bare global entry. A
+// connector-scoped block is authoritative for that connector, so callers that
+// check IsToolBlockedForConnector first will still block it before consulting
+// allow.
 func (e *PolicyEngine) IsToolAllowedForConnector(toolName, connector string) (bool, error) {
 	if e.store == nil {
 		return false, nil
 	}
 	if connector != "" {
 		scoped := toolConnectorTarget(toolName, connector)
-		allowed, err := e.store.HasAction("tool", scoped, "install", "allow")
+		action, ok, err := e.actionField("tool", scoped, "install")
 		if err != nil {
 			return false, err
 		}
-		if allowed {
-			return true, nil
+		if ok {
+			return action == "allow", nil
 		}
 	}
 	return e.store.HasAction("tool", toolName, "install", "allow")
+}
+
+func (e *PolicyEngine) actionField(targetType, name, field string) (string, bool, error) {
+	entry, err := e.store.GetAction(targetType, name)
+	if err != nil {
+		return "", false, err
+	}
+	if entry == nil {
+		return "", false, nil
+	}
+	return actionFieldValue(entry.Actions, field)
 }
 
 // BlockToolForConnector blocks toolName, optionally scoped to a connector.

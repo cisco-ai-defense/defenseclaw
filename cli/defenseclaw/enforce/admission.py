@@ -178,7 +178,7 @@ def evaluate_admission(
         # pin as a match. An empty presented path cannot prove it is the
         # pinned asset, so treat it as a mismatch and fail closed instead
         # of falling through to an allow.
-        existing = pe.get_action(target_type, name) if hasattr(pe, "get_action") else None
+        existing = _effective_action_entry(pe, target_type, name, connector)
         existing_path = getattr(existing, "source_path", None) if existing else None
         if existing_path and existing_path != source_path:
             presented = source_path or "(no source path presented)"
@@ -288,6 +288,7 @@ def evaluate_asset_policy(
         command,
         rule_args,
         transport,
+        connector_scope="scoped",
     ):
         reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
         return _asset_policy_block_or_observe(mode, reason, "asset-policy-deny")
@@ -301,6 +302,35 @@ def evaluate_asset_policy(
         command,
         rule_args,
         transport,
+        connector_scope="scoped",
+    ):
+        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is explicitly allowed"
+        return AdmissionDecision("allowed", reason, source="asset-policy-allow")
+
+    if rule := _find_asset_rule(
+        getattr(policy, "denied", []),
+        name,
+        connector,
+        source_path,
+        url,
+        command,
+        rule_args,
+        transport,
+        connector_scope="global",
+    ):
+        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
+        return _asset_policy_block_or_observe(mode, reason, "asset-policy-deny")
+
+    if rule := _find_asset_rule(
+        getattr(policy, "allowed", []),
+        name,
+        connector,
+        source_path,
+        url,
+        command,
+        rule_args,
+        transport,
+        connector_scope="global",
     ):
         reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is explicitly allowed"
         return AdmissionDecision("allowed", reason, source="asset-policy-allow")
@@ -413,13 +443,40 @@ def _find_asset_rule(
     transport: str,
     *,
     strict: bool = False,
+    connector_scope: str | None = None,
 ) -> Any | None:
     for rule in rules:
+        rule_connector = str(getattr(rule, "connector", "") or "").strip()
+        if connector_scope == "scoped":
+            if not rule_connector:
+                continue
+            if connector_paths.normalize(rule_connector) != connector_paths.normalize(connector):
+                continue
+        elif connector_scope == "global" and rule_connector:
+            continue
         if _asset_rule_matches(
             rule, name, connector, source_path, url, command, args, transport, strict=strict
         ):
             return rule
     return None
+
+
+def _effective_action_entry(
+    pe: Any,
+    target_type: str,
+    name: str,
+    connector: str = "",
+) -> Any | None:
+    if not hasattr(pe, "get_action"):
+        return None
+    if connector:
+        try:
+            scoped = pe.get_action(target_type, name, connector)
+        except TypeError:
+            scoped = None
+        if scoped is not None and getattr(getattr(scoped, "actions", None), "install", ""):
+            return scoped
+    return pe.get_action(target_type, name)
 
 
 def _asset_rule_matches(

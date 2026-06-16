@@ -139,13 +139,13 @@ class PolicyEngine:
     # A bare entry (connector="") is **GLOBAL** — it applies to every
     # connector; a non-empty connector **NARROWS** the entry to that peer.
     #
-    # Reads resolve **most-specific-wins**: the connector-scoped entry is
-    # checked first, then the global entry falls through — so a global block
-    # still applies to every connector, while a connector-scoped block applies
-    # only to its peer. Because the block check precedes the allow check at the
-    # gate, a global (or connector-scoped) block wins over a connector-scoped
-    # allow. Writes are exact-match on connector (the actions table is unique
-    # on (target_type, target_name, connector)). Mirrors the ``*ForConnector``
+    # Reads resolve **most-specific-wins per action field**: if the connector
+    # owns a row with the requested field set, that field is authoritative for
+    # that connector; otherwise the global row falls through. This lets a
+    # connector-scoped allow override a global block for that connector, while a
+    # connector-scoped block still wins when both scoped/global allows exist.
+    # Writes are exact-match on connector (the actions table is unique on
+    # (target_type, target_name, connector)). Mirrors the ``*ForConnector``
     # methods in internal/enforce/policy.go.
     # ------------------------------------------------------------------
 
@@ -155,26 +155,22 @@ class PolicyEngine:
         """True if blocked for ``connector`` (connector-scoped entry, else global)."""
         if not self.store:
             return False
-        if connector and self.store.has_action(
-            target_type, name, "install", "block", connector,
-        ):
-            return True
+        if connector:
+            scoped = self.store.get_action(target_type, name, connector)
+            if scoped is not None and scoped.actions.install:
+                return scoped.actions.install == "block"
         return self.store.has_action(target_type, name, "install", "block")
 
     def is_allowed_for_connector(
         self, target_type: str, name: str, connector: str = "",
     ) -> bool:
-        """True if allowed for ``connector`` (connector-scoped entry, else global).
-
-        Callers must consult :meth:`is_blocked_for_connector` first so a global
-        (or connector-scoped) block wins over an allow.
-        """
+        """True if allowed for ``connector`` (connector-scoped entry, else global)."""
         if not self.store:
             return False
-        if connector and self.store.has_action(
-            target_type, name, "install", "allow", connector,
-        ):
-            return True
+        if connector:
+            scoped = self.store.get_action(target_type, name, connector)
+            if scoped is not None and scoped.actions.install:
+                return scoped.actions.install == "allow"
         return self.store.has_action(target_type, name, "install", "allow")
 
     def is_quarantined_for_connector(
@@ -183,10 +179,10 @@ class PolicyEngine:
         """True if quarantined for ``connector`` (connector-scoped entry, else global)."""
         if not self.store:
             return False
-        if connector and self.store.has_action(
-            target_type, name, "file", "quarantine", connector,
-        ):
-            return True
+        if connector:
+            scoped = self.store.get_action(target_type, name, connector)
+            if scoped is not None and scoped.actions.file:
+                return scoped.actions.file == "quarantine"
         return self.store.has_action(target_type, name, "file", "quarantine")
 
     def block_for_connector(

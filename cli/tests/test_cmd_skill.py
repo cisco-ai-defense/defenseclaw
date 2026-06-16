@@ -29,7 +29,14 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-from defenseclaw.commands.cmd_skill import _build_scan_map, _skill_display_name, _skill_status_display, skill
+from defenseclaw.commands.cmd_skill import (
+    _apply_scan_enforcement,
+    _build_scan_map,
+    _skill_display_name,
+    _skill_status_display,
+    skill,
+)
+from defenseclaw.config import SeverityAction
 from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.models import ActionState, Finding, ScanResult
 
@@ -180,6 +187,68 @@ class TestSkillScan(SkillCommandTestBase):
         result = self.invoke(["scan", "allow-me", "--path", skill_dir])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("ALLOWED", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value=None)
+    def test_scan_connector_allow_overrides_global_block(self, _mock_oc):
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        pe = PolicyEngine(self.app.store)
+        pe.block("skill", "scoped-skill", "global block")
+        pe.allow_for_connector("skill", "scoped-skill", "codex", "codex allow")
+        skill_dir = os.path.join(self.tmp_dir, "scoped-skill")
+        os.makedirs(skill_dir)
+
+        result = self.invoke(["scan", "scoped-skill", "--path", skill_dir, "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("ALLOWED", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value=None)
+    def test_scan_connector_block_overrides_global_allow(self, _mock_oc):
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        pe = PolicyEngine(self.app.store)
+        pe.allow("skill", "scoped-block", "global allow")
+        pe.block_for_connector("skill", "scoped-block", "codex", "codex block")
+        skill_dir = os.path.join(self.tmp_dir, "scoped-block")
+        os.makedirs(skill_dir)
+
+        result = self.invoke(["scan", "scoped-block", "--path", skill_dir, "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("BLOCKED", result.output)
+
+    def test_scan_action_writes_connector_scoped_enforcement_rows(self):
+        rego_dir = os.path.join(self.app.cfg.policy_dir, "rego")
+        os.makedirs(rego_dir, exist_ok=True)
+        with open(os.path.join(rego_dir, "data.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "config": {"allow_list_bypass_scan": True, "scan_on_install": True},
+                    "actions": {
+                        "HIGH": {"runtime": "allow", "file": "none", "install": "block"},
+                    },
+                },
+                f,
+            )
+        self.app.cfg.skill_actions.high = SeverityAction(file="none", runtime="enable", install="block")
+        skill_dir = os.path.join(self.tmp_dir, "dirty-skill")
+        os.makedirs(skill_dir)
+        result = ScanResult(
+            scanner="skill-scanner",
+            target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="Shell injection", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.5),
+        )
+        pe = PolicyEngine(self.app.store)
+
+        _apply_scan_enforcement(self.app, pe, "dirty-skill", skill_dir, result, connector="codex")
+
+        self.assertTrue(
+            self.app.store.has_action("skill", "dirty-skill", "install", "block", "codex")
+        )
+        self.assertFalse(self.app.store.has_action("skill", "dirty-skill", "install", "block"))
 
     @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
@@ -640,6 +709,14 @@ class TestSkillQuarantine(SkillCommandTestBase):
         self.assertEqual(result2.exit_code, 0, result2.output)
         self.assertFalse(os.path.isdir(os.path.join(codex_dir, "dup-skill")))
         self.assertTrue(os.path.isdir(os.path.join(claude_dir, "dup-skill")))
+        pe = PolicyEngine(self.app.store)
+        self.assertTrue(pe.is_quarantined_for_connector("skill", "dup-skill", "codex"))
+        self.assertFalse(pe.is_quarantined_for_connector("skill", "dup-skill", "claudecode"))
+        self.assertFalse(pe.is_quarantined("skill", "dup-skill"))
+        self.assertEqual(
+            pe.get_action("skill", "dup-skill", "codex").source_path,
+            os.path.join(codex_dir, "dup-skill"),
+        )
 
 
 class TestSkillList(SkillCommandTestBase):
