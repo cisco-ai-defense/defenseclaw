@@ -117,6 +117,25 @@ Both files are written atomically (temp + rename, mode 0o600).
 
 ---
 
+### Connector-owned agent config files
+
+DefenseClaw reads and writes some connector-native files when a connector has a
+documented local customization surface. For Antigravity, the PR #365 contract is:
+
+| Surface | Paths | DefenseClaw behavior |
+| --- | --- | --- |
+| Hooks | `~/.gemini/config/hooks.json` | Read/write the global hook file only. Workspace and plugin hook files are discovery-only to avoid duplicate hook firing. |
+| MCP | `~/.gemini/config/mcp_config.json`, `<workspace>/.agents/mcp_config.json` | Read/write global and workspace MCP configs. Plugin-contained `<plugin>/mcp_config.json` is discovery-only. |
+| Skills | `~/.gemini/config/skills/<skill>/SKILL.md`, `<workspace>/.agents/skills/<skill>/SKILL.md` | Read/write AgentSkills folder form. CLI direct markdown skills under `~/.gemini/antigravity-cli/skills/` are discovery-only. |
+| Rules | `~/.gemini/GEMINI.md`, `<workspace>/.agents/rules/`, `<plugin>/rules/*.md` | Discovery-only until activation metadata and naming are documented. |
+| Plugins | `~/.gemini/config/plugins/<plugin>/`, `~/.gemini/antigravity-cli/plugins/<plugin>/`, `<workspace>/.agents/plugins/<plugin>/` | Discovery/scan only. DefenseClaw does not install or disable Antigravity plugins in this PR. |
+| Agents | `<plugin>/agents/` | Plugin-contained agents are discovery-only; standalone Antigravity agent paths are not documented. |
+
+The legacy Antigravity marketing-path hook file
+`~/.gemini/antigravity-cli/hooks.json` is not a DefenseClaw write target.
+
+---
+
 ### `~/.defenseclaw/policies/guardrail/<profile>/`
 
 Guardrail rule-pack directory for one profile such as `default`, `strict`, or

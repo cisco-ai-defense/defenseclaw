@@ -405,11 +405,22 @@
       ],
       "config_paths": [
         "~/.gemini/config/hooks.json",
-        "~/.gemini/antigravity-cli/hooks.json",
-        ".antigravitycli/hooks.json"
+        "~/.gemini/config/mcp_config.json",
+        ".agents/mcp_config.json",
+        "~/.gemini/config/skills",
+        ".agents/skills",
+        "~/.gemini/antigravity-cli/skills",
+        "~/.gemini/GEMINI.md",
+        ".agents/rules",
+        "~/.gemini/config/plugins",
+        "~/.gemini/antigravity-cli/plugins",
+        ".agents/plugins"
       ],
       "extension_ids": [],
-      "mcp_paths": [],
+      "mcp_paths": [
+        "~/.gemini/config/mcp_config.json",
+        ".agents/mcp_config.json"
+      ],
       "package_names": [],
       "env_var_names": [],
       "domain_patterns": [

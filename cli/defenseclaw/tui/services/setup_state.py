@@ -239,11 +239,8 @@ def build_readiness_checks(
     # fabricating one when the install is genuinely empty.
     connectors = _active_connector_names(cfg)
     if connectors:
-        if len(connectors) == 1:
-            detail = f"{connectors[0]} configured"
-        else:
-            detail = f"{len(connectors)} connectors configured: " + ", ".join(connectors)
-        checks.append(ReadinessCheck("Active Connector", detail, "pass"))
+        for connector in connectors:
+            checks.append(ReadinessCheck(f"Active Connector: {connector}", "configured", "pass"))
     else:
         checks.append(
             ReadinessCheck(

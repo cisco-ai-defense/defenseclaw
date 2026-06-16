@@ -1399,8 +1399,10 @@ def mcp_unset_target_for_connector(connector: str) -> str:
             return "./.github/mcp.json"
         case "openhands":
             return "~/.openhands/mcp.json"
+        case "antigravity":
+            return "~/.gemini/config/mcp_config.json / <workspace>/.agents/mcp_config.json"
         case _:
-            return "OpenClaw config"
+            return "OpenClaw config" if normalized_connector(connector) == "openclaw" else "connector MCP config"
 
 
 def registry_attribution_from_rules(rules: Sequence[object] | None) -> dict[str, str]:
@@ -1448,7 +1450,7 @@ def friendly_connector_name(connector: str) -> str:
         case "opencode":
             return "OpenCode"
         case value:
-            return value[:1].upper() + value[1:] if value else "OpenClaw"
+            return value[:1].upper() + value[1:] if value else "No connector"
 
 
 def connector_source_label(connector: str, category: str) -> str:
@@ -1458,17 +1460,32 @@ def connector_source_label(connector: str, category: str) -> str:
         ("claudecode", "skills"): ("~/.claude/skills", "./.claude/skills"),
         ("codex", "skills"): ("~/.codex/skills", "./.codex/skills"),
         ("zeptoclaw", "skills"): ("~/.zeptoclaw/skills", "./.zeptoclaw/skills"),
+        ("antigravity", "skills"): (
+            "~/.gemini/config/skills/<skill>/SKILL.md",
+            "<workspace>/.agents/skills/<skill>/SKILL.md",
+            "~/.gemini/antigravity-cli/skills/*.md (discovery-only)",
+        ),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): ("~/.claude/settings.json (mcpServers)", "./.mcp.json"),
         ("codex", "mcps"): ("~/.codex/config.toml ([mcp_servers])", "./.mcp.json"),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
+        ("antigravity", "mcps"): (
+            "~/.gemini/config/mcp_config.json",
+            "<workspace>/.agents/mcp_config.json",
+            "<plugin>/mcp_config.json (discovery-only)",
+        ),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
+        ("antigravity", "plugins"): (
+            "~/.gemini/config/plugins/<plugin>/ (discovery-only)",
+            "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
+            "<workspace>/.agents/plugins/<plugin>/ (discovery-only)",
+        ),
     }
     return ", ".join(sources.get((connector, category), ()))
 
 
 def normalized_connector(connector: str) -> str:
-    return (connector or "openclaw").strip().lower() or "openclaw"
+    return (connector or "").strip().lower()
 
 
 def load_rows_from_command(

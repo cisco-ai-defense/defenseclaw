@@ -223,6 +223,32 @@ def test_credentials_parse_missing_and_readiness_fix_intents() -> None:
     assert by_title["Restart Pending"].fix.binary == "defenseclaw-gateway"
 
 
+def test_readiness_renders_and_filters_per_active_connector() -> None:
+    cfg = {
+        "guardrail": {
+            "enabled": True,
+            "mode": "observe",
+            "connectors": {"codex": {}, "hermes": {}},
+        },
+        "llm": {"provider": "openai", "model": "gpt-5"},
+    }
+    checks = build_readiness_checks(cfg, None, None, (), RestartQueue())
+    titles = [check.title for check in checks]
+
+    assert "Active Connector: codex" in titles
+    assert "Active Connector: hermes" in titles
+    assert "Active Connector" not in titles
+
+    model = SetupPanelModel(cfg)
+    model.show_connector_column = True
+    model.set_connector_filter("hermes")
+    filtered = model.filtered_readiness_checks()
+
+    assert any(check.title == "Active Connector: hermes" for check in filtered)
+    assert all(check.title != "Active Connector: codex" for check in filtered)
+    assert model.connector_scope_summary() == "Setup scope: Hermes (hermes)"
+
+
 def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
     assert connector_setup_command_for_mode("claudecode") == (
         ("setup", "claude-code", "--yes"),
@@ -415,6 +441,29 @@ def test_guardrail_wizard_inherits_unified_llm_without_forcing_override() -> Non
     fields = _with_field(fields, "Model", "gpt-5-mini")
     assert "--judge-model" in build_wizard_args(SetupWizard.GUARDRAIL, fields)
     assert "openai/gpt-5-mini" in build_wizard_args(SetupWizard.GUARDRAIL, fields)
+
+
+def test_guardrail_wizard_exposes_judge_hook_connectors_without_openclaw_default() -> None:
+    empty_fields = guardrail_wizard_fields({})
+    assert wizard_field_value(empty_fields, "Connector") == ""
+    empty_argv = build_wizard_args(SetupWizard.GUARDRAIL, empty_fields)
+    assert ("--connector", "openclaw") not in zip(empty_argv, empty_argv[1:])
+
+    cfg = {
+        "claw": {"mode": "codex"},
+        "guardrail": {
+            "mode": "observe",
+            "scanner_mode": "local",
+            "judge": {"hook_connectors": ["codex"]},
+        },
+    }
+    fields = guardrail_wizard_fields(cfg)
+    assert wizard_field_value(fields, "Hook Connectors") == "codex"
+
+    fields = _with_field(fields, "Hook Connectors", "codex,antigravity")
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
+    assert "--judge-hook-connectors" in argv
+    assert _pair_after(argv, "--judge-hook-connectors") == "codex,antigravity"
 
 
 def test_observability_and_webhook_wizards_pass_positionals_and_defaults() -> None:

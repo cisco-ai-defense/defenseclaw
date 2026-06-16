@@ -149,11 +149,17 @@ output) so they're safe to call from the TUI and CI/CD pipelines.
 
 | Command | Description |
 |---------|-------------|
-| `tool block <name>` | Block a tool (global or scoped with `--source`) |
-| `tool allow <name>` | Allow a tool (skip scan gate) |
-| `tool unblock <name>` | Remove a tool from the block/allow list |
-| `tool list` | List tools in the block/allow list |
-| `tool status <name>` | Show block/allow status of a tool |
+| `tool block <name> [--connector X] [--source S]` | Block a tool globally or for one connector |
+| `tool allow <name> [--connector X] [--source S]` | Allow a tool globally or for one connector (runtime allow bypasses the scan gate for the matching connector scope) |
+| `tool unblock <name> [--connector X]` | Remove a global or connector-scoped tool decision |
+| `tool list [--connector X]` | List global decisions plus decisions that apply to a connector |
+| `tool status <name> [--connector X]` | Show the effective block/allow status globally or for a connector |
+
+`--connector` is the runtime enforcement scope. A scoped `tool block` or
+`tool allow` applies only to calls attributed to that connector; omitting it
+keeps the decision global. `--source` is audit/source metadata that records
+where the decision came from, but it is not used as a runtime enforcement
+selector.
 
 ### policy
 

@@ -499,7 +499,7 @@ defenseclaw setup mcp-scanner
 
 | Flag | Description |
 |------|-------------|
-| `--analyzers LIST` | Comma-separated analyzer list (e.g. `yara,api,llm,behavioral,readiness`) |
+| `--analyzers LIST` | Comma-separated analyzer list (default `auto`; explicit example: `yara,api,llm,behavioral,readiness`) |
 | `--llm-provider PROVIDER` | `anthropic` or `openai` |
 | `--llm-model MODEL` | Model for LLM analyzer |
 | `--scan-prompts` | Scan MCP server prompts |
@@ -509,6 +509,11 @@ defenseclaw setup mcp-scanner
 
 MCP server URLs are managed separately with `defenseclaw mcp set` /
 `defenseclaw mcp unset`, not through this setup command.
+
+`auto` lets DefenseClaw choose the scanner plugin set supported by the
+installed `cisco-ai-mcp-scanner` version and configured credentials. To opt out
+of an analyzer, pass an explicit list that omits it; once you pass a list,
+DefenseClaw uses that list as-is instead of adding missing analyzer names back.
 
 ```bash
 defenseclaw setup mcp-scanner --analyzers yara,api,behavioral --non-interactive
