@@ -37,23 +37,58 @@ import (
 // This function deliberately lives in internal/cli (not internal/audit
 // or internal/audit/sinks) because it is the *composition* layer: it
 // knows about config types and sink-package types, and bridges them.
-func buildAuditSinks(declared []config.AuditSink, appVersion string) (*sinks.Manager, error) {
+//
+// obs carries the per-connector observability routing overrides (D5b): for
+// each connector whose audit_sinks dimension is set, its sinks are built and
+// registered against the Manager so that connector's events route to them
+// (RegisterForConnector). An override that resolves to zero sinks (explicit
+// empty list) is still recorded (MarkConnectorOverride) so the connector's
+// events are SUPPRESSED rather than inheriting the global list. A connector
+// with no override is left untouched and inherits the global sinks — the
+// safety default that prevents a silent drop.
+func buildAuditSinks(declared []config.AuditSink, obs config.ObservabilityConfig, appVersion string) (*sinks.Manager, error) {
 	mgr := sinks.NewManager()
 	res := defaultSinkResource(appVersion)
 
 	var errs []error
-	for _, decl := range declared {
-		if !decl.Enabled {
-			continue
+	buildInto := func(decls []config.AuditSink, connector string, register func(sinks.Sink)) {
+		for _, decl := range decls {
+			if !decl.Enabled {
+				continue
+			}
+			s, err := buildOneSink(context.Background(), decl, res)
+			if err != nil {
+				label := fmt.Sprintf("audit_sinks[%q] (%s)", decl.Name, decl.Kind)
+				if connector != "" {
+					label = fmt.Sprintf("observability.connectors[%q].%s", connector, label)
+				}
+				errs = append(errs, fmt.Errorf("%s: %w", label, err))
+				continue
+			}
+			if s != nil {
+				register(s)
+			}
 		}
-		s, err := buildOneSink(context.Background(), decl, res)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("audit_sinks[%q] (%s): %w", decl.Name, decl.Kind, err))
-			continue
+	}
+
+	buildInto(declared, "", mgr.Register)
+
+	// Per-connector overrides (D5b). ConnectorNames yields a deterministic
+	// order; each connector with a non-nil audit_sinks dimension overrides
+	// the global routing for its own events.
+	for _, name := range obs.ConnectorNames() {
+		if !obs.HasConnectorAuditSinksOverride(name) {
+			continue // audit_sinks unset → inherit global (no marking).
 		}
-		if s != nil {
-			mgr.Register(s)
-		}
+		// EffectiveAuditSinks(name, nil) returns exactly the connector's
+		// override list (global is irrelevant here because the override is
+		// present). An empty result is the suppress case.
+		connSinks := obs.EffectiveAuditSinks(name, nil)
+		// Record the override up front so the empty-list suppress case takes
+		// effect even when no sink is built (e.g. all disabled / all errored).
+		mgr.MarkConnectorOverride(name)
+		conn := name
+		buildInto(connSinks, conn, func(s sinks.Sink) { mgr.RegisterForConnector(conn, s) })
 	}
 
 	if len(errs) > 0 {

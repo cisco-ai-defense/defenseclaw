@@ -331,11 +331,15 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	SetEgressTelemetry(otel)
 
 	var webhooks *WebhookDispatcher
-	if len(cfg.Webhooks) > 0 {
-		webhooks = NewWebhookDispatcher(cfg.Webhooks)
+	// Construct when there are global webhooks OR any per-connector
+	// observability override (D5b); NewWebhookDispatcher returns nil when
+	// neither yields an endpoint, and the nil-checks below tolerate that.
+	if len(cfg.Webhooks) > 0 || len(cfg.Observability.Connectors) > 0 {
+		webhooks = NewWebhookDispatcher(cfg.Webhooks, cfg.Observability)
 		if webhooks != nil {
 			webhooks.BindObservability(otel)
-			fmt.Fprintf(os.Stderr, "[sidecar] webhook dispatcher initialized (%d endpoints)\n", len(webhooks.endpoints))
+			fmt.Fprintf(os.Stderr, "[sidecar] webhook dispatcher initialized (%d global endpoints, %d per-connector overrides)\n",
+				len(webhooks.endpoints), len(webhooks.connectorOverride))
 		}
 	}
 	if shell != nil {
