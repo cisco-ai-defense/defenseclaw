@@ -628,7 +628,7 @@ class SkillScannerConfig:
 @dataclass
 class MCPScannerConfig:
     binary: str = "mcp-scanner"
-    analyzers: str = "yara"
+    analyzers: str = "auto"
     scan_prompts: bool = False
     scan_resources: bool = False
     scan_instructions: bool = False
@@ -3410,7 +3410,7 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
     if isinstance(raw, dict):
         return MCPScannerConfig(
             binary=raw.get("binary", "mcp-scanner"),
-            analyzers=raw.get("analyzers", "yara"),
+            analyzers=raw.get("analyzers", "auto"),
             scan_prompts=raw.get("scan_prompts", False),
             scan_resources=raw.get("scan_resources", False),
             scan_instructions=raw.get("scan_instructions", False),

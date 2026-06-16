@@ -2643,7 +2643,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("scanners.skill_scanner.virustotal_api_key", "")
 	viper.SetDefault("scanners.skill_scanner.virustotal_api_key_env", "VIRUSTOTAL_API_KEY")
 	viper.SetDefault("scanners.mcp_scanner.binary", "mcp-scanner")
-	viper.SetDefault("scanners.mcp_scanner.analyzers", "yara")
+	viper.SetDefault("scanners.mcp_scanner.analyzers", "auto")
 	viper.SetDefault("scanners.mcp_scanner.scan_prompts", false)
 	viper.SetDefault("scanners.mcp_scanner.scan_resources", false)
 	viper.SetDefault("scanners.mcp_scanner.scan_instructions", false)
