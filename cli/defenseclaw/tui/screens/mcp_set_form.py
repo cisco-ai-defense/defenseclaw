@@ -63,6 +63,13 @@ class MCPSetFormValues:
     transport: str = ""
     env: str = ""
     skip_scan: bool | str = False
+    # B10: the connector this MCP is being added to. Threaded from the
+    # focused connector in the catalog (the filtered connector, or the
+    # selected row's owner when editing). Empty = no ``--connector`` flag,
+    # so a single-connector install writes to the active connector exactly
+    # as before; a filtered multi-connector view writes to that peer's MCP
+    # config instead of silently defaulting to the primary connector.
+    connector: str = ""
 
     def build_result(self) -> MCPSetResult:
         """Validate and render the form values into `defenseclaw mcp set` argv."""
@@ -101,6 +108,12 @@ class MCPSetFormValues:
             env.append((key, value))
         if skip_scan_truthy(self.skip_scan):
             argv.append("--skip-scan")
+        # B10: scope the write to the focused connector so an MCP added from
+        # a filtered connector view lands in that connector's config, not the
+        # default/primary one. ``mcp set`` accepts ``--connector`` (see
+        # cmd_mcp.set_server); mirror catalog_state._connector_focus_args.
+        if connector := self.connector.strip():
+            argv.extend(("--connector", connector))
         return MCPSetResult(
             binary="defenseclaw",
             argv=tuple(argv),
@@ -161,9 +174,13 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
         Binding("ctrl+s", "submit", "Submit", show=False),
     ]
 
-    def __init__(self, initial_name: str = "") -> None:
+    def __init__(self, initial_name: str = "", connector: str = "") -> None:
         super().__init__()
         self.initial_name = initial_name
+        # B10: the connector the add/update targets. Carried into the pure
+        # form values so ``build_result`` can emit ``--connector`` and the
+        # write lands on the focused connector instead of the primary.
+        self.connector = connector
 
     def compose(self) -> ComposeResult:
         with Vertical(id="mcp-set-dialog"):
@@ -201,6 +218,7 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
             transport=self.query_one("#mcp-transport", Input).value,
             env=self.query_one("#mcp-env", Input).value,
             skip_scan=self.query_one("#mcp-skip-scan", Checkbox).value,
+            connector=self.connector,
         )
 
     def action_cancel(self) -> None:

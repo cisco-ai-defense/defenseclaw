@@ -1659,3 +1659,82 @@ def test_every_goal_opens_and_emits_only_real_cli_options() -> None:
                 continue
             result = runner.invoke(cmd_setup.setup, [*argv[1:], "--help"], catch_exceptions=True)
             assert "No such option" not in (result.output or ""), f"{wizard.name}/{goal.id}: {result.output}"
+
+
+# --- B4: per-connector guardrail override editor groups ---------------------
+
+
+def _multi_connector_cfg() -> object:
+    from defenseclaw.config import Config, GuardrailConfig, PerConnectorGuardrailConfig
+
+    return Config(
+        guardrail=GuardrailConfig(
+            enabled=True,
+            mode="observe",
+            rule_pack_dir="/global/pack",
+            connectors={
+                "codex": PerConnectorGuardrailConfig(mode="action"),
+                "hermes": PerConnectorGuardrailConfig(),
+            },
+        )
+    )
+
+
+def test_guardrail_section_renders_per_connector_override_groups() -> None:
+    section = _section(build_setup_sections(_multi_connector_cfg()), "Guardrail")
+    fields = {field.key: field for field in section.fields}
+
+    # Both active connectors get an editable mode + rule-pack override row.
+    assert "guardrail.connectors.codex.mode" in fields
+    assert "guardrail.connectors.codex.rule_pack_dir" in fields
+    assert "guardrail.connectors.hermes.mode" in fields
+    assert "guardrail.connectors.hermes.rule_pack_dir" in fields
+
+    # codex pins its own mode; the editor shows the *effective* value.
+    assert fields["guardrail.connectors.codex.mode"].value == "action"
+    assert fields["guardrail.connectors.codex.mode"].options == ("observe", "action")
+    # hermes has no override → inherits the global mode/rule-pack.
+    assert fields["guardrail.connectors.hermes.mode"].value == "observe"
+    assert fields["guardrail.connectors.hermes.rule_pack_dir"].value == "/global/pack"
+
+    # Only the two landed write-surfaces are exposed — no fail-mode/hilt/judge.
+    per_connector = {k for k in fields if k.startswith("guardrail.connectors.")}
+    assert all(k.endswith((".mode", ".rule_pack_dir")) for k in per_connector)
+
+
+def test_per_connector_guardrail_field_writes_typed_override() -> None:
+    from defenseclaw.config import PerConnectorGuardrailConfig
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = _multi_connector_cfg()
+    apply_config_field(cfg, "guardrail.connectors.hermes.mode", "action")
+
+    entry = cfg.guardrail.connectors["hermes"]
+    # Must remain a typed entry so effective_*() keeps working (a plain dict
+    # would crash the boot-loop resolvers).
+    assert isinstance(entry, PerConnectorGuardrailConfig)
+    assert entry.mode == "action"
+    assert cfg.guardrail.effective_mode("hermes") == "action"
+    # The sibling connector's override is untouched.
+    assert cfg.guardrail.connectors["codex"].mode == "action"
+
+
+def test_per_connector_guardrail_field_creates_missing_entry() -> None:
+    from defenseclaw.config import Config, GuardrailConfig, PerConnectorGuardrailConfig
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    cfg = Config(guardrail=GuardrailConfig(enabled=True, mode="observe", connector="codex"))
+    apply_config_field(cfg, "guardrail.connectors.codex.rule_pack_dir", "/codex/pack")
+
+    entry = cfg.guardrail.connectors["codex"]
+    assert isinstance(entry, PerConnectorGuardrailConfig)
+    assert entry.rule_pack_dir == "/codex/pack"
+
+
+def test_guardrail_section_single_connector_omits_per_connector_groups() -> None:
+    from defenseclaw.config import Config, GuardrailConfig
+
+    cfg = Config(guardrail=GuardrailConfig(enabled=True, mode="observe", connector="codex"))
+    section = _section(build_setup_sections(cfg), "Guardrail")
+    per_connector = [f.key for f in section.fields if f.key.startswith("guardrail.connectors.")]
+    assert per_connector == []

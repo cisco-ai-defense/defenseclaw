@@ -7078,7 +7078,15 @@ class DefenseClawTUI(App[None]):
         model = self.mcps_model
         selected = model.selected()
         initial_name = selected.name if selected is not None else ""
-        result = await self.push_screen_wait(MCPSetFormScreen(initial_name=initial_name))
+        # B10: scope the add/update to the focused connector. ``action_connector``
+        # prefers the selected row's owning connector (editing an existing MCP)
+        # and falls back to the active filter (adding under a filtered view),
+        # ultimately "" under the merged "All" view, so the form writes
+        # ``--connector`` instead of silently defaulting to the primary.
+        connector = model.action_connector(selected)
+        result = await self.push_screen_wait(
+            MCPSetFormScreen(initial_name=initial_name, connector=connector)
+        )
         if result is None:
             self._set_status("MCP set cancelled.")
             return

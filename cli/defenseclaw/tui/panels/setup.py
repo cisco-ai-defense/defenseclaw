@@ -4405,6 +4405,117 @@ def _build_custom_provider_args(fields: Sequence[WizardFormField]) -> tuple[str,
     return tuple(args)
 
 
+def _guardrail_connector_keys(cfg: object | Mapping[str, Any] | None) -> list[str]:
+    """Active connectors to render per-connector guardrail groups for (B4).
+
+    Prefers the live ``Config.active_connectors()`` (multi-connector aware,
+    R1-clean) so every active hook connector gets an editable override group;
+    falls back to the ``guardrail.connectors`` map keys for dict-backed configs.
+    Connectors with an existing override are always included even when the
+    active set can't be resolved, so a configured override never becomes
+    invisible/uneditable.
+    """
+
+    names: list[str] = []
+    method = getattr(cfg, "active_connectors", None)
+    if callable(method):
+        try:
+            names = [str(n).strip() for n in method() if str(n).strip()]
+        except Exception:  # noqa: BLE001 - degrade to the map keys below.
+            names = []
+    overrides = get_config_value(cfg, "guardrail.connectors", None)
+    override_keys = (
+        [str(k).strip() for k in overrides.keys() if str(k).strip()]
+        if isinstance(overrides, Mapping)
+        else []
+    )
+    # Merge, preserving active-set order then any override-only keys.
+    seen: set[str] = set()
+    merged: list[str] = []
+    for name in (*names, *override_keys):
+        if name and name not in seen:
+            seen.add(name)
+            merged.append(name)
+    return merged
+
+
+def _effective_guardrail_value(
+    cfg: object | Mapping[str, Any] | None, connector: str, method_name: str, fallback_path: str
+) -> str:
+    """Resolve a connector's *effective* guardrail value for display (B4).
+
+    Calls the matching ``GuardrailConfig.effective_*(connector)`` resolver so
+    the editor shows what the connector actually uses (its override, or the
+    inherited global). Falls back to the raw global path for dict-backed
+    configs that don't expose the resolver.
+    """
+
+    guardrail = getattr(cfg, "guardrail", None)
+    resolver = getattr(guardrail, method_name, None) if guardrail is not None else None
+    if callable(resolver):
+        try:
+            return str(resolver(connector) or "")
+        except Exception:  # noqa: BLE001 - degrade to the raw global value.
+            pass
+    return str(get_config_value(cfg, fallback_path, "") or "")
+
+
+def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> list[ConfigField]:
+    """Build per-connector guardrail override groups for the config editor (B4).
+
+    One header + editable rows per active connector. Only ``mode`` and
+    ``rule_pack_dir`` are exposed — the per-connector WRITE-surface for the
+    remaining fields (hook_fail_mode / block_message / hilt / judge) is still
+    being wired by the ``fu/setup`` lane (and a per-connector judge field does
+    not exist in the config schema), so they are deliberately omitted here to
+    avoid racing that surface. Each row displays the *effective* value (the
+    connector's override, or the inherited global) and is wired to the raw
+    per-connector path so editing it pins an override for that connector only.
+    """
+
+    keys = _guardrail_connector_keys(cfg)
+    if not keys:
+        return []
+    # Single-connector installs with no existing overrides have nothing to
+    # disambiguate — the global fields above already cover them — so skip the
+    # extra groups. (``guardrail.connectors`` defaults to an empty dict, so
+    # test for actual entries, not just "is a map".)
+    overrides = get_config_value(cfg, "guardrail.connectors", None)
+    has_overrides = isinstance(overrides, Mapping) and len(overrides) > 0
+    if len(keys) < 2 and not has_overrides:
+        return []
+    rows: list[ConfigField] = [_header(".. Per-Connector Overrides ..")]
+    for connector in keys:
+        label = friendly_connector_name(connector) or connector
+        rows.append(_header(f".. {label} ({connector}) .."))
+        mode_field = _field(
+            cfg,
+            "Mode",
+            f"guardrail.connectors.{connector}.mode",
+            "choice",
+            ("observe", "action"),
+            f"Per-connector mode for {connector} (blank inherits the global mode).",
+        )
+        rows.append(
+            _field_with_original(
+                mode_field, _effective_guardrail_value(cfg, connector, "effective_mode", "guardrail.mode")
+            )
+        )
+        pack_field = _field(
+            cfg,
+            "Rule Pack Dir",
+            f"guardrail.connectors.{connector}.rule_pack_dir",
+            hint=f"Per-connector rule pack for {connector} (blank inherits the global pack).",
+        )
+        rows.append(
+            _field_with_original(
+                pack_field,
+                _effective_guardrail_value(cfg, connector, "effective_rule_pack_dir", "guardrail.rule_pack_dir"),
+            )
+        )
+    return rows
+
+
 def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
     fields = [
         _header(".. Core .."),
@@ -4525,6 +4636,10 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             cfg, "Tool Injection", "guardrail.judge.tool_injection", "bool", hint="Detect payloads in tool-call args."
         ),
     ]
+    # B4: per-connector override groups (mode + rule-pack) so the connectors[...]
+    # map the boot loop actually reads is visible + editable, not just the
+    # singular/global fields above.
+    fields.extend(_per_connector_guardrail_fields(cfg))
     return ConfigSection("Guardrail", tuple(fields), "LLM-egress proxy and judge settings.")
 
 
