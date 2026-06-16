@@ -120,6 +120,41 @@ class TestPolicyCreate(PolicyCommandTestBase):
         actions = [e for e in events if e.action == "policy-create"]
         self.assertEqual(len(actions), 1)
 
+    # --- OTHER-3: tri-state --from-preset admission flags ---
+
+    def _load_created(self, name: str) -> dict:
+        import yaml
+        with open(os.path.join(self.app.cfg.policy_dir, f"{name}.yaml")) as f:
+            return yaml.safe_load(f)
+
+    def test_create_from_preset_keeps_admission_when_no_flag(self):
+        # strict ships allow_list_bypass_scan: false. Without the flag,
+        # create must keep the preset's value (the OTHER-3 bug reset it
+        # to the CLI default True).
+        result = self.invoke(["create", "from-strict-keep", "--from-preset", "strict"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = self._load_created("from-strict-keep")
+        self.assertFalse(data["admission"]["allow_list_bypass_scan"])
+        self.assertTrue(data["admission"]["scan_on_install"])
+
+    def test_create_from_preset_flag_overrides(self):
+        # An explicit flag still overrides the preset value.
+        result = self.invoke([
+            "create", "from-strict-override", "--from-preset", "strict",
+            "--allow-list-bypass",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = self._load_created("from-strict-override")
+        self.assertTrue(data["admission"]["allow_list_bypass_scan"])
+
+    def test_create_bare_defaults_scan_on_install_true(self):
+        # No preset, no flag → historical default preserved.
+        result = self.invoke(["create", "bare-default"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = self._load_created("bare-default")
+        self.assertTrue(data["admission"]["scan_on_install"])
+        self.assertTrue(data["admission"]["allow_list_bypass_scan"])
+
 
 class TestPolicyList(PolicyCommandTestBase):
     def test_list_shows_builtins(self):
@@ -351,9 +386,183 @@ class TestPolicyLifecycle(PolicyCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.app.cfg.skill_actions.medium.install, "block")
 
-        # Delete
-        result = self.invoke(["delete", "lifecycle-test"])
+        # Delete — lifecycle-test is now the active policy, so a bare delete
+        # is refused (N1). --force deletes it and re-activates 'default'.
+        result = self.invoke(["delete", "lifecycle-test", "--force"])
         self.assertEqual(result.exit_code, 0, result.output)
+
+
+class TestPolicyEditSyncGate(PolicyCommandTestBase):
+    """OTHER-2: editing a non-active policy must not touch the live data.json."""
+
+    def _data_json_path(self) -> str:
+        return os.path.join(self.app.cfg.policy_dir, "rego", "data.json")
+
+    def test_edit_nonactive_does_not_sync_or_activate(self):
+        from defenseclaw.commands.cmd_policy import _get_active_policy_name
+
+        # default is the live policy.
+        self.assertEqual(self.invoke(["activate", "default"]).exit_code, 0)
+        self.invoke(["create", "draft"])
+
+        with open(self._data_json_path()) as f:
+            before = f.read()
+
+        result = self.invoke(
+            ["edit", "actions", "-s", "low", "--runtime", "disable", "-p", "draft"]
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        # Live data.json untouched; default still active.
+        with open(self._data_json_path()) as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(_get_active_policy_name(self.app), "default")
+        self.assertIn("Activate with", result.output)
+
+        # But the draft YAML did get the edit.
+        import yaml
+        with open(os.path.join(self.app.cfg.policy_dir, "draft.yaml")) as f:
+            draft = yaml.safe_load(f)
+        self.assertEqual(draft["skill_actions"]["low"]["runtime"], "disable")
+
+    def test_edit_active_syncs(self):
+        from defenseclaw.commands.cmd_policy import _get_active_policy_name
+
+        self.invoke(["create", "liveone"])
+        self.assertEqual(self.invoke(["activate", "liveone"]).exit_code, 0)
+
+        result = self.invoke(
+            ["edit", "actions", "-s", "low", "--runtime", "disable", "-p", "liveone"]
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        with open(self._data_json_path()) as f:
+            data = json.load(f)
+        # 'disable' maps to OPA 'block'; the live policy stays liveone.
+        self.assertEqual(data["actions"]["LOW"]["runtime"], "block")
+        self.assertEqual(_get_active_policy_name(self.app), "liveone")
+
+
+class TestPolicyEditCopyOnWrite(PolicyCommandTestBase):
+    """OTHER-4: editing a built-in must not write into the bundled wheel dir."""
+
+    def setUp(self):
+        super().setUp()
+        from defenseclaw.commands.cmd_policy import _bundled_policies_dir
+
+        self._bundled_dir = _bundled_policies_dir()
+        # Snapshot bundled built-ins so a regression that writes them in
+        # place is both detected AND restored (never dirty the source tree).
+        self._snapshots: dict[str, bytes] = {}
+        for builtin in ("default", "strict"):
+            p = os.path.join(self._bundled_dir, f"{builtin}.yaml")
+            if os.path.isfile(p):
+                with open(p, "rb") as f:
+                    self._snapshots[p] = f.read()
+
+    def tearDown(self):
+        for p, content in self._snapshots.items():
+            with open(p, "rb") as f:
+                current = f.read()
+            if current != content:
+                with open(p, "wb") as f:
+                    f.write(content)
+        super().tearDown()
+
+    def _assert_bundled_unchanged(self):
+        for p, content in self._snapshots.items():
+            with open(p, "rb") as f:
+                self.assertEqual(f.read(), content, f"bundled {p} was modified")
+
+    def test_edit_active_builtin_copies_to_user_dir(self):
+        import yaml
+        from defenseclaw.commands.cmd_policy import _get_active_policy_name
+
+        self.assertEqual(self.invoke(["activate", "default"]).exit_code, 0)
+        user_copy = os.path.join(self.app.cfg.policy_dir, "default.yaml")
+        self.assertFalse(os.path.exists(user_copy))
+
+        result = self.invoke(
+            ["edit", "guardrail", "--block-threshold", "3", "-p", "default"]
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        # COW: user copy created with the change; bundled untouched.
+        self.assertTrue(os.path.isfile(user_copy))
+        with open(user_copy) as f:
+            data = yaml.safe_load(f)
+        self.assertEqual(data["guardrail"]["block_threshold"], 3)
+        self._assert_bundled_unchanged()
+
+        # default is active → the edit also synced the live data.json.
+        self.assertEqual(_get_active_policy_name(self.app), "default")
+        with open(os.path.join(self.app.cfg.policy_dir, "rego", "data.json")) as f:
+            dj = json.load(f)
+        self.assertEqual(dj["guardrail"]["block_threshold"], 3)
+
+    def test_edit_nonactive_builtin_copies_without_sync(self):
+        import yaml
+
+        self.assertEqual(self.invoke(["activate", "default"]).exit_code, 0)
+        data_json = os.path.join(self.app.cfg.policy_dir, "rego", "data.json")
+        with open(data_json) as f:
+            before = f.read()
+
+        # strict is bundled and NOT active → COW + no live sync.
+        result = self.invoke(
+            ["edit", "guardrail", "--block-threshold", "2", "-p", "strict"]
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        user_copy = os.path.join(self.app.cfg.policy_dir, "strict.yaml")
+        self.assertTrue(os.path.isfile(user_copy))
+        with open(user_copy) as f:
+            data = yaml.safe_load(f)
+        self.assertEqual(data["guardrail"]["block_threshold"], 2)
+        self._assert_bundled_unchanged()
+
+        with open(data_json) as f:
+            self.assertEqual(f.read(), before)
+        self.assertIn("Activate with", result.output)
+
+
+class TestPolicyDeleteActiveGuard(PolicyCommandTestBase):
+    """N1: deleting the active policy is guarded; --force re-activates default."""
+
+    def test_delete_active_refused_without_force(self):
+        self.invoke(["create", "activepol"])
+        self.assertEqual(self.invoke(["activate", "activepol"]).exit_code, 0)
+
+        result = self.invoke(["delete", "activepol"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("is active", result.output)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.app.cfg.policy_dir, "activepol.yaml")
+        ))
+
+    def test_delete_active_with_force_reactivates_default(self):
+        from defenseclaw.commands.cmd_policy import _get_active_policy_name
+
+        self.invoke(["create", "activepol"])
+        self.assertEqual(self.invoke(["activate", "activepol"]).exit_code, 0)
+
+        result = self.invoke(["delete", "activepol", "--force"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.app.cfg.policy_dir, "activepol.yaml")
+        ))
+        self.assertEqual(_get_active_policy_name(self.app), "default")
+
+    def test_delete_nonactive_unaffected(self):
+        self.invoke(["create", "keep"])
+        self.invoke(["create", "drop"])
+        self.assertEqual(self.invoke(["activate", "keep"]).exit_code, 0)
+
+        result = self.invoke(["delete", "drop"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.app.cfg.policy_dir, "drop.yaml")
+        ))
 
 
 if __name__ == "__main__":
