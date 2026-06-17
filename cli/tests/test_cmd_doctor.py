@@ -30,13 +30,13 @@ from defenseclaw.commands.cmd_doctor import (
     _bedrock_region,
     _check_antigravity_hooks,
     _check_cisco_ai_defense,
+    _check_connector_residue,
     _check_copilot_hooks,
     _check_custom_provider_overlay,
     _check_guardrail_proxy,
     _check_hilt_support,
     _check_llm_api_key,
     _check_openhands_hooks,
-    _check_connector_residue,
     _check_sidecar,
     _DoctorResult,
     _probe_splunk_hec,
@@ -1291,82 +1291,124 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         freshness = [c for c in result.checks if c["label"] == "Codex hooks freshness"]
         self.assertEqual(len(freshness), 1, result.checks)
         self.assertEqual(freshness[0]["status"], "warn")
-        self.assertIn("defenseclaw doctor --fix", freshness[0]["detail"])
+        self.assertIn("defenseclaw-gateway restart", freshness[0]["detail"])
+        # Warning is advisory only — it must NOT promise `doctor --fix` will
+        # repair it (the fixer was intentionally removed; the real remedy is
+        # updating DefenseClaw and restarting the gateway).
+        self.assertNotIn("doctor --fix", freshness[0]["detail"])
 
-    def test_fix_stale_generated_hooks_restarts_gateway(self):
-        from defenseclaw.commands import cmd_doctor
 
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = self._make_cfg(tmp)
-            proc = SimpleNamespace(returncode=0, stdout="", stderr="")
+class DoctorGatewayHomeMismatchTests(unittest.TestCase):
+    """`_check_gateway_home_mismatch` warns when a gateway from a different
+    DEFENSECLAW_HOME (e.g. a leftover /tmp sandbox) is holding the API port —
+    the exact failure that makes every hook 401 while each half looks healthy.
+    """
 
-            with (
-                patch.object(cmd_doctor.shutil, "which", return_value="/usr/bin/defenseclaw-gateway"),
-                patch.object(cmd_doctor.subprocess, "run", return_value=proc) as run,
-                patch.object(
-                    cmd_doctor,
-                    "_stale_generated_hook_reasons",
-                    side_effect=[["codex-hook.sh missing current helper"], []],
-                ),
-            ):
-                outcome = cmd_doctor._fix_stale_generated_hooks(cfg, assume_yes=True)
-
-        self.assertEqual(outcome[0], "pass")
-        self.assertIn("regenerated hooks for codex", outcome[1])
-        run.assert_called_once_with(
-            ["/usr/bin/defenseclaw-gateway", "restart"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
+    def _make_cfg(self, data_dir: str) -> Config:
+        return Config(
+            data_dir=data_dir,
+            audit_db=os.path.join(data_dir, "audit.db"),
+            quarantine_dir=os.path.join(data_dir, "quarantine"),
+            plugin_dir=os.path.join(data_dir, "plugins"),
+            policy_dir=os.path.join(data_dir, "policies"),
+            llm=LLMConfig(),
+            guardrail=GuardrailConfig(connector="codex"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
         )
 
-    def test_fix_stale_generated_hooks_warns_when_restart_uses_old_gateway(self):
+    def test_warns_when_foreign_home_holds_the_port(self):
         from defenseclaw.commands import cmd_doctor
 
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = self._make_cfg(tmp)
-            proc = SimpleNamespace(returncode=0, stdout="", stderr="")
-
+            cfg = self._make_cfg(tmp)  # this config = the real home
+            result = _DoctorResult()
             with (
-                patch.object(cmd_doctor.shutil, "which", return_value="/usr/bin/defenseclaw-gateway"),
-                patch.object(cmd_doctor.subprocess, "run", return_value=proc),
+                patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                # This home's tracked gateway is NOT alive (no/stale pid file).
+                patch.object(cmd_doctor, "_read_pid_from_file", return_value=0),
+                # A foreign gateway is the actual listener...
+                patch.object(cmd_doctor, "_gateway_listener_pid", return_value=4321),
+                # ...rooted at a /tmp sandbox home.
                 patch.object(
                     cmd_doctor,
-                    "_stale_generated_hook_reasons",
-                    side_effect=[
-                        ["codex-hook.sh missing current helper"],
-                        ["codex-hook.sh missing current helper"],
-                    ],
+                    "_read_process_env_var",
+                    return_value="/tmp/defenseclaw-pr365-sandbox",
                 ),
             ):
-                outcome = cmd_doctor._fix_stale_generated_hooks(cfg, assume_yes=True)
+                cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
-        self.assertEqual(outcome[0], "warn")
-        self.assertIn("gateway restarted, but generated hooks are still stale", outcome[1])
-        self.assertIn("/usr/bin/defenseclaw-gateway", outcome[1])
+        rows = [c for c in result.checks if c["label"] == "Gateway home"]
+        self.assertEqual(len(rows), 1, result.checks)
+        self.assertEqual(rows[0]["status"], "warn")
+        self.assertIn("/tmp/defenseclaw-pr365-sandbox", rows[0]["detail"])
+        self.assertIn("unset DEFENSECLAW_HOME", rows[0]["detail"])
 
-    def test_fix_stale_generated_hooks_skips_when_current(self):
+    def test_passes_when_this_homes_gateway_is_alive(self):
         from defenseclaw.commands import cmd_doctor
 
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._make_cfg(tmp)
-            self._write_hook(
-                tmp,
-                "codex-hook.sh",
-                "reason=\"$(defenseclaw_response_failure_reason \"$1\")\"\n",
-            )
-            self._write_hook(
-                tmp,
-                "_hardening.sh",
-                "defenseclaw_response_failure_reason() { echo 'possible token drift'; }\n",
-            )
+            result = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                patch.object(cmd_doctor, "_read_pid_from_file", return_value=999),
+            ):
+                cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
-            with patch.object(cmd_doctor.shutil, "which") as which:
-                outcome = cmd_doctor._fix_stale_generated_hooks(cfg, assume_yes=True)
+        rows = [c for c in result.checks if c["label"] == "Gateway home"]
+        self.assertEqual(len(rows), 1, result.checks)
+        self.assertEqual(rows[0]["status"], "pass")
 
-        self.assertEqual(outcome, ("skip", "generated hooks already current"))
-        which.assert_not_called()
+    def test_silent_when_listener_home_cannot_be_identified(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            result = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                patch.object(cmd_doctor, "_read_pid_from_file", return_value=0),
+                patch.object(cmd_doctor, "_gateway_listener_pid", return_value=4321),
+                # Can't read the listener's env (perms / no var) -> "can't tell".
+                patch.object(cmd_doctor, "_read_process_env_var", return_value=None),
+            ):
+                cmd_doctor._check_gateway_home_mismatch(cfg, result)
+
+        # No mismatch row emitted — indeterminacy must not nag.
+        rows = [c for c in result.checks if c["label"] == "Gateway home"]
+        self.assertEqual(rows, [], result.checks)
+
+    def test_passes_when_listener_home_matches_this_config(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            result = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                # Stale pid file, but the live listener is THIS home's gateway.
+                patch.object(cmd_doctor, "_read_pid_from_file", return_value=0),
+                patch.object(cmd_doctor, "_gateway_listener_pid", return_value=4321),
+                patch.object(cmd_doctor, "_read_process_env_var", return_value=tmp),
+            ):
+                cmd_doctor._check_gateway_home_mismatch(cfg, result)
+
+        rows = [c for c in result.checks if c["label"] == "Gateway home"]
+        self.assertEqual(len(rows), 1, result.checks)
+        self.assertEqual(rows[0]["status"], "pass")
+
+    def test_silent_when_api_not_reachable(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            result = _DoctorResult()
+            with patch.object(cmd_doctor, "_http_probe", return_value=(0, "")):
+                cmd_doctor._check_gateway_home_mismatch(cfg, result)
+
+        rows = [c for c in result.checks if c["label"] == "Gateway home"]
+        self.assertEqual(rows, [], result.checks)
 
 
 class DoctorFixDryRunTests(unittest.TestCase):
@@ -1402,7 +1444,6 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_gateway_token") as fix_token,
             patch.object(cmd_doctor, "_fix_gateway_token_env") as fix_token_env,
             patch.object(cmd_doctor, "_fix_gateway_token_drift") as fix_drift,
-            patch.object(cmd_doctor, "_fix_stale_generated_hooks") as fix_hooks,
             patch.object(cmd_doctor, "_fix_dotenv_perms") as fix_dotenv,
             patch.object(cmd_doctor, "_fix_pristine_backup") as fix_pristine,
             patch.object(cmd_doctor, "_fix_plugin_registry_required") as fix_plugin_reg,
@@ -1416,7 +1457,6 @@ class DoctorFixDryRunTests(unittest.TestCase):
             fix_token.assert_not_called()
             fix_token_env.assert_not_called()
             fix_drift.assert_not_called()
-            fix_hooks.assert_not_called()
             fix_dotenv.assert_not_called()
             fix_pristine.assert_not_called()
             # OTHER-5: the plugin-registry dead-end fixer is wired into --fix
@@ -1428,10 +1468,11 @@ class DoctorFixDryRunTests(unittest.TestCase):
 
         # Each remaining fixer should have produced a "skip" record so the TUI
         # can list every step the real run would touch. The teardown fixer was
-        # removed (D7); the plugin-registry dead-end fixer was added (OTHER-5);
-        # stale generated hook regeneration adds one more.
+        # removed (D7); the plugin-registry dead-end fixer was added (OTHER-5).
+        # Stale generated hooks are detected as a warning only — there is no
+        # auto-fixer for them, so they do not appear here.
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        self.assertEqual(len(fix_records), 8)
+        self.assertEqual(len(fix_records), 7)
         for record in fix_records:
             self.assertEqual(record["status"], "skip")
             self.assertIn("dry-run", record["detail"])
@@ -1451,7 +1492,6 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_gateway_token", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_gateway_token_env", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_gateway_token_drift", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_stale_generated_hooks", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_dotenv_perms", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_pristine_backup", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_plugin_registry_required", return_value=("pass", "ok")),
@@ -1464,10 +1504,11 @@ class DoctorFixDryRunTests(unittest.TestCase):
             )
 
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        # Eight fixers run: the connector-teardown fixer was removed (D7), the
-        # plugin-registry dead-end fixer was added (OTHER-5), and stale
-        # generated hook regeneration is included.
-        self.assertEqual(len(fix_records), 8)
+        # Seven fixers run: the connector-teardown fixer was removed (D7) and
+        # the plugin-registry dead-end fixer was added (OTHER-5). Stale
+        # generated hooks are warning-only (no auto-fixer), so they are not
+        # counted here.
+        self.assertEqual(len(fix_records), 7)
         for record in fix_records:
             self.assertEqual(record["status"], "pass")
         fix_residue.assert_not_called()

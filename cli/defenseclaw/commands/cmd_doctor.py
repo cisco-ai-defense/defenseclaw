@@ -351,8 +351,8 @@ def _check_generated_hook_freshness(
     _emit(
         "warn",
         f"{label} freshness",
-        f"stale generated script ({detail}); run `defenseclaw doctor --fix` "
-        "or `defenseclaw-gateway restart`",
+        f"stale generated script ({detail}); update DefenseClaw, then run "
+        "`defenseclaw-gateway restart` to regenerate",
         r=r,
     )
 
@@ -944,6 +944,110 @@ def _check_gateway_token_drift(cfg, r: _DoctorResult) -> None:
         f"~/.defenseclaw/.env has {env_prefix}. Every API call will "
         "return HTTP 401. Run `defenseclaw doctor --fix` (or "
         "`defenseclaw-gateway restart`) to reconcile.",
+        r=r,
+    )
+
+
+def _gateway_listener_pid(port: int) -> int:
+    """Best-effort PID of whatever is listening on the local API *port*.
+
+    Uses ``lsof`` (present on macOS and most Linux installs). Returns 0
+    when the listener can't be determined — callers degrade to "can't
+    tell" rather than guessing, so an absent ``lsof`` never produces a
+    false alarm.
+    """
+    if port <= 0:
+        return 0
+    try:
+        proc = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return 0
+    if proc.returncode != 0:
+        return 0
+    for token in proc.stdout.split():
+        try:
+            return int(token)
+        except ValueError:
+            continue
+    return 0
+
+
+def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
+    """Warn when a gateway from a DIFFERENT home is holding the API port.
+
+    Each home's hook scripts (under ``cfg.data_dir/hooks``) post to the
+    API port with that home's token. If a gateway started from another
+    ``DEFENSECLAW_HOME`` — typically a sandbox under ``/tmp`` left over
+    from testing — is squatting on that single port, every hook call
+    fails auth (401) even though each half looks healthy on its own.
+    This is invisible to :func:`_check_gateway_token_drift`, which only
+    compares process-vs-dotenv WITHIN one home.
+
+    To avoid false alarms we only warn on a POSITIVELY identified
+    foreign home: the API answers, this config's ``gateway.pid`` is not
+    a live process, AND the actual listener reports a data dir that
+    differs from ``cfg.data_dir``. When the listener can't be introspected
+    (no ``lsof``, perms, no env var) we stay silent — "can't tell" is not
+    a mismatch, same discipline as the token-drift check.
+    """
+    bind = "127.0.0.1"
+    if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
+        bind = getattr(cfg.guardrail, "host", None) or bind
+    api_port = cfg.gateway.api_port
+    code, _ = _http_probe(f"http://{bind}:{api_port}/health", timeout=5.0)
+    if code != 200:
+        # Nothing answering — `_check_sidecar` already reports "down".
+        return
+
+    # Is the gateway THIS config tracks the one that's actually alive?
+    if _read_pid_from_file(os.path.join(cfg.data_dir, "gateway.pid")):
+        _emit(
+            "pass",
+            "Gateway home",
+            f"sidecar on :{api_port} belongs to this config ({cfg.data_dir})",
+            r=r,
+        )
+        return
+
+    # The port is served, but not by the gateway this config started
+    # (our pid file is stale/dead). Try to identify the squatter's home.
+    listener_pid = _gateway_listener_pid(api_port)
+    foreign_home = ""
+    if listener_pid:
+        foreign_home = (
+            _read_process_env_var(listener_pid, "DEFENSECLAW_DATA_DIR")
+            or _read_process_env_var(listener_pid, "DEFENSECLAW_HOME")
+            or ""
+        )
+    if not foreign_home:
+        # Couldn't positively identify a foreign home — stay silent
+        # rather than nag (the listener may simply be this home's
+        # gateway with a stale pid file and no data-dir env var).
+        return
+    if os.path.normpath(foreign_home) == os.path.normpath(cfg.data_dir):
+        # Same home after all; the pid file was just stale.
+        _emit(
+            "pass",
+            "Gateway home",
+            f"sidecar on :{api_port} serves this config ({cfg.data_dir})",
+            r=r,
+        )
+        return
+
+    _emit(
+        "warn",
+        "Gateway home",
+        f"a gateway from {foreign_home} is holding port {api_port}, but this "
+        f"config is {cfg.data_dir} — hooks here will get HTTP 401. It is a "
+        "leftover sandbox gateway; restart from a clean shell "
+        "(`unset DEFENSECLAW_HOME DEFENSECLAW_DATA_DIR`), then "
+        "`defenseclaw-gateway restart`.",
         r=r,
     )
 
@@ -2819,6 +2923,7 @@ def doctor(
     _check_sidecar(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
     _check_gateway_token_drift(cfg, r)
+    _check_gateway_home_mismatch(cfg, r)
     # Run the per-connector hook/health check for EVERY active connector,
     # not just the primary. ``_doctor_active_connectors`` returns the single
     # active connector on single-connector installs (no label suffix applied,
@@ -3022,7 +3127,6 @@ def _run_fixers(
         ("gateway token", _fix_gateway_token),
         ("gateway token_env", _fix_gateway_token_env),
         ("gateway token drift", _fix_gateway_token_drift),
-        ("stale generated hooks", _fix_stale_generated_hooks),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
         ("pristine config backup", _fix_pristine_backup),
         ("plugin registry dead-end", _fix_plugin_registry_required),
@@ -3860,72 +3964,6 @@ def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
         return ("fail", detail[0] if detail else "restart failed")
 
     return ("pass", f"sidecar restarted; will now serve token from {dotenv_path}")
-
-
-def _fix_stale_generated_hooks(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    """Restart the gateway when active generated hooks are stale.
-
-    The gateway owns rendering ``~/.defenseclaw/hooks/*.sh``. If a user
-    updates DefenseClaw but keeps an older gateway process alive, the
-    live agent can still call old hook scripts. Restarting the gateway is
-    the canonical repair because it also refreshes the companion token
-    file and any connector-specific hook metadata.
-    """
-    stale: dict[str, list[str]] = {}
-    for connector in _doctor_active_connectors(cfg):
-        if not _connector_enabled(cfg, connector):
-            continue
-        reasons = _stale_generated_hook_reasons(cfg, connector)
-        if reasons:
-            stale[connector] = reasons
-
-    if not stale:
-        return ("skip", "generated hooks already current")
-
-    connectors = ", ".join(sorted(stale))
-    gw_binary = shutil.which("defenseclaw-gateway")
-    if not gw_binary:
-        return (
-            "warn",
-            f"stale generated hooks for {connectors}, but defenseclaw-gateway is not on PATH",
-        )
-
-    if not assume_yes and not click.confirm(
-        f"    Restart gateway to regenerate stale hooks for {connectors}?",
-        default=True,
-    ):
-        return ("skip", "declined by user")
-
-    try:
-        result = subprocess.run(
-            [gw_binary, "restart"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return ("fail", "restart command timed out after 30s")
-    except OSError as exc:
-        return ("fail", f"could not invoke restart: {exc}")
-
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
-        return ("fail", detail[0] if detail else "restart failed")
-
-    still_stale: dict[str, list[str]] = {}
-    for connector in stale:
-        reasons = _stale_generated_hook_reasons(cfg, connector)
-        if reasons:
-            still_stale[connector] = reasons
-    if still_stale:
-        return (
-            "warn",
-            "gateway restarted, but generated hooks are still stale; "
-            f"the gateway binary may be out of date ({gw_binary})",
-        )
-
-    return ("pass", f"gateway restarted; regenerated hooks for {connectors}")
 
 
 def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:
