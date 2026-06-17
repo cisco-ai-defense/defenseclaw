@@ -1682,6 +1682,8 @@ def friendly_connector_name(connector: str) -> str:
             return "Gemini CLI"
         case "copilot":
             return "GitHub Copilot CLI"
+        case "scout":
+            return "Microsoft Scout"
         case "openhands":
             return "OpenHands"
         case "antigravity":

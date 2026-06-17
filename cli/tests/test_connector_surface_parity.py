@@ -25,6 +25,7 @@ if any KNOWN_CONNECTOR is absent from a surface it must appear in.
 
 from __future__ import annotations
 
+from defenseclaw.commands import SURFACE_ONLY_CONNECTORS
 from defenseclaw.commands.cmd_doctor import _CONNECTOR_LABELS
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
@@ -34,6 +35,7 @@ from defenseclaw.tui.services.catalog_state import friendly_connector_name as ca
 from defenseclaw.tui.services.overview_state import friendly_connector_name as overview_friendly_name
 
 KNOWN = set(KNOWN_CONNECTORS)
+GUARDRAIL_KNOWN = KNOWN - set(SURFACE_ONLY_CONNECTORS)
 
 
 def _click_choices(cmd, param_name: str) -> set[str]:
@@ -45,12 +47,12 @@ def _click_choices(cmd, param_name: str) -> set[str]:
 
 def test_quickstart_offers_every_known_connector() -> None:
     choices = _click_choices(quickstart_cmd, "agent_name")
-    assert KNOWN <= choices, f"quickstart --agent missing: {KNOWN - choices}"
+    assert GUARDRAIL_KNOWN <= choices, f"quickstart --agent missing: {GUARDRAIL_KNOWN - choices}"
 
 
 def test_init_offers_every_known_connector() -> None:
     choices = _click_choices(init_cmd, "connector")
-    assert KNOWN <= choices, f"init --connector missing: {KNOWN - choices}"
+    assert GUARDRAIL_KNOWN <= choices, f"init --connector missing: {GUARDRAIL_KNOWN - choices}"
 
 
 def test_doctor_labels_cover_every_known_connector() -> None:
@@ -79,7 +81,7 @@ def test_command_palette_offers_setup_for_every_known_connector() -> None:
         for entry in GO_PARITY_REGISTRY
         if len(entry[2]) >= 2 and entry[2][0] == "setup"
     }
-    missing = {c for c in KNOWN if c not in targets}
+    missing = {c for c in GUARDRAIL_KNOWN if c not in targets}
     assert not missing, f"command palette 'setup <connector>' missing: {missing}"
 
 

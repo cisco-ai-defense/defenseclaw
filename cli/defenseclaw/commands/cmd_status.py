@@ -259,6 +259,7 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "windsurf": "Windsurf",
     "geminicli": "Gemini CLI",
     "copilot": "GitHub Copilot CLI",
+    "scout": "Microsoft Scout",
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
