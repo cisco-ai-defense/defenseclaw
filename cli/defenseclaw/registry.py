@@ -176,6 +176,28 @@ def _stream_download(
             resp.close()
 
 
+def _reject_extracted_symlinks(dest_dir: str) -> None:
+    """Walk *dest_dir* and refuse any symlink entry (F-0181).
+
+    System ``tar`` (used on the prefix extraction path) materializes
+    symlink members verbatim. A symlink under the extraction root could
+    later be followed by the plugin scanner to read/write an arbitrary
+    host path, so we fail closed if any link is found. Reuses the shared
+    :func:`defenseclaw.safety.is_symlink` guard rather than re-deriving
+    ``os.path.islink`` logic.
+    """
+    from defenseclaw.safety import is_symlink
+
+    for root, dirs, files in os.walk(dest_dir):
+        for name in dirs + files:
+            entry = os.path.join(root, name)
+            if is_symlink(entry):
+                raise RegistryError(
+                    f"tar extraction produced a symlink entry: {entry!r} "
+                    f"(refusing to leave a symlink inside the plugin tree)"
+                )
+
+
 def _extract_archive(archive_path: str, dest_dir: str, *, prefix: str = "") -> None:
     """Extract a tar.gz or zip archive into *dest_dir*.
 
@@ -187,6 +209,25 @@ def _extract_archive(archive_path: str, dest_dir: str, *, prefix: str = "") -> N
     if tarfile.is_tarfile(archive_path):
         if prefix:
             strip = prefix.count("/")
+            # F-0181: the prefix path shells out to system ``tar``, which
+            # bypasses the Python ``tarfile`` "data" filter / manual
+            # symlink-rejection that the non-prefix branch below applies.
+            # System ``tar`` happily extracts symlink (and hardlink/device)
+            # members, so a malicious tarball could plant a symlink under
+            # ``dest_dir`` that later reads/writes outside the intended
+            # root. Pre-inspect every member that would be extracted and
+            # refuse anything that isn't a plain file or directory, matching
+            # the safety contract of the non-prefix branch before we run the
+            # privileged-feeling subprocess.
+            with tarfile.open(archive_path) as tf:
+                for m in tf.getmembers():
+                    if not m.name.startswith(prefix):
+                        continue
+                    if not (m.isfile() or m.isdir()):
+                        raise RegistryError(
+                            f"tar contains non-regular member under prefix "
+                            f"{prefix!r}: {m.name!r} (type={m.type!r})"
+                        )
             result = subprocess.run(
                 [
                     "tar", "xzf", archive_path,
@@ -201,6 +242,12 @@ def _extract_archive(archive_path: str, dest_dir: str, *, prefix: str = "") -> N
                     f"tar extraction failed (exit {result.returncode}): "
                     f"{result.stderr.strip()[:200]}"
                 )
+            # Defense-in-depth: even though we pre-inspected members, walk
+            # the extracted tree and reject any symlink that slipped through
+            # (e.g. a TOCTOU swap of the archive between inspect and
+            # extract). Refuse to leave a symlink that points outside the
+            # extraction root in place.
+            _reject_extracted_symlinks(dest_dir)
         else:
             with tarfile.open(archive_path) as tf:
                 try:

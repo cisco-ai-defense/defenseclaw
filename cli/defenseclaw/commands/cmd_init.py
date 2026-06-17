@@ -41,6 +41,7 @@ from defenseclaw.paths import (
     bundled_rego_dir,
     bundled_splunk_bridge_dir,
 )
+from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
 
 
 @click.command("init")
@@ -1522,6 +1523,26 @@ def _resolve_gateway_for_connector(cfg) -> dict[str, str | int]:
     }
 
 
+def _validate_gateway_token(env_name: str, token: str) -> None:
+    """Reject a gateway token that would corrupt the dotenv file.
+
+    The token originates from connector-controlled state (openclaw.json) and
+    is therefore untrusted. A value containing a newline, carriage return, or
+    NUL would be parsed as a *second* KEY=VALUE assignment by the config
+    loader, letting an attacker inject arbitrary environment entries (e.g.
+    DEFENSECLAW_DISABLE_REDACTION=1). Fail clearly at the boundary where the
+    token enters rather than relying solely on the writer's sanitization.
+    """
+    try:
+        sanitize_dotenv_value(token, key=env_name)
+    except DotenvValueError as exc:
+        raise click.ClickException(
+            f"Refusing to persist the gateway token: {exc}. "
+            "The connector reported a token containing control characters; "
+            "fix the gateway configuration (e.g. openclaw.json) and retry."
+        ) from exc
+
+
 def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     """Resolve gateway settings from the active connector and display them.
 
@@ -1538,6 +1559,13 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     if connector == "openclaw" and gw_info["token"]:
         from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
+        # The OpenClaw gateway token is read from the connector-controlled
+        # openclaw.json and is untrusted. Validate at this boundary — before
+        # it reaches the dotenv writer — so a token carrying a newline/CR/NUL
+        # (which would inject extra KEY=VALUE lines into ~/.defenseclaw/.env)
+        # fails loudly with an operator-facing error instead of being relied
+        # on the writer's defense-in-depth sanitization alone. F-0361.
+        _validate_gateway_token("OPENCLAW_GATEWAY_TOKEN", gw_info["token"])
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", gw_info["token"], cfg.data_dir)
         cfg.gateway.token = ""
         cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
@@ -1546,6 +1574,7 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
         from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
         env_name = f"{connector.upper()}_GATEWAY_TOKEN"
+        _validate_gateway_token(env_name, gw_info["token"])
         _save_secret_to_dotenv(env_name, gw_info["token"], cfg.data_dir)
         cfg.gateway.token = ""
         cfg.gateway.token_env = env_name

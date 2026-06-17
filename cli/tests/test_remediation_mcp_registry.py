@@ -212,8 +212,10 @@ def test_f0343_registry_scan_does_not_forward_env_secrets(app_ctx, monkeypatch):
     )
     src = RegistrySource(id="s", kind="git", url="https://x.example", content="mcp")
 
+    # F-0541: stdio scanning is opt-in — pass scan_stdio=True so this
+    # test still exercises the env-forwarding path.
     with patch.object(MCPScannerWrapper, "scan", _fake_scan):
-        _run_mcp_scan(app_ctx, app_ctx.cfg, src, entry)
+        _run_mcp_scan(app_ctx, app_ctx.cfg, src, entry, scan_stdio=True)
 
     server_entry = captured["server_entry"]
     assert server_entry is not None
@@ -221,6 +223,71 @@ def test_f0343_registry_scan_does_not_forward_env_secrets(app_ctx, monkeypatch):
     # name) but carries an empty placeholder — never the live secret.
     assert server_entry.env == {"GITHUB_TOKEN": ""}
     assert "super-secret-value" not in server_entry.env.values()
+
+
+# ---------------------------------------------------------------------------
+# F-1261 — npx/uvx stay allowed launchers; the real controls are
+# (a) env-scrubbing of execution-control vars (F-0221) and (b) opt-in
+# stdio scanning during `registry sync` (F-0541).
+# ---------------------------------------------------------------------------
+
+def test_f1261_npx_uvx_remain_allowed_launchers():
+    # KEEP: npx/uvx are deliberately retained as valid stdio launchers.
+    assert is_safe_stdio_scan_command("npx", ["some-mcp"]) is True
+    assert is_safe_stdio_scan_command("uvx", ["some-mcp", "--flag"]) is True
+
+
+def test_f1261_exec_control_env_stripped_from_scan_subprocess():
+    """F-0221: untrusted MCP entry env cannot redirect the launcher.
+
+    Even with npx/uvx allowed, a publisher/connector-config that sets
+    PATH / NODE_PATH / LD_PRELOAD on the entry must not have those reach
+    the spawned subprocess env — the safe baseline wins.
+    """
+    from defenseclaw.scanner.mcp import _safe_subprocess_env
+
+    with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True):
+        env = _safe_subprocess_env({
+            "PATH": "/tmp/evil",
+            "NODE_PATH": "/tmp/evil",
+            "LD_PRELOAD": "/tmp/evil/hook.so",
+            "SERVER_FLAG": "keep-me",
+        })
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert "NODE_PATH" not in env
+    assert "LD_PRELOAD" not in env
+    # Non-exec server config still passes through.
+    assert env["SERVER_FLAG"] == "keep-me"
+
+
+def test_f1261_registry_sync_does_not_spawn_stdio_by_default(app_ctx):
+    """F-0541: routine `registry sync` must NOT spawn a stdio package
+    unless `--scan-stdio` is passed."""
+    entry = ManifestEntry(
+        name="some-mcp", type="mcp", transport="stdio",
+        command="npx", args=["some-mcp"],
+    )
+    src = RegistrySource(id="s", kind="git", url="https://x.example", content="mcp")
+
+    # Default: stdio scan is skipped, scanner.scan never called.
+    with patch.object(MCPScannerWrapper, "scan") as mock_scan:
+        result = _run_mcp_scan(app_ctx, app_ctx.cfg, src, entry)
+    assert result is None
+    assert mock_scan.call_count == 0
+
+    # Opt-in: --scan-stdio runs the scan (scanner.scan is called once).
+    called: dict = {}
+
+    def _fake_scan(self, target, server_entry=None, *, allow_private=False):
+        called["target"] = target
+        return _clean_result(target)
+
+    with patch.object(MCPScannerWrapper, "scan", _fake_scan):
+        result = _run_mcp_scan(
+            app_ctx, app_ctx.cfg, src, entry, scan_stdio=True,
+        )
+    assert result is not None
+    assert called["target"] == "some-mcp"
 
 
 # ---------------------------------------------------------------------------

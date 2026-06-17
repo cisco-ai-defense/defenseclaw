@@ -15,6 +15,7 @@ from defenseclaw.commands.cmd_setup_sandbox import (
     _generate_systemd_units,
     _parse_host_resolv,
     _pre_pair_device,
+    write_device_key_provenance,
 )
 
 
@@ -71,8 +72,12 @@ class TestGenerateResolvConf(unittest.TestCase):
 
 
 class _MockOpenshell:
-    def __init__(self):
+    def __init__(self, sandbox_home: str = "/home/sandbox"):
         self.host_networking = True
+        self.sandbox_home = sandbox_home
+
+    def effective_sandbox_home(self) -> str:
+        return self.sandbox_home
 
 
 class _MockGuardrail:
@@ -380,13 +385,39 @@ class TestLauncherScriptConditionals(unittest.TestCase):
         self.assertIn("saved.route_localnet", content)
         self.assertIn("sysctl -n net.ipv4.conf.all.route_localnet", content)
 
-    def _gen_run_sandbox(self):
+    def _gen_run_sandbox(self, pinned_home: str = "", sandbox_home: str = "/home/sandbox"):
         from defenseclaw.commands.cmd_setup_sandbox import (
             _generate_run_sandbox_script,
         )
 
         cfg = _CfgFactory.make(True, True)
+        cfg.openshell = _MockOpenshell(sandbox_home=sandbox_home)
+        cfg.claw = _MockClaw(openclaw_home_original=pinned_home)
         _generate_run_sandbox_script(self.data_dir, "10.200.0.1", cfg)
+
+    def test_run_sandbox_acl_fixer_uses_pinned_home_not_root(self):
+        """F-0427: the background ACL fixer in run-sandbox.sh must NOT
+        blanket-grant the sandbox user rwX on a hardcoded /root/.openclaw.
+        It must template the operator-confirmed pinned OpenClaw home plus
+        the sandbox-owned $SANDBOX_HOME/.openclaw."""
+        self._gen_run_sandbox(
+            pinned_home="/home/operator/.openclaw",
+            sandbox_home="/home/sandbox",
+        )
+        content = self._read_script("run-sandbox.sh")
+        # The hardcoded root path must be gone from the ACL fixer loop.
+        self.assertNotIn("/root/.openclaw", content)
+        # The pinned home and the sandbox's own .openclaw must be present.
+        self.assertIn("/home/operator/.openclaw", content)
+        self.assertIn("/home/sandbox/.openclaw", content)
+
+    def test_run_sandbox_acl_fixer_without_pin_skips_root(self):
+        """F-0427: with no pinned home, the ACL fixer must fall back to
+        ONLY the sandbox's own .openclaw — never root's."""
+        self._gen_run_sandbox(pinned_home="", sandbox_home="/home/sandbox")
+        content = self._read_script("run-sandbox.sh")
+        self.assertNotIn("/root/.openclaw", content)
+        self.assertIn("/home/sandbox/.openclaw", content)
 
     def test_run_sandbox_records_namespace_marker(self):
         """run-sandbox.sh must persist the discovered namespace name into
@@ -440,15 +471,16 @@ class TestPrePairDevice(unittest.TestCase):
         shutil.rmtree(self.sandbox_home, ignore_errors=True)
 
     def _write_device_key(self, blob: bytes) -> str:
-        """Write a device.key with mode 0o600 + the gateway provenance
-        sentinel that now requires before the pre-pair
-        flow will touch paired.json."""
+        """Write a device.key with mode 0o600 + a VALID gateway-minted
+        provenance sentinel (HMAC over the key bytes keyed by the
+        owner-only per-install secret). F-1441: a verifiable sentinel
+        — not a forgeable literal — is what the hardened pre-pair flow
+        now requires before it will touch paired.json."""
         path = os.path.join(self.data_dir, "device.key")
         with open(path, "wb") as f:
             f.write(blob)
         os.chmod(path, 0o600)
-        with open(path + ".provenance", "w", encoding="utf-8") as f:
-            f.write("source=test\n")
+        write_device_key_provenance(self.data_dir, path)
         return path
 
     def test_no_device_key(self):
@@ -495,13 +527,15 @@ class TestPrePairDevice(unittest.TestCase):
 
     def test_f2551_overpermissive_mode_refused(self):
         """device.key mode 0o644 (group/world read)
-        must be refused even with a provenance sentinel present."""
+        must be refused even with a VALID provenance sentinel present."""
         path = os.path.join(self.data_dir, "device.key")
         with open(path, "wb") as f:
             f.write(os.urandom(32))
+        os.chmod(path, 0o600)
+        # Mint a valid sentinel, THEN loosen the mode — proving the mode
+        # gate fires independently of provenance.
+        write_device_key_provenance(self.data_dir, path)
         os.chmod(path, 0o644)
-        with open(path + ".provenance", "w", encoding="utf-8") as f:
-            f.write("source=test\n")
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertFalse(result, "regression: 0o644 device.key was accepted")
@@ -518,6 +552,73 @@ class TestPrePairDevice(unittest.TestCase):
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertFalse(result, "regression: device.key without sentinel accepted")
+
+    def test_f1441_forged_literal_provenance_refused(self):
+        """F-1441: a sibling .provenance file containing an arbitrary
+        literal (the legacy forgeable shape ``source=test``) must NOT be
+        accepted — only a verifiable HMAC sentinel keyed by the owner-only
+        per-install secret counts. A local attacker can plant both
+        device.key and an arbitrary provenance literal; that path must
+        fail closed."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(32))
+        os.chmod(path, 0o600)
+        with open(path + ".provenance", "w", encoding="utf-8") as f:
+            f.write("source=test\n")
+        os.chmod(path + ".provenance", 0o600)
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(
+            result, "regression: forgeable literal provenance was accepted"
+        )
+
+    def test_f1441_tampered_device_key_invalidates_sentinel(self):
+        """F-1441: the sentinel is bound to the device.key bytes via HMAC.
+        If an attacker mints a valid sentinel for one key then swaps in a
+        different device.key, the HMAC no longer matches and pairing is
+        refused."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(64))
+        os.chmod(path, 0o600)
+        write_device_key_provenance(self.data_dir, path)
+        # Swap the key bytes AFTER the sentinel was minted.
+        with open(path, "wb") as f:
+            f.write(os.urandom(64))
+        os.chmod(path, 0o600)
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(
+            result, "regression: sentinel accepted for a swapped device.key"
+        )
+
+    def test_f1441_wrong_secret_provenance_refused(self):
+        """F-1441: a provenance HMAC computed with an attacker-chosen
+        secret (i.e. without the owner-only per-install secret) must be
+        refused. Simulates an attacker who knows the sentinel format but
+        not the secret."""
+        import hashlib
+        import hmac
+
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _PROVENANCE_SENTINEL_PREFIX,
+        )
+
+        key_bytes = os.urandom(32)
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(key_bytes)
+        os.chmod(path, 0o600)
+        forged = hmac.new(b"attacker-secret", key_bytes, hashlib.sha256).hexdigest()
+        with open(path + ".provenance", "w", encoding="utf-8") as f:
+            f.write(_PROVENANCE_SENTINEL_PREFIX + forged + "\n")
+        os.chmod(path + ".provenance", 0o600)
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(
+            result, "regression: HMAC with wrong secret was accepted"
+        )
 
     def test_f2551_legacy_optin_bypasses_sentinel(self):
         """The DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1 escape hatch
@@ -556,11 +657,10 @@ class TestPrePairDevice(unittest.TestCase):
         key_path = os.path.join(self.data_dir, "device.key")
         with open(key_path, "w") as f:
             f.write(pem_data)
-        # regenerate the on-disk perms + provenance
+        # regenerate the on-disk perms + a VALID gateway-minted provenance
         # sentinel that the hardened pre-pair flow now requires.
         os.chmod(key_path, 0o600)
-        with open(key_path + ".provenance", "w", encoding="utf-8") as f:
-            f.write("source=test\n")
+        write_device_key_provenance(self.data_dir, key_path)
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertTrue(result)

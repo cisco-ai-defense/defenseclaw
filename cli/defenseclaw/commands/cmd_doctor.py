@@ -39,6 +39,7 @@ from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.envvars import active_security_overrides
+from defenseclaw.safety import NoRedirectError, build_no_redirect_opener
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
 # Doctor status markers, recomputed per emission so the per-call
@@ -289,13 +290,26 @@ def _http_probe(
     timeout: float = 10.0,
     verify_tls: bool = True,
 ) -> tuple[int, str]:
-    """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure."""
+    """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure.
+
+    Redirects are NOT followed. Several probes attach credential-bearing
+    headers (Cisco AI-Defense ``X-Cisco-AI-Defense-API-Key``, Splunk HEC
+    ``Authorization: Splunk ...``, LLM API keys). Python's default opener
+    transparently replays those headers to a 30x redirect target, so a
+    hostile or misconfigured endpoint could harvest the secret simply by
+    returning a redirect. We route through ``build_no_redirect_opener`` and
+    surface a refused redirect as a non-following ``(0, message)`` result —
+    the same shape callers already treat as "could not complete the probe".
+    """
     req = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
     context = None
     if not verify_tls and url.lower().startswith("https://"):
         context = ssl._create_unverified_context()
+    # Preserve the verify_tls / SSL-context behavior by passing an
+    # HTTPSHandler carrying the (possibly unverified) context to the opener.
+    opener = build_no_redirect_opener(urllib.request.HTTPSHandler(context=context))
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", errors="replace")[:2000]
     except urllib.error.HTTPError as exc:
         body_text = ""
@@ -304,6 +318,10 @@ def _http_probe(
         except Exception:
             pass
         return exc.code, body_text
+    except NoRedirectError as exc:
+        # Refused redirect: report as an unreachable probe so the caller warns
+        # instead of leaking the auth header to the redirect target.
+        return 0, str(exc)
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return 0, str(exc)
 

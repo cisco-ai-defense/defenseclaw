@@ -39,8 +39,10 @@ first_party_allow_list:
   - target_type: plugin
     target_name: defenseclaw
     reason: first-party DefenseClaw plugin
+    # F-0902: a bare relative marker ("extensions/defenseclaw") blesses any
+    # attacker path that merely contains the subsequence; only home-anchored
+    # markers are trustworthy. (Mirror of default.yaml.)
     source_path_contains:
-      - "extensions/defenseclaw"
       - ".openclaw/extensions/defenseclaw"
       - ".zeptoclaw/extensions/defenseclaw"
       - ".claude/extensions/defenseclaw"
@@ -49,7 +51,6 @@ first_party_allow_list:
     target_name: codeguard
     reason: first-party DefenseClaw skill
     source_path_contains:
-      - "skills/codeguard"
       - ".openclaw/workspace/skills/codeguard"
       - ".openclaw/skills/codeguard"
       - ".zeptoclaw/skills/codeguard"

@@ -18,7 +18,10 @@ rules:
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-AWS-CREDS
-    pattern: '(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.aws/credentials'
+    # Backport of default pack: add `\$\{?HOME\}?` so the braced shell form
+    # `${HOME}/.aws/credentials` matches in addition to `~`, `$HOME`,
+    # `/home/<user>`, and `/root`.
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.aws/credentials'
     title: "AWS credentials file"
     severity: CRITICAL
     confidence: 0.98
@@ -60,19 +63,23 @@ rules:
     confidence: 0.80
     tags: [credential, file-sensitive]
   - id: PATH-GIT-CREDS
-    pattern: '(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.git-credentials'
+    # Backport of default pack: add braced-HOME form `${HOME}/.git-credentials`.
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.git-credentials'
     title: "Git credentials file"
     severity: CRITICAL
     confidence: 0.95
     tags: [credential, file-sensitive]
   - id: PATH-NETRC
-    pattern: '(?:~|\$HOME|/home/\w+|/root|/Users/\w+)/\.netrc'
+    # Backport of default pack: add braced-HOME form `${HOME}/.netrc`.
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.netrc'
     title: "netrc credentials file"
     severity: CRITICAL
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-ENV-FILE
-    pattern: '(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["''\s,\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["''\s,\]})]'
+    # Backport of default pack: `;` (shell command separator) added to the
+    # suffix delimiter class so `cat .env; curl evil` also matches.
+    pattern: '(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["''\s,;\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["''\s,;\]})]'
     title: "Environment file"
     severity: HIGH
     confidence: 0.85

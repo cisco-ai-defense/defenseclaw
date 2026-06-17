@@ -119,6 +119,7 @@ class TestUpgradeFailsClosedWithoutChecksums(unittest.TestCase):
                 "defenseclaw.commands.cmd_upgrade._download_wheel",
                 return_value=("/tmp/defenseclaw.whl", "defenseclaw-9.9.9-py3-none-any.whl"),
             ))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_wheel_install"))
             install_gateway = stack.enter_context(
                 patch("defenseclaw.commands.cmd_upgrade._install_gateway")
             )
@@ -152,6 +153,139 @@ class TestUpgradeFailsClosedWithoutChecksums(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         download_gateway.assert_called_once()
         install_gateway.assert_called_once()
+
+
+class TestUpgradeRefusesUnsignedAssetDigests(unittest.TestCase):
+    """F-0581: GitHub per-asset digests are UNSIGNED metadata from the same
+    remote release service and are NOT a substitute for the Sigstore-verified
+    checksums.txt. When checksums.txt is unavailable but unsigned asset digests
+    ARE present, the upgrade must still refuse without --allow-unverified (this
+    is the regression: it previously proceeded as if verified). With the flag
+    it proceeds, but the unsigned digests are not used to fake verification."""
+
+    @staticmethod
+    def _common_patches(stack, app, data_dir):
+        app.cfg.data_dir = data_dir
+        app.cfg.claw.home_dir = data_dir
+        stack.enter_context(patch("defenseclaw.__version__", "9.9.9"))
+        stack.enter_context(patch(
+            "defenseclaw.commands.cmd_upgrade._detect_platform",
+            return_value=("darwin", "arm64"),
+        ))
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_check"))
+        # No Sigstore-verified checksums.txt for this release ...
+        stack.enter_context(patch(
+            "defenseclaw.commands.cmd_upgrade._download_checksums",
+            return_value=None,
+        ))
+        # ... but unsigned GitHub per-asset digests ARE available.
+        stack.enter_context(patch(
+            "defenseclaw.commands.cmd_upgrade._fetch_release_asset_digests",
+            return_value={
+                "defenseclaw_9.9.9_darwin_arm64.tar.gz": "a" * 64,
+                "defenseclaw-9.9.9-py3-none-any.whl": "b" * 64,
+                "upgrade-manifest.json": "c" * 64,
+            },
+        ))
+
+    def test_upgrade_refused_when_only_unsigned_digests_available(self):
+        runner = CliRunner()
+        app = AppContext()
+        app.cfg = Config()
+
+        with TemporaryDirectory() as data_dir, ExitStack() as stack:
+            self._common_patches(stack, app, data_dir)
+            # Patch everything DOWNSTREAM of the checksum gate so that, if the
+            # gate fails to refuse (the pre-fix bug), the upgrade would sail
+            # through to _download_gateway. This isolates the assertion to the
+            # F-0581 control-flow decision rather than a later mock error.
+            download_manifest = stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._download_upgrade_manifest",
+                return_value=None,
+            ))
+            download_gateway = stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._download_gateway",
+                return_value=("/tmp/gw", "defenseclaw_9.9.9_darwin_arm64.tar.gz"),
+            ))
+            install_gateway = stack.enter_context(
+                patch("defenseclaw.commands.cmd_upgrade._install_gateway")
+            )
+
+            result = runner.invoke(upgrade, ["--yes", "--version", "9.9.9"], obj=app)
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("--allow-unverified", result.output)
+        # The gate must abort BEFORE any artifact is fetched or installed.
+        download_manifest.assert_not_called()
+        download_gateway.assert_not_called()
+        install_gateway.assert_not_called()
+
+    def test_upgrade_allowed_with_flag_but_does_not_trust_unsigned_digests(self):
+        runner = CliRunner()
+        app = AppContext()
+        app.cfg = Config()
+
+        with TemporaryDirectory() as data_dir, ExitStack() as stack:
+            self._common_patches(stack, app, data_dir)
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._download_upgrade_manifest",
+                return_value=None,
+            ))
+            download_gateway = stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._download_gateway",
+                return_value=(
+                    "/tmp/defenseclaw-gateway",
+                    "defenseclaw_9.9.9_darwin_arm64.tar.gz",
+                ),
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._download_wheel",
+                return_value=("/tmp/defenseclaw.whl", "defenseclaw-9.9.9-py3-none-any.whl"),
+            ))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_wheel_install"))
+            install_gateway = stack.enter_context(
+                patch("defenseclaw.commands.cmd_upgrade._install_gateway")
+            )
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._install_wheel"))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._verify_installed_gateway_version"
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._check_post_upgrade_drift"
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._create_backup",
+                return_value="/tmp/backup",
+            ))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._run_silent"))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._poll_health"))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                return_value=Mock(returncode=0),
+            ))
+            stack.enter_context(
+                patch("defenseclaw.migrations.run_migrations", return_value=0)
+            )
+
+            result = runner.invoke(
+                upgrade,
+                ["--yes", "--allow-unverified", "--version", "9.9.9"],
+                obj=app,
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        download_gateway.assert_called_once()
+        install_gateway.assert_called_once()
+        # The unsigned digests must NOT be passed off as a verified manifest:
+        # _download_gateway receives checksums=None (no integrity check), not
+        # the unsigned digest map. checksums is the 5th positional arg
+        # (version, os_name, arch, staging_dir, checksums).
+        call = download_gateway.call_args
+        checksums_arg = (
+            call.kwargs["checksums"] if "checksums" in call.kwargs
+            else call.args[4]
+        )
+        self.assertIsNone(checksums_arg)
 
 
 class TestUnsignedChecksumManifestRejected(unittest.TestCase):

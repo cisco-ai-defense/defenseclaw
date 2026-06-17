@@ -26,6 +26,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _install_gateway,
     _install_wheel,
     _normalize_target_version,
+    _preflight_wheel_install,
     _print_migration_cursor_summary,
     _run_silent,
     _validate_upgrade_manifest,
@@ -100,7 +101,7 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             venv_python = os.path.join(home, ".defenseclaw", ".venv", "bin", "python")
 
             def side_effect(args, **_kwargs):
-                if args[:2] == ["/usr/bin/uv", "venv"]:
+                if args[:3] == ["/usr/bin/uv", "--no-config", "venv"]:
                     os.makedirs(os.path.dirname(venv_python), exist_ok=True)
                     with open(venv_python, "w") as f:
                         f.write("# python")
@@ -111,8 +112,31 @@ class TestUpgradeWheelInstall(unittest.TestCase):
             _install_wheel("/tmp/defenseclaw.whl")
 
         pip_call = run_mock.call_args_list[-1].args[0]
-        self.assertEqual(pip_call[:4], ["/usr/bin/uv", "pip", "install", "--python"])
-        self.assertEqual(pip_call[4], venv_python)
+        self.assertEqual(pip_call[:5], ["/usr/bin/uv", "--no-config", "pip", "install", "--python"])
+        self.assertEqual(pip_call[5], venv_python)
+
+    def test_preflight_wheel_install_uses_dry_run_without_managed_venv(self):
+        with TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}), \
+             patch("shutil.which", return_value="/usr/bin/uv"), \
+             patch("subprocess.run") as run_mock:
+
+            def side_effect(args, **_kwargs):
+                if args[:3] == ["/usr/bin/uv", "--no-config", "venv"]:
+                    venv_python = os.path.join(args[3], "bin", "python")
+                    os.makedirs(os.path.dirname(venv_python), exist_ok=True)
+                    with open(venv_python, "w") as f:
+                        f.write("# python")
+                return Mock(returncode=0)
+
+            run_mock.side_effect = side_effect
+
+            _preflight_wheel_install("/tmp/defenseclaw.whl", "darwin")
+
+        calls = [call.args[0] for call in run_mock.call_args_list]
+        self.assertEqual(calls[0][:3], ["/usr/bin/uv", "--no-config", "venv"])
+        self.assertEqual(calls[1][:5], ["/usr/bin/uv", "--no-config", "pip", "install", "--python"])
+        self.assertIn("--dry-run", calls[1])
+        self.assertEqual(calls[1][-1], "/tmp/defenseclaw.whl")
 
 
 class TestUpgradeSameVersionRepair(unittest.TestCase):
@@ -150,6 +174,7 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
                 "defenseclaw.commands.cmd_upgrade._download_wheel",
                 return_value=("/tmp/defenseclaw.whl", "defenseclaw-9.9.9-py3-none-any.whl"),
             ))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_wheel_install"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._install_gateway"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._install_wheel"))
             stack.enter_context(patch(
@@ -175,6 +200,74 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         run_migrations.assert_called_once()
+
+    def test_upgrade_preflights_wheel_before_gateway_install(self):
+        runner = CliRunner()
+        app = AppContext()
+        app.cfg = Config()
+        events: list[str] = []
+
+        with TemporaryDirectory() as data_dir, ExitStack() as stack:
+            app.cfg.data_dir = data_dir
+            app.cfg.claw.home_dir = data_dir
+            stack.enter_context(patch("defenseclaw.__version__", "9.9.9"))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._detect_platform",
+                return_value=("darwin", "arm64"),
+            ))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_check"))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._download_checksums",
+                return_value={
+                    "defenseclaw_9.9.9_darwin_arm64.tar.gz": "0" * 64,
+                    "defenseclaw-9.9.9-py3-none-any.whl": "0" * 64,
+                    "upgrade-manifest.json": "0" * 64,
+                },
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._download_upgrade_manifest",
+                return_value=None,
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._download_gateway",
+                return_value=("/tmp/defenseclaw-gateway", "defenseclaw_9.9.9_darwin_arm64.tar.gz"),
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._download_wheel",
+                return_value=("/tmp/defenseclaw.whl", "defenseclaw-9.9.9-py3-none-any.whl"),
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._preflight_wheel_install",
+                side_effect=lambda *_args: events.append("preflight"),
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._install_gateway",
+                side_effect=lambda *_args, **_kwargs: events.append("gateway") or "/tmp/gateway",
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._install_wheel",
+                side_effect=lambda *_args: events.append("wheel"),
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._verify_installed_gateway_version"
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._check_post_upgrade_drift"
+            ))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._create_backup",
+                return_value="/tmp/backup",
+            ))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._run_silent"))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._poll_health"))
+            stack.enter_context(
+                patch("defenseclaw.migrations.run_migrations", return_value=0)
+            )
+            result = runner.invoke(upgrade, ["--yes", "--version", "9.9.9"], obj=app)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertLess(events.index("preflight"), events.index("gateway"))
+        self.assertLess(events.index("gateway"), events.index("wheel"))
 
 
 class TestUpgradeWithoutOpenClawCli(unittest.TestCase):
@@ -222,6 +315,7 @@ class TestUpgradeWithoutOpenClawCli(unittest.TestCase):
                 "defenseclaw.commands.cmd_upgrade._download_wheel",
                 return_value=("/tmp/defenseclaw.whl", "defenseclaw-9.9.9-py3-none-any.whl"),
             ))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_wheel_install"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._install_gateway"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._install_wheel"))
             stack.enter_context(patch(
@@ -495,22 +589,58 @@ class TestChecksumVerification(unittest.TestCase):
 
         self.assertEqual(result, {"defenseclaw-9.9.9-py3-none-any.whl": sha})
 
-    def test_missing_manifest_entries_are_filled_from_release_asset_digests(self):
+    def test_missing_manifest_entries_not_filled_from_unsigned_digests_by_default(self):
+        """F-0582: a verified checksums.txt with a gap must NOT be silently
+        topped up from unsigned GitHub asset digests — that would downgrade
+        the artifact from signed to unsigned auth. Without --allow-unverified
+        the gap is left in place (so _verify_sha256 fails closed)."""
+        runner = CliRunner()
+        checksums = {"defenseclaw_9.9.9_darwin_arm64.tar.gz": "a" * 64}
+        with patch(
+            "defenseclaw.commands.cmd_upgrade._fetch_release_asset_digests",
+            return_value={"defenseclaw-9.9.9-py3-none-any.whl": "b" * 64},
+        ) as fetch_mock:
+            with runner.isolation() as (out, _err, _):
+                _fill_missing_checksums_from_release_assets(
+                    "9.9.9",
+                    checksums,
+                    [
+                        "defenseclaw_9.9.9_darwin_arm64.tar.gz",
+                        "defenseclaw-9.9.9-py3-none-any.whl",
+                    ],
+                )
+                output = out.getvalue().decode()
+
+        # Gap left untouched; the unsigned digest was never even fetched.
+        self.assertNotIn("defenseclaw-9.9.9-py3-none-any.whl", checksums)
+        fetch_mock.assert_not_called()
+        self.assertIn("--allow-unverified", output)
+
+    def test_missing_manifest_entries_filled_only_with_allow_unverified(self):
+        """F-0582: the operator can still opt in to filling gaps from unsigned
+        GitHub asset digests with --allow-unverified, but the downgraded
+        artifact is named in a warning."""
+        runner = CliRunner()
         checksums = {"defenseclaw_9.9.9_darwin_arm64.tar.gz": "a" * 64}
         with patch(
             "defenseclaw.commands.cmd_upgrade._fetch_release_asset_digests",
             return_value={"defenseclaw-9.9.9-py3-none-any.whl": "b" * 64},
         ):
-            _fill_missing_checksums_from_release_assets(
-                "9.9.9",
-                checksums,
-                [
-                    "defenseclaw_9.9.9_darwin_arm64.tar.gz",
-                    "defenseclaw-9.9.9-py3-none-any.whl",
-                ],
-            )
+            with runner.isolation() as (out, _err, _):
+                _fill_missing_checksums_from_release_assets(
+                    "9.9.9",
+                    checksums,
+                    [
+                        "defenseclaw_9.9.9_darwin_arm64.tar.gz",
+                        "defenseclaw-9.9.9-py3-none-any.whl",
+                    ],
+                    allow_unverified=True,
+                )
+                output = out.getvalue().decode()
 
         self.assertEqual(checksums["defenseclaw-9.9.9-py3-none-any.whl"], "b" * 64)
+        self.assertIn("defenseclaw-9.9.9-py3-none-any.whl", output)
+        self.assertIn("UNSIGNED", output)
 
 
 class TestUpgradeManifest(unittest.TestCase):

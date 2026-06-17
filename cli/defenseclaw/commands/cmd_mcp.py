@@ -892,6 +892,22 @@ def set_server(
             "  defenseclaw mcp set myserver --url https://example.com/mcp"
         )
 
+    # F-1821: --command and --url are mutually exclusive. The scanner decides
+    # local vs remote with ``is_local = (command and not url)`` (scanner/mcp.py),
+    # so a mixed entry takes the REMOTE path and scans the benign URL while the
+    # local --command is what actually gets installed and run at admission time.
+    # That lets a malicious publisher pair a clean URL (scanned) with an
+    # unscanned command (executed). Reject the mismatch so the thing SCANNED is
+    # always the thing INSTALLED (command XOR url).
+    if cmd and url:
+        raise click.ClickException(
+            "Provide exactly one of --command or --url, not both.\n\n"
+            "A local command and a remote URL are scanned differently, so a "
+            "mixed entry would scan one and run the other. Choose one:\n"
+            "  defenseclaw mcp set myserver --command uvx --args my-mcp-server\n"
+            "  defenseclaw mcp set myserver --url https://example.com/mcp"
+        )
+
     # Without --connector, set the server on EVERY active connector; with it,
     # scope to one. The scan (finding generation) is connector-independent so
     # it runs once, but ADMISSION is evaluated PER connector: a connector-

@@ -220,6 +220,63 @@ class TestSandboxInitIdempotentPin(unittest.TestCase):
             self.assertFalse(_integrate_openclaw_home(cfg, sandbox_home))
 
 
+class TestInitSandboxChownTOCTOU(unittest.TestCase):
+    """F-0421: _init_sandbox must RE-validate the .openclaw symlink target
+    against the pinned home immediately before the step-7 recursive chown,
+    closing the TOCTOU window between integration and the privileged chown."""
+
+    def test_f0421_rechecks_pinned_home_before_chown(self):
+        from defenseclaw.commands import cmd_init_sandbox as mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox_home = os.path.join(tmp, "sandbox")
+            pinned = os.path.join(tmp, "real-openclaw")
+            evil = os.path.join(tmp, "evil")
+            os.makedirs(sandbox_home)
+            os.makedirs(pinned)
+            os.makedirs(evil)
+            # $SANDBOX_HOME/.openclaw is swapped to point at the attacker tree
+            # AFTER _integrate_openclaw_home "passed" — its realpath now
+            # diverges from the pinned home.
+            os.symlink(evil, os.path.join(sandbox_home, ".openclaw"))
+
+            cfg = MagicMock()
+            cfg.openshell.effective_sandbox_home.return_value = sandbox_home
+            cfg.openshell.host_networking = False
+            cfg.guardrail.enabled = False
+            cfg.data_dir = os.path.join(tmp, "data")
+            os.makedirs(cfg.data_dir)
+            cfg.openshell.effective_version.return_value = "test"
+            # The pinned original home recorded at integration.
+            cfg.claw.openclaw_home_original = pinned
+
+            logger = MagicMock()
+
+            chown_calls: list = []
+
+            def fake_run(args, *a, **k):
+                if args and "chown" in args:
+                    chown_calls.append(args)
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            with patch.object(mod.shutil, "which", return_value="openshell-sandbox"), \
+                 patch.object(mod, "_create_sandbox_user"), \
+                 patch.object(mod, "_integrate_openclaw_home", return_value=True), \
+                 patch.object(mod, "_copy_openshell_policies"), \
+                 patch.object(mod, "_pinned_openclaw_home", return_value=os.path.realpath(pinned)), \
+                 patch.object(mod, "_needs_sudo", return_value=False), \
+                 patch.object(mod.subprocess, "run", side_effect=fake_run):
+                result = mod._init_sandbox(cfg, logger)
+
+            # Fail closed: integration aborts and NO recursive chown ran on
+            # the swapped (evil) target.
+            self.assertFalse(result)
+            self.assertEqual(
+                chown_calls, [],
+                f"recursive chown ran despite symlink swap: {chown_calls}",
+            )
+
+
 class TestSystemdInstallValidation(unittest.TestCase):
     """F-0163: install only known filenames, refusing tampered sources."""
 
@@ -316,6 +373,48 @@ class TestRouteLocalnetRestore(unittest.TestCase):
             self.assertNotIn("net.ipv4.conf.all.route_localnet=0", sysctl_calls[0])
             # Saved-state file consumed so a later run can't restore stale data.
             self.assertFalse(os.path.exists(os.path.join(tmp, "saved.route_localnet")))
+
+
+class TestRestoreOpenclawGatewaySymlink(unittest.TestCase):
+    """F-0425: _restore_openclaw_gateway must refuse a symlinked
+    openclaw.json (read and write side) so a planted link can't disclose
+    or clobber an arbitrary operator file."""
+
+    @patch("defenseclaw.commands.cmd_setup_sandbox._needs_sudo", return_value=False)
+    def test_f0425_refuses_symlinked_config(self, _mock_sudo):
+        from defenseclaw.commands.cmd_setup_sandbox import _restore_openclaw_gateway
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # A secret the attacker wants disclosed/clobbered.
+            secret = os.path.join(tmp, "secret.json")
+            with open(secret, "w") as fh:
+                fh.write('{"private": "do-not-touch"}')
+            before = open(secret).read()
+
+            # openclaw.json is planted as a symlink to the secret.
+            oc_config = os.path.join(tmp, "openclaw.json")
+            os.symlink(secret, oc_config)
+
+            self.assertFalse(_restore_openclaw_gateway(oc_config))
+            # The symlink target must be untouched (no write through the link).
+            self.assertEqual(open(secret).read(), before)
+
+    @patch("defenseclaw.commands.cmd_setup_sandbox._needs_sudo", return_value=False)
+    def test_f0425_rewrites_regular_config(self, _mock_sudo):
+        """A genuine (non-symlink) openclaw.json is still restored."""
+        import json as _json
+
+        from defenseclaw.commands.cmd_setup_sandbox import _restore_openclaw_gateway
+
+        with tempfile.TemporaryDirectory() as tmp:
+            oc_config = os.path.join(tmp, "openclaw.json")
+            with open(oc_config, "w") as fh:
+                _json.dump({"gateway": {"mode": "local", "port": 1234, "bind": "lan"}}, fh)
+
+            self.assertTrue(_restore_openclaw_gateway(oc_config))
+            data = _json.loads(open(oc_config).read())
+            self.assertEqual(data["gateway"]["port"], 18789)
+            self.assertEqual(data["gateway"]["bind"], "loopback")
 
 
 class TestInitDirPermissions(unittest.TestCase):

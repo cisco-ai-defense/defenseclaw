@@ -386,9 +386,43 @@ CREDENTIAL_PATH_PATTERNS: list[CredentialPathPattern] = [
         pattern=re.compile(r"\.openclaw/agents/", re.IGNORECASE),
         title="Accesses OpenClaw agents directory",
     ),
+    # F-0261: Codex connector secrets. The Codex CLI stores its bearer
+    # token in ``~/.codex/auth.json`` and provider config in
+    # ``~/.codex/config.toml``; a plugin reading either is exfiltrating
+    # host credentials.
+    CredentialPathPattern(
+        id="CRED-CODEX-AUTH",
+        pattern=re.compile(r"\.codex/auth\.json", re.IGNORECASE),
+        title="Accesses Codex auth.json credentials",
+    ),
+    CredentialPathPattern(
+        id="CRED-CODEX-CONFIG",
+        pattern=re.compile(r"\.codex/config\.toml", re.IGNORECASE),
+        title="Accesses Codex config.toml",
+    ),
+    # F-0261: Claude connector secrets. Claude stores OAuth/connector
+    # state in ``~/.claude.json`` and settings/config under
+    # ``~/.claude/`` (``settings.json``, ``config.*``).
+    CredentialPathPattern(
+        id="CRED-CLAUDE-JSON",
+        pattern=re.compile(r"\.claude\.json", re.IGNORECASE),
+        title="Accesses Claude .claude.json credentials",
+    ),
+    CredentialPathPattern(
+        id="CRED-CLAUDE-SETTINGS",
+        pattern=re.compile(r"\.claude/settings\.json", re.IGNORECASE),
+        title="Accesses Claude settings.json",
+    ),
+    CredentialPathPattern(
+        id="CRED-CLAUDE-CONFIG",
+        pattern=re.compile(r"\.claude/config\.\w+", re.IGNORECASE),
+        title="Accesses Claude config file",
+    ),
+    # F-0261: broaden the generic readFile-secrets heuristic to also catch
+    # ``auth``/``config`` filenames alongside ``.env``/``credentials``/``secrets``.
     CredentialPathPattern(
         id="CRED-READFILE-SECRETS",
-        pattern=re.compile(r"readFile\w*\s*\([^)]*(?:\.env|credentials|secrets)", re.IGNORECASE),
+        pattern=re.compile(r"readFile\w*\s*\([^)]*(?:\.env|credentials|secrets|auth|config)", re.IGNORECASE),
         title="Reads credential or secrets files",
     ),
 ]
@@ -670,6 +704,11 @@ TAXONOMY_MAP: dict[str, TaxonomyRef] = {
     "CRED-OPENCLAW-DIR": TaxonomyRef(objective="OB-014", technique="AITech-14.1", sub_technique="AISubtech-14.1.1"),
     "CRED-OPENCLAW-ENV": TaxonomyRef(objective="OB-014", technique="AITech-14.1", sub_technique="AISubtech-14.1.1"),
     "CRED-OPENCLAW-AGENTS": TaxonomyRef(objective="OB-014", technique="AITech-14.1", sub_technique="AISubtech-14.1.1"),
+    "CRED-CODEX-AUTH": TaxonomyRef(objective="OB-014", technique="AITech-14.1", sub_technique="AISubtech-14.1.1"),
+    "CRED-CODEX-CONFIG": TaxonomyRef(objective="OB-014", technique="AITech-14.1", sub_technique="AISubtech-14.1.1"),
+    "CRED-CLAUDE-JSON": TaxonomyRef(objective="OB-014", technique="AITech-14.1", sub_technique="AISubtech-14.1.1"),
+    "CRED-CLAUDE-SETTINGS": TaxonomyRef(objective="OB-014", technique="AITech-14.1", sub_technique="AISubtech-14.1.1"),
+    "CRED-CLAUDE-CONFIG": TaxonomyRef(objective="OB-014", technique="AITech-14.1", sub_technique="AISubtech-14.1.1"),
     "CRED-READFILE-SECRETS": TaxonomyRef(objective="OB-014", technique="AITech-14.1", sub_technique="AISubtech-14.1.1"),
     "STRUCT-ENV-FILE": TaxonomyRef(objective="OB-008", technique="AITech-8.2", sub_technique="AISubtech-8.2.3"),
     # OB-008: Exfiltration
@@ -702,6 +741,11 @@ TAXONOMY_MAP: dict[str, TaxonomyRef] = {
     "COST-RUNAWAY": TaxonomyRef(objective="OB-013", technique="AITech-13.2", sub_technique="AISubtech-13.2.1"),
     # Structural
     "STRUCT-HIDDEN": TaxonomyRef(objective="OB-009", technique="AITech-9.2", sub_technique="AISubtech-9.2.2"),
+    # F-1907: native/binary payload hidden under a normally-skipped dir
+    # (node_modules/.git/etc.) — detection evasion via skip-dir blind spot.
+    "STRUCT-NATIVE-IN-SKIPDIR": TaxonomyRef(
+        objective="OB-009", technique="AITech-9.2", sub_technique="AISubtech-9.2.2"
+    ),
     # SSRF / Cloud metadata
     "SSRF-AWS-META": TaxonomyRef(objective="OB-009", technique="AITech-9.1", sub_technique="AISubtech-9.1.3"),
     "SSRF-GCP-META": TaxonomyRef(objective="OB-009", technique="AITech-9.1", sub_technique="AISubtech-9.1.3"),

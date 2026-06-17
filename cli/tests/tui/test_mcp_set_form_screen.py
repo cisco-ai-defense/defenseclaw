@@ -52,12 +52,15 @@ def test_mcp_set_form_field_order_matches_go_oracle() -> None:
 
 
 def test_mcp_set_form_builds_cli_argv_shape() -> None:
+    # F-1821: Command and URL are mutually exclusive. A local command and a
+    # remote URL are scanned differently by the CLI (scanner uses
+    # ``is_local = command and not url``), so a mixed entry would scan the URL
+    # while installing/running the command. Build a single-flag (local) entry.
     result = MCPSetFormValues(
         name="context7",
         command="uvx",
         args="context7-mcp",
-        url="https://example.com/mcp",
-        transport="sse",
+        transport="stdio",
         env="API_KEY=xxx, REGION=us-east-1",
         skip_scan="y",
     ).build_result()
@@ -75,15 +78,28 @@ def test_mcp_set_form_builds_cli_argv_shape() -> None:
         "uvx",
         "--args",
         "context7-mcp",
-        "--url",
-        "https://example.com/mcp",
         "--transport",
-        "sse",
+        "stdio",
         "--skip-scan",
     )
+    # The mixed entry never produces both flags.
+    assert not ("--command" in result.argv and "--url" in result.argv)
     assert "--env" not in result.argv
     assert all("API_KEY=xxx" not in arg for arg in result.argv)
     assert result.env == (("API_KEY", "xxx"), ("REGION", "us-east-1"))
+
+
+def test_mcp_set_form_rejects_mixed_command_and_url() -> None:
+    # F-1821: A mixed command+url entry is scanned remotely (URL) but the local
+    # command is what gets installed/run, so reject it instead of silently
+    # building a both-flags argv.
+    with pytest.raises(MCPSetValidationError, match="exactly one of Command or URL"):
+        MCPSetFormValues(
+            name="context7",
+            command="uvx",
+            args="context7-mcp",
+            url="https://example.com/mcp",
+        ).build_result()
 
 
 def test_mcp_set_form_validates_required_fields_and_env_pairs() -> None:
@@ -109,11 +125,12 @@ def test_mcp_set_form_skip_scan_truthy_and_text_editing() -> None:
 
 
 def _fill_screen(screen: MCPSetFormScreen) -> None:
+    # F-1821: Command and URL are mutually exclusive; fill a local-command
+    # entry (no URL) so build_result succeeds.
     screen.query_one("#mcp-name", Input).value = "context7"
     screen.query_one("#mcp-command", Input).value = "uvx"
     screen.query_one("#mcp-args", Input).value = "context7-mcp"
-    screen.query_one("#mcp-url", Input).value = "https://example.com/mcp"
-    screen.query_one("#mcp-transport", Input).value = "sse"
+    screen.query_one("#mcp-transport", Input).value = "stdio"
     screen.query_one("#mcp-env", Input).value = "API_KEY=xxx, REGION=us-east-1"
     screen.query_one("#mcp-skip-scan", Checkbox).value = True
 

@@ -144,36 +144,55 @@ def upgrade(
             target_version, staging_dir, allow_unverified=allow_unverified,
         )
         if checksums is None:
-            checksums = _fetch_release_asset_digests(target_version)
-            if checksums is None:
-                # F-0201 / F-0703: no verifiable integrity metadata is
-                # available for these artifacts. Fail closed by default so
-                # attacker-controlled release bytes never reach the install/
-                # execute sink. Operators who knowingly accept the risk can
-                # opt in with --allow-unverified.
-                if not allow_unverified:
-                    ux.err(
-                        "checksums.txt is unavailable and no GitHub release "
-                        "asset digests were found — refusing to install "
-                        "release artifacts that cannot be integrity-verified.",
-                        indent="  ",
-                    )
-                    ux.subhead(
-                        "Re-run with --allow-unverified to override (UNSAFE).",
-                        indent="    ",
-                    )
-                    raise SystemExit(1)
-                ux.warn(
-                    "checksums.txt unavailable — release artifacts will be "
-                    "downloaded WITHOUT integrity verification "
-                    "(--allow-unverified).",
+            # F-0581 (BREAKING CHANGE): the only signed integrity manifest is
+            # the Sigstore-verified checksums.txt. GitHub's per-asset `digest`
+            # values come from the same (untrusted, remote) release service and
+            # are UNSIGNED metadata — a compromised/spoofed release endpoint can
+            # serve matching bytes + digest, so they are NOT a substitute for a
+            # signed manifest. We therefore fail closed whenever checksums is
+            # None, regardless of whether unsigned asset digests are available.
+            #
+            # This is a user-visible behavior change: upgrades that previously
+            # succeeded on unsigned GitHub asset digests now require an explicit
+            # --allow-unverified opt-in. Operators who knowingly accept the
+            # supply-chain risk can still proceed, but only WITHOUT integrity
+            # verification (we do not pretend unsigned digests are trusted).
+            if not allow_unverified:
+                ux.err(
+                    "No Sigstore-verified checksums.txt is available for this "
+                    "release — refusing to install release artifacts that "
+                    "cannot be cryptographically integrity-verified. GitHub "
+                    "per-asset digests are unsigned metadata and are NOT "
+                    "accepted as a substitute for the signed manifest.",
                     indent="  ",
                 )
-            else:
-                ux.ok("Release artifact digests resolved (GitHub asset metadata)")
+                ux.subhead(
+                    "Re-run with --allow-unverified to override (UNSAFE).",
+                    indent="    ",
+                )
+                raise SystemExit(1)
+            # Operator opted in: proceed WITHOUT integrity verification. We do
+            # not seed `checksums` from unsigned GitHub digests — passing None
+            # downstream makes it explicit that nothing was verified.
+            ux.warn(
+                "No verified checksums.txt — release artifacts will be "
+                "downloaded WITHOUT integrity verification (--allow-unverified). "
+                "Unsigned GitHub asset digests are intentionally not used.",
+                indent="  ",
+            )
         else:
             ux.ok("Checksum manifest verified (checksums.txt)")
-            _fill_missing_checksums_from_release_assets(target_version, checksums, artifact_names)
+            # F-0582 (BREAKING CHANGE): do NOT silently fill missing artifact
+            # entries from unsigned GitHub asset digests. Doing so would
+            # downgrade those artifacts from signed to unsigned authentication
+            # behind the operator's back. Missing entries are only filled when
+            # --allow-unverified is set (with a per-artifact warning); otherwise
+            # the gap is left in place and _verify_sha256 fails closed on the
+            # unrecognized artifact.
+            _fill_missing_checksums_from_release_assets(
+                target_version, checksums, artifact_names,
+                allow_unverified=allow_unverified,
+            )
 
         upgrade_manifest = _download_upgrade_manifest(
             target_version, staging_dir, checksums, allow_unverified=allow_unverified,
@@ -184,6 +203,7 @@ def upgrade(
         whl_path, _whl_name = _download_wheel(
             target_version, staging_dir, checksums,
         )
+        _preflight_wheel_install(whl_path, os_name)
     except SystemExit:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
@@ -943,10 +963,39 @@ def _fill_missing_checksums_from_release_assets(
     version: str,
     checksums: dict[str, str],
     artifact_names: list[str],
+    allow_unverified: bool = False,
 ) -> None:
-    """Fill required checksum gaps from GitHub release asset metadata."""
+    """Fill required checksum gaps from GitHub release asset metadata.
+
+    F-0582 (BREAKING CHANGE): GitHub per-asset ``digest`` values are UNSIGNED
+    metadata from the (untrusted) release service. Filling a gap in the
+    Sigstore-verified ``checksums.txt`` from them silently downgrades that
+    artifact from signed to unsigned authentication. We therefore refuse to do
+    this unless the operator explicitly accepted the risk with
+    ``--allow-unverified`` — and even then we warn, naming each downgraded
+    artifact. Without the flag the gap is left untouched so ``_verify_sha256``
+    fails closed on the missing (unsigned) artifact rather than trusting it.
+    """
     missing = [name for name in artifact_names if name not in checksums]
     if not missing:
+        return
+
+    if not allow_unverified:
+        # Leave the gap: the signed manifest does not cover these artifacts.
+        # _verify_sha256 will refuse to install them ("No checksum entry"),
+        # which is the intended fail-closed behavior. Surface why up front so
+        # the operator gets an actionable message before the hard failure.
+        ux.warn(
+            "Signed checksums.txt is missing entries for: "
+            + ", ".join(missing)
+            + ". Refusing to fill them from unsigned GitHub asset digests.",
+            indent="  ",
+        )
+        ux.subhead(
+            "Re-run with --allow-unverified to install these artifacts using "
+            "unsigned GitHub asset digests (UNSAFE).",
+            indent="    ",
+        )
         return
 
     asset_digests = _fetch_release_asset_digests(version)
@@ -962,7 +1011,9 @@ def _fill_missing_checksums_from_release_assets(
 
     for name in filled:
         ux.warn(
-            f"checksums.txt missing {name}; using GitHub release asset digest.",
+            f"checksums.txt missing {name}; using UNSIGNED GitHub release "
+            "asset digest (--allow-unverified). This artifact is NOT covered "
+            "by the signed manifest.",
             indent="  ",
         )
 
@@ -1278,9 +1329,9 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
 
     if not os.path.isfile(venv_python):
         click.echo(f"  {ux.dim('→')} Creating venv ...")
-        subprocess.run([uv, "venv", venv, "--python", "3.12"], check=True)
+        subprocess.run([uv, "--no-config", "venv", venv, "--python", "3.12"], check=True)
 
-    subprocess.run([uv, "pip", "install", "--python", venv_python, "--quiet", whl_path], check=True)
+    subprocess.run([uv, "--no-config", "pip", "install", "--python", venv_python, "--quiet", whl_path], check=True)
 
     install_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(install_dir, exist_ok=True)
@@ -1301,6 +1352,75 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
                 os.remove(symlink)
             os.symlink(venv_bin, symlink)
     ux.ok("Python CLI installed")
+
+
+def _venv_python_path(venv: str, os_name: str) -> str:
+    scripts_subdir = "Scripts" if os_name == "windows" else "bin"
+    python_exe = "python.exe" if os_name == "windows" else "python"
+    return os.path.join(venv, scripts_subdir, python_exe)
+
+
+def _fail_wheel_preflight(message: str, exc: subprocess.CalledProcessError | None = None) -> None:
+    ux.err(message, indent="  ")
+    if exc is not None:
+        output = "\n".join(part for part in (exc.stderr, exc.stdout) if part).strip()
+        if output:
+            tail = "\n".join(output.splitlines()[-20:])
+            ux.subhead(tail, indent="    ")
+    ux.subhead("No services were stopped and no installed artifacts were changed.", indent="    ")
+    raise SystemExit(1)
+
+
+def _preflight_wheel_install(whl_path: str, os_name: str | None = None) -> None:
+    """Resolve the downloaded wheel before the upgrade mutates services.
+
+    A release wheel can be checksum-valid but dependency-unsatisfiable. Running
+    uv's dry-run resolver before backup/stop/install keeps that failure mode
+    from leaving the operator with a fresh gateway and the old Python CLI.
+    """
+    if os_name is None:
+        os_name = platform.system().lower()
+
+    uv = shutil.which("uv")
+    if not uv:
+        ux.err("uv not found on PATH — cannot update Python CLI", indent="  ")
+        raise SystemExit(1)
+
+    click.echo(f"  {ux.dim('→')} Resolving Python CLI dependencies ...")
+
+    managed_venv = os.path.expanduser("~/.defenseclaw/.venv")
+    venv_python = _venv_python_path(managed_venv, os_name)
+    cleanup_dir: str | None = None
+
+    if not os.path.isfile(venv_python):
+        cleanup_dir = tempfile.mkdtemp(prefix="defenseclaw-wheel-preflight-")
+        preflight_venv = os.path.join(cleanup_dir, "venv")
+        try:
+            subprocess.run(
+                [uv, "--no-config", "venv", preflight_venv, "--python", "3.12", "--quiet"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
+            _fail_wheel_preflight("Could not create Python CLI preflight environment.", exc)
+        venv_python = _venv_python_path(preflight_venv, os_name)
+
+    try:
+        subprocess.run(
+            [uv, "--no-config", "pip", "install", "--python", venv_python, "--dry-run", "--quiet", whl_path],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        _fail_wheel_preflight("Python CLI wheel dependencies are unsatisfiable.", exc)
+    finally:
+        if cleanup_dir is not None:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
+
+    ux.ok("Python CLI dependency preflight passed")
 
 
 def _poll_health(cfg, timeout_seconds: int = 60) -> None:

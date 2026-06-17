@@ -26,7 +26,7 @@ from defenseclaw.tui.theme import DEFAULT_TOKENS
 MCP_FIELD_ORDER: tuple[str, ...] = ("name", "command", "args", "url", "transport", "env", "skip_scan")
 MCP_FIELD_LABELS: tuple[str, ...] = (
     "Name (required)",
-    "Command (e.g. npx, uvx) - at least one of Command/URL",
+    "Command (e.g. npx, uvx) - exactly one of Command/URL",
     "Args (JSON array or comma-separated)",
     "URL (for SSE/HTTP transport)",
     "Transport (stdio, sse; blank = auto)",
@@ -75,6 +75,13 @@ class MCPSetFormValues:
         url = self.url.strip()
         if not command and not url:
             raise MCPSetValidationError("one of Command or URL is required")
+        # F-1821: Command and URL are mutually exclusive. A local command and a
+        # remote URL are scanned differently by the CLI, so a mixed entry would
+        # scan one and install/run the other. Build only single-flag argv.
+        if command and url:
+            raise MCPSetValidationError(
+                "provide exactly one of Command or URL, not both"
+            )
 
         argv: list[str] = ["mcp", "set", name]
         if command:

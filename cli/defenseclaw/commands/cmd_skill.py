@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from typing import Any
 
@@ -51,27 +52,81 @@ def skill() -> None:
 # skill search
 # ---------------------------------------------------------------------------
 
+def _resolve_clawhub_search_argv(query: str, allow_remote_fetch: bool) -> list[str]:
+    """Resolve the safest available launcher for ``clawhub search``.
+
+    F-1481: ``skill search`` is a read-only, pre-admission lookup, but plain
+    ``npx clawhub`` resolves and EXECUTES the third-party ``clawhub`` npm
+    package — fetching it from the network on first use — so an attacker who
+    controls (or typosquats) the registry entry runs code on the operator host
+    just from a search. We reduce that exposure here:
+
+      1. Prefer a locally-installed, pinned ``clawhub`` binary on PATH. Running
+         an already-installed binary performs no network fetch of executable
+         code, so the supply-chain decision was made at install time, not at
+         search time.
+      2. Otherwise fall back to ``npx --no-install clawhub``, which uses an
+         already-cached package and REFUSES to fetch it from the network.
+      3. Only when the operator explicitly opts in with --allow-remote-fetch do
+         we permit plain ``npx`` to fetch+execute from the network.
+
+    Residual risk (cannot be fully closed while delegating to the clawhub
+    registry): even a locally-installed or npx-cached ``clawhub`` is third-party
+    code, and the search itself queries a remote registry. --allow-remote-fetch
+    re-opens the original fetch-and-execute-on-search exposure; it exists only
+    as an explicit, documented operator decision.
+    """
+    local = shutil.which("clawhub")
+    if local:
+        return [local, "search", query]
+    if allow_remote_fetch:
+        # Explicit operator opt-in: npx may fetch+execute clawhub from the
+        # network. This re-opens the F-1481 supply-chain exposure by design.
+        return ["npx", "clawhub", "search", query]
+    # Default: never let npx silently fetch+execute from the network. With
+    # --no-install npx uses only an already-cached package and errors out if it
+    # would have to download one.
+    return ["npx", "--no-install", "clawhub", "search", query]
+
+
 @skill.command()
 @click.argument("query")
 @click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
+@click.option(
+    "--allow-remote-fetch", is_flag=True,
+    help="Permit npx to fetch+execute the clawhub package from the network "
+         "(supply-chain risk — see docs). Default: use a local/cached clawhub only.",
+)
 @pass_ctx
-def search(app: AppContext, query: str, as_json: bool) -> None:
+def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool) -> None:
     """Search the ClawHub skill registry.
 
-    Delegates to ``npx clawhub search <query>`` and displays results.
+    Delegates to a locally-installed ``clawhub`` binary (or a cached
+    ``npx clawhub``) and displays results.
+
+    \b
+    F-1481: by default this refuses to let ``npx`` fetch+execute the clawhub
+    package from the network at search time; pass --allow-remote-fetch to opt
+    into the original fetch-on-search behavior (supply-chain risk).
 
     \b
     Examples:
       defenseclaw skill search wiki
       defenseclaw skill search database --json
+      defenseclaw skill search wiki --allow-remote-fetch
     """
+    argv = _resolve_clawhub_search_argv(query, allow_remote_fetch)
     try:
         result = subprocess.run(
-            ["npx", "clawhub", "search", query],
+            argv,
             capture_output=True, text=True, timeout=30,
         )
     except FileNotFoundError:
-        click.echo("error: npx not found — install Node.js to use clawhub search", err=True)
+        click.echo(
+            "error: clawhub not found — install the clawhub binary, or install "
+            "Node.js (npx) and pass --allow-remote-fetch to fetch it",
+            err=True,
+        )
         raise SystemExit(1)
     except subprocess.TimeoutExpired:
         click.echo("error: clawhub search timed out", err=True)
@@ -79,7 +134,19 @@ def search(app: AppContext, query: str, as_json: bool) -> None:
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        click.echo(f"error: clawhub search failed: {stderr or 'unknown error'}", err=True)
+        hint = ""
+        # F-1481: with --no-install, npx fails (rather than fetching) when the
+        # clawhub package is not already cached. Point the operator at the
+        # explicit opt-in rather than silently fetching+executing.
+        if "--no-install" in argv:
+            hint = (
+                " (clawhub not installed/cached — install it or rerun with "
+                "--allow-remote-fetch to fetch it from the network)"
+            )
+        click.echo(
+            f"error: clawhub search failed: {stderr or 'unknown error'}{hint}",
+            err=True,
+        )
         raise SystemExit(1)
 
     output = result.stdout.strip()
@@ -753,6 +820,30 @@ def scan(
             if resolved:
                 scan_dir = resolved
 
+        # F-0501: ``scan_dir`` here came from a connector-reported
+        # ``baseDir``/``path`` (an UNTRUSTED connector home / sidecar
+        # response) or from name-based resolution. A malicious connector
+        # could report a baseDir OUTSIDE the configured skill roots
+        # (e.g. ``/etc`` or ``~/.ssh``) and DefenseClaw would happily scan
+        # — and, with ``--action``, quarantine/move — files there. Reject a
+        # derived scan dir that escapes the configured skill roots. The
+        # explicit ``--path`` operator override is intentionally exempt
+        # (handled above: ``scan_path`` skips this block).
+        if scan_dir:
+            from defenseclaw.safety import SafetyError, assert_within_roots
+            roots = _scan_skill_roots(app, connector_flag)
+            if roots:
+                try:
+                    assert_within_roots(scan_dir, roots, what="skill scan dir")
+                except SafetyError:
+                    click.echo(
+                        f"error: refusing to scan {target!r}: resolved path "
+                        f"{scan_dir!r} is outside the configured skill "
+                        f"directories. Use --path to scan an explicit location.",
+                        err=True,
+                    )
+                    raise SystemExit(1)
+
     if not scan_dir and not remote:
         click.echo(f"error: could not resolve skill {target!r} — use --path to specify manually", err=True)
         raise SystemExit(1)
@@ -1002,6 +1093,7 @@ def _scan_all(
     else:
         # Fall back to directory scan — resolve the target connector's
         # skill dirs so a non-primary connector's skills are scanned.
+        from defenseclaw.safety import is_symlink, is_within_roots
         dirs = app.cfg.skill_dirs(connector)
         sources = list(dirs)
         for skill_dir in dirs:
@@ -1009,7 +1101,25 @@ def _scan_all(
                 continue
             for entry in sorted(os.listdir(skill_dir)):
                 path = os.path.join(skill_dir, entry)
+                # F-0502: ``os.path.isdir`` follows symlinks, so a symlinked
+                # entry under a skill root (connector homes are UNTRUSTED)
+                # would be scanned at its realpath — anywhere on the host.
+                # Skip symlinked entries and require the realpath to stay
+                # under the skill root before scanning.
+                if is_symlink(path):
+                    click.echo(
+                        f"[scan] skipping symlinked skill entry {entry!r} in {skill_dir}",
+                        err=True,
+                    )
+                    continue
                 if not os.path.isdir(path):
+                    continue
+                if not is_within_roots(path, [skill_dir]):
+                    click.echo(
+                        f"[scan] skipping skill entry {entry!r}: resolves "
+                        f"outside skill root {skill_dir}",
+                        err=True,
+                    )
                     continue
                 targets.append((entry, path))
 
@@ -1082,13 +1192,56 @@ def _scan_all(
 
 
 def _resolve_path(app: AppContext, target: str) -> str | None:
-    """Resolve a skill name or path to an actual directory."""
-    if os.path.isdir(target):
-        return target
+    """Resolve a skill name or path to an actual directory.
+
+    F-0503: the resolved path is stored as the pinned ``source_path`` of an
+    allow/block entry (``skill allow``/``skill block`` → ``pe.set_source_path``)
+    and is later compared against a presented asset's path during admission
+    (F-0282/F-0401). If we pinned an attacker-influenceable symlink without
+    freezing it, a local user could retarget that symlink afterwards so the
+    pinned allow entry now points at — and waves through — a different
+    on-disk skill (a swap that defeats the path-pinned allow check). We
+    therefore (a) refuse to resolve a symlinked candidate and (b) return the
+    canonical realpath so the stored allow entry is frozen to a concrete
+    directory that cannot be swapped under it.
+    """
+    from defenseclaw.safety import is_symlink
+
+    def _freeze(candidate: str) -> str | None:
+        if is_symlink(candidate):
+            return None
+        return os.path.realpath(candidate)
+
+    if os.path.isdir(target) and not is_symlink(target):
+        return _freeze(target)
     for candidate in app.cfg.installed_skill_candidates(target):
-        if os.path.isdir(candidate):
-            return candidate
+        if os.path.isdir(candidate) and not is_symlink(candidate):
+            frozen = _freeze(candidate)
+            if frozen:
+                return frozen
     return None
+
+
+def _scan_skill_roots(app: AppContext, connector_flag: str) -> list[str]:
+    """Configured skill roots a connector-reported scan dir must live under.
+
+    F-0501: when ``--connector`` is given we scope containment to that
+    connector's skill dirs; otherwise we allow the union across every
+    active connector (a skill may legitimately live under any of them).
+    Returns ``[]`` when skill dirs can't be enumerated (older configs) so
+    the caller fails open rather than blocking every scan — the connector
+    info path is still the only place this is consulted.
+    """
+    cfg = app.cfg
+    if not (hasattr(cfg, "skill_dirs") and callable(cfg.skill_dirs)):
+        return []
+    if connector_flag:
+        try:
+            from defenseclaw.commands import resolve_list_connector
+            return list(cfg.skill_dirs(resolve_list_connector(app, connector_flag)))
+        except Exception:  # noqa: BLE001 — fall back to the union below.
+            pass
+    return _all_active_skill_dirs(app)
 
 
 def _all_active_skill_dirs(app: AppContext) -> list[str]:

@@ -68,13 +68,33 @@ def _default_admission_policy() -> AdmissionPolicyData:
             # asset's own directory, not a broad parent like ``.defenseclaw``
             # or ``.openclaw/extensions`` that any sibling plugin/skill could
             # be dropped into. Each marker pins the asset's leaf component.
+            #
+            # F-0902: markers must also be home-anchored, not bare relative
+            # sequences ("extensions/defenseclaw") — a bare marker blesses any
+            # attacker path that merely contains the subsequence
+            # (``/tmp/attacker/extensions/defenseclaw``). ``_matches_provenance``
+            # anchors the match defensively, but these built-in defaults are
+            # kept home-anchored too so they mirror the bundled policy data
+            # (policies/{default,strict,permissive}.yaml + rego/data.json) and
+            # never rely solely on the matcher.
             ("plugin", "defenseclaw"): (
                 "first-party DefenseClaw plugin",
-                ["extensions/defenseclaw"],
+                [
+                    ".openclaw/extensions/defenseclaw",
+                    ".zeptoclaw/extensions/defenseclaw",
+                    ".claude/extensions/defenseclaw",
+                    ".codex/extensions/defenseclaw",
+                ],
             ),
             ("skill", "codeguard"): (
                 "first-party DefenseClaw skill",
-                ["workspace/skills/codeguard", "skills/codeguard"],
+                [
+                    ".openclaw/workspace/skills/codeguard",
+                    ".openclaw/skills/codeguard",
+                    ".zeptoclaw/skills/codeguard",
+                    ".claude/skills/codeguard",
+                    ".codex/skills/codeguard",
+                ],
             ),
         },
     )
@@ -251,6 +271,13 @@ def evaluate_asset_policy(
         return AdmissionDecision("allowed", reason, source="asset-policy-allow")
 
     registry = getattr(policy, "registry", [])
+    # F-1906: registry membership for MCP servers is the gate that lets a
+    # command actually run, so it must be matched strictly. The loose match
+    # (command BASENAME + argv PREFIX) let an attacker register a benign basename
+    # like ``npx`` and then run ``/tmp/evil/npx`` with extra trailing argv while
+    # still "matching" the registry rule. Compare the full command and require an
+    # exact argv match for the MCP registry. Denied/allowed rules keep the looser
+    # semantics so an over-broad *block* still fires.
     registered = _find_asset_rule(
         registry,
         name,
@@ -260,6 +287,7 @@ def evaluate_asset_policy(
         command,
         rule_args,
         transport,
+        strict=(target_type == "mcp"),
     ) is not None
     if registry and registered:
         return AdmissionDecision("allowed", f"{target_type} {name!r} is registered", source="asset-policy-registry")
@@ -300,9 +328,13 @@ def _find_asset_rule(
     command: str,
     args: list[str],
     transport: str,
+    *,
+    strict: bool = False,
 ) -> Any | None:
     for rule in rules:
-        if _asset_rule_matches(rule, name, connector, source_path, url, command, args, transport):
+        if _asset_rule_matches(
+            rule, name, connector, source_path, url, command, args, transport, strict=strict
+        ):
             return rule
     return None
 
@@ -316,6 +348,8 @@ def _asset_rule_matches(
     command: str,
     args: list[str],
     transport: str,
+    *,
+    strict: bool = False,
 ) -> bool:
     constrained = False
     if getattr(rule, "name", ""):
@@ -337,16 +371,39 @@ def _asset_rule_matches(
             return False
     if getattr(rule, "command", ""):
         constrained = True
-        if os.path.basename(str(rule.command).strip()) != os.path.basename(command.strip()):
+        # F-1906: a basename-only compare lets ``/tmp/evil/npx`` satisfy a rule
+        # pinned to ``npx``. Under strict matching (MCP registry membership) the
+        # FULL command string must match so a substituted absolute path cannot
+        # impersonate a registered binary. Denied/allowed rules stay basename-
+        # based so an operator can broadly block by binary name.
+        if strict:
+            if str(rule.command).strip() != command.strip():
+                return False
+        elif os.path.basename(str(rule.command).strip()) != os.path.basename(command.strip()):
             return False
     prefix = getattr(rule, "args_prefix", []) or []
     if prefix:
         constrained = True
-        if len(args) < len(prefix):
+        # F-1906: an argv *prefix* match lets an attacker append trailing args
+        # (e.g. a second server spec or ``--allow-everything``) while still
+        # matching a registry rule. Under strict matching require an EXACT argv
+        # match — no extra trailing arguments — so the registered command line
+        # is the only one admitted.
+        if strict:
+            if len(args) != len(prefix):
+                return False
+        elif len(args) < len(prefix):
             return False
         for idx, want in enumerate(prefix):
             if str(want).strip() != str(args[idx]).strip():
                 return False
+    elif strict and args:
+        # A strict registry rule that pins a command but specifies no argv must
+        # only admit the bare command — reject any presented arguments rather
+        # than ignoring them (which would let trailing argv slip through).
+        if getattr(rule, "command", ""):
+            constrained = True
+            return False
     if getattr(rule, "transport", ""):
         constrained = True
         if str(rule.transport).strip().lower() != transport.strip().lower():
@@ -482,20 +539,45 @@ def _scan_summary(scan_result: Any) -> tuple[int, str]:
     return 0, "INFO"
 
 
+# F-0141: a first-party provenance marker is only trustworthy when it lives
+# under a DefenseClaw/agent-framework *home* the attacker cannot create siblings
+# in without already owning that home. These are the leaf directory names of the
+# per-connector homes (mirrors ``connector_paths.connector_home``). A marker run
+# must be anchored to one of these (either the marker begins with a home, or the
+# component immediately preceding the matched run is a home) so a user-writable
+# parent that merely *contains* the component subsequence — e.g.
+# ``/tmp/attacker/extensions/defenseclaw`` — does NOT bless the asset.
+_DEFENSECLAW_HOME_COMPONENTS = frozenset(
+    {
+        ".defenseclaw",
+        ".openclaw",
+        ".zeptoclaw",
+        ".claude",
+        ".codex",
+    }
+)
+
+
 def _matches_provenance(constraints: list[str], source_path: str) -> bool:
     """True if no constraints exist, or if source_path is a path
-    *component* match against one of them.
+    *component* match against one of them that is anchored to a
+    DefenseClaw-owned home.
 
-    The previous implementation compared each
-    constraint with ``in normalised``, which is a substring test on
-    the entire path string. That accepted attacker-controlled
-    paths whose components incidentally embed the constraint
-    (``/tmp/user/.defenseclaw-evil/defenseclaw``,
-    ``/tmp/user/workspace/skills/codeguard-malicious/codeguard``).
-    The fix requires each constraint to match either as a sequence
-    of path *components* or as a normalised path *prefix*, so a
-    constraint like ``.defenseclaw`` only matches when the full
-    component is exactly ``.defenseclaw`` (not ``.defenseclaw-evil``).
+    The first iteration of this matcher compared each constraint with
+    ``in normalised``, a substring test over the whole path string, which
+    accepted attacker paths whose components incidentally embedded the
+    constraint (``/tmp/user/.defenseclaw-evil/defenseclaw``). That was
+    tightened to a contiguous full-*component* match, but that alone still
+    accepted a user-writable parent that merely *contained* the component
+    subsequence: a bare marker like ``extensions/defenseclaw`` matched
+    ``/tmp/attacker/extensions/defenseclaw`` anywhere in the tree.
+
+    F-0141 anchors the match to a DefenseClaw-owned home: the matched run
+    must either start with a known home component (e.g.
+    ``.openclaw/extensions/defenseclaw``) or be immediately preceded in the
+    source path by one (so a marker leaf is only honored under a real home).
+    A location an unprivileged principal controls — which by definition does
+    not contain a DefenseClaw home as the anchoring parent — cannot match.
     """
     if not constraints:
         return True
@@ -514,7 +596,15 @@ def _matches_provenance(constraints: list[str], source_path: str) -> bool:
         # components in the source path.
         clen = len(constraint_parts)
         for i in range(len(components) - clen + 1):
-            if components[i : i + clen] == constraint_parts:
+            if components[i : i + clen] != constraint_parts:
+                continue
+            # F-0141: the run must be anchored to a DefenseClaw-owned home —
+            # either the constraint itself begins with one, or the component
+            # directly above the matched run is one. Otherwise an attacker
+            # parent (``/tmp/attacker/extensions/defenseclaw``) would match.
+            if constraint_parts[0] in _DEFENSECLAW_HOME_COMPONENTS:
+                return True
+            if i > 0 and components[i - 1] in _DEFENSECLAW_HOME_COMPONENTS:
                 return True
     return False
 

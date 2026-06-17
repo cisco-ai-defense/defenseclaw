@@ -83,6 +83,27 @@ validate_version() {
         || die "Invalid release version: ${version}. Expected MAJOR.MINOR.PATCH."
 }
 
+preflight_python_wheel() {
+    local wheel="$1"
+    local uv_bin
+    uv_bin="$(command -v uv 2>/dev/null || true)"
+    [[ -z "${uv_bin}" ]] \
+        && die "uv not found on PATH — cannot update Python CLI. Install uv, then re-run the upgrade."
+
+    local preflight_python="${DEFENSECLAW_VENV}/bin/python"
+    if [[ ! -x "${preflight_python}" ]]; then
+        local preflight_venv="${STAGING_DIR}/wheel-preflight-venv"
+        "${uv_bin}" --no-config venv "${preflight_venv}" --python 3.12 --quiet \
+            || die "Could not create Python CLI preflight environment; no services changed."
+        preflight_python="${preflight_venv}/bin/python"
+    fi
+
+    step "Resolving Python CLI dependencies ..."
+    "${uv_bin}" --no-config pip install --python "${preflight_python}" --dry-run --quiet "${wheel}" \
+        || die "Python CLI wheel dependencies are unsatisfiable; no services changed."
+    ok "Python CLI dependency preflight passed"
+}
+
 # ── Argument Parsing ──────────────────────────────────────────────────────────
 
 YES=0
@@ -492,6 +513,7 @@ whl_name="${WHL_NAME}"
 fetch_artifact "${WHL_URL}" "${STAGING_DIR}/${whl_name}"
 verify_checksum "${STAGING_DIR}/${whl_name}" "${whl_name}"
 ok "Python CLI wheel downloaded"
+preflight_python_wheel "${STAGING_DIR}/${whl_name}"
 
 # a download alone is not proof of integrity. The
 # legacy upgrade flow extracted the tarball and pip-installed the
@@ -655,11 +677,11 @@ UV_BIN="$(command -v uv 2>/dev/null || true)"
 
 if [[ ! -d "${DEFENSECLAW_VENV}" ]]; then
     step "Creating venv at ${DEFENSECLAW_VENV} ..."
-    "${UV_BIN}" venv "${DEFENSECLAW_VENV}" --python 3.12
+    "${UV_BIN}" --no-config venv "${DEFENSECLAW_VENV}" --python 3.12
 fi
 
 VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
-"${UV_BIN}" pip install --python "${VENV_PYTHON}" --quiet "${STAGING_DIR}/${whl_name}" \
+"${UV_BIN}" --no-config pip install --python "${VENV_PYTHON}" --quiet "${STAGING_DIR}/${whl_name}" \
     || die "Failed to install CLI wheel"
 ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
 ok "Python CLI installed"

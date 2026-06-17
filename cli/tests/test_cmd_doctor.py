@@ -1443,5 +1443,117 @@ class CustomProviderOverlayChecksTests(unittest.TestCase):
             self.assertEqual(warn_checks, [], r.checks)
 
 
+class DoctorHttpProbeRedirectTests(unittest.TestCase):
+    """F-0441: _http_probe must NOT follow HTTP redirects.
+
+    Several doctor probes attach credential-bearing headers (Cisco AI-Defense
+    ``X-Cisco-AI-Defense-API-Key``, Splunk HEC ``Authorization: Splunk ...``,
+    LLM API keys). Python's default opener transparently replays those headers
+    to a 30x redirect target, so a hostile/misconfigured endpoint could harvest
+    the secret simply by returning a redirect. _http_probe must refuse the
+    redirect and surface it as an unreachable (status 0) result, never
+    re-issuing the request to the redirect target.
+    """
+
+    def setUp(self):
+        import http.server
+        import threading
+
+        # Records every path + header set the server received, so a test can
+        # prove the auth header was NOT replayed to the redirect target.
+        self.requests: list[dict] = []
+        recorder = self.requests
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):  # silence test output
+                pass
+
+            def _record_and_route(self):
+                recorder.append({
+                    "path": self.path,
+                    "headers": {k.lower(): v for k, v in self.headers.items()},
+                })
+                if self.path == "/redirect":
+                    # 302 to a different path that, if followed, would receive
+                    # the replayed credential header.
+                    self.send_response(302)
+                    self.send_header("Location", "/leaked")
+                    self.end_headers()
+                else:
+                    body = b"reached"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+            def do_GET(self):
+                self._record_and_route()
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                if length:
+                    self.rfile.read(length)
+                self._record_and_route()
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def _url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def test_redirect_is_not_followed(self):
+        from defenseclaw.commands.cmd_doctor import _http_probe
+
+        status, body = _http_probe(self._url("/redirect"), timeout=5.0)
+
+        # Refused redirect surfaces as an unreachable probe (status 0), the
+        # shape every caller already treats as "could not complete".
+        self.assertEqual(status, 0, (status, body))
+        # The redirect target must never have been contacted.
+        paths = [r["path"] for r in self.requests]
+        self.assertIn("/redirect", paths)
+        self.assertNotIn("/leaked", paths)
+
+    def test_auth_header_not_replayed_to_redirect_target(self):
+        from defenseclaw.commands.cmd_doctor import _http_probe
+
+        secret = "super-secret-splunk-token"
+        status, _ = _http_probe(
+            self._url("/redirect"),
+            method="POST",
+            headers={
+                "Authorization": f"Splunk {secret}",
+                "X-Cisco-AI-Defense-API-Key": secret,
+                "Content-Type": "application/json",
+            },
+            body=b"{}",
+            timeout=5.0,
+        )
+        self.assertEqual(status, 0)
+
+        # Only the initial /redirect request should have been made.
+        leaked = [r for r in self.requests if r["path"] == "/leaked"]
+        self.assertEqual(leaked, [], "auth header was replayed to redirect target")
+        # And the secret must not appear in any request sent to /leaked
+        # (defense-in-depth: ensure no second hop carried the header at all).
+        for r in self.requests:
+            if r["path"] == "/leaked":
+                self.fail("redirect target received a request carrying credentials")
+
+    def test_no_redirect_normal_request_still_succeeds(self):
+        from defenseclaw.commands.cmd_doctor import _http_probe
+
+        status, body = _http_probe(self._url("/ok"), timeout=5.0)
+        self.assertEqual(status, 200, (status, body))
+        self.assertIn("reached", body)
+
+
 if __name__ == "__main__":
     unittest.main()

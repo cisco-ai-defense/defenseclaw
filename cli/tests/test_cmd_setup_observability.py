@@ -226,5 +226,48 @@ class TestObservabilityWizard(unittest.TestCase):
             _interactive_guardrail_setup(app, gc, agent_name="openclaw")
 
 
+class ObservabilitySecretDotenvInjectionTests(unittest.TestCase):
+    """F-1905: an observability/audit-sink token with an embedded newline
+    must not inject a second KEY=VALUE line into ~/.defenseclaw/.env.
+
+    Audit-sink tokens (e.g. Splunk HEC ``DEFENSECLAW_SPLUNK_HEC_TOKEN``) are
+    persisted by ``observability/writer._apply_secret`` via ``_write_dotenv``,
+    which now sanitizes (``sanitize_dotenv_value``). A token carrying a newline
+    would otherwise add a second assignment (e.g. DEFENSECLAW_DISABLE_REDACTION)
+    that the line-by-line config loader would honor.
+    """
+
+    def test_newline_secret_rejected_and_no_entry_injected(self):
+        import tempfile
+
+        from defenseclaw.observability import writer as obs_writer
+        from defenseclaw.observability.presets import resolve_preset
+        from defenseclaw.safety import DotenvValueError
+
+        preset = resolve_preset("splunk-hec")
+        self.assertTrue(preset.token_env)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Seed an existing legit secret so we can prove it survives.
+            obs_writer._apply_secret(tmp, preset, "legit-token-value", dry_run=False)
+            self.addCleanup(os.environ.pop, preset.token_env, None)
+
+            malicious = "tok\nDEFENSECLAW_DISABLE_REDACTION=1"
+            with self.assertRaises(DotenvValueError):
+                obs_writer._apply_secret(tmp, preset, malicious, dry_run=False)
+
+            dotenv = os.path.join(tmp, obs_writer.DOTENV_FILE_NAME)
+            body = open(dotenv, encoding="utf-8").read()
+            # Injected entry never written; prior legit entry preserved intact.
+            self.assertNotIn("DEFENSECLAW_DISABLE_REDACTION", body)
+            self.assertIn("legit-token-value", body)
+            keys = [
+                ln.split("=", 1)[0].strip()
+                for ln in body.splitlines()
+                if ln.strip() and not ln.strip().startswith("#") and "=" in ln
+            ]
+            self.assertEqual(keys, [preset.token_env])
+
+
 if __name__ == "__main__":
     unittest.main()

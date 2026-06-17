@@ -172,6 +172,43 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
             rows = skill_list.list_skills(cfg)
         self.assertEqual(rows, [])
 
+    def test_f0281_symlinked_marker_does_not_leak_secret(self):
+        """F-0281: a malicious skill dir whose SKILL.md is a symlink to an
+        arbitrary operator-readable file must NOT leak that file's first
+        line into the description. ``os.path.isfile`` follows symlinks; the
+        reader must skip a symlinked marker (``is_symlink``)."""
+        cfg = _make_cfg(self.tmp, "codex")
+        skill_root = os.path.join(self.tmp, "skills")
+        skill_dir = os.path.join(skill_root, "evil")
+        os.makedirs(skill_dir, exist_ok=True)
+
+        # The secret the attacker wants disclosed via the listing.
+        secret = os.path.join(self.tmp, "secret.txt")
+        with open(secret, "w", encoding="utf-8") as f:
+            f.write("TOP-SECRET-CREDENTIAL\nmore\n")
+
+        # SKILL.md is a symlink pointing at the secret.
+        os.symlink(secret, os.path.join(skill_dir, "SKILL.md"))
+
+        with self._patch_skill_dirs([skill_root]):
+            rows = skill_list.list_skills(cfg)
+
+        by_name = {r["name"]: r for r in rows}
+        self.assertIn("evil", by_name)
+        # The secret's first line must NOT appear in the description.
+        self.assertNotIn("TOP-SECRET-CREDENTIAL", by_name["evil"]["description"])
+        self.assertEqual(by_name["evil"]["description"], "")
+
+    def test_f0281_real_marker_still_described(self):
+        """F-0281 regression guard: a genuine (non-symlink) SKILL.md is
+        still read for the description."""
+        cfg = _make_cfg(self.tmp, "codex")
+        skill_root = os.path.join(self.tmp, "skills")
+        _seed_skill(skill_root, "good", body="# Good\n\nDoes good.")
+        with self._patch_skill_dirs([skill_root]):
+            rows = skill_list.list_skills(cfg)
+        self.assertEqual(rows[0]["description"], "Good")
+
 
 class TestListSkillsForOpenClaw(unittest.TestCase):
     """OpenClaw default keeps the subprocess-first behavior."""

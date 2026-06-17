@@ -46,6 +46,7 @@ import yaml
 
 from defenseclaw.config import locked_config_yaml, write_config_yaml_secure
 from defenseclaw.observability.presets import Preset, Signal, resolve_preset
+from defenseclaw.safety import sanitize_dotenv_value
 
 # ---------------------------------------------------------------------------
 # Constants mirrored with internal/config/sinks.go and internal/telemetry
@@ -908,7 +909,10 @@ def _load_dotenv(path: str) -> dict[str, str]:
 
 
 def _write_dotenv(path: str, entries: dict[str, str]) -> None:
-    lines = [f"{k}={v}\n" for k, v in sorted(entries.items())]
+    lines = [
+        f"{k}={sanitize_dotenv_value(v, key=k)}\n"
+        for k, v in sorted(entries.items())
+    ]
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     # O_NOFOLLOW (where available) refuses to open through a symlink so a
     # pre-planted symlink cannot redirect the secret write elsewhere.

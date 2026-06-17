@@ -771,6 +771,83 @@ class TestResolveOpenclawGateway(unittest.TestCase):
             self.assertEqual(result["token"], "")
 
 
+class TestValidateGatewayToken(unittest.TestCase):
+    """F-0361: gateway token boundary validation before dotenv persist.
+
+    The OpenClaw gateway token is read from connector-controlled
+    openclaw.json (untrusted). A token carrying a newline/CR/NUL would be
+    parsed as a second KEY=VALUE assignment by the config loader, injecting
+    arbitrary environment variables (e.g. DEFENSECLAW_DISABLE_REDACTION=1).
+    Validation must reject such a token at the boundary with a clean,
+    operator-facing error and must NOT write anything to ~/.defenseclaw/.env.
+    """
+
+    def test_clean_token_passes(self):
+        from defenseclaw.commands.cmd_init import _validate_gateway_token
+
+        # A normal secret with no control characters is accepted (no raise).
+        _validate_gateway_token("OPENCLAW_GATEWAY_TOKEN", "abc123-DEF456_token")
+
+    def test_newline_token_rejected_with_clean_error(self):
+        import click
+        from defenseclaw.commands.cmd_init import _validate_gateway_token
+
+        malicious = "good-prefix\nDEFENSECLAW_DISABLE_REDACTION=1"
+        with self.assertRaises(click.ClickException) as ctx:
+            _validate_gateway_token("OPENCLAW_GATEWAY_TOKEN", malicious)
+        # Operator-facing message, not a raw traceback.
+        self.assertIn("gateway token", str(ctx.exception).lower())
+
+    def test_cr_and_nul_tokens_rejected(self):
+        import click
+        from defenseclaw.commands.cmd_init import _validate_gateway_token
+
+        for bad in ("tok\rEVIL=1", "tok\x00EVIL=1"):
+            with self.assertRaises(click.ClickException):
+                _validate_gateway_token("OPENCLAW_GATEWAY_TOKEN", bad)
+
+    def test_malicious_token_not_persisted_to_dotenv(self):
+        """End-to-end: a connector-supplied token with an embedded newline
+        must abort _setup_gateway_defaults and leave no injected .env entry."""
+        import click
+        from defenseclaw.commands.cmd_init import _setup_gateway_defaults
+
+        from tests.helpers import cleanup_app, make_app_context
+
+        app, tmp_dir, db_path = make_app_context()
+        self.addCleanup(cleanup_app, app, db_path, tmp_dir)
+        # _save_secret_to_dotenv also mutates os.environ — guard against leak.
+        self.addCleanup(os.environ.pop, "OPENCLAW_GATEWAY_TOKEN", None)
+        prior = os.environ.get("DEFENSECLAW_DISABLE_REDACTION")
+        self.addCleanup(
+            lambda: os.environ.__setitem__("DEFENSECLAW_DISABLE_REDACTION", prior)
+            if prior is not None
+            else os.environ.pop("DEFENSECLAW_DISABLE_REDACTION", None)
+        )
+
+        cfg = app.cfg
+        cfg.data_dir = tmp_dir
+        cfg.guardrail.connector = "openclaw"
+
+        malicious_token = "legit\nDEFENSECLAW_DISABLE_REDACTION=1"
+        with patch(
+            "defenseclaw.commands.cmd_init._resolve_gateway_for_connector",
+            return_value={"host": "127.0.0.1", "port": 18789, "token": malicious_token},
+        ):
+            with self.assertRaises(click.ClickException):
+                _setup_gateway_defaults(cfg, logger=None, is_new_config=True)
+
+        dotenv_path = os.path.join(tmp_dir, ".env")
+        if os.path.exists(dotenv_path):
+            with open(dotenv_path) as f:
+                contents = f.read()
+            # No injected second entry, no token line written at all.
+            self.assertNotIn("DEFENSECLAW_DISABLE_REDACTION", contents)
+            self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", contents)
+        # And the injected var must not have leaked into the process env.
+        self.assertNotEqual(os.environ.get("OPENCLAW_GATEWAY_TOKEN"), malicious_token)
+
+
 class TestResolveSplunkBridgeBundle(unittest.TestCase):
     def test_prefers_packaged_bundle_data(self):
         from defenseclaw.commands.cmd_init import _resolve_splunk_bridge_bundle

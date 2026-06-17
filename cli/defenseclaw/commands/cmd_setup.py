@@ -67,6 +67,7 @@ from defenseclaw.connector_contracts import (
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
+from defenseclaw.safety import reject_symlink, sanitize_dotenv_value
 
 # Key used to stash the pre-invocation config.yaml mtime in the Click
 # context so the post-invocation hook can tell whether a `setup`
@@ -1575,8 +1576,13 @@ def _write_dotenv(path: str, entries: dict[str, str]) -> None:
     so that repeated invocations keep converging on 0600, even if a
     stray ``chmod 644`` happened out-of-band.
     """
-    lines = [f"{k}={v}\n" for k, v in sorted(entries.items())]
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    lines = [
+        f"{k}={sanitize_dotenv_value(v, key=k)}\n"
+        for k, v in sorted(entries.items())
+    ]
+    reject_symlink(path, what="dotenv file")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w") as f:
         f.writelines(lines)
     try:

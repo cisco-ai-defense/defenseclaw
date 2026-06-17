@@ -300,6 +300,149 @@ class TestSkillScan(SkillCommandTestBase):
         scanner.scan.assert_called_once_with(skill_dir)
 
 
+class TestSkillScanContainment(SkillCommandTestBase):
+    """F-0501/F-0502: scan must not trust a connector-reported baseDir or a
+    symlinked entry that escapes the configured skill roots."""
+
+    @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value=None)
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
+    def test_f0501_rejects_connector_basedir_outside_skill_roots(
+        self, mock_info, _mock_oc
+    ):
+        # A malicious connector reports a baseDir OUTSIDE the configured
+        # skill directories (here: a sibling temp dir).
+        evil_dir = os.path.join(self.tmp_dir, "evil-outside")
+        os.makedirs(evil_dir)
+        mock_info.return_value = {"name": "pwn", "baseDir": evil_dir}
+
+        result = self.invoke(["scan", "pwn"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("outside the configured skill", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value=None)
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_f0501_allows_basedir_inside_skill_root(
+        self, mock_scanner_cls, _mock_info, _mock_oc
+    ):
+        # A skill that genuinely lives under a configured skill root scans.
+        skill_root = self.app.cfg.skill_dirs()[1]  # <home>/skills
+        skill_dir = os.path.join(skill_root, "legit")
+        os.makedirs(skill_dir)
+        scanner = MagicMock()
+        scanner.scan.return_value = ScanResult(
+            scanner="skill-scanner", target=skill_dir,
+            timestamp=datetime.now(timezone.utc), findings=[],
+            duration=timedelta(seconds=0.1),
+        )
+        mock_scanner_cls.return_value = scanner
+
+        result = self.invoke(["scan", "legit"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        # _resolve_path freezes to realpath (F-0503), so compare canonically.
+        scanner.scan.assert_called_once_with(os.path.realpath(skill_dir))
+
+    @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value=None)
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_f0501_explicit_path_override_is_exempt(
+        self, mock_scanner_cls, _mock_info, _mock_oc
+    ):
+        # The operator's explicit --path bypasses containment (trusted).
+        outside = os.path.join(self.tmp_dir, "operator-chosen")
+        os.makedirs(outside)
+        scanner = MagicMock()
+        scanner.scan.return_value = ScanResult(
+            scanner="skill-scanner", target=outside,
+            timestamp=datetime.now(timezone.utc), findings=[],
+            duration=timedelta(seconds=0.1),
+        )
+        mock_scanner_cls.return_value = scanner
+
+        result = self.invoke(["scan", "anything", "--path", outside])
+        self.assertEqual(result.exit_code, 0, result.output)
+        scanner.scan.assert_called_once_with(outside)
+
+    @patch("defenseclaw.config.Config.skill_dirs")
+    def test_f0502_scan_all_skips_symlinked_entry(self, mock_skill_dirs):
+        from defenseclaw.commands.cmd_skill import _scan_all
+
+        skill_root = os.path.join(self.tmp_dir, "skills")
+        real_skill = os.path.join(skill_root, "real")
+        os.makedirs(real_skill)
+        with open(os.path.join(real_skill, "SKILL.md"), "w") as f:
+            f.write("# real\n")
+        # A symlinked entry under the skill root pointing OUTSIDE it.
+        outside = os.path.join(self.tmp_dir, "outside-target")
+        os.makedirs(outside)
+        os.symlink(outside, os.path.join(skill_root, "evil-link"))
+
+        mock_skill_dirs.return_value = [skill_root]
+        self.app.cfg.active_connector = lambda: "openclaw"  # type: ignore[method-assign]
+        # Force the filesystem fallback (no openclaw skill list).
+        scanned: list[str] = []
+        scanner = MagicMock()
+
+        def _scan(path):
+            scanned.append(path)
+            return ScanResult(
+                scanner="skill-scanner", target=path,
+                timestamp=datetime.now(timezone.utc), findings=[],
+                duration=timedelta(seconds=0.1),
+            )
+
+        scanner.scan.side_effect = _scan
+
+        with patch(
+            "defenseclaw.commands.cmd_skill._list_openclaw_skills_full",
+            return_value=None,
+        ):
+            _scan_all(self.app, scanner, as_json=False)
+
+        # Only the real skill was scanned; the symlinked entry was skipped.
+        self.assertIn(real_skill, scanned)
+        self.assertNotIn(os.path.join(skill_root, "evil-link"), scanned)
+        self.assertNotIn(outside, scanned)
+
+
+class TestResolvePathFreezesSymlinks(SkillCommandTestBase):
+    """F-0503: _resolve_path must reject symlinked candidates and return a
+    frozen realpath so a pinned allow entry cannot be retargeted later."""
+
+    def test_f0503_rejects_symlinked_target(self):
+        from defenseclaw.commands.cmd_skill import _resolve_path
+
+        outside = os.path.join(self.tmp_dir, "secret-dir")
+        os.makedirs(outside)
+        link = os.path.join(self.tmp_dir, "link-skill")
+        os.symlink(outside, link)
+
+        # A symlinked directory target must NOT be resolved (frozen-only).
+        self.assertIsNone(_resolve_path(self.app, link))
+
+    def test_f0503_returns_realpath_for_regular_dir(self):
+        from defenseclaw.commands.cmd_skill import _resolve_path
+
+        skill_root = self.app.cfg.skill_dirs()[1]
+        skill_dir = os.path.join(skill_root, "frozen")
+        os.makedirs(skill_dir)
+
+        resolved = _resolve_path(self.app, "frozen")
+        self.assertEqual(resolved, os.path.realpath(skill_dir))
+
+    def test_f0503_rejects_symlinked_candidate(self):
+        from defenseclaw.commands.cmd_skill import _resolve_path
+
+        # Candidate path (<root>/<name>) is itself a symlink to elsewhere.
+        skill_root = self.app.cfg.skill_dirs()[1]
+        os.makedirs(skill_root)
+        outside = os.path.join(self.tmp_dir, "elsewhere")
+        os.makedirs(outside)
+        os.symlink(outside, os.path.join(skill_root, "swapme"))
+
+        self.assertIsNone(_resolve_path(self.app, "swapme"))
+
+
 class TestSkillInstall(SkillCommandTestBase):
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
@@ -805,8 +948,17 @@ class TestBuildActionsMap(SkillCommandTestBase):
 # ---------------------------------------------------------------------------
 
 class TestSkillSearch(SkillCommandTestBase):
+    # F-1481: `skill search` must not let `npx` fetch+execute the third-party
+    # clawhub package from the network on every read-only search. The default
+    # path prefers a locally-installed clawhub binary, and otherwise uses
+    # `npx --no-install` (cached only, never network-fetched). Plain `npx`
+    # (network fetch + execute) is gated behind explicit --allow-remote-fetch.
+
+    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_search_success(self, mock_run):
+    def test_search_default_uses_npx_no_install_no_network_fetch(self, mock_run, _which):
+        # No local clawhub binary, no opt-in: must use `npx --no-install` so npx
+        # refuses to download+execute the package from the network.
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="wiki  Wiki  (3.504)\nwiki-local  WikiLocal  (3.392)\n",
@@ -817,19 +969,54 @@ class TestSkillSearch(SkillCommandTestBase):
         self.assertIn("wiki", result.output)
         self.assertIn("wiki-local", result.output)
         mock_run.assert_called_once_with(
+            ["npx", "--no-install", "clawhub", "search", "wiki"],
+            capture_output=True, text=True, timeout=30,
+        )
+        # Must never invoke the network-fetching plain `npx clawhub`.
+        self.assertNotIn(
+            ["npx", "clawhub", "search", "wiki"],
+            [c.args[0] for c in mock_run.call_args_list],
+        )
+
+    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value="/usr/local/bin/clawhub")
+    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
+    def test_search_prefers_local_clawhub_binary(self, mock_run, _which):
+        # A locally-installed pinned binary is run directly — no npx, no fetch.
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="wiki  Wiki  (3.504)\n", stderr="",
+        )
+        result = self.invoke(["search", "wiki"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_run.assert_called_once_with(
+            ["/usr/local/bin/clawhub", "search", "wiki"],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
+    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
+    def test_search_allow_remote_fetch_opts_into_npx_network_fetch(self, mock_run, _which):
+        # Explicit opt-in re-enables the original fetch+execute behavior.
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="wiki  Wiki  (3.504)\n", stderr="",
+        )
+        result = self.invoke(["search", "wiki", "--allow-remote-fetch"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_run.assert_called_once_with(
             ["npx", "clawhub", "search", "wiki"],
             capture_output=True, text=True, timeout=30,
         )
 
+    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_search_no_results(self, mock_run):
+    def test_search_no_results(self, mock_run, _which):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         result = self.invoke(["search", "zzz_nonexistent"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No skills found", result.output)
 
+    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_search_json_output(self, mock_run):
+    def test_search_json_output(self, mock_run, _which):
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="wiki  Wiki  (3.504)\n",
@@ -841,20 +1028,28 @@ class TestSkillSearch(SkillCommandTestBase):
         self.assertIsInstance(data, list)
         self.assertTrue(len(data) >= 1)
 
+    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_skill.subprocess.run", side_effect=FileNotFoundError)
-    def test_search_npx_not_found(self, _mock):
+    def test_search_npx_not_found(self, _mock, _which):
         result = self.invoke(["search", "wiki"])
         self.assertNotEqual(result.exit_code, 0)
 
+    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_skill.subprocess.run")
-    def test_search_clawhub_failure(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="network error")
+    def test_search_clawhub_failure_hints_at_remote_fetch(self, mock_run, _which):
+        # `npx --no-install` fails when clawhub isn't cached; the error must
+        # point at --allow-remote-fetch rather than silently fetching.
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="npm ERR! could not determine executable",
+        )
         result = self.invoke(["search", "wiki"])
         self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--allow-remote-fetch", result.output)
 
+    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_skill.subprocess.run",
            side_effect=__import__("subprocess").TimeoutExpired(cmd="npx", timeout=30))
-    def test_search_timeout(self, _mock):
+    def test_search_timeout(self, _mock, _which):
         result = self.invoke(["search", "wiki"])
         self.assertNotEqual(result.exit_code, 0)
 

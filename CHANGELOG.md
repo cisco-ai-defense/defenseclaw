@@ -14,6 +14,20 @@ default and only path; the V1 OTLP builders and the per-phase
 feature flags that existed in early review iterations have been
 deleted.
 
+### Packaging / upgrade hotfix
+
+- Kept `cisco-ai-mcp-scanner` as a core dependency and relaxed
+  DefenseClaw's Click requirement to `click>=8.1.8,<9`, restoring clean
+  wheel installs for releases whose MCP scanner metadata pins LiteLLM to
+  a Click 8.1.x-compatible version.
+- Added a pre-install wheel resolver check to the Python and shell upgrade
+  paths so a dependency conflict aborts before services are stopped or
+  gateway binaries are replaced.
+- Security note: this hotfix intentionally accepts the MCP scanner's
+  current LiteLLM pin in release-wheel metadata to preserve core MCP
+  scanning. Re-tighten the LiteLLM floor after the scanner publishes
+  metadata that no longer pins the older LiteLLM release.
+
 ### Behaviour changes (no flag)
 
 - **W3C trace propagation is enabled for trusted hook routes**

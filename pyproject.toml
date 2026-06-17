@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "click==8.3.1",
+    "click>=8.1.8,<9",
     "pyyaml==6.0.3",
     "requests==2.33.0",
     "rich>=13.0",
@@ -138,7 +138,6 @@ override-dependencies = [
     # in CI).
     "python-dotenv>=1.2.2",   # CVE-2026-28684 fixed in 1.2.2; scanner >=2.0.10 allows it.
     "openai==2.30.0",
-    "click>=8.3.1",
     "importlib-metadata>=8.7.1",
     "jsonschema>=4.26.0",
     "python-multipart>=0.0.27", # CVE-2026-40347 and CVE-2026-42561 fixed by 0.0.27

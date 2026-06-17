@@ -149,8 +149,16 @@ class TestF0541TightenedFirstPartyProvenance(unittest.TestCase):
         # it must not be a first-party provenance marker.
         self.assertNotIn(".codex-plugin/defenseclaw", self.constraints)
 
-    def test_precise_plugin_dir_entry_present(self):
-        self.assertIn("extensions/defenseclaw", self.constraints)
+    def test_bare_relative_marker_removed(self):
+        # F-0902: the bare, home-UNANCHORED ``extensions/defenseclaw`` marker
+        # matched the same component sequence under ANY parent (including an
+        # attacker-writable one), so it must no longer ship. Only home-anchored
+        # markers remain.
+        self.assertNotIn("extensions/defenseclaw", self.constraints)
+
+    def test_precise_home_anchored_entry_present(self):
+        # The replacement is the home-anchored leaf path.
+        self.assertIn(".openclaw/extensions/defenseclaw", self.constraints)
 
     def test_spoofed_codex_plugin_path_no_longer_bypasses(self):
         # F-0541 repro path: a hostile plugin named "defenseclaw" dropped
@@ -160,6 +168,18 @@ class TestF0541TightenedFirstPartyProvenance(unittest.TestCase):
         self.assertFalse(
             _matches_provenance(
                 self.constraints, "/tmp/attacker/.codex-plugin/defenseclaw"
+            )
+        )
+
+    def test_f0141_spoofed_extensions_sibling_no_longer_bypasses(self):
+        # F-0141 repro: a hostile plugin dropped at
+        # ``<attacker-writable>/extensions/defenseclaw`` used to match the bare
+        # ``extensions/defenseclaw`` marker anywhere in the tree. With the bare
+        # marker removed and the matcher anchored to a DefenseClaw-owned home,
+        # this attacker path must fall through to a scan.
+        self.assertFalse(
+            _matches_provenance(
+                self.constraints, "/tmp/attacker/extensions/defenseclaw"
             )
         )
 
@@ -180,6 +200,26 @@ class TestF0541TightenedFirstPartyProvenance(unittest.TestCase):
             target_type="plugin",
             name="defenseclaw",
             source_path="/tmp/attacker/.codex-plugin/defenseclaw",
+        )
+        self.assertEqual(decision.verdict, "scan")
+        self.assertEqual(decision.source, "scan-required")
+
+    def test_evaluate_admission_scans_spoofed_extensions_sibling(self):
+        # F-0141 end-to-end: the bare-marker bypass path is scan-required.
+        pe = SimpleNamespace(
+            is_blocked=lambda *a: False,
+            is_allowed=lambda *a: False,
+            is_quarantined=lambda *a: False,
+        )
+        bundled_policies = os.path.join(
+            os.path.dirname(defenseclaw.__file__), "_data", "policies"
+        )
+        decision = evaluate_admission(
+            pe,
+            policy_dir=bundled_policies,
+            target_type="plugin",
+            name="defenseclaw",
+            source_path="/tmp/attacker/extensions/defenseclaw",
         )
         self.assertEqual(decision.verdict, "scan")
         self.assertEqual(decision.source, "scan-required")

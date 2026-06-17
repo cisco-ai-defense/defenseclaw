@@ -88,6 +88,52 @@ _SAFE_INHERIT_ENV = (
     "PWD", "PYTHONPATH", "NODE_PATH", "DISPLAY",
 )
 
+# F-0221: env vars that control how/what an executable RESOLVES, LOADS,
+# or RUNS. The scan subprocess env is layered with operator/publisher-
+# supplied ``MCPServerEntry.env`` (sourced from connector config /
+# publisher manifest — both untrusted), so a config that sets
+# ``PATH=/tmp/evil``, ``NODE_PATH``/``PYTHONPATH=/tmp/inject`` or
+# ``LD_PRELOAD``/``LD_LIBRARY_PATH``/``DYLD_*`` could redirect what the
+# allowlisted ``npx``/``uvx`` launcher resolves or pre-loads, defeating
+# the launcher allowlist entirely. We REFUSE to let untrusted entries
+# set any of these — the safe baseline value (e.g. a minimal PATH) wins.
+# Non-exec env vars the server legitimately needs still pass through.
+#
+# ``DYLD_*`` (macOS) and ``LD_*`` (glibc) are matched by prefix below
+# because the dynamic loader honours a whole family of names
+# (DYLD_INSERT_LIBRARIES, DYLD_LIBRARY_PATH, LD_PRELOAD, LD_AUDIT,
+# LD_LIBRARY_PATH, …).
+_EXEC_CONTROL_ENV_NAMES = frozenset({
+    "PATH",
+    "NODE_PATH",
+    "NODE_OPTIONS",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONSTARTUP",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+})
+_EXEC_CONTROL_ENV_PREFIXES = ("LD_", "DYLD_")
+
+
+def _is_exec_control_env_name(name: str) -> bool:
+    """Return True for env vars that steer executable resolution/loading.
+
+    F-0221: such names are never accepted from untrusted
+    operator/publisher ``MCPServerEntry.env`` — only the safe baseline
+    may set them.
+    """
+    if not isinstance(name, str):
+        return False
+    upper = name.upper()
+    if upper in _EXEC_CONTROL_ENV_NAMES:
+        return True
+    for prefix in _EXEC_CONTROL_ENV_PREFIXES:
+        if upper.startswith(prefix):
+            return True
+    return False
+
 
 def _is_sensitive_env_name(name: str) -> bool:
     upper = name.upper()
@@ -104,9 +150,18 @@ def _safe_subprocess_env(operator_env: dict | None) -> dict:
     every operator-set secret to the scanned server. We start from an
     allowlisted baseline (``PATH``, ``HOME``, ``LANG``, …), strip any
     name that looks sensitive, then layer on top whatever the operator
-    explicitly placed on ``MCPServerEntry.env``. Operator-supplied
-    values always win — they are the contract for what the MCP server
-    is supposed to see.
+    explicitly placed on ``MCPServerEntry.env``.
+
+    F-0221: ``MCPServerEntry.env`` is sourced from connector config /
+    publisher manifest — both UNTRUSTED. We therefore do NOT let those
+    entries win for execution-control variables (``PATH``, ``NODE_PATH``,
+    ``PYTHONPATH``, ``LD_PRELOAD``/``LD_LIBRARY_PATH``, ``DYLD_*``, …):
+    allowing them would let an untrusted config redirect what the
+    allowlisted ``npx``/``uvx`` launcher resolves or pre-loads and so
+    bypass the launcher allowlist. The safe baseline ``PATH`` (and the
+    rest of the loader environment) wins; such names are dropped from the
+    untrusted overlay with a clear warning. Non-exec env vars the server
+    legitimately needs still pass through.
     """
     out: dict[str, str] = {}
     for name in _SAFE_INHERIT_ENV:
@@ -119,6 +174,15 @@ def _safe_subprocess_env(operator_env: dict | None) -> dict:
     if operator_env:
         for k, v in operator_env.items():
             if not isinstance(k, str):
+                continue
+            # F-0221: refuse to let an untrusted entry set exec-control
+            # vars; the safe baseline value (if any) is preserved.
+            if _is_exec_control_env_name(k):
+                print(
+                    f"warning: ignoring execution-control env var {k!r} from "
+                    f"untrusted MCP entry (using safe baseline instead)",
+                    file=sys.stderr,
+                )
                 continue
             out[k] = "" if v is None else str(v)
     return out

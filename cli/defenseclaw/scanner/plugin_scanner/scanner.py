@@ -32,6 +32,7 @@ from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext
 from defenseclaw.scanner.plugin_scanner.analyzer_factory import build_analyzers
 from defenseclaw.scanner.plugin_scanner.analyzers import has_install_scripts
 from defenseclaw.scanner.plugin_scanner.helpers import (
+    audit_skipped_dirs_for_native,
     build_result,
     deduplicate_findings,
     make_finding,
@@ -147,6 +148,17 @@ def scan_plugin(
         manifest_missing_finding.id = f"plugin-{ctx.finding_counter[0]}"
         ctx.finding_counter[0] += 1
         all_findings.append(manifest_missing_finding)
+
+    # F-1907: surface native/binary payloads hidden under normally-skipped
+    # dirs (node_modules/.git/etc.). The directory-structure analyzer skips
+    # those trees, so this audit is the only thing that catches a native
+    # addon stashed there to dodge both source and binary scanning. Run it
+    # before the analyzer loop so the meta analyzer can fold the signal into
+    # its cross-reference chains.
+    for f in audit_skipped_dirs_for_native(target):
+        f.id = f"plugin-{ctx.finding_counter[0]}"
+        ctx.finding_counter[0] += 1
+        all_findings.append(f)
 
     for analyzer in analyzers:
         # Feed accumulated findings to meta analyzer
@@ -290,15 +302,25 @@ def _manifest_permissions(raw: dict) -> list[str]:
 
     Includes both the top-level ``permissions`` list and a nested
     ``defenseclaw.permissions`` list so the strictest declared set is
-    considered when merging across manifests.
+    considered (F-0241) and when merging across manifests. Order is
+    first-seen; duplicates are dropped so the returned list is stable and
+    free of redundant entries for downstream consumers.
     """
     perms: list[str] = []
-    top = raw.get("permissions")
-    if isinstance(top, list):
-        perms.extend(p for p in top if isinstance(p, str))
+    seen: set[str] = set()
+
+    def _add(values: object) -> None:
+        if not isinstance(values, list):
+            return
+        for p in values:
+            if isinstance(p, str) and p not in seen:
+                seen.add(p)
+                perms.append(p)
+
+    _add(raw.get("permissions"))
     dc = raw.get("defenseclaw")
-    if isinstance(dc, dict) and isinstance(dc.get("permissions"), list):
-        perms.extend(p for p in dc["permissions"] if isinstance(p, str))
+    if isinstance(dc, dict):
+        _add(dc.get("permissions"))
     return perms
 
 
@@ -401,12 +423,17 @@ def _normalize_manifest(
         source=filename,
     )
 
-    if isinstance(raw.get("permissions"), list):
-        manifest.permissions = raw["permissions"]
-
-    defenseclaw = raw.get("defenseclaw")
-    if isinstance(defenseclaw, dict) and isinstance(defenseclaw.get("permissions"), list):
-        manifest.permissions = defenseclaw["permissions"]
+    # F-0241: UNION the top-level ``permissions`` list with any nested
+    # ``defenseclaw.permissions`` list rather than letting the nested block
+    # REPLACE the top-level one. A malicious manifest could otherwise hide a
+    # dangerous top-level permission (e.g. ``fs:*``) behind an empty/benign
+    # nested ``defenseclaw.permissions`` and dodge the permission checks.
+    # ``_manifest_permissions`` already unions both sources and de-dups while
+    # preserving first-seen ordering, which is what downstream consumers
+    # (check_permissions, _merge_declared_capabilities) expect.
+    merged_perms = _manifest_permissions(raw)
+    if merged_perms:
+        manifest.permissions = merged_perms
 
     if isinstance(raw.get("tools"), list):
         manifest.tools = raw["tools"]

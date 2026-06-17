@@ -132,6 +132,29 @@ jobs:
           name: python-coverage
           path: coverage-py.xml
 
+  python-wheel-install:
+    name: Python Wheel Install (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f8835a001bd4359d8480cc68d1259b8bce334668f8be97bd # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: make dist-cli
+      - shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          whl="$(find dist -maxdepth 1 -name 'defenseclaw-*.whl' -print -quit)"
+          test -n "$whl"
+          uv --no-config venv "$tmp/venv" --python "${{ matrix.python-version }}"
+          uv --no-config pip install --python "$tmp/venv/bin/python" "$whl"
+          "$tmp/venv/bin/defenseclaw" --help >/dev/null
+
   connector-matrix:
     name: Connector Matrix
     runs-on: ubuntu-latest

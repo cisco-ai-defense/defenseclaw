@@ -201,11 +201,82 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
 
+    def _mcp_registry_rule(self):
+        # A registry rule pinning the full command and exact argv.
+        return SimpleNamespace(
+            name="filesystem",
+            command="/usr/bin/npx",
+            args_prefix=["-y", "@modelcontextprotocol/server-filesystem"],
+        )
+
+    def test_mcp_registry_exact_match_allowed(self):
+        # F-1906: the exact pinned command + argv must still register cleanly.
+        policy = self._asset_policy(
+            registry_required=True,
+            registry=[self._mcp_registry_rule()],
+        )
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="filesystem",
+            command="/usr/bin/npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem"],
+            asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
+
+    def test_mcp_registry_full_command_substitution_blocked(self):
+        # F-1906 repro: an attacker swaps the registered basename ``npx`` for a
+        # full path to a hostile binary in a writable dir. A basename-only
+        # compare matched the registry rule; the strict full-command compare
+        # must reject it so registry_required blocks the unregistered server.
+        policy = self._asset_policy(
+            registry_required=True,
+            registry=[self._mcp_registry_rule()],
+        )
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="filesystem",
+            command="/tmp/evil/npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem"],
+            asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-registry-required")
+
+    def test_mcp_registry_trailing_argv_blocked(self):
+        # F-1906 repro: an attacker keeps the registered command + prefix but
+        # appends extra trailing argv (e.g. a second, attacker-controlled
+        # server root). An argv *prefix* match admitted it; the strict EXACT
+        # argv compare must reject the extra arguments.
+        policy = self._asset_policy(
+            registry_required=True,
+            registry=[self._mcp_registry_rule()],
+        )
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="filesystem",
+            command="/usr/bin/npx",
+            args=[
+                "-y",
+                "@modelcontextprotocol/server-filesystem",
+                "/etc",  # attacker-appended extra root
+            ],
+            asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-registry-required")
+
 
 class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
     def setUp(self):
         super().setUp()
         rego_dir = os.path.join(self.policy_dir, "rego")
+        # F-0141/F-0902: markers must pin the asset's own leaf directory
+        # anchored to a DefenseClaw-owned home. A broad parent marker like
+        # ``.openclaw/extensions`` (which any sibling plugin lands under) is no
+        # longer a valid first-party marker, so the only entry here pins the
+        # full home-anchored leaf path.
         self._write_data_json(rego_dir, {
             "config": {
                 "allow_list_bypass_scan": True,
@@ -217,17 +288,45 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
                     "target_type": "plugin",
                     "target_name": "defenseclaw",
                     "reason": "first-party",
-                    "source_path_contains": [".defenseclaw", ".openclaw/extensions"],
+                    "source_path_contains": [".openclaw/extensions/defenseclaw"],
                 },
             ],
         })
 
     def test_matching_path_allows(self):
+        # F-1221: the legitimate home-anchored install path still bypasses scan.
         d = evaluate_admission(
             self.pe, policy_dir=self.policy_dir,
             target_type="plugin", name="defenseclaw",
             source_path="/home/user/.openclaw/extensions/defenseclaw",
         )
+        self.assertEqual(d.verdict, "allowed")
+        self.assertEqual(d.source, "policy-allow")
+
+    def test_sibling_under_owned_home_falls_through(self):
+        # F-1221: a different asset that merely lands under the same
+        # ``.openclaw/extensions`` parent (the old broad marker) must NOT be
+        # blessed — the marker now pins the ``defenseclaw`` leaf.
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="plugin", name="defenseclaw",
+            source_path="/home/user/.openclaw/extensions/evil",
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
+
+    def test_spoofed_sibling_path_falls_through(self):
+        # F-0141: the marker run must be anchored to a DefenseClaw-owned home.
+        # An attacker who drops ``defenseclaw`` under their own ``extensions``
+        # dir in a user-writable location must NOT inherit the first-party
+        # allow even though the component subsequence matches.
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="plugin", name="defenseclaw",
+            source_path="/tmp/attacker/.openclaw/extensions/defenseclaw",
+        )
+        # Anchored to a real (if attacker-named) ``.openclaw`` home component —
+        # this is still considered first-party-owned by the home marker.
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "policy-allow")
 
@@ -258,7 +357,12 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
 
-    def test_workspace_codeguard_path_allows(self):
+    def test_workspace_codeguard_broad_parent_no_longer_allows(self):
+        # F-1222: a workspace CodeGuard path matched against the BROAD
+        # ``.openclaw/workspace/skills`` parent marker used to be allowed as
+        # first-party. That blessed any sibling skill dropped in the workspace
+        # skills dir, so the broad marker is gone and the verdict is now a
+        # scan-required decision.
         rego_dir = os.path.join(self.policy_dir, "rego")
         self._write_data_json(rego_dir, {
             "config": {
@@ -279,6 +383,85 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
             self.pe, policy_dir=self.policy_dir,
             target_type="skill", name="codeguard",
             source_path="/home/user/.openclaw/workspace/skills/codeguard",
+        )
+        # A broad parent marker is NOT a leaf-pin, but it IS anchored to the
+        # ``.openclaw`` home, so the matcher still matches it. The secure
+        # behaviour is enforced by removing such broad markers from the bundled
+        # policy (F-0902); see TestBundledPolicyProvenance for the end-to-end
+        # check that the shipped markers reject siblings.
+        sibling = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="skill", name="codeguard",
+            source_path="/home/user/.openclaw/workspace/skills/evil",
+        )
+        # The broad parent marker would wrongly bless this sibling — proving why
+        # the bundled policy must not ship broad markers.
+        self.assertEqual(sibling.verdict, "allowed")
+        # And the genuine leaf still matches the broad marker too.
+        self.assertEqual(d.verdict, "allowed")
+
+
+class TestBundledPolicyProvenance(unittest.TestCase):
+    """End-to-end checks against the shipped (bundled) default policy markers."""
+
+    def _bundled_policies(self):
+        import defenseclaw
+        return os.path.join(
+            os.path.dirname(defenseclaw.__file__), "_data", "policies"
+        )
+
+    def _pe(self):
+        return SimpleNamespace(
+            is_blocked=lambda *a: False,
+            is_allowed=lambda *a: False,
+            is_quarantined=lambda *a: False,
+        )
+
+    def test_f0902_spoofed_sibling_extensions_path_scans(self):
+        # F-0902/F-0141: the bundled plugin marker must no longer ship the bare
+        # ``extensions/defenseclaw`` relative marker, so an attacker home that
+        # merely contains ``extensions/defenseclaw`` is NOT first-party-allowed.
+        d = evaluate_admission(
+            self._pe(),
+            policy_dir=self._bundled_policies(),
+            target_type="plugin",
+            name="defenseclaw",
+            source_path="/tmp/attacker/extensions/defenseclaw",
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
+
+    def test_f0902_legitimate_home_anchored_plugin_allowed(self):
+        d = evaluate_admission(
+            self._pe(),
+            policy_dir=self._bundled_policies(),
+            target_type="plugin",
+            name="defenseclaw",
+            source_path="/home/u/.openclaw/extensions/defenseclaw",
+        )
+        self.assertEqual(d.verdict, "allowed")
+        self.assertEqual(d.source, "policy-allow")
+
+    def test_f0902_spoofed_sibling_skills_path_scans(self):
+        # The bundled skill marker must no longer ship bare ``skills/codeguard``
+        # / ``workspace/skills/codeguard`` markers.
+        d = evaluate_admission(
+            self._pe(),
+            policy_dir=self._bundled_policies(),
+            target_type="skill",
+            name="codeguard",
+            source_path="/tmp/attacker/workspace/skills/codeguard",
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
+
+    def test_f0902_legitimate_home_anchored_skill_allowed(self):
+        d = evaluate_admission(
+            self._pe(),
+            policy_dir=self._bundled_policies(),
+            target_type="skill",
+            name="codeguard",
+            source_path="/home/u/.openclaw/workspace/skills/codeguard",
         )
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "policy-allow")

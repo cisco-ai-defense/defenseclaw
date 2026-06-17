@@ -28,6 +28,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.scanner.mcp import (  # noqa: E402
+    _is_exec_control_env_name,
     _is_sensitive_env_name,
     _safe_subprocess_env,
 )
@@ -63,6 +64,33 @@ class IsSensitiveEnvNameTests(unittest.TestCase):
                                  f"{name!r} is a safe baseline name")
 
 
+class IsExecControlEnvNameTests(unittest.TestCase):
+    """F-0221: names that steer executable resolution/loading."""
+
+    def test_exec_control_names_flagged(self):
+        for name in [
+            "PATH", "NODE_PATH", "NODE_OPTIONS", "PYTHONPATH",
+            "PYTHONHOME", "PYTHONSTARTUP",
+            "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+            "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+            # prefix matches (case-insensitive)
+            "ld_preload", "dyld_force_flat_namespace",
+        ]:
+            with self.subTest(name=name):
+                self.assertTrue(_is_exec_control_env_name(name),
+                                f"{name!r} must be flagged exec-control")
+
+    def test_non_exec_control_names_not_flagged(self):
+        for name in [
+            "HOME", "USER", "LANG", "TERM", "TMPDIR",
+            "MY_FEATURE_FLAG", "PROVIDER_API_KEY", "DISPLAY",
+            "GITHUB_TOKEN",
+        ]:
+            with self.subTest(name=name):
+                self.assertFalse(_is_exec_control_env_name(name),
+                                 f"{name!r} is not an exec-control name")
+
+
 class SafeSubprocessEnvTests(unittest.TestCase):
 
     def test_does_not_inherit_api_keys(self):
@@ -85,18 +113,60 @@ class SafeSubprocessEnvTests(unittest.TestCase):
         self.assertEqual(env.get("PATH"), "/usr/bin:/bin",
                          "PATH should be inherited from baseline")
 
-    def test_operator_env_wins(self):
-        """Operator-specified MCP env entries are preserved verbatim."""
+    def test_non_exec_operator_env_preserved(self):
+        """Non-exec operator/publisher MCP env entries still pass through.
+
+        F-0221: only execution-control vars are stripped; everything
+        else the server legitimately needs is preserved (including keys
+        that overlap the sensitive-substring list, which the operator
+        explicitly placed on the MCP entry).
+        """
         operator = {
             "MY_FEATURE_FLAG": "true",
-            # Even keys that overlap with the sensitive substring
-            # list are kept when the operator explicitly placed them
-            # on the MCP entry — that's the contract.
             "PROVIDER_API_KEY": "operator-supplied",
         }
         env = _safe_subprocess_env(operator)
         self.assertEqual(env["MY_FEATURE_FLAG"], "true")
         self.assertEqual(env["PROVIDER_API_KEY"], "operator-supplied")
+
+    def test_operator_cannot_override_exec_control_vars(self):
+        """F-0221: untrusted entries MUST NOT set execution-control vars.
+
+        ``MCPServerEntry.env`` comes from connector config / publisher
+        manifest. A config that tries to point the allowlisted launcher
+        at an attacker-controlled PATH / NODE_PATH / PYTHONPATH or to
+        preload a library via LD_PRELOAD / LD_LIBRARY_PATH / DYLD_* must
+        NOT win — the safe baseline value is kept instead.
+        """
+        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True):
+            env = _safe_subprocess_env({
+                "PATH": "/tmp/evil",
+                "NODE_PATH": "/tmp/evil/node_modules",
+                "PYTHONPATH": "/tmp/evil/site-packages",
+                "LD_PRELOAD": "/tmp/evil/hook.so",
+                "LD_LIBRARY_PATH": "/tmp/evil/lib",
+                "DYLD_INSERT_LIBRARIES": "/tmp/evil/hook.dylib",
+                # a non-exec var on the same entry must still come through
+                "BENIGN_FLAG": "ok",
+            })
+        # Exec-control overrides from the untrusted entry are rejected.
+        self.assertEqual(env.get("PATH"), "/usr/bin:/bin",
+                         "operator PATH override must NOT reach the subprocess")
+        self.assertNotIn("NODE_PATH", env)
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertNotIn("LD_PRELOAD", env)
+        self.assertNotIn("LD_LIBRARY_PATH", env)
+        self.assertNotIn("DYLD_INSERT_LIBRARIES", env)
+        # The benign, non-exec var still passes through.
+        self.assertEqual(env.get("BENIGN_FLAG"), "ok")
+
+    def test_tmp_evil_path_does_not_reach_subprocess_env(self):
+        """Negative case: a PATH=/tmp/evil entry never reaches the env;
+        the safe baseline PATH wins."""
+        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True):
+            env = _safe_subprocess_env({"PATH": "/tmp/evil"})
+        self.assertEqual(env["PATH"], "/usr/bin:/bin")
+        self.assertNotEqual(env["PATH"], "/tmp/evil")
 
     def test_none_values_become_empty_string(self):
         env = _safe_subprocess_env({"X": None})

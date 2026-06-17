@@ -511,6 +511,48 @@ class TestExtractArchive:
         # Confirm nothing leaked outside the dest dir.
         assert not (tmp_path / "escape.txt").exists()
 
+    def test_tar_prefix_symlink_member_blocked(self, tmp_path):
+        """F-0181: the prefix extraction path shells out to system ``tar``
+        which materializes symlink members verbatim, bypassing the
+        symlink rejection on the non-prefix branch. A symlink member under
+        the requested prefix must be refused before extraction."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            # A legit file plus a symlink, both under the prefix.
+            data = b"ok"
+            ti = tarfile.TarInfo(name="package/plugins/voice-call/index.js")
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+            link = tarfile.TarInfo(name="package/plugins/voice-call/evil")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "/etc/passwd"
+            tf.addfile(link)
+        archive = tmp_path / "evil.tgz"
+        archive.write_bytes(buf.getvalue())
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        with pytest.raises(RegistryError, match="non-regular member"):
+            _extract_archive(
+                str(archive), str(dest), prefix="package/plugins/voice-call/"
+            )
+
+    def test_tar_prefix_regular_files_still_extract(self, tmp_path):
+        """F-0181 regression guard: a clean prefix archive (regular files
+        only) must still extract successfully after the symlink
+        pre-inspection was added."""
+        tgz_bytes = _make_tgz({
+            "package/plugins/voice-call/index.js": "// ok",
+            "package/plugins/voice-call/package.json": "{}",
+        })
+        archive = tmp_path / "ok.tgz"
+        archive.write_bytes(tgz_bytes)
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        _extract_archive(str(archive), str(dest), prefix="package/plugins/voice-call/")
+        assert "index.js" in os.listdir(str(dest))
+
     def test_tar_symlink_member_blocked_in_fallback(self, tmp_path,
                                                      monkeypatch):
         """symlink members must be rejected (the 3.12+ "data"

@@ -362,7 +362,16 @@ def setup_sandbox(
         )
 
     # 6. Patch sandbox-side OpenClaw config (port + bind + guardrail baseUrl)
+    # F-0422: the patch below writes (and chowns to sandbox) a file under
+    # $SANDBOX_HOME/.openclaw, which is reachable through the
+    # attacker-writable .openclaw symlink. Validate that the symlink still
+    # resolves to the pinned original OpenClaw home BEFORE the privileged
+    # patch write, not just before the later recursive chown (step 11).
+    # Otherwise a symlink swap would steer the openclaw.json patch (and its
+    # `chown sandbox:sandbox`) at an arbitrary host file.
     if oc_json is not None:
+        oc_patch_target = os.path.realpath(os.path.join(sandbox_home, ".openclaw"))
+        _assert_oc_target_is_pinned_home(oc_patch_target, app.cfg)
         _patch_openclaw_gateway(oc_config, openclaw_port, existing_cfg=oc_json, host_ip=host_ip)
         click.echo(f"    openclaw.json:        patched (gateway.port={openclaw_port}, gateway.bind=lan)")
 
@@ -1016,6 +1025,20 @@ def _patch_openclaw_gateway(
 
 def _restore_openclaw_gateway(openclaw_config: str) -> bool:
     """Restore gateway defaults in openclaw.json after sandbox mode."""
+    from defenseclaw.safety import SafetyError, reject_symlink
+
+    # F-0425: openclaw.json lives under $SANDBOX_HOME/.openclaw, reachable
+    # through the attacker-writable .openclaw symlink. The read (below) and
+    # the rewrite (further down) both followed symlinks, so a planted link
+    # could disclose an arbitrary operator-readable file or have the
+    # privileged write clobber an arbitrary path. Refuse to follow a
+    # symlinked config target before reading.
+    try:
+        reject_symlink(openclaw_config, what="openclaw config")
+    except SafetyError as exc:
+        click.echo(f"  Gateway:       refusing to restore — {exc}", err=True)
+        return False
+
     cfg = _sudo_read_json(openclaw_config)
     if cfg is None:
         return False
@@ -1032,6 +1055,14 @@ def _restore_openclaw_gateway(openclaw_config: str) -> bool:
         dc_provider["baseUrl"] = f"http://localhost:{parsed.port or 4000}"
 
     content = _json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
+
+    # Re-check immediately before the write: the path could have been
+    # swapped to a symlink between the read above and this write (TOCTOU).
+    try:
+        reject_symlink(openclaw_config, what="openclaw config")
+    except SafetyError as exc:
+        click.echo(f"  Gateway:       refusing to write — {exc}", err=True)
+        return False
 
     if _needs_sudo():
         import tempfile
@@ -1700,6 +1731,24 @@ def _generate_run_sandbox_script(data_dir: str, host_ip: str, cfg) -> None:
     q_gateway_bin = shlex.quote(gateway_bin)
     q_api_bind = shlex.quote(api_bind)
 
+    # F-0427: the background ACL fixer must NOT blanket-grant the sandbox
+    # user rwX on a hardcoded ``/root/.openclaw`` — that would expose ROOT's
+    # own OpenClaw home (and anything an attacker can reach through it) to
+    # the unprivileged sandbox user even when the real pinned home lives
+    # elsewhere. Template the operator-confirmed pinned OpenClaw home
+    # (recorded at sandbox-init time) plus the sandbox-owned
+    # ``$SANDBOX_HOME/.openclaw`` instead. When nothing is pinned we fall
+    # back to only the sandbox's own .openclaw — never root's.
+    sandbox_home = cfg.openshell.effective_sandbox_home()
+    sandbox_oc_home = os.path.join(sandbox_home, ".openclaw")
+    pinned_oc_home = (cfg.claw.openclaw_home_original or "").strip()
+    acl_fix_targets: list[str] = []
+    if pinned_oc_home:
+        acl_fix_targets.append(pinned_oc_home)
+    if sandbox_oc_home not in acl_fix_targets:
+        acl_fix_targets.append(sandbox_oc_home)
+    q_acl_fix_targets = " ".join(shlex.quote(t) for t in acl_fix_targets)
+
     script = f"""#!/bin/bash
 set -euo pipefail
 
@@ -1905,7 +1954,7 @@ fi
 _fix_sandbox_acls() {{
     while kill -0 "$SANDBOX_PID" 2>/dev/null; do
         sleep 5
-        for d in /root/.openclaw /home/sandbox/.openclaw; do
+        for d in {q_acl_fix_targets}; do
             [ -d "$d" ] || continue
             setfacl -R -m u:sandbox:rwX "$d" 2>/dev/null || true
             setfacl -R -m m::rwx "$d" 2>/dev/null || true
@@ -1957,6 +2006,140 @@ def _extract_ed25519_pubkey(key_data: bytes) -> bytes | None:
     return None
 
 
+# F-1441: provenance sentinel format. The sentinel proves that the
+# *same* DefenseClaw install that owns the 0o600 provenance secret minted
+# this device.key — an HMAC an external process cannot forge without that
+# secret. ``write_device_key_provenance`` (called by the gateway minting
+# flow) produces it; ``_verify_device_key_provenance`` checks it.
+_PROVENANCE_SENTINEL_PREFIX = "defenseclaw-device-provenance-v1:"
+_PROVENANCE_SECRET_FILE = "device.provenance.secret"
+
+
+def _provenance_secret_path(data_dir: str) -> str:
+    return os.path.join(data_dir, _PROVENANCE_SECRET_FILE)
+
+
+def _read_owner_only_secret(path: str) -> bytes | None:
+    """Read a provenance secret only if it is a 0o600-or-stricter regular
+    file owned by the running user (or root) and not a symlink.
+
+    Returns ``None`` (verification fails closed) otherwise so a planted,
+    world-writable, or symlinked secret can never be trusted.
+    """
+    import stat as _stat
+
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not _stat.S_ISREG(st.st_mode):
+        return None
+    if st.st_mode & 0o077:
+        return None
+    try:
+        running_uid = os.geteuid()
+    except AttributeError:
+        running_uid = -1
+    if running_uid >= 0 and st.st_uid not in (0, running_uid):
+        return None
+    try:
+        with open(path, "rb") as f:
+            secret = f.read()
+    except OSError:
+        return None
+    return secret or None
+
+
+def write_device_key_provenance(data_dir: str, device_key_path: str) -> str:
+    """Mint a verifiable provenance sentinel for *device_key_path*.
+
+    Called by the legitimate gateway/DefenseClaw key-generation flow right
+    after writing ``device.key``. Ensures a per-install 0o600 provenance
+    secret exists, then writes ``device.key.provenance`` containing an
+    HMAC-SHA256 of the device.key bytes keyed by that secret. Because the
+    secret is owner-only, an external attacker who can drop a ``device.key``
+    cannot compute a matching sentinel. Returns the provenance file path.
+    """
+    import hashlib
+    import hmac
+
+    secret_path = _provenance_secret_path(data_dir)
+    secret = _read_owner_only_secret(secret_path)
+    if secret is None:
+        secret = os.urandom(32)
+        # Create owner-only; O_NOFOLLOW so we never write through a planted
+        # symlink at the secret path.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(secret_path, flags, 0o600)
+        try:
+            os.write(fd, secret)
+        finally:
+            os.close(fd)
+        os.chmod(secret_path, 0o600)
+
+    with open(device_key_path, "rb") as f:
+        key_data = f.read()
+    digest = hmac.new(secret, key_data, hashlib.sha256).hexdigest()
+
+    provenance_path = device_key_path + ".provenance"
+    content = _PROVENANCE_SENTINEL_PREFIX + digest + "\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(provenance_path, flags, 0o600)
+    try:
+        os.write(fd, content.encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(provenance_path, 0o600)
+    return provenance_path
+
+
+def _verify_device_key_provenance(
+    data_dir: str, device_key_file: str, key_data: bytes
+) -> bool:
+    """Return True iff a valid, non-forgeable provenance sentinel exists.
+
+    The sentinel file must be an owner-only regular file (not a symlink)
+    whose body is ``<prefix><hmac>`` where ``hmac`` matches
+    HMAC-SHA256(provenance_secret, device.key bytes). Any literal /
+    arbitrary string (the old ``source=test`` shape) fails the HMAC
+    comparison and is rejected.
+    """
+    import hashlib
+    import hmac
+    import stat as _stat
+
+    provenance_path = device_key_file + ".provenance"
+    try:
+        pst = os.lstat(provenance_path)
+    except OSError:
+        return False
+    if not _stat.S_ISREG(pst.st_mode):
+        return False
+    if pst.st_mode & 0o077:
+        return False
+    try:
+        running_uid = os.geteuid()
+    except AttributeError:
+        running_uid = -1
+    if running_uid >= 0 and pst.st_uid not in (0, running_uid):
+        return False
+
+    secret = _read_owner_only_secret(_provenance_secret_path(data_dir))
+    if secret is None:
+        return False
+
+    try:
+        with open(provenance_path, encoding="utf-8") as f:
+            body = f.read().strip()
+    except OSError:
+        return False
+    if not body.startswith(_PROVENANCE_SENTINEL_PREFIX):
+        return False
+    claimed = body[len(_PROVENANCE_SENTINEL_PREFIX):].strip()
+    expected = hmac.new(secret, key_data, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(claimed, expected)
+
+
 def _pre_pair_device(data_dir: str, sandbox_home: str) -> bool:
     """Pre-inject the sidecar's device key into OpenClaw's devices/paired.json.
 
@@ -1966,14 +2149,22 @@ def _pre_pair_device(data_dir: str, sandbox_home: str) -> bool:
     pairing record from it. A local attacker that could write
     ``device.key`` (or that simply wrote it before sandbox setup
     ran) therefore enrolled their own key as an OpenClaw operator
-    device. We now refuse the pairing unless:
+    device. A first hardening attempt only checked that a sibling
+    ``device.key.provenance`` file *existed* — but that file is just as
+    forgeable as device.key itself (an attacker plants both, with an
+    arbitrary literal like ``source=test``). F-1441: we now require the
+    provenance file to carry a cryptographically VERIFIABLE sentinel — an
+    HMAC of the device.key bytes keyed by a per-install owner-only secret
+    that the gateway minting flow (:func:`write_device_key_provenance`)
+    holds and an external attacker cannot read. We refuse the pairing
+    unless:
 
-      * the file is a regular file (not a symlink, FIFO, etc.),
+      * device.key is a regular file (not a symlink, FIFO, etc.),
       * it is owned by the user running setup (or root),
       * its mode is at most 0o600, and
-      * a sentinel ``device.key.provenance`` file generated by the
-        gateway is present alongside it (or the operator has
-        explicitly opted into the legacy loose behavior).
+      * the sibling ``device.key.provenance`` carries a valid HMAC
+        sentinel (or the operator has explicitly opted into the legacy
+        loose behavior via DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1).
     """
     import base64
     import hashlib
@@ -2014,24 +2205,27 @@ def _pre_pair_device(data_dir: str, sandbox_home: str) -> bool:
         )
         return False
 
-    # Require a provenance sentinel that was created by the gateway
-    # alongside device.key. Operators who explicitly want the legacy
-    # behavior can opt back in with DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1.
-    provenance_path = device_key_file + ".provenance"
-    legacy_opt_in = os.environ.get("DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY", "").strip() == "1"
-    if not os.path.isfile(provenance_path) and not legacy_opt_in:
-        click.echo(
-            f"    device pairing:       refused — no gateway provenance sentinel at "
-            f"{provenance_path}; refusing to mint operator pairing from arbitrary device.key. "
-            f"Set DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1 to opt back into legacy behavior.",
-            err=True,
-        )
-        return False
-
     try:
         with open(device_key_file, "rb") as f:
             key_data = f.read()
     except OSError:
+        return False
+
+    # F-1441: require a cryptographically verifiable provenance sentinel,
+    # not merely the presence of a (forgeable) sibling file. Operators who
+    # explicitly want the legacy loose behavior can opt back in with
+    # DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1.
+    legacy_opt_in = os.environ.get("DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY", "").strip() == "1"
+    if not legacy_opt_in and not _verify_device_key_provenance(
+        data_dir, device_key_file, key_data
+    ):
+        click.echo(
+            f"    device pairing:       refused — {device_key_file}.provenance is missing or "
+            f"does not carry a valid gateway-minted sentinel; refusing to mint operator "
+            f"pairing from an unverified device.key. Set "
+            f"DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1 to opt back into legacy behavior.",
+            err=True,
+        )
         return False
 
     pub_key = _extract_ed25519_pubkey(key_data)

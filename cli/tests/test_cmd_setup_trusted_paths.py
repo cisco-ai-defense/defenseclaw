@@ -119,6 +119,62 @@ class AddTrustedBinPrefixTests(unittest.TestCase):
             self.assertIn("/opt/tools", body)
             self.assertIn("/opt/more", body)
 
+    def test_embedded_newline_prefix_is_rejected_and_no_entry_injected(self):
+        """F-1401: a trusted-path NAME with an embedded newline must not be
+        able to inject a second KEY=VALUE line into ~/.defenseclaw/.env.
+
+        ``~/.defenseclaw/.env`` is parsed line-by-line, so a prefix like
+        ``/opt/tools\\nDEFENSECLAW_DISABLE_REDACTION=1`` would otherwise add a
+        second assignment that disables redaction. The dotenv writer now
+        sanitizes (sanitize_dotenv_value) and raises DotenvValueError; the
+        write is built before the file is opened, so the pre-existing legit
+        entry is preserved and the injected key never lands.
+        """
+        from defenseclaw.safety import DotenvValueError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
+                # Seed a legitimate trusted prefix first.
+                cmd_setup._add_trusted_bin_prefix("/opt/legit", tmp)
+
+                malicious = "/opt/tools\nDEFENSECLAW_DISABLE_REDACTION=1"
+                with self.assertRaises(DotenvValueError):
+                    cmd_setup._add_trusted_bin_prefix(malicious, tmp)
+
+            dotenv = os.path.join(tmp, ".env")
+            body = open(dotenv, encoding="utf-8").read()
+            # The injected entry never made it into the file...
+            self.assertNotIn("DEFENSECLAW_DISABLE_REDACTION", body)
+            # ...and the file is exactly the prior single legit entry: no
+            # multi-line corruption, only the one expected key.
+            self.assertIn("/opt/legit", body)
+            keys = [
+                ln.split("=", 1)[0].strip()
+                for ln in body.splitlines()
+                if ln.strip() and not ln.strip().startswith("#") and "=" in ln
+            ]
+            self.assertEqual(keys, ["DEFENSECLAW_TRUSTED_BIN_PREFIXES"])
+
+    def test_dotenv_writer_refuses_symlink_target(self):
+        """Secret/trusted-prefix writes must not follow a symlinked .env."""
+        from defenseclaw.safety import SafetyError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "target")
+            dotenv = os.path.join(tmp, ".env")
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("ORIGINAL=1\n")
+            try:
+                os.symlink(target, dotenv)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            with self.assertRaises(SafetyError):
+                cmd_setup._write_dotenv(dotenv, {"SAFE": "value"})
+
+            with open(target, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "ORIGINAL=1\n")
+
 
 class CaskroomDefaultTests(unittest.TestCase):
     def test_caskroom_is_a_builtin_default(self):

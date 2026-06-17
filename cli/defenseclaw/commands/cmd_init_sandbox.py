@@ -275,6 +275,24 @@ def _init_sandbox(cfg, logger) -> bool:
     # 7. Fix ownership — files written after the initial chown (plugin, policies)
     #    need to be owned by sandbox too
     oc_target = os.path.realpath(os.path.join(sandbox_home, ".openclaw"))
+    # F-0421: the earlier integration validated the .openclaw symlink against
+    # the pinned home, but $SANDBOX_HOME/.openclaw is attacker-writable and a
+    # local user could swap the symlink in the window between that check and
+    # this recursive privileged chown (TOCTOU). Re-resolve and re-validate
+    # the realpath against the pinned original OpenClaw home immediately
+    # before the chown; fail closed on any divergence so the chown can never
+    # follow a swapped link into an arbitrary host tree.
+    pinned = _pinned_openclaw_home(cfg)
+    if pinned and oc_target != pinned:
+        click.echo(
+            "  ERROR: refusing privileged chown of sandbox OpenClaw home.\n"
+            f"  {os.path.join(sandbox_home, '.openclaw')} resolves to {oc_target}\n"
+            f"  but the pinned original OpenClaw home is {pinned}.\n"
+            "  Possible symlink swap; aborting before chowning an "
+            "attacker-controlled path.",
+            err=True,
+        )
+        return False
     try:
         subprocess.run(
             [*_sudo_prefix(), "chown", "-R", "sandbox:sandbox", oc_target],

@@ -997,6 +997,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         --action still install with a warning so existing operator
         workflows don't break."""
         from datetime import datetime, timedelta, timezone
+
         from defenseclaw.models import Finding, ScanResult
         mock_scan.return_value = ScanResult(
             scanner="plugin-scanner", target="x",
@@ -1063,6 +1064,38 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         result = self._invoke_install(["install", "https://example.com/pkg.tgz"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Installed plugin: derived-name", result.output)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    @patch("defenseclaw.registry.fetch_from_url")
+    def test_install_url_blocked_after_name_derived(self, mock_fetch, mock_scan):
+        """F-0481/F-1461: a URL install whose DERIVED name is on the block list
+        must be blocked.
+
+        For HTTP/URL sources the plugin name is empty before the fetch, so the
+        pre-install admission gate is skipped. The real name is only known after
+        fetch_from_url() derives it from the extracted source. The post-fetch
+        admission re-evaluation must catch a blocked verdict on that derived name
+        and abort BEFORE shutil.copytree — even though the scanner returns clean.
+        """
+        # Scanner returns clean so the only thing that can stop the install is
+        # the admission gate (proving the gate, not the scan, does the blocking).
+        mock_scan.return_value = self._clean_scan_result()
+        src = self._create_plugin_dir("evil-url-plugin")
+        mock_fetch.return_value = src
+
+        # Block the DERIVED name (basename of the fetched source dir).
+        pe = PolicyEngine(self.app.store)
+        pe.block("plugin", "evil-url-plugin", "testing url admission bypass")
+
+        result = self._invoke_install(["install", "https://evil.example.com/pkg.tgz"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("block list", result.output)
+        # The blocked plugin must NOT have been copied into plugin_dir.
+        self.assertFalse(
+            os.path.isdir(os.path.join(self.app.cfg.plugin_dir, "evil-url-plugin")),
+            "blocked URL plugin was installed — admission bypass not fixed",
+        )
 
     @patch("defenseclaw.registry.fetch_npm_package")
     def test_install_tmpdir_cleaned_on_registry_error(self, mock_fetch):

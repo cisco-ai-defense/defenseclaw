@@ -773,6 +773,9 @@ def test_cmd(
               help="With --all, also sync disabled sources")
 @click.option("--scan/--no-scan", default=True,
               help="Run skill/MCP scanners on each entry (default: yes)")
+@click.option("--scan-stdio", is_flag=True,
+              help="Also scan stdio MCP entries, which SPAWNS the "
+                   "publisher-controlled package (off by default)")
 @click.option("--allow-private", is_flag=True,
               help="Permit RFC1918 / ULA destinations (off by default)")
 @click.option("--no-promote", is_flag=True,
@@ -785,6 +788,7 @@ def sync_cmd(  # noqa: PLR0913
     sync_all_flag: bool,
     include_disabled: bool,
     scan: bool,
+    scan_stdio: bool,
     allow_private: bool,
     no_promote: bool,
     emit_json: bool,
@@ -798,11 +802,20 @@ def sync_cmd(  # noqa: PLR0913
       defenseclaw registry sync --all
       defenseclaw registry sync --all --no-scan       # metadata-only refresh
       defenseclaw registry sync corp-skills --no-promote   # preview
+      defenseclaw registry sync corp-mcp --scan-stdio      # opt-in stdio scan
+
+    \b
+    F-0541: scanning a stdio MCP entry inherently SPAWNS the
+    publisher-controlled package. Routine ``sync`` therefore does NOT
+    auto-scan stdio entries unless ``--scan-stdio`` is passed; skipped
+    entries emit a one-line notice so the coverage loss is not silent.
+    Remote/URL MCP entries (no local process spawn) are always scanned.
     """
     cfg = _require_cfg(app)
 
     callback: ScanCallback | None = (
-        _make_scan_callback(app, allow_private=allow_private) if scan else None
+        _make_scan_callback(app, allow_private=allow_private, scan_stdio=scan_stdio)
+        if scan else None
     )
 
     if sync_all_flag:
@@ -877,14 +890,19 @@ def _print_sync_reports(reports: list[SyncReport]) -> None:
 _HASH_REQUIRED_SKILL_SOURCE_KINDS = {"http_yaml", "http_json", "git", "file"}
 
 
-def _make_scan_callback(app: AppContext, *, allow_private: bool = False) -> ScanCallback:
+def _make_scan_callback(
+    app: AppContext, *, allow_private: bool = False, scan_stdio: bool = False,
+) -> ScanCallback:
     cfg = _require_cfg(app)
 
     def _scan(source: RegistrySource, entry: ManifestEntry):  # type: ignore[no-untyped-def]
         if entry.is_skill():
             return _run_skill_scan(app, cfg, source, entry, allow_private=allow_private)
         if entry.is_mcp():
-            return _run_mcp_scan(app, cfg, source, entry, allow_private=allow_private)
+            return _run_mcp_scan(
+                app, cfg, source, entry,
+                allow_private=allow_private, scan_stdio=scan_stdio,
+            )
         return None
 
     return _scan
@@ -1032,6 +1050,7 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
     entry: ManifestEntry,
     *,
     allow_private: bool = False,
+    scan_stdio: bool = False,
 ):
     """Best-effort MCP scan via the SDK wrapper."""
     try:
@@ -1042,19 +1061,36 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
         )
     except ImportError:
         return None
-    try:
-        scanner = MCPScannerWrapper(
-            cfg.scanners.mcp_scanner,
-            cfg.effective_inspect_llm(),
-            cfg.cisco_ai_defense,
-            llm=cfg.resolve_llm("scanners.mcp"),
-        )
-    except Exception:  # noqa: BLE001
-        return None
+
+    def _build_scanner():  # type: ignore[no-untyped-def]
+        try:
+            return MCPScannerWrapper(
+                cfg.scanners.mcp_scanner,
+                cfg.effective_inspect_llm(),
+                cfg.cisco_ai_defense,
+                llm=cfg.resolve_llm("scanners.mcp"),
+            )
+        except Exception:  # noqa: BLE001
+            return None
 
     transport = entry.transport or "stdio"
     if transport == "stdio":
         if not entry.command:
+            return None
+        # F-0541: scanning a stdio MCP entry inherently SPAWNS the
+        # publisher-controlled package. Routine `registry sync` must NOT
+        # auto-spawn it without explicit operator intent, so the stdio
+        # scan is opt-in via `registry sync --scan-stdio`. When skipped,
+        # emit a one-line notice (the verdict stays `pending`) so the
+        # coverage loss is visible, not silent. Remote/URL entries below
+        # spawn no local process and are unaffected.
+        if not scan_stdio:
+            click.echo(
+                f"[registry] skipping stdio MCP scan (would spawn package): "
+                f"name={entry.name!r} command={entry.command!r} — pass "
+                f"`registry sync --scan-stdio` to scan it",
+                err=True,
+            )
             return None
         # a registry manifest is publisher-controlled.
         # The legacy code passed publisher-supplied entry.command and
@@ -1088,6 +1124,9 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
             args=list(entry.args),
             env={k: "" for k in entry.env_required},
         )
+        scanner = _build_scanner()
+        if scanner is None:
+            return None
         try:
             return scanner.scan(
                 entry.name, server_entry=server, allow_private=allow_private
@@ -1110,6 +1149,9 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
             f"`defenseclaw registry sync --allow-private` to opt in.",
             err=True,
         )
+        return None
+    scanner = _build_scanner()
+    if scanner is None:
         return None
     try:
         return scanner.scan(entry.url, allow_private=allow_private)

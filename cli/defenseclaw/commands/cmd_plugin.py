@@ -408,6 +408,46 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
             click.echo(f"error: invalid plugin name: {plugin_name!r}", err=True)
             raise SystemExit(1)
 
+        # --- Re-run admission on the derived name (F-0481) ---
+        # For URL installs `plugin_name` started empty, so the pre-install
+        # admission gate above was skipped entirely; the real name is only
+        # known after `fetch_from_url()` derives it from the fetched source.
+        # Without re-evaluating, a blocked plugin reached `shutil.copytree`
+        # on the clean-scan path. Re-run admission here — once the name is
+        # known and validated — for any source whose name was NOT available
+        # before the fetch, and honor a "blocked" verdict the same way the
+        # pre-install gate does. An "allowed" verdict also lets us skip the
+        # scan, matching the pre-install allow path.
+        if pre_decision is None:
+            post_fetch_source = name_or_path if source == SourceType.LOCAL else ""
+            derived_decision = evaluate_admission(
+                pe,
+                policy_dir=app.cfg.policy_dir,
+                target_type="plugin",
+                name=plugin_name,
+                source_path=post_fetch_source,
+                fallback_actions=app.cfg.plugin_actions,
+                connector=connector,
+                asset_policy=app.cfg.asset_policy,
+            )
+            if derived_decision.verdict == "blocked":
+                if app.logger:
+                    app.logger.log_action("install-rejected", plugin_name, "reason=blocked")
+                click.echo(
+                    f"error: plugin {plugin_name!r} is on the block list"
+                    f" — run 'defenseclaw plugin allow {plugin_name}' to unblock",
+                    err=True,
+                )
+                raise SystemExit(1)
+            if derived_decision.verdict == "allowed" and not allowed:
+                allowed = True
+                if derived_decision.source == "scan-disabled":
+                    click.echo(f"[install] policy allows {plugin_name!r} without scan")
+                else:
+                    click.echo(f"[install] {plugin_name!r} is on the allow list — skipping scan")
+                if app.logger:
+                    app.logger.log_action("install-allowed", plugin_name, "reason=allow-listed")
+
         # --- Duplicate check ---
         dest = os.path.join(plugin_dir, plugin_name)
         real_plugin_dir = os.path.realpath(plugin_dir)

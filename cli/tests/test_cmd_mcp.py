@@ -263,6 +263,24 @@ class TestMCPScan(MCPCommandTestBase):
         called = {c.kwargs.get("connector") for c in mock_set.call_args_list}
         self.assertEqual(called, {"codex"})
 
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_rejects_mixed_command_and_url(self, mock_set):
+        # F-1821: An entry carrying BOTH --command and --url takes the REMOTE
+        # scan path (is_local = command and not url -> False) so the URL is
+        # scanned while the local command is what gets installed/run. Reject
+        # the mismatch so the scanned thing is the installed thing.
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+
+        result = self.invoke(
+            ["set", "ctx7", "--command", "uvx", "--args", "ctx7-mcp",
+             "--url", "https://x/mcp", "--skip-scan"]
+        )
+
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("exactly one of --command or --url", result.output)
+        # The mixed entry must never reach a connector write.
+        mock_set.assert_not_called()
+
     @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
     def test_unset_fans_out_to_all_connectors_with_the_server(self, mock_unset):
         self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
