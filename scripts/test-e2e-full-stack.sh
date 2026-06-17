@@ -281,8 +281,12 @@ get_gateway_token() {
         return
     fi
 
-    # Strategy 1: resolve via Python config (loads .env + config.yaml).
-    GATEWAY_TOKEN_CACHE=$(python3 - <<'PY' 2>/dev/null || true
+    # Strategy 1: canonical sidecar API token from the current process env.
+    GATEWAY_TOKEN_CACHE="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+
+    # Strategy 2: resolve via Python config (loads .env + config.yaml).
+    if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
+        GATEWAY_TOKEN_CACHE=$(python3 - <<'PY' 2>/dev/null || true
 from defenseclaw.config import load
 try:
     print(load().gateway.resolved_token())
@@ -290,13 +294,14 @@ except Exception:
     print("")
 PY
 )
+    fi
 
-    # Strategy 2: env var directly (matches Go sidecar's ResolvedToken).
+    # Strategy 3: legacy OpenClaw token from the current process env.
     if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
         GATEWAY_TOKEN_CACHE="${OPENCLAW_GATEWAY_TOKEN:-}"
     fi
 
-    # Strategy 3: read token_env name from config, then check that env var.
+    # Strategy 4: read token_env name from config, then check that env var.
     if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$HOME/.defenseclaw/config.yaml" ]; then
         local token_env_name
         token_env_name=$(grep 'token_env:' "$HOME/.defenseclaw/config.yaml" 2>/dev/null | head -1 | awk '{print $2}' | tr -d "'\"" || true)
@@ -305,9 +310,12 @@ PY
         fi
     fi
 
-    # Strategy 4: parse ~/.defenseclaw/.env directly (same as Go loadDotEnvIntoOS).
+    # Strategy 5: parse ~/.defenseclaw/.env directly (same as Go loadDotEnvIntoOS).
     if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$HOME/.defenseclaw/.env" ]; then
-        GATEWAY_TOKEN_CACHE=$(grep '^OPENCLAW_GATEWAY_TOKEN=' "$HOME/.defenseclaw/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" || true)
+        GATEWAY_TOKEN_CACHE=$(grep '^DEFENSECLAW_GATEWAY_TOKEN=' "$HOME/.defenseclaw/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" || true)
+        if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
+            GATEWAY_TOKEN_CACHE=$(grep '^OPENCLAW_GATEWAY_TOKEN=' "$HOME/.defenseclaw/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" || true)
+        fi
     fi
 
     printf '%s\n' "$GATEWAY_TOKEN_CACHE"
@@ -351,7 +359,8 @@ sidecar_api_authenticated() {
     if echo "$raw" | jq -e '.error' >/dev/null 2>&1; then
         echo "  [diag] sidecar API probe failed: $raw" >&2
         echo "  [diag] token resolved by test: '$(get_gateway_token | head -c6)...'" >&2
-        echo "  [diag] OPENCLAW_GATEWAY_TOKEN env: '${OPENCLAW_GATEWAY_TOKEN:+set (${#OPENCLAW_GATEWAY_TOKEN} chars)}${OPENCLAW_GATEWAY_TOKEN:-<empty>}'" >&2
+        echo "  [diag] DEFENSECLAW_GATEWAY_TOKEN env: '${DEFENSECLAW_GATEWAY_TOKEN:+set (${#DEFENSECLAW_GATEWAY_TOKEN} chars)}'" >&2
+        echo "  [diag] OPENCLAW_GATEWAY_TOKEN env: '${OPENCLAW_GATEWAY_TOKEN:+set (${#OPENCLAW_GATEWAY_TOKEN} chars)}'" >&2
         return 1
     fi
     return 0
