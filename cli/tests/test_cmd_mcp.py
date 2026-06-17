@@ -427,6 +427,17 @@ class TestMCPScan(MCPCommandTestBase):
         set_help = self.runner.invoke(mcp, ["set", "--help"]).output
         self.assertNotIn("OpenClaw config", set_help)
 
+    def test_empty_list_warning_names_selected_connector_source(self):
+        self.app.cfg.active_connectors = lambda: ["opencode"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = lambda connector=None: []  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--connector", "opencode"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector='opencode'", result.output)
+        self.assertIn("OpenCode MCP config", result.output)
+        self.assertNotIn("OpenClaw", result.output)
+
     @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
     def test_unset_connector_flag_targets_one(self, mock_unset):
         # D2 parity: `mcp unset --connector X` removes from X's config.

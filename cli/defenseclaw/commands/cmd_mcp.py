@@ -126,9 +126,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
         if not servers:
             ux.warn(
                 f"No MCP servers configured for connector={connector!r} "
-                "(checked the connector-specific source: openclaw.json / "
-                ".claude/settings.json / .codex/config.toml / "
-                ".zeptoclaw/config.json / user-global hook connector MCP files).",
+                f"(checked: {_mcp_source_hint(connector)}).",
             )
             continue
         _print_mcp_list_table(servers, scan_map, actions_map, connector)
@@ -144,13 +142,31 @@ def _collect_mcps_for_connector(
 ) -> list[MCPServerEntry]:
     """Return the per-connector MCP server list.
 
-    The connector-aware ``cfg.mcp_servers(connector)`` reads the
-    connector-specific source (openclaw.json / .claude/settings.json /
-    .codex/config.toml / .zeptoclaw/config.json / user-global hook
-    connector MCP files), so each active connector resolves its own
-    catalog when ``mcp list`` fans out.
+    The connector-aware ``cfg.mcp_servers(connector)`` reads the peer's
+    own MCP config, so each active connector resolves its own catalog when
+    ``mcp list`` fans out.
     """
     return app.cfg.mcp_servers(connector)
+
+
+def _mcp_source_hint(connector: str) -> str:
+    """Human label for the connector-specific MCP source used by list/scan."""
+    name = connector_paths.normalize(connector)
+    hints = {
+        "openclaw": "OpenClaw MCP config",
+        "claudecode": "Claude Code settings and workspace MCP config",
+        "codex": "Codex config and workspace MCP config",
+        "zeptoclaw": "ZeptoClaw config and workspace MCP config",
+        "hermes": "Hermes config",
+        "cursor": "Cursor MCP config",
+        "windsurf": "Windsurf MCP config",
+        "geminicli": "Gemini CLI settings",
+        "copilot": "Copilot hook MCP config",
+        "openhands": "OpenHands MCP config",
+        "antigravity": "Antigravity MCP config",
+        "opencode": "OpenCode MCP config",
+    }
+    return hints.get(name, "connector-specific MCP config")
 
 
 def _mcp_list_json_items(
@@ -488,7 +504,9 @@ def _scan_all_mcp(
         # N2: honor a per-connector block — resolve most-specific-wins for the
         # connector being scanned (connector-scoped entry, else global), so a
         # block scoped to a different peer doesn't skip this connector's scan.
-        if pe.is_blocked_for_connector("mcp", s.name, connector) or pe.is_blocked_for_connector("mcp", scan_target, connector):
+        if pe.is_blocked_for_connector(
+            "mcp", s.name, connector
+        ) or pe.is_blocked_for_connector("mcp", scan_target, connector):
             if not as_json:
                 click.echo(
                     f"BLOCKED: {s.name} — skipping (remove from block list first)",
