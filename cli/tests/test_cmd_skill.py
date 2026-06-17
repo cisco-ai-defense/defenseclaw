@@ -263,6 +263,19 @@ class TestSkillScan(SkillCommandTestBase):
 
     @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_without_target_uses_bulk_scan_path(self, mock_scanner_cls, mock_scan_all):
+        # `skill scan` is the natural no-target spelling for scanning
+        # configured skills; --all remains only an explicit alias.
+        mock_scanner = MagicMock()
+        mock_scanner_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_scan_all.assert_called_once_with(self.app, mock_scanner, False, enforce=False, connector=None)
+
+    @patch("defenseclaw.commands.cmd_skill._scan_all")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scan_all_multi_connector_fans_out_per_connector(self, mock_scanner_cls, mock_scan_all):
         # D1 parity: in a multi-connector install `scan --all` must scan
         # EVERY active connector's skills, not just the primary's.
@@ -289,6 +302,20 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_scan_all.assert_called_once_with(self.app, mock_scanner, False, enforce=False, connector="codex")
 
+    @patch("defenseclaw.commands.cmd_skill._scan_all")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_connector_without_target_scans_that_connector(self, mock_scanner_cls, mock_scan_all):
+        # MCP parity: `skill scan --connector X` is the natural shorthand
+        # for scanning all skills configured on that connector.
+        mock_scanner = MagicMock()
+        mock_scanner_cls.return_value = mock_scanner
+        self.app.cfg.active_connectors = lambda: ["claudecode", "hermes"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--connector", "hermes"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_scan_all.assert_called_once_with(self.app, mock_scanner, False, enforce=False, connector="hermes")
+
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scan_all_connector_flag_rejects_unknown(self, mock_scanner_cls):
         # A typo'd --connector must fail loudly, not silently scan the primary.
@@ -296,6 +323,17 @@ class TestSkillScan(SkillCommandTestBase):
         self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
 
         result = self.invoke(["scan", "--all", "--connector", "nope"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_connector_without_target_rejects_unknown(self, mock_scanner_cls):
+        # The shorthand path validates the connector the same way --all does.
+        mock_scanner_cls.return_value = MagicMock()
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--connector", "nope"])
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("not configured", result.output)

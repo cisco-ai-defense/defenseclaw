@@ -817,13 +817,13 @@ def _build_skill_scanner(app: AppContext, use_llm: bool | None = None):
 @click.option("--json", "as_json", is_flag=True, help="Output scan results as JSON")
 @click.option("--path", "scan_path", default="", help="Override skill directory path")
 @click.option("--remote", is_flag=True, help="Scan via sidecar API (for skills on a remote host)")
-@click.option("--all", "scan_all", is_flag=True, help="Scan all configured skills")
+@click.option("--all", "scan_all", is_flag=True, help="Scan all configured skills (also the default with no TARGET)")
 @click.option(
     "--connector", "connector_flag", default="",
     help=(
-        "Scan a specific connector's skills. Default for 'skill scan all' "
-        "on multi-connector installs: every active connector (use "
-        "--connector <name> to narrow to one)."
+        "Scope to one connector. With no TARGET, scans all skills for "
+        "that connector. Without --connector, no TARGET scans every "
+        "active connector's skills."
     ),
 )
 @click.option(
@@ -850,7 +850,12 @@ def scan(
     action: bool,
     use_llm: bool | None,
 ) -> None:
-    """Scan a skill by name, path, URL, or 'all' for all configured skills.
+    """Scan configured skills, or scan one skill by name, path, URL, or 'all'.
+
+    With no TARGET, scans configured skills. On multi-connector installs this
+    scans every active connector; pass ``--connector <name>`` to narrow to a
+    single connector. ``--all`` remains an explicit/backward-compatible alias
+    for the no-TARGET bulk scan.
 
     Uses the native cisco-ai-skill-scanner SDK for local scans.
 
@@ -893,6 +898,12 @@ def scan(
             raise SystemExit(1)
         _scan_from_url(app, target, as_json)
         return
+
+    # Connector-scoped parity with MCP/list: a missing TARGET means "scan
+    # configured skills" (all active connectors by default, or the selected
+    # connector when --connector is present). --all remains a readable alias.
+    if not target and not scan_path:
+        scan_all = True
 
     scanner = _build_skill_scanner(app, use_llm)
 
