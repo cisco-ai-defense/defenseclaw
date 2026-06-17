@@ -109,6 +109,11 @@ AGENTS.md
 CLAUDE.md
 agent-out/
 
+# Local PR365 follow-up session scratch notes. Keep the canonical audit
+# reports and non-markdown follow-up artifacts reviewable, but do not
+# publish per-session markdown working notes in the PR.
+.audit/pr365-followups/session*.md
+
 # Local security-tooling working directories — each contributor's
 # Avarice / DeepSec runs drop campaign data, findings, and node_modules
 # under these trees. Keep them out of git so per-machine scan artifacts
