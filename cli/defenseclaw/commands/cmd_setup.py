@@ -38,7 +38,6 @@ import click
 # convention is obvious to anybody auditing this file.
 from defenseclaw import connector_paths, platform_support, ux
 from defenseclaw.audit_actions import (
-    ACTION_SETUP_CONNECTOR_MODE,
     ACTION_SETUP_GATEWAY,
     ACTION_SETUP_GUARDRAIL,
     ACTION_SETUP_HOOK_CONNECTOR,
@@ -3808,14 +3807,14 @@ def setup_guardrail(
         return
 
     setup_connector = target_connector if non_interactive else gc.connector
-    setup_mode = (
+    enforcement_mode = (
         gc.effective_mode(setup_connector)
         if setup_connector and hasattr(gc, "effective_mode")
         else (gc.mode or "observe")
     )
     if not _check_connector_version_supported_for_setup(
         setup_connector or gc.connector or "openclaw",
-        mode=setup_mode or "observe",
+        mode=enforcement_mode or "observe",
         data_dir=getattr(app.cfg, "data_dir", None),
     ):
         return
@@ -4400,11 +4399,10 @@ def _apply_hook_connector_setup(
     # "regex_only" and force gc.judge.enabled = False on EVERY invocation,
     # silently undoing a prior `guardrail judge add` / `setup guardrail` the
     # next time the operator re-ran `setup <connector>` for any reason. Only
-    # seed the per-direction completion strategy when unset (mirrors the
-    # connector-switch path's `if not gc.detection_strategy_completion` guard at
-    # the `setup mode` site); never clobber an existing non-regex_only strategy
-    # or an enabled judge. The dataclass default (regex_judge) now survives a
-    # hook setup, aligning with the documented default (ND-1).
+    # seed the per-direction completion strategy when unset; never clobber an
+    # existing non-regex_only strategy or an enabled judge. The dataclass
+    # default (regex_judge) now survives a hook setup, aligning with the
+    # documented default (ND-1).
     if not gc.detection_strategy:
         gc.detection_strategy = "regex_only"
     if not gc.detection_strategy_completion:
@@ -6084,280 +6082,6 @@ for _guardrail_connector in ("openclaw", "zeptoclaw"):
     setup.add_command(_make_guardrail_connector_setup_command(_guardrail_connector))
 
 
-def _apply_connector_mode_switch(
-    app: AppContext,
-    *,
-    new_connector: str,
-    restart: bool,
-) -> bool:
-    """Switch the active claw connector with smart guardrail inheritance.
-
-    Inheritance rules (intentionally asymmetric — the user wants
-    "switch fast, don't surprise me"):
-
-      • openclaw ↔ zeptoclaw
-            Inherit the current ``guardrail.*`` config verbatim. Both
-            connectors run the same proxy-mode pipeline so whatever
-            ``mode`` / ``scanner_mode`` / ``judge`` / etc. was set
-            stays set. Only ``claw.mode`` and ``guardrail.connector``
-            change.
-
-      • {openclaw|zeptoclaw} → hook-enforced connector
-            Switch to the hook-based template via
-            ``_apply_hook_connector_setup``: the proxy stops binding
-            and the Go gateway wires hook scripts + (where the vendor
-            documents it) native OTel. ``guardrail.mode`` is preserved
-            verbatim so an operator running on ``action`` keeps
-            enforcement — via the destination's PreToolUse deny verdict
-            rather than the proxy. Use ``--observe`` to force
-            observe-only.
-
-      • hook-enforced → {openclaw|zeptoclaw}
-            Treat as a "guardrail-supporting but don't auto-block"
-            switch: enable guardrail in observe mode so the proxy
-            binds and we collect telemetry, but never turn enforcement
-            on without an explicit ``defenseclaw setup guardrail`` run.
-            This avoids silently re-enabling proxy-driven blocking
-            against an upstream that may now reject the proxy URL.
-
-      • hook-enforced ↔ hook-enforced
-            Apply the destination's hook template so ``claw.mode``,
-            ``guardrail.connector``, and the hook-script footprint are
-            realigned. ``guardrail.mode`` is preserved.
-
-    Returns True on success, False on persistence error.
-    """
-    cfg = app.cfg
-    gc = cfg.guardrail
-    prev = (cfg.claw.mode or "openclaw").strip().lower()
-    if prev not in _CONNECTOR_NAMES:
-        prev = "openclaw"
-
-    if new_connector not in _CONNECTOR_NAMES:
-        ux.err(
-            f"unknown connector {new_connector!r} — expected one of {sorted(_CONNECTOR_NAMES)}",
-        )
-        return False
-
-    if prev == new_connector:
-        if not _check_connector_version_supported_for_setup(
-            new_connector,
-            mode=gc.mode or "observe",
-            data_dir=getattr(cfg, "data_dir", None),
-        ):
-            return False
-        if new_connector in _HOOK_ENFORCED_CONNECTORS:
-            carry_mode = (gc.mode or "").strip().lower()
-            if carry_mode not in ("observe", "action"):
-                carry_mode = "observe"
-            click.echo(
-                f"  • Already on {_CONNECTOR_META[new_connector]['label']} ({new_connector}) — refreshing hook wiring."
-            )
-            _print_connector_mutation_notice(new_connector)
-            return _apply_hook_connector_setup(
-                app,
-                connector=new_connector,
-                mode=carry_mode,
-                restart=restart,
-            )
-        click.echo(f"  • Already on {_CONNECTOR_META[new_connector]['label']} ({new_connector}) — nothing to change.")
-        # Persisting the picked-connector hint is still cheap and
-        # idempotent; do it so a reinstall sees the right default.
-        _write_picked_connector_hint(getattr(cfg, "data_dir", None), new_connector)
-        return True
-
-    # Branch on the destination kind. Source kind only matters for
-    # the third bullet above (recover guardrail state when leaving a
-    # hook-enforced connector).
-    if new_connector in _HOOK_ENFORCED_CONNECTORS:
-        # Preserve the operator's existing enforcement posture across
-        # the switch. The hook-enforced surface honors both ``observe``
-        # and ``action``, so flipping connectors should not silently
-        # downgrade enforcement; an operator who was on action stays
-        # on action and the destination's pre-tool hook picks up the
-        # policy load.
-        carry_mode = (gc.mode or "").strip().lower()
-        if carry_mode not in ("observe", "action"):
-            carry_mode = "observe"
-        suffix = (
-            "hook-enforced — pre-tool hook blocks on policy hits"
-            if carry_mode == "action"
-            else "hook-driven observe (no proxy listener)"
-        )
-        click.echo(
-            f"  Switching {_CONNECTOR_META[prev]['label']} → {_CONNECTOR_META[new_connector]['label']} ({suffix})"
-        )
-        _print_connector_mutation_notice(new_connector, switching_from=prev)
-        return _apply_hook_connector_setup(
-            app,
-            connector=new_connector,
-            mode=carry_mode,
-            restart=restart,
-        )
-
-    # Destination is openclaw or zeptoclaw.
-    proxy_mode = gc.mode if prev in _GUARDRAIL_SUPPORTING_CONNECTORS else "observe"
-    if not _check_connector_version_supported_for_setup(
-        new_connector,
-        mode=proxy_mode or "observe",
-        data_dir=getattr(cfg, "data_dir", None),
-    ):
-        return False
-
-    cfg.claw.mode = new_connector
-    workspace = _configure_connector_workspace(cfg)
-    gc.connector = new_connector
-
-    if prev in _GUARDRAIL_SUPPORTING_CONNECTORS:
-        # openclaw ↔ zeptoclaw: pure inheritance. We only re-pin
-        # claw.mode + guardrail.connector. ``gc.enabled``, ``gc.mode``,
-        # ``gc.scanner_mode``, judge config, ports, block message —
-        # all left exactly as the operator configured them.
-        click.echo(
-            f"  Switching {_CONNECTOR_META[prev]['label']} → "
-            f"{_CONNECTOR_META[new_connector]['label']} "
-            f"(inheriting current guardrail config)"
-        )
-    else:
-        # codex/claudecode → openclaw/zeptoclaw: the proxy needs to
-        # bind so guardrail traffic flows, but we deliberately leave
-        # enforcement off (mode=observe). Operators who want enforce
-        # mode run ``defenseclaw setup guardrail`` next.
-        click.echo(
-            f"  Switching {_CONNECTOR_META[prev]['label']} → "
-            f"{_CONNECTOR_META[new_connector]['label']} "
-            f"(observe-only — run `defenseclaw setup guardrail` "
-            f"to enable enforcement)"
-        )
-        gc.enabled = True
-        gc.mode = "observe"
-        if not gc.port:
-            gc.port = 4000
-        if not gc.scanner_mode:
-            gc.scanner_mode = "local"
-        if not gc.detection_strategy:
-            gc.detection_strategy = "regex_only"
-        if not gc.detection_strategy_completion:
-            gc.detection_strategy_completion = "regex_only"
-        # Don't auto-enable judge — that's an opt-in toggle that
-        # implies an LLM API call per inspection. Leave whatever was
-        # there.
-
-    _print_connector_mutation_notice(new_connector, switching_from=prev)
-
-    try:
-        cfg.save()
-        click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
-    except OSError as exc:
-        click.echo(f"  ✗ Failed to save config: {exc}", err=True)
-        return False
-
-    _write_picked_connector_hint(getattr(cfg, "data_dir", None), new_connector)
-    click.echo(f"  ✓ Active connector set to {new_connector!r} (claw.mode={new_connector})")
-    if workspace:
-        click.echo(f"  ✓ Workspace root pinned to {workspace}")
-    else:
-        click.echo("  ✓ Scope: global user config (no workspace pinned)")
-
-    # Refresh the runtime guardrail snapshot so the gateway picks up
-    # connector + mode without restarting when the operator chooses
-    # --no-restart. Restart still required for a different connector
-    # because OpenClawConnector.Setup / ZeptoClawConnector.Setup runs
-    # at boot only, but the runtime snapshot keeps the proxy honest
-    # in the meantime.
-    if hasattr(cfg, "data_dir"):
-        _write_guardrail_runtime(cfg.data_dir, gc)
-
-    if restart:
-        click.echo()
-        click.echo("  Restarting gateway to wire connector hooks + OTel...")
-        _restart_services(
-            cfg.data_dir,
-            cfg.gateway.host,
-            cfg.gateway.port,
-            connector=new_connector,
-        )
-
-    if app.logger:
-        app.logger.log_action(
-            ACTION_SETUP_CONNECTOR_MODE,
-            "config",
-            f"from={prev} to={new_connector}",
-        )
-    return True
-
-
-@setup.command(
-    "mode",
-    short_help="Switch the active connector (NOT observe/action — see --mode).",
-)
-@click.argument(
-    "connector",
-    type=click.Choice(
-        sorted(_CONNECTOR_NAMES),
-        case_sensitive=False,
-    ),
-)
-@click.option(
-    "--restart/--no-restart",
-    default=True,
-    show_default=True,
-    help=(
-        "Restart defenseclaw-gateway after switching. The gateway "
-        "selects its connector at boot only, so a switch without "
-        "restart leaves the previous connector handling traffic "
-        "until the next bounce."
-    ),
-)
-@click.option(
-    "--yes",
-    "-y",
-    "yes",
-    is_flag=True,
-    help="Reserved for symmetry with other setup commands; this command "
-    "is non-interactive by default and never prompts.",
-)
-@pass_ctx
-def setup_mode(app: AppContext, connector: str, restart: bool, yes: bool) -> None:
-    """Switch WHICH agent connector is active (its enforcement mode is unchanged).
-
-    \b
-    ND-3 — do not confuse these two senses of "mode":
-      • `setup mode <connector>`  — this command. Picks which AGENT
-        DefenseClaw drives (codex ↔ claudecode ↔ openclaw …). The
-        CONNECTOR argument is an agent name, not observe/action.
-      • `setup <connector> --mode observe|action`  — the ENFORCEMENT
-        mode (log-only vs block) for a connector. That is the
-        observe/action flag; it never switches the active agent.
-    On a multi-connector install prefer `setup <connector>` (add) and
-    `setup remove <connector>` over this single-active switch.
-
-    \b
-    Inheritance rules:
-      openclaw ↔ zeptoclaw         inherit current guardrail config
-      → hook/observability agents  observability-only (proxy off)
-      from hook/observability      observe-only (proxy on, no enforce)
-
-    The TUI Overview's [m] action now runs full connector setup
-    aliases instead. This command remains the fast/scripted switch.
-
-    Examples:
-
-    \b
-        defenseclaw setup mode openclaw
-        defenseclaw setup mode codex --no-restart
-    """
-    _ = yes  # reserved
-    connector = connector.strip().lower()
-    ok = _apply_connector_mode_switch(
-        app,
-        new_connector=connector,
-        restart=restart,
-    )
-    if not ok:
-        raise click.ClickException(f"failed to switch to {connector!r} — see errors above")
-
-
 @setup.command("redaction")
 @click.argument(
     "action",
@@ -7164,7 +6888,7 @@ def _interactive_guardrail_setup(
     # misleads operators about what their answer does. Their
     # previously-saved ``gc.hilt`` block stays intact for the day
     # they later flip to action via this same wizard or via
-    # ``defenseclaw setup mode``.
+    # ``defenseclaw setup <connector> --mode action``.
     #
     # ``_configure_hilt_interactive`` itself emits the
     # action-mode-only short-circuit message when called outside

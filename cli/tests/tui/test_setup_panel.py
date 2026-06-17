@@ -31,7 +31,7 @@ from defenseclaw.tui.panels.setup import (
     action_matrix_fields,
     build_setup_sections,
     build_wizard_args,
-    connector_setup_command_for_mode,
+    connector_setup_command,
     connector_setup_wizard_fields,
     guardrail_wizard_fields,
     llm_model_candidates,
@@ -250,7 +250,7 @@ def test_readiness_renders_and_filters_per_active_connector() -> None:
 
 
 def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
-    assert connector_setup_command_for_mode("claudecode") == (
+    assert connector_setup_command("claudecode") == (
         ("setup", "claude-code", "--yes"),
         "setup claude-code",
     )

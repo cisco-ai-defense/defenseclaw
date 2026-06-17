@@ -26,7 +26,7 @@ Covers:
   options (parity with the proxy factory) + a hook/proxy help epilog.
 * SU-11 — bare ``setup`` is repurposed to an interactive multi-connector
   picker + scripting flags (``-c/--connector`` / ``--detected`` / ``--all``).
-* ND-3 — ``setup mode`` help disambiguates connector-switch vs ``--mode``.
+* ND-3 — legacy ``setup mode`` is removed; use ``setup <connector> --mode``.
 * J3 — opt-in per-direction detection-strategy flags on ``setup guardrail``
   (OFF by default).
 """
@@ -374,21 +374,24 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertEqual(len(self.app.cfg.guardrail.connectors), 1)
 
     def test_flags_ignored_with_subcommand_warns(self):
-        with _stub_side_effects(), \
-                patch("defenseclaw.commands.cmd_setup._apply_connector_mode_switch", return_value=True):
-            res = _invoke(["-c", "hermes", "mode", "codex", "--no-restart"], self.app)
+        with _stub_side_effects():
+            res = _invoke(["-c", "hermes", "redaction", "status"], self.app)
         self.assertIn("are ignored when a setup", res.output)
 
 
 # ---------------------------------------------------------------------------
-# ND-3 — setup mode help disambiguation
+# ND-3 — setup mode removal
 # ---------------------------------------------------------------------------
 class TestSetupModeHelp(unittest.TestCase):
-    def test_mode_help_disambiguates(self):
-        out = CliRunner().invoke(setup_group, ["mode", "--help"], catch_exceptions=False).output
-        # Mentions both senses of "mode" to disambiguate.
-        self.assertIn("--mode observe|action", out)
-        self.assertIn("active", out.lower())
+    def test_mode_subcommand_is_removed(self):
+        res = CliRunner().invoke(setup_group, ["mode", "--help"])
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertIn("No such command 'mode'", res.output)
+
+    def test_setup_help_keeps_enforcement_mode_flag(self):
+        out = CliRunner().invoke(setup_group, ["--help"], catch_exceptions=False).output
+        self.assertIn("--mode [observe|action]", out)
+        self.assertNotIn("setup mode", out)
 
 
 # ---------------------------------------------------------------------------

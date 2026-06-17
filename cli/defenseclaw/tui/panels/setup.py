@@ -1536,7 +1536,7 @@ def action_matrix_fields(prefix: str, cfg: object | Mapping[str, Any] | None) ->
     return tuple(out)
 
 
-def connector_setup_command_for_mode(wire: str) -> tuple[tuple[str, ...], str]:
+def connector_setup_command(wire: str) -> tuple[tuple[str, ...], str]:
     alias = _connector_setup_alias(wire)
     if not alias:
         return (), ""
@@ -4322,9 +4322,9 @@ def wizard_bool_value(fields: Sequence[WizardFormField], label: str, fallback: s
 
 def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     connector = wizard_field_value(fields, "Connector") or "openclaw"
-    args, _display = connector_setup_command_for_mode(connector)
+    args, _display = connector_setup_command(connector)
     if not args:
-        args, _display = connector_setup_command_for_mode("openclaw")
+        args, _display = connector_setup_command("openclaw")
         connector = "openclaw"
     out = list(args)
     # ``--mode`` and ``--no-restart`` apply to every connector (proxy and

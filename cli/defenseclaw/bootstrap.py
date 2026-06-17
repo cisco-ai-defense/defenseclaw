@@ -828,7 +828,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "Connector",
             "warn",
             f"OpenClaw config missing: {cfg.claw.config_file}",
-            "defenseclaw setup mode openclaw",
+            "defenseclaw setup openclaw",
         )
     if connector == "codex":
         path = os.path.expanduser("~/.codex/config.toml")
@@ -844,27 +844,27 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         path = os.path.expanduser("~/.zeptoclaw/config.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "ZeptoClaw config found")
-        return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup mode zeptoclaw")
+        return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup zeptoclaw")
     if connector == "hermes":
         path = os.path.expanduser("~/.hermes/config.yaml")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Hermes config found")
-        return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup mode hermes")
+        return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup hermes")
     if connector == "cursor":
         path = os.path.expanduser("~/.cursor/hooks.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Cursor hooks found")
-        return StepResult("Connector", "warn", "Cursor hooks not found yet", "defenseclaw setup mode cursor")
+        return StepResult("Connector", "warn", "Cursor hooks not found yet", "defenseclaw setup cursor")
     if connector == "windsurf":
         path = os.path.expanduser("~/.codeium/windsurf/hooks.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Windsurf hooks found")
-        return StepResult("Connector", "warn", "Windsurf hooks not found yet", "defenseclaw setup mode windsurf")
+        return StepResult("Connector", "warn", "Windsurf hooks not found yet", "defenseclaw setup windsurf")
     if connector == "geminicli":
         path = os.path.expanduser("~/.gemini/settings.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Gemini CLI settings found")
-        return StepResult("Connector", "warn", "Gemini CLI settings not found yet", "defenseclaw setup mode geminicli")
+        return StepResult("Connector", "warn", "Gemini CLI settings not found yet", "defenseclaw setup geminicli")
     if connector == "copilot":
         claw_cfg = getattr(cfg, "claw", None)
         workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
@@ -874,7 +874,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             path = os.path.expanduser("~/.copilot/hooks/defenseclaw.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Copilot hooks found")
-        return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup mode copilot")
+        return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup copilot")
     if connector == "openhands":
         claw_cfg = getattr(cfg, "claw", None)
         workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
@@ -885,7 +885,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             candidates.insert(0, os.path.join(workspace, ".openhands", "hooks.json"))
         if any(os.path.isfile(path) for path in candidates):
             return StepResult("Connector", "pass", "OpenHands hooks found")
-        return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup mode openhands")
+        return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup openhands")
     if connector == "antigravity":
         # Antigravity is global-only by design — agy merges discovered
         # hooks files, so DefenseClaw never writes to a workspace copy.
@@ -903,7 +903,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "Connector",
             "warn",
             "Antigravity hooks not found yet",
-            "defenseclaw setup mode antigravity",
+            "defenseclaw setup antigravity",
         )
     if connector == "opencode":
         # opencode is governed by a bridge plugin DefenseClaw writes into
@@ -915,7 +915,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "Connector",
             "warn",
             "OpenCode bridge plugin not found yet",
-            "defenseclaw setup mode opencode",
+            "defenseclaw setup opencode",
         )
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 

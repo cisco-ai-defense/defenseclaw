@@ -63,7 +63,7 @@ If a different connector is already wired, the wizard asks whether to **Add** or
 
 <Cards>
   <Card title="Add" description="Keep the existing connector(s) wired and layer the new one in. The gateway now enforces both; claw.mode flips to multi. This is the multi-connector path." />
-  <Card title="Replace" description="Tear down the previous connector's wiring and make the new one the single active connector. This is the classic single-connector switch — see Switching connectors." />
+  <Card title="Replace" description="Tear down the previous connector's wiring and make the new one the single active connector. Use this only when you no longer want the old connector wired." />
 </Cards>
 
 Choose **Add** to build a multi-connector install. Each added connector starts from the global guardrail defaults; tune it afterward with the per-connector CLI (below).
@@ -135,7 +135,7 @@ Per-connector policy is a *guardrail* concept. The egress firewall is **not** pe
 
 ## See also
 
-- [Switching connectors](/docs/setup/guardrail/switching-connectors) — replace the primary connector instead of adding one
+- [Changing connectors](/docs/setup/guardrail/switching-connectors) — add, reconfigure, remove, or replace connector wiring
 - [Setup Guardrail](/docs/setup/guardrail) — the central setup command and the Add/Replace prompt
 - [Reference → Configuration](/docs/reference/configuration) — the `guardrail.connectors` schema
 - [Observability](/docs/observability) — filtering telemetry by the `connector` dimension

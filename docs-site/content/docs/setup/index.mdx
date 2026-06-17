@@ -43,7 +43,6 @@ Each alias pre-fills the connector flag and inherits every guardrail option. Pas
   <Card title="setup copilot" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=copilot and writes global Copilot hook config." />
   <Card title="setup hermes" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=hermes and wires config.yaml hooks for MCP, skills, and plugins." />
   <Card title="setup opencode" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=opencode and writes the auto-loaded DefenseClaw bridge plugin." />
-  <Card title="setup mode <connector>" href="/docs/setup/guardrail/switching-connectors" description="Switch the active claw connector with smart guardrail inheritance — does not re-prompt for guardrail options unless you change the integration scope." />
 </Cards>
 
 ## Auxiliary setup verbs
@@ -100,7 +99,7 @@ Every verb in the setup family exposes both a fully-interactive walkthrough and 
 | Verb | Interactive | Non-interactive | Notes |
 | --- | --- | --- | --- |
 | `setup guardrail` | yes (default) | `--non-interactive` + flags | Wizard explains each prompt; non-interactive mode requires every required flag. |
-| `setup mode <connector>` | yes | flags only | Reuses the existing guardrail config; only re-prompts when the integration scope changes. |
+| `setup <connector>` | yes | flags + `--yes` | Adds or reconfigures a connector; pass `--mode observe\|action` to choose enforcement mode. |
 | `keys list` / `set` / `fill-missing` / `check` | yes (default) | `--value` + `--yes` | `keys set` prompts for the value (hidden) when `--value` is omitted. |
 | `setup webhook add <type>` | yes (default) | `--non-interactive` + flags | URL and secret-env are prompt-or-flag; type is always positional. |
 | `setup webhook test <name>` | n/a | n/a | Always non-interactive; safe to re-run. |

@@ -510,7 +510,6 @@ py-connector-matrix-test:
 		cli/tests/test_agent_discovery.py \
 		cli/tests/test_cmd_guardrail_matrix.py \
 		cli/tests/test_cmd_init.py \
-		cli/tests/test_cmd_setup_mode.py \
 		cli/tests/test_codeguard_opt_in.py \
 		cli/tests/test_connector_mcp_writers.py \
 		cli/tests/test_connector_paths.py \

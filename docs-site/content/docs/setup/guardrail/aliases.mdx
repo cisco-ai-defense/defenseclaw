@@ -102,9 +102,9 @@ defenseclaw setup openclaw --mode observe --restart
 defenseclaw setup openclaw --mode action --human-approval --rule-pack strict --restart
 ```
 
-## Switch active connector
+## Add or reconfigure connectors
 
-Use `defenseclaw setup mode <connector>` to switch the active claw connector with smart guardrail inheritance — see [Switching connectors](/docs/setup/guardrail/switching-connectors).
+Use `defenseclaw setup <connector>` to add or reconfigure that connector. On hosts that already have another connector wired, the interactive flow asks whether to add the connector alongside the existing one or replace the old wiring. Use `defenseclaw setup remove <connector>` when you want to retire a connector.
 
 ## Why aliases at all?
 

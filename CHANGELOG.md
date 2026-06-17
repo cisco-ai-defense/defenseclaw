@@ -641,8 +641,7 @@ Claude Code now talk directly to their native upstreams in both
 - Python CLI test suite updated:
   - `test_cmd_init.py` and `test_cmd_doctor.py` no longer assert
     on `codex_enforcement_enabled`.
-  - `test_cmd_setup_mode.py`,
-    `test_cmd_setup_observability.py`,
+  - `test_cmd_setup_observability.py`,
     `test_cmd_setup_codex_claudecode_alias.py`, and
     `test_guardrail.py` were rewritten to cover the hook-driven
     mode contract end-to-end.

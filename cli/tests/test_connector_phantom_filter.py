@@ -96,7 +96,7 @@ class _ConnectorFilterTestBase(unittest.TestCase):
         os.environ["COLUMNS"] = "200"
         # Force the active connector by pinning ``claw.mode`` only —
         # leaves ``guardrail.connector`` at its "openclaw" default so
-        # tests don't accidentally cover the post-``setup mode``
+        # tests don't accidentally cover the post-setup connector
         # transition path. ``Config.active_connector()`` consults
         # ``guardrail.connector`` first, so set both for symmetry.
         self._orig_home = os.environ.get("HOME")

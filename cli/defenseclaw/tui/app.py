@@ -73,7 +73,7 @@ from defenseclaw.tui.panels.setup import (
     SetupPanelAction,
     SetupPanelModel,
     SetupWizard,
-    connector_setup_command_for_mode,
+    connector_setup_command,
     llm_model_candidates,
     render_wizard_value,
     wizard_field_value,
@@ -7506,7 +7506,7 @@ class DefenseClawTUI(App[None]):
         if choice is None:
             self._set_status("Mode switch cancelled.")
             return
-        args, display = connector_setup_command_for_mode(choice)
+        args, display = connector_setup_command(choice)
         if not args:
             self._set_status(f"No setup command available for connector {choice}.")
             return
