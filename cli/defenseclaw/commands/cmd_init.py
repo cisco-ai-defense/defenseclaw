@@ -531,8 +531,10 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         _rollup_status,
         run_first_run,
     )
+    from defenseclaw.config import default_data_path
     from defenseclaw.ux import CLIRenderer
 
+    data_dir = default_data_path()
     connector_settings: list[dict] | None = None
     # --observe-all / --action-connectors express an explicit, scripted
     # connector selection. Honor them deterministically even on a TTY instead
@@ -562,6 +564,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             start_gateway=start_gateway,
             verify=verify,
             rescan_agents=rescan_agents,
+            data_dir=data_dir,
         )
 
     # Non-interactive / no-TTY path. With --observe-all / --action-connectors
@@ -688,6 +691,93 @@ def _parse_connector_list(raw: str | None) -> list[str]:
     return out
 
 
+def _stdout_is_tty() -> bool:
+    try:
+        return click.get_text_stream("stdout").isatty()
+    except Exception:
+        return False
+
+
+def _checkbox_key_name(ch: str) -> str:
+    if ch in ("\r", "\n"):
+        return "enter"
+    if ch in (" ", "\t"):
+        return "toggle"
+    if ch in ("\x1b[A", "k", "K"):
+        return "up"
+    if ch in ("\x1b[B", "j", "J"):
+        return "down"
+    if ch == "a":
+        return "all"
+    if ch == "n":
+        return "none"
+    return ""
+
+
+def _render_checkbox_menu(
+    options: list[str],
+    selected: set[str],
+    cursor: int,
+    *,
+    redraw: bool,
+) -> None:
+    if redraw:
+        click.echo(f"\x1b[{len(options)}F", nl=False)
+    for idx, name in enumerate(options):
+        if redraw:
+            click.echo("\r\x1b[2K", nl=False)
+        pointer = ">" if idx == cursor else " "
+        mark = "x" if name in selected else " "
+        click.echo(f"  {pointer} [{mark}] {name}")
+
+
+def _prompt_checkbox_selection(
+    options: list[str],
+    *,
+    default_selected: list[str],
+    title: str,
+    empty_ok: bool,
+) -> list[str]:
+    """Tiny checkbox selector for first-run terminal prompts.
+
+    Click gives us portable raw-key reads but not a full list widget. This keeps
+    the interaction small: j/k moves, Space toggles, Enter accepts.
+    """
+    if not options:
+        return []
+
+    selected = {name for name in default_selected if name in options}
+    cursor = 0
+    ux.subhead(title)
+    ux.subhead("  Space toggles, j/k moves, a selects all, n clears, Enter continues.")
+
+    redraw = _stdout_is_tty()
+    rendered = False
+    while True:
+        _render_checkbox_menu(options, selected, cursor, redraw=redraw and rendered)
+        rendered = True
+        key = _checkbox_key_name(click.getchar())
+        if key == "enter":
+            if selected or empty_ok:
+                return [name for name in options if name in selected]
+            ux.warn("Select at least one connector.", indent="  ")
+            continue
+        if key == "toggle":
+            name = options[cursor]
+            if name in selected:
+                selected.remove(name)
+            else:
+                selected.add(name)
+        elif key == "up":
+            cursor = (cursor - 1) % len(options)
+        elif key == "down":
+            cursor = (cursor + 1) % len(options)
+        elif key == "all":
+            selected = set(options)
+        elif key == "none":
+            selected.clear()
+
+
 def _installed_hook_connectors(disc) -> list[str]:
     """Installed connectors that can run as multi-connector hook peers.
 
@@ -706,7 +796,85 @@ def _installed_hook_connectors(disc) -> list[str]:
     return names
 
 
-def _prompt_connector_selection(connector: str | None, rescan_agents: bool) -> list[str]:
+def _untrusted_discovery_prefixes(disc) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", None) or sorted(disc.agents)
+    for name in order:
+        signal = disc.agents.get(name)
+        if (
+            signal is None
+            or signal.error != agent_discovery.UNTRUSTED_PREFIX_ERROR
+            or not signal.binary_path
+        ):
+            continue
+        resolved_bin = os.path.realpath(signal.binary_path)
+        parent = os.path.dirname(resolved_bin)
+        if parent in seen:
+            continue
+        seen.add(parent)
+        rows.append((name, resolved_bin, parent))
+    return rows
+
+
+def _prompt_trust_discovery_prefixes(
+    disc,
+    *,
+    data_dir: str | os.PathLike[str] | None,
+    rescan_agents: bool,
+):
+    rows = _untrusted_discovery_prefixes(disc)
+    if not rows:
+        return disc
+
+    ux.section("Trusted binary paths")
+    ux.subhead(
+        "Some connector binaries are outside DefenseClaw's trusted prefixes, so their versions were not probed.",
+    )
+    for name, resolved_bin, parent in rows:
+        click.echo(f"  - {name}: {parent}")
+        click.echo(f"    {ux.dim('binary: ' + resolved_bin)}")
+    ux.subhead(
+        "Trust only directories you control; DefenseClaw may execute binaries there during discovery.",
+    )
+    if not click.confirm("  Add these directories to trusted binary prefixes?", default=False):
+        for _name, _resolved_bin, parent in rows:
+            ux.subhead(f"  Trust later with: defenseclaw setup trusted-paths add {parent}")
+        return disc
+
+    from defenseclaw.commands.cmd_setup import _add_trusted_bin_prefix
+    from defenseclaw.config import default_data_path
+
+    target_data_dir = os.fspath(data_dir or default_data_path())
+    os.makedirs(target_data_dir, mode=0o700, exist_ok=True)
+    trusted_any = False
+    for _name, _resolved_bin, parent in rows:
+        resolved, err = agent_discovery.validate_trusted_prefix(parent)
+        if err:
+            ux.warn(f"Not trusting {parent}: {err}", indent="  ")
+            continue
+        added = _add_trusted_bin_prefix(resolved, target_data_dir)
+        trusted_any = True
+        verb = "trusted" if added else "already trusted"
+        ux.subhead(f"  {verb}: {resolved}")
+
+    if not trusted_any:
+        return disc
+
+    ux.subhead("  Re-scanning connector versions with updated trusted prefixes...")
+    return agent_discovery.discover_agents(
+        use_cache=False,
+        refresh=rescan_agents,
+        data_dir=target_data_dir,
+    )
+
+
+def _prompt_connector_selection(
+    connector: str | None,
+    rescan_agents: bool,
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> list[str]:
     """Prompt for ONE OR MORE connectors to configure during first run.
 
     Returns an ordered, de-duplicated list (first = primary). A single name
@@ -718,29 +886,35 @@ def _prompt_connector_selection(connector: str | None, rescan_agents: bool) -> l
         names = _parse_connector_list(connector)
         if names:
             return names
-    disc = agent_discovery.discover_agents(refresh=rescan_agents)
+    disc = agent_discovery.discover_agents(refresh=rescan_agents, data_dir=data_dir)
+    disc = _prompt_trust_discovery_prefixes(
+        disc,
+        data_dir=data_dir,
+        rescan_agents=rescan_agents,
+    )
     table = agent_discovery.render_discovery_table(disc).rstrip()
     if table:
         click.echo(table)
         click.echo()
     _note_proxy_connectors(disc)
     installed = _installed_hook_connectors(disc)
-    default = ",".join(installed) if installed else agent_discovery.first_installed(disc, "codex")
     if installed:
-        ux.subhead(
-            "Every detected connector is pre-selected — press Enter to configure them "
-            "all in observe mode, or edit the list to drop some.",
+        return _prompt_checkbox_selection(
+            installed,
+            default_selected=installed,
+            title="Select connector(s) to configure. Detected connectors are pre-selected.",
+            empty_ok=False,
         )
-    else:
-        ux.subhead(
-            "Enter one connector, or a comma-separated list to set up several at once "
-            "(e.g. codex,claudecode,antigravity).",
-        )
-    raw = click.prompt("  Connector(s)", default=default, show_default=True)
-    names = _parse_connector_list(raw)
-    if not names:
-        names = [agent_discovery.first_installed(disc, "codex")]
-    return names
+
+    fallback = agent_discovery.first_installed(disc, "codex")
+    ux.subhead("No hook connectors were detected. Choose one connector to configure.")
+    raw = click.prompt(
+        "  Connector",
+        type=click.Choice(sorted(connector_paths.KNOWN_CONNECTORS), case_sensitive=False),
+        default=fallback,
+        show_default=True,
+    )
+    return [_normalize_connector_arg(raw)]
 
 
 def _note_proxy_connectors(disc) -> None:
@@ -775,16 +949,16 @@ def _prompt_action_connectors(connectors: list[str]) -> list[str]:
     that isn't being set up."""
     ux.section("Enforcement mode")
     ux.subhead(
-        "All connectors start in observe (log-only). Name the ones that should "
-        "ACTION (block/enforce); leave blank to keep everything in observe.",
+        "All connectors start in observe (log-only). Select the ones that should "
+        "ACTION (block/enforce); leave every box clear to keep everything in observe.",
     )
     ux.subhead("Configured: " + ", ".join(connectors))
-    raw = click.prompt(
-        "  " + ux.bold("Action-mode connector(s)"),
-        default="",
-        show_default=False,
+    requested = _prompt_checkbox_selection(
+        connectors,
+        default_selected=[],
+        title="Select connector(s) to run in action mode.",
+        empty_ok=True,
     )
-    requested = _parse_connector_list(raw)
     allowed = set(connectors)
     action: list[str] = []
     for name in requested:
@@ -1007,13 +1181,14 @@ def _prompt_first_run(
     start_gateway: bool | None,
     verify: bool | None,
     rescan_agents: bool,
+    data_dir: str | os.PathLike[str] | None = None,
 ) -> tuple[list[dict], str, bool, bool, bool]:
     ux.section("DefenseClaw First-Run Setup")
     ux.subhead(
         "This wizard writes config.yaml, then runs targeted readiness checks.",
     )
     click.echo()
-    connectors = _prompt_connector_selection(connector, rescan_agents)
+    connectors = _prompt_connector_selection(connector, rescan_agents, data_dir=data_dir)
 
     # Scanner mode and the LLM judge are process-wide guardrail config
     # fields (not per-connector), so they are asked once regardless of how

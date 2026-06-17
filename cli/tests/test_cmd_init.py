@@ -1964,8 +1964,8 @@ class TestMultiConnectorInit(unittest.TestCase):
         from defenseclaw.commands import cmd_init
 
         disc = self._disc({"codex", "claudecode"})
-        # connector list, scanner mode, action subset, fail mode, HITL severity
-        prompts = iter(["codex,claudecode", "local", "claudecode", "closed", "MEDIUM"])
+        # scanner mode, fail mode, HITL severity
+        prompts = iter(["local", "closed", "MEDIUM"])
         confirms = iter([False, True, False, True])  # judge, action HITL, start_gateway, verify
 
         with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
@@ -1973,6 +1973,11 @@ class TestMultiConnectorInit(unittest.TestCase):
                 patch(
                     "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
                     return_value=True,
+                ), \
+                patch.object(
+                    cmd_init,
+                    "_prompt_checkbox_selection",
+                    side_effect=[["codex", "claudecode"], ["claudecode"]],
                 ), \
                 patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
                 patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
@@ -2005,11 +2010,16 @@ class TestMultiConnectorInit(unittest.TestCase):
         from defenseclaw.commands import cmd_init
 
         disc = self._disc({"codex", "claudecode"})
-        prompts = iter(["codex,claudecode", "local", ""])  # connectors, scanner, action (blank)
+        prompts = iter(["local"])  # scanner
         confirms = iter([False, False, True])  # judge, start_gateway, verify
 
         with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
                 patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(
+                    cmd_init,
+                    "_prompt_checkbox_selection",
+                    side_effect=[["codex", "claudecode"], []],
+                ), \
                 patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
                 patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
             settings, _scanner, _judge, _start, _verify = cmd_init._prompt_first_run(
@@ -2024,12 +2034,16 @@ class TestMultiConnectorInit(unittest.TestCase):
     def test_prompt_action_connectors_intersects_with_configured(self):
         from defenseclaw.commands import cmd_init
 
-        with patch.object(cmd_init.click, "prompt", return_value="claudecode, bogus, codex"):
+        with patch.object(
+            cmd_init,
+            "_prompt_checkbox_selection",
+            return_value=["claudecode", "bogus", "codex"],
+        ):
             got = cmd_init._prompt_action_connectors(["codex", "claudecode"])
         # Out-of-set entries (bogus) are dropped; configured ones are kept.
         self.assertEqual(sorted(got), ["claudecode", "codex"])
 
-        with patch.object(cmd_init.click, "prompt", return_value=""):
+        with patch.object(cmd_init, "_prompt_checkbox_selection", return_value=[]):
             self.assertEqual(cmd_init._prompt_action_connectors(["codex"]), [])
 
     def test_single_connector_selection_keeps_legacy_shape(self):
@@ -2037,6 +2051,65 @@ class TestMultiConnectorInit(unittest.TestCase):
 
         # An explicit single connector short-circuits discovery entirely.
         self.assertEqual(_prompt_connector_selection("codex", False), ["codex"])
+
+    def test_checkbox_selector_toggles_with_keys(self):
+        from defenseclaw.commands import cmd_init
+
+        keys = iter([" ", "j", " ", "\r"])
+        with patch.object(cmd_init.click, "getchar", side_effect=lambda: next(keys)), \
+                patch.object(cmd_init, "_stdout_is_tty", return_value=False):
+            got = cmd_init._prompt_checkbox_selection(
+                ["codex", "claudecode"],
+                default_selected=["codex"],
+                title="Select connectors",
+                empty_ok=False,
+            )
+        self.assertEqual(got, ["claudecode"])
+
+    def test_connector_selection_uses_checkbox_menu(self):
+        from defenseclaw.commands import cmd_init
+
+        disc = self._disc({"codex", "claudecode"})
+        with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(
+                    cmd_init,
+                    "_prompt_checkbox_selection",
+                    return_value=["claudecode"],
+                ) as selector:
+            got = cmd_init._prompt_connector_selection(None, False)
+        self.assertEqual(got, ["claudecode"])
+        selector.assert_called_once()
+        self.assertEqual(selector.call_args.kwargs["default_selected"], ["codex", "claudecode"])
+
+    def test_connector_selection_can_trust_untrusted_binary_dirs_and_rescan(self):
+        from defenseclaw.commands import cmd_init
+        from defenseclaw.inventory import agent_discovery as ad
+
+        bin_dir = os.path.join(self.tmp_dir, "tool", "bin")
+        os.makedirs(bin_dir)
+        bin_path = os.path.join(bin_dir, "codex")
+        first = self._disc({"codex"})
+        first.agents["codex"].binary_path = bin_path
+        first.agents["codex"].version = ""
+        first.agents["codex"].error = ad.UNTRUSTED_PREFIX_ERROR
+        second = self._disc({"codex"})
+        second.agents["codex"].binary_path = bin_path
+        second.agents["codex"].version = "codex 1.0"
+        second.agents["codex"].error = ""
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", side_effect=[first, second]) as discover, \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(cmd_init.click, "confirm", return_value=True), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", return_value=["codex"]):
+            got = cmd_init._prompt_connector_selection(None, False, data_dir=self.tmp_dir)
+
+        self.assertEqual(got, ["codex"])
+        self.assertEqual(discover.call_count, 2)
+        dotenv = os.path.join(self.tmp_dir, ".env")
+        self.assertTrue(os.path.isfile(dotenv))
+        with open(dotenv, encoding="utf-8") as fh:
+            self.assertIn(os.path.realpath(bin_dir), fh.read())
 
 
 class TestInitObserveAllActionConnectors(unittest.TestCase):
