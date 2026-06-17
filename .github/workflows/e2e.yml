@@ -32,6 +32,7 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 30
     env:
+      DEFENSECLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -301,6 +302,7 @@ jobs:
         run: |
           defenseclaw init
 
+          echo "DEFENSECLAW_GATEWAY_TOKEN=${DEFENSECLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
           echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
           echo "DEFENSECLAW_RUN_ID=${DEFENSECLAW_RUN_ID}" >> ~/.defenseclaw/.env
           if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
@@ -530,6 +532,7 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 45
     env:
+      DEFENSECLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
       # ANTHROPIC_API_KEY intentionally NOT plumbed into this job. The full-live
       # guardrail agent now runs on OpenClaw's stock amazon-bedrock provider
@@ -1000,6 +1003,7 @@ jobs:
         run: |
           defenseclaw init
 
+          echo "DEFENSECLAW_GATEWAY_TOKEN=${DEFENSECLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
           echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
           echo "DEFENSECLAW_RUN_ID=${DEFENSECLAW_RUN_ID}" >> ~/.defenseclaw/.env
           if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
