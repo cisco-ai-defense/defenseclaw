@@ -92,13 +92,13 @@ func TestNewSidecarHealthInitialState(t *testing.T) {
 func TestSidecarHealthSetGateway(t *testing.T) {
 	h := NewSidecarHealth()
 
-	h.SetGateway(StateRunning, "", map[string]interface{}{"protocol": 3})
+	h.SetGateway(StateRunning, "", map[string]interface{}{"protocol": openClawMaxProtocol})
 	snap := h.Snapshot()
 	if snap.Gateway.State != StateRunning {
 		t.Errorf("Gateway.State = %q, want %q", snap.Gateway.State, StateRunning)
 	}
-	if snap.Gateway.Details["protocol"] != 3 {
-		t.Errorf("Gateway.Details[protocol] = %v, want 3", snap.Gateway.Details["protocol"])
+	if snap.Gateway.Details["protocol"] != openClawMaxProtocol {
+		t.Errorf("Gateway.Details[protocol] = %v, want %d", snap.Gateway.Details["protocol"], openClawMaxProtocol)
 	}
 
 	h.SetGateway(StateError, "connection lost", nil)
@@ -1243,7 +1243,7 @@ func TestEventFrameNoSeq(t *testing.T) {
 func TestHelloOKParsing(t *testing.T) {
 	raw := `{
 		"type": "hello-ok",
-		"protocol": 3,
+		"protocol": 4,
 		"features": {
 			"methods": ["skills.update", "config.patch"],
 			"events": ["tool_call", "tool_result"]
@@ -1260,8 +1260,8 @@ func TestHelloOKParsing(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	if hello.Protocol != 3 {
-		t.Errorf("Protocol = %d, want 3", hello.Protocol)
+	if hello.Protocol != openClawMaxProtocol {
+		t.Errorf("Protocol = %d, want %d", hello.Protocol, openClawMaxProtocol)
 	}
 	if hello.Features == nil {
 		t.Fatal("Features should not be nil")
@@ -1278,7 +1278,7 @@ func TestHelloOKParsing(t *testing.T) {
 }
 
 func TestHelloOKWithPolicy(t *testing.T) {
-	raw := `{"type":"hello-ok","protocol":3,"policy":{"tickIntervalMs":5000}}`
+	raw := `{"type":"hello-ok","protocol":4,"policy":{"tickIntervalMs":5000}}`
 	var hello HelloOK
 	if err := json.Unmarshal([]byte(raw), &hello); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
@@ -1292,7 +1292,7 @@ func TestHelloOKWithPolicy(t *testing.T) {
 }
 
 func TestHelloOKMinimalPayload(t *testing.T) {
-	raw := `{"type":"hello-ok","protocol":3}`
+	raw := `{"type":"hello-ok","protocol":4}`
 	var hello HelloOK
 	if err := json.Unmarshal([]byte(raw), &hello); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
@@ -2477,7 +2477,7 @@ func TestAPIStatusHandlerWithHello(t *testing.T) {
 	health := NewSidecarHealth()
 	client := &Client{
 		hello: &HelloOK{
-			Protocol: 3,
+			Protocol: openClawMaxProtocol,
 			Features: &HelloFeatures{Methods: []string{"skills.update"}},
 		},
 	}
