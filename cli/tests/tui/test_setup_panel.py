@@ -1573,7 +1573,8 @@ def test_every_goal_opens_and_emits_only_real_cli_options() -> None:
     The TUI shells out to ``defenseclaw setup ...``; an unknown flag would
     crash the subprocess. This walks every goal (including the gated
     judge/agent LLM goals and each Observability/Webhook preset branch) and
-    asserts the real ``setup`` group accepts every emitted option.
+    asks the real ``setup`` group for help so Click validates every emitted
+    option without running setup side effects.
     """
 
     from click.testing import CliRunner
@@ -1593,5 +1594,5 @@ def test_every_goal_opens_and_emits_only_real_cli_options() -> None:
             argv = list(build_wizard_args(wizard, list(model.form_fields)))
             if not argv or argv[0] != "setup":
                 continue
-            result = runner.invoke(cmd_setup.setup, argv[1:], catch_exceptions=True)
+            result = runner.invoke(cmd_setup.setup, [*argv[1:], "--help"], catch_exceptions=True)
             assert "No such option" not in (result.output or ""), f"{wizard.name}/{goal.id}: {result.output}"
