@@ -30,34 +30,54 @@ class SkillEnforcer:
         self.quarantine_dir = os.path.join(quarantine_dir, "skills")
         os.makedirs(self.quarantine_dir, exist_ok=True)
 
-    def quarantine(self, skill_name: str, source_path: str) -> str | None:
-        """Move skill directory to quarantine. Returns quarantine path or None."""
-        safe_name = os.path.basename(skill_name)
-        if not safe_name or safe_name != skill_name:
+    @staticmethod
+    def _safe_segment(value: str) -> str | None:
+        safe = os.path.basename(value)
+        if not safe or safe != value or safe in (".", ".."):
             return None
+        return safe
+
+    def _quarantine_path(self, skill_name: str, connector: str = "") -> str | None:
+        safe_name = self._safe_segment(skill_name)
+        if safe_name is None:
+            return None
+        if connector:
+            safe_connector = self._safe_segment(connector)
+            if safe_connector is None:
+                return None
+            dest = os.path.join(self.quarantine_dir, safe_connector, safe_name)
+        else:
+            dest = os.path.join(self.quarantine_dir, safe_name)
+        if not os.path.realpath(dest).startswith(os.path.realpath(self.quarantine_dir) + os.sep):
+            return None
+        return dest
+
+    def quarantine(
+        self, skill_name: str, source_path: str, connector: str = "",
+    ) -> str | None:
+        """Move skill directory to quarantine. Returns quarantine path or None."""
         if os.path.islink(source_path):
             return None
         real_path = os.path.realpath(source_path)
         if not os.path.exists(real_path):
             return None
-        dest = os.path.join(self.quarantine_dir, safe_name)
-        # Verify dest is still inside quarantine_dir
-        if not os.path.realpath(dest).startswith(os.path.realpath(self.quarantine_dir) + os.sep):
+        dest = self._quarantine_path(skill_name, connector)
+        if dest is None:
             return None
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
         if os.path.exists(dest):
             shutil.rmtree(dest)
         shutil.move(real_path, dest)
         return dest
 
     def restore(
-        self, skill_name: str, restore_path: str, allowed_roots: list[str] | None = None
+        self, skill_name: str, restore_path: str,
+        allowed_roots: list[str] | None = None,
+        connector: str = "",
     ) -> bool:
         """Restore a quarantined skill to its original location."""
-        safe_name = os.path.basename(skill_name)
-        if not safe_name or safe_name != skill_name:
-            return False
-        src = os.path.join(self.quarantine_dir, safe_name)
-        if not os.path.realpath(src).startswith(os.path.realpath(self.quarantine_dir) + os.sep):
+        src = self._quarantine_path(skill_name, connector)
+        if src is None:
             return False
         if not os.path.exists(src):
             return False
@@ -72,5 +92,6 @@ class SkillEnforcer:
         shutil.move(src, restore_path)
         return True
 
-    def is_quarantined(self, skill_name: str) -> bool:
-        return os.path.exists(os.path.join(self.quarantine_dir, skill_name))
+    def is_quarantined(self, skill_name: str, connector: str = "") -> bool:
+        path = self._quarantine_path(skill_name, connector)
+        return bool(path and os.path.exists(path))

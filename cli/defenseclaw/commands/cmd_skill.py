@@ -41,10 +41,10 @@ def skill() -> None:
     """Manage agent skills — search, install, scan, block, allow, disable, enable, quarantine, restore.
 
     Multi-connector: skills are tracked per-connector. ``skill list``
-    shows every active connector's skills by default (pass ``--connector
-    X`` to narrow to one peer). The other subcommands take ``--connector
-    X`` to target a configured peer (default: the active connector);
-    ``skill scan --all`` fans out across every active connector.
+    and no-target ``skill scan`` cover every active connector by default
+    (pass ``--connector X`` to narrow to one peer). Policy commands such
+    as block/allow/disable are global when bare and connector-scoped only
+    when ``--connector X`` is supplied.
     """
 
 
@@ -105,6 +105,17 @@ def _clawhub_unavailable(stderr: str) -> bool:
         or "cannot find module" in s
         or "cannot find package" in s
     )
+
+
+def _clawhub_args(*args: str) -> list[str]:
+    """Prefer a real clawhub binary; fall back to npx for on-demand installs."""
+    local_bin = os.path.join(os.getcwd(), "node_modules", ".bin", "clawhub")
+    if os.path.isfile(local_bin) and os.access(local_bin, os.X_OK):
+        return [local_bin, *args]
+    found = shutil.which("clawhub")
+    if found:
+        return [found, *args]
+    return ["npx", "clawhub", *args]
 
 
 @skill.command()
@@ -404,6 +415,18 @@ def _severity_counts_from_raw(raw_json: str) -> dict[str, int]:
     return counts
 
 
+def _scan_payload_from_latest(ls: dict[str, Any]) -> dict[str, Any]:
+    finding_count = ls["finding_count"]
+    return {
+        "target": ls["target"],
+        "clean": finding_count == 0,
+        "max_severity": ls["max_severity"] if finding_count > 0 else "CLEAN",
+        "total_findings": finding_count,
+        # E4i: per-severity breakdown alongside the existing max+total.
+        "severity_counts": _severity_counts_from_raw(ls.get("raw_json", "")),
+    }
+
+
 def _build_scan_map(store) -> dict[str, dict[str, Any]]:
     """Build a map of skill-name -> latest scan entry from the DB."""
     scan_map: dict[str, dict[str, Any]] = {}
@@ -415,16 +438,31 @@ def _build_scan_map(store) -> dict[str, dict[str, Any]]:
         return scan_map
     for ls in latest:
         name = os.path.basename(ls["target"])
-        finding_count = ls["finding_count"]
-        scan_map[name] = {
-            "target": ls["target"],
-            "clean": finding_count == 0,
-            "max_severity": ls["max_severity"] if finding_count > 0 else "CLEAN",
-            "total_findings": finding_count,
-            # E4i: per-severity breakdown alongside the existing max+total.
-            "severity_counts": _severity_counts_from_raw(ls.get("raw_json", "")),
-        }
+        scan_map[name] = _scan_payload_from_latest(ls)
     return scan_map
+
+
+def _latest_skill_scan_for_connector(
+    app: AppContext, skill_name: str, connector: str,
+) -> dict[str, Any] | None:
+    if app.store is None:
+        return None
+    try:
+        latest = app.store.latest_scans_by_scanner("skill-scanner")
+    except Exception:
+        return None
+    matches: list[tuple[Any, dict[str, Any]]] = []
+    for ls in latest:
+        if os.path.basename(ls["target"]) != skill_name:
+            continue
+        payload = _scan_payload_from_latest(ls)
+        if connector and not _scan_entry_matches_connector(app, payload, connector):
+            continue
+        matches.append((ls.get("timestamp"), payload))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0], reverse=True)
+    return matches[0][1]
 
 
 def _build_actions_map(store, connector: str = "") -> dict[str, Any]:
@@ -444,13 +482,143 @@ def _build_actions_map(store, connector: str = "") -> dict[str, Any]:
     except Exception:
         return actions_map
     for e in entries:
-        if e.connector == "":
+        if e.connector == "" and e.target_name not in actions_map:
             actions_map[e.target_name] = e
     if connector:
+        seen_scoped: set[str] = set()
         for e in entries:
-            if e.connector == connector:
+            if e.connector == connector and e.target_name not in seen_scoped:
                 actions_map[e.target_name] = e
+                seen_scoped.add(e.target_name)
     return actions_map
+
+
+def _scan_entry_matches_connector(
+    app: AppContext, scan_data: dict[str, Any] | None, connector: str,
+) -> bool:
+    """Best-effort connector filter for historical skill scans.
+
+    The scan table is not connector-tagged, so use the recorded local target
+    path and the requested connector's configured skill dirs. Unknown/non-local
+    targets do not match an explicit connector; unscoped info keeps the legacy
+    phantom behavior.
+    """
+    if not connector or not scan_data:
+        return True
+    target = str(scan_data.get("target") or "")
+    if not target:
+        return False
+    real_target = os.path.realpath(target)
+    try:
+        roots = app.cfg.skill_dirs(connector)
+    except Exception:  # noqa: BLE001 — fail closed for explicit connector scope.
+        return False
+    return any(
+        real_target == os.path.realpath(root)
+        or real_target.startswith(os.path.realpath(root) + os.sep)
+        for root in roots
+    )
+
+
+def _skill_info_card(
+    app: AppContext,
+    skill_name: str,
+    info_map: dict[str, Any] | None,
+    *,
+    connector: str = "",
+    filter_scan_to_connector: bool = False,
+    suppress_global_action_only: bool = False,
+) -> dict[str, Any] | None:
+    """Build the rendered ``skill info`` payload for one connector scope."""
+    scan_map = _build_scan_map(app.store)
+    scan_entry: dict[str, Any] | None = None
+    if (
+        filter_scan_to_connector
+        and connector
+    ):
+        scan_entry = _latest_skill_scan_for_connector(app, skill_name, connector)
+    elif skill_name in scan_map:
+        scan_entry = scan_map[skill_name]
+    actions_map = _build_actions_map(app.store, connector)
+    scoped_action = None
+    if suppress_global_action_only and connector and app.store is not None:
+        try:
+            scoped_action = app.store.get_action("skill", skill_name, connector)
+        except Exception:
+            scoped_action = None
+
+    if info_map is None:
+        if (
+            suppress_global_action_only
+            and connector
+            and skill_name in actions_map
+            and scoped_action is None
+            and scan_entry is None
+        ):
+            return None
+        if scan_entry is None and skill_name not in actions_map:
+            return None
+        info_map = {"name": skill_name}
+    else:
+        info_map = dict(info_map)
+
+    if connector:
+        info_map["connector"] = connector
+    if scan_entry is not None:
+        info_map["scan"] = scan_entry
+    if skill_name in actions_map:
+        ae = actions_map[skill_name]
+        if not ae.actions.is_empty():
+            info_map["actions"] = ae.actions.to_dict()
+    return info_map
+
+
+def _print_skill_info_card(
+    info_map: dict[str, Any], skill_name: str, *, show_connector: bool = False,
+) -> None:
+    click.echo(f"{ux.bold('Skill:')}       {info_map.get('name', skill_name)}")
+    if show_connector and info_map.get("connector"):
+        click.echo(f"{ux.bold('Connector:')}   {info_map['connector']}")
+    if info_map.get("description"):
+        click.echo(f"{ux.bold('Description:')} {info_map['description']}")
+    if info_map.get("source"):
+        click.echo(f"{ux.bold('Source:')}      {info_map['source']}")
+    if info_map.get("baseDir"):
+        click.echo(f"{ux.bold('Path:')}        {info_map['baseDir']}")
+    if info_map.get("filePath"):
+        click.echo(f"{ux.bold('File:')}        {info_map['filePath']}")
+    click.echo(f"{ux.bold('Eligible:')}    {info_map.get('eligible', False)}")
+    click.echo(f"{ux.bold('Bundled:')}     {info_map.get('bundled', False)}")
+    if info_map.get("homepage"):
+        click.echo(f"{ux.bold('Homepage:')}    {info_map['homepage']}")
+
+    scan_data = info_map.get("scan")
+    if scan_data:
+        click.echo()
+        click.echo(ux.bold("Last Scan:"))
+        if scan_data.get("clean"):
+            ux.ok("Verdict:  CLEAN", indent="  ")
+        else:
+            # SK-3: label the count plainly and stamp the *severity word* with
+            # the matching colour (was: "{n} CRITICAL findings" always in
+            # yellow, conflating the total count with the max severity).
+            n = scan_data.get("total_findings", 0)
+            sev = scan_data.get("max_severity", "INFO")
+            sev_color = {
+                "CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan",
+            }.get(sev, "white")
+            click.echo(
+                f"  {ux.bold('Verdict:')}  {n} findings "
+                f"(max severity: {ux._style(sev, fg=sev_color, bold=True)})"
+            )
+        click.echo(f"  {ux.bold('Target:')}   {scan_data.get('target', '')}")
+
+    actions_data = info_map.get("actions")
+    if actions_data or info_map.get("connector"):
+        from defenseclaw.models import ActionState
+        state = ActionState.from_dict(actions_data)
+        click.echo()
+        click.echo(f"{ux.bold('Actions:')}     {state.summary()}")
 
 
 # ---------------------------------------------------------------------------
@@ -873,8 +1041,6 @@ def scan(
         defenseclaw skill scan https://example.com/skills/my-skill.tar.gz
         defenseclaw skill scan clawhub://my-skill@1.2.3
     """
-    from defenseclaw.enforce import PolicyEngine
-
     if action and remote:
         click.echo(
             "error: --action is not supported with --remote; enforcement "
@@ -935,26 +1101,46 @@ def scan(
 
     # Resolve scan directory
     scan_dir = scan_path
+    scan_connector = ""
     if not scan_dir:
         info = _get_openclaw_skill_info(target, app, connector=connector_flag or None)
         if info and _skill_info_path(info):
             scan_dir = _skill_info_path(info) or ""
+            if connector_flag:
+                from defenseclaw.commands import resolve_list_connector as _resolve_scan_connector
+                scan_connector = _resolve_scan_connector(app, connector_flag)
         else:
             # ND-1: resolve a bare name across every active connector (not
-            # just the active one). If the name exists under more than one
-            # peer, refuse and ask for --connector rather than silently
-            # scanning whichever copy happened to sort first.
-            matches = _skill_match_dirs(app, target, connector_flag)
+            # just the active one). Scanning is read-only, so if multiple
+            # connectors contain the same skill name, fan out across every
+            # matching copy instead of asking for --connector.
+            matches = _skill_match_dir_scopes(app, target, connector_flag)
             if len(matches) > 1:
-                click.echo(
-                    f"error: skill {target!r} exists under multiple connectors:\n"
-                    + "\n".join(f"  - {m}" for m in matches)
-                    + "\n  Pass --connector <name> to choose which one.",
-                    err=True,
-                )
-                raise SystemExit(1)
+                if remote:
+                    for match_connector, match_dir in matches:
+                        if not as_json:
+                            click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                        _scan_via_sidecar(
+                            app,
+                            target=match_dir,
+                            name=os.path.basename(match_dir),
+                            as_json=as_json,
+                        )
+                    return
+                for match_connector, match_dir in matches:
+                    if not as_json:
+                        click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                    _scan_one_local_skill(
+                        app,
+                        scanner,
+                        scan_dir=match_dir,
+                        as_json=as_json,
+                        action=action,
+                        connector=match_connector,
+                    )
+                return
             if matches:
-                scan_dir = _resolve_path(app, target, connector_flag) or ""
+                scan_connector, scan_dir = matches[0]
 
         # F-0501: ``scan_dir`` here came from a connector-reported
         # ``baseDir``/``path`` (an UNTRUSTED connector home / sidecar
@@ -967,7 +1153,7 @@ def scan(
         # (handled above: ``scan_path`` skips this block).
         if scan_dir:
             from defenseclaw.safety import SafetyError, assert_within_roots
-            roots = _scan_skill_roots(app, connector_flag)
+            roots = _scan_skill_roots(app, scan_connector or connector_flag)
             if roots:
                 try:
                     assert_within_roots(scan_dir, roots, what="skill scan dir")
@@ -984,19 +1170,45 @@ def scan(
         click.echo(f"error: could not resolve skill {target!r} — use --path to specify manually", err=True)
         raise SystemExit(1)
 
-    name = os.path.basename(scan_dir) if scan_dir else target
-
     # --remote: delegate scan to sidecar API — skip local policy checks
     # since enforcement runs on the remote host.
     if remote:
-        _scan_via_sidecar(app, target=scan_dir or target, name=name, as_json=as_json)
+        _scan_via_sidecar(
+            app,
+            target=scan_dir or target,
+            name=os.path.basename(scan_dir) if scan_dir else target,
+            as_json=as_json,
+        )
         return
 
-    from defenseclaw.commands import _scan_ui, resolve_list_connector
+    from defenseclaw.commands import resolve_list_connector
 
     # Resolve before policy checks so --connector X reads that connector's
     # scoped allow/block rows instead of the global row only.
-    connector = resolve_list_connector(app, connector_flag)
+    connector = scan_connector or resolve_list_connector(app, connector_flag)
+    _scan_one_local_skill(
+        app,
+        scanner,
+        scan_dir=scan_dir,
+        as_json=as_json,
+        action=action,
+        connector=connector,
+    )
+
+
+def _scan_one_local_skill(
+    app: AppContext,
+    scanner: Any,
+    *,
+    scan_dir: str,
+    as_json: bool,
+    action: bool,
+    connector: str,
+) -> None:
+    from defenseclaw.commands import _scan_ui
+    from defenseclaw.enforce import PolicyEngine
+
+    name = os.path.basename(scan_dir)
 
     pe = PolicyEngine(app.store)
 
@@ -1388,6 +1600,43 @@ def _skill_match_dirs(app: AppContext, target: str, connector: str = "") -> list
     return matches
 
 
+def _skill_match_dir_scopes(app: AppContext, target: str, connector: str = "") -> list[tuple[str, str]]:
+    """Every ``(connector, path)`` pair that contains ``target``.
+
+    This is the connector-aware sibling of :func:`_skill_match_dirs` for
+    commands that need to label/evaluate the matched connector, not just scan a
+    filesystem path.
+    """
+    from defenseclaw.safety import is_symlink
+
+    def _matched_candidate(skill_root: str, skill_name: str) -> str | None:
+        candidate = os.path.join(skill_root, skill_name)
+        if not os.path.isdir(candidate) or is_symlink(candidate):
+            return None
+        return os.path.realpath(candidate)
+
+    name = _skill_basename(target)
+    if connector:
+        from defenseclaw.commands import resolve_list_connector
+        resolved = resolve_list_connector(app, connector)
+        scoped_matches: list[tuple[str, str]] = []
+        for d in app.cfg.skill_dirs(resolved):
+            candidate = _matched_candidate(d, name)
+            if candidate and (resolved, candidate) not in scoped_matches:
+                scoped_matches.append((resolved, candidate))
+        return scoped_matches
+
+    matches: list[tuple[str, str]] = []
+    seen_paths: set[str] = set()
+    for c in _active_skill_connectors(app):
+        for d in app.cfg.skill_dirs(c):
+            candidate = _matched_candidate(d, name)
+            if candidate and candidate not in seen_paths:
+                matches.append((c, candidate))
+                seen_paths.add(candidate)
+    return matches
+
+
 def _resolve_path(app: AppContext, target: str, connector: str = "") -> str | None:
     """Resolve a skill name or path to an actual directory.
 
@@ -1465,6 +1714,22 @@ def _all_active_skill_dirs(app: AppContext) -> list[str]:
             if d not in dirs:
                 dirs.append(d)
     return dirs
+
+
+def _active_skill_connectors(app: AppContext) -> list[str]:
+    cfg = app.cfg
+    if hasattr(cfg, "active_connectors"):
+        try:
+            names = [n for n in cfg.active_connectors() if n]
+            if names:
+                return names
+        except Exception:  # noqa: BLE001 — fall back to singular active connector.
+            pass
+    if hasattr(cfg, "active_connector"):
+        active = cfg.active_connector()
+        if active:
+            return [active]
+    return ["openclaw"]
 
 
 def _skill_info_path(info: dict[str, Any] | None) -> str:
@@ -2103,6 +2368,53 @@ _CONNECTOR_SCOPE_HELP = (
 )
 
 
+def _resolve_connector_scope(app: AppContext, connector_flag: str) -> str:
+    """Validate a connector-scoped skill policy flag.
+
+    Bare policy commands intentionally write a global row. When a connector is
+    supplied, route through the same resolver as list/scan/info/install so a
+    typo cannot create inert policy state for a non-existent connector.
+    """
+    if not connector_flag:
+        return ""
+    from defenseclaw.commands import resolve_list_connector
+    return resolve_list_connector(app, connector_flag)
+
+
+def _resolve_skill_quarantine_restore_scopes(
+    app: AppContext, pe: Any, skill_name: str, connector_flag: str,
+) -> list[tuple[str, Any | None]]:
+    """Resolve which quarantine action rows a restore command should use.
+
+    Explicit ``--connector`` narrows to that connector. Bare restore restores
+    the legacy global quarantine row plus every active connector-scoped
+    quarantine row for the skill.
+    """
+    if connector_flag:
+        connector = _resolve_connector_scope(app, connector_flag)
+        return [(connector, pe.get_action("skill", skill_name, connector))]
+
+    matches: list[tuple[str, Any]] = []
+    global_entry = pe.get_action("skill", skill_name)
+    if global_entry is not None and global_entry.actions.file == "quarantine":
+        matches.append(("", global_entry))
+
+    active_order = {c: i for i, c in enumerate(_active_skill_connectors(app))}
+    seen_connectors: set[str] = set()
+    for entry in pe.list_by_type("skill"):
+        c = entry.connector
+        if not c or c in seen_connectors:
+            continue
+        seen_connectors.add(c)
+        scoped_entry = pe.get_action("skill", skill_name, c)
+        if scoped_entry is not None and scoped_entry.actions.file == "quarantine":
+            matches.append((c, scoped_entry))
+
+    if matches:
+        return sorted(matches, key=lambda item: active_order.get(item[0], len(active_order)))
+    return [("", global_entry)]
+
+
 @skill.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for blocking")
@@ -2126,21 +2438,22 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     if not reason:
         reason = "manual block via CLI"
 
-    if connector_flag:
-        if pe.is_blocked_for_connector("skill", skill_name, connector_flag):
+    connector = _resolve_connector_scope(app, connector_flag)
+    if connector:
+        if pe.is_blocked_for_connector("skill", skill_name, connector):
             if app.store and app.store.has_action(
-                "skill", skill_name, "install", "block", connector_flag,
+                "skill", skill_name, "install", "block", connector,
             ):
-                click.echo(f"Already blocked for {connector_flag}: {skill_name}")
+                click.echo(f"Already blocked for {connector}: {skill_name}")
             else:
-                click.echo(f"Already blocked globally (covers {connector_flag}): {skill_name}")
+                click.echo(f"Already blocked globally (covers {connector}): {skill_name}")
             return
-        pe.block_for_connector("skill", skill_name, connector_flag, reason)
-        skill_path = _resolve_path(app, skill_name)
+        pe.block_for_connector("skill", skill_name, connector, reason)
+        skill_path = _resolve_path(app, skill_name, connector)
         if skill_path:
-            pe.set_source_path("skill", skill_name, skill_path, connector_flag)
+            pe.set_source_path("skill", skill_name, skill_path, connector)
         click.secho(
-            f"[skill] {skill_name!r} added to block list (connector={connector_flag})",
+            f"[skill] {skill_name!r} added to block list (connector={connector})",
             fg="red",
         )
     else:
@@ -2152,7 +2465,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 
     if app.logger:
         app.logger.log_action(
-            "skill-block", skill_name, f"reason={reason} connector={connector_flag}",
+            "skill-block", skill_name, f"reason={reason} connector={connector}",
         )
 
     from defenseclaw.commands import hint
@@ -2193,31 +2506,34 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 
     # SK-4 connector-scoped unblock: EXACT-match on the targeted peer so a
     # connector unblock never falsely reports (or clears) the global block.
-    if connector_flag:
+    connector = _resolve_connector_scope(app, connector_flag)
+    if connector:
         has_state = bool(app.store) and (
-            app.store.has_action("skill", skill_name, "install", "block", connector_flag)
-            or app.store.has_action("skill", skill_name, "file", "quarantine", connector_flag)
-            or app.store.has_action("skill", skill_name, "runtime", "disable", connector_flag)
+            app.store.has_action("skill", skill_name, "install", "block", connector)
+            or app.store.has_action("skill", skill_name, "install", "allow", connector)
+            or app.store.has_action("skill", skill_name, "file", "quarantine", connector)
+            or app.store.has_action("skill", skill_name, "runtime", "disable", connector)
         )
         if not has_state:
             click.echo(
-                f"[skill] {skill_name!r} has no enforcement state to clear for {connector_flag}"
+                f"[skill] {skill_name!r} has no enforcement state to clear for {connector}"
             )
             return
-        pe.remove_action_for_connector("skill", skill_name, connector_flag)
+        pe.remove_action_for_connector("skill", skill_name, connector)
         click.secho(
             f"[skill] {skill_name!r} all enforcement state cleared "
-            f"(connector={connector_flag}) (block/quarantine/disable)",
+            f"(connector={connector}) (allow/block/quarantine/disable)",
             fg="green",
         )
         if app.logger:
             app.logger.log_action(
-                "skill-unblock", skill_name, f"manual unblock via CLI connector={connector_flag}",
+                "skill-unblock", skill_name, f"manual unblock via CLI connector={connector}",
             )
         return
 
     has_state = (
         pe.is_blocked("skill", skill_name)
+        or pe.is_allowed("skill", skill_name)
         or pe.is_quarantined("skill", skill_name)
         or app.store.has_action("skill", skill_name, "runtime", "disable")
     )
@@ -2235,7 +2551,11 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 
     if runtime_cleared:
         pe.remove_action("skill", skill_name)
-        click.secho(f"[skill] {skill_name!r} all enforcement state cleared (block/quarantine/disable)", fg="green")
+        click.secho(
+            f"[skill] {skill_name!r} all enforcement state cleared "
+            "(allow/block/quarantine/disable)",
+            fg="green",
+        )
     else:
         pe.unblock("skill", skill_name)
         pe.clear_quarantine("skill", skill_name)
@@ -2287,26 +2607,27 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     # SK-4 connector-scoped allow: write the narrowed entry and clear residual
     # file/runtime state for that peer. The gateway runtime-enable dance below
     # is for the global/OpenClaw runtime lane and stays on the bare path.
-    if connector_flag:
-        if pe.is_allowed_for_connector("skill", skill_name, connector_flag):
+    connector = _resolve_connector_scope(app, connector_flag)
+    if connector:
+        if pe.is_allowed_for_connector("skill", skill_name, connector):
             if app.store and app.store.has_action(
-                "skill", skill_name, "install", "allow", connector_flag,
+                "skill", skill_name, "install", "allow", connector,
             ):
-                click.echo(f"Already allowed for {connector_flag}: {skill_name}")
+                click.echo(f"Already allowed for {connector}: {skill_name}")
             else:
-                click.echo(f"Already allowed globally (covers {connector_flag}): {skill_name}")
+                click.echo(f"Already allowed globally (covers {connector}): {skill_name}")
             return
-        pe.allow_for_connector("skill", skill_name, connector_flag, reason)
-        skill_path = _resolve_path(app, skill_name)
+        pe.allow_for_connector("skill", skill_name, connector, reason)
+        skill_path = _resolve_path(app, skill_name, connector)
         if skill_path:
-            pe.set_source_path("skill", skill_name, skill_path, connector_flag)
+            pe.set_source_path("skill", skill_name, skill_path, connector)
         click.secho(
-            f"[skill] {skill_name!r} added to allow list (connector={connector_flag})",
+            f"[skill] {skill_name!r} added to allow list (connector={connector})",
             fg="green",
         )
         if app.logger:
             app.logger.log_action(
-                "skill-allow", skill_name, f"reason={reason} connector={connector_flag}",
+                "skill-allow", skill_name, f"reason={reason} connector={connector}",
             )
         return
 
@@ -2390,12 +2711,14 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
     skill_name = os.path.basename(name)
 
     active = _active_connector_name(app)
-    target_connector = _normalize_runtime_connector(connector_flag or active)
 
     if not reason:
         reason = "manual disable via CLI"
 
+    connector = _resolve_connector_scope(app, connector_flag)
     pe = PolicyEngine(app.store)
+    target_connector = _normalize_runtime_connector(connector or active)
+
     if target_connector == "openclaw":
         client = _sidecar_client(app)
         try:
@@ -2425,14 +2748,14 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
         else:
             _warn_skill_runtime_disable_advisory(skill_name, target_connector, False)
 
-    if connector_flag:
+    if connector:
         pe.disable_for_connector("skill", skill_name, target_connector, reason)
     else:
         pe.disable("skill", skill_name, reason)
 
     if app.logger:
         app.logger.log_action(
-            "skill-disable", skill_name, f"reason={reason} connector={connector_flag}",
+            "skill-disable", skill_name, f"reason={reason} connector={connector}",
         )
 
 
@@ -2454,7 +2777,8 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
 
     skill_name = os.path.basename(name)
     active = _active_connector_name(app)
-    target_connector = _normalize_runtime_connector(connector_flag or active)
+    connector = _resolve_connector_scope(app, connector_flag)
+    target_connector = _normalize_runtime_connector(connector or active)
 
     if target_connector == "openclaw":
         client = _sidecar_client(app)
@@ -2473,14 +2797,14 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         click.echo(f"[skill] {skill_name!r} global runtime disable cleared")
 
     pe = PolicyEngine(app.store)
-    if connector_flag:
+    if connector:
         pe.enable_for_connector("skill", skill_name, target_connector)
     else:
         pe.enable("skill", skill_name)
 
     if app.logger:
         app.logger.log_action(
-            "skill-enable", skill_name, f"re-enabled via CLI connector={connector_flag}",
+            "skill-enable", skill_name, f"re-enabled via CLI connector={connector}",
         )
 
 
@@ -2495,8 +2819,7 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
     "connector_flag",
     default="",
     help="Connector whose copy of the skill to quarantine "
-    "(default: search every active connector; required to disambiguate when "
-    "the same skill name exists under more than one).",
+    "(default: quarantine every matching copy across active connectors).",
 )
 @click.option("--reason", default="", help="Reason for quarantine")
 @pass_ctx
@@ -2506,9 +2829,9 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
     Moves the skill's directory to ~/.defenseclaw/quarantine/skills/ and records
     the action. The skill can be restored with 'skill restore'.
 
-    On a multi-connector install the skill is located across EVERY active
-    connector's skill directories; pass --connector to scope the search (and to
-    disambiguate when the same name exists under more than one connector).
+    On a multi-connector install a bare skill name quarantines every matching
+    copy across active connectors; pass --connector to scope the operation to
+    one connector.
     """
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
@@ -2518,8 +2841,6 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
         click.echo(f"error: invalid skill name {name!r}", err=True)
         raise SystemExit(1)
 
-    # Search scope: one connector (--connector) or the union of every active
-    # connector's skill dirs, so a non-primary connector's skill is reachable.
     resolved_connector = ""
     if connector_flag:
         from defenseclaw.commands import resolve_list_connector
@@ -2545,50 +2866,41 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
                 err=True,
             )
             raise SystemExit(1)
-        skill_path: str | None = real
+        targets: list[tuple[str, str]] = [(resolved_connector, real)]
     else:
-        # Locate the named skill across the scope. If it exists under more than
-        # one connector, refuse and ask for --connector rather than guessing.
-        matches: list[str] = []
-        for d in scope_dirs:
-            candidate = os.path.join(d, skill_name)
-            if os.path.isdir(candidate) and candidate not in matches:
-                matches.append(candidate)
-        if len(matches) > 1:
-            click.echo(
-                f"error: skill {skill_name!r} exists under multiple connectors:\n"
-                + "\n".join(f"  - {m}" for m in matches)
-                + "\n  Pass --connector <name> to choose which one.",
-                err=True,
-            )
-            raise SystemExit(1)
-        skill_path = matches[0] if matches else None
+        targets = _skill_match_dir_scopes(app, skill_name, connector_flag)
 
-    if not skill_path:
+    if not targets:
         click.echo(f"error: could not locate skill {skill_name!r} — provide an absolute path", err=True)
         raise SystemExit(1)
 
     se = SkillEnforcer(app.cfg.quarantine_dir)
-    dest = se.quarantine(skill_name, skill_path)
-    if dest is None:
-        click.echo(f"error: skill path does not exist: {skill_path}", err=True)
-        raise SystemExit(1)
-
-    click.echo(f'[skill] {skill_name!r} quarantined to {dest}')
-
     if not reason:
         reason = "manual quarantine via CLI"
-
     pe = PolicyEngine(app.store)
-    if resolved_connector:
-        pe.quarantine_for_connector("skill", skill_name, resolved_connector, reason)
-        pe.set_source_path("skill", skill_name, skill_path, resolved_connector)
-    else:
-        pe.quarantine("skill", skill_name, reason)
-        pe.set_source_path("skill", skill_name, skill_path)
 
-    if app.logger:
-        app.logger.log_action("skill-quarantine", skill_name, f"reason={reason}, dest={dest}")
+    for target_connector, skill_path in targets:
+        dest = se.quarantine(skill_name, skill_path, connector=target_connector)
+        if dest is None:
+            click.echo(f"error: skill path does not exist: {skill_path}", err=True)
+            raise SystemExit(1)
+
+        suffix = f" (connector={target_connector})" if target_connector else ""
+        click.echo(f"[skill] {skill_name!r} quarantined to {dest}{suffix}")
+
+        if target_connector:
+            pe.quarantine_for_connector("skill", skill_name, target_connector, reason)
+            pe.set_source_path("skill", skill_name, skill_path, target_connector)
+        else:
+            pe.quarantine("skill", skill_name, reason)
+            pe.set_source_path("skill", skill_name, skill_path)
+
+        if app.logger:
+            app.logger.log_action(
+                "skill-quarantine",
+                skill_name,
+                f"reason={reason}, connector={target_connector}, dest={dest}",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -2620,54 +2932,92 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
 
     skill_name = os.path.basename(name)
+    pe = PolicyEngine(app.store)
+    targets = _resolve_skill_quarantine_restore_scopes(
+        app, pe, skill_name, connector_flag,
+    )
+    if restore_path and len(targets) > 1:
+        click.echo(
+            "error: --path with multiple quarantined connector copies is ambiguous; "
+            "pass --connector <name> to restore one copy to an explicit path",
+            err=True,
+        )
+        raise SystemExit(1)
 
     se = SkillEnforcer(app.cfg.quarantine_dir)
-    if not se.is_quarantined(skill_name):
+    existing_targets = [
+        (target_connector, entry)
+        for target_connector, entry in targets
+        if se.is_quarantined(skill_name, target_connector)
+    ]
+    if not existing_targets:
         click.echo(f"error: {skill_name!r} is not quarantined", err=True)
         raise SystemExit(1)
 
-    pe = PolicyEngine(app.store)
+    for resolved_connector, entry in existing_targets:
+        target_restore_path = restore_path
+        if not target_restore_path:
+            if entry is None or not entry.source_path:
+                click.echo(
+                    f"error: no stored path for {skill_name!r}"
+                    + (
+                        f" on connector={resolved_connector}"
+                        if resolved_connector else ""
+                    )
+                    + " — use --path to specify restore destination",
+                    err=True,
+                )
+                raise SystemExit(1)
+            target_restore_path = entry.source_path
 
-    if not restore_path:
-        entry = pe.get_action("skill", skill_name)
-        if entry is None or not entry.source_path:
-            click.echo(
-                f"error: no stored path for {skill_name!r} — use --path to specify restore destination",
-                err=True,
-            )
-            raise SystemExit(1)
-        restore_path = entry.source_path
+        if not (hasattr(app.cfg, "skill_dirs") and callable(app.cfg.skill_dirs)):
+            allowed_roots = None
+        elif resolved_connector:
+            allowed_roots = app.cfg.skill_dirs(resolved_connector)
+        else:
+            allowed_roots = _all_active_skill_dirs(app)
+        real_restore = os.path.realpath(target_restore_path)
+        if allowed_roots:
+            if not any(
+                real_restore.startswith(os.path.realpath(r) + os.sep)
+                or real_restore == os.path.realpath(r)
+                for r in allowed_roots
+            ):
+                click.echo(
+                    "error: restore path must be within configured skill directories",
+                    err=True,
+                )
+                raise SystemExit(1)
 
-    if not (hasattr(app.cfg, "skill_dirs") and callable(app.cfg.skill_dirs)):
-        allowed_roots = None
-    elif connector_flag:
-        from defenseclaw.commands import resolve_list_connector
-        allowed_roots = app.cfg.skill_dirs(resolve_list_connector(app, connector_flag))
-    else:
-        allowed_roots = _all_active_skill_dirs(app)
-    real_restore = os.path.realpath(restore_path)
-    if allowed_roots:
-        if not any(
-            real_restore.startswith(os.path.realpath(r) + os.sep) or real_restore == os.path.realpath(r)
-            for r in allowed_roots
+        if not se.restore(
+            skill_name,
+            target_restore_path,
+            allowed_roots=allowed_roots,
+            connector=resolved_connector,
         ):
             click.echo(
-                "error: restore path must be within configured skill directories",
+                f"error: restore failed for {skill_name!r}"
+                + (f" on connector={resolved_connector}" if resolved_connector else ""),
                 err=True,
             )
             raise SystemExit(1)
 
-    if not se.restore(skill_name, restore_path, allowed_roots=allowed_roots):
-        click.echo(f"error: restore failed for {skill_name!r}", err=True)
-        raise SystemExit(1)
+        suffix = f" (connector={resolved_connector})" if resolved_connector else ""
+        click.echo(f"[skill] {skill_name!r} restored to {target_restore_path}{suffix}")
 
-    click.echo(f'[skill] {skill_name!r} restored to {restore_path}')
+        if resolved_connector:
+            pe.clear_quarantine_for_connector("skill", skill_name, resolved_connector)
+            pe.set_source_path("skill", skill_name, target_restore_path, resolved_connector)
+        else:
+            pe.clear_quarantine("skill", skill_name)
+            pe.set_source_path("skill", skill_name, target_restore_path)
 
-    pe.clear_quarantine("skill", skill_name)
-    pe.set_source_path("skill", skill_name, restore_path)
-
-    if app.logger:
-        app.logger.log_action("skill-restore", skill_name, f"restored to {restore_path}")
+        if app.logger:
+            app.logger.log_action(
+                "skill-restore",
+                skill_name,
+                f"connector={resolved_connector}, restored to {target_restore_path}",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -2691,196 +3041,168 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
     from defenseclaw.commands import resolve_list_connector
 
     skill_name = os.path.basename(name)
-    connector = resolve_list_connector(app, connector_flag)
+    if connector_flag:
+        connector = resolve_list_connector(app, connector_flag)
+        info_map = _skill_info_card(
+            app,
+            skill_name,
+            _get_openclaw_skill_info(skill_name, app, connector=connector),
+            connector=connector,
+            filter_scan_to_connector=True,
+        )
+        cards = [info_map] if info_map is not None else []
+    else:
+        cards: list[dict[str, Any]] = []
+        for c in _active_skill_connectors(app):
+            found = _get_openclaw_skill_info(skill_name, app, connector=c)
+            card = _skill_info_card(
+                app,
+                skill_name,
+                found,
+                connector=c,
+                filter_scan_to_connector=True,
+                suppress_global_action_only=True,
+            )
+            if card is not None:
+                cards.append(card)
+        if not cards:
+            # SK-2: a true miss must error rather than render a blank
+            # "Eligible: False / Bundled: False" card that implies the skill
+            # exists. Keep rendering when a scan-history or enforcement record
+            # carries the name, so a quarantined/removed-but-scanned skill stays
+            # inspectable in unscoped mode.
+            fallback = _skill_info_card(app, skill_name, None)
+            if fallback is not None:
+                cards.append(fallback)
 
-    info_map = _get_openclaw_skill_info(skill_name, app, connector=connector)
-    scan_map = _build_scan_map(app.store)
-    actions_map = _build_actions_map(app.store, connector)
-
-    if info_map is None:
-        # SK-2: a true miss must error rather than render a blank
-        # "Eligible: False / Bundled: False" card that implies the skill
-        # exists. Keep rendering when a scan-history or enforcement record
-        # carries the name, so a quarantined/removed-but-enforced skill stays
-        # inspectable.
-        if skill_name not in scan_map and skill_name not in actions_map:
-            click.echo(f"error: skill {skill_name!r} not found", err=True)
-            raise SystemExit(1)
-        info_map = {"name": skill_name}
-
-    if skill_name in scan_map:
-        info_map["scan"] = scan_map[skill_name]
-
-    if skill_name in actions_map:
-        ae = actions_map[skill_name]
-        if not ae.actions.is_empty():
-            info_map["actions"] = ae.actions.to_dict()
+    if not cards:
+        click.echo(f"error: skill {skill_name!r} not found", err=True)
+        raise SystemExit(1)
 
     if as_json:
-        click.echo(json.dumps(info_map, indent=2, default=str))
+        payload: Any = cards if len(cards) > 1 else cards[0]
+        click.echo(json.dumps(payload, indent=2, default=str))
         return
 
-    # Text output
-    click.echo(f"{ux.bold('Skill:')}       {info_map.get('name', skill_name)}")
-    if info_map.get("description"):
-        click.echo(f"{ux.bold('Description:')} {info_map['description']}")
-    if info_map.get("source"):
-        click.echo(f"{ux.bold('Source:')}      {info_map['source']}")
-    if info_map.get("baseDir"):
-        click.echo(f"{ux.bold('Path:')}        {info_map['baseDir']}")
-    if info_map.get("filePath"):
-        click.echo(f"{ux.bold('File:')}        {info_map['filePath']}")
-    click.echo(f"{ux.bold('Eligible:')}    {info_map.get('eligible', False)}")
-    click.echo(f"{ux.bold('Bundled:')}     {info_map.get('bundled', False)}")
-    if info_map.get("homepage"):
-        click.echo(f"{ux.bold('Homepage:')}    {info_map['homepage']}")
-
-    scan_data = info_map.get("scan")
-    if scan_data:
-        click.echo()
-        click.echo(ux.bold("Last Scan:"))
-        if scan_data.get("clean"):
-            ux.ok("Verdict:  CLEAN", indent="  ")
-        else:
-            # SK-3: label the count plainly and stamp the *severity word* with
-            # the matching colour (was: "{n} CRITICAL findings" always in
-            # yellow, conflating the total count with the max severity).
-            n = scan_data.get("total_findings", 0)
-            sev = scan_data.get("max_severity", "INFO")
-            sev_color = {
-                "CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan",
-            }.get(sev, "white")
-            click.echo(
-                f"  {ux.bold('Verdict:')}  {n} findings "
-                f"(max severity: {ux._style(sev, fg=sev_color, bold=True)})"
-            )
-        click.echo(f"  {ux.bold('Target:')}   {scan_data.get('target', '')}")
-
-    actions_data = info_map.get("actions")
-    if actions_data:
-        from defenseclaw.models import ActionState
-        state = ActionState.from_dict(actions_data)
-        if not state.is_empty():
+    for idx, card in enumerate(cards):
+        if idx:
             click.echo()
-            click.echo(f"{ux.bold('Actions:')}     {state.summary()}")
+        _print_skill_info_card(card, skill_name, show_connector=(not connector_flag))
 
 
 # ---------------------------------------------------------------------------
 # skill install
 # ---------------------------------------------------------------------------
 
-@skill.command()
-@click.argument("name")
-@click.option("--force", is_flag=True, help="Force install (overwrites existing)")
-@click.option("--action", "take_action", is_flag=True, help="Apply skill_actions policy based on scan severity")
-@click.option(
-    "--connector", "connector_flag", default="",
-    help="Attribute install/enforcement to a specific connector (multi-connector installs)",
-)
-@pass_ctx
-def install(app: AppContext, name: str, force: bool, take_action: bool, connector_flag: str) -> None:
-    """Install and scan an OpenClaw skill via clawhub.
+def _skill_install_targets(
+    app: AppContext, connectors: list[str], *, explicit_connector: bool = False,
+) -> list[tuple[str, str]]:
+    """Return ``(connector, install_root)`` targets for registry installs."""
+    targets: list[tuple[str, str]] = []
+    skipped: list[str] = []
+    for connector in connectors:
+        dirs = [d for d in app.cfg.skill_dirs(connector) if d]
+        if not dirs:
+            skipped.append(connector)
+            continue
+        targets.append((connector, dirs[0]))
 
-    By default, install only runs the scan and reports findings — no enforcement
-    actions are taken. Pass --action to apply the configured skill_actions policy
-    (quarantine, disable, block) based on scan severity.
+    if not targets:
+        if explicit_connector and connectors:
+            click.echo(
+                f"error: connector {connectors[0]!r} does not expose a skill install directory",
+                err=True,
+            )
+        else:
+            click.echo(
+                "error: no active connector exposes a skill install directory",
+                err=True,
+            )
+        raise SystemExit(1)
 
-    Use --force to overwrite an existing skill.
-    """
-    from defenseclaw.commands import resolve_list_connector
-    from defenseclaw.enforce import PolicyEngine
+    for connector in skipped:
+        click.echo(
+            f"[install] skipping connector={connector}: no skill install directory"
+        )
+    return targets
+
+
+def _find_clawhub_staged_skill(stage_dir: str, skill_name: str) -> str | None:
+    """Find the skill directory produced by ``clawhub install`` in a staging cwd."""
+    candidates = [
+        os.path.join(stage_dir, "skills", skill_name),
+        os.path.join(stage_dir, skill_name),
+    ]
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def _copy_skill_tree_to_connector(
+    source_path: str, install_root: str, skill_name: str, *, force: bool,
+) -> str:
+    target_path = os.path.join(install_root, skill_name)
+    real_root = os.path.realpath(install_root)
+    real_target = os.path.realpath(target_path)
+    if not (real_target == real_root or real_target.startswith(real_root + os.sep)):
+        click.echo("error: resolved install path escapes the connector skill directory", err=True)
+        raise SystemExit(1)
+
+    if os.path.realpath(source_path) == real_target:
+        return target_path
+    if os.path.exists(target_path):
+        if not force:
+            click.echo(
+                f"error: skill {skill_name!r} already exists at {target_path}; pass --force to replace it",
+                err=True,
+            )
+            raise SystemExit(1)
+        shutil.rmtree(target_path)
+    os.makedirs(install_root, exist_ok=True)
+    shutil.copytree(source_path, target_path)
+    return target_path
+
+
+def _rollback_skill_install_paths(paths: list[str]) -> None:
+    seen: set[str] = set()
+    for path in paths:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+        except OSError as exc:
+            click.echo(
+                f"[install] warning: could not remove partial install {path}: {exc}",
+                err=True,
+            )
+
+
+def _scan_installed_skill_for_connector(
+    app: AppContext,
+    pe: Any,
+    scanner: Any,
+    skill_name: str,
+    skill_path: str,
+    *,
+    connector: str,
+    take_action: bool,
+    rollback_paths: list[str] | None = None,
+) -> None:
     from defenseclaw.enforce.admission import evaluate_admission
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
 
-    skill_name = os.path.basename(name)
-    connector = resolve_list_connector(app, connector_flag)
-    pe = PolicyEngine(app.store)
-
-    pre_decision = evaluate_admission(
-        pe,
-        policy_dir=app.cfg.policy_dir,
-        target_type="skill",
-        name=skill_name,
-        source_path=name,
-        fallback_actions=app.cfg.skill_actions,
-        connector=connector,
-        asset_policy=app.cfg.asset_policy,
-        # F-0283: a quarantined skill must NOT be (re)installed. Without
-        # this flag the admission evaluator never consulted quarantine
-        # state, so an asset that a prior scan quarantined could be
-        # reinstalled straight past the gate. Reject quarantined installs.
-        include_quarantine=True,
-    )
-
-    if pre_decision.verdict == "blocked":
-        if app.logger:
-            app.logger.log_action("install-rejected", skill_name, "reason=blocked")
-        click.echo(
-            f"error: skill {skill_name!r} is on the block list"
-            f" — run 'defenseclaw skill allow {skill_name}' to unblock",
-            err=True,
-        )
-        raise SystemExit(1)
-
-    if pre_decision.verdict == "rejected" and pre_decision.source == "quarantine":
-        if app.logger:
-            app.logger.log_action("install-rejected", skill_name, "reason=quarantined")
-        click.echo(
-            f"error: skill {skill_name!r} is quarantined"
-            f" — release the quarantine before reinstalling",
-            err=True,
-        )
-        raise SystemExit(1)
-
-    if pre_decision.verdict == "allowed":
-        if pre_decision.source == "scan-disabled":
-            click.echo(f"[install] policy allows {skill_name!r} without scan")
-        else:
-            click.echo(f"[install] {skill_name!r} is on the allow list — skipping scan")
-        if app.logger:
-            app.logger.log_action("install-allowed", skill_name, "reason=allow-listed")
-        _run_clawhub_install(skill_name, force)
-        return
-
-    # Install via clawhub
-    click.echo(f"[install] installing {skill_name!r} via clawhub...")
-    _run_clawhub_install(skill_name, force)
-
-    # Locate and scan
-    skill_path = _resolve_path(app, skill_name)
-    # when the post-install scan cannot run (skill
-    # unresolved, scanner crash) we must NOT leave the installed
-    # package on disk with no policy decision. Roll back the
-    # clawhub install before exiting.
-    if not skill_path:
-        click.echo(
-            f"[install] could not locate installed skill {skill_name!r} for scan — "
-            "rolling back via clawhub uninstall",
-            err=True,
-        )
-        _run_clawhub_uninstall(skill_name)
-        if app.logger:
-            app.logger.log_action(
-                "install-rolled-back", skill_name,
-                "reason=skill-unresolved scan=skipped",
-            )
-        raise SystemExit(1)
-
-    click.echo(f"[install] scanning {skill_path}...")
-    scanner = _build_skill_scanner(app)
+    click.echo(f"[install] scanning {skill_path} (connector={connector})...")
     try:
         result = scanner.scan(skill_path)
     except Exception as exc:
+        _rollback_skill_install_paths(rollback_paths or [skill_path])
         click.echo(
-            f"error: scan failed: {exc} — rolling back via clawhub uninstall",
+            f"error: scan failed for connector={connector}: {exc}",
             err=True,
         )
-        _run_clawhub_uninstall(skill_name)
-        if app.logger:
-            app.logger.log_action(
-                "install-rolled-back", skill_name,
-                f"reason=scan-failed exc={type(exc).__name__}",
-            )
         raise SystemExit(1)
 
     if app.logger:
@@ -2901,81 +3223,254 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
     )
 
     if post_decision.verdict == "allowed":
-        click.echo(f"[install] {skill_name!r} became allow-listed — skipping post-scan enforcement")
+        click.echo(
+            f"[install] {skill_name!r} became allow-listed for connector={connector} "
+            "— skipping post-scan enforcement"
+        )
         if app.logger:
-            app.logger.log_action("install-allowed", skill_name, "reason=allow-listed-post-scan")
+            app.logger.log_action(
+                "install-allowed",
+                skill_name,
+                f"reason=allow-listed-post-scan connector={connector}",
+            )
         return
 
     if post_decision.verdict == "clean":
-        click.echo(f"[install] {skill_name!r} installed and clean")
+        click.echo(f"[install] {skill_name!r} installed and clean (connector={connector})")
         if app.logger:
-            app.logger.log_action("install-clean", skill_name, "verdict=clean")
+            app.logger.log_action(
+                "install-clean", skill_name, f"verdict=clean connector={connector}",
+            )
         return
 
     sev = result.max_severity()
-    detail = f"severity={sev} findings={len(result.findings)}"
+    detail = f"severity={sev} findings={len(result.findings)} connector={connector}"
 
     if not take_action:
         click.echo(
             f"[install] {len(result.findings)} {sev} findings in {skill_name!r} "
-            f"(no action taken — pass --action to enforce)"
+            f"(connector={connector}; no action taken — pass --action to enforce)"
         )
         if app.logger:
             app.logger.log_action("install-warning", skill_name, detail)
         return
 
-    # --action: apply configured skill_actions policy
     action_cfg = post_decision.action
-    enforcement_reason = f"post-install scan: {len(result.findings)} findings, max={sev}"
+    enforcement_reason = (
+        f"post-install scan: {len(result.findings)} findings, max={sev}"
+    )
     applied_actions: list[str] = []
 
     if action_cfg.file == "quarantine":
         se = SkillEnforcer(app.cfg.quarantine_dir)
-        dest = se.quarantine(skill_name, skill_path)
+        dest = se.quarantine(skill_name, skill_path, connector=connector)
         if dest:
             applied_actions.append(f"quarantined to {dest}")
-            pe.quarantine("skill", skill_name, enforcement_reason)
+            pe.quarantine_for_connector("skill", skill_name, connector, enforcement_reason)
         else:
             click.echo("[install] quarantine failed", err=True)
 
     if action_cfg.runtime == "disable":
-        client = _sidecar_client(app)
-        try:
-            client.disable_skill(skill_name)
-            applied_actions.append("disabled via gateway")
-            pe.disable("skill", skill_name, enforcement_reason)
-        except Exception as exc:
-            click.echo(f"[install] gateway disable failed: {exc}", err=True)
+        target_connector = _normalize_runtime_connector(connector)
+        if target_connector == "openclaw":
+            client = _sidecar_client(app)
+            try:
+                client.disable_skill(skill_name)
+                applied_actions.append("disabled via gateway")
+                pe.disable_for_connector("skill", skill_name, connector, enforcement_reason)
+            except Exception as exc:
+                click.echo(f"[install] gateway disable failed: {exc}", err=True)
+        else:
+            applied_actions.append(f"runtime disable recorded for connector={connector}")
+            pe.disable_for_connector("skill", skill_name, connector, enforcement_reason)
 
     if action_cfg.install == "block":
-        pe.block("skill", skill_name, enforcement_reason)
+        pe.block_for_connector("skill", skill_name, connector, enforcement_reason)
         applied_actions.append("added to block list")
 
     if action_cfg.install == "allow":
-        pe.allow("skill", skill_name, enforcement_reason)
+        pe.allow_for_connector("skill", skill_name, connector, enforcement_reason)
         applied_actions.append("added to allow list")
 
-    pe.set_source_path("skill", skill_name, skill_path)
+    pe.set_source_path("skill", skill_name, skill_path, connector)
 
     if applied_actions:
         actions_str = ", ".join(applied_actions)
         click.echo(f"[install] {skill_name!r}: {actions_str} ({detail})")
         if app.logger:
-            app.logger.log_action("install-enforced", skill_name, f"{detail}; {actions_str}")
-        click.echo(f"error: skill {skill_name!r} had {sev} findings — actions applied: {actions_str}", err=True)
+            app.logger.log_action(
+                "install-enforced", skill_name, f"{detail}; {actions_str}",
+            )
+        click.echo(
+            f"error: skill {skill_name!r} had {sev} findings for connector={connector} "
+            f"— actions applied: {actions_str}",
+            err=True,
+        )
         raise SystemExit(1)
 
-    click.echo(f"[install] warning: {len(result.findings)} {sev} findings in {skill_name!r}")
+    click.echo(
+        f"[install] warning: {len(result.findings)} {sev} findings in {skill_name!r} "
+        f"(connector={connector})"
+    )
     if app.logger:
         app.logger.log_action("install-warning", skill_name, detail)
 
 
-def _run_clawhub_install(skill_name: str, force: bool) -> None:
-    args = ["npx", "clawhub", "install", skill_name]
+@skill.command()
+@click.argument("name")
+@click.option("--force", is_flag=True, help="Force install (overwrites existing)")
+@click.option("--action", "take_action", is_flag=True, help="Apply skill_actions policy based on scan severity")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help="Attribute install/enforcement to a specific connector (multi-connector installs)",
+)
+@pass_ctx
+def install(app: AppContext, name: str, force: bool, take_action: bool, connector_flag: str) -> None:
+    """Install and scan an OpenClaw skill via clawhub.
+
+    By default, install only runs the scan and reports findings — no enforcement
+    actions are taken. Pass --action to apply the configured skill_actions policy
+    (quarantine, disable, block) based on scan severity.
+
+    Use --force to overwrite an existing skill.
+    """
+    import tempfile
+
+    from defenseclaw.commands import resolve_list_connectors
+    from defenseclaw.enforce import PolicyEngine
+    from defenseclaw.enforce.admission import evaluate_admission
+
+    skill_name = os.path.basename(name)
+    if not skill_name or not _CLAWHUB_NAME_RE.match(skill_name):
+        click.echo(f"error: invalid ClawHub skill name {name!r}", err=True)
+        raise SystemExit(2)
+
+    connectors = resolve_list_connectors(app, connector_flag)
+    targets = _skill_install_targets(
+        app, connectors, explicit_connector=bool(connector_flag),
+    )
+    pe = PolicyEngine(app.store)
+
+    pre_decisions: dict[str, Any] = {}
+    for connector, _install_root in targets:
+        decision = evaluate_admission(
+            pe,
+            policy_dir=app.cfg.policy_dir,
+            target_type="skill",
+            name=skill_name,
+            source_path=name,
+            fallback_actions=app.cfg.skill_actions,
+            connector=connector,
+            asset_policy=app.cfg.asset_policy,
+            # F-0283: a quarantined skill must NOT be (re)installed. Without
+            # this flag the admission evaluator never consulted quarantine
+            # state, so an asset that a prior scan quarantined could be
+            # reinstalled straight past the gate. Reject quarantined installs.
+            include_quarantine=True,
+        )
+        pre_decisions[connector] = decision
+
+        if decision.verdict == "blocked":
+            if app.logger:
+                app.logger.log_action(
+                    "install-rejected", skill_name, f"reason=blocked connector={connector}",
+                )
+            click.echo(
+                f"error: skill {skill_name!r} is on the block list for connector={connector}"
+                f" — run 'defenseclaw skill allow {skill_name} --connector {connector}' to unblock",
+                err=True,
+            )
+            raise SystemExit(1)
+
+        if decision.verdict == "rejected" and decision.source == "quarantine":
+            if app.logger:
+                app.logger.log_action(
+                    "install-rejected", skill_name, f"reason=quarantined connector={connector}",
+                )
+            click.echo(
+                f"error: skill {skill_name!r} is quarantined for connector={connector}"
+                f" — release the quarantine before reinstalling",
+                err=True,
+            )
+            raise SystemExit(1)
+
+    # Install via clawhub
+    click.echo(
+        f"[install] installing {skill_name!r} via clawhub for "
+        + ", ".join(f"connector={connector}" for connector, _root in targets)
+        + "..."
+    )
+    installed_paths: list[str] = []
+    installed_by_connector: dict[str, str] = {}
+    with tempfile.TemporaryDirectory(prefix="defenseclaw-clawhub-install-") as stage_dir:
+        _run_clawhub_install(skill_name, force, cwd=stage_dir)
+        staged_skill = _find_clawhub_staged_skill(stage_dir, skill_name)
+        if not staged_skill:
+            click.echo(
+                f"[install] could not locate staged ClawHub skill {skill_name!r} "
+                "after install",
+                err=True,
+            )
+            if app.logger:
+                app.logger.log_action(
+                    "install-rolled-back", skill_name,
+                    "reason=staged-skill-unresolved scan=skipped",
+                )
+            raise SystemExit(1)
+
+        for connector, install_root in targets:
+            skill_path = _copy_skill_tree_to_connector(
+                staged_skill, install_root, skill_name, force=force,
+            )
+            installed_paths.append(skill_path)
+            installed_by_connector[connector] = skill_path
+            click.echo(
+                f"[install] installed {skill_name!r} -> {skill_path} "
+                f"(connector={connector})"
+            )
+
+    scanner = _build_skill_scanner(app)
+    for connector, _install_root in targets:
+        skill_path = installed_by_connector[connector]
+        pre_decision = pre_decisions[connector]
+        if pre_decision.verdict == "allowed":
+            if pre_decision.source == "scan-disabled":
+                click.echo(
+                    f"[install] policy allows {skill_name!r} without scan "
+                    f"(connector={connector})"
+                )
+            else:
+                click.echo(
+                    f"[install] {skill_name!r} is on the allow list for "
+                    f"connector={connector} — skipping scan"
+                )
+            pe.set_source_path("skill", skill_name, skill_path, connector)
+            if app.logger:
+                app.logger.log_action(
+                    "install-allowed",
+                    skill_name,
+                    f"reason=allow-listed connector={connector}",
+                )
+            continue
+
+        _scan_installed_skill_for_connector(
+            app,
+            pe,
+            scanner,
+            skill_name,
+            skill_path,
+            connector=connector,
+            take_action=take_action,
+            rollback_paths=installed_paths,
+        )
+
+
+def _run_clawhub_install(skill_name: str, force: bool, cwd: str | None = None) -> None:
+    args = _clawhub_args("install", skill_name)
     if force:
         args.append("--force")
     try:
-        subprocess.run(args, check=True, timeout=300)
+        subprocess.run(args, check=True, timeout=300, cwd=cwd)
     except subprocess.TimeoutExpired:
         click.echo("error: clawhub install timed out after 300s", err=True)
         raise SystemExit(1)
@@ -2984,17 +3479,17 @@ def _run_clawhub_install(skill_name: str, force: bool) -> None:
         raise SystemExit(1)
 
 
-def _run_clawhub_uninstall(skill_name: str) -> None:
+def _run_clawhub_uninstall(skill_name: str, cwd: str | None = None) -> None:
     """Best-effort rollback for a partial install.
 
-    Runs `npx clawhub uninstall <skill>` with a short timeout. We
+    Runs `clawhub uninstall <skill>` with a short timeout. We
     intentionally do not raise on rollback failures — the caller is
     already exiting non-zero — but we surface the error to the
     operator so they can manually remediate.
     """
-    args = ["npx", "clawhub", "uninstall", skill_name]
+    args = _clawhub_args("uninstall", skill_name)
     try:
-        subprocess.run(args, check=False, timeout=120)
+        subprocess.run(args, check=False, timeout=120, cwd=cwd, input="y\n", text=True)
     except subprocess.TimeoutExpired:
         click.echo(
             f"[install] warning: clawhub uninstall of {skill_name!r} timed out — "
