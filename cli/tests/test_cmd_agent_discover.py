@@ -149,8 +149,9 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         finally:
             cleanup_app(app, db_path, tmp_dir)
 
-        self.assertEqual(result.exit_code, 0, result.output + result.stderr)
-        self.assertIn("OTel: not emitted", result.stderr)
+        combined_output = result.output + result.stderr
+        self.assertEqual(result.exit_code, 0, combined_output)
+        self.assertIn("OTel: not emitted", combined_output)
         self.assertNotEqual(required.exit_code, 0)
         self.assertIn("sidecar unavailable", required.output)
 
