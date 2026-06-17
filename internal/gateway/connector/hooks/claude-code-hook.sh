@@ -80,8 +80,10 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_log_hook_failure claudecode claude-code-hook "$1" response "$FAIL_MODE"
-  echo "defenseclaw: claude-code hook error: $1" >&2
+  local reason
+  reason="$(defenseclaw_response_failure_reason "$1")"
+  defenseclaw_log_hook_failure claudecode claude-code-hook "$reason" response "$FAIL_MODE"
+  echo "defenseclaw: claude-code hook error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
   fi

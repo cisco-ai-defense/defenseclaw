@@ -309,12 +309,20 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
+	reason = responseFailureReason(reason)
 	logHookFailure(opts, sp, reason, "response", failMode)
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
 	if failMode == "open" {
 		return 0
 	}
 	return emit(opts.Stdout, sp.responseClosed)
+}
+
+func responseFailureReason(reason string) string {
+	if strings.Contains(reason, "HTTP 401") || strings.Contains(reason, "HTTP 403") {
+		return reason + " (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)"
+	}
+	return reason
 }
 
 // emit writes a fail-closed JSON body (if any) and returns its exit code.

@@ -5114,7 +5114,7 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
-	err := cmd.Run()
+	output, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatal("hook should fail-closed (exit 2) on 401 response when FAIL_MODE=closed, but got exit 0")
 	}
@@ -5122,6 +5122,13 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 		if exitErr.ExitCode() != 2 {
 			t.Errorf("exit code = %d, want 2 (fail-closed on response failure)", exitErr.ExitCode())
 		}
+	}
+	outputText := string(output)
+	if !strings.Contains(outputText, "possible token drift") {
+		t.Errorf("hook output should explain possible token drift, got:\n%s", outputText)
+	}
+	if !strings.Contains(outputText, "defenseclaw doctor --fix") {
+		t.Errorf("hook output should suggest doctor --fix, got:\n%s", outputText)
 	}
 
 	// And the failure log entry must be tagged as a response-layer
@@ -5135,6 +5142,7 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 	for _, want := range []string{
 		`"category":"response"`,
 		`"fail_mode":"closed"`,
+		`possible token drift`,
 	} {
 		if !strings.Contains(logText, want) {
 			t.Errorf("hook failure log missing %q:\n%s", want, logText)

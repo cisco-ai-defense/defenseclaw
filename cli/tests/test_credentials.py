@@ -29,12 +29,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from defenseclaw import credentials as C
 from defenseclaw.config import (
     CiscoAIDefenseConfig,
+    ClawConfig,
     Config,
     GatewayConfig,
     GuardrailConfig,
     JudgeConfig,
     LLMConfig,
     OpenShellConfig,
+    PerConnectorGuardrailConfig,
     ScannersConfig,
     SkillScannerConfig,
     SplunkConfig,
@@ -60,8 +62,36 @@ def _make_cfg(data_dir: str, **overrides) -> Config:
 class RequirementPredicateTests(unittest.TestCase):
     """Each predicate should correctly respond to whether its feature is on."""
 
-    def test_openclaw_token_always_required(self):
+    def test_openclaw_token_required_for_explicit_openclaw(self):
         cfg = _make_cfg("/tmp/dc-test")
+        self.assertEqual(C._openclaw_gateway_token(cfg), C.Requirement.REQUIRED)
+
+    def test_openclaw_token_not_used_for_codex_connector(self):
+        cfg = _make_cfg("/tmp/dc-test", claw=ClawConfig(mode="codex"))
+        self.assertEqual(C._openclaw_gateway_token(cfg), C.Requirement.NOT_USED)
+
+    def test_openclaw_token_not_used_for_multiconnector_without_openclaw(self):
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            guardrail=GuardrailConfig(
+                connectors={
+                    "codex": PerConnectorGuardrailConfig(),
+                    "hermes": PerConnectorGuardrailConfig(),
+                }
+            ),
+        )
+        self.assertEqual(C._openclaw_gateway_token(cfg), C.Requirement.NOT_USED)
+
+    def test_openclaw_token_required_for_multiconnector_with_openclaw(self):
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            guardrail=GuardrailConfig(
+                connectors={
+                    "codex": PerConnectorGuardrailConfig(),
+                    "openclaw": PerConnectorGuardrailConfig(),
+                }
+            ),
+        )
         self.assertEqual(C._openclaw_gateway_token(cfg), C.Requirement.REQUIRED)
 
     def test_judge_key_not_used_when_guardrail_disabled(self):
@@ -324,6 +354,7 @@ class ClassifyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _make_cfg(
                 tmp,
+                claw=ClawConfig(mode="codex"),
                 guardrail=GuardrailConfig(
                     enabled=True,
                     scanner_mode="remote",  # triggers CISCO_AI_DEFENSE_API_KEY
@@ -333,7 +364,7 @@ class ClassifyTests(unittest.TestCase):
                    if k not in ("OPENCLAW_GATEWAY_TOKEN", "CISCO_AI_DEFENSE_API_KEY")}
             with patch.dict(os.environ, env, clear=True):
                 missing = {s.spec.env_name for s in C.missing_required(cfg)}
-                self.assertIn("OPENCLAW_GATEWAY_TOKEN", missing)
+                self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", missing)
                 self.assertIn("CISCO_AI_DEFENSE_API_KEY", missing)
 
 

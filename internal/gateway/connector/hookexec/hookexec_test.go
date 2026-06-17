@@ -377,6 +377,12 @@ func TestResponseFailure(t *testing.T) {
 		if r.stdout != cursorDeny("DefenseClaw hook failed closed")+"\n" {
 			t.Errorf("stdout = %q", r.stdout)
 		}
+		if !strings.Contains(r.stderr, "possible token drift") {
+			t.Errorf("stderr should explain possible token drift, got %q", r.stderr)
+		}
+		if !strings.Contains(r.stderr, "defenseclaw doctor --fix") {
+			t.Errorf("stderr should suggest doctor --fix, got %q", r.stderr)
+		}
 	})
 
 	t.Run("invalid JSON body is a response failure", func(t *testing.T) {

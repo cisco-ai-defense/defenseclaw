@@ -123,8 +123,30 @@ class CredentialSpec:
 # would add capability but the operator can run without it".
 
 
-def _openclaw_gateway_token(_cfg: Config) -> Requirement:
-    # The gateway always needs an auth token to talk to OpenClaw.
+def _connector_name(value: object) -> str:
+    return str(value or "").strip().lower().replace("-", "")
+
+
+def _openclaw_gateway_token(cfg: Config) -> Requirement:
+    guardrail = getattr(cfg, "guardrail", None)
+    connectors = getattr(guardrail, "connectors", {}) if guardrail is not None else {}
+    if isinstance(connectors, dict) and connectors:
+        return (
+            Requirement.REQUIRED
+            if any(_connector_name(name) == "openclaw" for name in connectors)
+            else Requirement.NOT_USED
+        )
+
+    guardrail_connector = getattr(guardrail, "connector", "") if guardrail is not None else ""
+    if str(guardrail_connector or "").strip():
+        return Requirement.REQUIRED if _connector_name(guardrail_connector) == "openclaw" else Requirement.NOT_USED
+
+    claw = getattr(cfg, "claw", None)
+    claw_mode = getattr(claw, "mode", "")
+    if str(claw_mode or "").strip():
+        return Requirement.REQUIRED if _connector_name(claw_mode) == "openclaw" else Requirement.NOT_USED
+
+    # Old configs defaulted to OpenClaw when no connector was specified.
     # We auto-detect it from ~/.openclaw/openclaw.json when available,
     # but it is still required — "REQUIRED but auto-detected" is shown
     # in the keys list UX as a friendly hint.

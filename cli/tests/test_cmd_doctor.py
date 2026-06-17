@@ -1244,6 +1244,131 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
         self.assertIn("preview.api.inspect.aidefense.aiteam.cisco.com", printed)
 
 
+class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
+    def _make_cfg(self, data_dir: str) -> Config:
+        return Config(
+            data_dir=data_dir,
+            audit_db=os.path.join(data_dir, "audit.db"),
+            quarantine_dir=os.path.join(data_dir, "quarantine"),
+            plugin_dir=os.path.join(data_dir, "plugins"),
+            policy_dir=os.path.join(data_dir, "policies"),
+            llm=LLMConfig(),
+            guardrail=GuardrailConfig(connector="codex"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+
+    def _write_hook(self, data_dir: str, filename: str, text: str) -> None:
+        hook_dir = os.path.join(data_dir, "hooks")
+        os.makedirs(hook_dir, exist_ok=True)
+        with open(os.path.join(hook_dir, filename), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_stale_generated_hook_reasons_detect_old_codex_scripts(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            self._write_hook(tmp, "codex-hook.sh", "fail_response() { echo \"$1\"; }\n")
+            self._write_hook(tmp, "_hardening.sh", "defenseclaw_read_stdin_capped() { cat; }\n")
+
+            reasons = cmd_doctor._stale_generated_hook_reasons(cfg, "codex")
+
+        self.assertTrue(any("codex-hook.sh missing" in reason for reason in reasons), reasons)
+        self.assertTrue(any("_hardening.sh missing" in reason for reason in reasons), reasons)
+
+    def test_codex_hook_check_warns_when_generated_script_is_stale(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            self._write_hook(tmp, "codex-hook.sh", "fail_response() { echo \"$1\"; }\n")
+            self._write_hook(tmp, "_hardening.sh", "defenseclaw_read_stdin_capped() { cat; }\n")
+            result = _DoctorResult()
+
+            cmd_doctor._check_codex_hooks(cfg, result)
+
+        freshness = [c for c in result.checks if c["label"] == "Codex hooks freshness"]
+        self.assertEqual(len(freshness), 1, result.checks)
+        self.assertEqual(freshness[0]["status"], "warn")
+        self.assertIn("defenseclaw doctor --fix", freshness[0]["detail"])
+
+    def test_fix_stale_generated_hooks_restarts_gateway(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            proc = SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with (
+                patch.object(cmd_doctor.shutil, "which", return_value="/usr/bin/defenseclaw-gateway"),
+                patch.object(cmd_doctor.subprocess, "run", return_value=proc) as run,
+                patch.object(
+                    cmd_doctor,
+                    "_stale_generated_hook_reasons",
+                    side_effect=[["codex-hook.sh missing current helper"], []],
+                ),
+            ):
+                outcome = cmd_doctor._fix_stale_generated_hooks(cfg, assume_yes=True)
+
+        self.assertEqual(outcome[0], "pass")
+        self.assertIn("regenerated hooks for codex", outcome[1])
+        run.assert_called_once_with(
+            ["/usr/bin/defenseclaw-gateway", "restart"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    def test_fix_stale_generated_hooks_warns_when_restart_uses_old_gateway(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            proc = SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with (
+                patch.object(cmd_doctor.shutil, "which", return_value="/usr/bin/defenseclaw-gateway"),
+                patch.object(cmd_doctor.subprocess, "run", return_value=proc),
+                patch.object(
+                    cmd_doctor,
+                    "_stale_generated_hook_reasons",
+                    side_effect=[
+                        ["codex-hook.sh missing current helper"],
+                        ["codex-hook.sh missing current helper"],
+                    ],
+                ),
+            ):
+                outcome = cmd_doctor._fix_stale_generated_hooks(cfg, assume_yes=True)
+
+        self.assertEqual(outcome[0], "warn")
+        self.assertIn("gateway restarted, but generated hooks are still stale", outcome[1])
+        self.assertIn("/usr/bin/defenseclaw-gateway", outcome[1])
+
+    def test_fix_stale_generated_hooks_skips_when_current(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            self._write_hook(
+                tmp,
+                "codex-hook.sh",
+                "reason=\"$(defenseclaw_response_failure_reason \"$1\")\"\n",
+            )
+            self._write_hook(
+                tmp,
+                "_hardening.sh",
+                "defenseclaw_response_failure_reason() { echo 'possible token drift'; }\n",
+            )
+
+            with patch.object(cmd_doctor.shutil, "which") as which:
+                outcome = cmd_doctor._fix_stale_generated_hooks(cfg, assume_yes=True)
+
+        self.assertEqual(outcome, ("skip", "generated hooks already current"))
+        which.assert_not_called()
+
+
 class DoctorFixDryRunTests(unittest.TestCase):
     """``doctor --fix --dry-run`` previews fixers without mutating disk.
 
@@ -1277,6 +1402,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_gateway_token") as fix_token,
             patch.object(cmd_doctor, "_fix_gateway_token_env") as fix_token_env,
             patch.object(cmd_doctor, "_fix_gateway_token_drift") as fix_drift,
+            patch.object(cmd_doctor, "_fix_stale_generated_hooks") as fix_hooks,
             patch.object(cmd_doctor, "_fix_dotenv_perms") as fix_dotenv,
             patch.object(cmd_doctor, "_fix_pristine_backup") as fix_pristine,
             patch.object(cmd_doctor, "_fix_plugin_registry_required") as fix_plugin_reg,
@@ -1290,6 +1416,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
             fix_token.assert_not_called()
             fix_token_env.assert_not_called()
             fix_drift.assert_not_called()
+            fix_hooks.assert_not_called()
             fix_dotenv.assert_not_called()
             fix_pristine.assert_not_called()
             # OTHER-5: the plugin-registry dead-end fixer is wired into --fix
@@ -1301,10 +1428,10 @@ class DoctorFixDryRunTests(unittest.TestCase):
 
         # Each remaining fixer should have produced a "skip" record so the TUI
         # can list every step the real run would touch. The teardown fixer was
-        # removed (D7); the plugin-registry dead-end fixer was added (OTHER-5),
-        # leaving seven.
+        # removed (D7); the plugin-registry dead-end fixer was added (OTHER-5);
+        # stale generated hook regeneration adds one more.
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        self.assertEqual(len(fix_records), 7)
+        self.assertEqual(len(fix_records), 8)
         for record in fix_records:
             self.assertEqual(record["status"], "skip")
             self.assertIn("dry-run", record["detail"])
@@ -1324,6 +1451,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_gateway_token", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_gateway_token_env", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_gateway_token_drift", return_value=("pass", "ok")),
+            patch.object(cmd_doctor, "_fix_stale_generated_hooks", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_dotenv_perms", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_pristine_backup", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_plugin_registry_required", return_value=("pass", "ok")),
@@ -1336,9 +1464,10 @@ class DoctorFixDryRunTests(unittest.TestCase):
             )
 
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        # Seven fixers run: the connector-teardown fixer was removed (D7) and
-        # the plugin-registry dead-end fixer was added (OTHER-5).
-        self.assertEqual(len(fix_records), 7)
+        # Eight fixers run: the connector-teardown fixer was removed (D7), the
+        # plugin-registry dead-end fixer was added (OTHER-5), and stale
+        # generated hook regeneration is included.
+        self.assertEqual(len(fix_records), 8)
         for record in fix_records:
             self.assertEqual(record["status"], "pass")
         fix_residue.assert_not_called()

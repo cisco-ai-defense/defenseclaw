@@ -44,6 +44,11 @@ const (
 	EnvDataDir = "DEFENSECLAW_DATA_DIR"
 )
 
+var gatewayTokenEnvNames = []string{
+	"DEFENSECLAW_GATEWAY_TOKEN",
+	"OPENCLAW_GATEWAY_TOKEN",
+}
+
 var (
 	ErrAlreadyRunning = errors.New("daemon is already running")
 	ErrNotRunning     = errors.New("daemon is not running")
@@ -292,19 +297,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// line".
 	args = stripTokenArgs(args)
 
-	// Strip any inherited DEFENSECLAW_DATA_DIR before re-setting so a
-	// caller that already had it in their environment cannot trick the
-	// child into recording a different data dir than the daemon
-	// actually uses.
-	parentEnv := os.Environ()
-	cleanEnv := make([]string, 0, len(parentEnv)+2)
-	for _, kv := range parentEnv {
-		if strings.HasPrefix(kv, EnvDataDir+"=") || strings.HasPrefix(kv, EnvDaemon+"=") {
-			continue
-		}
-		cleanEnv = append(cleanEnv, kv)
-	}
-	env := append(cleanEnv, EnvDaemon+"=1", EnvDataDir+"="+d.dataDir)
+	env := d.childEnv(os.Environ())
 	cmd := exec.Command(executable, args...)
 	cmd.Env = env
 	cmd.Stdin = devNull
@@ -379,6 +372,74 @@ func (d *Daemon) Start(args []string) (int, error) {
 	}
 
 	return pid, nil
+}
+
+func (d *Daemon) childEnv(parentEnv []string) []string {
+	dotenv := readGatewayTokenDotenv(filepath.Join(d.dataDir, ".env"))
+	hasDotenvToken := len(dotenv) > 0
+	tokenKeys := make(map[string]struct{}, len(gatewayTokenEnvNames))
+	for _, key := range gatewayTokenEnvNames {
+		tokenKeys[key] = struct{}{}
+	}
+
+	cleanEnv := make([]string, 0, len(parentEnv)+2+len(dotenv))
+	for _, kv := range parentEnv {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			cleanEnv = append(cleanEnv, kv)
+			continue
+		}
+		if key == EnvDataDir || key == EnvDaemon {
+			continue
+		}
+		if _, isToken := tokenKeys[key]; isToken {
+			if hasDotenvToken {
+				continue
+			}
+		}
+		cleanEnv = append(cleanEnv, kv)
+	}
+	cleanEnv = append(cleanEnv, EnvDaemon+"=1", EnvDataDir+"="+d.dataDir)
+	for _, key := range gatewayTokenEnvNames {
+		if value := dotenv[key]; value != "" {
+			cleanEnv = append(cleanEnv, key+"="+value)
+		}
+	}
+	return cleanEnv
+}
+
+func readGatewayTokenDotenv(path string) map[string]string {
+	values := map[string]string{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return values
+	}
+	wanted := make(map[string]struct{}, len(gatewayTokenEnvNames))
+	for _, key := range gatewayTokenEnvNames {
+		wanted[key] = struct{}{}
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if _, ok := wanted[key]; !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
+			value = value[1 : len(value)-1]
+		}
+		if value != "" {
+			values[key] = value
+		}
+	}
+	return values
 }
 
 func (d *Daemon) Stop(timeout time.Duration) error {

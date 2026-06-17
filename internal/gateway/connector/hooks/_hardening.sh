@@ -401,6 +401,17 @@ defenseclaw_log_hook_failure() {
   return 0
 }
 
+defenseclaw_response_failure_reason() {
+  case "$1" in
+    *"HTTP 401"*|*"HTTP 403"*)
+      printf '%s (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)' "$1"
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
+}
+
 # defenseclaw_should_fail_closed_on_unreachable returns 0 (true) only
 # when the operator has explicitly opted into strict availability via
 # DEFENSECLAW_STRICT_AVAILABILITY=1. The default is to fail open on

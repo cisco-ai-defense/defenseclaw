@@ -281,6 +281,82 @@ def _resolve_api_key(env_name: str, dotenv_path: str) -> str:
     return ""
 
 
+_GENERATED_HOOK_SENTINELS: dict[str, dict[str, tuple[str, ...]]] = {
+    "codex": {
+        "codex-hook.sh": ("defenseclaw_response_failure_reason",),
+        "_hardening.sh": (
+            "defenseclaw_response_failure_reason",
+            "possible token drift",
+        ),
+    },
+    "claudecode": {
+        "claude-code-hook.sh": ("defenseclaw_response_failure_reason",),
+        "_hardening.sh": (
+            "defenseclaw_response_failure_reason",
+            "possible token drift",
+        ),
+    },
+}
+
+
+def _stale_generated_hook_reasons(cfg, connector: str) -> list[str]:
+    """Return stale/missing generated-hook diagnostics for *connector*.
+
+    Generated hooks live outside the package in ``cfg.data_dir/hooks``.
+    When a user updates the source/venv but the gateway has not been
+    restarted yet, Codex/Claude can still execute an older script. This
+    check intentionally looks for tiny, non-secret template sentinels
+    rather than comparing whole files, because setup renders runtime
+    values into the scripts.
+    """
+    connector = (connector or "").lower()
+    sentinels = _GENERATED_HOOK_SENTINELS.get(connector)
+    if not sentinels:
+        return []
+
+    hook_dir = os.path.join(getattr(cfg, "data_dir", "") or "", "hooks")
+    reasons: list[str] = []
+    for filename, needles in sentinels.items():
+        path = os.path.join(hook_dir, filename)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except FileNotFoundError:
+            reasons.append(f"{filename} missing")
+            continue
+        except OSError as exc:
+            reasons.append(f"{filename} unreadable: {exc}")
+            continue
+
+        missing = [needle for needle in needles if needle not in text]
+        if missing:
+            reasons.append(f"{filename} missing {', '.join(missing)}")
+    return reasons
+
+
+def _check_generated_hook_freshness(
+    cfg,
+    connector: str,
+    label: str,
+    r: _DoctorResult,
+) -> None:
+    reasons = _stale_generated_hook_reasons(cfg, connector)
+    if not reasons:
+        _emit("pass", f"{label} freshness", "generated scripts include latest diagnostics", r=r)
+        return
+
+    detail = "; ".join(reasons[:2])
+    if len(reasons) > 2:
+        detail += f"; +{len(reasons) - 2} more"
+    _emit(
+        "warn",
+        f"{label} freshness",
+        f"stale generated script ({detail}); run `defenseclaw doctor --fix` "
+        "or `defenseclaw-gateway restart`",
+        r=r,
+    )
+
+
 def _http_probe(
     url: str,
     *,
@@ -899,6 +975,7 @@ def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
                     dc_hooks += 1
     if dc_hooks > 0:
         _emit("pass", "Claude Code hooks", f"{dc_hooks} DefenseClaw hook(s) registered", r=r)
+        _check_generated_hook_freshness(cfg, "claudecode", "Claude Code hooks", r)
     else:
         _emit("fail", "Claude Code hooks", "no DefenseClaw hooks found in settings.json", r=r)
 
@@ -908,6 +985,7 @@ def _check_codex_hooks(cfg, r: _DoctorResult) -> None:
     hook_script = os.path.join(hook_dir, "codex-hook.sh")
     if os.path.isfile(hook_script):
         _emit("pass", "Codex hooks", f"hook script at {hook_script}", r=r)
+        _check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
     else:
         _emit("fail", "Codex hooks", f"hook script not found at {hook_script}", r=r)
 
@@ -2944,6 +3022,7 @@ def _run_fixers(
         ("gateway token", _fix_gateway_token),
         ("gateway token_env", _fix_gateway_token_env),
         ("gateway token drift", _fix_gateway_token_drift),
+        ("stale generated hooks", _fix_stale_generated_hooks),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
         ("pristine config backup", _fix_pristine_backup),
         ("plugin registry dead-end", _fix_plugin_registry_required),
@@ -3781,6 +3860,72 @@ def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
         return ("fail", detail[0] if detail else "restart failed")
 
     return ("pass", f"sidecar restarted; will now serve token from {dotenv_path}")
+
+
+def _fix_stale_generated_hooks(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Restart the gateway when active generated hooks are stale.
+
+    The gateway owns rendering ``~/.defenseclaw/hooks/*.sh``. If a user
+    updates DefenseClaw but keeps an older gateway process alive, the
+    live agent can still call old hook scripts. Restarting the gateway is
+    the canonical repair because it also refreshes the companion token
+    file and any connector-specific hook metadata.
+    """
+    stale: dict[str, list[str]] = {}
+    for connector in _doctor_active_connectors(cfg):
+        if not _connector_enabled(cfg, connector):
+            continue
+        reasons = _stale_generated_hook_reasons(cfg, connector)
+        if reasons:
+            stale[connector] = reasons
+
+    if not stale:
+        return ("skip", "generated hooks already current")
+
+    connectors = ", ".join(sorted(stale))
+    gw_binary = shutil.which("defenseclaw-gateway")
+    if not gw_binary:
+        return (
+            "warn",
+            f"stale generated hooks for {connectors}, but defenseclaw-gateway is not on PATH",
+        )
+
+    if not assume_yes and not click.confirm(
+        f"    Restart gateway to regenerate stale hooks for {connectors}?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    try:
+        result = subprocess.run(
+            [gw_binary, "restart"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return ("fail", "restart command timed out after 30s")
+    except OSError as exc:
+        return ("fail", f"could not invoke restart: {exc}")
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
+        return ("fail", detail[0] if detail else "restart failed")
+
+    still_stale: dict[str, list[str]] = {}
+    for connector in stale:
+        reasons = _stale_generated_hook_reasons(cfg, connector)
+        if reasons:
+            still_stale[connector] = reasons
+    if still_stale:
+        return (
+            "warn",
+            "gateway restarted, but generated hooks are still stale; "
+            f"the gateway binary may be out of date ({gw_binary})",
+        )
+
+    return ("pass", f"gateway restarted; regenerated hooks for {connectors}")
 
 
 def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:

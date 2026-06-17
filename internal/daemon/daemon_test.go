@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -186,6 +187,80 @@ func TestIsDaemonChild(t *testing.T) {
 	if IsDaemonChild() {
 		t.Error("IsDaemonChild should be false when DEFENSECLAW_DAEMON is empty")
 	}
+}
+
+func TestChildEnvUsesDotenvGatewayTokenOverStaleParent(t *testing.T) {
+	dir := t.TempDir()
+	d := New(dir)
+	dotenvPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(dotenvPath, []byte("DEFENSECLAW_GATEWAY_TOKEN=from-dotenv\n"), 0o600); err != nil {
+		t.Fatalf("write dotenv: %v", err)
+	}
+
+	env := d.childEnv([]string{
+		"PATH=/bin",
+		"DEFENSECLAW_GATEWAY_TOKEN=stale-parent",
+		"OPENCLAW_GATEWAY_TOKEN=legacy-parent",
+		EnvDaemon + "=0",
+		EnvDataDir + "=/wrong",
+	})
+	got := envMap(env)
+
+	if got["DEFENSECLAW_GATEWAY_TOKEN"] != "from-dotenv" {
+		t.Errorf("DEFENSECLAW_GATEWAY_TOKEN = %q, want dotenv token", got["DEFENSECLAW_GATEWAY_TOKEN"])
+	}
+	if _, ok := got["OPENCLAW_GATEWAY_TOKEN"]; ok {
+		t.Errorf("OPENCLAW_GATEWAY_TOKEN should be stripped when dotenv provides the gateway token")
+	}
+	if got[EnvDaemon] != "1" {
+		t.Errorf("%s = %q, want 1", EnvDaemon, got[EnvDaemon])
+	}
+	if got[EnvDataDir] != dir {
+		t.Errorf("%s = %q, want %q", EnvDataDir, got[EnvDataDir], dir)
+	}
+}
+
+func TestChildEnvPreservesParentGatewayTokenWhenDotenvMissing(t *testing.T) {
+	dir := t.TempDir()
+	d := New(dir)
+
+	env := d.childEnv([]string{
+		"DEFENSECLAW_GATEWAY_TOKEN=operator-env",
+	})
+	got := envMap(env)
+
+	if got["DEFENSECLAW_GATEWAY_TOKEN"] != "operator-env" {
+		t.Errorf("DEFENSECLAW_GATEWAY_TOKEN = %q, want parent token", got["DEFENSECLAW_GATEWAY_TOKEN"])
+	}
+}
+
+func TestChildEnvUsesLegacyDotenvGatewayTokenOverStaleParent(t *testing.T) {
+	dir := t.TempDir()
+	d := New(dir)
+	dotenvPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(dotenvPath, []byte("OPENCLAW_GATEWAY_TOKEN='legacy-dotenv'\n"), 0o600); err != nil {
+		t.Fatalf("write dotenv: %v", err)
+	}
+
+	env := d.childEnv([]string{
+		"OPENCLAW_GATEWAY_TOKEN=legacy-parent",
+	})
+	got := envMap(env)
+
+	if got["OPENCLAW_GATEWAY_TOKEN"] != "legacy-dotenv" {
+		t.Errorf("OPENCLAW_GATEWAY_TOKEN = %q, want legacy dotenv token", got["OPENCLAW_GATEWAY_TOKEN"])
+	}
+}
+
+func envMap(env []string) map[string]string {
+	out := map[string]string{}
+	for _, kv := range env {
+		key, value, ok := strings.Cut(kv, "=")
+		if ok {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func TestVerifyProcessCurrentPID(t *testing.T) {
