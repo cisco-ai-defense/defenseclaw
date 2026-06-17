@@ -104,7 +104,7 @@ No production CLI command calls this directly.
 ```json
 {
   "health": { "..." },
-  "gateway_hello": { "protocol": "v3", "features": ["..."] }
+  "gateway_hello": { "protocol": 4, "features": { "methods": ["..."], "events": ["..."] } }
 }
 ```
 
