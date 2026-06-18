@@ -49,6 +49,7 @@ from defenseclaw.config import (
     GuardrailConfig,
     LLMConfig,
     OpenShellConfig,
+    PerConnectorGuardrailConfig,
 )
 
 
@@ -350,6 +351,26 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.failed, 0)
         self.assertEqual(result.warned, 1)
         self.assertIn("no native ask surface", result.checks[0]["detail"])
+
+    def test_hilt_observe_warning_names_connector_mode(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, mode="observe", connector="hermes"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.guardrail.hilt.enabled = True
+
+        result = _DoctorResult()
+        _check_hilt_support(cfg, "hermes", result)
+
+        self.assertEqual(result.warned, 1)
+        self.assertIn("hermes mode is observe", result.checks[0]["detail"])
+        self.assertNotIn("guardrail.mode", result.checks[0]["detail"])
 
     def test_hilt_new_connector_support_matrix(self):
         cfg = Config(
@@ -1770,6 +1791,40 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
         self.assertIn("proxy port intentionally closed", detail)
         self.assertIn("codex", detail)
         self.assertIn("hermes", detail)
+
+    def test_mixed_hook_connector_modes_are_rendered_per_connector(self):
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
+        )
+
+        cfg = self._cfg(["codex", "hermes"], mode="observe")
+        cfg.guardrail.connectors = {
+            "codex": PerConnectorGuardrailConfig(mode="action"),
+            "hermes": PerConnectorGuardrailConfig(mode="observe"),
+        }
+        cfg.guardrail.effective_mode = lambda name: (
+            cfg.guardrail.connectors[name].mode or cfg.guardrail.mode
+        )
+
+        detail = _guardrail_proxy_intentionally_closed(cfg)
+
+        self.assertIn("codex (mode=action via PreToolUse deny)", detail)
+        self.assertIn("hermes (mode=observe)", detail)
+        self.assertNotIn("codex, hermes (mode=observe)", detail)
+        self.assertIn("proxy port intentionally closed", detail)
+
+    def test_multi_hook_action_mode_reports_action_once_when_uniform(self):
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
+        )
+
+        detail = _guardrail_proxy_intentionally_closed(
+            self._cfg(["codex", "hermes"], mode="action")
+        )
+
+        self.assertIn("hook-enforced for codex, hermes", detail)
+        self.assertIn("mode=action via PreToolUse deny", detail)
+        self.assertIn("proxy port intentionally closed", detail)
 
     def test_proxy_peer_forces_real_probe(self):
         """hermes (hook) + openclaw (proxy): openclaw needs port 4000, so the

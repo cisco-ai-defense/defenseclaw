@@ -16,6 +16,7 @@ pre-flight hook, so any regression here cascades into every command.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands import cmd_config
+from defenseclaw.config import default_config
 
 
 class _IsolatedHome:
@@ -122,6 +124,27 @@ class ValidateConfigTests(unittest.TestCase):
             self.assertTrue(res.ok, msg=f"errors: {res.errors}")
             self.assertTrue(any("api_port" in w for w in res.warnings),
                             msg=f"warnings: {res.warnings}")
+
+
+class ConfigShowTests(unittest.TestCase):
+    def test_masked_dict_hides_internal_loader_snapshots(self):
+        cfg = default_config()
+        cfg._loaded_authoritative_dicts = {
+            "guardrail.connectors": {
+                "codex": {"mode": "observe", "rule_pack_dir": ""}
+            }
+        }
+        cfg._loaded_owned_nested_values = {
+            "guardrail.connectors": {"codex": {"hilt": {"enabled": True}}}
+        }
+
+        rendered = cmd_config._config_to_masked_dict(cfg, reveal=False)
+        blob = json.dumps(rendered)
+
+        self.assertNotIn("_loaded_authoritative_dicts", rendered)
+        self.assertNotIn("_loaded_owned_nested_values", rendered)
+        self.assertNotIn("_loaded_authoritative_dicts", blob)
+        self.assertNotIn("_loaded_owned_nested_values", blob)
 
 
 if __name__ == "__main__":

@@ -322,6 +322,124 @@ def _judge_gated(gate, name: str) -> bool:
     return False
 
 
+def _judge_gate_config_label(gate) -> str:
+    entries = list(gate or [])
+    if not entries:
+        return "none"
+    if any((e or "").strip() == _JUDGE_ALL_SENTINEL for e in entries):
+        return "all"
+    return ", ".join((e or "").strip() for e in entries if (e or "").strip()) or "none"
+
+
+def _connector_status_label(name: str) -> str:
+    return f"{_connector_label(name)} ({name})"
+
+
+def _judge_active_for_connector(
+    *,
+    gate,
+    judge_enabled: bool,
+    prompt_strategy: str,
+    connector: str,
+) -> bool:
+    return (
+        judge_enabled
+        and _judge_gated(gate, connector)
+        and (prompt_strategy or "").strip().lower() != "regex_only"
+    )
+
+
+def _judge_status_label(
+    *,
+    gate,
+    judge_enabled: bool,
+    prompt_strategy: str,
+    connectors: list[str],
+    connector_flag: str | None,
+) -> str:
+    if connector_flag and connectors:
+        name = connectors[0]
+        label = _connector_status_label(name)
+        if _judge_active_for_connector(
+            gate=gate,
+            judge_enabled=judge_enabled,
+            prompt_strategy=prompt_strategy,
+            connector=name,
+        ):
+            return f"on for {label}"
+        if not judge_enabled:
+            return f"off for {label} (disabled globally)"
+        if (prompt_strategy or "").strip().lower() == "regex_only":
+            return f"off for {label} (prompt strategy is regex_only)"
+        if not _judge_gated(gate, name):
+            return f"off for {label} (not selected)"
+        return f"off for {label}"
+    if not judge_enabled:
+        return "off (disabled globally)"
+    if (prompt_strategy or "").strip().lower() == "regex_only":
+        return "off (prompt strategy is regex_only)"
+    active = [
+        name
+        for name in connectors
+        if _judge_active_for_connector(
+            gate=gate,
+            judge_enabled=judge_enabled,
+            prompt_strategy=prompt_strategy,
+            connector=name,
+        )
+    ]
+    if not active:
+        return "off (no connectors selected)"
+    return "on"
+
+
+def _judge_coverage_label(
+    *,
+    gate,
+    judge_enabled: bool,
+    prompt_strategy: str,
+    connectors: list[str],
+    connector_flag: str | None,
+) -> str:
+    active = [
+        name
+        for name in connectors
+        if _judge_active_for_connector(
+            gate=gate,
+            judge_enabled=judge_enabled,
+            prompt_strategy=prompt_strategy,
+            connector=name,
+        )
+    ]
+    if connector_flag:
+        if not active:
+            if not judge_enabled or (prompt_strategy or "").strip().lower() == "regex_only":
+                return "none active"
+            return "not selected"
+        return "selected"
+    if not active:
+        return "none active"
+    if _judge_gate_config_label(gate) == "all" and len(active) == len(connectors) and connectors:
+        return "all active connectors"
+    return ", ".join(_connector_status_label(name) for name in active)
+
+
+def _saved_judge_gate_label(
+    *,
+    gate,
+    judge_enabled: bool,
+    prompt_strategy: str,
+) -> str:
+    configured = _judge_gate_config_label(gate)
+    if configured == "none":
+        return configured
+    if not judge_enabled:
+        return f"{configured} (inactive until judge is enabled)"
+    if (prompt_strategy or "").strip().lower() == "regex_only":
+        return f"{configured} (inactive while prompt strategy is regex_only)"
+    return configured
+
+
 def _connector_judge_token(gc, name: str, prompt_strategy: str) -> str:
     """Per-connector hook-lane judge state for the status roster.
 
@@ -388,26 +506,6 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
         f"  • {ux._style('scan strategy:', fg='bright_black', bold=True)} {base_strategy} "
         f"{ux.dim(f'(prompt: {prompt_strategy}, completion: {completion_strategy})')}"
     )
-    judge_cfg = getattr(gc, "judge", None)
-    judge_enabled = bool(getattr(judge_cfg, "enabled", False))
-    judge_gate = list(getattr(judge_cfg, "hook_connectors", None) or [])
-    if not judge_gate:
-        gate_lbl = "none"
-    elif any((e or "").strip() == _JUDGE_ALL_SENTINEL for e in judge_gate):
-        gate_lbl = "all"
-    else:
-        gate_lbl = ", ".join(judge_gate)
-    judge_state_txt = "enabled" if judge_enabled else "disabled"
-    judge_state_val = (
-        ux._style(judge_state_txt, fg="green")
-        if judge_enabled
-        else ux._style(judge_state_txt, fg="yellow")
-    )
-    click.echo(
-        f"  • {ux._style('judge:', fg='bright_black', bold=True)}      {judge_state_val} "
-        f"{ux.dim(f'(hook gate: {gate_lbl})')}"
-    )
-
     # Resolve the full active set and render exactly one coherent view: a
     # per-connector block for EACH active connector. active_connectors()
     # returns [connector] on a single-connector install and the full set on
@@ -464,6 +562,43 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
             ux.subhead("Active connectors: " + ", ".join(actives), indent="    ")
             raise SystemExit(1)
         actives = scoped
+
+    judge_cfg = getattr(gc, "judge", None)
+    judge_enabled = bool(getattr(judge_cfg, "enabled", False))
+    judge_gate = list(getattr(judge_cfg, "hook_connectors", None) or [])
+    judge_state_txt = _judge_status_label(
+        gate=judge_gate,
+        judge_enabled=judge_enabled,
+        prompt_strategy=prompt_strategy,
+        connectors=actives,
+        connector_flag=connector_flag,
+    )
+    judge_state_val = (
+        ux._style(judge_state_txt, fg="green")
+        if judge_state_txt.startswith("on")
+        else ux._style(judge_state_txt, fg="yellow")
+    )
+    coverage_lbl = _judge_coverage_label(
+        gate=judge_gate,
+        judge_enabled=judge_enabled,
+        prompt_strategy=prompt_strategy,
+        connectors=actives,
+        connector_flag=connector_flag,
+    )
+    saved_gate_lbl = _saved_judge_gate_label(
+        gate=judge_gate,
+        judge_enabled=judge_enabled,
+        prompt_strategy=prompt_strategy,
+    )
+    click.echo(f"  • {ux._style('judge:', fg='bright_black', bold=True)}      {judge_state_val}")
+    click.echo(
+        f"  • {ux._style('judge coverage:', fg='bright_black', bold=True)} "
+        f"{ux.dim(coverage_lbl)}"
+    )
+    click.echo(
+        f"  • {ux._style('saved judge gate:', fg='bright_black', bold=True)} "
+        f"{ux.dim(saved_gate_lbl)}"
+    )
 
     click.echo(f"  • {ux._style('connectors:', fg='bright_black', bold=True)}")
     for name in actives:

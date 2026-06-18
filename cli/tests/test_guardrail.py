@@ -1173,6 +1173,125 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["privacy"]["disable_redaction"])
         self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
 
+    def test_yes_alias_updates_rule_pack(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--rule-pack",
+                "strict",
+                "--yes",
+                "--no-restart",
+                "--no-verify",
+            ],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            raw = yaml.safe_load(f)
+        self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
+
+    def test_unscoped_rule_pack_updates_global_for_all_connectors(self):
+        from defenseclaw.commands.cmd_setup import setup
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        gc = self.app.cfg.guardrail
+        gc.connector = "antigravity"
+        gc.connectors = {
+            "antigravity": PerConnectorGuardrailConfig(),
+            "codex": PerConnectorGuardrailConfig(),
+            "hermes": PerConnectorGuardrailConfig(),
+            "opencode": PerConnectorGuardrailConfig(),
+        }
+        gc.connectors["codex"].rule_pack_dir = "/tmp/old-codex-pack"
+        gc.connectors["hermes"].rule_pack_dir = "/tmp/old-hermes-pack"
+        self.app.cfg.claw.home_dir = self.tmp_dir
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--rule-pack",
+                "strict",
+                "--yes",
+                "--no-restart",
+                "--no-verify",
+            ],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        self.assertTrue(gc.rule_pack_dir.endswith("/policies/guardrail/strict"))
+        for connector in ("antigravity", "codex", "hermes", "opencode"):
+            self.assertEqual(gc.connectors[connector].rule_pack_dir, "")
+            self.assertTrue(
+                gc.effective_rule_pack_dir(connector).endswith("/policies/guardrail/strict")
+            )
+
+    def test_scoped_rule_pack_updates_only_requested_connector(self):
+        from defenseclaw.commands.cmd_setup import setup
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        gc = self.app.cfg.guardrail
+        gc.connector = "antigravity"
+        gc.connectors = {
+            "antigravity": PerConnectorGuardrailConfig(),
+            "codex": PerConnectorGuardrailConfig(),
+            "hermes": PerConnectorGuardrailConfig(),
+            "opencode": PerConnectorGuardrailConfig(),
+        }
+        self.app.cfg.claw.home_dir = self.tmp_dir
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--connector",
+                "hermes",
+                "--rule-pack",
+                "strict",
+                "--yes",
+                "--no-restart",
+                "--no-verify",
+            ],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        self.assertEqual(gc.rule_pack_dir, "")
+        self.assertEqual(gc.connectors["antigravity"].rule_pack_dir, "")
+        self.assertEqual(gc.connectors["codex"].rule_pack_dir, "")
+        self.assertTrue(gc.connectors["hermes"].rule_pack_dir.endswith("/policies/guardrail/strict"))
+        self.assertEqual(gc.connectors["opencode"].rule_pack_dir, "")
+
+    def test_rule_pack_dir_missing_is_rejected_before_save(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        missing = os.path.join(self.tmp_dir, "missing-pack")
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--rule-pack-dir",
+                missing,
+                "--yes",
+                "--no-restart",
+                "--no-verify",
+            ],
+            obj=self.app,
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--rule-pack-dir", result.output)
+        self.assertIn("does not exist", result.output)
+        self.assertEqual(self.app.cfg.guardrail.rule_pack_dir, "")
+
     def test_block_message_written_to_runtime_json(self):
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
@@ -1781,6 +1900,19 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("defenseclaw-gateway restart", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway")
+    @patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True)
+    def test_no_restart_suppresses_parent_auto_restart(self, _mock_alive, mock_restart):
+        from defenseclaw.commands.cmd_setup import setup
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("defenseclaw-gateway restart", result.output)
+        mock_restart.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup._restart_services")
     def test_disable_restarts_gateway_for_teardown(self, mock_restart):

@@ -439,7 +439,7 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
     min_sev = (getattr(hilt, "min_severity", "") or "HIGH").upper()
     mode = mode_src.lower()
     if mode != "action":
-        _emit("warn", "Human approval", f"enabled at {min_sev}, but guardrail.mode is observe", r=r)
+        _emit("warn", "Human approval", f"enabled at {min_sev}, but {connector} mode is observe", r=r)
         return
 
     if connector == "openclaw":
@@ -1548,13 +1548,36 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
         return ""
     if any(c not in _HOOK_ENFORCED_CONNECTORS for c in connectors):
         return ""
-    mode = (getattr(gc, "mode", "") or "observe").strip().lower()
+    modes = {c: _doctor_effective_guardrail_mode(gc, c) for c in sorted(connectors)}
     # Preserve the exact single-connector wording; aggregate (sorted, stable)
     # for a multi-connector all-hook-enforced fan-out.
     label = connectors[0] if len(connectors) == 1 else ", ".join(sorted(connectors))
-    if mode == "action":
+    if len(connectors) == 1:
+        mode = modes.get(connectors[0], "observe")
+        if mode == "action":
+            return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
+        return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
+    if all(mode == "action" for mode in modes.values()):
         return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
-    return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
+    if all(mode != "action" for mode in modes.values()):
+        return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
+    parts = []
+    for connector, mode in modes.items():
+        if mode == "action":
+            parts.append(f"{connector} (mode=action via PreToolUse deny)")
+        else:
+            parts.append(f"{connector} (mode=observe)")
+    return f"hook-driven for {', '.join(parts)} — proxy port intentionally closed"
+
+
+def _doctor_effective_guardrail_mode(gc, connector: str) -> str:
+    mode = (getattr(gc, "mode", "") or "observe").strip().lower()
+    if hasattr(gc, "effective_mode"):
+        try:
+            mode = (gc.effective_mode(connector) or mode).strip().lower()
+        except Exception:  # noqa: BLE001 — keep the global fallback.
+            pass
+    return "action" if mode == "action" else "observe"
 
 
 def _check_llm_api_key(cfg, r: _DoctorResult) -> None:

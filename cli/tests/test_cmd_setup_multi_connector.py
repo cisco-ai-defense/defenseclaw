@@ -168,6 +168,17 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.guardrail.connectors, {})
         self.assertEqual(self.app.cfg.guardrail.connector, "codex")
 
+    def test_no_restart_suppresses_parent_auto_restart_for_hook_alias(self):
+        self._seed_map("antigravity", "codex", "hermes", "opencode")
+        with (
+            _setup_patches(),
+            patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True),
+            patch("defenseclaw.commands.cmd_setup._restart_defense_gateway") as bounce,
+        ):
+            result = _invoke(["hermes", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        bounce.assert_not_called()
+
 
 class TestWriteConnectorIdentityUnit(unittest.TestCase):
     """Direct unit tests for the write-mode writer (no Click layer)."""

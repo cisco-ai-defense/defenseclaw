@@ -3142,17 +3142,13 @@ def _resolve_rule_pack_dir(
         if not raw:
             return ""
         resolved = os.path.abspath(os.path.expanduser(raw))
-        # R5: validate the pack dir on set. We WARN rather than reject: the
-        # gateway resolves the rule pack at boot, possibly on a different host,
-        # so a directory that's absent on this machine can still be valid (and
-        # the free-text --rule-pack-dir contract, mirrored from the TUI, has
-        # always accepted not-yet-created paths). But silently accepting a
-        # missing path hides the common typo, so flag it loudly here.
+        # R5: validate the pack dir on set. Setup is a local authoring command;
+        # saving a path that does not exist makes the summary look successful
+        # while the gateway cannot load the intended rules at boot.
         if not os.path.isdir(resolved):
-            ux.warn(
-                f"rule-pack dir {resolved!r} does not exist (or is not a "
-                "directory) on this host — saved anyway; the gateway resolves "
-                "it at boot. Double-check the path if this is unexpected."
+            raise click.UsageError(
+                f"--rule-pack-dir {resolved!r} does not exist or is not a directory. "
+                "Create the directory first, or use --rule-pack default|strict|permissive."
             )
         return resolved
     return None
@@ -3161,19 +3157,19 @@ def _resolve_rule_pack_dir(
 def _apply_rule_pack_selection(gc, pack_dir: str, *, connector: str | None) -> bool:
     """Write *pack_dir* with per-connector scoping (R3).
 
-    When *connector* already owns an override block in ``gc.connectors`` the
-    pack is written there; otherwise it falls back to the global
-    ``gc.rule_pack_dir``. This mirrors ``_apply_hook_connector_setup`` exactly
-    (after ``_write_connector_identity`` runs, ``connector in gc.connectors``
-    holds iff the connector is a multi-install peer — ``replace`` clears the
-    map, ``add`` always inserts it), so ``setup guardrail --connector X
-    --rule-pack`` and ``setup X --rule-pack`` now scope the same flag the same
-    way. Returns True when the write was per-connector.
+    When *connector* already owns an override block in ``gc.connectors``, the
+    pack is written there and peers keep their current rule pack. Without an
+    explicit connector, this is a global/all-connectors write: update
+    ``gc.rule_pack_dir`` and clear every per-connector rule-pack override so
+    all active connectors inherit the same pack. Returns True when the write
+    was per-connector.
     """
     if connector and getattr(gc, "connectors", None) and connector in gc.connectors:
         gc.connectors[connector].rule_pack_dir = pack_dir
         return True
     gc.rule_pack_dir = pack_dir
+    for block in (getattr(gc, "connectors", None) or {}).values():
+        block.rule_pack_dir = ""
     return False
 
 
@@ -3508,8 +3504,9 @@ def _resolve_judge_hook_gate(
               help="Restart gateway and the active connector after setup (default: on)")
 @click.option("--verify/--no-verify", default=True,
               help="Run connectivity checks after setup (default: on)")
-@click.option("--non-interactive", "--accept-defaults", is_flag=True,
-              help="Use flags instead of prompts (alias: --accept-defaults)")
+@click.option("--non-interactive", "--accept-defaults", "--yes", "non_interactive",
+              is_flag=True,
+              help="Use flags instead of prompts (aliases: --accept-defaults, --yes)")
 @pass_ctx
 def setup_guardrail(
     app: AppContext,
@@ -3582,6 +3579,7 @@ def setup_guardrail(
     """
 
     gc = app.cfg.guardrail
+    explicit_connector = normalize_connector(agent_name) if agent_name else None
 
     if disable:
         # Always restart on disable — leaving the proxy running defeats the
@@ -3652,7 +3650,7 @@ def setup_guardrail(
             gc,
             rule_pack=rule_pack,
             rule_pack_dir=rule_pack_dir,
-            connector=target_connector,
+            connector=explicit_connector,
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
             disable_redaction=disable_redaction,
@@ -3796,7 +3794,7 @@ def setup_guardrail(
             gc,
             rule_pack=rule_pack,
             rule_pack_dir=rule_pack_dir,
-            connector=gc.connector,
+            connector=explicit_connector,
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
             disable_redaction=disable_redaction,
@@ -3937,6 +3935,9 @@ def setup_guardrail(
             connectors=app.cfg.active_connectors(),
         )
     else:
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
         click.echo("  Next steps:")
         click.echo("    Restart the defenseclaw sidecar for changes to take effect:")
         click.echo("       defenseclaw-gateway restart")
@@ -4062,6 +4063,93 @@ def _configured_connector_set(gc) -> list[str]:
         return sorted(name for name in connectors if (name or "").strip())
     single = (getattr(gc, "connector", "") or "").strip()
     return [single] if single else []
+
+
+def _checkbox_key_name(ch: str) -> str:
+    if ch in ("\r", "\n"):
+        return "enter"
+    if ch in (" ", "\t"):
+        return "toggle"
+    if ch in ("\x1b[A", "k", "K"):
+        return "up"
+    if ch in ("\x1b[B", "j", "J"):
+        return "down"
+    if ch == "a":
+        return "all"
+    if ch == "n":
+        return "none"
+    return ""
+
+
+def _stdout_is_tty() -> bool:
+    try:
+        return click.get_text_stream("stdout").isatty()
+    except Exception:
+        return False
+
+
+def _render_checkbox_menu(
+    options: list[str],
+    selected: set[str],
+    cursor: int,
+    *,
+    redraw: bool,
+) -> None:
+    if redraw:
+        click.echo(f"\x1b[{len(options)}F", nl=False)
+    for idx, name in enumerate(options):
+        if redraw:
+            click.echo("\r\x1b[2K", nl=False)
+        pointer = ">" if idx == cursor else " "
+        mark = "x" if name in selected else " "
+        click.echo(f"  {pointer} [{mark}] {name}")
+
+
+def _prompt_checkbox_selection(
+    options: list[str],
+    *,
+    default_selected: list[str],
+    title: str,
+    empty_ok: bool,
+) -> list[str]:
+    """Small TTY checkbox selector used by setup wizards.
+
+    Mirrors the first-run init picker: j/k moves, Space toggles, a selects all,
+    n clears, Enter accepts.
+    """
+    if not options:
+        return []
+
+    selected = {name for name in default_selected if name in options}
+    cursor = 0
+    ux.subhead(title)
+    ux.subhead("  Space toggles, j/k moves, a selects all, n clears, Enter continues.")
+
+    redraw = _stdout_is_tty()
+    rendered = False
+    while True:
+        _render_checkbox_menu(options, selected, cursor, redraw=redraw and rendered)
+        rendered = True
+        key = _checkbox_key_name(click.getchar())
+        if key == "enter":
+            if selected or empty_ok:
+                return [name for name in options if name in selected]
+            ux.warn("Select at least one connector.", indent="  ")
+            continue
+        if key == "toggle":
+            name = options[cursor]
+            if name in selected:
+                selected.remove(name)
+            else:
+                selected.add(name)
+        elif key == "up":
+            cursor = (cursor - 1) % len(options)
+        elif key == "down":
+            cursor = (cursor + 1) % len(options)
+        elif key == "all":
+            selected = set(options)
+        elif key == "none":
+            selected.clear()
 
 
 def _prompt_add_replace_cancel(connector: str, others: list[str]) -> str | None:
@@ -4856,6 +4944,10 @@ def _setup_observability_alias(
     )
     if not ok:
         raise click.ClickException(f"failed to configure {connector} (mode={normalized_mode}) — see errors above")
+    if not restart:
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
 
     _maybe_bring_up_local_stack(app, auto=with_local_stack)
     _print_observability_summary(connector, app.cfg, mode=normalized_mode)
@@ -6650,11 +6742,8 @@ def _prompt_judge_hook_connectors(gc) -> None:
 
     Only shown when at least one configured connector is hook-enforced —
     on a proxy-only install the gate is irrelevant (that lane is always
-    judged when the judge is enabled). The default answer never mutates
-    the gate: "none" on a fresh install preserves the opt-in default,
-    and on re-runs the default reflects the current gate ("keep" when an
-    explicit multi-connector list can't be expressed as one choice), so
-    walking the wizard with Enter is always config-preserving.
+    judged when the judge is enabled). Fresh installs default to no selected
+    hook connectors; reruns preselect the saved hook gate.
     """
     hook_targets = [
         c for c in _configured_connector_set(gc) if c in _HOOK_ENFORCED_CONNECTORS
@@ -6663,16 +6752,10 @@ def _prompt_judge_hook_connectors(gc) -> None:
         return
 
     current = list(gc.judge.hook_connectors or [])
-    choices = list(hook_targets) + ["all", "none"]
     if current == ["*"]:
-        default = "all"
-    elif len(current) == 1 and current[0] in hook_targets:
-        default = current[0]
-    elif not current:
-        default = "none"
+        default_selected = list(hook_targets)
     else:
-        choices.insert(0, "keep")
-        default = "keep"
+        default_selected = [c for c in hook_targets if c in current]
 
     ux.section("Hook-lane judge")
     ux.subhead("The judge always covers the proxy lane. Hook connectors are")
@@ -6680,30 +6763,25 @@ def _prompt_judge_hook_connectors(gc) -> None:
     ux.subhead("hook timeout, default 5s) and LLM cost.")
     click.echo()
     if current:
-        # Display speaks the CLI's input language: ["*"] renders as
-        # "all" (parity with `guardrail judge list`).
-        gate_label = "all" if current == ["*"] else str(current)
-        click.echo("  " + ux.dim(f"Current gate: {gate_label}"))
-    choice = click.prompt(
-        "  Run the judge on hook connectors?",
-        type=click.Choice(choices),
-        default=default,
-    )
-    if choice == "keep":
-        return
-    if choice == "all":
-        gc.judge.hook_connectors = ["*"]
-    elif choice == "none":
-        gc.judge.hook_connectors = []
+        gate_label = "all configured hook connectors" if current == ["*"] else ", ".join(current)
+        click.echo("  " + ux.dim(f"Current hook judge coverage: {gate_label}"))
     else:
-        gc.judge.hook_connectors = [choice]
-        if len(hook_targets) > 1:
-            click.echo(
-                "  "
-                + ux.dim(
-                    "Add more later: defenseclaw guardrail judge add <connector>"
-                )
-            )
+        click.echo("  " + ux.dim("Current hook judge coverage: none"))
+    selected = _prompt_checkbox_selection(
+        hook_targets,
+        default_selected=default_selected,
+        title="Select hook connector(s) for judge coverage.",
+        empty_ok=True,
+    )
+    if len(selected) == len(hook_targets):
+        gc.judge.hook_connectors = ["*"]
+        click.echo("  " + ux.dim("Hook judge coverage: all configured hook connectors"))
+    elif not selected:
+        gc.judge.hook_connectors = []
+        click.echo("  " + ux.dim("Hook judge coverage: none"))
+    else:
+        gc.judge.hook_connectors = selected
+        click.echo("  " + ux.dim(f"Hook judge coverage: {', '.join(selected)}"))
 
 
 def _interactive_guardrail_setup(

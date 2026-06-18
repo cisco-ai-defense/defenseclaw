@@ -680,6 +680,7 @@ class TestConnectorRulePackFlag(unittest.TestCase):
         # Codex is the only (hook) connector -> replace -> the free-text
         # dir lands on the GLOBAL rule_pack_dir, anchored absolute.
         custom = os.path.join(self.tmp_dir, "my-pack")
+        os.makedirs(custom, exist_ok=True)
         result = self._run(
             "codex", "--yes", "--no-restart", "--rule-pack-dir", custom
         )
@@ -693,6 +694,7 @@ class TestConnectorRulePackFlag(unittest.TestCase):
         # dir (now a peer -> per-connector override). codex inherits the
         # global strict pack; claudecode runs the custom dir.
         custom = os.path.join(self.tmp_dir, "cc-pack")
+        os.makedirs(custom, exist_ok=True)
         r1 = self._run("codex", "--yes", "--no-restart", "--rule-pack", "strict")
         self.assertEqual(r1.exit_code, 0, msg=r1.output)
         r2 = self._run(
@@ -717,6 +719,18 @@ class TestConnectorRulePackFlag(unittest.TestCase):
         self.assertEqual(
             gc.effective_rule_pack_dir("claudecode"), os.path.abspath(custom)
         )
+
+    def test_rule_pack_dir_missing_is_rejected(self):
+        custom = os.path.join(self.tmp_dir, "missing-pack")
+        result = self._run(
+            "codex", "--yes", "--no-restart", "--rule-pack-dir", custom
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--rule-pack-dir", result.output)
+        self.assertIn("does not exist", result.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.rule_pack_dir, "")
+        self.assertEqual(gc.connectors, {})
 
     def test_rule_pack_and_rule_pack_dir_are_mutually_exclusive(self):
         # Naming a pack two ways in one invocation is the one-input-two-
@@ -807,6 +821,7 @@ class TestGuardrailRulePackScoping(unittest.TestCase):
         gc = self.app.cfg.guardrail
         gc.connectors = {"hermes": PerConnectorGuardrailConfig()}
         custom = os.path.join(self.tmp_dir, "hermes-pack")
+        os.makedirs(custom, exist_ok=True)
         self._apply(rule_pack=None, rule_pack_dir=custom, connector="hermes")
         self.assertEqual(gc.rule_pack_dir, "")
         self.assertEqual(

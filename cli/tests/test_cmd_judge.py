@@ -27,7 +27,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import click
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -547,58 +546,81 @@ class WizardHookPromptTests(unittest.TestCase):
 
     def test_proxy_only_install_skips_prompt(self):
         gc = self._gc(connectors=("openclaw",))
-        with patch.object(click, "prompt") as prompt:
+        with patch.object(cmd_setup, "_prompt_checkbox_selection") as prompt:
             cmd_setup._prompt_judge_hook_connectors(gc)
         prompt.assert_not_called()
         self.assertEqual(gc.judge.hook_connectors, [])
 
     def test_fresh_install_defaults_to_none(self):
         gc = self._gc()
-        with patch.object(click, "prompt", return_value="none") as prompt:
+        with patch.object(cmd_setup, "_prompt_checkbox_selection", return_value=[]) as prompt:
             cmd_setup._prompt_judge_hook_connectors(gc)
-        self.assertEqual(prompt.call_args.kwargs.get("default"), "none")
+        self.assertEqual(prompt.call_args.kwargs.get("default_selected"), [])
+        self.assertEqual(prompt.call_args.kwargs.get("empty_ok"), True)
         self.assertEqual(gc.judge.hook_connectors, [])
 
     def test_choice_all_writes_star(self):
         gc = self._gc()
-        with patch.object(click, "prompt", return_value="all"):
+        with patch.object(
+            cmd_setup,
+            "_prompt_checkbox_selection",
+            return_value=["hermes", "opencode"],
+        ):
             cmd_setup._prompt_judge_hook_connectors(gc)
         self.assertEqual(gc.judge.hook_connectors, ["*"])
 
     def test_choice_single_connector(self):
         gc = self._gc()
-        with patch.object(click, "prompt", return_value="hermes"):
+        with patch.object(cmd_setup, "_prompt_checkbox_selection", return_value=["hermes"]):
             cmd_setup._prompt_judge_hook_connectors(gc)
         self.assertEqual(gc.judge.hook_connectors, ["hermes"])
 
     def test_rerun_with_star_defaults_to_all(self):
         gc = self._gc(gate=("*",))
-        with patch.object(click, "prompt", return_value="all") as prompt:
+        with patch.object(
+            cmd_setup,
+            "_prompt_checkbox_selection",
+            return_value=["hermes", "opencode"],
+        ) as prompt:
             cmd_setup._prompt_judge_hook_connectors(gc)
-        self.assertEqual(prompt.call_args.kwargs.get("default"), "all")
+        self.assertEqual(prompt.call_args.kwargs.get("default_selected"), ["hermes", "opencode"])
         self.assertEqual(gc.judge.hook_connectors, ["*"])
 
     def test_rerun_with_single_entry_defaults_to_it(self):
         gc = self._gc(gate=("hermes",))
-        with patch.object(click, "prompt", return_value="hermes") as prompt:
+        with patch.object(cmd_setup, "_prompt_checkbox_selection", return_value=["hermes"]) as prompt:
             cmd_setup._prompt_judge_hook_connectors(gc)
-        self.assertEqual(prompt.call_args.kwargs.get("default"), "hermes")
+        self.assertEqual(prompt.call_args.kwargs.get("default_selected"), ["hermes"])
         self.assertEqual(gc.judge.hook_connectors, ["hermes"])
 
-    def test_rerun_with_multi_entry_defaults_to_keep(self):
-        # An explicit two-connector gate can't be expressed as one
-        # choice — Enter must preserve it, never clear it.
+    def test_rerun_with_multi_entry_preselects_each_connector(self):
         gc = self._gc(connectors=("hermes", "opencode", "codex"), gate=("hermes", "codex"))
-        with patch.object(click, "prompt", return_value="keep") as prompt:
+        with patch.object(
+            cmd_setup,
+            "_prompt_checkbox_selection",
+            return_value=["codex", "hermes"],
+        ) as prompt:
             cmd_setup._prompt_judge_hook_connectors(gc)
-        self.assertEqual(prompt.call_args.kwargs.get("default"), "keep")
-        self.assertEqual(gc.judge.hook_connectors, ["hermes", "codex"])
+        self.assertEqual(prompt.call_args.kwargs.get("default_selected"), ["codex", "hermes"])
+        self.assertEqual(gc.judge.hook_connectors, ["codex", "hermes"])
 
     def test_choice_none_clears_gate(self):
         gc = self._gc(gate=("hermes",))
-        with patch.object(click, "prompt", return_value="none"):
+        with patch.object(cmd_setup, "_prompt_checkbox_selection", return_value=[]):
             cmd_setup._prompt_judge_hook_connectors(gc)
         self.assertEqual(gc.judge.hook_connectors, [])
+
+    def test_checkbox_selector_toggles_with_keys(self):
+        keys = iter([" ", "j", " ", "\r"])
+        with patch.object(cmd_setup.click, "getchar", side_effect=lambda: next(keys)), \
+                patch.object(cmd_setup, "_stdout_is_tty", return_value=False):
+            got = cmd_setup._prompt_checkbox_selection(
+                ["codex", "hermes"],
+                default_selected=["codex"],
+                title="Select hook connectors",
+                empty_ok=True,
+            )
+        self.assertEqual(got, ["hermes"])
 
 
 if __name__ == "__main__":

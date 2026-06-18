@@ -249,7 +249,11 @@ def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
 
     def _convert(value):
         if is_dataclass(value):
-            return {f.name: _convert(getattr(value, f.name)) for f in fields(value)}
+            return {
+                f.name: _convert(getattr(value, f.name))
+                for f in fields(value)
+                if not f.name.startswith("_")
+            }
         if isinstance(value, dict):
             return {k: _convert(v) for k, v in value.items()}
         if isinstance(value, list):
