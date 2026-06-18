@@ -4473,9 +4473,9 @@ async def test_connector_chip_click_sets_and_clears_filter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_setup_m_key_opens_connector_filter_picker() -> None:
-    """B5: in a multi-connector install, `m` on the Setup panel opens the shared
-    connector-filter picker like every other multi-connector pane."""
+async def test_setup_m_key_does_not_open_connector_filter_picker() -> None:
+    """Setup is an action surface: connector scope is chosen inside wizards,
+    not via the shared view filter used by catalog/signal panes."""
 
     app = _multi_connector_app()
     async with app.run_test(size=(170, 44)) as pilot:
@@ -4484,7 +4484,7 @@ async def test_setup_m_key_opens_connector_filter_picker() -> None:
         await pilot.pause()
         await pilot.press("m")
         await pilot.pause()
-        assert app.screen_stack[-1].__class__.__name__ == "ActionMenuScreen"
+        assert app.screen_stack[-1].__class__.__name__ != "ActionMenuScreen"
 
 
 @pytest.mark.asyncio

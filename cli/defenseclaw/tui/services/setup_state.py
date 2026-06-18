@@ -615,6 +615,9 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
     if key.startswith(("skill_actions.", "mcp_actions.", "plugin_actions.")):
         _apply_action_matrix_field(cfg, key, value)
         return
+    if key.startswith("asset_policy.connectors."):
+        _apply_per_connector_asset_policy_field(cfg, key, value)
+        return
     if key.startswith("asset_policy."):
         _apply_typed_field(cfg, key, value)
         return
@@ -973,6 +976,90 @@ def _apply_action_matrix_field(cfg: object | dict[str, Any], key: str, value: st
     if column not in {"file", "runtime", "install"}:
         return
     set_config_value(cfg, key, value)
+
+
+def _coerce_per_connector_asset_policy_value(field_name: str, value: str) -> Any:
+    raw = value.strip()
+    if field_name == "registry_required":
+        lowered = raw.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        return None
+    return raw.lower()
+
+
+def _apply_per_connector_asset_policy_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
+    """Write one ``asset_policy.connectors.<c>`` scalar override.
+
+    The generic config writer would materialize missing typed entries as
+    ``SimpleNamespace`` objects, which breaks ``AssetPolicyConfig.effective_*``
+    resolution. Mirror the guardrail override writer: preserve typed map
+    entries, materialize optional per-type blocks only when touched, and use
+    ``None`` for blank per-connector ``registry_required`` so it inherits the
+    global setting.
+    """
+
+    parts = key.split(".")
+    # asset_policy.connectors.<connector>.mode
+    # asset_policy.connectors.<connector>.<asset>.{default,registry_required,registry_empty_action}
+    if len(parts) not in (4, 5) or parts[1] != "connectors":
+        return
+    connector = parts[2].strip()
+    if not connector:
+        return
+    is_mode = len(parts) == 4
+    if is_mode:
+        if parts[3] != "mode":
+            return
+        asset_type = ""
+        field_name = "mode"
+    else:
+        asset_type = parts[3]
+        field_name = parts[4]
+        if asset_type not in {"skill", "mcp", "plugin"} or field_name not in {
+            "default",
+            "registry_required",
+            "registry_empty_action",
+        }:
+            return
+
+    asset_policy = getattr(cfg, "asset_policy", None)
+    connectors = getattr(asset_policy, "connectors", None) if asset_policy is not None else None
+    if asset_policy is None or isinstance(asset_policy, Mapping) or not isinstance(connectors, dict):
+        set_config_value(cfg, key, _coerce_per_connector_asset_policy_value(field_name, value))
+        return
+
+    try:
+        from defenseclaw.config import PerConnectorAssetPolicy, PerConnectorAssetTypePolicy  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - degrade to the dict fallback.
+        set_config_value(cfg, key, _coerce_per_connector_asset_policy_value(field_name, value))
+        return
+
+    entry = connectors.get(connector)
+    if not isinstance(entry, PerConnectorAssetPolicy):
+        replacement = PerConnectorAssetPolicy()
+        if isinstance(entry, Mapping):
+            for sib_key, sib_val in entry.items():
+                if hasattr(replacement, sib_key):
+                    setattr(replacement, sib_key, sib_val)
+        connectors[connector] = replacement
+        entry = replacement
+    if is_mode:
+        entry.mode = _coerce_per_connector_asset_policy_value(field_name, value)
+        return
+
+    block = getattr(entry, asset_type, None)
+    if not isinstance(block, PerConnectorAssetTypePolicy):
+        replacement_block = PerConnectorAssetTypePolicy()
+        if isinstance(block, Mapping):
+            for sib_key, sib_val in block.items():
+                if hasattr(replacement_block, sib_key):
+                    setattr(replacement_block, sib_key, sib_val)
+        setattr(entry, asset_type, replacement_block)
+        block = replacement_block
+    setattr(block, field_name, _coerce_per_connector_asset_policy_value(field_name, value))
 
 
 _BOOL_FIELD_KEYS = frozenset(

@@ -1510,7 +1510,7 @@ class DefenseClawTUI(App[None]):
         """Ordered list of panel names that should currently be visible.
 
         Used by tab cycling and the compose-time tab filter so the two
-        always agree on what's reachable for the current connector.
+        always agree on what's reachable for the active connector set.
         """
 
         return [name for name, _key, _label in PANELS if not self._panel_hidden(name)]
@@ -4406,12 +4406,6 @@ class DefenseClawTUI(App[None]):
             self.plugins_model,
             self.tools_model,
             self.inventory_model,
-            # B5: Setup joins the shared-filter fan-out so the connector
-            # selection reaches it like every other multi-connector panel.
-            # The setters are hasattr/AttributeError-guarded, so this is inert
-            # until SetupPanelModel grows the filter interface (panels/setup.py,
-            # B1) — at which point the wiring is already in place.
-            self.setup_model,
         ):
             try:
                 # Keep action intents (scan/info/install) pointed at the
@@ -4448,9 +4442,6 @@ class DefenseClawTUI(App[None]):
             self.plugins_model,
             self.tools_model,
             self.inventory_model,
-            # B5: Setup tracks the shared filter too (hasattr-guarded — inert
-            # until panels/setup.py honours it; see B1).
-            self.setup_model,
         ):
             if hasattr(model, "show_connector_column"):
                 model.show_connector_column = multi
@@ -6497,18 +6488,6 @@ class DefenseClawTUI(App[None]):
             if self.first_run_model.active:
                 action = self.first_run_model.handle_key(_vim_key(key))
                 return self._apply_first_run_action(action)
-            # B5: Setup honours the shared connector filter like every other
-            # multi-connector pane — ``m`` opens the picker. Gated to the
-            # browse states (not a wizard goal/form) so ``m`` is never stolen
-            # from text-entry while editing a field.
-            if (
-                key == "m"
-                and len(self._active_connector_names()) > 1
-                and not self.setup_model.form_active
-                and not self.setup_model.goal_active
-            ):
-                self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
-                return True
             action = self._handle_setup_key(_vim_key(key))
             return self._apply_setup_action(action)
         return False
@@ -6790,13 +6769,7 @@ class DefenseClawTUI(App[None]):
         return ("Wizard", "Status", "Command", "Description"), tuple(rows)
 
     def _setup_body_text(self) -> str:
-        if len(self._active_connector_names()) > 1:
-            self._sync_catalog_connector_filters()
-        connector_chip = self._connector_chip_text()
-        setup_scope = ""
-        if hasattr(self.setup_model, "connector_scope_summary"):
-            setup_scope = self.setup_model.connector_scope_summary()
-        scope_line = f"{setup_scope}\n" if setup_scope else ""
+        self._chip_click_segments = []
         if self.first_run_model.active:
             self._chip_click_segments = []
             return (
@@ -6812,7 +6785,6 @@ class DefenseClawTUI(App[None]):
             summary_line = f"[{TOKENS.text_secondary}]{rich_escape(summary)}[/]\n" if summary else ""
             return (
                 f"[bold #22D3EE]Setup[/] · [bold]{wizard}[/] · What do you want to do?\n"
-                f"{connector_chip}{scope_line}"
                 f"{summary_line}"
                 f"[{TOKENS.text_muted}]Enter choose · ↑/↓ move · Esc back · "
                 f"Advanced opens the full form[/]"
@@ -6842,7 +6814,6 @@ class DefenseClawTUI(App[None]):
             return (
                 f"[bold #22D3EE]Setup Wizard[/]  [bold]{wizard}[/]   "
                 f"[{TOKENS.text_muted}]{description}[/]\n"
-                f"{connector_chip}{scope_line}"
                 f"[{TOKENS.text_secondary}]{how_to}[/]\n"
                 f"[bold]Will run:[/] [{TOKENS.accent_green}]$ {preview}[/]\n"
                 f"{focused_line}{focused_action}\n"
@@ -6869,7 +6840,6 @@ class DefenseClawTUI(App[None]):
             )
             return (
                 f"[bold #22D3EE]Setup Config[/]  {section.name if section else 'No sections'}\n"
-                f"{connector_chip}{scope_line}"
                 f"{sections}\n"
                 f"Focused: {focused.label}  Key: {focused.key or '-'}  "
                 f"Validation: {focused.validation.severity}"
@@ -6882,11 +6852,7 @@ class DefenseClawTUI(App[None]):
                 "Keys: tab/shift+tab section, up/down field, enter/space cycle, type/backspace edit, "
                 "S save, R revert, w wizards."
             ).strip()
-        readiness_rows = (
-            self.setup_model.filtered_readiness_checks()
-            if hasattr(self.setup_model, "filtered_readiness_checks")
-            else self.setup_model.readiness_checks
-        )
+        readiness_rows = self.setup_model.readiness_checks
         readiness = "\n".join(f"{check.status.upper()}: {check.title} - {check.detail}" for check in readiness_rows[:8])
         credentials = self.setup_model.credential_empty_state()
         suffix = f"\n\n{credentials}" if credentials else ""
@@ -6894,8 +6860,7 @@ class DefenseClawTUI(App[None]):
         focused = self.setup_model.focused_row_metadata()
         return (
             "[bold #22D3EE]Setup Wizards[/]\n"
-            f"{connector_chip}{scope_line}"
-            f"Active: {info.name} - {info.description}\n"
+            f"Selected workflow: {info.name} - {info.description}\n"
             f"{info.how_to}\n"
             f"Focused action: {focused.action.hotkey if focused.action else 'Enter'} "
             f"{focused.action.description if focused.action else ''}\n"
