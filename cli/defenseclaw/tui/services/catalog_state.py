@@ -296,6 +296,7 @@ class ToolRow:
     reason: str = ""
     time: str = ""
     target_name: str = ""
+    connector: str = ""
 
     @property
     def display_scope(self) -> str:
@@ -303,6 +304,8 @@ class ToolRow:
 
     @property
     def dispatch_target(self) -> str:
+        if self.connector and self.target_name.startswith("@"):
+            return self.name
         return self.target_name or self.name
 
 
@@ -383,11 +386,9 @@ class CatalogListModel(Generic[RowT]):
     def focus_connector(self) -> str:
         """The focused connector name, or ``""`` when focus is inactive.
 
-        E2: mutation intents (scan/info/install/set/unset) thread this so
-        the action targets the focused connector. Block/allow/unblock are
-        deliberately excluded — enforcement is a process-global block list
-        keyed by ``(type, name)``, so a blocked capability is blocked for
-        every connector (not a per-connector knob)."""
+        Mutation intents thread this through only when the underlying CLI
+        subcommand accepts ``--connector``. A blank connector preserves the
+        legacy active/global CLI behavior."""
         connector = getattr(self, "connector", "")
         if self.connector_focus_enabled and connector:
             return connector
@@ -401,10 +402,9 @@ class CatalogListModel(Generic[RowT]):
         scan/info/install/unset would silently hit the active/primary
         connector instead of the row's owner ("could not resolve skill" /
         "No MCP servers configured"). Prefer the selected row's owner; fall
-        back to the focused connector, and ultimately ``""`` (CLI active) for
-        untagged single-connector rows so existing behaviour is unchanged.
-        The intent builders still gate ``--connector`` per verb, so global
-        block/allow/unblock stay connector-agnostic regardless of this value.
+        back to the focused connector, and ultimately ``""`` (CLI active or
+        global) for untagged single-connector rows so existing behaviour is
+        unchanged. Intent builders still gate ``--connector`` per verb.
         """
         return self.row_connector(row) or self.focus_connector()
 
@@ -480,21 +480,28 @@ class CatalogListModel(Generic[RowT]):
     def apply_filter(self) -> None:
         rows: tuple[RowT, ...] = self.items
         if self.connector_filter:
-            rows = tuple(
-                row
-                for row in rows
-                if connector_filter_svc.filter_allows(self.connector_filter, self.row_connector(row))
-            )
+            rows = tuple(row for row in rows if self._row_matches_connector_filter(row))
         if self.filter_text and self._filter_fields:
             query = self.filter_text.lower()
             rows = tuple(row for row in rows if query in self._haystack(row))
         self.filtered = rows
         self._clamp_cursor()
 
+    def _row_matches_connector_filter(self, row: RowT) -> bool:
+        return connector_filter_svc.filter_allows(self.connector_filter, self.row_connector(row))
+
     def selected(self) -> RowT | None:
         if 0 <= self.cursor < len(self.filtered):
             return self.filtered[self.cursor]
         return None
+
+    def action_key_available(self, key: str) -> bool:
+        """Whether the selected row currently advertises ``key`` as an action."""
+
+        actions = getattr(self, "menu_actions", None)
+        if not callable(actions):
+            return False
+        return any(action.key == key and not action.disabled for action in actions())
 
     def select_row(self, index: int) -> RowT | None:
         self.set_cursor(index)
@@ -565,9 +572,12 @@ class CatalogListModel(Generic[RowT]):
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
         if self.show_connector_column:
             return tuple(
-                (self.row_connector(row) or "—", *catalog_row_cells(row)) for row in self.filtered
+                (self.connector_cell(row), *catalog_row_cells(row)) for row in self.filtered
             )
         return tuple(catalog_row_cells(row) for row in self.filtered)
+
+    def connector_cell(self, row: RowT) -> str:
+        return self.row_connector(row) or "—"
 
     def summary_text(self, title: str) -> str:
         filter_text = f" filter={self.filter_text!r}" if self.filter_text else ""
@@ -672,8 +682,13 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
             return CatalogPanelAction(True, detail_opened=True)
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
-        if key in {"s", "b", "a"}:
-            return CatalogPanelAction(True, self.action_intent(key, origin="skills") if self.selected() else None)
+        if key in {"s", "b", "a", "u"}:
+            intent = (
+                self.action_intent(key, origin="skills")
+                if self.selected() and self.action_key_available(key)
+                else None
+            )
+            return CatalogPanelAction(True, intent)
         if key == "r":
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
@@ -767,8 +782,13 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
             return CatalogPanelAction(True, detail_opened=True)
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
-        if key in {"s", "b", "a"}:
-            return CatalogPanelAction(True, self.action_intent(key, origin="mcps") if self.selected() else None)
+        if key in {"s", "b", "a", "u"}:
+            intent = (
+                self.action_intent(key, origin="mcps")
+                if self.selected() and self.action_key_available(key)
+                else None
+            )
+            return CatalogPanelAction(True, intent)
         if key in {"n", "+"}:
             return CatalogPanelAction(True, open_mcp_set_form=True)
         if key == "r":
@@ -866,6 +886,13 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
             return CatalogPanelAction(True, plugin_direct_scan_intent(row, self.action_connector(row)))
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
+        if key in {"b", "a", "u"}:
+            intent = (
+                self.action_intent(key, origin="plugins")
+                if self.selected() and self.action_key_available(key)
+                else None
+            )
+            return CatalogPanelAction(True, intent)
         if key == "r":
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         return CatalogPanelAction(False)
@@ -918,6 +945,21 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
     def allowed_count(self) -> int:
         return sum(1 for row in self.items if row.status == "allowed")
 
+    def _row_matches_connector_filter(self, row: ToolRow) -> bool:
+        connector = self.row_connector(row)
+        if connector:
+            return connector_filter_svc.filter_allows(self.connector_filter, connector)
+        return not row.scope
+
+    def connector_cell(self, row: ToolRow) -> str:
+        connector = self.row_connector(row)
+        if connector:
+            return connector
+        return "source" if row.scope else "all"
+
+    def action_connector(self, row: object | None) -> str:
+        return self.row_connector(row) or self.connector_filter or self.focus_connector()
+
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
         row = self.selected()
         return tool_actions(row.status if row else "")
@@ -926,7 +968,7 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         row = self.selected()
         if row is None:
             return None
-        return tool_action_intent(key, row, origin=origin)
+        return tool_action_intent(key, row, origin=origin, connector=self.action_connector(row))
 
     def list_height(self) -> int:
         height = self.height - 4
@@ -951,15 +993,33 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
             return CatalogPanelAction(True, detail_opened=True)
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
+        if key in {"b", "a", "u"}:
+            intent = (
+                self.action_intent(key, origin="tools")
+                if self.selected() and self.action_key_available(key)
+                else None
+            )
+            return CatalogPanelAction(True, intent)
         if key == "r":
             self.refresh()
             return CatalogPanelAction(True, hint="Refreshed.")
         return CatalogPanelAction(False)
 
+    def summary_text(self, title: str) -> str:
+        filter_text = f" filter={self.filter_text!r}" if self.filter_text else ""
+        detail = " detail=open" if self.detail_open else ""
+        return (
+            f"[bold #22D3EE]{title}[/]\n"
+            f"{len(self.filtered)} of {len(self.items)} policy rows{filter_text}{detail}\n"
+            "[dim]Rows:[/] block/allow policy only; unblocked tools disappear from this table.\n"
+            "[dim]Navigate:[/] j/k move  ·  Enter detail  ·  / filter  ·  Esc close  ·  r refresh\n"
+            "[dim]Actions:[/]  o open menu  ·  b block  ·  a allow  ·  u unblock"
+        )
+
     def empty_state(self) -> str:
         return (
-            "No tools in the block/allow list. "
-            'Press : then type "tool block <name>" or "tool allow <name> --source <skill|mcp>".'
+            "No tool policy rows. This table only shows block/allow entries; "
+            "unblocked tools disappear here."
         )
 
 
@@ -1082,7 +1142,7 @@ def tools_from_action_entries(entries: Sequence[object]) -> tuple[ToolRow, ...]:
     rows: list[ToolRow] = []
     for entry in entries:
         target_name = str(_get_attr(entry, "target_name", "TargetName"))
-        name, scope = split_tool_target(target_name)
+        name, scope, target_connector = parse_tool_target(target_name)
         actions = _get_attr(entry, "actions", "Actions", default=None)
         install = str(_get_attr(actions, "install", "Install", default=""))
         if install == "block":
@@ -1100,19 +1160,31 @@ def tools_from_action_entries(entries: Sequence[object]) -> tuple[ToolRow, ...]:
                 reason=str(_get_attr(entry, "reason", "Reason")),
                 time=format_tool_time(updated_at),
                 target_name=target_name,
+                connector=normalized_connector(
+                    str(_get_attr(entry, "connector", "Connector", default="") or target_connector)
+                ),
             )
         )
     return tuple(rows)
 
 
 def split_tool_target(target_name: str) -> tuple[str, str]:
+    name, scope, _connector = parse_tool_target(target_name)
+    return name, scope
+
+
+def parse_tool_target(target_name: str) -> tuple[str, str, str]:
+    if target_name.startswith("@") and "/" in target_name:
+        connector, _, name = target_name[1:].partition("/")
+        if connector and name:
+            return name, "connector", normalized_connector(connector)
     if "@" in target_name and not target_name.startswith("@"):
         name, scope = target_name.rsplit("@", 1)
-        return name, scope
+        return name, scope, ""
     if "/" in target_name and not target_name.startswith("/") and not target_name.endswith("/"):
         scope, name = target_name.split("/", 1)
-        return name, scope
-    return target_name, ""
+        return name, scope, ""
+    return target_name, "", ""
 
 
 def format_tool_time(value: object) -> str:
@@ -1260,12 +1332,14 @@ def tool_actions(status: str) -> tuple[CatalogMenuAction, ...]:
     return tuple(actions)
 
 
-# E2: verb keys whose CLI subcommand accepts ``--connector``. Mutations
-# that hit the process-global enforcement store (block/allow/unblock/...)
-# are intentionally absent — those are connector-agnostic by design.
-_SKILL_CONNECTOR_VERBS = frozenset({"s", "i", "n"})  # scan, info, install
-_MCP_CONNECTOR_VERBS = frozenset({"s", "i", "x"})  # scan, list, unset
-_PLUGIN_CONNECTOR_VERBS = frozenset({"s", "i"})  # scan, info
+# Verb keys whose CLI subcommand accepts ``--connector``. In a filtered or
+# merged multi-connector table, row actions should target the selected
+# connector instead of writing an accidental global policy row.
+_SKILL_CONNECTOR_VERBS = frozenset(
+    {"s", "i", "b", "a", "u", "d", "e", "q", "r", "n"}
+)
+_MCP_CONNECTOR_VERBS = frozenset({"s", "i", "b", "a", "u", "x"})
+_PLUGIN_CONNECTOR_VERBS = frozenset({"s", "i", "b", "a", "u", "d", "e", "q", "r", "x"})
 
 
 def skill_action_intent(
@@ -1361,7 +1435,9 @@ def plugin_action_intent(
     )
 
 
-def tool_action_intent(key: str, row: ToolRow, *, origin: str) -> CatalogCommandIntent | None:
+def tool_action_intent(
+    key: str, row: ToolRow, *, origin: str, connector: str = ""
+) -> CatalogCommandIntent | None:
     verbs = {
         "i": ("status", "info tool"),
         "b": ("block", "block tool"),
@@ -1372,9 +1448,12 @@ def tool_action_intent(key: str, row: ToolRow, *, origin: str) -> CatalogCommand
         return None
     verb, label_prefix = verbs[key]
     target = row.dispatch_target
+    args = ["tool", verb, target]
+    if connector:
+        args.extend(("--connector", normalized_connector(connector)))
     return CatalogCommandIntent(
         label=f"{label_prefix} {target}",
-        args=("tool", verb, target),
+        args=tuple(args),
         origin=origin,
     )
 

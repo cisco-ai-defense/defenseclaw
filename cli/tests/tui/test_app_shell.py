@@ -23,6 +23,7 @@ from defenseclaw.config import RegistrySource
 from defenseclaw.models import Event
 from defenseclaw.tui.app import (
     DefenseClawTUI,
+    _catalog_panel_invalidated_by_command,
     _enforcement_label,
     _event_histogram,
     _fetch_ai_usage,
@@ -52,8 +53,11 @@ from defenseclaw.tui.panels.overview import (
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistriesTab
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
+from defenseclaw.tui.panels.tools import ToolsPanelModel
 from defenseclaw.tui.services.gateway_log_views import GatewayLogRow
 from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, CredentialRow
+from defenseclaw.tui.services.tui_state import STATE_FILENAME
+from defenseclaw.tui.widgets.action_menu import ActionMenu
 from defenseclaw.tui.widgets.native_metrics import MetricTile, OverviewMetrics
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -74,6 +78,42 @@ async def test_textual_shell_starts_on_overview() -> None:
         assert "SCANNERS" in app.body_text
         assert "backend=textual" in app.status_text
         assert app.hint_text
+
+
+@pytest.mark.asyncio
+async def test_textual_shell_ignores_persisted_last_panel_on_startup(tmp_path) -> None:
+    (tmp_path / STATE_FILENAME).write_text(
+        json.dumps({"active_panel": "logs", "theme": ""}),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+
+        assert app.state.active_panel == "logs"
+        assert app.active_panel == "overview"
+        assert app.query_one("#tabs").active == "tab-overview"
+        assert "Overview" in app.body_text
+
+
+@pytest.mark.asyncio
+async def test_stale_tab_activation_does_not_bounce_back_after_rapid_clicks() -> None:
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        tabs = app.query_one("#tabs")
+
+        # Simulate rapid mouse clicks where Textual's tab strip has already
+        # moved to Logs, but the older Alerts activation is delivered first.
+        tabs.active = "tab-logs"
+        app._on_tab_activated(SimpleNamespace(tab=SimpleNamespace(id="tab-alerts")))  # noqa: SLF001
+        app._on_tab_activated(SimpleNamespace(tab=SimpleNamespace(id="tab-logs")))  # noqa: SLF001
+        await pilot.pause()
+
+        assert app.active_panel == "logs"
+        assert tabs.active == "tab-logs"
 
 
 @pytest.mark.asyncio
@@ -962,6 +1002,139 @@ async def test_skills_panel_renders_catalog_table_and_action_menu() -> None:
 
 
 @pytest.mark.asyncio
+async def test_catalog_control_action_uses_visible_table_cursor() -> None:
+    skills = SkillsPanelModel(connector="codex")
+    skills.apply_loaded(
+        [
+            SkillRow(name="alpha", status="active"),
+            SkillRow(name="beta", status="active"),
+        ]
+    )
+    app = DefenseClawTUI(skills_model=skills)
+    captured: list[tuple[str, object]] = []
+
+    def fake_apply_catalog_action(panel: str, action: object) -> bool:
+        captured.append((panel, action))
+        return True
+
+    app._apply_catalog_action = fake_apply_catalog_action  # type: ignore[method-assign]
+
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.press("3")
+        await pilot.pause()
+
+        table = app.query_one("#panel-table", DataTable)
+        table.move_cursor(row=1, column=0, animate=False)
+        skills.set_cursor(0)
+
+        app._handle_catalog_control("skills", "skills-block")  # noqa: SLF001
+
+    assert skills.cursor == 1
+    assert captured
+    panel, action = captured[0]
+    assert panel == "skills"
+    assert action.intent.args == ("skill", "block", "beta")
+
+
+@pytest.mark.asyncio
+async def test_successful_skill_policy_mutation_reloads_loaded_skills_panel() -> None:
+    skills = SkillsPanelModel(connector="hermes")
+    skills.apply_loaded(
+        [
+            SkillRow(
+                name="clean-skill",
+                status="blocked",
+                actions="blocked",
+                install_action="block",
+            )
+        ]
+    )
+    skills.detail_open = True
+    app = DefenseClawTUI(skills_model=skills)
+    app.active_panel = "skills"
+    reloaded: list[str] = []
+
+    async def fake_load_catalog(panel: str) -> None:
+        reloaded.append(panel)
+        skills.apply_loaded(
+            [
+                SkillRow(
+                    name="clean-skill",
+                    status="allowed",
+                    actions="allowed",
+                    install_action="allow",
+                )
+            ]
+        )
+
+    app._load_catalog_model = fake_load_catalog  # type: ignore[method-assign]
+
+    await app._handle_successful_command("defenseclaw", ("skill", "allow", "clean-skill"))  # noqa: SLF001
+
+    assert reloaded == ["skills"]
+    assert skills.selected() is not None
+    assert skills.selected().status == "allowed"
+    assert skills.selected().actions == "allowed"
+    assert "allowed" in app._detail_text()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_successful_tool_policy_mutation_refreshes_and_rerenders_loaded_tools_panel() -> None:
+    class Store:
+        def __init__(self) -> None:
+            self.entries = [
+                SimpleNamespace(
+                    target_name="@codex/write_file",
+                    actions=SimpleNamespace(install="block"),
+                    reason="manual block",
+                    updated_at=None,
+                )
+            ]
+
+        def list_actions_by_type(self, target_type: str) -> list[SimpleNamespace]:
+            assert target_type == "tool"
+            return self.entries
+
+    store = Store()
+    tools = ToolsPanelModel(store)
+    tools.show_connector_column = True
+    tools.set_connector_filter("codex")
+    tools.refresh()
+    app = DefenseClawTUI(tools_model=tools)
+    app.active_panel = "tools"
+    rendered: list[bool] = []
+
+    def fake_render_chrome() -> None:
+        rendered.append(True)
+
+    app._render_chrome = fake_render_chrome  # type: ignore[method-assign]
+    store.entries = [
+        SimpleNamespace(
+            target_name="@codex/write_file",
+            actions=SimpleNamespace(install="allow"),
+            reason="manual allow",
+            updated_at=None,
+        )
+    ]
+
+    await app._handle_successful_command("defenseclaw", ("tool", "allow", "write_file"))  # noqa: SLF001
+
+    assert rendered == [True]
+    assert tools.selected() is not None
+    assert tools.selected().connector == "codex"
+    assert tools.selected().status == "allowed"
+    assert tools.selected().dispatch_target == "write_file"
+
+
+def test_catalog_mutation_command_classifier_ignores_read_only_commands() -> None:
+    assert _catalog_panel_invalidated_by_command(("skill", "allow", "clean-skill")) == "skills"
+    assert _catalog_panel_invalidated_by_command(("skill", "list", "--json")) is None
+    assert _catalog_panel_invalidated_by_command(("mcp", "set", "filesystem")) == "mcps"
+    assert _catalog_panel_invalidated_by_command(("plugin", "info", "x")) is None
+    assert _catalog_panel_invalidated_by_command(("tool", "block", "write_file")) == "tools"
+
+
+@pytest.mark.asyncio
 async def test_logs_and_audit_panels_render_worker_models() -> None:
     logs = LogsPanelModel()
     logs.lines["gateway"] = ["event tick seq=1", "error failed"]
@@ -1238,6 +1411,127 @@ async def test_ai_usage_poll_fans_out_to_overview_and_ai_panel(monkeypatch: pyte
         assert overview.ai_usage is snapshot
         assert ai.snapshot is snapshot
         assert "1 active" in overview.ai_discovery_box().summary_parts
+
+
+def test_scheduled_background_polls_are_single_flight(tmp_path) -> None:
+    config = SimpleNamespace(
+        data_dir=str(tmp_path),
+        gateway=SimpleNamespace(api_port=18970, host="127.0.0.1", token="token"),
+    )
+    app = DefenseClawTUI(config=config)
+    scheduled: list[object] = []
+
+    def fake_run_worker(coro: object, **_kwargs: object) -> None:
+        scheduled.append(coro)
+
+    def close_last_scheduled() -> None:
+        close = getattr(scheduled.pop(), "close", None)
+        if callable(close):
+            close()
+
+    app.run_worker = fake_run_worker  # type: ignore[method-assign]
+
+    app._schedule_health_poll()  # noqa: SLF001
+    app._schedule_health_poll()  # noqa: SLF001
+    assert len(scheduled) == 1
+    assert app._health_poll_running is True  # noqa: SLF001
+    close_last_scheduled()
+    app._health_poll_running = False  # noqa: SLF001
+
+    app._schedule_ai_usage_poll()  # noqa: SLF001
+    app._schedule_ai_usage_poll()  # noqa: SLF001
+    assert len(scheduled) == 1
+    assert app._ai_usage_poll_running is True  # noqa: SLF001
+    close_last_scheduled()
+    app._ai_usage_poll_running = False  # noqa: SLF001
+
+    app._schedule_credentials_refresh()  # noqa: SLF001
+    app._schedule_credentials_refresh()  # noqa: SLF001
+    assert len(scheduled) == 1
+    assert app._credentials_refresh_running is True  # noqa: SLF001
+    close_last_scheduled()
+
+
+@pytest.mark.asyncio
+async def test_background_poll_wrappers_clear_single_flight_flags(tmp_path) -> None:
+    config = SimpleNamespace(
+        data_dir=str(tmp_path),
+        gateway=SimpleNamespace(api_port=18970, host="127.0.0.1", token="token"),
+    )
+    app = DefenseClawTUI(config=config)
+    calls: list[str] = []
+
+    async def fake_health() -> None:
+        calls.append("health")
+
+    async def fake_ai_usage(*, force_render: bool) -> None:
+        calls.append(f"ai:{force_render}")
+
+    async def fake_credentials() -> None:
+        calls.append("credentials")
+
+    app._poll_health = fake_health  # type: ignore[method-assign]
+    app._poll_ai_usage = fake_ai_usage  # type: ignore[method-assign]
+    app._load_setup_credentials = fake_credentials  # type: ignore[method-assign]
+
+    app._health_poll_running = True  # noqa: SLF001
+    await app._poll_health_once()  # noqa: SLF001
+    assert app._health_poll_running is False  # noqa: SLF001
+
+    app._ai_usage_poll_running = True  # noqa: SLF001
+    await app._poll_ai_usage_once(force_render=False)  # noqa: SLF001
+    assert app._ai_usage_poll_running is False  # noqa: SLF001
+
+    app._credentials_refresh_running = True  # noqa: SLF001
+    await app._refresh_credentials_once()  # noqa: SLF001
+    assert app._credentials_refresh_running is False  # noqa: SLF001
+    assert calls == ["health", "ai:False", "credentials"]
+
+
+def test_slow_refresh_scheduler_is_single_flight(tmp_path) -> None:
+    app = DefenseClawTUI(config=SimpleNamespace(data_dir=str(tmp_path)))
+    scheduled: list[object] = []
+
+    def fake_run_worker(coro: object, **_kwargs: object) -> None:
+        scheduled.append(coro)
+
+    def close_last_scheduled() -> None:
+        close = getattr(scheduled.pop(), "close", None)
+        if callable(close):
+            close()
+
+    app.run_worker = fake_run_worker  # type: ignore[method-assign]
+
+    app._schedule_slow_refresh()  # noqa: SLF001
+    app._schedule_slow_refresh()  # noqa: SLF001
+
+    assert len(scheduled) == 1
+    assert app._slow_refresh_running is True  # noqa: SLF001
+    close_last_scheduled()
+
+
+@pytest.mark.asyncio
+async def test_slow_refresh_uses_tools_store_refresh_without_catalog_subprocess(tmp_path) -> None:
+    app = DefenseClawTUI(config=SimpleNamespace(data_dir=str(tmp_path)))
+    app.tools_model.loaded = True
+    refreshed: list[str] = []
+    loaded: list[str] = []
+
+    def fake_tools_refresh() -> None:
+        refreshed.append("tools")
+
+    async def fake_load_catalog(panel: str) -> None:
+        loaded.append(panel)
+
+    app.tools_model.refresh = fake_tools_refresh  # type: ignore[method-assign]
+    app._load_catalog_model = fake_load_catalog  # type: ignore[method-assign]
+
+    app._slow_refresh_running = True  # noqa: SLF001
+    await app._run_slow_refresh()  # noqa: SLF001
+
+    assert refreshed == ["tools"]
+    assert loaded == []
+    assert app._slow_refresh_running is False  # noqa: SLF001
 
 
 def test_fetch_ai_usage_uses_gateway_auth_and_accept_headers() -> None:
@@ -3517,12 +3811,13 @@ async def test_catalog_inventory_show_connector_column_in_multi() -> None:
             app.skills_model,
             app.mcps_model,
             app.plugins_model,
+            app.tools_model,
             app.inventory_model,
         ):
             assert model.show_connector_column is True
 
         app._set_connector_filter("cursor")
-        for model in (app.skills_model, app.mcps_model, app.plugins_model):
+        for model in (app.skills_model, app.mcps_model, app.plugins_model, app.tools_model):
             assert model.connector_filter == "cursor"
         assert app.inventory_model.connector_filter == "cursor"
 
@@ -3542,6 +3837,7 @@ async def test_catalog_inventory_no_connector_column_in_single() -> None:
             app.skills_model,
             app.mcps_model,
             app.plugins_model,
+            app.tools_model,
             app.inventory_model,
         ):
             assert model.show_connector_column is False
@@ -3786,6 +4082,7 @@ async def test_overview_enforcement_narrows_to_selected_connector() -> None:
     cfg = OverviewConfig(
         data_dir="/tmp/dc",
         claw_mode="codex",
+        guardrail_enabled=True,
         guardrail_connector="codex",
         connector_modes=(("codex", "action"), ("cursor", "observe")),
         connector_packs=(("codex", "strict"), ("cursor", "permissive")),
@@ -3862,8 +4159,16 @@ async def test_overview_enforcement_narrows_to_selected_connector() -> None:
         assert "Scanned" in codex_text
         assert "1/3 assets" in codex_text
         assert "(gateway-wide)" not in codex_text
-        # SCANNERS surfaces the connector's enforcement policy.
+        # CONFIGURATION and SCANNERS narrow with ENFORCEMENT instead of
+        # keeping the generic multi-connector summary.
+        assert "CONFIGURATION · codex" in codex_text
+        assert "Connector" in codex_text and "Codex (codex)" in codex_text
+        assert "Mode" in codex_text and "action" in codex_text
+        assert "Rule pack" in codex_text and "strict" in codex_text
+        assert "Last activity" in codex_text
+        assert "SCANNERS · codex" in codex_text
         assert "policy" in codex_text
+        assert "coverage" in codex_text
 
 
 @pytest.mark.asyncio
@@ -4180,6 +4485,26 @@ async def test_setup_m_key_opens_connector_filter_picker() -> None:
         await pilot.press("m")
         await pilot.pause()
         assert app.screen_stack[-1].__class__.__name__ == "ActionMenuScreen"
+
+
+@pytest.mark.asyncio
+async def test_connector_filter_picker_highlights_current_filter() -> None:
+    """The `m` picker should visually start on the active shared connector filter."""
+
+    app = _multi_connector_app()
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app._set_connector_filter("cursor")  # noqa: SLF001 - shared filter state setup.
+        await pilot.press("m")
+        await pilot.pause()
+
+        screen = app.screen_stack[-1]
+        menu = screen.query_one(ActionMenu)
+        assert menu.selected_index == 2
+        assert "cursor" in menu.actions[2].label
+        assert "current" in menu.actions[2].label
+        assert not menu.query_one("#action-menu-row-0", Button).has_class("-selected")
+        assert menu.query_one("#action-menu-row-2", Button).has_class("-selected")
 
 
 def test_destructive_intent_modal_is_danger_gated() -> None:

@@ -183,7 +183,7 @@ PANELS = (
     ("logs", "8", "Logs"),
     ("audit", "9", "Audit"),
     ("activity", "A", "Activity"),
-    ("tools", "T", "Tools"),
+    ("tools", "T", "Tool Policy"),
     ("ai", "V", "AI Discovery"),
     ("registries", "R", "Registries"),
     ("setup", "0", "Setup"),
@@ -660,8 +660,8 @@ class DefenseClawTUI(App[None]):
         self.executor = CommandExecutor()
         self.config = config
         self.data_dir = _resolve_data_dir(config, data_dir)
-        # Operator's persisted session preferences (active panel,
-        # palette MRU, per-panel "last seen" cursors, last filter).
+        # Operator's persisted session preferences (palette MRU,
+        # per-panel "last seen" cursors, last filter, theme).
         # Stored in ``<data_dir>/tui-state.json`` mode 0600. Tokens
         # never live here — only opaque panel/command names.
         self.state_store = TUIStateStore(self.data_dir)
@@ -669,7 +669,11 @@ class DefenseClawTUI(App[None]):
         if self.first_run_model.active:
             self.active_panel = "setup"
         else:
-            self.active_panel = self.state.active_panel or "overview"
+            # Plain ``defenseclaw tui`` should always land on the
+            # overview dashboard. ``active_panel`` is still written for
+            # older state files and unread-badge bookkeeping, but it is
+            # intentionally not a launch preference.
+            self.active_panel = "overview"
         self.help_open = False
         self.activity_lines: list[str] = []
         self.body_text = ""
@@ -727,6 +731,10 @@ class DefenseClawTUI(App[None]):
         self._table_columns: tuple[str, ...] = ()
         self._table_rows: tuple[tuple[str, ...], ...] = ()
         self._periodic_refresh_running = False
+        self._slow_refresh_running = False
+        self._credentials_refresh_running = False
+        self._health_poll_running = False
+        self._ai_usage_poll_running = False
         # Fingerprints of the last payload pushed into the body and
         # detail ``Static`` widgets. Textual's ``Static.update`` forces
         # a layout pass even when the content is byte-for-byte
@@ -771,6 +779,11 @@ class DefenseClawTUI(App[None]):
         self._command_registry = build_registry()
         self._command_palette_values: list[str] = []
         self._last_table_click: tuple[str, int] | None = None
+        # Textual posts Tabs.TabActivated for programmatic ``tabs.active``
+        # changes too. Keep a one-shot count for tab ids that _render_chrome
+        # selected on behalf of the app so delayed sync messages cannot bounce
+        # the operator back to an older tab after rapid mouse clicks.
+        self._suppressed_tab_activations: dict[str, int] = {}
         # Auto-dismissing toast queue. Mirrors the Go TUI's
         # ToastManager: cap of MAX_TOASTS (3), TTLs of 4s/4s/6s/8s for
         # info/success/warn/error. The widget itself is mounted in
@@ -785,11 +798,10 @@ class DefenseClawTUI(App[None]):
         self._last_gateway_started_at: str = ""
 
     def compose(self) -> ComposeResult:
-        # If the persisted ``active_panel`` is now connector-gated
-        # (e.g. operator quit on Plugins, then changed connector before
-        # relaunch), fall back to the first visible panel. Otherwise
-        # Tabs(active="tab-plugins", ...) would resolve to a Tab that
-        # isn't in the list and Textual raises during validate_active.
+        # If the startup panel is connector-gated (e.g. embedded first-run
+        # setup is hidden by a future gate), fall back to the first visible
+        # panel. Otherwise Tabs(active=...) can point at a Tab that is not in
+        # the list and Textual raises during validate_active.
         visible_panels = self._visible_panels() or ["overview"]
         if self.active_panel not in visible_panels:
             self.active_panel = visible_panels[0]
@@ -1195,7 +1207,7 @@ class DefenseClawTUI(App[None]):
                     )
                 with Horizontal(id="tools-controls", classes="panel-controls hidden"):
                     yield Input(
-                        placeholder="Filter tools…",
+                        placeholder="Filter tool policy…",
                         id="tools-filter",
                         compact=True,
                     )
@@ -1209,7 +1221,7 @@ class DefenseClawTUI(App[None]):
                         "Refresh",
                         id="tools-refresh",
                         compact=True,
-                        tooltip="Reload tools from the audit store (r)",
+                        tooltip="Reload tool policy rows from the audit store (r)",
                     )
                     yield Button(
                         "Detail",
@@ -1320,7 +1332,7 @@ class DefenseClawTUI(App[None]):
         # warnings that flake the visual snapshot suite.
         self._app_shutting_down = True
         # Best-effort final flush of session state so the next launch
-        # restores active panel + palette MRU + per-panel cursors.
+        # keeps palette MRU, theme, filters, and per-panel cursors.
         try:
             self.state_store.save()
         except Exception:  # noqa: BLE001
@@ -1365,6 +1377,12 @@ class DefenseClawTUI(App[None]):
         # spin up CLI processes for screens the operator doesn't care
         # about.
         self.set_interval(60.0, self._schedule_slow_refresh)
+        self._write_activity(
+            "[bold #22D3EE]Textual backend[/] ready. "
+            "Go backend remains available with --backend go."
+        )
+        if self.first_run_model.active:
+            self._write_activity("[#FBBF24]First-run setup[/] config is missing; embedded init flow is active.")
         self._render_chrome()
 
     def _schedule_slow_refresh(self) -> None:
@@ -1378,26 +1396,28 @@ class DefenseClawTUI(App[None]):
 
         if self.config is None or getattr(self, "_app_shutting_down", False):
             return
-        for panel, model in self.catalog_models.items():
-            if not getattr(model, "loaded", False):
-                continue
-            self.run_worker(
-                self._load_catalog_model(panel),
-                exclusive=False,
-                thread=False,
-            )
-        if getattr(self.inventory_model, "loaded", False):
-            self.run_worker(
-                self._load_inventory_model(),
-                exclusive=False,
-                thread=False,
-            )
-        self._write_activity(
-            "[bold #22D3EE]Textual backend[/] ready. "
-            "Go backend remains available with --backend go."
+        if self._slow_refresh_running:
+            return
+        self._slow_refresh_running = True
+        self.run_worker(
+            self._run_slow_refresh(),
+            exclusive=False,
+            thread=False,
         )
-        if self.first_run_model.active:
-            self._write_activity("[#FBBF24]First-run setup[/] config is missing; embedded init flow is active.")
+
+    async def _run_slow_refresh(self) -> None:
+        try:
+            for panel, model in self.catalog_models.items():
+                if not getattr(model, "loaded", False):
+                    continue
+                if panel == "tools":
+                    self.tools_model.refresh()
+                    continue
+                await self._load_catalog_model(panel)
+            if getattr(self.inventory_model, "loaded", False):
+                await self._load_inventory_model()
+        finally:
+            self._slow_refresh_running = False
 
     def on_key(self, event: events.Key) -> None:
         if len(self.screen_stack) > 1:
@@ -1734,6 +1754,13 @@ class DefenseClawTUI(App[None]):
     @on(Tabs.TabActivated, "#tabs")
     def _on_tab_activated(self, event: Tabs.TabActivated) -> None:
         if event.tab.id is None:
+            return
+        suppressed = self._suppressed_tab_activations.get(event.tab.id, 0)
+        if suppressed > 0:
+            if suppressed == 1:
+                self._suppressed_tab_activations.pop(event.tab.id, None)
+            else:
+                self._suppressed_tab_activations[event.tab.id] = suppressed - 1
             return
         panel = event.tab.id.removeprefix("tab-")
         if panel == self.active_panel:
@@ -2365,7 +2392,10 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             return
         tab_id = f"tab-{self.active_panel}"
-        if tabs.query(f"#{tab_id}"):
+        if tabs.active != tab_id and tabs.query(f"#{tab_id}"):
+            self._suppressed_tab_activations[tab_id] = (
+                self._suppressed_tab_activations.get(tab_id, 0) + 1
+            )
             tabs.active = tab_id
         # Refresh unread "(N)" badges on every tab whenever chrome
         # re-renders. Cheap (≤ 14 string updates) and keeps the tab
@@ -3147,8 +3177,27 @@ class DefenseClawTUI(App[None]):
         model = self.catalog_models.get(panel)
         if model is None:
             return
+        self._sync_catalog_cursor_from_table(panel)
         action = model.handle_key(key)
         self._apply_catalog_action(panel, action)
+
+    def _sync_catalog_cursor_from_table(self, panel: str) -> None:
+        """Use the visible table cursor as source of truth before row actions."""
+
+        if panel != self.active_panel:
+            return
+        model = self.catalog_models.get(panel)
+        if model is None or not self._table_rows:
+            return
+        try:
+            table = self.query_one("#panel-table", DataTable)
+        except NoMatches:
+            return
+        if table.has_class("hidden"):
+            return
+        cursor_row = getattr(table, "cursor_row", -1)
+        if 0 <= cursor_row < model.filtered_count():
+            model.set_cursor(cursor_row)
 
     def _sync_catalog_controls(self, panel: str) -> None:
         """Toggle catalog control-bar buttons to match panel state.
@@ -4262,6 +4311,47 @@ class DefenseClawTUI(App[None]):
         pack = (dict(cfg.connector_packs).get(connector) or "").strip()
         return " · ".join(part for part in (mode, pack) if part)
 
+    def _overview_connector_row(self, connector: str) -> ConnectorOverviewRow | None:
+        """Return the rendered Overview row for ``connector`` if it is active."""
+
+        want = (connector or "").strip().lower()
+        if not want:
+            return None
+        for row in self._overview_connector_rows():
+            if row.connector.strip().lower() == want:
+                return row
+        return None
+
+    def _connector_configuration_lines(self, connector: str) -> tuple[tuple[str, str], ...]:
+        """Connector-scoped CONFIGURATION rows for the filtered Overview."""
+
+        cfg = self.overview_model.cfg
+        row = self._overview_connector_row(connector)
+        mode = (row.mode if row else dict(cfg.connector_modes).get(connector, "")) if cfg else ""
+        rule_pack = (row.rule_pack if row else dict(cfg.connector_packs).get(connector, "")) if cfg else ""
+        status = (row.status if row else "") or "unknown"
+        last_activity = (row.last_activity if row else "") or "none"
+        disabled = bool(cfg and (cfg.connector_is_disabled(connector) or not cfg.guardrail_enabled))
+        guardrail_state = "disabled" if disabled else "enabled"
+        redaction = "ON (global redacted)" if cfg and not cfg.privacy_disable_redaction else "OFF (global RAW)"
+        if cfg and cfg.hilt_enabled:
+            approval = f"ON (global min {cfg.hilt_min_severity or 'HIGH'})"
+        else:
+            approval = "OFF (global)"
+        lines = [
+            ("Connector", f"{friendly_connector_name(connector)} ({connector})"),
+            ("Mode", mode or "?"),
+            ("Rule pack", rule_pack or "default"),
+            ("Guardrail", guardrail_state),
+            ("Status", status),
+            ("Last activity", last_activity),
+            ("Redaction", redaction),
+            ("Human approval", approval),
+        ]
+        if cfg and cfg.environment:
+            lines.append(("Environment", f"{cfg.environment} (global)"))
+        return tuple(lines)
+
     def _active_connector_names(self) -> list[str]:
         """Names of every active connector when more than one is configured.
 
@@ -4314,6 +4404,7 @@ class DefenseClawTUI(App[None]):
             self.skills_model,
             self.mcps_model,
             self.plugins_model,
+            self.tools_model,
             self.inventory_model,
             # B5: Setup joins the shared-filter fan-out so the connector
             # selection reaches it like every other multi-connector panel.
@@ -4355,6 +4446,7 @@ class DefenseClawTUI(App[None]):
             self.skills_model,
             self.mcps_model,
             self.plugins_model,
+            self.tools_model,
             self.inventory_model,
             # B5: Setup tracks the shared filter too (hasattr-guarded — inert
             # until panels/setup.py honours it; see B1).
@@ -5128,41 +5220,49 @@ class DefenseClawTUI(App[None]):
                 Text(detail, style=TOKENS.text_secondary),
             )
 
+        selected_connector = self._connector_filter()
+        selected_scan: dict[str, int] | None = None
+
         cfg_table = Table.grid(padding=(0, 2), expand=True)
         cfg_table.add_column(width=17, no_wrap=True)
         cfg_table.add_column(overflow="fold")
-        cfg_rows: list[tuple[str, RenderableType]] = [
-            ("Agent", Text(self.overview_model.active_connector_name())),
-            (
-                "Redaction",
-                Text.from_markup(
-                    f"[{TOKENS.accent_green}]ON (redacted)[/]"
-                    if cfg and not cfg.privacy_disable_redaction
-                    else f"[{TOKENS.accent_red}]OFF (RAW)[/]"
+        if selected_connector:
+            cfg_rows: list[tuple[str, RenderableType]] = [
+                (label, Text(value)) for label, value in self._connector_configuration_lines(selected_connector)
+            ]
+        else:
+            cfg_rows = [
+                ("Agent", Text(self.overview_model.active_connector_name())),
+                (
+                    "Redaction",
+                    Text.from_markup(
+                        f"[{TOKENS.accent_green}]ON (redacted)[/]"
+                        if cfg and not cfg.privacy_disable_redaction
+                        else f"[{TOKENS.accent_red}]OFF (RAW)[/]"
+                    ),
                 ),
-            ),
-            ("Policy posture", Text(_policy_posture(cfg))),
-            ("Enforcement", Text(_enforcement_label(cfg))),
-            (
-                "Human approval",
-                Text.from_markup(
-                    f"[{TOKENS.accent_green}]ON[/] (min {cfg.hilt_min_severity or 'HIGH'})"
-                    if cfg and cfg.hilt_enabled
-                    else f"[{TOKENS.text_muted}]OFF[/]"
+                ("Policy posture", Text(_policy_posture(cfg))),
+                ("Enforcement", Text(_enforcement_label(cfg))),
+                (
+                    "Human approval",
+                    Text.from_markup(
+                        f"[{TOKENS.accent_green}]ON[/] (min {cfg.hilt_min_severity or 'HIGH'})"
+                        if cfg and cfg.hilt_enabled
+                        else f"[{TOKENS.text_muted}]OFF[/]"
+                    ),
                 ),
-            ),
-            ("Environment", Text((cfg.environment if cfg else "") or "unknown")),
-            ("Policy dir", Text((cfg.policy_dir if cfg else "") or "—")),
-            ("Data dir", Text((cfg.data_dir if cfg else "") or "—")),
-        ]
-        # 8.13: when more than one connector is active, replace the
-        # primary-only "Agent: <connector>" line with a concise
-        # "Agents: N active" header. The full per-connector roster (mode,
-        # rule pack, status, live counts) now lives in the dedicated
-        # CONNECTORS table below, so we don't duplicate it here. No-op for
-        # the common single-connector install.
+                ("Environment", Text((cfg.environment if cfg else "") or "unknown")),
+                ("Policy dir", Text((cfg.policy_dir if cfg else "") or "—")),
+                ("Data dir", Text((cfg.data_dir if cfg else "") or "—")),
+            ]
+            # 8.13: when more than one connector is active, replace the
+            # primary-only "Agent: <connector>" line with a concise
+            # "Agents: N active" header. The full per-connector roster (mode,
+            # rule pack, status, live counts) now lives in the dedicated
+            # CONNECTORS table below, so we don't duplicate it here. No-op for
+            # the common single-connector install.
         overview_connector_rows = self._overview_connector_rows()
-        if overview_connector_rows:
+        if overview_connector_rows and not selected_connector:
             cfg_rows[0] = (
                 "Agents",
                 Text(f"{len(overview_connector_rows)} active", style=TOKENS.text_secondary),
@@ -5170,11 +5270,18 @@ class DefenseClawTUI(App[None]):
         llm_provider = (cfg.llm_provider if cfg else "") or (cfg.inspect_llm_provider if cfg else "")
         llm_model = (cfg.llm_model if cfg else "") or (cfg.inspect_llm_model if cfg else "")
         if llm_provider:
-            cfg_rows.append(("LLM provider", Text(llm_provider)))
+            label = f"{llm_provider} (global)" if selected_connector else llm_provider
+            cfg_rows.append(("LLM provider", Text(label)))
         if llm_model:
-            cfg_rows.append(("LLM model", Text(llm_model)))
+            label = f"{llm_model} (global)" if selected_connector else llm_model
+            cfg_rows.append(("LLM model", Text(label)))
         if cfg and cfg.cisco_ai_defense_endpoint:
-            cfg_rows.append(("AI Defense", Text(cfg.cisco_ai_defense_endpoint)))
+            label = (
+                f"{cfg.cisco_ai_defense_endpoint} (global)"
+                if selected_connector
+                else cfg.cisco_ai_defense_endpoint
+            )
+            cfg_rows.append(("AI Defense", Text(label)))
         for label, value in cfg_rows:
             cfg_table.add_row(Text(label, style=TOKENS.text_secondary), value)
 
@@ -5183,11 +5290,10 @@ class DefenseClawTUI(App[None]):
         enf_table.add_column(overflow="fold")
         # 8.13: when a connector is selected the ENFORCEMENT panel narrows to
         # that connector's real Alerts/Hook calls/Blocks (the connector-
-        # attributed hook stream — same source as the CONNECTORS table). The
-        # install/scan rows below stay but are tagged "(gateway-wide)" because
-        # the audit DB doesn't attribute them per connector. "All" keeps the
-        # original global numbers.
-        enf_selected = self._connector_filter()
+        # attributed hook stream — same source as the CONNECTORS table) plus
+        # per-connector inventory scan coverage. "All" keeps the original
+        # global numbers.
+        enf_selected = selected_connector
         if enf_selected:
             calls_n, alert_n, block_n = self._enforcement_connector_breakdown(enf_selected)
             alerts_color = TOKENS.accent_red if alert_n else TOKENS.accent_green
@@ -5225,8 +5331,8 @@ class DefenseClawTUI(App[None]):
             # aibom snapshot (not the gateway-wide audit totals). Loads lazily,
             # so show "scan pending" + trigger a one-shot load until it lands.
             self._request_enforcement_inventory(enf_selected)
-            scan = self._connector_scan_metrics(enf_selected)
-            if scan is None:
+            selected_scan = self._connector_scan_metrics(enf_selected)
+            if selected_scan is None:
                 enf_table.add_row(
                     Text("Skills", style=TOKENS.text_secondary),
                     Text.from_markup(f"[{TOKENS.text_muted}]scan pending — loading inventory…[/]"),
@@ -5235,19 +5341,19 @@ class DefenseClawTUI(App[None]):
                 enf_table.add_row(
                     Text("Skills", style=TOKENS.text_secondary),
                     Text.from_markup(
-                        f"[{TOKENS.text_primary}]{scan['skills']}[/]   "
-                        f"[{TOKENS.accent_red}]{scan['skills_blocked']}[/] blocked   "
-                        f"[{TOKENS.accent_green}]{scan['skills_allowed']}[/] allowed"
+                        f"[{TOKENS.text_primary}]{selected_scan['skills']}[/]   "
+                        f"[{TOKENS.accent_red}]{selected_scan['skills_blocked']}[/] blocked   "
+                        f"[{TOKENS.accent_green}]{selected_scan['skills_allowed']}[/] allowed"
                     ),
                 )
                 enf_table.add_row(
                     Text("MCPs", style=TOKENS.text_secondary),
-                    Text.from_markup(f"[{TOKENS.text_primary}]{scan['mcps']}[/] configured"),
+                    Text.from_markup(f"[{TOKENS.text_primary}]{selected_scan['mcps']}[/] configured"),
                 )
                 enf_table.add_row(
                     Text("Scanned", style=TOKENS.text_secondary),
                     Text.from_markup(
-                        f"[{TOKENS.accent_green}]{scan['scanned']}[/]/{scan['scannable']} assets"
+                        f"[{TOKENS.accent_green}]{selected_scan['scanned']}[/]/{selected_scan['scannable']} assets"
                     ),
                 )
         else:
@@ -5321,9 +5427,25 @@ class DefenseClawTUI(App[None]):
         # is the enforcement policy the scanners apply — surface that as a
         # context row when a connector is selected.
         if enf_selected:
+            context_rows: list[tuple[str, str, str, str]] = []
             policy_label = self._connector_policy_label(enf_selected)
             if policy_label:
-                scanner_rows.insert(0, ("policy", policy_label, TOKENS.accent_cyan, "●"))
+                context_rows.append(("policy", policy_label, TOKENS.accent_cyan, "●"))
+            if selected_scan is None:
+                context_rows.append(("coverage", "scan pending", TOKENS.text_muted, "○"))
+            else:
+                scannable = selected_scan["scannable"]
+                scanned = selected_scan["scanned"]
+                complete = scannable > 0 and scanned >= scannable
+                context_rows.append(
+                    (
+                        "coverage",
+                        f"{scanned}/{scannable} assets",
+                        TOKENS.accent_green if complete else TOKENS.accent_amber,
+                        "●" if complete else "○",
+                    ),
+                )
+            scanner_rows = [*context_rows, *scanner_rows]
         for label, value, color, dot in scanner_rows:
             sc_table.add_row(
                 Text(dot, style=color),
@@ -5436,7 +5558,10 @@ class DefenseClawTUI(App[None]):
         )
         cfg_panel = Panel(
             cfg_table,
-            title=Text("CONFIGURATION", style=f"bold {TOKENS.accent_blue}"),
+            title=Text(
+                f"CONFIGURATION · {selected_connector}" if selected_connector else "CONFIGURATION",
+                style=f"bold {TOKENS.accent_blue}",
+            ),
             title_align="left",
             border_style=TOKENS.accent_blue,
             padding=(0, 1),
@@ -5453,7 +5578,10 @@ class DefenseClawTUI(App[None]):
         )
         sc_panel = Panel(
             sc_table,
-            title=Text("SCANNERS", style=f"bold {TOKENS.accent_orange}"),
+            title=Text(
+                f"SCANNERS · {selected_connector}" if selected_connector else "SCANNERS",
+                style=f"bold {TOKENS.accent_orange}",
+            ),
             title_align="left",
             border_style=TOKENS.accent_orange,
             padding=(0, 1),
@@ -5654,20 +5782,24 @@ class DefenseClawTUI(App[None]):
         if not notice_lines:
             notice_lines.append(f"[{TOKENS.accent_green}][OK][/] Runtime signals are quiet.")
 
-        config_lines = [
-            ("Agent", self.overview_model.active_connector_name()),
-            (
-                "Redaction",
-                "ON - prompts and outputs are redacted" if cfg and not cfg.privacy_disable_redaction else "OFF",
-            ),
-            ("Policy posture", _policy_posture(cfg)),
-            ("Enforcement", _enforcement_label(cfg)),
-            ("Environment", (cfg.environment if cfg else "") or "unknown"),
-            ("LLM provider", (cfg.llm_provider if cfg else "") or "-"),
-            ("LLM model", (cfg.llm_model if cfg else "") or "-"),
-        ]
+        enf_selected = self._connector_filter()
+        if enf_selected:
+            config_lines = list(self._connector_configuration_lines(enf_selected))
+        else:
+            config_lines = [
+                ("Agent", self.overview_model.active_connector_name()),
+                (
+                    "Redaction",
+                    "ON - prompts and outputs are redacted" if cfg and not cfg.privacy_disable_redaction else "OFF",
+                ),
+                ("Policy posture", _policy_posture(cfg)),
+                ("Enforcement", _enforcement_label(cfg)),
+                ("Environment", (cfg.environment if cfg else "") or "unknown"),
+                ("LLM provider", (cfg.llm_provider if cfg else "") or "-"),
+                ("LLM model", (cfg.llm_model if cfg else "") or "-"),
+            ]
         overview_connector_rows = self._overview_connector_rows()
-        if overview_connector_rows:
+        if overview_connector_rows and not enf_selected:
             # Multi: replace the redundant "Agent: <primary>" line (index 0)
             # with a unified "Agents: N active" header. The per-connector
             # detail lives in the CONNECTORS section appended below.
@@ -5687,13 +5819,13 @@ class DefenseClawTUI(App[None]):
         ]
         services_text = "\n".join(_overview_state_line(name, state, detail) for name, state, detail in scanner_lines)
 
-        enf_selected = self._connector_filter()
         silent_line = (
             f"  Silent bypass   [{TOKENS.accent_red} bold]{self.overview_model.silent_bypass}[/] "
             f"[{TOKENS.text_muted}](see Alerts -> egress)[/]\n"
             if self.overview_model.silent_bypass > 0
             else ""
         )
+        selected_scan: dict[str, int] | None = None
         if enf_selected:
             # Per-connector: hook decisions from the audit stream + Skills/MCPs/
             # scan coverage from this connector's own aibom snapshot (loads
@@ -5702,16 +5834,16 @@ class DefenseClawTUI(App[None]):
             calls_n, alert_n, block_n = self._enforcement_connector_breakdown(enf_selected)
             alert_color = TOKENS.accent_red if alert_n else TOKENS.accent_green
             block_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
-            scan = self._connector_scan_metrics(enf_selected)
-            if scan is None:
+            selected_scan = self._connector_scan_metrics(enf_selected)
+            if selected_scan is None:
                 scan_lines = f"  Skills           [{TOKENS.text_muted}]scan pending — loading inventory…[/]\n"
             else:
                 scan_lines = (
-                    f"  Skills           [{TOKENS.text_primary}]{scan['skills']}[/]   "
-                    f"[{TOKENS.accent_red}]{scan['skills_blocked']}[/] blocked   "
-                    f"[{TOKENS.accent_green}]{scan['skills_allowed']}[/] allowed\n"
-                    f"  MCPs             [{TOKENS.text_primary}]{scan['mcps']}[/] configured\n"
-                    f"  Scanned          [{TOKENS.accent_green}]{scan['scanned']}[/]/{scan['scannable']} assets\n"
+                    f"  Skills           [{TOKENS.text_primary}]{selected_scan['skills']}[/]   "
+                    f"[{TOKENS.accent_red}]{selected_scan['skills_blocked']}[/] blocked   "
+                    f"[{TOKENS.accent_green}]{selected_scan['skills_allowed']}[/] allowed\n"
+                    f"  MCPs             [{TOKENS.text_primary}]{selected_scan['mcps']}[/] configured\n"
+                    f"  Scanned          [{TOKENS.accent_green}]{selected_scan['scanned']}[/]/{selected_scan['scannable']} assets\n"
                 )
             enforcement_text = (
                 f"  Alerts           [{alert_color} bold]{alert_n}[/]   "
@@ -5770,6 +5902,17 @@ class DefenseClawTUI(App[None]):
         scanner_override_line = (
             f"  overrides      {rich_escape(scanner_override_summary)}\n" if scanner_override_summary else ""
         )
+        scanner_context = ""
+        if enf_selected:
+            policy_label = self._connector_policy_label(enf_selected)
+            if policy_label:
+                scanner_context += f"  policy         {policy_label}\n"
+            if selected_scan is None:
+                scanner_context += "  coverage       scan pending\n"
+            else:
+                scanner_context += (
+                    f"  coverage       {selected_scan['scanned']}/{selected_scan['scannable']} assets\n"
+                )
         # Escape the lowercase hotkey labels: Rich parses ``[s]`` /
         # ``[d]`` / ``[i]`` / ``[g]`` / ``[m]`` / ``[l]`` as opening
         # style tags and silently drops the bracketed text from the
@@ -5788,15 +5931,25 @@ class DefenseClawTUI(App[None]):
             + "\n".join(notice_lines)
             + "\n\n"
             f"[bold {TOKENS.accent_blue}]SERVICES[/]\n{services_text}\n\n"
-            f"[bold {TOKENS.accent_amber}]ENFORCEMENT[/]\n{enforcement_text}\n\n"
-            f"[bold {TOKENS.accent_green}]CONFIGURATION[/]\n{config_text}\n\n"
-            + connectors_text
-            + f"[bold {TOKENS.accent_orange}]SCANNERS[/]\n"
             + (
-                f"  policy         {self._connector_policy_label(enf_selected)}\n"
-                if enf_selected and self._connector_policy_label(enf_selected)
-                else ""
+                f"[bold {TOKENS.accent_amber}]ENFORCEMENT · {enf_selected}[/]\n"
+                if enf_selected
+                else f"[bold {TOKENS.accent_amber}]ENFORCEMENT[/]\n"
             )
+            + f"{enforcement_text}\n\n"
+            + (
+                f"[bold {TOKENS.accent_green}]CONFIGURATION · {enf_selected}[/]\n"
+                if enf_selected
+                else f"[bold {TOKENS.accent_green}]CONFIGURATION[/]\n"
+            )
+            + f"{config_text}\n\n"
+            + connectors_text
+            + (
+                f"[bold {TOKENS.accent_orange}]SCANNERS · {enf_selected}[/]\n"
+                if enf_selected
+                else f"[bold {TOKENS.accent_orange}]SCANNERS[/]\n"
+            )
+            + scanner_context
             + scanner_override_line
             + f"  skill-scanner  {'installed' if self.overview_model.skill_scanner_available else 'missing'}\n"
             f"  credentials    {keys_line}\n\n"
@@ -6284,7 +6437,10 @@ class DefenseClawTUI(App[None]):
             if key == "m" and len(self._active_connector_names()) > 1:
                 self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
-            action = self.catalog_models[self.active_panel].handle_key(_catalog_key(key))
+            catalog_key = _catalog_key(key)
+            if catalog_key not in {"j", "k", "up", "down", "esc", "r"}:
+                self._sync_catalog_cursor_from_table(self.active_panel)
+            action = self.catalog_models[self.active_panel].handle_key(catalog_key)
             return self._apply_catalog_action(self.active_panel, action)
         if self.active_panel == "logs":
             if key == "enter" and not self.logs_model.searching:
@@ -7242,6 +7398,20 @@ class DefenseClawTUI(App[None]):
             self.setup_model.mark_wizard_complete(args, success=True)
         elif command == "doctor":
             self._load_doctor_cache()
+        elif panel := _catalog_panel_invalidated_by_command(args):
+            await self._refresh_loaded_catalog_after_mutation(panel)
+
+    async def _refresh_loaded_catalog_after_mutation(self, panel: str) -> None:
+        """Reload an already-opened catalog after a successful row mutation."""
+
+        model = self.catalog_models.get(panel)
+        if model is None or not getattr(model, "loaded", False):
+            return
+        if panel == "tools":
+            self.tools_model.refresh()
+            self._render_chrome()
+            return
+        await self._load_catalog_model(panel)
 
     def _refresh_cached_config(self) -> None:
         """Full reload-from-disk after ``setup``/``init``/``sandbox``/``registry``.
@@ -7359,11 +7529,20 @@ class DefenseClawTUI(App[None]):
             return
         if _gateway_api_port(self.config) <= 0:
             return
+        if self._credentials_refresh_running:
+            return
+        self._credentials_refresh_running = True
         self.run_worker(
-            self._load_setup_credentials(),
+            self._refresh_credentials_once(),
             exclusive=False,
             thread=False,
         )
+
+    async def _refresh_credentials_once(self) -> None:
+        try:
+            await self._load_setup_credentials()
+        finally:
+            self._credentials_refresh_running = False
 
     async def _load_setup_credentials(self) -> None:
         try:
@@ -7533,6 +7712,7 @@ class DefenseClawTUI(App[None]):
         """
 
         current = self._connector_filter()
+        selected_index = connectors.index(current) + 1 if current in connectors else 0
         actions: list[MenuAction] = []
         all_marker = "  ← current" if not current else ""
         actions.append(
@@ -7565,6 +7745,7 @@ class DefenseClawTUI(App[None]):
                 "Filter by Connector",
                 tuple(actions),
                 subtitle="Applies across Overview, Alerts, Audit, Logs",
+                selected_index=selected_index,
             )
         )
         if choice is None:
@@ -7953,8 +8134,11 @@ class DefenseClawTUI(App[None]):
         api_port = _gateway_api_port(self.config)
         if api_port <= 0:
             return
+        if self._health_poll_running:
+            return
+        self._health_poll_running = True
         self.run_worker(
-            self._poll_health(),
+            self._poll_health_once(),
             exclusive=False,
             thread=False,
         )
@@ -7967,11 +8151,26 @@ class DefenseClawTUI(App[None]):
         api_port = _gateway_api_port(self.config)
         if api_port <= 0:
             return
+        if self._ai_usage_poll_running:
+            return
+        self._ai_usage_poll_running = True
         self.run_worker(
-            self._poll_ai_usage(force_render=False),
+            self._poll_ai_usage_once(force_render=False),
             exclusive=False,
             thread=False,
         )
+
+    async def _poll_health_once(self) -> None:
+        try:
+            await self._poll_health()
+        finally:
+            self._health_poll_running = False
+
+    async def _poll_ai_usage_once(self, *, force_render: bool) -> None:
+        try:
+            await self._poll_ai_usage(force_render=force_render)
+        finally:
+            self._ai_usage_poll_running = False
 
     async def _poll_health(self) -> None:
         # Use the configured token + host so a gateway that requires
@@ -8739,6 +8938,56 @@ def _panel_key(event: events.Key) -> str:
 
 def _catalog_key(key: str) -> str:
     return "esc" if key == "escape" else key
+
+
+def _catalog_panel_invalidated_by_command(args: tuple[str, ...]) -> str | None:
+    """Return the catalog panel whose loaded rows are stale after ``args``."""
+
+    if len(args) < 2:
+        return None
+    command, verb = args[0], args[1]
+    catalog_mutations = {
+        "skill": (
+            "skills",
+            {
+                "allow",
+                "block",
+                "disable",
+                "enable",
+                "install",
+                "quarantine",
+                "restore",
+                "scan",
+                "unblock",
+            },
+        ),
+        "mcp": (
+            "mcps",
+            {"allow", "block", "scan", "set", "unblock", "unset"},
+        ),
+        "plugin": (
+            "plugins",
+            {
+                "allow",
+                "block",
+                "disable",
+                "enable",
+                "quarantine",
+                "remove",
+                "restore",
+                "scan",
+            },
+        ),
+        "tool": (
+            "tools",
+            {"allow", "block", "unblock"},
+        ),
+    }
+    entry = catalog_mutations.get(command)
+    if entry is None:
+        return None
+    panel, verbs = entry
+    return panel if verb in verbs else None
 
 
 def _vim_key(key: str) -> str:
