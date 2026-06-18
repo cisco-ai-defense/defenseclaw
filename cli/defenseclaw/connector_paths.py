@@ -420,15 +420,9 @@ def skill_dirs(
     if name == "openhands":
         return _openhands_skill_dirs(workspace_dir)
     if name == "antigravity":
-        # Antigravity v1 publishes only the hooks surface; no
-        # documented skills install/discovery path yet.
-        return []
+        return _antigravity_skill_dirs(workspace_dir)
     if name == "opencode":
-        # opencode is governed solely by its bridge plugin; it exposes no
-        # documented skills install/discovery surface in v1. Return [] so
-        # inventory/list/scan honestly report "none" instead of falling
-        # through to OpenClaw's skill dirs (mirrors antigravity/windsurf).
-        return []
+        return _opencode_skill_dirs(workspace_dir)
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
 
 
@@ -467,11 +461,9 @@ def plugin_dirs(
     if name == "openhands":
         return []
     if name == "antigravity":
-        return []
+        return _antigravity_plugin_dirs(workspace_dir)
     if name == "opencode":
-        # Bridge-plugin-only; no documented opencode plugin/extension
-        # discovery dir. [] keeps it out of OpenClaw's extensions path.
-        return []
+        return _opencode_plugin_dirs(workspace_dir)
     return _openclaw_plugin_dirs(openclaw_home)
 
 
@@ -589,6 +581,47 @@ def _windsurf_skill_dirs() -> list[str]:
     return []
 
 
+def _opencode_config_dir() -> str:
+    raw = os.environ.get("OPENCODE_CONFIG_DIR", "").strip()
+    if raw:
+        return os.path.abspath(os.path.expanduser(_expand(raw)))
+    return ""
+
+
+def _opencode_skill_dirs(workspace_dir: str | None = None) -> list[str]:
+    home = str(Path.home())
+    custom = _opencode_config_dir()
+    return _dedup(
+        [
+            _workspace_path(workspace_dir, ".opencode", "skills"),
+            _workspace_path(workspace_dir, ".claude", "skills"),
+            _workspace_path(workspace_dir, ".agents", "skills"),
+            os.path.join(home, ".config", "opencode", "skills"),
+            os.path.join(home, ".claude", "skills"),
+            os.path.join(home, ".agents", "skills"),
+            os.path.join(custom, "skills") if custom else "",
+        ]
+    )
+
+
+def _antigravity_skill_dirs(workspace_dir: str | None = None) -> list[str]:
+    home = str(Path.home())
+    plugin_skill_dirs = _plugin_component_dirs(
+        _antigravity_plugin_dirs(workspace_dir),
+        "skills",
+    )
+    return _dedup(
+        [
+            _workspace_path(workspace_dir, ".agents", "skills"),
+            _workspace_path(workspace_dir, "_agents", "skills"),
+            os.path.join(home, ".gemini", "antigravity-cli", "skills"),
+            os.path.join(home, ".gemini", "skills"),
+            os.path.join(home, ".agents", "skills"),
+            *plugin_skill_dirs,
+        ]
+    )
+
+
 def _gemini_skill_dirs(workspace_dir: str | None = None) -> list[str]:
     return _dedup(
         [
@@ -688,6 +721,49 @@ def _hermes_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
             _workspace_path(workspace_dir, ".hermes", "plugins"),
         ]
     )
+
+
+def _opencode_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
+    home = str(Path.home())
+    custom = _opencode_config_dir()
+    return _dedup(
+        [
+            _workspace_path(workspace_dir, ".opencode", "plugins"),
+            os.path.join(home, ".config", "opencode", "plugins"),
+            os.path.join(custom, "plugins") if custom else "",
+        ]
+    )
+
+
+def _antigravity_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
+    home = str(Path.home())
+    return _dedup(
+        [
+            _workspace_path(workspace_dir, ".agents", "plugins"),
+            _workspace_path(workspace_dir, "_agents", "plugins"),
+            os.path.join(home, ".gemini", "config", "plugins"),
+            os.path.join(home, ".gemini", "antigravity-cli", "plugins"),
+        ]
+    )
+
+
+def _plugin_component_dirs(plugin_dirs: list[str], component: str) -> list[str]:
+    out: list[str] = []
+    for plugin_dir in plugin_dirs:
+        if not os.path.isdir(plugin_dir):
+            continue
+        try:
+            entries = sorted(os.listdir(plugin_dir))
+        except OSError:
+            continue
+        for entry in entries:
+            plugin_root = os.path.join(plugin_dir, entry)
+            if not os.path.isdir(plugin_root):
+                continue
+            component_dir = os.path.join(plugin_root, component)
+            if os.path.isdir(component_dir):
+                out.append(component_dir)
+    return _dedup(out)
 
 
 def _gemini_plugin_dirs(workspace_dir: str | None = None) -> list[str]:

@@ -2207,6 +2207,60 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(len(inv["skills"]), 1)
         self.assertEqual(inv["skills"][0]["id"], "alpha")
 
+    def test_opencode_catalog_surfaces_skills_plugins_and_tools(self):
+        cfg = _make_cfg_for_connector(self.tmp, "opencode")
+        home = self.tmp
+        root = os.path.join(home, ".config", "opencode")
+        _seed_skill(os.path.join(root, "skills"), "oc-skill")
+        _seed_plugin(os.path.join(root, "plugins"), "oc-plugin", manifest="package.json")
+        tool_dir = os.path.join(root, "tools")
+        os.makedirs(tool_dir, exist_ok=True)
+        with open(os.path.join(tool_dir, "file-tool.ts"), "w", encoding="utf-8") as f:
+            f.write("export default {}\n")
+        with open(os.path.join(root, "opencode.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {"tool": {"config-tool": {"description": "configured tool"}}},
+                f,
+            )
+
+        with patch.dict(os.environ, {"HOME": home}, clear=False):
+            inv = build_claw_aibom(cfg, live=True)
+
+        self.assertEqual(inv["connector"], "opencode")
+        self.assertIn("oc-skill", {row["id"] for row in inv["skills"]})
+        self.assertIn("oc-plugin", {row["id"] for row in inv["plugins"]})
+        self.assertIn("file-tool", {row["id"] for row in inv["tools"]})
+        self.assertIn("config-tool", {row["id"] for row in inv["tools"]})
+        self.assertNotIn("opencode:tools", {e["command"] for e in inv["errors"]})
+
+    def test_antigravity_catalog_surfaces_skills_plugins_and_commands(self):
+        cfg = _make_cfg_for_connector(self.tmp, "antigravity")
+        home = self.tmp
+        _seed_skill(
+            os.path.join(home, ".gemini", "antigravity-cli", "skills"),
+            "agy-direct",
+        )
+        plugin_root = _seed_plugin(
+            os.path.join(home, ".gemini", "config", "plugins"),
+            "agy-plugin",
+            manifest="plugin.json",
+        )
+        _seed_skill(os.path.join(plugin_root, "skills"), "agy-plugin-skill")
+        command_dir = os.path.join(plugin_root, "commands")
+        os.makedirs(command_dir, exist_ok=True)
+        with open(os.path.join(command_dir, "triage.md"), "w", encoding="utf-8") as f:
+            f.write("---\ndescription: Triage issues\n---\n")
+
+        with patch.dict(os.environ, {"HOME": home}, clear=False):
+            inv = build_claw_aibom(cfg, live=True)
+
+        self.assertEqual(inv["connector"], "antigravity")
+        self.assertIn("agy-direct", {row["id"] for row in inv["skills"]})
+        self.assertIn("agy-plugin-skill", {row["id"] for row in inv["skills"]})
+        self.assertIn("agy-plugin", {row["id"] for row in inv["plugins"]})
+        self.assertIn("triage", {row["id"] for row in inv["tools"]})
+        self.assertNotIn("antigravity:tools", {e["command"] for e in inv["errors"]})
+
     def test_openclaw_only_categories_return_empty_with_notes(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
         with self._patch_skill_dirs([]), \

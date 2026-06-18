@@ -104,6 +104,7 @@ class TestSkillDirs:
     def test_new_connector_skill_dirs_are_connector_specific(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "opencode-custom"))
         assert connector_paths.skill_dirs("hermes") == [
             os.path.join(str(tmp_path / "home"), ".hermes", "skills"),
         ]
@@ -113,10 +114,20 @@ class TestSkillDirs:
             workspace_dir=str(tmp_path),
         )
         assert connector_paths.skill_dirs("windsurf") == []
-        # opencode + antigravity expose no documented skills surface — must
-        # be [] (mirror windsurf), never OpenClaw's skill dirs.
-        assert connector_paths.skill_dirs("antigravity") == []
-        assert connector_paths.skill_dirs("opencode") == []
+        antigravity = connector_paths.skill_dirs("antigravity", workspace_dir=str(tmp_path))
+        assert os.path.join(str(tmp_path), ".agents", "skills") in antigravity
+        assert os.path.join(str(tmp_path), "_agents", "skills") in antigravity
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "antigravity-cli", "skills") in antigravity
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "skills") in antigravity
+        assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in antigravity
+        opencode = connector_paths.skill_dirs("opencode", workspace_dir=str(tmp_path))
+        assert os.path.join(str(tmp_path), ".opencode", "skills") in opencode
+        assert os.path.join(str(tmp_path), ".claude", "skills") in opencode
+        assert os.path.join(str(tmp_path), ".agents", "skills") in opencode
+        assert os.path.join(str(tmp_path / "home"), ".config", "opencode", "skills") in opencode
+        assert os.path.join(str(tmp_path / "home"), ".claude", "skills") in opencode
+        assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in opencode
+        assert os.path.join(str(tmp_path), "opencode-custom", "skills") in opencode
         assert os.path.join(str(tmp_path / "home"), ".gemini", "skills") in connector_paths.skill_dirs("geminicli")
         assert os.path.join(str(tmp_path), ".gemini", "skills") in connector_paths.skill_dirs(
             "geminicli",
@@ -225,6 +236,7 @@ class TestPluginDirs:
     def test_new_connector_plugin_dirs(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "opencode-custom"))
         assert os.path.join(str(tmp_path / "home"), ".hermes", "plugins") in connector_paths.plugin_dirs("hermes")
         assert connector_paths.plugin_dirs("cursor") == []
         assert connector_paths.plugin_dirs("windsurf") == []
@@ -237,9 +249,15 @@ class TestPluginDirs:
         )
         assert connector_paths.plugin_dirs("copilot") == []
         assert connector_paths.plugin_dirs("openhands") == []
-        assert connector_paths.plugin_dirs("antigravity") == []
-        # opencode is bridge-plugin-only — no plugin/extension discovery dir.
-        assert connector_paths.plugin_dirs("opencode") == []
+        antigravity = connector_paths.plugin_dirs("antigravity", workspace_dir=str(tmp_path))
+        assert os.path.join(str(tmp_path), ".agents", "plugins") in antigravity
+        assert os.path.join(str(tmp_path), "_agents", "plugins") in antigravity
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "config", "plugins") in antigravity
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "antigravity-cli", "plugins") in antigravity
+        opencode = connector_paths.plugin_dirs("opencode", workspace_dir=str(tmp_path))
+        assert os.path.join(str(tmp_path), ".opencode", "plugins") in opencode
+        assert os.path.join(str(tmp_path / "home"), ".config", "opencode", "plugins") in opencode
+        assert os.path.join(str(tmp_path), "opencode-custom", "plugins") in opencode
 
     def test_no_overlap_between_connectors(self, tmp_path, monkeypatch):
         """Switching connectors must change the path set — pins the
