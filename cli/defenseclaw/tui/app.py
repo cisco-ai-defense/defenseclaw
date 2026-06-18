@@ -1598,6 +1598,8 @@ class DefenseClawTUI(App[None]):
     def action_switch_panel(self, panel: str) -> None:
         self.active_panel = panel
         self.help_open = False
+        if self.status_text.startswith("backend=textual  panel="):
+            self.status_text = ""
         self._render_chrome()
         # Persist the operator's last-active panel + clear the "unread"
         # badge for the panel they just opened. Best-effort: a failed
