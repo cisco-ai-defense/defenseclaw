@@ -376,3 +376,9 @@ class PolicyEngine:
         self.store.set_action_field("tool", target, "install", "allow", reason)
         self.store.clear_action_field("tool", target, "file")
         self.store.clear_action_field("tool", target, "runtime")
+
+    def unblock_tool_for_connector(self, tool_name: str, connector: str = "") -> None:
+        """Clear the install action for a connector-scoped tool row."""
+        if self.store:
+            target = self._tool_connector_target(tool_name, connector)
+            self.store.clear_action_field("tool", target, "install")

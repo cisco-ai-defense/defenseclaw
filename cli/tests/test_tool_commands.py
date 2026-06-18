@@ -37,6 +37,7 @@ class ToolCommandTestBase(unittest.TestCase):
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -203,7 +204,11 @@ class TestToolList(ToolCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.output)
         self.assertIsInstance(data, list)
-        names = [row["name"] for row in data]
+        names = [
+            row["name"]
+            for group in data
+            for row in group.get("tools", [])
+        ]
         self.assertIn("shell_exec", names)
 
     def test_list_scoped_entry_appears(self):
@@ -241,8 +246,11 @@ class TestToolStatus(ToolCommandTestBase):
         # The source audit row is still shown (it reads 'block')…
         self.assertIn("filesystem", result.output)
         self.assertIn("block", result.output)
-        # …but Effective mirrors the runtime: the global allow wins.
-        self.assertRegex(result.output, r"Effective:\s+allow")
+        # …but the connector cards still show the global allow as effective.
+        self.assertIn("Connector: codex", result.output)
+        self.assertIn("Connector: hermes", result.output)
+        self.assertIn("Status: allow", result.output)
+        self.assertIn("Scope: global", result.output)
 
     def test_status_connector_block_wins_over_global_allow(self):
         """Runtime-aligned: a connector-scoped block resolves before the global
@@ -252,13 +260,30 @@ class TestToolStatus(ToolCommandTestBase):
 
         result = self.invoke(["status", "write_file", "--connector", "hermes"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertRegex(result.output, r"Effective:\s+block")
+        self.assertIn("Connector: hermes", result.output)
+        self.assertIn("Status: block", result.output)
+        self.assertIn("Scope: connector", result.output)
+
+    def test_status_without_connector_fans_out_active_connectors(self):
+        self.pe().allow_tool("write_file", "", "global allow")
+        self.pe().block_tool_for_connector("write_file", "hermes", "scoped block")
+
+        result = self.invoke(["status", "write_file"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: codex", result.output)
+        self.assertIn("Connector: hermes", result.output)
+        self.assertIn("Status: allow", result.output)
+        self.assertIn("Scope: global", result.output)
+        self.assertIn("Status: block", result.output)
+        self.assertIn("Scope: connector", result.output)
+        self.assertIn("Overall: mixed", result.output)
 
     def test_status_write_tool_allow_notes_codeguard(self):
         """An allowed WRITE tool still runs CodeGuard (D2) — status says so."""
         self.pe().allow_tool("write_file", "", "vetted")
         result = self.invoke(["status", "write_file"])
-        self.assertRegex(result.output, r"Effective:\s+allow")
+        self.assertIn("Status: allow", result.output)
         self.assertIn("CodeGuard", result.output)
 
     def test_status_json(self):
@@ -270,6 +295,7 @@ class TestToolStatus(ToolCommandTestBase):
         self.assertIsNone(data["connector"])
         self.assertEqual(data["global"]["status"], "block")
         self.assertEqual(data["effective"], "block")
+        self.assertEqual({row["connector"] for row in data["connectors"]}, {"codex", "hermes"})
 
     def test_status_json_connector_scoped(self):
         self.pe().block_tool_for_connector("exec_cmd", "hermes", "scoped")
@@ -332,6 +358,16 @@ class TestToolConnectorScoping(ToolCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertFalse(self.pe().is_tool_blocked_for_connector("delete_file", "hermes"))
 
+    def test_unblock_global_keeps_connector_scoped_row(self):
+        self.pe().block_tool("delete_file", "", "global")
+        self.pe().block_tool_for_connector("delete_file", "hermes", "scoped")
+
+        result = self.invoke(["unblock", "delete_file"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(self.pe().is_tool_blocked("delete_file"))
+        self.assertTrue(self.app.store.has_action("tool", "@hermes/delete_file", "install", "block"))
+
     def test_connector_normalized(self):
         """A connector value is canonicalized (e.g. 'Hermes' → 'hermes') so the
         CLI write surface matches the runtime's lowercase connector keys."""
@@ -341,7 +377,25 @@ class TestToolConnectorScoping(ToolCommandTestBase):
     def test_invalid_connector_rejected(self):
         result = self.invoke(["block", "delete_file", "--connector", "bogus"])
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("unknown connector", result.output.lower())
+        self.assertIn("not configured", result.output.lower())
+        self.assertIsNone(self.app.store.get_action("tool", "@bogus/delete_file"))
+
+    def test_unknown_connector_rejected_for_all_connector_commands(self):
+        commands = [
+            ["block", "delete_file", "--connector", "bogus"],
+            ["allow", "delete_file", "--connector", "bogus"],
+            ["unblock", "delete_file", "--connector", "bogus"],
+            ["list", "--connector", "bogus"],
+            ["status", "delete_file", "--connector", "bogus"],
+        ]
+
+        for args in commands:
+            with self.subTest(args=args):
+                result = self.invoke(args)
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertIn("not configured", result.output)
+
+        self.assertIsNone(self.app.store.get_action("tool", "@bogus/delete_file"))
 
     def test_connector_and_source_mutually_exclusive(self):
         result = self.invoke(
@@ -355,9 +409,14 @@ class TestToolConnectorScoping(ToolCommandTestBase):
         self.pe().block_tool("exec_cmd", "", "global")
         self.pe().block_tool_for_connector("other_tool", "codex", "x")
 
-        # Default list: CONNECTOR column present, @C/T shown by its bare name.
+        # Default list: one connector-scoped section per active connector;
+        # @C/T rows are shown by bare tool name.
         result = self.invoke(["list"])
-        self.assertIn("CONNECTOR", result.output)
+        self.assertIn("SCOPE", result.output)
+        self.assertIn("Tools (connector=codex)", result.output)
+        self.assertIn("Tools (connector=hermes)", result.output)
+        self.assertIn("global", result.output)
+        self.assertIn("connector", result.output)
         self.assertIn("hermes", result.output)
         self.assertIn("delete_file", result.output)
         self.assertNotIn("@hermes/delete_file", result.output)
@@ -366,6 +425,8 @@ class TestToolConnectorScoping(ToolCommandTestBase):
         result = self.invoke(["list", "--connector", "hermes"])
         self.assertIn("delete_file", result.output)   # @hermes/ row
         self.assertIn("exec_cmd", result.output)       # global applies to hermes
+        self.assertIn("global", result.output)
+        self.assertIn("connector", result.output)
         self.assertNotIn("other_tool", result.output)  # @codex/ row excluded
 
     def test_list_json_has_connector_field(self):
@@ -373,8 +434,22 @@ class TestToolConnectorScoping(ToolCommandTestBase):
         result = self.invoke(["list", "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.output)
-        row = next(r for r in data if r["name"] == "delete_file")
+        hermes_group = next(g for g in data if g["connector"] == "hermes")
+        row = next(r for r in hermes_group["tools"] if r["name"] == "delete_file")
         self.assertEqual(row["connector"], "hermes")
+        self.assertEqual(row["scope"], "connector")
+        self.assertEqual(row["status"], "block")
+
+    def test_list_json_connector_filter_marks_global_fallback_scope(self):
+        self.pe().block_tool("exec_cmd", "", "global")
+
+        result = self.invoke(["list", "--connector", "hermes", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.output)
+        row = next(r for r in data if r["name"] == "exec_cmd")
+        self.assertEqual(row["connector"], "hermes")
+        self.assertEqual(row["scope"], "global")
         self.assertEqual(row["status"], "block")
 
 

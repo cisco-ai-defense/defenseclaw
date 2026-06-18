@@ -20,9 +20,9 @@ Tools are named functions exposed by skills, MCP servers, or connectors.
 
 Scoping is one of two ORTHOGONAL, mutually exclusive encodings:
 
-* ``--connector C`` → ``@C/<tool>``  — the runtime-enforceable scope. Both
-  gateway lanes (hook + sidecar) resolve connector-scoped rows then fall back
-  to the bare global row.
+* ``--connector C`` → ``@C/<tool>``  — the runtime-enforceable scope for a
+  configured connector. Both gateway lanes (hook + sidecar) resolve
+  connector-scoped rows then fall back to the bare global row.
 * ``--source S``    → ``S/<tool>``   — audit/global only. The runtime payload
   carries no source, so a ``block --source`` fail-closes to a GLOBAL block and
   an ``allow --source`` row is recorded for visibility but never enforced.
@@ -61,26 +61,18 @@ def _target_name(name: str, source: str) -> str:
     return f"{source}/{name}" if source else name
 
 
-def _normalize_connector(connector: str) -> str:
+def _resolve_connector_scope(app: AppContext, connector: str) -> str:
     """Validate + canonicalize a ``--connector`` value.
 
     Empty stays empty (the global tier — applies to every connector). A
-    non-empty value must be a recognized connector; otherwise the command
-    fails closed with a usage error rather than silently writing a row no
-    runtime lane will ever match.
+    non-empty value must be one of the configured active connectors, matching
+    plugin/skill policy semantics: typos must not create inert policy rows that
+    no runtime lane will ever match.
     """
     if not connector:
         return ""
-    from defenseclaw import connector_paths
-
-    canon = connector_paths.normalize(connector)
-    if canon not in connector_paths.KNOWN_CONNECTORS:
-        raise click.BadParameter(
-            f"unknown connector {connector!r}; expected one of "
-            f"{', '.join(connector_paths.KNOWN_CONNECTORS)}",
-            param_hint="'--connector'",
-        )
-    return canon
+    from defenseclaw.commands import resolve_list_connector
+    return resolve_list_connector(app, connector)
 
 
 def _reject_connector_with_source(connector: str, source: str) -> None:
@@ -205,7 +197,7 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
     from defenseclaw.enforce import PolicyEngine
 
     _reject_connector_with_source(connector, source)
-    connector = _normalize_connector(connector)
+    connector = _resolve_connector_scope(app, connector)
     if not reason:
         reason = "manual block via CLI"
 
@@ -286,7 +278,7 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
     from defenseclaw.enforce import PolicyEngine
 
     _reject_connector_with_source(connector, source)
-    connector = _normalize_connector(connector)
+    connector = _resolve_connector_scope(app, connector)
     if not reason:
         reason = "manual allow via CLI"
 
@@ -338,7 +330,7 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
     from defenseclaw.enforce import PolicyEngine
 
     _reject_connector_with_source(connector, source)
-    connector = _normalize_connector(connector)
+    connector = _resolve_connector_scope(app, connector)
 
     if connector:
         target = _connector_target(name, connector)
@@ -351,7 +343,10 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
         scope_note = " (global)"
 
     pe = PolicyEngine(app.store)
-    pe.unblock("tool", target)
+    if connector:
+        pe.unblock_tool_for_connector(name, connector)
+    else:
+        pe.unblock("tool", target)
 
     if app.logger:
         app.logger.log_action("tool-unblock", target, "removed from block/allow list")
@@ -368,7 +363,14 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
 @tool.command("list")
 @click.option("--blocked", "filter_blocked", is_flag=True, help="Show only blocked tools")
 @click.option("--allowed", "filter_allowed", is_flag=True, help="Show only allowed tools")
-@click.option("--connector", default="", help="Show only rows in effect for this connector (its @<connector>/ rows plus global)")
+@click.option(
+    "--connector",
+    default="",
+    help=(
+        "Narrow to one configured connector. Default: show rows in effect "
+        "for every active connector."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @pass_ctx
 def list_tools(
@@ -377,9 +379,9 @@ def list_tools(
 ) -> None:
     """List tools in the block/allow list.
 
-    By default shows all tools. Use --blocked or --allowed to filter by status,
-    and --connector to show only the rows in effect for one connector (its
-    connector-scoped rows plus the global fallback rows).
+    By default shows rows in effect for every active connector. Use --blocked
+    or --allowed to filter by status, and --connector to narrow to one
+    connector (its connector-scoped rows plus the global fallback rows).
 
     \b
     Examples:
@@ -388,9 +390,12 @@ def list_tools(
       defenseclaw tool list --allowed --json
       defenseclaw tool list --connector hermes
     """
+    from defenseclaw.commands import resolve_list_connectors
     from defenseclaw.enforce import PolicyEngine
 
-    connector = _normalize_connector(connector)
+    requested_connector = bool(connector and connector.strip())
+    connector = _resolve_connector_scope(app, connector)
+    connectors = [connector] if connector else resolve_list_connectors(app, "")
     pe = PolicyEngine(app.store)
 
     if filter_blocked:
@@ -400,60 +405,158 @@ def list_tools(
     else:
         entries = pe.list_by_type("tool")
 
-    # Decorate each entry with its parsed (connector, display name) and apply
-    # the --connector filter: a connector "sees" its own @C/ rows plus the
-    # global fallback rows.
-    decorated = []
+    if requested_connector:
+        decorated = _tool_rows_for_connector(entries, connector)
+        if as_json:
+            click.echo(
+                json.dumps(
+                    _tool_rows_json(decorated, effective_connector=connector),
+                    indent=2,
+                    default=str,
+                )
+            )
+            return
+
+        if not decorated:
+            label = "blocked " if filter_blocked else "allowed " if filter_allowed else ""
+            click.echo(f"No {label}tools in the block/allow list.")
+            return
+
+        _print_tool_rows(decorated, effective_connector=connector)
+        return
+
+    audit_rows = _tool_source_audit_rows(entries)
+    if as_json:
+        groups = [
+            {
+                "connector": c,
+                "tools": _tool_rows_json(
+                    _tool_rows_for_connector(entries, c),
+                    effective_connector=c,
+                ),
+            }
+            for c in connectors
+        ]
+        if audit_rows:
+            groups.append(
+                {
+                    "connector": None,
+                    "scope": "source",
+                    "tools": _tool_rows_json(audit_rows),
+                }
+            )
+        click.echo(json.dumps(groups, indent=2, default=str))
+        return
+
+    label = "blocked " if filter_blocked else "allowed " if filter_allowed else ""
+    shown_any = False
+    for c in connectors:
+        rows = _tool_rows_for_connector(entries, c)
+        title = f"Tools (connector={c})"
+        if not rows:
+            click.echo(f"{title}: No {label}tools in the block/allow list.")
+            continue
+        _print_tool_rows(rows, effective_connector=c, title=title)
+        shown_any = True
+
+    if audit_rows:
+        _print_tool_rows(
+            audit_rows,
+            title="Tool audit rows (source-scoped; not runtime-enforced)",
+        )
+        shown_any = True
+
+    if not shown_any and not connectors:
+        click.echo(f"No {label}tools in the block/allow list.")
+
+
+def _tool_rows_for_connector(entries: list, connector: str) -> list[tuple[object, str, str, str]]:
+    rows: list[tuple[object, str, str, str]] = []
     for e in entries:
         conn, disp = _parse_target(e.target_name)
-        if connector and not (conn == connector or _is_global_target(e.target_name)):
-            continue
-        decorated.append((e, conn, disp))
+        if conn == connector:
+            rows.append((e, conn, disp, "connector"))
+        elif _is_global_target(e.target_name):
+            rows.append((e, "", disp, "global"))
+    return rows
 
-    if as_json:
-        rows = [
-            {
-                "name": disp,
-                "connector": conn or None,
-                "status": e.actions.install or "none",
-                "reason": e.reason,
-                "updated_at": e.updated_at.isoformat() if e.updated_at else None,
-            }
-            for (e, conn, disp) in decorated
-        ]
-        click.echo(json.dumps(rows, indent=2, default=str))
-        return
 
-    if not decorated:
-        label = "blocked " if filter_blocked else "allowed " if filter_allowed else ""
-        click.echo(f"No {label}tools in the block/allow list.")
-        return
+def _tool_source_audit_rows(entries: list) -> list[tuple[object, str, str, str]]:
+    rows: list[tuple[object, str, str, str]] = []
+    for e in entries:
+        if _is_source_audit_target(e.target_name):
+            rows.append((e, "", e.target_name, "source"))
+    return rows
 
-    # Align columns manually — mirrors skill/mcp list output.
-    name_w = max(max(len(disp) for (_, _, disp) in decorated), 4)
-    conn_w = max(max(len(conn or "global") for (_, conn, _) in decorated), len("CONNECTOR"))
+
+def _is_source_audit_target(target_name: str) -> bool:
+    return not target_name.startswith("@") and "/" in target_name
+
+
+def _tool_rows_json(
+    rows: list[tuple[object, str, str, str]], *, effective_connector: str = "",
+) -> list[dict[str, object]]:
+    return [
+        {
+            "name": disp,
+            "connector": _tool_row_json_connector(
+                conn,
+                scope,
+                effective_connector=effective_connector,
+            ),
+            "scope": scope,
+            "status": e.actions.install or "none",
+            "reason": e.reason,
+            "updated_at": e.updated_at.isoformat() if e.updated_at else None,
+        }
+        for (e, conn, disp, scope) in rows
+    ]
+
+
+def _tool_row_json_connector(
+    connector: str, scope: str, *, effective_connector: str = "",
+) -> str | None:
+    if scope == "source":
+        return None
+    if connector:
+        return connector
+    if effective_connector:
+        return effective_connector
+    return None
+
+
+def _print_tool_rows(
+    rows: list[tuple[object, str, str, str]],
+    *,
+    effective_connector: str = "",
+    title: str = "",
+) -> None:
+    if title:
+        click.echo(ux.bold(title))
+
+    name_w = max(max(len(disp) for (_e, _conn, disp, _scope) in rows), 4)
     status_w = 7  # "blocked" / "allowed"
+    scope_w = max(max(len(scope) for (_e, _conn, _disp, scope) in rows), len("SCOPE"))
 
     header = (
         f"{ux.bold('TOOL'.ljust(name_w))}  "
-        f"{ux.bold('CONNECTOR'.ljust(conn_w))}  "
         f"{ux.bold('STATUS'.ljust(status_w))}  "
+        f"{ux.bold('SCOPE'.ljust(scope_w))}  "
         f"{ux.bold('REASON'.ljust(40))}  "
         f"{ux.bold('UPDATED')}"
     )
     click.echo(header)
     click.echo(ux.dim("-" * len(header)))
 
-    for e, conn, disp in decorated:
+    for e, _conn, disp, scope in rows:
         status = e.actions.install or "none"
         reason = (e.reason or "")[:40]
         updated = e.updated_at.strftime("%Y-%m-%d %H:%M") if e.updated_at else "-"
-        conn_disp = conn or "global"
 
         color = "red" if status == "block" else "green" if status == "allow" else None
         line_core = (
-            f"{disp:<{name_w}}  {conn_disp:<{conn_w}}  "
-            f"{status:<{status_w}}  {reason:<40}  {updated}"
+            f"{disp:<{name_w}}  {status:<{status_w}}  "
+            f"{scope:<{scope_w}}  {reason:<40}  {updated}"
         )
         if color:
             click.echo(ux._style(line_core, fg=color))
@@ -467,7 +570,14 @@ def list_tools(
 
 @tool.command()
 @click.argument("name")
-@click.option("--connector", default="", help="Also show the connector-scoped status (runtime-enforceable)")
+@click.option(
+    "--connector",
+    default="",
+    help=(
+        "Narrow to one configured connector. Default: show effective status "
+        "for every active connector."
+    ),
+)
 @click.option("--source", default="", help="Also show the source-scoped audit row (not runtime-enforced)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @pass_ctx
@@ -484,10 +594,12 @@ def status(app: AppContext, name: str, connector: str, source: str, as_json: boo
       defenseclaw tool status delete_file
       defenseclaw tool status delete_file --connector hermes
     """
+    from defenseclaw.commands import resolve_list_connectors
     from defenseclaw.enforce import PolicyEngine
 
     _reject_connector_with_source(connector, source)
-    connector = _normalize_connector(connector)
+    connector = _resolve_connector_scope(app, connector)
+    connectors = [connector] if connector else resolve_list_connectors(app, "")
 
     pe = PolicyEngine(app.store)
 
@@ -495,11 +607,31 @@ def status(app: AppContext, name: str, connector: str, source: str, as_json: boo
     connector_entry = (
         pe.get_action("tool", _connector_target(name, connector)) if connector else None
     )
+    connector_statuses = []
+    for c in connectors:
+        scoped_entry = pe.get_action("tool", _connector_target(name, c))
+        status_label, scope_label, effective_entry = _tool_effective_entry(
+            scoped_entry, global_entry,
+        )
+        connector_statuses.append(
+            {
+                "connector": c,
+                "connector_scoped": scoped_entry,
+                "status": status_label,
+                "scope": scope_label,
+                "entry": effective_entry,
+            }
+        )
+
     source_entry = (
         pe.get_action("tool", _target_name(name, source)) if source else None
     )
 
-    effective = _effective_status(connector_entry, global_entry)
+    effective = (
+        _effective_status(connector_entry, global_entry)
+        if connector
+        else _overall_effective_status([str(row["status"]) for row in connector_statuses])
+    )
     is_write = name.lower() in _WRITE_TOOL_NAMES
 
     if as_json:
@@ -511,30 +643,93 @@ def status(app: AppContext, name: str, connector: str, source: str, as_json: boo
             "connector_scoped": _entry_json(connector_entry),
             "scoped": _entry_json(source_entry),  # source-scoped audit row
             "effective": effective,
+            "connectors": [
+                {
+                    "connector": str(row["connector"]),
+                    "connector_scoped": _entry_json(row["connector_scoped"]),
+                    "status": str(row["status"]),
+                    "scope": str(row["scope"]),
+                    "reason": _entry_reason(row["entry"]),
+                    "updated_at": _entry_updated(row["entry"]),
+                }
+                for row in connector_statuses
+            ],
         }
         click.echo(json.dumps(result, indent=2, default=str))
         return
 
-    click.echo(f"{ux.bold('Tool:')} {name}")
-    if connector:
-        click.echo(f"{ux.bold('Connector:')} {connector}")
-    if source:
-        click.echo(
-            f"{ux.bold('Source:')} {source} "
-            f"{ux.dim('(audit-only — not runtime-enforced)')}"
+    for idx, row in enumerate(connector_statuses):
+        if idx:
+            click.echo()
+        _echo_tool_status_card(
+            name,
+            str(row["connector"]),
+            str(row["status"]),
+            str(row["scope"]),
+            row["entry"],
+            is_write=is_write,
         )
 
-    _echo_status_line("Global status", global_entry, always=True)
-    if connector:
-        _echo_status_line("Connector status", connector_entry, always=True)
     if source:
+        click.echo()
+        click.echo(f"{ux.bold('Tool:')} {name}")
+        click.echo(
+            f"{ux.bold('Source:')} {source} "
+            f"{ux.dim('(audit-only; not runtime-enforced)')}"
+        )
         _echo_status_line("Source status", source_entry, always=True)
 
-    color = "red" if effective == "block" else "green" if effective == "allow" else None
-    msg = f"  Effective:      {effective}"
-    if effective == "allow" and is_write:
-        msg += "  (CodeGuard still applies to write tools)"
-    click.echo(ux._style(msg, fg=color) if color else msg)
+    if not connector and len({str(row["status"]) for row in connector_statuses}) > 1:
+        click.echo()
+        click.echo(f"{ux.bold('Overall:')} mixed")
+
+
+def _tool_effective_entry(connector_entry, global_entry) -> tuple[str, str, object | None]:
+    if connector_entry and connector_entry.actions.install == "block":
+        return "block", "connector", connector_entry
+    if global_entry and global_entry.actions.install == "block":
+        return "block", "global", global_entry
+    if connector_entry and connector_entry.actions.install == "allow":
+        return "allow", "connector", connector_entry
+    if global_entry and global_entry.actions.install == "allow":
+        return "allow", "global", global_entry
+    return "none", "-", None
+
+
+def _echo_tool_status_card(
+    name: str,
+    connector: str,
+    status: str,
+    scope: str,
+    entry,
+    *,
+    is_write: bool = False,
+) -> None:
+    click.echo(f"{ux.bold('Tool:')} {name}")
+    click.echo(f"{ux.bold('Connector:')} {connector}")
+    color = "red" if status == "block" else "green" if status == "allow" else None
+    click.echo(
+        ux._style(f"{ux.bold('Status:')} {status}", fg=color)
+        if color
+        else f"{ux.bold('Status:')} {status}"
+    )
+    click.echo(f"{ux.bold('Scope:')} {scope}")
+    click.echo(f"{ux.bold('Reason:')} {_entry_reason(entry)}")
+    click.echo(f"{ux.bold('Updated:')} {_entry_updated(entry) or '-'}")
+    if status == "allow" and is_write:
+        click.echo(ux.dim("CodeGuard still applies to write tools."))
+
+
+def _entry_reason(entry) -> str:
+    if entry and getattr(entry, "reason", ""):
+        return entry.reason
+    return "-"
+
+
+def _entry_updated(entry) -> str:
+    if entry and getattr(entry, "updated_at", None):
+        return entry.updated_at.isoformat()
+    return ""
 
 
 def _echo_status_line(label: str, entry, always: bool = False) -> None:
@@ -548,6 +743,15 @@ def _echo_status_line(label: str, entry, always: bool = False) -> None:
         click.echo(ux._style(msg, fg=color) if color else msg)
     elif always:
         click.echo(f"  {ux.dim(label + ':')}  none")
+
+
+def _overall_effective_status(statuses: list[str]) -> str:
+    if not statuses:
+        return "none"
+    unique = set(statuses)
+    if len(unique) == 1:
+        return statuses[0]
+    return "mixed"
 
 
 def _effective_status(connector_entry, global_entry) -> str:

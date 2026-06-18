@@ -86,6 +86,7 @@ class PluginPerConnectorCLITests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
         self.runner = CliRunner()
         self.pe = PolicyEngine(self.app.store)
 
@@ -138,6 +139,7 @@ class SkillPerConnectorCLITests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
         self.runner = CliRunner()
         self.pe = PolicyEngine(self.app.store)
 
