@@ -163,11 +163,11 @@ def _scan_one_connector(
 
     errors = inv.get("errors", [])
     if errors:
-        msg = f"Warning: {len(errors)} openclaw command(s) failed"
+        msg = f"Warning: {len(errors)} connector inventory command(s) failed"
         if as_json:
             click.echo(ux._style(msg, fg="yellow", bold=True), err=True)
         else:
-            ux.warn(f"{len(errors)} openclaw command(s) failed")
+            ux.warn(f"{len(errors)} connector inventory command(s) failed")
 
     stamp_aibom_inventory(inv, app.cfg)
     if as_json:

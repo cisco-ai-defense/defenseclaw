@@ -506,6 +506,40 @@ class TestAIBOMCommand(unittest.TestCase):
         mock_build.assert_called_once()
         self.assertEqual(mock_build.call_args.kwargs.get("connector"), "codex")
 
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_inventory_warning_is_connector_neutral(
+        self, mock_build, mock_to_scan, mock_enrich
+    ):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        inv = self._make_inventory()
+        inv["claw_mode"] = "codex"
+        inv["errors"] = [
+            {
+                "command": "codex:agents",
+                "error": "agents are not a first-class concept on this connector",
+            }
+        ]
+        mock_build.return_value = inv
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw",
+            target="x",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+
+        result = self.runner.invoke(
+            aibom, ["scan", "--connector", "codex"], obj=self.app, catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector inventory command(s) failed", result.output)
+        self.assertNotIn("openclaw command(s) failed", result.output)
+
     def test_scan_all_connectors_flag_removed(self):
         # --all-connectors was removed (a bare scan already covers all), so
         # passing it must be rejected as an unknown option rather than

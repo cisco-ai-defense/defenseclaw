@@ -146,13 +146,14 @@ def build_claw_aibom(
         "errors": errors,
     }
     _attach_connector_paths(out, cfg, connector)
+    _sync_legacy_connector_paths(out)
     out["summary"] = _build_summary(out)
     return out
 
 
 def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
     """One INFO finding per category so audit logging stays compact."""
-    target = _expand(cfg.claw.config_file)
+    target = _aibom_target_path(inv, cfg)
     ts = datetime.now(timezone.utc)
     category_labels = [
         ("skills", "Skills"),
@@ -578,16 +579,9 @@ def format_claw_aibom_human(
 # ---------------------------------------------------------------------------
 # Polymorphic-path attachment
 #
-# These keys ride alongside the historical ``openclaw_config`` /
-# ``claw_home`` for back-compat (existing TUI / Go consumers still
-# parse those). New consumers should prefer ``connector_home`` /
-# ``connector_config_files`` / ``connector_skill_dirs`` /
-# ``connector_plugin_dirs`` / ``connector_mcp_files`` because they
-# carry the right value for non-OpenClaw connectors instead of an
-# ``~/.openclaw`` fallback that confuses operators running the CLI
-# against e.g. Codex or Claude Code. See ``internal/tui/inventory.go``
-# for the renderer side that picks the polymorphic value when it's
-# present and falls back to the legacy keys otherwise.
+# Connector-aware path metadata lives in ``connector_*`` fields. The
+# historical ``openclaw_config`` field is retained only for OpenClaw
+# inventories; non-OpenClaw JSON should not imply OpenClaw is installed.
 # ---------------------------------------------------------------------------
 
 def _attach_connector_paths(
@@ -596,9 +590,7 @@ def _attach_connector_paths(
     """Populate ``connector_*`` polymorphic path fields on *out*.
 
     Best-effort: any helper that raises is silently elided so a
-    misconfigured cfg never hijacks the inventory pipeline. The
-    legacy ``openclaw_config`` / ``claw_home`` keys remain populated
-    by the caller — this helper only ADDs polymorphic siblings.
+    misconfigured cfg never hijacks the inventory pipeline.
     """
     try:
         out["connector_home"] = connector_paths.connector_home(
@@ -627,6 +619,41 @@ def _attach_connector_paths(
         out["connector_mcp_files"] = list(_collect_mcp_config_files(connector, cfg))
     except Exception:
         out["connector_mcp_files"] = []
+
+
+def _sync_legacy_connector_paths(out: dict[str, Any]) -> None:
+    """Publish a connector-neutral primary config path.
+
+    ``openclaw_config`` predates multi-connector inventory and is now emitted
+    only for actual OpenClaw scans. ``connector_config`` is the neutral single
+    primary path; ``connector_config_files`` remains the full ordered list.
+    """
+    connector = str(out.get("connector") or out.get("claw_mode") or "").lower()
+    home = str(out.get("connector_home") or "")
+    if home:
+        out["claw_home"] = home
+
+    config_files = out.get("connector_config_files") or []
+    if isinstance(config_files, list) and config_files:
+        first = config_files[0]
+        if first:
+            out["connector_config"] = first
+            if connector == "openclaw":
+                out["openclaw_config"] = first
+    if connector != "openclaw":
+        out.pop("openclaw_config", None)
+
+
+def _aibom_target_path(inv: dict[str, Any], cfg: Config) -> str:
+    config_files = inv.get("connector_config_files") or []
+    if isinstance(config_files, list) and config_files:
+        first = config_files[0]
+        if first:
+            return str(first)
+    legacy = inv.get("openclaw_config")
+    if legacy:
+        return str(legacy)
+    return _expand(cfg.claw.config_file)
 
 
 def _collect_mcp_config_files(connector: str, cfg: Config) -> list[str]:
@@ -1870,6 +1897,7 @@ def _build_aibom_from_filesystem(
         "errors": errors,
     }
     _attach_connector_paths(out, cfg, connector)
+    _sync_legacy_connector_paths(out)
     out["summary"] = _build_summary(out)
     return out
 

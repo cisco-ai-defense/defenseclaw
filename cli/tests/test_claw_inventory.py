@@ -2137,9 +2137,30 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         ))
         self.assertEqual(inv["connector_skill_dirs"], [skill_root])
         self.assertEqual(inv["connector_plugin_dirs"], [plugin_root])
-        # Back-compat: legacy keys still present for older readers.
-        self.assertIn("openclaw_config", inv)
-        self.assertIn("claw_home", inv)
+        self.assertEqual(inv["connector_config"], inv["connector_config_files"][0])
+        self.assertNotIn("openclaw_config", inv)
+        self.assertEqual(inv["claw_home"], inv["connector_home"])
+
+    def test_opencode_inventory_legacy_paths_are_connector_aware(self):
+        cfg = _make_cfg_for_connector(self.tmp, "opencode")
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([]), \
+             self._patch_mcp([]), \
+             patch("defenseclaw.inventory.claw_inventory.subprocess.run"):
+            inv = build_claw_aibom(cfg, live=True)
+
+        self.assertEqual(inv["connector"], "opencode")
+        self.assertTrue(inv["connector_home"].endswith(os.path.join(".config", "opencode")))
+        self.assertTrue(inv["connector_config_files"][0].endswith(
+            os.path.join(".config", "opencode", "plugins", "defenseclaw.js")
+        ))
+        self.assertEqual(inv["connector_config"], inv["connector_config_files"][0])
+        self.assertNotIn("openclaw_config", inv)
+        self.assertEqual(inv["claw_home"], inv["connector_home"])
+
+        result = claw_aibom_to_scan_result(inv, cfg)
+        self.assertEqual(result.target, inv["connector_config_files"][0])
+        self.assertTrue(all(f.location == result.target for f in result.findings))
 
     def test_connector_inventory_mode_follows_scanned_connector(self):
         """The AIBOM ``Mode:`` line (inv['claw_mode']) must report the
@@ -2370,6 +2391,7 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
             inv = build_claw_aibom(cfg, live=True)
             self.assertGreater(mock_sub.call_count, 0)
         self.assertEqual(inv["connector"], "openclaw")
+        self.assertEqual(inv["connector_config"], inv["openclaw_config"])
 
 
 class TestBuildAibomConnectorPathSkippedForOpenClaw(unittest.TestCase):
