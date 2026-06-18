@@ -1184,7 +1184,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw-audit\"} |= \"\\\"would_block\\\":true\" | json | line_format \"{{.connector}} | {{.event}} | sev={{.severity}} | {{.reason}}\"",
+          "expr": "{service_name=\"defenseclaw\"} |= \"\\\"would_block\\\":true\" | json | line_format \"{{.gen_ai_agent_name}} | {{.defenseclaw_gateway_event_type}} | sev={{.severity}} | {{.reason}}\"",
           "queryType": "range"
         }
       ],
@@ -1885,7 +1885,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "count(sum by (host)(count_over_time({service_name=\"defenseclaw-audit\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*|.*\\\\.local|prometheus|loki|tempo|grafana|0\\\\.0\\\\.0\\\\.0\" [$__range])))",
+          "expr": "count(sum by (host)(count_over_time({service_name=\"defenseclaw\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*|.*\\\\.local|prometheus|loki|tempo|grafana|0\\\\.0\\\\.0\\\\.0\" [$__range])))",
           "queryType": "instant"
         }
       ],
@@ -1946,7 +1946,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(25, sum by (host)(count_over_time({service_name=\"defenseclaw-audit\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" [$__range])))",
+          "expr": "topk(25, sum by (host)(count_over_time({service_name=\"defenseclaw\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" [$__range])))",
           "queryType": "instant"
         }
       ],
@@ -2038,7 +2038,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw-audit\"} |~ \"https?://\"",
+          "expr": "{service_name=\"defenseclaw\"} |~ \"https?://\"",
           "queryType": "range"
         }
       ],
@@ -2817,7 +2817,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw-audit\"} | audit_session_id=~\"$session\" [$__range]))",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | gen_ai_conversation_id=~\"$session\" [$__range]))",
           "queryType": "instant"
         }
       ],
@@ -2874,7 +2874,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw-audit\"} | audit_session_id=~\"$session\" |= \"\\\"would_block\\\":true\" [$__range]))",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | gen_ai_conversation_id=~\"$session\" |= \"\\\"would_block\\\":true\" [$__range]))",
           "queryType": "instant"
         }
       ],
@@ -2935,7 +2935,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw-audit\"} | audit_session_id=~\"$session\" | line_format \"[{{.audit_connector}}] {{.audit_target}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | gen_ai_conversation_id=~\"$session\" | line_format \"[{{.gen_ai_agent_name}}] {{.defenseclaw_tool_name}}\"",
           "queryType": "range"
         }
       ],

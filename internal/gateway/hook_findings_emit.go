@@ -576,6 +576,7 @@ func hookAgentIdentityFromContext(ctx context.Context) scanner.AgentIdentity {
 		RequestID:         env.RequestID,
 		SessionID:         env.SessionID,
 		TraceID:           env.TraceID,
+		Connector:         env.Connector,
 	}
 }
 

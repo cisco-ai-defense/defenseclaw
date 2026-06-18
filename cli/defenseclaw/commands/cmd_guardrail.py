@@ -49,6 +49,7 @@ import os
 import click
 
 from defenseclaw import ux
+from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 
 # Note: ``defenseclaw.commands.cmd_setup._restart_services`` is
@@ -135,11 +136,11 @@ def _active_connector_display(cfg, fallback: str) -> str:
 
 def _resolve_member_connector(app, requested: str) -> str | None:
     """Return the canonical ``guardrail.connectors`` key matching
-    ``requested`` (case-insensitive), or ``None`` if it is not a member."""
+    ``requested`` (case/alias-insensitive), or ``None`` if it is not a member."""
     conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
-    req = requested.strip().lower()
+    req = normalize_connector(requested)
     for key in conns:
-        if key.strip().lower() == req:
+        if normalize_connector(key) == req:
             return key
     return None
 

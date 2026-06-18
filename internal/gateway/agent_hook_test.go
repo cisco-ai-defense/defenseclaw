@@ -768,6 +768,22 @@ func TestRefreshAuditEnvelopeFromHook_PayloadOverridesStale(t *testing.T) {
 	}
 }
 
+func TestHookAgentIdentityFromContext_PropagatesConnector(t *testing.T) {
+	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
+		Connector: "codex",
+		RunID:     "run-1",
+		SessionID: "session-1",
+	})
+
+	got := hookAgentIdentityFromContext(ctx)
+	if got.Connector != "codex" {
+		t.Fatalf("Connector = %q, want codex", got.Connector)
+	}
+	if got.RunID != "run-1" || got.SessionID != "session-1" {
+		t.Fatalf("correlation fields not preserved: RunID=%q SessionID=%q", got.RunID, got.SessionID)
+	}
+}
+
 // TestRefreshAuditEnvelopeFromIdentity_BespokeHandlerParity guards the
 // follow-up fix that wires the F2 envelope refresh into the bespoke
 // claudecode + codex handlers (handleClaudeCodeHook /

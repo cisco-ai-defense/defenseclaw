@@ -857,7 +857,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\"",
+          "expr": "{service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_gateway_event_type=~\"tool_invocation|scan|scan_finding|llm_prompt|llm_response|error\"",
           "refId": "A",
           "datasource": {
             "type": "loki",

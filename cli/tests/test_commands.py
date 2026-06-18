@@ -47,6 +47,16 @@ def _invoke(cmd, args=None, app=None):
     return runner.invoke(cmd, args or [], obj=obj, catch_exceptions=False)
 
 
+def _set_plugin_dir(app: AppContext, plugin_dir: str) -> None:
+    """Point legacy plugin command tests at a temp connector plugin dir."""
+    app.cfg.plugin_dir = plugin_dir
+
+    def _plugin_dirs(connector=None):
+        return [plugin_dir] if (connector or "openclaw") == "openclaw" else []
+
+    app.cfg.plugin_dirs = _plugin_dirs  # type: ignore[method-assign]
+
+
 # ── status ────────────────────────────────────────────────────────────────
 
 class TestStatusCommand(unittest.TestCase):
@@ -141,7 +151,7 @@ class TestPluginCommands(unittest.TestCase):
         from defenseclaw.commands.cmd_plugin import list_plugins
         with tempfile.TemporaryDirectory() as tmpdir:
             app = _make_app()
-            app.cfg.plugin_dir = tmpdir
+            _set_plugin_dir(app, tmpdir)
             result = _invoke(list_plugins, app=app)
             self.assertEqual(result.exit_code, 0)
             self.assertIn("No plugins", result.output)
@@ -151,7 +161,7 @@ class TestPluginCommands(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             os.makedirs(os.path.join(tmpdir, "my-plugin"))
             app = _make_app()
-            app.cfg.plugin_dir = tmpdir
+            _set_plugin_dir(app, tmpdir)
             result = _invoke(list_plugins, args=["--json"], app=app)
             self.assertEqual(result.exit_code, 0)
             self.assertIn("my-plugin", result.output)
@@ -164,7 +174,7 @@ class TestPluginCommands(unittest.TestCase):
                     f.write("{}")
 
                 app = _make_app()
-                app.cfg.plugin_dir = plugin_dest
+                _set_plugin_dir(app, plugin_dest)
                 result = _invoke(install, [plugin_src], app=app)
                 self.assertEqual(result.exit_code, 0)
                 self.assertIn("Installed plugin", result.output)
@@ -176,27 +186,27 @@ class TestPluginCommands(unittest.TestCase):
                 name = os.path.basename(plugin_src)
                 os.makedirs(os.path.join(plugin_dest, name))
                 app = _make_app()
-                app.cfg.plugin_dir = plugin_dest
+                _set_plugin_dir(app, plugin_dest)
                 result = _invoke(install, [plugin_src], app=app)
                 self.assertEqual(result.exit_code, 1)
-                self.assertIn("already installed", result.output)
+                self.assertIn("already exists", result.output)
 
     def test_plugin_remove_success(self):
         from defenseclaw.commands.cmd_plugin import remove
         with tempfile.TemporaryDirectory() as tmpdir:
             os.makedirs(os.path.join(tmpdir, "del-me"))
             app = _make_app()
-            app.cfg.plugin_dir = tmpdir
+            _set_plugin_dir(app, tmpdir)
             result = _invoke(remove, ["del-me"], app=app)
             self.assertEqual(result.exit_code, 0)
-            self.assertIn("Removed", result.output)
+            self.assertIn("removed from", result.output)
             self.assertFalse(os.path.exists(os.path.join(tmpdir, "del-me")))
 
     def test_plugin_remove_not_found(self):
         from defenseclaw.commands.cmd_plugin import remove
         with tempfile.TemporaryDirectory() as tmpdir:
             app = _make_app()
-            app.cfg.plugin_dir = tmpdir
+            _set_plugin_dir(app, tmpdir)
             result = _invoke(remove, ["nonexistent"], app=app)
             self.assertEqual(result.exit_code, 0)
             self.assertIn("not found", result.output)
@@ -206,7 +216,7 @@ class TestPluginCommands(unittest.TestCase):
     def test_plugin_install_from_registry(self, mock_fetch, mock_scan):
         from defenseclaw.commands.cmd_plugin import install
         app = _make_app()
-        app.cfg.plugin_dir = tempfile.mkdtemp()
+        _set_plugin_dir(app, tempfile.mkdtemp())
 
         plugin_src = os.path.join(app.cfg.plugin_dir, "_src", "some-registry-plugin")
         os.makedirs(plugin_src, exist_ok=True)

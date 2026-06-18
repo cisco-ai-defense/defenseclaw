@@ -1042,12 +1042,14 @@ class TestPolicyEngineToolConnectorScope(_StoreTestBase):
                 self.pe.is_tool_allowed_for_connector("search", connector)
             )
 
-    def test_global_block_and_connector_allow_coexist(self):
-        # Resolution order is block-first; both rows are independently visible.
+    def test_connector_allow_overrides_global_block_for_connector(self):
+        # Connector-scoped rows are authoritative before the global fallback.
         self.pe.block_tool_for_connector("write_file", "", "global block")
         self.pe.allow_tool_for_connector("write_file", "hermes", "scoped allow")
-        self.assertTrue(self.pe.is_tool_blocked_for_connector("write_file", "hermes"))
+        self.assertFalse(self.pe.is_tool_blocked_for_connector("write_file", "hermes"))
         self.assertTrue(self.pe.is_tool_allowed_for_connector("write_file", "hermes"))
+        self.assertTrue(self.pe.is_tool_blocked_for_connector("write_file", "codex"))
+        self.assertFalse(self.pe.is_tool_allowed_for_connector("write_file", "codex"))
 
     def test_connector_allow_clears_enforcement(self):
         target = "@hermes/run"

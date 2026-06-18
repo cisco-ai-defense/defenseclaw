@@ -908,6 +908,14 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 // connectorModesSummary fans the same shape out across every active
 // connector for the multi-connector status surface.
 func (a *APIServer) connectorModeSummary() map[string]interface{} {
+	if a.scannerCfg != nil && !a.scannerCfg.HasConnectorConfigured() {
+		return map[string]interface{}{
+			"connector":       "",
+			"mode":            "unconfigured",
+			"telemetry":       []string{},
+			"proxy_intercept": false,
+		}
+	}
 	return connectorModeFor(a.connectorName())
 }
 
@@ -922,6 +930,9 @@ func (a *APIServer) connectorModesSummary() []map[string]interface{} {
 	var names []string
 	if a.scannerCfg != nil {
 		names = a.scannerCfg.ActiveConnectors()
+		if !a.scannerCfg.HasConnectorConfigured() {
+			return []map[string]interface{}{}
+		}
 	}
 	if len(names) == 0 {
 		names = []string{a.connectorName()}

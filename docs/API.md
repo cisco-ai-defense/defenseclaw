@@ -127,6 +127,13 @@ The handler branches on the `tool` field:
   command patterns, sensitive path access, and secrets in arguments via
   `inspectToolPolicy()`.
 
+Static MCP-server and tool block/allow policy is checked before pattern
+scanning. Policy-store lookup errors fail closed and return a block verdict.
+An explicit tool allow skips the rule/AID/judge scan gate; for write tools,
+this inspect endpoint still runs CodeGuard on the submitted content before
+returning a clean allow. The sidecar stream lane has no CodeGuard payload
+scanner, so a matching runtime tool allow is a full scan bypass there.
+
 **Callers:**
 - OpenClaw plugin: `before_tool_call` hook in `extensions/defenseclaw/src/index.ts`
   calls `inspectTool()` which POSTs to this endpoint via `fetch()`.

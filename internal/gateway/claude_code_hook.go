@@ -127,7 +127,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
 		}
 	case "PreToolUse", "PermissionRequest", "PermissionDenied":
-		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call", Connector: "claudecode"})
+		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call", Connector: "claudecode", MCPServerName: req.MCPServerName})
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}

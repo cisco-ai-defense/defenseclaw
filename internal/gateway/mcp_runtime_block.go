@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 )
@@ -32,9 +33,10 @@ import (
 // the audit DB and enforced by the Python CLI / admission gate but never
 // consulted when the blocked server's tools were actually invoked at Go
 // runtime — a fail-open affecting BOTH global and per-connector blocks. We
-// resolve the owning MCP server from the tool name
-// (`mcp__<server>__<tool>` / `mcp:<server>:<tool>`) and consult
-// IsBlockedForConnector("mcp", server, connector), which resolves
+// resolve the owning MCP server from the explicit hook payload field when
+// present, otherwise from the tool name (`mcp__<server>__<tool>` /
+// `mcp:<server>:<tool>`), and consult IsBlockedForConnector("mcp", server,
+// connector), which resolves
 // most-specific-wins (connector-scoped entry, then the bare global entry): a
 // global block denies every connector while a `--connector` block denies only
 // its peer. Mirrors the Python admission gate's is_blocked_for_connector
@@ -46,11 +48,14 @@ import (
 //
 // Returns deny=false (server may still be non-empty) when the tool is not an
 // MCP tool or the resolved server is not blocked.
-func mcpServerRuntimeBlock(pe *enforce.PolicyEngine, toolName, connector string) (deny bool, server, reason string) {
+func mcpServerRuntimeBlock(pe *enforce.PolicyEngine, toolName, connector, explicitServer string) (deny bool, server, reason string) {
 	if pe == nil {
 		return false, "", ""
 	}
-	server = serverFromMCPToolName(toolName)
+	server = strings.TrimSpace(explicitServer)
+	if server == "" {
+		server = serverFromMCPToolName(toolName)
+	}
 	if server == "" {
 		return false, "", ""
 	}

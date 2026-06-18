@@ -90,6 +90,21 @@ class ResolveActiveConnectorTests(unittest.TestCase):
     def test_none_cfg_defaults_to_openclaw(self):
         self.assertEqual(cmd_guardrail._resolve_active_connector(None), "openclaw")
 
+    def test_resolve_member_connector_accepts_aliases(self):
+        app = make_ctx(enabled=True, connector="codex")
+        app.cfg.guardrail.connectors = {
+            "claudecode": SimpleNamespace(),
+            "openhands": SimpleNamespace(),
+        }
+        self.assertEqual(
+            cmd_guardrail._resolve_member_connector(app, "claude-code"),
+            "claudecode",
+        )
+        self.assertEqual(
+            cmd_guardrail._resolve_member_connector(app, "open-hands"),
+            "openhands",
+        )
+
 
 class StatusCommandTests(unittest.TestCase):
     def test_status_enabled_openclaw(self):

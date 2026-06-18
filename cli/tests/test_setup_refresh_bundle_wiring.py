@@ -28,10 +28,12 @@ tests don't need a real Docker daemon or filesystem-resident bundle.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
@@ -305,9 +307,9 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_called_once()
-        # The wiring should pass refresh_config=False unless the user
-        # opts in.
-        self.assertFalse(mock_refresh.call_args.kwargs["refresh_config"])
+        # The standard setup path should bring host-mounted dashboards,
+        # rules, and collector config up to the latest bundled version.
+        self.assertTrue(mock_refresh.call_args.kwargs["refresh_config"])
 
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability"
@@ -409,6 +411,99 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_called_once()
         self.assertTrue(mock_refresh.call_args.kwargs["refresh_config"])
+
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability"
+        "._refresh_and_maybe_restart_local_observability",
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability._preflight_docker",
+        return_value=True,
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability._run_bridge_up",
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability._resolve_bridge",
+        return_value="/fake/bin/openclaw-observability-bridge",
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability"
+        "._apply_local_otlp_audit_sink",
+    )
+    def test_up_no_refresh_config_preserves_local_config(
+        self,
+        _audit: MagicMock,
+        _otlp: MagicMock,
+        _resolve: MagicMock,
+        mock_run_up: MagicMock,
+        _preflight: MagicMock,
+        mock_refresh: MagicMock,
+    ) -> None:
+        from defenseclaw.commands.cmd_setup_local_observability import (
+            local_observability,
+        )
+
+        mock_run_up.return_value = {
+            "otlp_endpoint": "127.0.0.1:4317",
+            "otlp_protocol": "grpc",
+        }
+
+        result = self.runner.invoke(
+            local_observability,
+            ["up", "--no-wait", "--no-refresh-config"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_refresh.assert_called_once()
+        self.assertFalse(mock_refresh.call_args.kwargs["refresh_config"])
+
+
+class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):
+    """Direct coverage for local-observability refresh messaging."""
+
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability"
+        ".refresh_local_observability_stack",
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup_local_observability"
+        ".is_compose_project_running",
+        return_value=False,
+    )
+    def test_preserved_config_hint_is_printed(
+        self,
+        _running: MagicMock,
+        mock_refresh: MagicMock,
+    ) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup_local_observability import (
+            _refresh_and_maybe_restart_local_observability,
+        )
+
+        mock_refresh.return_value = RefreshResult(
+            bundle_kind="observability-stack",
+            seeded_dest="/dest",
+            bundle_source="/src",
+            refreshed=False,
+            preserved_paths=["grafana", "prometheus"],
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _refresh_and_maybe_restart_local_observability(
+                "/data",
+                refresh_config=False,
+            )
+
+        self.assertIn("Preserved local observability config", output.getvalue())
+        self.assertIn("--refresh-config", output.getvalue())
+        self.assertIn("--no-refresh-config", output.getvalue())
 
 
 if __name__ == "__main__":

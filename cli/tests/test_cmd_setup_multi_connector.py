@@ -385,6 +385,14 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "codex")
 
+    def test_remove_connector_alias(self):
+        self._seed_map("claudecode", "codex")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "claude-code", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
+        self.assertNotIn("claudecode", self.app.cfg.guardrail.connectors)
+
     # D3=A: --restart bounces the gateway so boot-time set-diff teardown runs.
     def test_remove_restart_bounces_gateway(self):
         self._seed_map("codex", "cursor")

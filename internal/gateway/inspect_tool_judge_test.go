@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -104,6 +105,28 @@ func TestToolCallJudge_OptInRunsJudge(t *testing.T) {
 	}
 	if !judgeTaggedFinding(verdict.Findings) {
 		t.Fatalf("no llm-judge: tagged finding in %v", verdict.Findings)
+	}
+}
+
+func TestToolCallJudge_ProviderErrorFailsOpen(t *testing.T) {
+	mock := &mockLLMProvider{err: errors.New("provider down")}
+	a := newHookJudgeAPIServer(t,
+		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}},
+		"judge_first", mock)
+
+	verdict := a.inspectToolPolicy(&ToolInspectRequest{
+		Tool: "fetch_url", Args: json.RawMessage(benignToolArgs),
+		Direction: "tool_call", Connector: "hermes",
+	})
+
+	if len(mock.captured) == 0 {
+		t.Fatal("judge provider was never attempted")
+	}
+	if verdict.Action != "allow" {
+		t.Fatalf("action=%q, want allow (fail-open) when the tool-call judge errors (verdict=%+v)", verdict.Action, verdict)
+	}
+	if judgeTaggedFinding(verdict.Findings) {
+		t.Fatalf("failed judge leaked findings into %v", verdict.Findings)
 	}
 }
 

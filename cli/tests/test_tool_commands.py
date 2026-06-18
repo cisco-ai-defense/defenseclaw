@@ -264,6 +264,16 @@ class TestToolStatus(ToolCommandTestBase):
         self.assertIn("Status: block", result.output)
         self.assertIn("Scope: connector", result.output)
 
+    def test_status_connector_allow_wins_over_global_block(self):
+        self.pe().block_tool("write_file", "", "global block")
+        self.pe().allow_tool_for_connector("write_file", "hermes", "scoped allow")
+
+        result = self.invoke(["status", "write_file", "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: hermes", result.output)
+        self.assertIn("Status: allow", result.output)
+        self.assertIn("Scope: connector", result.output)
+
     def test_status_without_connector_fans_out_active_connectors(self):
         self.pe().allow_tool("write_file", "", "global allow")
         self.pe().block_tool_for_connector("write_file", "hermes", "scoped block")

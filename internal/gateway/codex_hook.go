@@ -52,6 +52,7 @@ type codexHookRequest struct {
 	Model                string                 `json:"model,omitempty"`
 	Source               string                 `json:"source,omitempty"`
 	ToolName             string                 `json:"tool_name,omitempty"`
+	MCPServerName        string                 `json:"mcp_server_name,omitempty"`
 	ToolUseID            string                 `json:"tool_use_id,omitempty"`
 	ToolInput            map[string]interface{} `json:"tool_input,omitempty"`
 	ToolResponse         interface{}            `json:"tool_response,omitempty"`
@@ -166,10 +167,11 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 		})
 	case "PreToolUse", "PermissionRequest":
 		verdict = a.inspectToolPolicy(&ToolInspectRequest{
-			Tool:      codexToolName(req),
-			Args:      codexToolArgs(req),
-			Direction: "tool_call",
-			Connector: "codex",
+			Tool:          codexToolName(req),
+			Args:          codexToolArgs(req),
+			Direction:     "tool_call",
+			Connector:     "codex",
+			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
 		})
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})

@@ -1499,6 +1499,11 @@ def _seed_local_observability_stack(data_dir: str) -> None:
         click.echo(f"  Observability stack: preserved existing ({dest}); refreshed {joined}")
     else:
         click.echo(f"  Observability stack: preserved existing ({dest})")
+    click.echo(
+        "  Observability stack: dashboards/rules/config preserved; "
+        "run 'defenseclaw setup local-observability up' to refresh them "
+        "with bundled versions, or pass --no-refresh-config to keep local edits."
+    )
 
 
 def _refresh_observability_stack_scripts(bundled, dest: str) -> list[str]:

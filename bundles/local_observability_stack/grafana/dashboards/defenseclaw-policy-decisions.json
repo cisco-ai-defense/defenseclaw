@@ -246,7 +246,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw-audit\"} |~ \"https?://\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"https?://\" [$__range])) or vector(0)",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -481,7 +481,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum by (host) (count_over_time({service_name=\"defenseclaw-audit\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__range])))",
+          "expr": "topk(10, sum by (host) (count_over_time({service_name=\"defenseclaw\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__range])))",
           "instant": true,
           "format": "table",
           "refId": "A",
@@ -537,7 +537,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (host) (count_over_time({service_name=\"defenseclaw-audit\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" [$__interval]))",
+          "expr": "sum by (host) (count_over_time({service_name=\"defenseclaw\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" [$__interval]))",
           "legendFormat": "{{host}}",
           "refId": "A",
           "datasource": {
@@ -675,7 +675,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (audit_target) (count_over_time({service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\" |~ \"Shell|tool\" [$__range])))",
+          "expr": "topk(20, sum by (defenseclaw_tool_name) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_gateway_event_type=\"tool_invocation\" [$__range])))",
           "instant": true,
           "refId": "A",
           "format": "table",
@@ -713,8 +713,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_type) (rate(defenseclaw_gateway_errors_total[$__rate_interval])) or vector(0)",
-          "legendFormat": "{{event_type}} \u00b7 {{code}}",
+          "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval])) or vector(0)",
+          "legendFormat": "{{error_subsystem}} \u00b7 {{error_code}}",
           "refId": "A"
         }
       ],
@@ -740,7 +740,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\" |~ \"would_block|block|confirm|verdict\"",
+          "expr": "{service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_gateway_event_type=~\"tool_invocation|scan_finding|error\"",
           "refId": "A",
           "datasource": {
             "type": "loki",

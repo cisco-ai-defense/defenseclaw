@@ -72,7 +72,8 @@ type ToolInspectRequest struct {
 	// handlers stamp it (codex/claudecode/...) so each connector scans
 	// against its own EffectiveRulePackDir. Empty ⇒ process-global default
 	// set (single-connector installs and the generic inspect endpoint).
-	Connector string `json:"connector,omitempty"`
+	Connector     string `json:"connector,omitempty"`
+	MCPServerName string `json:"mcp_server_name,omitempty"`
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
@@ -301,7 +302,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 	// Static block/allow list takes priority — checked before any rule
 	// scanning. Connector-scoped (@C/T) entries resolve before the bare
 	// global entry, mirroring the sidecar lane and the PolicyEngine helpers:
-	//   block @C/T → block T → allow @C/T → allow T → scan
+	//   block @C/T → allow @C/T → block T → allow T → scan
 	if a.store != nil {
 		pe := enforce.NewPolicyEngine(a.store)
 		// MCP-server runtime block: a blocked MCP server denies ALL of its
@@ -310,7 +311,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		// --connector scoped); it is checked before the per-tool block/allow so
 		// a server-level block wins over a tool-level allow, and it fails closed
 		// + loud on a store lookup error.
-		if deny, server, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector); deny {
+		if deny, server, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector, req.MCPServerName); deny {
 			if a.otel != nil {
 				a.otel.EmitPolicyDecision("admission", "blocked", req.Tool, "mcp", reason, map[string]string{
 					"mcp_server_name": server,
@@ -326,7 +327,11 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 				Findings:   []string{"MCP-BLOCK"},
 			}
 		}
-		if blocked, _ := pe.IsToolBlockedForConnector(req.Tool, req.Connector); blocked {
+		blocked, err := pe.IsToolBlockedForConnector(req.Tool, req.Connector)
+		if err != nil {
+			return toolPolicyLookupErrorVerdict("inspect", "block-list", req.Tool, req.Connector, err)
+		}
+		if blocked {
 			return &ToolInspectVerdict{
 				Action:     "block",
 				Severity:   "HIGH",
@@ -338,7 +343,11 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		// An explicit allow skips rule/pattern/AID/judge scanning. Write tools
 		// still run CodeGuard on their content (D2): the allow bypasses the
 		// scan gate, not code-content inspection.
-		if allowed, _ := pe.IsToolAllowedForConnector(req.Tool, req.Connector); allowed {
+		allowed, err := pe.IsToolAllowedForConnector(req.Tool, req.Connector)
+		if err != nil {
+			return toolPolicyLookupErrorVerdict("inspect", "allow-list", req.Tool, req.Connector, err)
+		}
+		if allowed {
 			if !isWriteToolName(strings.ToLower(req.Tool)) {
 				return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 			}

@@ -811,7 +811,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\" |~ \"preToolUse|beforeShell|beforeSubmitPrompt\"",
+          "expr": "{service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_gateway_event_type=\"tool_invocation\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -842,7 +842,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw-audit\"} | audit_target=~\"beforeShellExecution|preToolUse\"",
+          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"tool_invocation\" | defenseclaw_tool_name=~\"Bash|.*[sS]hell.*|.*[eE]xec.*\"",
           "refId": "A",
           "datasource": {
             "type": "loki",

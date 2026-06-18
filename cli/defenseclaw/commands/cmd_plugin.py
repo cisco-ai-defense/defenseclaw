@@ -858,6 +858,9 @@ def _plugin_install_targets(
     targets: list[tuple[str, str]] = []
     skipped: list[str] = []
     for connector in connectors:
+        if connector == "antigravity":
+            skipped.append(connector)
+            continue
         dirs = [d for d in app.cfg.plugin_dirs(connector) if d]
         if not dirs:
             skipped.append(connector)

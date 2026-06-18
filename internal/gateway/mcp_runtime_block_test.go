@@ -164,16 +164,32 @@ func TestMCPServerRuntimeBlock_NonMCPAndUnblocked(t *testing.T) {
 	}
 
 	// Plain (non-MCP) tool name: never an MCP-server decision.
-	if deny, _, _ := mcpServerRuntimeBlock(pe, "shell", ""); deny {
+	if deny, _, _ := mcpServerRuntimeBlock(pe, "shell", "", ""); deny {
 		t.Error("plain tool name: deny = true, want false")
 	}
 	// MCP tool for an unblocked server.
-	if deny, _, _ := mcpServerRuntimeBlock(pe, "mcp__github__listRepos", ""); deny {
+	if deny, _, _ := mcpServerRuntimeBlock(pe, "mcp__github__listRepos", "", ""); deny {
 		t.Error("unblocked mcp server: deny = true, want false")
 	}
 	// MCP tool for the blocked server.
-	if deny, server, _ := mcpServerRuntimeBlock(pe, "mcp__jira__createIssue", ""); !deny || server != "jira" {
+	if deny, server, _ := mcpServerRuntimeBlock(pe, "mcp__jira__createIssue", "", ""); !deny || server != "jira" {
 		t.Errorf("blocked mcp server: deny=%v server=%q, want deny=true server=jira", deny, server)
+	}
+}
+
+func TestInspectTool_MCPServerBlock_UsesExplicitServerName(t *testing.T) {
+	api, store := toolPolicyAPI(t, "action")
+	pe := enforce.NewPolicyEngine(store)
+	if err := pe.BlockForConnector("mcp", "jira", "codex", "scoped"); err != nil {
+		t.Fatalf("BlockForConnector mcp: %v", err)
+	}
+
+	_, v := postInspect(t, api, `{"tool":"createIssue","mcp_server_name":"jira","connector":"codex","args":{}}`)
+	if v.Action != "block" {
+		t.Errorf("explicit mcp_server_name: action = %q, want block", v.Action)
+	}
+	if !hasFinding(v.Findings, "MCP-BLOCK") {
+		t.Errorf("findings = %v, want MCP-BLOCK", v.Findings)
 	}
 }
 

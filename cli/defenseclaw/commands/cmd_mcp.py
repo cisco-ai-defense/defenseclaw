@@ -899,25 +899,27 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     Bare ``mcp block <name>`` blocks the server GLOBALLY (every connector);
     ``--connector <name>`` narrows the block to one peer.
     """
+    from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
     pe = PolicyEngine(app.store)
+    connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
     # Most-specific-wins guard so we never write a redundant connector row when
     # a global block already covers this peer. The bare path keeps the pre-N2
     # global calls.
-    if connector_flag:
-        if pe.is_blocked_for_connector("mcp", target, connector_flag):
+    if connector:
+        if pe.is_blocked_for_connector("mcp", target, connector):
             if app.store and app.store.has_action(
-                "mcp", target, "install", "block", connector_flag,
+                "mcp", target, "install", "block", connector,
             ):
-                click.echo(f"Already blocked for {connector_flag}: {target}")
+                click.echo(f"Already blocked for {connector}: {target}")
             else:
-                click.echo(f"Already blocked globally (covers {connector_flag}): {target}")
+                click.echo(f"Already blocked globally (covers {connector}): {target}")
             return
         pe.block_for_connector(
-            "mcp", target, connector_flag, reason or "manually blocked via CLI",
+            "mcp", target, connector, reason or "manually blocked via CLI",
         )
-        click.secho(f"Blocked: {target} (connector={connector_flag})", fg="red")
+        click.secho(f"Blocked: {target} (connector={connector})", fg="red")
     else:
         if pe.is_blocked("mcp", target):
             click.echo(f"Already blocked: {target}")
@@ -927,7 +929,7 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
 
     if app.logger:
         app.logger.log_action(
-            "block-mcp", target, f"reason={reason} connector={connector_flag}",
+            "block-mcp", target, f"reason={reason} connector={connector}",
         )
 
 
@@ -946,25 +948,27 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     """Allow an MCP server (by name or URL).
 
     Bare ``mcp allow <name>`` allows the server GLOBALLY (every connector);
-    ``--connector <name>`` narrows the allow to one peer. A global block still
-    wins over a connector-scoped allow.
+    ``--connector <name>`` narrows the allow to one peer. A connector-scoped
+    allow is authoritative for that peer before global fallback applies.
     """
+    from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
     pe = PolicyEngine(app.store)
-    if connector_flag:
-        if pe.is_allowed_for_connector("mcp", target, connector_flag):
+    connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
+    if connector:
+        if pe.is_allowed_for_connector("mcp", target, connector):
             if app.store and app.store.has_action(
-                "mcp", target, "install", "allow", connector_flag,
+                "mcp", target, "install", "allow", connector,
             ):
-                click.echo(f"Already allowed for {connector_flag}: {target}")
+                click.echo(f"Already allowed for {connector}: {target}")
             else:
-                click.echo(f"Already allowed globally (covers {connector_flag}): {target}")
+                click.echo(f"Already allowed globally (covers {connector}): {target}")
             return
         pe.allow_for_connector(
-            "mcp", target, connector_flag, reason or "manually allowed via CLI",
+            "mcp", target, connector, reason or "manually allowed via CLI",
         )
-        click.secho(f"Allowed: {target} (connector={connector_flag})", fg="green")
+        click.secho(f"Allowed: {target} (connector={connector})", fg="green")
     else:
         if pe.is_allowed("mcp", target):
             click.echo(f"Already allowed: {target}")
@@ -974,7 +978,7 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
 
     if app.logger:
         app.logger.log_action(
-            "allow-mcp", target, f"reason={reason} connector={connector_flag}",
+            "allow-mcp", target, f"reason={reason} connector={connector}",
         )
 
 
@@ -1000,18 +1004,20 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
     ``--connector <name>`` clears only that peer's per-connector state (a
     global block stays in force — unblock it without --connector to lift it).
     """
+    from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
     pe = PolicyEngine(app.store)
+    connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
 
     # State check is EXACT-match on the targeted scope (global when no
     # --connector), so a connector-scoped unblock never falsely reports a
     # global block as clearable and remove_action stays exact-match.
-    if connector_flag:
+    if connector:
         has_state = bool(app.store) and (
-            app.store.has_action("mcp", target, "install", "block", connector_flag)
-            or app.store.has_action("mcp", target, "file", "quarantine", connector_flag)
-            or app.store.has_action("mcp", target, "runtime", "disable", connector_flag)
+            app.store.has_action("mcp", target, "install", "block", connector)
+            or app.store.has_action("mcp", target, "file", "quarantine", connector)
+            or app.store.has_action("mcp", target, "runtime", "disable", connector)
         )
     else:
         has_state = (
@@ -1020,15 +1026,15 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
             or app.store.has_action("mcp", target, "runtime", "disable")
         )
     if not has_state:
-        scope = f" for {connector_flag}" if connector_flag else ""
+        scope = f" for {connector}" if connector else ""
         click.echo(f"[mcp] {target!r} has no enforcement state to clear{scope}")
         return
 
-    if connector_flag:
-        pe.remove_action_for_connector("mcp", target, connector_flag)
+    if connector:
+        pe.remove_action_for_connector("mcp", target, connector)
     else:
         pe.remove_action("mcp", target)
-    scope = f" (connector={connector_flag})" if connector_flag else ""
+    scope = f" (connector={connector})" if connector else ""
     click.secho(
         f"[mcp] {target!r} all enforcement state cleared{scope} "
         f"(block/quarantine/disable)",
@@ -1040,7 +1046,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
 
     if app.logger:
         app.logger.log_action(
-            "mcp-unblock", target, f"manual unblock via CLI connector={connector_flag}",
+            "mcp-unblock", target, f"manual unblock via CLI connector={connector}",
         )
 
 
@@ -1117,10 +1123,11 @@ def _unset_mcp_via_connector(cfg, name: str, connector: str | None = None) -> No
 # ---------------------------------------------------------------------------
 # opencode write gate (M5) — opencode EXECUTES the command[] it stores in
 # opencode.json, so a `mcp set --connector opencode` write needs input
-# validation ON TOP OF admission: sanitise the server name + command and warn
-# when the command resolves outside a trusted install prefix. Scoped to
-# opencode because it is the connector that runs an argv DefenseClaw writes
-# into a config file from the CLI (other connectors are owned by their lanes).
+# validation ON TOP OF admission: sanitise the server name + command and block
+# commands outside trusted install prefixes unless the operator explicitly
+# forces the write. Scoped to opencode because it is the connector that runs an
+# argv DefenseClaw writes into a config file from the CLI (other connectors are
+# owned by their lanes).
 # ---------------------------------------------------------------------------
 
 # The name becomes a JSON key under opencode's top-level ``mcp`` map pointing
@@ -1151,37 +1158,33 @@ def _validate_opencode_write(name: str, cmd: str, url: str) -> str | None:
     return None
 
 
-def _warn_untrusted_opencode_command(cmd: str) -> None:
-    """Warn (non-blocking) when an opencode command resolves outside a trusted
-    install prefix — opencode will execute it.
+def _opencode_command_trust_error(cmd: str) -> str | None:
+    """Return a refusal reason when an opencode command is not trusted.
 
-    Per the locked decision this is a WARNING, not a block: typical MCP
-    commands (npx/uvx/node via Homebrew/nvm/pyenv) legitimately resolve outside
-    the default trusted prefixes, so a hard block would refuse normal servers.
-    Operators who want to silence it extend ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``.
     Reuses the SAME allow-list the passive discovery exec-gate uses so the trust
-    rule can't drift.
+    rule can't drift. Operators with a bespoke install can either add the
+    directory to ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` or pass
+    ``--force-untrusted-command`` on this one write.
     """
     c = (cmd or "").strip()
     if not c:
-        return
+        return None
     # ``_is_trusted_binary_path`` needs an absolute path; resolve a bare
     # command via PATH the way opencode would at launch.
     from defenseclaw.inventory.agent_discovery import _is_trusted_binary_path
 
     resolved = c if os.path.isabs(c) else shutil.which(c)
     if resolved is None:
-        ux.warn(
+        return (
             f"opencode command {c!r} was not found on PATH — opencode will fail "
-            "to launch this server until it is installed/resolvable."
+            "to launch this server until it is installed/resolvable"
         )
-        return
     if not _is_trusted_binary_path(resolved):
-        ux.warn(
+        return (
             f"opencode will EXECUTE {c!r} (resolved {resolved!r}), which is not "
-            "in a trusted install prefix. Proceeding — extend "
-            "DEFENSECLAW_TRUSTED_BIN_PREFIXES to trust this location."
+            "in a trusted install prefix"
         )
+    return None
 
 
 @mcp.command("set")
@@ -1192,6 +1195,11 @@ def _warn_untrusted_opencode_command(cmd: str) -> None:
 @click.option("--transport", default="", help="Transport type (stdio, sse)")
 @click.option("--env", "env_pairs", multiple=True, help="Env vars as KEY=VAL (repeatable)")
 @click.option("--skip-scan", is_flag=True, help="Skip security scan before adding")
+@click.option(
+    "--force-untrusted-command",
+    is_flag=True,
+    help="For opencode only: write a command outside trusted install prefixes.",
+)
 @click.option(
     "--connector", "connector_flag", default="",
     help="Scope to one connector's MCP config (default: every active connector)",
@@ -1206,6 +1214,7 @@ def set_server(
     transport: str,
     env_pairs: tuple[str, ...],
     skip_scan: bool,
+    force_untrusted_command: bool,
     connector_flag: str,
 ) -> None:
     """Add or update an MCP server in the active connector(s)' MCP config.
@@ -1338,16 +1347,32 @@ def set_server(
             policy_blocked.append(c)
             continue
         # M5 security gate (opencode only): opencode EXECUTES the command[] it
-        # stores, so validate/sanitise the server name + command and warn on an
-        # untrusted command prefix before writing. Admission already ran above;
-        # an invalid input refuses just this connector (the fan-out continues).
+        # stores, so validate/sanitise the server name + command and block an
+        # untrusted command prefix unless the operator forces the write.
+        # Admission already ran above; invalid input refuses just this
+        # connector (the fan-out continues).
         if connector_paths.normalize(c) == "opencode":
             gate_err = _validate_opencode_write(name, cmd, url)
             if gate_err:
                 click.secho(f"  refused [{c}]: {gate_err}", fg="red")
                 invalid_input.append(c)
                 continue
-            _warn_untrusted_opencode_command(cmd)
+            trust_err = _opencode_command_trust_error(cmd)
+            if trust_err:
+                if force_untrusted_command:
+                    ux.warn(
+                        f"{trust_err}. Proceeding because "
+                        "--force-untrusted-command was supplied."
+                    )
+                else:
+                    click.secho(
+                        f"  refused [{c}]: {trust_err}. Add the directory to "
+                        "DEFENSECLAW_TRUSTED_BIN_PREFIXES or re-run with "
+                        "--force-untrusted-command.",
+                        fg="red",
+                    )
+                    invalid_input.append(c)
+                    continue
         allow_record = False
         if pre_c.verdict == "allowed":
             note = (

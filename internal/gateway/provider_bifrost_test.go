@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func TestBifrostProvider_Creation(t *testing.T) {
@@ -117,7 +119,7 @@ func TestBifrostProvider_ABSKKeyDetection(t *testing.T) {
 func TestBifrostProvider_NewTenantAccount(t *testing.T) {
 	provKey := schemas.ModelProvider("test-provider")
 	keyID := bifrostKeyID(provKey, "test-key-123")
-	acc := newTenantAccount(provKey, "test-key-123", keyID, "", tlsOverrides{}, nil, nil, nil, nil)
+	acc := newTenantAccount(provKey, "test-key-123", keyID, "", "", tlsOverrides{}, nil, nil, nil, nil)
 
 	if len(acc.keys) != 1 {
 		t.Fatalf("expected 1 key, got %d", len(acc.keys))
@@ -150,7 +152,7 @@ func TestBifrostProvider_NewTenantAccount(t *testing.T) {
 
 func TestBifrostProvider_NewTenantAccountBedrockABSK(t *testing.T) {
 	keyID := bifrostKeyID(schemas.Bedrock, "ABSKtest123")
-	acc := newTenantAccount(schemas.Bedrock, "ABSKtest123", keyID, "", tlsOverrides{}, nil, nil, nil, nil)
+	acc := newTenantAccount(schemas.Bedrock, "ABSKtest123", keyID, "", "", tlsOverrides{}, nil, nil, nil, nil)
 
 	if len(acc.keys) != 1 {
 		t.Fatalf("expected 1 key, got %d", len(acc.keys))
@@ -164,9 +166,124 @@ func TestBifrostProvider_NewTenantAccountBedrockABSK(t *testing.T) {
 	}
 }
 
+func TestBifrostProvider_BedrockDeploymentAliases(t *testing.T) {
+	target := "anthropic.claude-3-haiku-20240307-v1:0"
+	keyID := bifrostKeyID(schemas.Bedrock, "bedrock-key")
+	acc := newTenantAccount(
+		schemas.Bedrock,
+		"bedrock-key",
+		keyID,
+		"",
+		"fast",
+		tlsOverrides{},
+		&config.BedrockKeyConfig{
+			DeploymentAliases: map[string]string{"fast": target},
+		},
+		nil,
+		nil,
+		nil,
+	)
+
+	alias := acc.keys[0].Aliases.ResolveConfig("fast")
+	if alias == nil {
+		t.Fatal("expected bedrock deployment alias")
+	}
+	if alias.ModelID != target {
+		t.Errorf("bedrock alias ModelID = %q, want %q", alias.ModelID, target)
+	}
+	if got := acc.keys[0].Aliases.Resolve("fast"); got != target {
+		t.Errorf("bedrock alias Resolve = %q, want %q", got, target)
+	}
+}
+
+func TestBifrostProvider_AzureDeploymentAliasesCarryAPIVersion(t *testing.T) {
+	keyID := bifrostKeyID(schemas.Azure, "azure-key")
+	acc := newTenantAccount(
+		schemas.Azure,
+		"azure-key",
+		keyID,
+		"",
+		"fast",
+		tlsOverrides{},
+		nil,
+		nil,
+		&config.AzureKeyConfig{
+			Endpoint:          "https://azure.example",
+			APIVersion:        "2024-08-01-preview",
+			DeploymentAliases: map[string]string{"fast": "gpt-4o-prod"},
+		},
+		nil,
+	)
+
+	alias := acc.keys[0].Aliases.ResolveConfig("fast")
+	if alias == nil {
+		t.Fatal("expected azure deployment alias")
+	}
+	if alias.ModelID != "gpt-4o-prod" {
+		t.Errorf("azure alias ModelID = %q, want gpt-4o-prod", alias.ModelID)
+	}
+	if alias.AzureAliasCfg == nil || alias.AzureAliasCfg.APIVersion == nil || *alias.AzureAliasCfg.APIVersion != "2024-08-01-preview" {
+		t.Fatalf("azure alias api_version not propagated: %+v", alias.AzureAliasCfg)
+	}
+}
+
+func TestBifrostProvider_AzureAPIVersionSeedsIdentityAlias(t *testing.T) {
+	keyID := bifrostKeyID(schemas.Azure, "azure-key")
+	acc := newTenantAccount(
+		schemas.Azure,
+		"azure-key",
+		keyID,
+		"",
+		"gpt-4o",
+		tlsOverrides{},
+		nil,
+		nil,
+		&config.AzureKeyConfig{
+			Endpoint:   "https://azure.example",
+			APIVersion: "2024-08-01-preview",
+		},
+		nil,
+	)
+
+	alias := acc.keys[0].Aliases.ResolveConfig("gpt-4o")
+	if alias == nil {
+		t.Fatal("expected azure identity alias for api_version")
+	}
+	if alias.ModelID != "gpt-4o" {
+		t.Errorf("identity alias ModelID = %q, want gpt-4o", alias.ModelID)
+	}
+	if alias.AzureAliasCfg == nil || alias.AzureAliasCfg.APIVersion == nil || *alias.AzureAliasCfg.APIVersion != "2024-08-01-preview" {
+		t.Fatalf("identity alias api_version not propagated: %+v", alias.AzureAliasCfg)
+	}
+}
+
+func TestAzureAPIVersionIdentityAliasID(t *testing.T) {
+	azure := &config.AzureKeyConfig{
+		APIVersion:        "2024-08-01-preview",
+		DeploymentAliases: map[string]string{"fast": "gpt-4o-prod"},
+	}
+	if got := azureAPIVersionIdentityAliasID(schemas.Azure, "fast", azure); got != "" {
+		t.Errorf("covered deployment alias should not need identity alias id, got %q", got)
+	}
+	first := azureAPIVersionIdentityAliasID(schemas.Azure, "gpt-4o", azure)
+	if first == "" {
+		t.Fatal("direct Azure model with api_version should need identity alias id")
+	}
+	second := azureAPIVersionIdentityAliasID(schemas.Azure, "gpt-4.1", azure)
+	if second == "" || second == first {
+		t.Fatalf("different direct models should get distinct identity alias ids: first=%q second=%q", first, second)
+	}
+	if got := azureAPIVersionIdentityAliasID(schemas.OpenAI, "gpt-4o", azure); got != "" {
+		t.Errorf("non-Azure provider should not need identity alias id, got %q", got)
+	}
+	if got := azureAPIVersionIdentityAliasID(schemas.Azure, "gpt-4o", &config.AzureKeyConfig{}); got != "" {
+		t.Errorf("Azure without api_version should not need identity alias id, got %q", got)
+	}
+}
+
 func TestBifrostProvider_NewTenantAccountVLLM(t *testing.T) {
 	keyID := bifrostKeyID(schemas.VLLM, "demo")
-	acc := newTenantAccount(schemas.VLLM, "demo", keyID, "http://localhost:30080/v1", tlsOverrides{}, nil, nil, nil, nil)
+	acc := newTenantAccount(schemas.VLLM, "demo", keyID, "http://localhost:30080/v1", "", tlsOverrides{}, nil, nil, nil, nil)
 
 	if len(acc.keys) != 1 {
 		t.Fatalf("expected 1 key, got %d", len(acc.keys))
@@ -594,8 +711,8 @@ func TestBifrostProvider_TenantIsolation(t *testing.T) {
 
 	// Each tuple builds an independent, immutable Account. Mutating one's
 	// input arguments can't affect another's cached state.
-	a1 := newTenantAccount(provKey, "key-1", k1, "", tlsOverrides{}, nil, nil, nil, nil)
-	a2 := newTenantAccount(provKey, "key-2", k2, "", tlsOverrides{}, nil, nil, nil, nil)
+	a1 := newTenantAccount(provKey, "key-1", k1, "", "", tlsOverrides{}, nil, nil, nil, nil)
+	a2 := newTenantAccount(provKey, "key-2", k2, "", "", tlsOverrides{}, nil, nil, nil, nil)
 	if a1 == a2 {
 		t.Fatal("newTenantAccount must return distinct instances for distinct tenants")
 	}
@@ -604,7 +721,7 @@ func TestBifrostProvider_TenantIsolation(t *testing.T) {
 	}
 
 	// BaseURL variation must flow into NetworkConfig.
-	aURL := newTenantAccount(provKey, "key-1", k1, "http://custom:8080", tlsOverrides{}, nil, nil, nil, nil)
+	aURL := newTenantAccount(provKey, "key-1", k1, "http://custom:8080", "", tlsOverrides{}, nil, nil, nil, nil)
 	if aURL.config.NetworkConfig.BaseURL != "http://custom:8080" {
 		t.Errorf("baseURL = %q, want http://custom:8080", aURL.config.NetworkConfig.BaseURL)
 	}

@@ -150,7 +150,7 @@ def tool() -> None:
 
     \b
     Runtime resolution (request connector C, tool T):
-      block @C/T → block T → allow @C/T → allow T → scan
+      block @C/T → allow @C/T → block T → allow T → scan
     An allow skips rule/pattern/judge scanning, but WRITE tools still run
     CodeGuard.
 
@@ -585,7 +585,7 @@ def status(app: AppContext, name: str, connector: str, source: str, as_json: boo
     """Show the block/allow status of a tool.
 
     The "Effective" line mirrors the gateway's real resolution order
-    (connector-scoped → global; block wins over allow; allow skips the scan
+    (connector-scoped action first, then global fallback; allow skips the scan
     gate but write tools still run CodeGuard). A --source row is audit-only and
     never decides the effective verdict.
 
@@ -687,10 +687,10 @@ def status(app: AppContext, name: str, connector: str, source: str, as_json: boo
 def _tool_effective_entry(connector_entry, global_entry) -> tuple[str, str, object | None]:
     if connector_entry and connector_entry.actions.install == "block":
         return "block", "connector", connector_entry
-    if global_entry and global_entry.actions.install == "block":
-        return "block", "global", global_entry
     if connector_entry and connector_entry.actions.install == "allow":
         return "allow", "connector", connector_entry
+    if global_entry and global_entry.actions.install == "block":
+        return "block", "global", global_entry
     if global_entry and global_entry.actions.install == "allow":
         return "allow", "global", global_entry
     return "none", "-", None
@@ -757,20 +757,20 @@ def _overall_effective_status(statuses: list[str]) -> str:
 def _effective_status(connector_entry, global_entry) -> str:
     """Return the effective install action, mirroring the gateway runtime order:
 
-        block @C/T → block T → allow @C/T → allow T → none
+        block @C/T → allow @C/T → block T → allow T → none
 
-    Block wins over allow, and a connector-scoped entry wins over global within
-    each verb. Source scoping does NOT participate: the runtime payload carries
-    no source, so a source-scoped row never decides the effective verdict (a
+    A connector-scoped entry wins over global. Source scoping does NOT
+    participate: the runtime payload carries no source, so a source-scoped row
+    never decides the effective verdict (a
     ``block --source`` already fail-closed to a global block, counted here via
     the global entry).
     """
     if connector_entry and connector_entry.actions.install == "block":
         return "block"
-    if global_entry and global_entry.actions.install == "block":
-        return "block"
     if connector_entry and connector_entry.actions.install == "allow":
         return "allow"
+    if global_entry and global_entry.actions.install == "block":
+        return "block"
     if global_entry and global_entry.actions.install == "allow":
         return "allow"
     return "none"

@@ -62,7 +62,7 @@ When the gateway is unreachable, the bridge honors the configured fail mode: `FA
   </Folder>
 </Files>
 
-DefenseClaw v1 governs opencode tool execution via the bridge plugin only. opencode's MCP servers and provider config live in `opencode.json`, which DefenseClaw does not manage in v1, so MCP / skills / rules / plugins / agents surfaces are treated as unsupported and their panels are hidden while `claw.mode=opencode`.
+DefenseClaw v1 governs opencode tool execution via the bridge plugin. opencode's MCP servers live in `opencode.json`; `defenseclaw mcp list/set/unset --connector opencode` reads and updates the top-level `mcp` map. For local MCP servers, `mcp set` refuses commands outside trusted install prefixes unless you add the directory to `DEFENSECLAW_TRUSTED_BIN_PREFIXES` or pass `--force-untrusted-command` for that one write, because OpenCode will execute the stored command. Skills / rules / plugins / agents surfaces remain unsupported and their panels are hidden while `claw.mode=opencode`.
 
 ## Hook capabilities
 

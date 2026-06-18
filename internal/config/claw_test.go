@@ -674,6 +674,10 @@ func TestHasConnectorConfigured(t *testing.T) {
 	if whitespace.HasConnectorConfigured() {
 		t.Error("whitespace-only connector must be treated as unset")
 	}
+	whitespace.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"   ": {}}
+	if whitespace.HasConnectorConfigured() {
+		t.Error("whitespace-only connector map key must be treated as unset")
+	}
 
 	multi := &Config{}
 	multi.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {}}

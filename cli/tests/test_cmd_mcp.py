@@ -148,6 +148,30 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         # Bare/global check is untouched — no global row was written.
         self.assertFalse(pe.is_blocked("mcp", "http://demo.example.com"))
 
+    def test_block_connector_alias_writes_canonical_connector(self):
+        result = self.invoke(["block", "jira", "--connector", "claude-code"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=claudecode", result.output)
+        self.assertTrue(
+            self.app.store.has_action("mcp", "jira", "install", "block", "claudecode")
+        )
+        self.assertFalse(
+            self.app.store.has_action("mcp", "jira", "install", "block", "claude-code")
+        )
+
+    def test_connector_mutators_reject_unknown_without_policy_row(self):
+        for args in (
+            ["block", "jira", "--connector", "nope"],
+            ["allow", "jira", "--connector", "nope"],
+            ["unblock", "jira", "--connector", "nope"],
+        ):
+            with self.subTest(args=args):
+                result = self.invoke(args)
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertIn("not configured", result.output)
+
+        self.assertIsNone(self.app.store.get_action("mcp", "jira", "nope"))
+
     def test_global_block_applies_to_every_connector(self):
         result = self.invoke(["block", "http://demo.example.com"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -794,8 +818,9 @@ class TestMCPScan(MCPCommandTestBase):
 
 class TestMCPSetOpencodeGate(MCPCommandTestBase):
     """M5: `mcp set --connector opencode` writes an executable opencode RUNS,
-    so the CLI validates/sanitises the server name + command and warns on an
-    untrusted command prefix — on TOP of admission, scoped to opencode."""
+    so the CLI validates/sanitises the server name + command and blocks an
+    untrusted command prefix unless explicitly forced — on TOP of admission,
+    scoped to opencode."""
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     def test_opencode_rejects_bad_server_name(self, mock_set):
@@ -824,17 +849,34 @@ class TestMCPSetOpencodeGate(MCPCommandTestBase):
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.commands.cmd_mcp.shutil.which", return_value="/tmp/untrusted/npx")
     @patch("defenseclaw.inventory.agent_discovery._is_trusted_binary_path", return_value=False)
-    def test_opencode_warns_on_untrusted_command_but_writes(self, _trust, _which, mock_set):
-        # Locked decision: trusted-prefix is a WARNING, not a block — the write
-        # still happens so npx/uvx-style servers aren't refused.
+    def test_opencode_blocks_untrusted_command_by_default(self, _trust, _which, mock_set):
         self.app.cfg.active_connectors = lambda: ["opencode"]  # type: ignore[method-assign]
 
         result = self.invoke(
             ["set", "demo", "--command", "npx", "--connector", "opencode", "--skip-scan"]
         )
 
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not in a trusted install prefix", result.output)
+        self.assertIn("--force-untrusted-command", result.output)
+        mock_set.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.commands.cmd_mcp.shutil.which", return_value="/tmp/untrusted/npx")
+    @patch("defenseclaw.inventory.agent_discovery._is_trusted_binary_path", return_value=False)
+    def test_opencode_force_untrusted_command_warns_and_writes(self, _trust, _which, mock_set):
+        self.app.cfg.active_connectors = lambda: ["opencode"]  # type: ignore[method-assign]
+
+        result = self.invoke(
+            [
+                "set", "demo", "--command", "npx", "--connector", "opencode",
+                "--skip-scan", "--force-untrusted-command",
+            ]
+        )
+
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("not in a trusted install prefix", result.output)
+        self.assertIn("--force-untrusted-command was supplied", result.output)
         self.assertEqual(mock_set.call_args.kwargs.get("connector"), "opencode")
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")

@@ -392,7 +392,8 @@
       },
       "targets": [
         {
-          "expr": "topk(1, sum by (audit_target) (count_over_time({service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\" [$__range])))",
+          "expr": "topk(1, sum by (scan_finding_target) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"scan_finding\" | json | scan_finding_target!=\"\" | scan_finding_scanner=~\"$scanner\" | scan_finding_rule_id=~\"$rule_id\" | scan_finding_severity=~\"$severity\" | gen_ai_agent_name=~\"$connector\" [1h])))",
+          "legendFormat": "{{scan_finding_target}}",
           "refId": "A",
           "instant": true
         }
@@ -401,11 +402,10 @@
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ],
-          "fields": "/^target$/"
+          ]
         },
         "colorMode": "value",
-        "textMode": "value"
+        "textMode": "name"
       }
     },
     {
@@ -617,7 +617,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, max by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[24h]) > 0)))",
+          "expr": "1000 * topk(20, max by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[24h]) > 0)))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -635,7 +635,7 @@
               "service_namespace": true
             },
             "renameByName": {
-              "Value": "last seen (epoch)"
+              "Value": "last seen"
             }
           }
         }
@@ -645,7 +645,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "last seen (epoch)"
+              "options": "last seen"
             },
             "properties": [
               {
@@ -673,7 +673,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, min by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[24h]) > 0)))",
+          "expr": "1000 * topk(20, min by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[24h]) > 0)))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -691,7 +691,7 @@
               "service_namespace": true
             },
             "renameByName": {
-              "Value": "first seen (epoch)"
+              "Value": "first seen"
             }
           }
         }
@@ -701,7 +701,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "first seen (epoch)"
+              "options": "first seen"
             },
             "properties": [
               {
@@ -740,7 +740,7 @@
       },
       "targets": [
         {
-          "expr": "topk(15, sum by (audit_target) (count_over_time({service_name=\"defenseclaw-audit\"} | audit_connector=~\"$connector\" [$__range])))",
+          "expr": "topk(15, sum by (scan_finding_target) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"scan_finding\" | json | scan_finding_target!=\"\" | scan_finding_scanner=~\"$scanner\" | scan_finding_rule_id=~\"$rule_id\" | scan_finding_severity=~\"$severity\" | gen_ai_agent_name=~\"$connector\" [1h])))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -748,6 +748,20 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value": "findings/1h",
+              "scan_finding_target": "target"
+            }
+          }
         }
       ],
       "options": {

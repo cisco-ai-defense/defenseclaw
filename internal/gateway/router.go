@@ -1194,7 +1194,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		// --connector scoped) denies all of its tools at runtime. Checked
 		// before the per-tool block/allow so a server-level block wins over a
 		// tool-level allow; fails closed + loud on a store lookup error.
-		if deny, server, reason := mcpServerRuntimeBlock(r.policy, payload.Tool, conn); deny {
+		if deny, server, reason := mcpServerRuntimeBlock(r.policy, payload.Tool, conn, ""); deny {
 			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED mcp tool call: %s\n", reason)
 			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-blocked", payload.Tool, payload.ID,
 				"reason=mcp-server-block server="+server)
@@ -1211,7 +1211,25 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			}
 			return
 		}
-		if blocked, _ := r.policy.IsToolBlockedForConnector(payload.Tool, conn); blocked {
+		blocked, err := r.policy.IsToolBlockedForConnector(payload.Tool, conn)
+		if err != nil {
+			reason := logToolPolicyLookupError("sidecar", "block-list", payload.Tool, conn, err)
+			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-blocked", payload.Tool, payload.ID,
+				"reason=tool-policy-lookup-error check=block-list")
+			vctx := r.streamContext(payload.SessionID, audit.CorrelationEnvelope{
+				DestinationApp: "builtin",
+				ToolName:       payload.Tool,
+				ToolID:         payload.ID,
+			})
+			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
+				"block", reason,
+				gatewaylog.SeverityHigh, []string{"policy:error", "surface:tool_call", toolPolicyLookupErrorFinding}, 0)
+			if r.otel != nil {
+				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
+			}
+			return
+		}
+		if blocked {
 			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED tool call: %q is on the static block list\n", payload.Tool)
 			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-blocked", payload.Tool, payload.ID, "reason=static-block-list")
 			vctx := r.streamContext(payload.SessionID, audit.CorrelationEnvelope{
@@ -1230,7 +1248,25 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		// An explicit allow skips the scan gate: no rule scan, no judge. This
 		// lane runs no CodeGuard, so the allow is a full bypass here — the
 		// CodeGuard-on-write guarantee (D2) lives on the hook/inspect lane.
-		if allowed, _ := r.policy.IsToolAllowedForConnector(payload.Tool, conn); allowed {
+		allowed, err := r.policy.IsToolAllowedForConnector(payload.Tool, conn)
+		if err != nil {
+			reason := logToolPolicyLookupError("sidecar", "allow-list", payload.Tool, conn, err)
+			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-blocked", payload.Tool, payload.ID,
+				"reason=tool-policy-lookup-error check=allow-list")
+			vctx := r.streamContext(payload.SessionID, audit.CorrelationEnvelope{
+				DestinationApp: "builtin",
+				ToolName:       payload.Tool,
+				ToolID:         payload.ID,
+			})
+			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
+				"block", reason,
+				gatewaylog.SeverityHigh, []string{"policy:error", "surface:tool_call", toolPolicyLookupErrorFinding}, 0)
+			if r.otel != nil {
+				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
+			}
+			return
+		}
+		if allowed {
 			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-allowed", payload.Tool, payload.ID, "reason=allow-list")
 			if r.otel != nil {
 				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "allow", "NONE")

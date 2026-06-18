@@ -5534,11 +5534,12 @@ def _remove_connector(
     if not requested:
         click.echo("  ✗ No connector specified.", err=True)
         return False
+    requested_norm = normalize_connector(requested)
 
     configured = _configured_connector_set(gc)
-    # Match case-insensitively against the configured names so operators
-    # can type `Codex` or `codex` interchangeably.
-    match = next((c for c in configured if c.lower() == requested.lower()), None)
+    # Match against canonical aliases so operators can type `Codex`,
+    # `claude-code`, or `open-hands` interchangeably.
+    match = next((c for c in configured if normalize_connector(c) == requested_norm), None)
     if match is None:
         configured_label = ", ".join(configured) if configured else "(none configured)"
         click.echo(

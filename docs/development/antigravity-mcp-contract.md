@@ -89,31 +89,10 @@ Remote schema contract:
 
 DefenseClaw should read both `serverUrl` and `url`, preserve unknown fields, and write `serverUrl` for new or migrated remote entries.
 
-## Session Assignments
+## Implemented PR #365 Decisions
 
-Session B should handle the hook/capability cleanup:
-
-- Keep Antigravity hook installation global-only at `~/.gemini/config/hooks.json`.
-- Preserve `PreToolUse` as the only empirically verified ask/block event.
-- Add workspace/plugin hook paths as discovery-only, not write targets.
-- Remove or demote stale canonical mentions of `~/.gemini/antigravity-cli/hooks.json` and `.antigravitycli/hooks.json`.
-
-Session D should implement MCP support:
-
-- Add Antigravity MCP read/write support for `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json`.
-- Support local `command`/`args`/`env`/`cwd` and remote `serverUrl`/`url`/`headers`/`authProviderType`/`oauth`.
-- Canonically write `serverUrl`; read `url` for compatibility.
-- Preserve unknown fields and avoid logging secret-bearing `env` or `headers` values.
-
-Session E should implement local surface capabilities:
-
-- Mark Antigravity MCP as read/write and required.
-- Mark Antigravity skills as read/write for AgentSkills folder form, with CLI direct-`.md` skill files as discovery-only.
-- Mark rules, workflows, plugins, and plugin-contained agents as discovery-only or unsupported exactly as listed in the table above.
-- Update connector inventory/matrix entries from contract-only/stale paths to this contract without adding unsupported write behavior.
-
-## Maintainer Questions
-
-1. Should DefenseClaw expose Antigravity global skills writes to `~/.gemini/config/skills/`, or keep writes workspace-only for PR #365?
-2. Should direct CLI skill markdown files under `~/.gemini/antigravity-cli/skills/` become write targets, or remain discovery-only until Google reconciles the skill-shape conflict?
-3. Does the maintainer want plugin install/disable support through `agy plugin`, or should Antigravity plugins remain scan/discovery-only for this PR?
+- DefenseClaw writes Antigravity hooks only to `~/.gemini/config/hooks.json`. Workspace and plugin hook files are discovery-only so agy's multi-file merge cannot duplicate DefenseClaw hook firings.
+- `PreToolUse` remains the only empirically verified ask/block event in agy v1.0.x. Other lifecycle events are registered according to the Antigravity 2.0 contract and handled when upstream starts emitting them.
+- MCP read/write support uses `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json`; plugin MCP configs are discovery-only. DefenseClaw writes `serverUrl` for remote entries, reads `url` for compatibility, preserves unknown fields, and does not log secret-bearing `env` or `headers` values.
+- AgentSkills folder form is read/write at `~/.gemini/config/skills/<skill>/SKILL.md` and `<workspace>/.agents/skills/<skill>/SKILL.md`. CLI direct markdown skills under `~/.gemini/antigravity-cli/skills/` remain discovery-only because they use a different shape.
+- Rules, workflows, plugins, and plugin-contained agents remain discovery/scan only as listed in the contract table. DefenseClaw does not install or disable Antigravity plugins in PR #365.

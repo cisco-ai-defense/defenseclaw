@@ -59,6 +59,8 @@ All five run under one Compose project (`defenseclaw-local-observability`). They
   </Step>
 </Steps>
 
+`up` also refreshes the host-mounted stack copy in `~/.defenseclaw/observability-stack/` from the bundled version before Compose starts. That includes Grafana dashboards, Prometheus rules, Loki, Tempo, and OTel Collector config. Deleting Docker containers is not enough to update those files because they live on the host; pass `--no-refresh-config` only when you intentionally want to keep local edits.
+
 ## Useful flags
 
 The `up` subcommand exposes the bridge configuration directly:
@@ -79,6 +81,7 @@ defenseclaw setup local-observability up \
 | `--service-name` | Resource attribute set on every emitted span. Defaults to `defenseclaw`. |
 | `--with-audit-sink` / `--no-audit-sink` | Also (or don't) add an `audit_sinks: otlp_logs` entry so audit events flow as OTel logs. Default is on. |
 | `--no-config` | Bring containers up but do **not** modify `config.yaml`. Useful when you manage gateway config out-of-band. |
+| `--refresh-config` / `--no-refresh-config` | Refresh bundled Grafana dashboards, Prometheus rules, Loki, Tempo, and OTel Collector config by default; opt out to preserve local edits. |
 | `--no-wait` | Don't block on healthchecks — fire-and-forget. |
 | `--timeout` | Seconds to wait for healthchecks. Default 180. |
 
@@ -196,7 +199,7 @@ See [Splunk integration](/docs/observability/splunk) for the dashboards we ship 
 
 <Accordions>
   <Accordion title="Grafana shows no data">
-    Send a synthetic event with `defenseclaw setup observability test`, then check the collector logs (`defenseclaw setup local-observability logs --service otel-collector --follow`). Most "no data" issues are the collector not being reachable from the gateway, not a Grafana problem.
+    Run `defenseclaw setup local-observability up` again so the host-mounted dashboards and collector config are refreshed from the bundle, then send a synthetic event with `defenseclaw setup observability test` and check the collector logs (`defenseclaw setup local-observability logs --service otel-collector --follow`). Most remaining "no data" issues are the collector not being reachable from the gateway, not a Grafana problem.
   </Accordion>
   <Accordion title="Port already in use">
     Grafana 3000, Loki 3100, Tempo 3200, OTLP 4317/4318, Prometheus 9090. The bundled compose file pins these ports; the `up` preflight refuses to launch if a non-stack process is bound to one of them. Free the conflicting port (or stop the foreign container shown in the preflight warning) and re-run `up`. There is no `--port-shift` flag — edit `bundles/local_observability_stack/docker-compose.yml` if you need to relocate a port permanently.

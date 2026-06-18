@@ -1328,6 +1328,10 @@ func resolveActiveConnector(reg *connector.Registry, name, surface string) (conn
 
 // runGuardrail starts the Go guardrail proxy when guardrail is enabled.
 func (s *Sidecar) runGuardrail(ctx context.Context) error {
+	if s.cfg == nil || !s.cfg.HasConnectorConfigured() {
+		return s.waitForConnectorSetup(ctx)
+	}
+
 	// Reuse the rule pack already loaded by NewSidecar and stored on the
 	// router, avoiding a redundant disk/embed read and potential drift.
 	rp := s.router.rp
@@ -1367,6 +1371,15 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// somehow not blocking anything" sidecar.
 		return err
 	}
+	rp = guardrail.LoadRulePack(s.cfg.Guardrail.EffectiveRulePackDir(conn.Name()))
+	rp.Validate()
+	fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded for %s: %s\n", conn.Name(), rp)
+	if s.router != nil {
+		s.router.SetRulePack(rp)
+	}
+	ApplyRulePackOverrides(rp)
+	ApplyConnectorRulePackOverrides(conn.Name(), rp)
+	ApplyLocalPatternsOverride(rp.LocalPatterns)
 	proxyAddr := guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host)
 	apiBind := "127.0.0.1"
 	if s.cfg.Gateway.APIBind != "" {
@@ -1606,6 +1619,18 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	return proxy.Run(ctx)
 }
 
+func (s *Sidecar) waitForConnectorSetup(ctx context.Context) error {
+	details := map[string]interface{}{
+		"summary": "no connector configured; run defenseclaw setup for a connector",
+	}
+	if s.health != nil {
+		s.health.SetGuardrail(StateDisabled, "no connector configured", details)
+	}
+	fmt.Fprintln(os.Stderr, "[guardrail] no connector configured; guardrail connector boot is idle until setup runs")
+	<-ctx.Done()
+	return nil
+}
+
 // runGuardrailMulti is the multi-connector boot loop. It activates ONLY when
 // the operator configured more than one connector (guardrail.connectors has
 // >1 entry); the guarded dispatch in Run() keeps every single-connector
@@ -1637,6 +1662,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 // hook lane (the only lane active in multi) uses the per-connector rule sets
 // described above.
 func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
+	if s.cfg == nil || !s.cfg.HasConnectorConfigured() {
+		return s.waitForConnectorSetup(ctx)
+	}
+
 	// Reuse the primary rule pack already loaded by NewSidecar (it drives
 	// the process-global scanner overrides). The per-connector packs below
 	// are loaded separately via the cache.
@@ -1880,7 +1909,9 @@ func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector
 	for _, conn := range conns {
 		opts := s.connectorSetupOpts(conn, apiToken, proxyAddr, apiAddr)
 		if err := s.setupOneConnector(ctx, conn, opts, masterKey, cache); err != nil {
-			// Isolate: log, leave the other connectors untouched, continue.
+			// Isolate: roll back this connector's partial state, log, leave
+			// the other connectors untouched, continue.
+			recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", conn.Name(), err)
 			continue
 		}

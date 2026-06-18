@@ -69,12 +69,17 @@ type bifrostProvider struct {
 // Vertex project, Azure endpoint, deployment aliases, ...) so two
 // instances differing only in region or auth mode never share a
 // Bifrost client and never confuse their dispatch routing.
+//
+// aliasID is set only when the Bifrost v1.5.21 rich-alias API needs
+// a per-model identity alias to preserve DefenseClaw's Azure api_version
+// behavior for models that are not already covered by deployment_aliases.
 type tenantKey struct {
 	provider schemas.ModelProvider
 	keyID    string // sha256 of apiKey — the raw key is never in the map key.
 	baseURL  string
 	tlsID    string // sha256 of tls posture; empty when no per-instance TLS overrides.
 	subID    string // sha256 of per-provider sub-block; empty when none set.
+	aliasID  string // current model only when a per-model identity alias is needed.
 }
 
 // tlsOverrides bundles the per-instance TLS knobs from a custom-providers
@@ -129,11 +134,11 @@ var (
 
 // tenantKeyString gives evictOldestBifrostTenantLocked a deterministic
 // tie-break order. We do NOT include the raw apiKey here — keyID is
-// already a sha256 of apiKey (see bifrostKeyID). Provider name +
-// baseURL + keyID is plenty for stable lexicographic ordering and
-// contains no secrets.
+// already a sha256 of apiKey (see bifrostKeyID). The remaining fields
+// are endpoint, TLS, provider sub-block, and optional model-alias posture;
+// none contain raw credentials.
 func tenantKeyString(k tenantKey) string {
-	return string(k.provider) + "|" + k.baseURL + "|" + k.keyID
+	return string(k.provider) + "|" + k.baseURL + "|" + k.keyID + "|" + k.tlsID + "|" + k.subID + "|" + k.aliasID
 }
 
 // evictOldestBifrostTenantLocked drops the LRU tenant client. Caller
@@ -261,6 +266,7 @@ func applyAWSProfile(profile string) {
 func newTenantAccount(
 	providerKey schemas.ModelProvider,
 	apiKey, keyID, baseURL string,
+	model string,
 	tls tlsOverrides,
 	bedrock *config.BedrockKeyConfig,
 	vertex *config.VertexKeyConfig,
@@ -309,7 +315,7 @@ func newTenantAccount(
 		}
 		key.BedrockKeyConfig = bcfg
 		if len(bedrock.DeploymentAliases) > 0 {
-			key.Aliases = schemas.KeyAliases(bedrock.DeploymentAliases)
+			key.Aliases = deploymentAliasesToBifrost(bedrock.DeploymentAliases)
 		}
 	}
 
@@ -341,13 +347,8 @@ func newTenantAccount(
 		acfg := &schemas.AzureKeyConfig{
 			Endpoint: schemas.EnvVar{Val: azure.Endpoint},
 		}
-		if azure.APIVersion != "" {
-			acfg.APIVersion = &schemas.EnvVar{Val: azure.APIVersion}
-		}
 		key.AzureKeyConfig = acfg
-		if len(azure.DeploymentAliases) > 0 {
-			key.Aliases = schemas.KeyAliases(azure.DeploymentAliases)
-		}
+		key.Aliases = azureAliasesToBifrost(model, azure)
 	}
 
 	nc := schemas.NetworkConfig{
@@ -360,7 +361,7 @@ func newTenantAccount(
 		nc.InsecureSkipVerify = true
 	}
 	if tls.CACertPEM != "" {
-		nc.CACertPEM = tls.CACertPEM
+		nc.CACertPEM = &schemas.EnvVar{Val: tls.CACertPEM}
 	}
 	if len(extraHeaders) > 0 {
 		nc.ExtraHeaders = extraHeaders
@@ -378,6 +379,81 @@ func vllmServerURL(baseURL string) string {
 		return strings.TrimSuffix(trimmed, "/v1")
 	}
 	return trimmed
+}
+
+func deploymentAliasesToBifrost(aliases map[string]string) schemas.KeyAliases {
+	if len(aliases) == 0 {
+		return nil
+	}
+	out := make(schemas.KeyAliases, len(aliases))
+	for from, to := range aliases {
+		out[from] = schemas.AliasConfig{ModelID: to}
+	}
+	return out
+}
+
+func azureAliasesToBifrost(model string, azure *config.AzureKeyConfig) schemas.KeyAliases {
+	if azure == nil {
+		return nil
+	}
+	apiVersion := strings.TrimSpace(azure.APIVersion)
+	if apiVersion == "" {
+		return deploymentAliasesToBifrost(azure.DeploymentAliases)
+	}
+
+	version := apiVersion
+	withAPIVersion := func(modelID string) schemas.AliasConfig {
+		return schemas.AliasConfig{
+			ModelID: modelID,
+			AzureAliasCfg: &schemas.AzureAliasCfg{
+				APIVersion: &version,
+			},
+		}
+	}
+
+	aliases := make(schemas.KeyAliases, len(azure.DeploymentAliases)+1)
+	for from, to := range azure.DeploymentAliases {
+		aliases[from] = withAPIVersion(to)
+	}
+
+	model = strings.TrimSpace(model)
+	if model != "" && !aliasMapContains(aliases, model) {
+		aliases[model] = withAPIVersion(model)
+	}
+	if len(aliases) == 0 {
+		return nil
+	}
+	return aliases
+}
+
+func aliasMapContains(aliases schemas.KeyAliases, model string) bool {
+	for alias := range aliases {
+		if strings.EqualFold(alias, model) {
+			return true
+		}
+	}
+	return false
+}
+
+func deploymentAliasMapContains(aliases map[string]string, model string) bool {
+	for alias := range aliases {
+		if strings.EqualFold(alias, model) {
+			return true
+		}
+	}
+	return false
+}
+
+func azureAPIVersionIdentityAliasID(providerKey schemas.ModelProvider, model string, azure *config.AzureKeyConfig) string {
+	if providerKey != schemas.Azure || azure == nil || strings.TrimSpace(azure.APIVersion) == "" {
+		return ""
+	}
+	model = strings.TrimSpace(model)
+	if model == "" || deploymentAliasMapContains(azure.DeploymentAliases, model) {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(model))
+	return "azure-api-version-model:sha256:" + hex.EncodeToString(sum[:8])
 }
 
 // subBlockID returns a stable hash of the per-provider sub-block so two
@@ -424,14 +500,14 @@ func bifrostKeyID(providerKey schemas.ModelProvider, apiKey string) string {
 }
 
 // getBifrostClient returns a Bifrost client dedicated to the given
-// (provider, apiKey, baseURL, tls, sub-block) tuple. Distinct tuples get
-// distinct clients; identical tuples share a cached client. The
-// returned client's Account is immutable for the tuple's lifetime, so a
-// concurrent call with different credentials cannot change what this
-// client uses mid-request.
+// (provider, apiKey, baseURL, tls, sub-block, alias-seed) tuple. Distinct
+// tuples get distinct clients; identical tuples share a cached client.
+// The returned client's Account is immutable for the tuple's lifetime,
+// so a concurrent call with different credentials cannot change what
+// this client uses mid-request.
 func getBifrostClient(
 	providerKey schemas.ModelProvider,
-	apiKey, baseURL string,
+	apiKey, baseURL, model string,
 	tls tlsOverrides,
 	bedrock *config.BedrockKeyConfig,
 	vertex *config.VertexKeyConfig,
@@ -444,6 +520,7 @@ func getBifrostClient(
 		baseURL:  baseURL,
 		tlsID:    tls.id(),
 		subID:    subBlockID(bedrock, vertex, azure),
+		aliasID:  azureAPIVersionIdentityAliasID(providerKey, model, azure),
 	}
 
 	now := time.Now()
@@ -469,7 +546,7 @@ func getBifrostClient(
 		evictOldestBifrostTenantLocked()
 	}
 
-	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL, tls, bedrock, vertex, azure, extraHeaders)
+	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL, model, tls, bedrock, vertex, azure, extraHeaders)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})
@@ -534,7 +611,7 @@ func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 }
 
 func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
+	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.model, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +627,7 @@ func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest)
 }
 
 func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRequest, chunkCb func(StreamChunk)) (*ChatUsage, error) {
-	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
+	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.model, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
 	if err != nil {
 		return nil, err
 	}

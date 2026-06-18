@@ -108,8 +108,16 @@ set the global default. `guardrail status` is read-only and takes no
 |---------|-------------|
 | `mcp list` | List MCP servers with enforcement status |
 | `mcp scan <url>` | Scan an MCP server endpoint |
+| `mcp set <name> --command <cmd> [--connector X]` | Add/update an MCP server in the active connector config |
+| `mcp unset <name> [--connector X]` | Remove an MCP server from the active connector config |
 | `mcp block <url>` | Add an MCP server to the block list |
 | `mcp allow <url>` | Add an MCP server to the allow list |
+
+For `--connector opencode`, `mcp set` writes a command that OpenCode will
+execute from `opencode.json`. DefenseClaw refuses commands that resolve
+outside trusted install prefixes unless you add the directory to
+`DEFENSECLAW_TRUSTED_BIN_PREFIXES` or pass `--force-untrusted-command` for
+that one write.
 
 ### plugin
 
@@ -160,6 +168,11 @@ output) so they're safe to call from the TUI and CI/CD pipelines.
 keeps the decision global. `--source` is audit/source metadata that records
 where the decision came from, but it is not used as a runtime enforcement
 selector.
+
+Runtime allow semantics differ by lane. Hook/inspect calls still run CodeGuard
+on allow-listed write tools before returning a clean allow. The sidecar stream
+lane has no CodeGuard payload scanner, so a matching tool allow is a full scan
+bypass on that lane.
 
 ### policy
 

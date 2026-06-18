@@ -190,6 +190,9 @@ func TestSetupConnectorsIsolated_DN1_MiddleFailsOthersSurvive(t *testing.T) {
 		t.Errorf("setupCalls codex=%d cursor=%d windsurf=%d, want 1/1/1",
 			first.setupCalls, middle.setupCalls, last.setupCalls)
 	}
+	if middle.teardownCalls != 1 {
+		t.Errorf("failed connector teardownCalls=%d, want 1 rollback", middle.teardownCalls)
+	}
 }
 
 // TestSetupConnectorsIsolated_AllFailReturnsEmpty confirms that when every

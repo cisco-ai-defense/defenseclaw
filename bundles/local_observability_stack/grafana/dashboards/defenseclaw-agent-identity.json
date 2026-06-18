@@ -168,7 +168,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (audit_connector) (count_over_time({service_name=\"defenseclaw-audit\"} [$__interval]))",
+          "expr": "count(sum by (defenseclaw_agent_instance_id) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_agent_instance_id != \"\" [5m])))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -359,7 +359,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (audit_connector) (count_over_time({service_name=\"defenseclaw-audit\"} [$__interval]))",
+          "expr": "count by (gen_ai_agent_name) (sum by (gen_ai_agent_name, defenseclaw_agent_instance_id) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_agent_instance_id != \"\" [$__interval])))",
           "legendFormat": "{{gen_ai_agent_name}}",
           "refId": "A",
           "datasource": {
@@ -390,7 +390,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (audit_connector) (count_over_time({service_name=\"defenseclaw-audit\"} [$__interval]))",
+          "expr": "sum by (gen_ai_agent_name) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_agent_instance_id != \"\" [$__interval])) / sum by (gen_ai_agent_name) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" [$__interval]))",
           "legendFormat": "{{gen_ai_agent_name}}",
           "refId": "A",
           "datasource": {

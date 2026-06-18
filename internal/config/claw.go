@@ -111,20 +111,26 @@ func (c *Config) activeConnector() string {
 	return "openclaw"
 }
 
-// activeConnectors returns the resolved set of connector names for this
-// config, in deterministic (sorted) order. It is additive over
-// activeConnector(): when the multi-connector guardrail.connectors map
-// is populated its keys drive the set; otherwise it is the single
-// activeConnector() value, so the legacy single-connector behavior is
-// preserved byte-for-byte. The multi-connector boot loop iterates this
-// slice while every existing single-connector reader keeps calling
-// activeConnector() unchanged.
+// activeConnectors returns the configured connector roster for this config, in
+// deterministic (sorted) order. Unlike activeConnector(), this plural list is
+// a roster surface: an unconfigured install returns an empty slice instead of
+// fabricating the legacy "openclaw" floor. The singular activeConnector()
+// keeps that default for path-resolution/back-compat callers that explicitly
+// need it.
 func (c *Config) activeConnectors() []string {
-	if c != nil && len(c.Guardrail.Connectors) > 0 {
+	if c == nil || !c.HasConnectorConfigured() {
+		return nil
+	}
+	if len(c.Guardrail.Connectors) > 0 {
 		names := make([]string, 0, len(c.Guardrail.Connectors))
+		seen := make(map[string]struct{}, len(c.Guardrail.Connectors))
 		for name := range c.Guardrail.Connectors {
-			if trimmed := strings.TrimSpace(name); trimmed != "" {
-				names = append(names, trimmed)
+			if normalized := normalizeConnectorKey(name); normalized != "" {
+				if _, ok := seen[normalized]; ok {
+					continue
+				}
+				seen[normalized] = struct{}{}
+				names = append(names, normalized)
 			}
 		}
 		if len(names) > 0 {
@@ -141,18 +147,21 @@ func (c *Config) activeConnectors() []string {
 // phantom-openclaw root) and lets callers distinguish a genuinely
 // unconfigured install from an explicit openclaw one.
 //
-// Deliberately NOT wired into activeConnector()/activeConnectors(): those
-// keep flooring to "openclaw" for backward compatibility (telemetry and
-// every path dispatcher depend on the default). The phantom-openclaw fix
-// belongs in the user-facing list/scan resolvers, which must consult this
-// helper first and report "no connector configured" instead of fanning out
-// to ["openclaw"] — mirroring R0-LIST's resolve_list_connectors change.
+// activeConnectors() is wired to this helper so Go roster/status/runtime
+// callers mirror Python list semantics on a zero-config install. The singular
+// activeConnector() deliberately keeps flooring to "openclaw" for legacy path
+// dispatchers; callers using that API to touch connector state must check this
+// helper first when zero-config behavior matters.
 func (c *Config) HasConnectorConfigured() bool {
 	if c == nil {
 		return false
 	}
 	if len(c.Guardrail.Connectors) > 0 {
-		return true
+		for name := range c.Guardrail.Connectors {
+			if normalizeConnectorKey(name) != "" {
+				return true
+			}
+		}
 	}
 	if strings.TrimSpace(c.Guardrail.Connector) != "" {
 		return true

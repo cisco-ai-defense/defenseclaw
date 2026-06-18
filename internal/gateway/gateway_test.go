@@ -981,6 +981,25 @@ func TestGuardrailProxyDisabled(t *testing.T) {
 	}
 }
 
+func TestSidecarRunGuardrailZeroConfigDoesNotDefaultOpenClaw(t *testing.T) {
+	health := NewSidecarHealth()
+	sidecar := &Sidecar{cfg: &config.Config{}, health: health}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := sidecar.runGuardrail(ctx); err != nil {
+		t.Fatalf("runGuardrail zero-config returned error: %v", err)
+	}
+
+	snap := health.Snapshot()
+	if snap.Guardrail.State != StateDisabled {
+		t.Fatalf("Guardrail.State = %q, want %q", snap.Guardrail.State, StateDisabled)
+	}
+	if snap.Guardrail.LastError != "no connector configured" {
+		t.Fatalf("Guardrail.LastError = %q, want no connector configured", snap.Guardrail.LastError)
+	}
+}
+
 func TestDeriveMasterKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	keyFile := filepath.Join(tmpDir, "device.key")

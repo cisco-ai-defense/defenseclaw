@@ -65,9 +65,13 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     # so a user passing a documented alias resolves the configured canonical
     # peer instead of hitting "not configured".
     from defenseclaw import connector_paths
+    from defenseclaw.connector_contracts import normalize_connector
 
-    by_norm = {connector_paths.normalize(name): name for name in configured if name}
-    match = by_norm.get(connector_paths.normalize(requested))
+    def _normalize_alias(name: str) -> str:
+        return connector_paths.normalize(normalize_connector(name))
+
+    by_norm = {_normalize_alias(name): name for name in configured if name}
+    match = by_norm.get(_normalize_alias(requested))
     if match is None:
         allowed = ", ".join(sorted(configured)) or active
         raise click.UsageError(

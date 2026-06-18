@@ -320,10 +320,9 @@ class PolicyEngine:
     # ``<source>/<tool>`` source scoping above. Runtime resolution order
     # (mirrored by the Go gateway lanes via the policy.go methods of the same
     # name) is, for request connector ``C`` and tool ``T``:
-    #   block @C/T → block T → allow @C/T → allow T → scan
-    # i.e. a global block still wins over a connector-scoped allow because
-    # callers consult is_tool_blocked_for_connector before
-    # is_tool_allowed_for_connector.
+    #   block @C/T → allow @C/T → block T → allow T → scan
+    # i.e. a connector-scoped row is authoritative for that connector; only
+    # when no scoped action exists does the global row fall through.
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -336,27 +335,25 @@ class PolicyEngine:
         return f"@{connector}/{tool_name}" if connector else tool_name
 
     def is_tool_blocked_for_connector(self, tool_name: str, connector: str = "") -> bool:
-        """Return True if the tool is blocked for ``connector`` (scoped then global)."""
+        """Return True if the tool is blocked for ``connector`` (scoped row, else global)."""
         if not self.store:
             return False
         if connector:
             scoped = self._tool_connector_target(tool_name, connector)
-            if self.store.has_action("tool", scoped, "install", "block"):
-                return True
+            entry = self.store.get_action("tool", scoped)
+            if entry is not None and entry.actions.install:
+                return entry.actions.install == "block"
         return self.store.has_action("tool", tool_name, "install", "block")
 
     def is_tool_allowed_for_connector(self, tool_name: str, connector: str = "") -> bool:
-        """Return True if the tool is allowed for ``connector`` (scoped then global).
-
-        Callers must check :meth:`is_tool_blocked_for_connector` first so a
-        global block wins over a connector-scoped allow.
-        """
+        """Return True if the tool is allowed for ``connector`` (scoped row, else global)."""
         if not self.store:
             return False
         if connector:
             scoped = self._tool_connector_target(tool_name, connector)
-            if self.store.has_action("tool", scoped, "install", "allow"):
-                return True
+            entry = self.store.get_action("tool", scoped)
+            if entry is not None and entry.actions.install:
+                return entry.actions.install == "allow"
         return self.store.has_action("tool", tool_name, "install", "allow")
 
     def block_tool_for_connector(self, tool_name: str, connector: str, reason: str) -> None:

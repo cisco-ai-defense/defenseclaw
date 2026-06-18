@@ -913,6 +913,22 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertTrue(os.path.isdir(os.path.join(self.hermes_root, "narrow")))
         self.assertEqual(mock_scan.call_count, 1)
 
+    def test_install_antigravity_remains_unsupported_despite_discovery_dirs(self):
+        antigravity_root = os.path.join(self.tmp_dir, "antigravity", "plugins")
+        os.makedirs(antigravity_root)
+        self.app.cfg.active_connector = lambda: "antigravity"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["antigravity"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: {  # type: ignore[method-assign]
+            "antigravity": [antigravity_root],
+        }.get(connector or "antigravity", [])
+        src = self._create_plugin_dir("agy-plugin")
+
+        result = self.invoke(["install", src, "--connector", "antigravity"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("does not expose a plugin install directory", result.output)
+        self.assertFalse(os.path.exists(os.path.join(antigravity_root, "agy-plugin")))
+
     def test_policy_verbs_reject_unknown_connector_without_writing_rows(self):
         commands = [
             ["block", "sample", "--connector", "nope"],

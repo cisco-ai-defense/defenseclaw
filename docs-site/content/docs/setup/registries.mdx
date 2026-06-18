@@ -209,7 +209,7 @@ When `registry_required=true`:
 
 - An asset whose name matches a rule in `asset_policy.<type>.registry` follows that rule.
 - An asset whose name does **not** match any rule falls through to the configured `registry_empty_action` (default `deny`).
-- An empty registry list with `require=on` blocks **every** asset of that class until the next `sync` populates it. The CLI warns you in colour when you flip `require=on` against an empty list — read the warning carefully.
+- An empty registry list with `require=on` blocks **every** asset of that class by default until the next `sync` populates it. Setting `registry_empty_action: warn` or `allow` relaxes only this empty-registry gate and falls through to the type default; `warn` is non-blocking. The CLI warns you in colour when you flip `require=on` against an empty list — read the warning carefully.
 
 The Go gateway tags every admission decision with `Reason="registry:<id>"` (or `"registry:operator-approved"` for manually approved entries) so you can grep `~/.defenseclaw/gateway.jsonl` to see which catalog won.
 

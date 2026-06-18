@@ -1382,7 +1382,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// would-block automatically.
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	case isGenericToolInspectionEvent(req.HookEventName):
-		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: req.ToolName, Args: req.ToolArgs, Direction: "tool_call", Connector: req.ConnectorName})
+		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: req.ToolName, Args: req.ToolArgs, Direction: "tool_call", Connector: req.ConnectorName, MCPServerName: payloadString(req.Payload, "mcp_server_name")})
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
 
