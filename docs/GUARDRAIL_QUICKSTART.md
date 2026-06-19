@@ -15,7 +15,16 @@ Set up the LLM guardrail and verify it works end-to-end.
 defenseclaw init
 ```
 
-This configures the guardrail proxy and installs the OpenClaw plugin.
+This configures the guardrail proxy, installs the DefenseClaw OpenClaw plugin,
+and installs the separate InsightClaw OpenClaw plugin with:
+
+```bash
+openclaw plugins install insightclaw
+```
+
+DefenseClaw patches `~/.openclaw/openclaw.json` after installation so
+InsightClaw emits telemetry to the local OpenTelemetry collector at
+`http://172.17.0.1:4318`.
 
 If you've already run `init` before, it will skip what's already present.
 
@@ -321,6 +330,8 @@ defenseclaw setup guardrail --disable --restart
 This restores direct LLM access:
 - DefenseClaw plugin entries removed from `openclaw.json`
 - Plugin uninstalled from `~/.openclaw/extensions/defenseclaw/`
+- InsightClaw plugin entries removed from `openclaw.json`
+- InsightClaw plugin directory removed from `~/.openclaw/extensions/insightclaw/`
 - Guardrail is disabled in `config.yaml`
 - OpenClaw gateway restarted (fetch interceptor unloads)
 
@@ -347,6 +358,14 @@ This restores direct LLM access:
 2. Check that `defenseclaw` is in `plugins.allow` in `openclaw.json`
 3. Restart OpenClaw: `openclaw gateway restart`
 4. Check the sidecar logs for `fetch-interceptor: active` on startup
+
+### InsightClaw telemetry not appearing
+
+1. Verify the plugin is installed: `ls ~/.openclaw/extensions/insightclaw/`
+2. Check that `insightclaw` is in `plugins.allow` in `openclaw.json`
+3. Check `plugins.entries.insightclaw.config.endpoint` is `http://172.17.0.1:4318`
+4. Verify the local OpenTelemetry collector is reachable from the OpenClaw runtime
+5. Re-run setup if the plugin directory is missing: `defenseclaw setup guardrail --restart`
 
 ### Provider key not forwarded
 

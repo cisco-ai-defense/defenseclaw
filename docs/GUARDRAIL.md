@@ -261,6 +261,7 @@ X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
 │  ├── `defenseclaw setup guardrail` — config wizard (plugin-only, no model changes) │
 │  ├── `defenseclaw upgrade` — in-place upgrade with backup/restore  │
 │  ├── openclaw.json patching (plugin registration only)             │
+│  ├── InsightClaw OpenClaw plugin install + telemetry config        │
 │  └── openclaw.json revert + plugin uninstall on --disable          │
 └─────────────────────────────────────────────────────────────────────┘
 
@@ -461,12 +462,41 @@ all outbound LLM calls through the guardrail proxy — regardless of
 which provider the user selects in the UI.
 ```
 
+### InsightClaw plugin lifecycle
+
+InsightClaw is a separate OpenClaw plugin, not a nested setting inside the
+DefenseClaw fetch interceptor plugin. During OpenClaw connector setup,
+DefenseClaw installs it through OpenClaw's plugin manager:
+
+```bash
+openclaw plugins install insightclaw
+```
+
+Use the OpenClaw command rather than `npm install insightclaw`: OpenClaw's
+installer places the package where the gateway expects plugins and records the
+plugin metadata it needs to load it. DefenseClaw then patches
+`~/.openclaw/openclaw.json` to ensure `insightclaw` is enabled, allowed, and
+configured for the local OpenTelemetry collector:
+
+```json
+{
+  "captureContent": true,
+  "endpoint": "http://172.17.0.1:4318",
+  "metrics": true,
+  "protocol": "http",
+  "serviceName": "openclaw-gateway",
+  "spanCache": true,
+  "spanCacheVerboseLogs": false,
+  "traces": true
+}
+```
+
 ## Teardown
 
 ```
 defenseclaw setup guardrail --disable
-  1. Remove defenseclaw plugin entries from openclaw.json
-  2. Uninstall plugin from ~/.openclaw/extensions/defenseclaw/
+  1. Remove defenseclaw and insightclaw plugin entries from openclaw.json
+  2. Uninstall plugins from ~/.openclaw/extensions/defenseclaw/ and ~/.openclaw/extensions/insightclaw/
   3. Set guardrail.enabled = false in config.yaml
   4. Restart OpenClaw gateway (fetch interceptor unloads)
 ```
@@ -819,6 +849,7 @@ All suppression patterns are compiled through a global LRU regex cache
 │  ├── `defenseclaw setup guardrail` — config wizard (plugin-only, no model changes) │
 │  ├── `defenseclaw upgrade` — in-place upgrade with backup/restore  │
 │  ├── openclaw.json patching (plugin registration only)             │
+│  ├── InsightClaw OpenClaw plugin install + telemetry config        │
 │  └── openclaw.json revert + plugin uninstall on --disable          │
 └─────────────────────────────────────────────────────────────────────┘
 
