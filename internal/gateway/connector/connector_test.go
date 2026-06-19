@@ -650,6 +650,7 @@ func TestOpenClaw_Setup_InstallsExtensionAndPatchesConfig(t *testing.T) {
 
 	OpenClawHomeOverride = ocHome
 	defer func() { OpenClawHomeOverride = "" }()
+	stubInsightClawInstall(t, ocHome)
 
 	c := NewOpenClawConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
@@ -698,19 +699,45 @@ func TestOpenClaw_Setup_InstallsExtensionAndPatchesConfig(t *testing.T) {
 		t.Error("plugins.allow clobbered the pre-existing entry")
 	}
 	entries, _ := plugins["entries"].(map[string]interface{})
-	if entry, ok := entries["defenseclaw"].(map[string]interface{}); !ok || entry["enabled"] != true {
+	entry, ok := entries["defenseclaw"].(map[string]interface{})
+	if !ok || entry["enabled"] != true {
 		t.Errorf("plugins.entries.defenseclaw not enabled, got %v", entries["defenseclaw"])
+	}
+	insightClaw, _ := entries["insightclaw"].(map[string]interface{})
+	if insightClaw == nil || insightClaw["enabled"] != true {
+		t.Errorf("plugins.entries.insightclaw.enabled not installed, got %v", entries["insightclaw"])
+	}
+	insightClawConfig, _ := insightClaw["config"].(map[string]interface{})
+	if insightClawConfig == nil {
+		t.Fatal("plugins.entries.insightclaw.config missing")
+	}
+	for k, want := range defaultInsightClawConfig {
+		if got := insightClawConfig[k]; got != want {
+			t.Errorf("insightclaw.config.%s = %v, want %v", k, got, want)
+		}
 	}
 	load, _ := plugins["load"].(map[string]interface{})
 	paths, _ := load["paths"].([]interface{})
 	foundPath := false
+	foundInsightPath := false
 	for _, v := range paths {
 		if s, _ := v.(string); s == extDir {
 			foundPath = true
 		}
+		if s, _ := v.(string); s == filepath.Join(ocHome, "extensions", "insightclaw") {
+			foundInsightPath = true
+		}
 	}
 	if !foundPath {
 		t.Errorf("plugins.load.paths missing %s, got %v", extDir, paths)
+	}
+	if !foundInsightPath {
+		t.Errorf("plugins.load.paths missing insightclaw extension path, got %v", paths)
+	}
+	installs, _ := plugins["installs"].(map[string]interface{})
+	insightInstall, _ := installs["insightclaw"].(map[string]interface{})
+	if insightInstall == nil || insightInstall["source"] != "npm" || insightInstall["sourcePath"] != "insightclaw" {
+		t.Errorf("plugins.installs.insightclaw not installed as npm source, got %v", insightInstall)
 	}
 	// Unrelated sections untouched.
 	if cfg["version"] != float64(1) {
@@ -735,6 +762,7 @@ func TestOpenClaw_Setup_IsIdempotent(t *testing.T) {
 
 	OpenClawHomeOverride = ocHome
 	defer func() { OpenClawHomeOverride = "" }()
+	stubInsightClawInstall(t, ocHome)
 
 	c := NewOpenClawConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
@@ -763,14 +791,87 @@ func TestOpenClaw_Setup_IsIdempotent(t *testing.T) {
 
 	paths := plugins["load"].(map[string]interface{})["paths"].([]interface{})
 	pathCount := 0
+	insightPathCount := 0
 	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+	insightExtDir := filepath.Join(ocHome, "extensions", "insightclaw")
 	for _, v := range paths {
 		if s, _ := v.(string); s == extDir {
 			pathCount++
 		}
+		if s, _ := v.(string); s == insightExtDir {
+			insightPathCount++
+		}
 	}
 	if pathCount != 1 {
 		t.Errorf("plugins.load.paths has %d entries after two Setups, want 1", pathCount)
+	}
+	if insightPathCount != 1 {
+		t.Errorf("plugins.load.paths has %d insightclaw entries after two Setups, want 1", insightPathCount)
+	}
+}
+
+func TestPatchOpenClawConfig_PreservesDefenseClawPluginConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "openclaw.json")
+	os.WriteFile(configPath, []byte(`{
+		"plugins": {
+			"entries": {
+				"defenseclaw": {
+					"enabled": false,
+					"awsHttp1Shim": "off",
+					"agent": {"id": "agent-123"}
+				},
+				"insightclaw": {
+					"enabled": false,
+					"config": {
+						"endpoint": "http://collector.test:4318",
+						"metrics": false
+					}
+				}
+			}
+		}
+	}`), 0o644)
+
+	if err := patchOpenClawConfig(configPath, filepath.Join(dir, "extensions", "defenseclaw"), false); err != nil {
+		t.Fatalf("patchOpenClawConfig: %v", err)
+	}
+
+	var cfg map[string]interface{}
+	data, _ := os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("openclaw.json not valid JSON after patch: %v", err)
+	}
+	plugins := cfg["plugins"].(map[string]interface{})
+	entries := plugins["entries"].(map[string]interface{})
+	entry := entries["defenseclaw"].(map[string]interface{})
+	if entry["enabled"] != true {
+		t.Errorf("defenseclaw entry not enabled, got %v", entry["enabled"])
+	}
+	if entry["awsHttp1Shim"] != "off" {
+		t.Errorf("awsHttp1Shim clobbered, got %v", entry["awsHttp1Shim"])
+	}
+	agent := entry["agent"].(map[string]interface{})
+	if agent["id"] != "agent-123" {
+		t.Errorf("agent config clobbered, got %v", entry["agent"])
+	}
+	insightClaw := entries["insightclaw"].(map[string]interface{})
+	if insightClaw["enabled"] != true {
+		t.Errorf("insightclaw entry not enabled, got %v", insightClaw["enabled"])
+	}
+	insightClawConfig := insightClaw["config"].(map[string]interface{})
+	if insightClawConfig["endpoint"] != "http://collector.test:4318" {
+		t.Errorf("explicit insightclaw.config.endpoint should be preserved, got %v", insightClawConfig["endpoint"])
+	}
+	if insightClawConfig["metrics"] != false {
+		t.Errorf("explicit insightclaw.config.metrics should be preserved, got %v", insightClawConfig["metrics"])
+	}
+	for k, want := range defaultInsightClawConfig {
+		if k == "endpoint" || k == "metrics" {
+			continue
+		}
+		if got := insightClawConfig[k]; got != want {
+			t.Errorf("insightclaw.config.%s = %v, want %v", k, got, want)
+		}
 	}
 }
 
@@ -792,6 +893,7 @@ func TestOpenClaw_Setup_HILTEnablesPluginApprovalForwarding(t *testing.T) {
 
 	OpenClawHomeOverride = ocHome
 	defer func() { OpenClawHomeOverride = "" }()
+	stubInsightClawInstall(t, ocHome)
 
 	c := NewOpenClawConnector()
 	opts := SetupOpts{
@@ -833,6 +935,7 @@ func TestOpenClaw_Setup_HILTDefaultsPluginApprovalMode(t *testing.T) {
 
 	OpenClawHomeOverride = ocHome
 	defer func() { OpenClawHomeOverride = "" }()
+	stubInsightClawInstall(t, ocHome)
 
 	c := NewOpenClawConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", HILTEnabled: true}
@@ -866,6 +969,7 @@ func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
 
 	OpenClawHomeOverride = ocHome
 	defer func() { OpenClawHomeOverride = "" }()
+	stubInsightClawInstall(t, ocHome)
 
 	c := NewOpenClawConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
@@ -880,6 +984,10 @@ func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
 	if _, err := os.Stat(extDir); !os.IsNotExist(err) {
 		t.Errorf("extension dir still present after Teardown: err=%v", err)
 	}
+	insightExtDir := filepath.Join(ocHome, "extensions", "insightclaw")
+	if _, err := os.Stat(insightExtDir); !os.IsNotExist(err) {
+		t.Errorf("insightclaw extension dir still present after Teardown: err=%v", err)
+	}
 
 	var cfg map[string]interface{}
 	data, _ := os.ReadFile(configPath)
@@ -889,6 +997,9 @@ func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
 	for _, v := range allow {
 		if s, _ := v.(string); s == "defenseclaw" {
 			t.Errorf("plugins.allow still contains defenseclaw after Teardown")
+		}
+		if s, _ := v.(string); s == "insightclaw" {
+			t.Errorf("plugins.allow still contains insightclaw after Teardown")
 		}
 	}
 	// Pre-existing unrelated entry preserved.
@@ -908,6 +1019,26 @@ func requireOpenClawExtensionBundle(t *testing.T) {
 	if !OpenClawExtensionAvailable() {
 		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
 	}
+}
+
+func stubInsightClawInstall(t *testing.T, ocHome string) {
+	t.Helper()
+	orig := execOpenClawPluginInstall
+	execOpenClawPluginInstall = func(_ context.Context, pluginName string) ([]byte, error) {
+		if pluginName != insightClawNPMSource {
+			return nil, fmt.Errorf("unexpected plugin install: %s", pluginName)
+		}
+		dir := filepath.Join(ocHome, "extensions", insightClawOpenClawPluginID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+		pkg := []byte(`{"name":"insightclaw","version":"0.0.0"}`)
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), pkg, 0o644); err != nil {
+			return nil, err
+		}
+		return []byte("installed insightclaw"), nil
+	}
+	t.Cleanup(func() { execOpenClawPluginInstall = orig })
 }
 
 func TestOpenClaw_Route(t *testing.T) {

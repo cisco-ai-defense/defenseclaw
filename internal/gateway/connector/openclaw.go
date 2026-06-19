@@ -25,6 +25,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -54,6 +55,21 @@ const openClawPluginRoot = "openclaw_extension"
 // Other connectors (zeptoclaw, codex, claudecode) don't touch this
 // embed at all and remain fully usable.
 const openClawPlaceholderName = ".placeholder"
+
+const defenseClawOpenClawPluginID = "defenseclaw"
+const insightClawOpenClawPluginID = "insightclaw"
+const insightClawNPMSource = "insightclaw"
+
+var defaultInsightClawConfig = map[string]interface{}{
+	"captureContent":       true,
+	"endpoint":             "http://172.17.0.1:4318",
+	"metrics":              true,
+	"protocol":             "http",
+	"serviceName":          "openclaw-gateway",
+	"spanCache":            true,
+	"spanCacheVerboseLogs": false,
+	"traces":               true,
+}
 
 // openClawExtensionAvailable returns true when the embedded OpenClaw
 // extension contains the runtime files (package.json, dist/, etc.) and
@@ -151,7 +167,7 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := captureManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
 		return fmt.Errorf("openclaw config backup: %w", err)
 	}
-	if err := installOpenClawExtension(openClawHome(), opts.HILTEnabled); err != nil {
+	if err := installOpenClawExtension(ctx, openClawHome(), opts.HILTEnabled); err != nil {
 		return fmt.Errorf("openclaw extension install: %w", err)
 	}
 	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
@@ -181,9 +197,13 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 		errs = append(errs, fmt.Sprintf("restore openclaw.json backup: %v", err))
 	} else if restored {
 		extDir := filepath.Join(openClawHome(), "extensions", "defenseclaw")
+		insightExtDir := filepath.Join(openClawHome(), "extensions", insightClawOpenClawPluginID)
 		parentDir := filepath.Join(openClawHome(), "extensions")
 		if err := safeRemoveAll(extDir, parentDir); err != nil {
 			errs = append(errs, fmt.Sprintf("remove extension dir: %v", err))
+		}
+		if err := safeRemoveAll(insightExtDir, parentDir); err != nil {
+			errs = append(errs, fmt.Sprintf("remove insightclaw extension dir: %v", err))
 		}
 	} else {
 		if err := uninstallOpenClawExtension(openClawHome()); err != nil {
@@ -214,7 +234,7 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 // <ocHome>/extensions/defenseclaw and registers the plugin in
 // <ocHome>/openclaw.json. Idempotent: re-running leaves the config in the
 // same shape (single allow entry, single load path, enabled=true).
-func installOpenClawExtension(ocHome string, enablePluginApprovals bool) error {
+func installOpenClawExtension(ctx context.Context, ocHome string, enablePluginApprovals bool) error {
 	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
 	parentDir := filepath.Join(ocHome, "extensions")
 
@@ -224,12 +244,49 @@ func installOpenClawExtension(ocHome string, enablePluginApprovals bool) error {
 	if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir, 0o644, 0o755); err != nil {
 		return fmt.Errorf("write plugin files: %w", err)
 	}
+	if err := installInsightClawNPMPlugin(ctx, ocHome); err != nil {
+		return fmt.Errorf("insightclaw plugin install: %w", err)
+	}
 
 	configPath := filepath.Join(ocHome, "openclaw.json")
 	if err := patchOpenClawConfig(configPath, extDir, enablePluginApprovals); err != nil {
 		return fmt.Errorf("patch openclaw.json: %w", err)
 	}
 	return nil
+}
+
+var execOpenClawPluginInstall = func(ctx context.Context, pluginName string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "openclaw", "plugins", "install", pluginName)
+	return cmd.CombinedOutput()
+}
+
+func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
+	installDir := filepath.Join(ocHome, "extensions", insightClawOpenClawPluginID)
+	if openClawPluginDirLooksUsable(installDir) {
+		return nil
+	}
+	out, err := execOpenClawPluginInstall(ctx, insightClawNPMSource)
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return fmt.Errorf("openclaw plugins install %s: %w: %s", insightClawNPMSource, err, msg)
+		}
+		return fmt.Errorf("openclaw plugins install %s: %w", insightClawNPMSource, err)
+	}
+	if !openClawPluginDirLooksUsable(installDir) {
+		return fmt.Errorf("openclaw plugins install %s completed but %s is missing a package.json or openclaw.plugin.json", insightClawNPMSource, installDir)
+	}
+	return nil
+}
+
+func openClawPluginDirLooksUsable(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "openclaw.plugin.json")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+		return true
+	}
+	return false
 }
 
 // safeRemoveAll removes target only if it resolves to a path under parent.
@@ -315,13 +372,36 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals bool) 
 			plugins = map[string]interface{}{}
 		}
 
-		plugins["allow"] = appendUniqueString(plugins["allow"], "defenseclaw")
+		plugins["allow"] = appendUniqueString(plugins["allow"], defenseClawOpenClawPluginID)
+		plugins["allow"] = appendUniqueString(plugins["allow"], insightClawOpenClawPluginID)
 
 		entries, _ := plugins["entries"].(map[string]interface{})
 		if entries == nil {
 			entries = map[string]interface{}{}
 		}
-		entries["defenseclaw"] = map[string]interface{}{"enabled": true}
+		defenseClawEntry, _ := entries[defenseClawOpenClawPluginID].(map[string]interface{})
+		if defenseClawEntry == nil {
+			defenseClawEntry = map[string]interface{}{}
+		}
+		defenseClawEntry["enabled"] = true
+		entries[defenseClawOpenClawPluginID] = defenseClawEntry
+
+		insightClawEntry, _ := entries[insightClawOpenClawPluginID].(map[string]interface{})
+		if insightClawEntry == nil {
+			insightClawEntry = map[string]interface{}{}
+		}
+		insightClawEntry["enabled"] = true
+		insightClawConfig, _ := insightClawEntry["config"].(map[string]interface{})
+		if insightClawConfig == nil {
+			insightClawConfig = map[string]interface{}{}
+		}
+		for k, v := range defaultInsightClawConfig {
+			if _, ok := insightClawConfig[k]; !ok {
+				insightClawConfig[k] = v
+			}
+		}
+		insightClawEntry["config"] = insightClawConfig
+		entries[insightClawOpenClawPluginID] = insightClawEntry
 		plugins["entries"] = entries
 
 		load, _ := plugins["load"].(map[string]interface{})
@@ -329,7 +409,27 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals bool) 
 			load = map[string]interface{}{}
 		}
 		load["paths"] = appendUniqueString(load["paths"], extDir)
+		insightClawExtDir := filepath.Join(filepath.Dir(configPath), "extensions", insightClawOpenClawPluginID)
+		load["paths"] = appendUniqueString(load["paths"], insightClawExtDir)
 		plugins["load"] = load
+
+		installs, _ := plugins["installs"].(map[string]interface{})
+		if installs == nil {
+			installs = map[string]interface{}{}
+		}
+		insightInstall, _ := installs[insightClawOpenClawPluginID].(map[string]interface{})
+		if insightInstall == nil {
+			insightInstall = map[string]interface{}{}
+		}
+		if _, ok := insightInstall["source"]; !ok {
+			insightInstall["source"] = "npm"
+		}
+		if _, ok := insightInstall["sourcePath"]; !ok {
+			insightInstall["sourcePath"] = insightClawNPMSource
+		}
+		insightInstall["installPath"] = insightClawExtDir
+		installs[insightClawOpenClawPluginID] = insightInstall
+		plugins["installs"] = installs
 
 		cfg["plugins"] = plugins
 		if enablePluginApprovals {
@@ -357,17 +457,21 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals bool) 
 	})
 }
 
-// uninstallOpenClawExtension removes the extension directory and deletes
-// the DefenseClaw entries from openclaw.json, leaving unrelated plugins
-// untouched. Returns an error if cleanup fails so the caller can log or
-// retry.
+// uninstallOpenClawExtension removes the extension directories and deletes
+// the DefenseClaw-managed OpenClaw plugin entries from openclaw.json,
+// leaving unrelated plugins untouched. Returns an error if cleanup fails
+// so the caller can log or retry.
 func uninstallOpenClawExtension(ocHome string) error {
 	var errs []string
 
 	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+	insightExtDir := filepath.Join(ocHome, "extensions", insightClawOpenClawPluginID)
 	parentDir := filepath.Join(ocHome, "extensions")
 	if err := safeRemoveAll(extDir, parentDir); err != nil {
 		errs = append(errs, fmt.Sprintf("remove extension dir: %v", err))
+	}
+	if err := safeRemoveAll(insightExtDir, parentDir); err != nil {
+		errs = append(errs, fmt.Sprintf("remove insightclaw extension dir: %v", err))
 	}
 
 	configPath := filepath.Join(ocHome, "openclaw.json")
@@ -389,14 +493,21 @@ func uninstallOpenClawExtension(ocHome string) error {
 
 	plugins, _ := cfg["plugins"].(map[string]interface{})
 	if plugins != nil {
-		plugins["allow"] = removeString(plugins["allow"], "defenseclaw")
+		plugins["allow"] = removeString(plugins["allow"], defenseClawOpenClawPluginID)
+		plugins["allow"] = removeString(plugins["allow"], insightClawOpenClawPluginID)
 		if entries, ok := plugins["entries"].(map[string]interface{}); ok {
-			delete(entries, "defenseclaw")
+			delete(entries, defenseClawOpenClawPluginID)
+			delete(entries, insightClawOpenClawPluginID)
 			plugins["entries"] = entries
 		}
 		if load, ok := plugins["load"].(map[string]interface{}); ok {
 			load["paths"] = removeString(load["paths"], extDir)
+			load["paths"] = removeString(load["paths"], insightExtDir)
 			plugins["load"] = load
+		}
+		if installs, ok := plugins["installs"].(map[string]interface{}); ok {
+			delete(installs, insightClawOpenClawPluginID)
+			plugins["installs"] = installs
 		}
 		cfg["plugins"] = plugins
 	}
@@ -449,6 +560,10 @@ func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 	if _, err := os.Stat(extDir); err == nil {
 		residual = append(residual, "extensions/defenseclaw still exists")
 	}
+	insightExtDir := filepath.Join(openClawHome(), "extensions", insightClawOpenClawPluginID)
+	if _, err := os.Stat(insightExtDir); err == nil {
+		residual = append(residual, "extensions/insightclaw still exists")
+	}
 
 	// Check openclaw.json for defenseclaw entries
 	configPath := filepath.Join(openClawHome(), "openclaw.json")
@@ -457,14 +572,20 @@ func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 		if json.Unmarshal(data, &cfg) == nil {
 			if plugins, ok := cfg["plugins"].(map[string]interface{}); ok {
 				if entries, ok := plugins["entries"].(map[string]interface{}); ok {
-					if _, found := entries["defenseclaw"]; found {
+					if _, found := entries[defenseClawOpenClawPluginID]; found {
 						residual = append(residual, "openclaw.json still has defenseclaw plugin entry")
+					}
+					if _, found := entries[insightClawOpenClawPluginID]; found {
+						residual = append(residual, "openclaw.json still has insightclaw plugin entry")
 					}
 				}
 				if allow, ok := plugins["allow"].([]interface{}); ok {
 					for _, v := range allow {
-						if s, ok := v.(string); ok && s == "defenseclaw" {
+						if s, ok := v.(string); ok && s == defenseClawOpenClawPluginID {
 							residual = append(residual, "openclaw.json allow list still contains defenseclaw")
+						}
+						if s, ok := v.(string); ok && s == insightClawOpenClawPluginID {
+							residual = append(residual, "openclaw.json allow list still contains insightclaw")
 						}
 					}
 				}
