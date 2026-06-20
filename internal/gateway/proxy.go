@@ -2353,6 +2353,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 	req.RawBody = body
+	req.ExtraParams = extractExtraParams(body)
 
 	// X-DC-Target-URL is set by the plugin's fetch interceptor and tells the
 	// proxy the real upstream URL the request was originally destined for.
@@ -4986,6 +4987,37 @@ func mergeToolCallChunks(existing json.RawMessage, chunk json.RawMessage) json.R
 		return existing
 	}
 	return out
+}
+
+// extractExtraParams pulls provider-specific fields from the request body
+// so bifrost can forward them to the upstream. Handles both the extra_body
+// convention and top-level provider keys (google, anthropic, amazon).
+func extractExtraParams(body []byte) map[string]any {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(body, &raw) != nil {
+		return nil
+	}
+	extra := map[string]any{}
+	for _, key := range []string{"google", "anthropic", "amazon"} {
+		if v, ok := raw[key]; ok {
+			var parsed any
+			if json.Unmarshal(v, &parsed) == nil {
+				extra[key] = parsed
+			}
+		}
+	}
+	if eb, ok := raw["extra_body"]; ok {
+		var extraBody map[string]any
+		if json.Unmarshal(eb, &extraBody) == nil {
+			for k, v := range extraBody {
+				extra[k] = v
+			}
+		}
+	}
+	if len(extra) == 0 {
+		return nil
+	}
+	return extra
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, msg string) {
