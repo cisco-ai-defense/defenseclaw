@@ -44,8 +44,20 @@ docker builder prune -a -f 2>/dev/null || true
 # these directories on the next run.
 for state_dir in "$HOME/.defenseclaw" "$HOME/.openclaw"; do
   [ -e "$state_dir" ] || continue
-  sudo -n chown -R "$(id -u):$(id -g)" "$state_dir" 2>/dev/null || true
-  chmod -R u+rwX "$state_dir" 2>/dev/null || true
+  runner_uid="$(id -u)"
+  runner_gid="$(id -g)"
+  if sudo -n chown -R "$runner_uid:$runner_gid" "$state_dir" 2>/dev/null; then
+    chmod -R u+rwX "$state_dir" 2>/dev/null || true
+    continue
+  fi
+  if sudo -n setfacl -R -m "u:${runner_uid}:rwX" "$state_dir" 2>/dev/null; then
+    continue
+  fi
+  if sudo -n chmod -R a+rwX "$state_dir" 2>/dev/null; then
+    log "Relaxed permissions on $state_dir after ownership repair failed"
+    continue
+  fi
+  log "WARNING: unable to repair permissions on $state_dir"
 done
 
 # 3. Runner-level caches. _work/_actions and _tool accumulate from every job

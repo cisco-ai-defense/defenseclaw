@@ -117,8 +117,12 @@ jobs:
           if not cfg_path.exists():
               raise SystemExit(0)
 
-          with cfg_path.open() as f:
-              cfg = json.load(f)
+          try:
+              with cfg_path.open() as f:
+                  cfg = json.load(f)
+          except PermissionError as exc:
+              print(f"OpenClaw config unreadable during cleanup; skipping normalization: {exc}")
+              raise SystemExit(0)
 
           changed = False
           workspace = Path(
@@ -659,8 +663,12 @@ jobs:
           if not cfg_path.exists():
               raise SystemExit(0)
 
-          with cfg_path.open() as f:
-              cfg = json.load(f)
+          try:
+              with cfg_path.open() as f:
+                  cfg = json.load(f)
+          except PermissionError as exc:
+              print(f"OpenClaw config unreadable during cleanup; skipping normalization: {exc}")
+              raise SystemExit(0)
 
           changed = False
           workspace = Path(
