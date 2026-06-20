@@ -72,6 +72,7 @@ class TestUpgradeBackup(unittest.TestCase):
         cfg = Config()
         with TemporaryDirectory() as data_dir:
             cfg.data_dir = data_dir
+            cfg.claw.home_dir = os.path.join(data_dir, "openclaw")
             managed = os.path.join(
                 data_dir,
                 "connector_backups",
