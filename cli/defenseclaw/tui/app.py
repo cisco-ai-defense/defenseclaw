@@ -183,13 +183,13 @@ PANELS = (
     ("logs", "8", "Logs"),
     ("audit", "9", "Audit"),
     ("activity", "A", "Activity"),
-    ("tools", "T", "Tool Policy"),
     ("ai", "V", "AI Discovery"),
     ("registries", "R", "Registries"),
     ("setup", "0", "Setup"),
 )
 
 PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS}
+PANEL_NAMES = {name for name, _key, _label in PANELS}
 
 
 class _BodyStatic(Static):
@@ -1597,6 +1597,9 @@ class DefenseClawTUI(App[None]):
             tab.label = text
 
     def action_switch_panel(self, panel: str) -> None:
+        if panel not in PANEL_NAMES:
+            visible = self._visible_panels()
+            panel = visible[0] if visible else "overview"
         self.active_panel = panel
         self.help_open = False
         if self.status_text.startswith("backend=textual  panel="):
@@ -2530,7 +2533,7 @@ class DefenseClawTUI(App[None]):
         """
 
         global_section: list[tuple[str, str]] = [
-            ("1-9 / 0 / T V R A", "Switch panel by hotkey"),
+            ("1-9 / 0 / V R A", "Switch panel by hotkey"),
             ("Tab / Shift+Tab", "Next / previous panel"),
             (": or Ctrl+K", "Open command palette"),
             ("Ctrl+P", "Fuzzy panel jumper"),
@@ -2579,11 +2582,6 @@ class DefenseClawTUI(App[None]):
                 ("/", "Filter"),
                 ("r", "Refresh"),
                 ("s / b / a", "Scan / block / allow selected"),
-            ],
-            "tools": [
-                ("j/k or Up/Down", "Navigate items"),
-                ("/", "Filter"),
-                ("r", "Refresh"),
             ],
             "inventory": [
                 ("j/k or Up/Down", "Navigate items"),

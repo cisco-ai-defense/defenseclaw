@@ -62,7 +62,7 @@ from defenseclaw.tui.widgets.native_metrics import MetricTile, OverviewMetrics
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
-from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static
+from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static, Tab, Tabs
 
 
 @pytest.mark.asyncio
@@ -413,6 +413,28 @@ async def test_mouse_click_switches_top_level_tabs() -> None:
 
         assert app.active_panel == "alerts"
         assert "Alerts" in app.body_text
+
+
+@pytest.mark.asyncio
+async def test_tool_policy_tab_is_removed() -> None:
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+
+        tabs = app.query_one("#tabs", Tabs)
+        assert tabs.get_tab("tab-tools") is None
+        assert all("Tool Policy" not in str(tab.label) for tab in tabs.query(Tab))
+
+        await pilot.press("T")
+        await pilot.pause()
+
+        assert app.active_panel == "overview"
+
+        app.action_switch_panel("tools")
+        await pilot.pause()
+
+        assert app.active_panel == "overview"
 
 
 @pytest.mark.asyncio

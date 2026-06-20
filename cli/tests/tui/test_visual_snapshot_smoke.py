@@ -46,7 +46,6 @@ TOP_LEVEL_PANELS = (
     ("logs", "8", "Logs"),
     ("audit", "9", "Audit"),
     ("activity", "a", "Activity"),
-    ("tools", "T", "Tool Policy"),
     ("ai", "V", "AI Discovery"),
     ("registries", None, "Registries"),
     ("setup", "0", "Setup Wizards"),
