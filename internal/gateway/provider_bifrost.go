@@ -758,6 +758,9 @@ func fromBifrostStreamChunk(resp *schemas.BifrostChatResponse) StreamChunk {
 					msg.ToolCalls = raw
 				}
 			}
+			if len(d.ExtraContent) > 0 {
+				msg.ExtraContent = d.ExtraContent
+			}
 			cc.Delta = msg
 		}
 		sc.Choices = append(sc.Choices, cc)
