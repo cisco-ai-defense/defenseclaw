@@ -465,7 +465,8 @@ func TestBifrostProvider_LiveBedrock(t *testing.T) {
 		t.Skip("BIFROST_API_KEY not set — skipping live Bedrock test")
 	}
 
-	p, err := NewProvider("bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0", apiKey)
+	const model = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+	p, err := NewProvider(model, apiKey)
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
 	}
@@ -474,7 +475,7 @@ func TestBifrostProvider_LiveBedrock(t *testing.T) {
 	defer cancel()
 
 	resp, err := p.ChatCompletion(ctx, &ChatRequest{
-		Model: "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+		Model: model,
 		Messages: []ChatMessage{
 			{Role: "user", Content: "Say 'hello' and nothing else."},
 		},
@@ -497,7 +498,8 @@ func TestBifrostProvider_LiveBedrockStream(t *testing.T) {
 		t.Skip("BIFROST_API_KEY not set — skipping live Bedrock stream test")
 	}
 
-	p, err := NewProvider("bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0", apiKey)
+	const model = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+	p, err := NewProvider(model, apiKey)
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
 	}
@@ -508,7 +510,7 @@ func TestBifrostProvider_LiveBedrockStream(t *testing.T) {
 	var chunks int
 	var accumulated string
 	usage, err := p.ChatCompletionStream(ctx, &ChatRequest{
-		Model: "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+		Model: model,
 		Messages: []ChatMessage{
 			{Role: "user", Content: "Say 'streaming works' and nothing else."},
 		},

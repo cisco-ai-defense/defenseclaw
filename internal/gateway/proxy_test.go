@@ -3544,6 +3544,8 @@ func TestSwitchConnectorLocked_TearsDownOldAndSetsUpNew(t *testing.T) {
 		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
 	}
 
+	applyHermeticConnectorHomes(t)
+
 	dir := t.TempDir()
 	reg := connector.NewDefaultRegistry()
 
@@ -3622,6 +3624,8 @@ func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
 	if !connector.OpenClawExtensionAvailable() {
 		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
 	}
+
+	applyHermeticConnectorHomes(t)
 
 	dir := t.TempDir()
 	reg := connector.NewDefaultRegistry()
