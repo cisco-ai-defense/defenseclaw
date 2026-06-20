@@ -211,7 +211,17 @@ jobs:
       # Use OSV for the vulnerability database so an outage in PyPI's
       # package-metadata JSON API does not turn the audit red before
       # pip-audit can evaluate the installed environment.
-      - run: uv run pip-audit --vulnerability-service osv --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196
+      # TODO: Remove GHSA-6v7p-g79w-8964 once msgpack >= 1.2.1 is pinned.
+      # Transitive dep of skill-scanner; not used by the Go gateway.
+      # TODO: Remove GHSA-4xgf-cpjx-pc3j once pydantic-settings >= 2.14.2.
+      # Transitive dep of skill-scanner; not in the gateway hot path.
+      - run: >
+          uv run pip-audit --vulnerability-service osv
+          --ignore-vuln CVE-2026-4539
+          --ignore-vuln CVE-2026-3219
+          --ignore-vuln PYSEC-2026-196
+          --ignore-vuln GHSA-6v7p-g79w-8964
+          --ignore-vuln GHSA-4xgf-cpjx-pc3j
 
   ts-build-test:
     name: TypeScript Build & Test
