@@ -611,6 +611,11 @@ jobs:
           rm -f "${SPLUNK_MOCK_LOG}"
           rm -f /tmp/defenseclaw-full-live-e2e-success*
 
+          # Repair persistent state before backup restore touches ~/.openclaw.
+          # A crashed sandbox/full-live run can leave ~/.openclaw symlinked to
+          # a root-owned target, which makes even cleanup rm/cp fail under -e.
+          bash scripts/runner-cleanup.sh
+
           if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
             mkdir -p ~/.openclaw
             cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json
@@ -622,7 +627,7 @@ jobs:
             rm -f "${OPENCLAW_AUTH_BACKUP_PATH}"
           fi
           if [ -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}" ]; then
-            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null || true
             rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
           fi
 
@@ -855,7 +860,7 @@ jobs:
             rm -f "${OPENCLAW_AUTH_BACKUP_PATH}"
           fi
           if [ -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}" ]; then
-            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null || true
             rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
           fi
 
@@ -1378,7 +1383,7 @@ jobs:
             rm -f "${OPENCLAW_AUTH_BACKUP_PATH}"
           fi
           if [ -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}" ]; then
-            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null || true
             rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
           fi
 
