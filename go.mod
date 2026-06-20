@@ -148,4 +148,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace github.com/maximhq/bifrost/core => github.com/nghodkicisco/bifrost-06162026/core v0.0.0-20260616183238-85dae6267ee7
+replace github.com/maximhq/bifrost/core => github.com/nghodkicisco/bifrost-06162026/core v0.0.0-thought-sig-fix-2
