@@ -112,14 +112,18 @@ def test_f0562_local_prometheus_apis_enabled_but_loopback_bound() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# F-0563 — OTLP receivers bind to loopback
+# F-0563 — OTLP receivers bind container interface, host publish stays loopback
 # --------------------------------------------------------------------------- #
-def test_f0563_otlp_binds_loopback() -> None:
+def test_f0563_otlp_receiver_accepts_docker_port_forwarding() -> None:
+    # Docker's host-side port publish is loopback-bound in docker-compose.yml.
+    # Inside the collector container, however, the receiver must bind to the
+    # container interface. Binding 127.0.0.1 here makes the host-published
+    # 4317/4318 ports accept TCP but never deliver OTLP records to the receiver.
     text = _read(OTEL)
-    assert "endpoint: 127.0.0.1:4317" in text
-    assert "endpoint: 127.0.0.1:4318" in text
-    assert "0.0.0.0:4317" not in text
-    assert "0.0.0.0:4318" not in text
+    assert "endpoint: 0.0.0.0:4317" in text
+    assert "endpoint: 0.0.0.0:4318" in text
+    assert "endpoint: 127.0.0.1:4317" not in text
+    assert "endpoint: 127.0.0.1:4318" not in text
 
 
 # --------------------------------------------------------------------------- #
