@@ -921,6 +921,10 @@ jobs:
       # DefenseClaw's gateway is pure Go and does not use aiohttp at runtime.
       # TODO: Remove python-multipart ignores once >= 0.0.31 is available
       # and pinned. Same skill-scanner transitive; not in the gateway.
+      # TODO: Remove GHSA-6v7p-g79w-8964 once msgpack >= 1.2.1 is pinned.
+      # Transitive dep of skill-scanner; not used by the Go gateway.
+      # TODO: Remove GHSA-4xgf-cpjx-pc3j once pydantic-settings >= 2.14.2.
+      # Transitive dep of skill-scanner; not in the gateway hot path.
       - run: >
           uv run pip-audit --vulnerability-service osv
           --ignore-vuln CVE-2026-4539
