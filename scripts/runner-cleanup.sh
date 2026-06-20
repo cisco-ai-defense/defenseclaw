@@ -39,6 +39,15 @@ docker volume prune -f 2>/dev/null || true
 docker image prune -a -f 2>/dev/null || true
 docker builder prune -a -f 2>/dev/null || true
 
+# 2b. Persistent product state can be left owned by root after sandboxed or
+# service-backed E2E paths. Repair it before workflow cleanup parses or prunes
+# these directories on the next run.
+for state_dir in "$HOME/.defenseclaw" "$HOME/.openclaw"; do
+  [ -e "$state_dir" ] || continue
+  sudo -n chown -R "$(id -u):$(id -g)" "$state_dir" 2>/dev/null || true
+  chmod -R u+rwX "$state_dir" 2>/dev/null || true
+done
+
 # 3. Runner-level caches. _work/_actions and _tool accumulate from every job
 # that ever ran on this host; without TTL pruning they grow unbounded.
 RUNNER_ROOT="$(dirname "$(dirname "${RUNNER_WORKSPACE:-/home/ubuntu/actions-runner/_work/defenseclaw}")")"

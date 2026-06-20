@@ -620,7 +620,9 @@ class Store:
         aid = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         self.db.execute(
-            """INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
+            """INSERT INTO actions (
+                 id, target_type, target_name, source_path, actions_json, reason,
+                 updated_at, connector)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
                  actions_json = excluded.actions_json,
@@ -643,7 +645,9 @@ class Store:
         init_json = json.dumps({field: value})
         path = f"$.{field}"
         self.db.execute(
-            """INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
+            """INSERT INTO actions (
+                 id, target_type, target_name, source_path, actions_json, reason,
+                 updated_at, connector)
                VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
                ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
                  actions_json = json_set(actions_json, ?, ?),
