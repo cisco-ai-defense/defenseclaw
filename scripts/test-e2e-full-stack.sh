@@ -763,6 +763,19 @@ with cfg_path.open() as f:
     cfg = json.load(f)
 
 changed = False
+
+
+def is_dead_defenseclaw_load_path(value):
+    if isinstance(value, str):
+        path = Path(value.rstrip("/")).expanduser()
+        return path.name == "defenseclaw" and not path.exists()
+    if isinstance(value, dict):
+        return any(is_dead_defenseclaw_load_path(item) for item in value.values())
+    if isinstance(value, list):
+        return any(is_dead_defenseclaw_load_path(item) for item in value)
+    return False
+
+
 skills = cfg.setdefault("skills", {}).setdefault("entries", {})
 kept = {name: meta for name, meta in skills.items() if not name.startswith(prefix)}
 if kept != skills:
@@ -781,6 +794,15 @@ for bucket_name in ("entries", "installs"):
     if next_bucket != bucket:
         plugins[bucket_name] = next_bucket
         changed = True
+
+load = plugins.get("load")
+if isinstance(load, dict):
+    paths = load.get("paths")
+    if isinstance(paths, list):
+        next_paths = [path for path in paths if not is_dead_defenseclaw_load_path(path)]
+        if next_paths != paths:
+            load["paths"] = next_paths
+            changed = True
 
 if changed:
     with cfg_path.open("w") as f:
@@ -801,12 +823,24 @@ state = {
     "current_prefix_skill_entries": 0,
     "current_prefix_plugin_entries": 0,
     "defenseclaw_plugin_entries": 0,
+    "stale_defenseclaw_plugin_load_paths": 0,
 }
 if cfg_path.exists():
     with cfg_path.open() as f:
         cfg = json.load(f)
     skills = cfg.get("skills", {}).get("entries", {})
     plugins = cfg.get("plugins", {})
+
+    def is_dead_defenseclaw_load_path(value):
+        if isinstance(value, str):
+            path = Path(value.rstrip("/")).expanduser()
+            return path.name == "defenseclaw" and not path.exists()
+        if isinstance(value, dict):
+            return any(is_dead_defenseclaw_load_path(item) for item in value.values())
+        if isinstance(value, list):
+            return any(is_dead_defenseclaw_load_path(item) for item in value)
+        return False
+
     state["current_prefix_skill_entries"] = sum(
         1 for name in skills if str(name).startswith(prefix)
     )
@@ -821,6 +855,13 @@ if cfg_path.exists():
         for bucket_name in ("entries", "installs")
         if "defenseclaw" in (plugins.get(bucket_name, {}) or {})
     )
+    load = plugins.get("load")
+    if isinstance(load, dict):
+        paths = load.get("paths")
+        if isinstance(paths, list):
+            state["stale_defenseclaw_plugin_load_paths"] = sum(
+                1 for path in paths if is_dead_defenseclaw_load_path(path)
+            )
 print(json.dumps(state))
 PY
 }
@@ -1221,6 +1262,12 @@ phase_start() {
         pass "preflight: no stale defenseclaw plugin config entry"
     else
         fail "preflight: no stale defenseclaw plugin config entry" "$cfg_state"
+    fi
+
+    if [ "$(echo "$cfg_state" | jq -r '.stale_defenseclaw_plugin_load_paths' 2>/dev/null || echo 99)" = "0" ]; then
+        pass "preflight: no stale DefenseClaw plugin load paths"
+    else
+        fail "preflight: no stale DefenseClaw plugin load paths" "$cfg_state"
     fi
 
     echo "  Starting OpenClaw gateway..."

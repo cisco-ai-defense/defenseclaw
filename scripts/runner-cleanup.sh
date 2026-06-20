@@ -68,29 +68,25 @@ repair_persistent_state_permissions() {
 }
 
 normalize_openclaw_ci_config() {
-  local cfg_path="$HOME/.openclaw/openclaw.json"
-  [ -f "$cfg_path" ] || return 0
-  python3 - "$cfg_path" <<'PY'
+  local oc_home="$HOME/.openclaw"
+  [ -d "$oc_home" ] || return 0
+  python3 - "$oc_home" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-cfg_path = Path(sys.argv[1])
+oc_home = Path(sys.argv[1])
+cfg_paths = []
+seen = set()
+for pattern in ("openclaw.json", "openclaw.json.*"):
+    for path in sorted(oc_home.glob(pattern)):
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        cfg_paths.append(path)
 
-try:
-    with cfg_path.open() as f:
-        cfg = json.load(f)
-except PermissionError as exc:
-    print(f"[runner-cleanup] WARNING: OpenClaw config unreadable during normalization: {exc}")
+if not cfg_paths:
     raise SystemExit(0)
-except json.JSONDecodeError as exc:
-    print(f"[runner-cleanup] WARNING: OpenClaw config invalid during normalization: {exc}")
-    raise SystemExit(0)
-
-if not isinstance(cfg, dict):
-    raise SystemExit(0)
-
-changed = False
 
 
 def is_defenseclaw_load_path(value):
@@ -103,58 +99,90 @@ def is_defenseclaw_load_path(value):
     return False
 
 
-plugins = cfg.get("plugins")
-if isinstance(plugins, dict):
-    for section in ("entries", "installs", "allow", "enabled"):
-        bucket = plugins.get(section)
-        if isinstance(bucket, dict):
-            next_bucket = {name: meta for name, meta in bucket.items() if str(name) != "defenseclaw"}
-            if next_bucket != bucket:
-                plugins[section] = next_bucket
+def normalize_config(cfg_path):
+    try:
+        with cfg_path.open() as f:
+            cfg = json.load(f)
+    except PermissionError as exc:
+        print(f"[runner-cleanup] WARNING: OpenClaw config unreadable during normalization: {exc}")
+        return "skipped"
+    except json.JSONDecodeError as exc:
+        print(f"[runner-cleanup] WARNING: OpenClaw config invalid during normalization: {exc}")
+        return "skipped"
+
+    if not isinstance(cfg, dict):
+        return "skipped"
+
+    changed = False
+    plugins = cfg.get("plugins")
+    if isinstance(plugins, dict):
+        for section in ("entries", "installs", "allow", "enabled"):
+            bucket = plugins.get(section)
+            if isinstance(bucket, dict):
+                next_bucket = {name: meta for name, meta in bucket.items() if str(name) != "defenseclaw"}
+                if next_bucket != bucket:
+                    plugins[section] = next_bucket
+                    changed = True
+            elif isinstance(bucket, list):
+                next_bucket = [item for item in bucket if str(item) != "defenseclaw"]
+                if next_bucket != bucket:
+                    plugins[section] = next_bucket
+                    changed = True
+
+        load = plugins.get("load")
+        if isinstance(load, dict):
+            paths = load.get("paths")
+            if isinstance(paths, list):
+                next_paths = [path for path in paths if not is_defenseclaw_load_path(path)]
+                if next_paths != paths:
+                    load["paths"] = next_paths
+                    changed = True
+
+    gateway = cfg.get("gateway")
+    if not isinstance(gateway, dict):
+        gateway = {}
+        cfg["gateway"] = gateway
+        changed = True
+    if not gateway.get("mode"):
+        gateway["mode"] = "local"
+        changed = True
+
+    channels = cfg.get("channels")
+    if isinstance(channels, dict):
+        for channel in channels.values():
+            if not isinstance(channel, dict):
+                continue
+            if "nativeStreaming" in channel:
+                channel.pop("nativeStreaming", None)
                 changed = True
-        elif isinstance(bucket, list):
-            next_bucket = [item for item in bucket if str(item) != "defenseclaw"]
-            if next_bucket != bucket:
-                plugins[section] = next_bucket
+            if "streaming" in channel and not isinstance(channel.get("streaming"), dict):
+                channel.pop("streaming", None)
                 changed = True
 
-    load = plugins.get("load")
-    if isinstance(load, dict):
-        paths = load.get("paths")
-        if isinstance(paths, list):
-            next_paths = [path for path in paths if not is_defenseclaw_load_path(path)]
-            if next_paths != paths:
-                load["paths"] = next_paths
-                changed = True
+    if changed:
+        with cfg_path.open("w") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        return "changed"
+    return "clean"
 
-gateway = cfg.get("gateway")
-if not isinstance(gateway, dict):
-    gateway = {}
-    cfg["gateway"] = gateway
-    changed = True
-if not gateway.get("mode"):
-    gateway["mode"] = "local"
-    changed = True
 
-channels = cfg.get("channels")
-if isinstance(channels, dict):
-    for channel in channels.values():
-        if not isinstance(channel, dict):
-            continue
-        if "nativeStreaming" in channel:
-            channel.pop("nativeStreaming", None)
-            changed = True
-        if "streaming" in channel and not isinstance(channel.get("streaming"), dict):
-            channel.pop("streaming", None)
-            changed = True
+changed = clean = skipped = 0
+for cfg_path in cfg_paths:
+    result = normalize_config(cfg_path)
+    if result == "changed":
+        changed += 1
+    elif result == "clean":
+        clean += 1
+    else:
+        skipped += 1
 
 if changed:
-    with cfg_path.open("w") as f:
-        json.dump(cfg, f, indent=2)
-        f.write("\n")
-    print("[runner-cleanup] OpenClaw config normalized for CI")
-else:
+    print(f"[runner-cleanup] OpenClaw config normalized for CI ({changed} file(s))")
+elif clean:
     print("[runner-cleanup] OpenClaw config already clean")
+elif skipped:
+    print("[runner-cleanup] OpenClaw config normalization skipped")
 PY
 }
 
