@@ -156,6 +156,15 @@ jobs:
                   plugins[section] = next_bucket
                   changed = True
 
+          def _is_defenseclaw_load_path(value):
+              if isinstance(value, str):
+                  return Path(value.rstrip("/")).name == "defenseclaw"
+              if isinstance(value, dict):
+                  return any(_is_defenseclaw_load_path(item) for item in value.values())
+              if isinstance(value, list):
+                  return any(_is_defenseclaw_load_path(item) for item in value)
+              return False
+
           load = plugins.get("load")
           if isinstance(load, dict):
               paths = load.get("paths")
@@ -163,7 +172,7 @@ jobs:
                   next_paths = [
                       path
                       for path in paths
-                      if Path(str(path).rstrip("/")).name != "defenseclaw"
+                      if not _is_defenseclaw_load_path(path)
                   ]
                   if next_paths != paths:
                       load["paths"] = next_paths
@@ -761,6 +770,15 @@ jobs:
                   plugins[section] = next_bucket
                   changed = True
 
+          def _is_defenseclaw_load_path(value):
+              if isinstance(value, str):
+                  return Path(value.rstrip("/")).name == "defenseclaw"
+              if isinstance(value, dict):
+                  return any(_is_defenseclaw_load_path(item) for item in value.values())
+              if isinstance(value, list):
+                  return any(_is_defenseclaw_load_path(item) for item in value)
+              return False
+
           load = plugins.get("load")
           if isinstance(load, dict):
               paths = load.get("paths")
@@ -768,7 +786,7 @@ jobs:
                   next_paths = [
                       path
                       for path in paths
-                      if Path(str(path).rstrip("/")).name != "defenseclaw"
+                      if not _is_defenseclaw_load_path(path)
                   ]
                   if next_paths != paths:
                       load["paths"] = next_paths

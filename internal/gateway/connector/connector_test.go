@@ -721,6 +721,73 @@ func TestOpenClaw_Setup_InstallsExtensionAndPatchesConfig(t *testing.T) {
 	}
 }
 
+func TestOpenClaw_Setup_ReplacesStaleDefenseClawLoadPaths(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	if err := os.MkdirAll(ocHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	otherPath := filepath.Join(ocHome, "extensions", "somebody-else")
+	initial := map[string]interface{}{
+		"plugins": map[string]interface{}{
+			"load": map[string]interface{}{
+				"paths": []interface{}{
+					"/data/openclaw/extensions/defenseclaw",
+					map[string]interface{}{"plugin": "/legacy/openclaw/extensions/defenseclaw"},
+					otherPath,
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	var cfg map[string]interface{}
+	data, _ = os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("openclaw.json not valid JSON after Setup: %v", err)
+	}
+	paths := cfg["plugins"].(map[string]interface{})["load"].(map[string]interface{})["paths"].([]interface{})
+	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+	foundCurrent := 0
+	foundOther := false
+	for _, path := range paths {
+		text := fmt.Sprint(path)
+		if strings.Contains(text, "/data/openclaw/extensions/defenseclaw") || strings.Contains(text, "/legacy/openclaw/extensions/defenseclaw") {
+			t.Fatalf("stale DefenseClaw load path survived Setup: %v", paths)
+		}
+		if s, _ := path.(string); s == extDir {
+			foundCurrent++
+		}
+		if s, _ := path.(string); s == otherPath {
+			foundOther = true
+		}
+	}
+	if foundCurrent != 1 {
+		t.Fatalf("current DefenseClaw load path count = %d, want 1; paths=%v", foundCurrent, paths)
+	}
+	if !foundOther {
+		t.Fatalf("unrelated plugin load path was removed: %v", paths)
+	}
+}
+
 func TestOpenClaw_Setup_IsIdempotent(t *testing.T) {
 	requireOpenClawExtensionBundle(t)
 
@@ -771,6 +838,78 @@ func TestOpenClaw_Setup_IsIdempotent(t *testing.T) {
 	}
 	if pathCount != 1 {
 		t.Errorf("plugins.load.paths has %d entries after two Setups, want 1", pathCount)
+	}
+}
+
+func TestOpenClaw_Uninstall_RemovesAllDefenseClawLoadPaths(t *testing.T) {
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	if err := os.MkdirAll(ocHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	currentPath := filepath.Join(ocHome, "extensions", "defenseclaw")
+	otherPath := filepath.Join(ocHome, "extensions", "somebody-else")
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	initial := map[string]interface{}{
+		"plugins": map[string]interface{}{
+			"allow": []interface{}{"defenseclaw", "somebody-else"},
+			"entries": map[string]interface{}{
+				"defenseclaw":   map[string]interface{}{"enabled": true},
+				"somebody-else": map[string]interface{}{"enabled": true},
+			},
+			"load": map[string]interface{}{
+				"paths": []interface{}{
+					currentPath,
+					"/data/openclaw/extensions/defenseclaw",
+					map[string]interface{}{"plugin": "/legacy/openclaw/extensions/defenseclaw"},
+					otherPath,
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := uninstallOpenClawExtension(ocHome); err != nil {
+		t.Fatalf("uninstallOpenClawExtension: %v", err)
+	}
+
+	var cfg map[string]interface{}
+	data, _ = os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("openclaw.json not valid JSON after uninstall: %v", err)
+	}
+	plugins := cfg["plugins"].(map[string]interface{})
+	for _, value := range plugins["allow"].([]interface{}) {
+		if value == "defenseclaw" {
+			t.Fatalf("plugins.allow still contains defenseclaw: %v", plugins["allow"])
+		}
+	}
+	entries := plugins["entries"].(map[string]interface{})
+	if _, ok := entries["defenseclaw"]; ok {
+		t.Fatalf("plugins.entries still contains defenseclaw: %v", entries)
+	}
+	if _, ok := entries["somebody-else"]; !ok {
+		t.Fatalf("plugins.entries lost unrelated plugin: %v", entries)
+	}
+	paths := plugins["load"].(map[string]interface{})["paths"].([]interface{})
+	foundOther := false
+	for _, path := range paths {
+		text := fmt.Sprint(path)
+		if strings.Contains(text, "defenseclaw") {
+			t.Fatalf("DefenseClaw load path survived uninstall: %v", paths)
+		}
+		if s, _ := path.(string); s == otherPath {
+			foundOther = true
+		}
+	}
+	if !foundOther {
+		t.Fatalf("unrelated plugin load path was removed: %v", paths)
 	}
 }
 
