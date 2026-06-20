@@ -6099,19 +6099,27 @@ class DefenseClawTUI(App[None]):
         target = path or Path("defenseclaw-audit-export.json")
         if not target.is_absolute():
             target = (self.data_dir or Path.cwd()) / target
-        rows = [
-            {
-                "id": event.id,
-                "timestamp": event.timestamp.isoformat(),
-                "action": event.action,
-                "target": event.target,
-                "actor": event.actor,
-                "details": event.details,
-                "severity": event.severity,
-                "run_id": event.run_id,
-            }
-            for event in self.audit_model.filtered
-        ]
+        rows = []
+        store = getattr(self.audit_model, "store", None)
+        for event in self.audit_model.filtered:
+            full_event = event
+            if store is not None and hasattr(store, "get_event"):
+                try:
+                    full_event = store.get_event(event.id) or event  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001 - export the visible row if hydration fails.
+                    full_event = event
+            rows.append(
+                {
+                    "id": full_event.id,
+                    "timestamp": full_event.timestamp.isoformat(),
+                    "action": full_event.action,
+                    "target": full_event.target,
+                    "actor": full_event.actor,
+                    "details": full_event.details,
+                    "severity": full_event.severity,
+                    "run_id": full_event.run_id,
+                }
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(rows, indent=2), encoding="utf-8")
         # F-0781: audit exports can carry sensitive identifiers (targets,

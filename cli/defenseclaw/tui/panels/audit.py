@@ -332,7 +332,10 @@ class AuditPanelModel:
         if self.store is None:
             return
         try:
-            self.items = list(self.store.list_events(500))  # type: ignore[attr-defined]
+            if hasattr(self.store, "list_event_summaries"):
+                self.items = list(self.store.list_event_summaries(500))  # type: ignore[attr-defined]
+            else:
+                self.items = list(self.store.list_events(500))  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 - store failures are panel error state.
             self.error_message = f"Audit refresh failed: {exc}"
             self.items = []
@@ -487,10 +490,11 @@ class AuditPanelModel:
         if self._detail_cache is not None and self._detail_cache_cursor == self.cursor:
             return self._detail_cache
 
-        findings = _list_findings_by_run_id(self.store, selected.run_id)
-        related = _list_related_events(self.store, selected, 12)
-        action = _get_current_action(self.store, selected)
-        info = AuditDetailInfo(event=selected, findings=findings, related=related, action=action)
+        event = _get_event_by_id(self.store, selected.id) or selected
+        findings = _list_findings_by_run_id(self.store, event.run_id)
+        related = _list_related_events(self.store, event, 12)
+        action = _get_current_action(self.store, event)
+        info = AuditDetailInfo(event=event, findings=findings, related=related, action=action)
         self._detail_cache = info
         self._detail_cache_cursor = self.cursor
         return info
@@ -806,6 +810,16 @@ def _list_events_by_target(store: object | None, target: str, limit: int) -> tup
         (target, max(limit, 1)),
     ).fetchall()
     return tuple(_event_from_row(row) for row in rows)
+
+
+def _get_event_by_id(store: object | None, event_id: str) -> Event | None:
+    if store is None or not event_id or not hasattr(store, "get_event"):
+        return None
+    try:
+        event = store.get_event(event_id)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - detail hydration is best-effort.
+        return None
+    return event if isinstance(event, Event) else None
 
 
 def _list_events_by_run_id(store: object | None, run_id: str, limit: int) -> tuple[Event, ...]:

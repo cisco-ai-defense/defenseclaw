@@ -210,6 +210,29 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(events[0].structured["schema"], "defenseclaw.hook.v1")
         self.assertEqual(events[0].structured["connector"], "codex")
 
+    def test_summary_readers_avoid_heavy_payloads_but_get_event_hydrates_full_row(self):
+        details = "connector=codex " + ("x" * 6000)
+        evt = Event(
+            action="connector-hook",
+            target="PreToolUse",
+            severity="INFO",
+            details=details,
+            structured={"payload": "y" * 6000},
+        )
+        self.store.log_event(evt)
+
+        event_summary = self.store.list_event_summaries(1)[0]
+        alert_summary = self.store.list_alert_summaries(1)[0]
+        full_event = self.store.get_event(event_summary.id)
+
+        self.assertLess(len(event_summary.details), len(details))
+        self.assertEqual(event_summary.structured, {})
+        self.assertEqual(alert_summary.details, event_summary.details)
+        self.assertIsNotNone(full_event)
+        assert full_event is not None
+        self.assertEqual(full_event.details, details)
+        self.assertEqual(full_event.structured["payload"], "y" * 6000)
+
     def test_logger_uses_run_id_from_env(self):
         old = os.environ.get("DEFENSECLAW_RUN_ID")
         os.environ["DEFENSECLAW_RUN_ID"] = "python-run-id"

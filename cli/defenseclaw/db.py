@@ -185,6 +185,7 @@ _VALID_FIELDS: dict[str, set[str]] = {
     "file": {"", "quarantine", "none"},
     "runtime": {"", "disable", "enable"},
 }
+_SUMMARY_DETAILS_BYTES = 4096
 
 
 def _validate(field: str, value: str) -> None:
@@ -464,6 +465,18 @@ class Store:
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
 
+    def list_event_summaries(self, limit: int = 100) -> list[Event]:
+        """List recent audit rows without loading large structured payloads."""
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id
+               FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
     def list_alerts(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
             """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
@@ -474,6 +487,32 @@ class Store:
             (max(limit, 1),),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def list_alert_summaries(self, limit: int = 100) -> list[Event]:
+        """List alert rows without loading large structured payloads."""
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id
+               FROM audit_events
+               WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
+                 AND action NOT LIKE 'dismiss%'
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def get_event(self, event_id: str) -> Event | None:
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
+               FROM audit_events WHERE id = ?""",
+            (event_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_event(row)
 
     def acknowledge_alerts(self, severity_filter: str = "all") -> int:
         """Mirror internal/audit/store.go AcknowledgeAlerts — rows updated."""

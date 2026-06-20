@@ -271,10 +271,8 @@ def render_verdict_line(event: GatewayEvent) -> str:
 def load_gateway_activity(path: Path) -> tuple[ActivityMutation, ...]:
     """Load activity events from a gateway JSONL file."""
 
-    if not path.exists():
-        return ()
     rows: list[ActivityMutation] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _tail_event_lines(path):
         if not line.strip():
             continue
         try:
@@ -302,10 +300,8 @@ def load_gateway_activity(path: Path) -> tuple[ActivityMutation, ...]:
 def load_gateway_scan_blocks(path: Path) -> tuple[ScanBlock, ...]:
     """Load scan summary blocks and attached findings from gateway JSONL."""
 
-    if not path.exists():
-        return ()
     blocks: dict[str, dict[str, Any]] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _tail_event_lines(path):
         if not line.strip():
             continue
         # A single malformed gateway row must never break the Alerts
@@ -372,6 +368,35 @@ def load_gateway_scan_blocks(path: Path) -> tuple[ScanBlock, ...]:
             reverse=True,
         )
     )
+
+
+def _tail_event_lines(
+    path: Path,
+    *,
+    max_bytes: int = 512 * 1024,
+    max_lines: int = 2000,
+) -> tuple[str, ...]:
+    """Return a bounded tail of a JSONL event file."""
+
+    try:
+        size = path.stat().st_size
+    except (OSError, FileNotFoundError):
+        return ()
+    read_size = min(size, max_bytes)
+    offset = size - read_size
+    try:
+        with path.open("rb") as fh:
+            if offset > 0:
+                fh.seek(offset)
+            data = fh.read(read_size)
+    except OSError:
+        return ()
+    if offset > 0:
+        _, _, data = data.partition(b"\n")
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    return tuple(lines)
 
 
 def _mapping(raw: object) -> dict[str, Any]:

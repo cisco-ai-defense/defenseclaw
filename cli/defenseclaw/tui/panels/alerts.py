@@ -264,9 +264,14 @@ class AlertsPanelModel:
         """Refresh external data sources owned by the model."""
 
         if self.store is not None and hasattr(self.store, "list_alerts"):
+            reader = (
+                self.store.list_alert_summaries
+                if hasattr(self.store, "list_alert_summaries")
+                else self.store.list_alerts
+            )
             self.audit_events = [
                 _coerce_alert_event(event)
-                for event in self.store.list_alerts(500)  # type: ignore[attr-defined]
+                for event in reader(500)  # type: ignore[misc]
             ]
         if self.data_dir is None:
             self.apply_filter()
@@ -700,6 +705,7 @@ class AlertsPanelModel:
                         scan=block,
                     ),
                 )
+        event = _get_alert_event_by_id(self.store, event.id) or event
         return AlertDetailInfo(
             event=event,
             findings=_list_findings_by_run_id(self.store, event.run_id),
@@ -988,6 +994,16 @@ def _list_events_by_target(store: object | None, target: str, limit: int) -> tup
         (target, max(limit, 1)),
     ).fetchall()
     return tuple(_alert_event_from_row(row) for row in rows)
+
+
+def _get_alert_event_by_id(store: object | None, event_id: str) -> AlertEvent | None:
+    if store is None or not event_id or event_id.startswith("gw:") or not hasattr(store, "get_event"):
+        return None
+    try:
+        event = store.get_event(event_id)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - detail hydration is best-effort.
+        return None
+    return _coerce_alert_event(event) if event is not None else None
 
 
 def _coerce_finding(item: object) -> AlertFinding:
