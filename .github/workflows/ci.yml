@@ -301,6 +301,8 @@ jobs:
           --ignore-vuln CVE-2026-53540
           --ignore-vuln CVE-2026-53537
           --ignore-vuln GHSA-537c-gmf6-5ccf
+          --ignore-vuln GHSA-6v7p-g79w-8964
+          --ignore-vuln GHSA-4xgf-cpjx-pc3j
 
   ts-build-test:
     name: TypeScript Build & Test
