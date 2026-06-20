@@ -22,19 +22,56 @@ log() { printf '[runner-cleanup] %s\n' "$*"; }
 repair_state_path() {
   local state_path="$1"
   [ -e "$state_path" ] || return 0
-  if sudo -n chown -R "$runner_uid:$runner_gid" "$state_path" 2>/dev/null; then
-    chmod -R u+rwX "$state_path" 2>/dev/null || true
+  if sudo -n chown -R -- "$runner_uid:$runner_gid" "$state_path" 2>/dev/null; then
+    chmod -R u+rwX -- "$state_path" 2>/dev/null || true
     return 0
   fi
-  if sudo -n setfacl -R -m "u:${runner_uid}:rwX" "$state_path" 2>/dev/null; then
+  if sudo -n setfacl -R -m "u:${runner_uid}:rwX" -- "$state_path" 2>/dev/null; then
     return 0
   fi
-  if sudo -n chmod -R a+rwX "$state_path" 2>/dev/null; then
+  if sudo -n chmod -R a+rwX -- "$state_path" 2>/dev/null; then
     log "Relaxed permissions on $state_path after ownership repair failed"
     return 0
   fi
   return 1
 }
+
+repair_persistent_state_permissions() {
+  local runner_uid runner_gid state_dir repaired resolved_state_dir
+  runner_uid="$(id -u)"
+  runner_gid="$(id -g)"
+  for state_dir in "$HOME/.defenseclaw" "$HOME/.openclaw"; do
+    [ -e "$state_dir" ] || continue
+    repaired=0
+
+    # Sandbox setup can leave ~/.openclaw as a symlink to a root-owned target.
+    # Repair the resolved target first; chown -R on the symlink path itself may
+    # only affect the link and leave openclaw.json unreadable.
+    if [ -L "$state_dir" ]; then
+      resolved_state_dir="$(realpath "$state_dir" 2>/dev/null || true)"
+      if [ -n "$resolved_state_dir" ] && [ "$resolved_state_dir" != "$state_dir" ]; then
+        if repair_state_path "$resolved_state_dir"; then
+          repaired=1
+        else
+          log "WARNING: unable to repair permissions on $resolved_state_dir"
+        fi
+      fi
+    fi
+
+    if repair_state_path "$state_dir"; then
+      repaired=1
+    fi
+    if [ "$repaired" -ne 1 ]; then
+      log "WARNING: unable to repair permissions on $state_dir"
+    fi
+  done
+}
+
+if [ "${RUNNER_CLEANUP_STATE_ONLY:-0}" = "1" ]; then
+  log "Repairing persistent product state permissions only"
+  repair_persistent_state_permissions
+  exit 0
+fi
 
 log "Disk before cleanup: $(df -h / | tail -1)"
 
@@ -59,33 +96,7 @@ docker builder prune -a -f 2>/dev/null || true
 # 2b. Persistent product state can be left owned by root after sandboxed or
 # service-backed E2E paths. Repair it before workflow cleanup parses or prunes
 # these directories on the next run.
-for state_dir in "$HOME/.defenseclaw" "$HOME/.openclaw"; do
-  [ -e "$state_dir" ] || continue
-  runner_uid="$(id -u)"
-  runner_gid="$(id -g)"
-  repaired=0
-
-  # Sandbox setup can leave ~/.openclaw as a symlink to a root-owned target.
-  # Repair the resolved target first; chown -R on the symlink path itself may
-  # only affect the link and leave openclaw.json unreadable.
-  if [ -L "$state_dir" ]; then
-    resolved_state_dir="$(realpath "$state_dir" 2>/dev/null || true)"
-    if [ -n "$resolved_state_dir" ] && [ "$resolved_state_dir" != "$state_dir" ]; then
-      if repair_state_path "$resolved_state_dir"; then
-        repaired=1
-      else
-        log "WARNING: unable to repair permissions on $resolved_state_dir"
-      fi
-    fi
-  fi
-
-  if repair_state_path "$state_dir"; then
-    repaired=1
-  fi
-  if [ "$repaired" -ne 1 ]; then
-    log "WARNING: unable to repair permissions on $state_dir"
-  fi
-done
+repair_persistent_state_permissions
 
 # 3. Runner-level caches. _work/_actions and _tool accumulate from every job
 # that ever ran on this host; without TTL pruning they grow unbounded.

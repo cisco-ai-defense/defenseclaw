@@ -452,6 +452,9 @@ jobs:
       - name: Rego policy tests
         run: make rego-test
 
+      - name: Repair persistent state before E2E tests
+        run: RUNNER_CLEANUP_STATE_ONLY=1 bash scripts/runner-cleanup.sh
+
       - name: E2E tests
         run: bash scripts/test-e2e-full-stack.sh
 
