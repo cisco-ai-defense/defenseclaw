@@ -67,9 +67,101 @@ repair_persistent_state_permissions() {
   done
 }
 
+normalize_openclaw_ci_config() {
+  local cfg_path="$HOME/.openclaw/openclaw.json"
+  [ -f "$cfg_path" ] || return 0
+  python3 - "$cfg_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+cfg_path = Path(sys.argv[1])
+
+try:
+    with cfg_path.open() as f:
+        cfg = json.load(f)
+except PermissionError as exc:
+    print(f"[runner-cleanup] WARNING: OpenClaw config unreadable during normalization: {exc}")
+    raise SystemExit(0)
+except json.JSONDecodeError as exc:
+    print(f"[runner-cleanup] WARNING: OpenClaw config invalid during normalization: {exc}")
+    raise SystemExit(0)
+
+if not isinstance(cfg, dict):
+    raise SystemExit(0)
+
+changed = False
+
+
+def is_defenseclaw_load_path(value):
+    if isinstance(value, str):
+        return Path(value.rstrip("/")).name == "defenseclaw"
+    if isinstance(value, dict):
+        return any(is_defenseclaw_load_path(item) for item in value.values())
+    if isinstance(value, list):
+        return any(is_defenseclaw_load_path(item) for item in value)
+    return False
+
+
+plugins = cfg.get("plugins")
+if isinstance(plugins, dict):
+    for section in ("entries", "installs", "allow", "enabled"):
+        bucket = plugins.get(section)
+        if isinstance(bucket, dict):
+            next_bucket = {name: meta for name, meta in bucket.items() if str(name) != "defenseclaw"}
+            if next_bucket != bucket:
+                plugins[section] = next_bucket
+                changed = True
+        elif isinstance(bucket, list):
+            next_bucket = [item for item in bucket if str(item) != "defenseclaw"]
+            if next_bucket != bucket:
+                plugins[section] = next_bucket
+                changed = True
+
+    load = plugins.get("load")
+    if isinstance(load, dict):
+        paths = load.get("paths")
+        if isinstance(paths, list):
+            next_paths = [path for path in paths if not is_defenseclaw_load_path(path)]
+            if next_paths != paths:
+                load["paths"] = next_paths
+                changed = True
+
+gateway = cfg.get("gateway")
+if not isinstance(gateway, dict):
+    gateway = {}
+    cfg["gateway"] = gateway
+    changed = True
+if not gateway.get("mode"):
+    gateway["mode"] = "local"
+    changed = True
+
+channels = cfg.get("channels")
+if isinstance(channels, dict):
+    for channel in channels.values():
+        if not isinstance(channel, dict):
+            continue
+        if "nativeStreaming" in channel:
+            channel.pop("nativeStreaming", None)
+            changed = True
+        if "streaming" in channel and not isinstance(channel.get("streaming"), dict):
+            channel.pop("streaming", None)
+            changed = True
+
+if changed:
+    with cfg_path.open("w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    print("[runner-cleanup] OpenClaw config normalized for CI")
+else:
+    print("[runner-cleanup] OpenClaw config already clean")
+PY
+}
+
 if [ "${RUNNER_CLEANUP_STATE_ONLY:-0}" = "1" ]; then
-  log "Repairing persistent product state permissions only"
+  log "Repairing persistent product state permissions and config only"
   repair_persistent_state_permissions
+  normalize_openclaw_ci_config
   exit 0
 fi
 
@@ -97,6 +189,7 @@ docker builder prune -a -f 2>/dev/null || true
 # service-backed E2E paths. Repair it before workflow cleanup parses or prunes
 # these directories on the next run.
 repair_persistent_state_permissions
+normalize_openclaw_ci_config
 
 # 3. Runner-level caches. _work/_actions and _tool accumulate from every job
 # that ever ran on this host; without TTL pruning they grow unbounded.
