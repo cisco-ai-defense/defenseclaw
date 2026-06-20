@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 from defenseclaw.config import RegistrySource
-from defenseclaw.models import Event
+from defenseclaw.models import Counts, Event
 from defenseclaw.tui.app import (
     DefenseClawTUI,
     _catalog_panel_invalidated_by_command,
@@ -768,6 +768,7 @@ async def test_activity_forwards_input_to_running_command() -> None:
 @pytest.mark.asyncio
 async def test_alerts_panel_renders_table_and_panel_local_keys_win() -> None:
     alerts = AlertsPanelModel()
+    alerts.show_all_severities = True
     alerts.set_events(
         [
             AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one", details="token"),
@@ -882,6 +883,7 @@ async def test_alerts_clickable_filter_and_dismiss_controls_open_preview() -> No
 @pytest.mark.asyncio
 async def test_alerts_table_row_click_updates_cursor() -> None:
     alerts = AlertsPanelModel()
+    alerts.show_all_severities = True
     alerts.set_events(
         [
             AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one"),
@@ -2556,22 +2558,33 @@ def test_startup_binds_alerts_model_to_audit_store(monkeypatch, tmp_path) -> Non
     assert app.alerts_model.store is store
 
 
-def test_refresh_alerts_mirrors_loaded_alerts_without_count_scan(tmp_path) -> None:
-    """Refreshing alerts should not call Store.get_counts on the hot path."""
+def test_refresh_alerts_mirrors_loaded_alerts_with_cheap_enforcement_counts(tmp_path) -> None:
+    """Refreshing alerts should use actionable summaries and cheap counts."""
 
     class FakeStore:
-        def list_alert_summaries(self, limit: int) -> list[AlertEvent]:
+        def list_actionable_alert_summaries(self, limit: int) -> list[AlertEvent]:
             assert limit == 500
             return [
                 AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one"),
-                AlertEvent(id="a2", severity="LOW", action="proxy", target="gateway"),
             ]
+
+        def list_alert_summaries(self, _limit: int) -> list[AlertEvent]:
+            raise AssertionError("default refresh should use actionable summaries")
 
         def list_alerts(self, _limit: int) -> list[AlertEvent]:
             raise AssertionError("refresh should use list_alert_summaries")
 
         def get_counts(self) -> object:
             raise AssertionError("refresh should not scan counts")
+
+        def get_enforcement_counts(self) -> Counts:
+            return Counts(
+                blocked_skills=7,
+                allowed_skills=8,
+                blocked_mcps=9,
+                allowed_mcps=10,
+                total_scans=11,
+            )
 
     overview = OverviewPanelModel()
     overview.set_enforcement_counts(
@@ -2593,12 +2606,12 @@ def test_refresh_alerts_mirrors_loaded_alerts_without_count_scan(tmp_path) -> No
     app._refresh_alerts()  # noqa: SLF001 - regression for the startup refresh path.
 
     assert overview.enforcement == EnforcementCounts(
-        blocked_skills=2,
-        allowed_skills=3,
-        blocked_mcps=4,
-        allowed_mcps=5,
-        total_scans=6,
-        active_alerts=2,
+        blocked_skills=7,
+        allowed_skills=8,
+        blocked_mcps=9,
+        allowed_mcps=10,
+        total_scans=11,
+        active_alerts=1,
     )
 
 
@@ -3212,14 +3225,14 @@ def test_audit_panel_render_text_renders_e_export_close_filter_literally() -> No
     panel = AuditPanelModel()
     # Inject a synthetic event so render_text reaches the header line.
     panel.set_events([
-        Event(
-            id="1",
-            action="scan",
-            target="example",
-            severity="info",
-            details="",
-        )
-    ])
+            Event(
+                id="1",
+                action="scan",
+                target="example",
+                severity="HIGH",
+                details="",
+            )
+        ])
     panel.apply_filter()
     rendered = panel.render_text(height=24)
     plain = Text.from_markup(rendered).plain

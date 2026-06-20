@@ -476,6 +476,7 @@ var migrations = []migration{
 			);
 			CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp);
 			CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
+			CREATE INDEX IF NOT EXISTS idx_audit_severity_timestamp ON audit_events(severity, timestamp);
 			CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
 			CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 			CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);

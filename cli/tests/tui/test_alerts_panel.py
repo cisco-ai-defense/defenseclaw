@@ -60,6 +60,23 @@ def test_alerts_filter_selection_and_counts() -> None:
     assert action.filter_change.new == "CRITICAL"
 
 
+def test_alerts_default_hides_low_signal_rows_until_all_opt_in() -> None:
+    model = AlertsPanelModel()
+    model.set_events(
+        [
+            AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one"),
+            AlertEvent(id="a2", severity="MEDIUM", action="proxy", target="gateway"),
+            AlertEvent(id="a3", severity="INFO", action="connector-hook", target="preToolUse"),
+        ]
+    )
+
+    assert [row.event.id for row in model.filtered] == ["a1"]
+    assert "No actionable" not in model.empty_state()
+
+    assert model.handle_key("1").handled is True
+    assert {row.event.id for row in model.filtered} == {"a1", "a2", "a3"}
+
+
 def test_alerts_slash_search_and_exact_severity_filter() -> None:
     model = AlertsPanelModel()
     model.set_events(
@@ -91,6 +108,7 @@ def test_alerts_connector_column_and_shared_filter() -> None:
     """8.13: CONNECTOR column + shared connector filter on the Alerts panel."""
 
     model = AlertsPanelModel()
+    model.show_all_severities = True
     model.set_events(
         [
             AlertEvent(id="a1", severity="HIGH", action="connector-hook",
@@ -162,6 +180,7 @@ def test_alerts_refresh_ingests_scan_finding_from_gateway_jsonl(tmp_path) -> Non
         encoding="utf-8",
     )
     model = AlertsPanelModel(tmp_path)
+    model.show_all_severities = True
     model.refresh_gateway_scans()
     model.expanded.add("sid1")
     model.apply_filter()
@@ -191,6 +210,7 @@ def test_alerts_refresh_ingests_gateway_egress_and_filters_warning_as_medium(tmp
         encoding="utf-8",
     )
     model = AlertsPanelModel(tmp_path)
+    model.show_all_severities = True
     model.refresh_gateway_scans()
 
     egress_rows = [row for row in model.filtered if row.kind == "egress"]
@@ -327,6 +347,7 @@ def test_alerts_table_metadata_marks_scan_rows_non_selectable(tmp_path) -> None:
         encoding="utf-8",
     )
     model = AlertsPanelModel(tmp_path)
+    model.show_all_severities = True
     model.set_events([AlertEvent(id="a1", severity="LOW", action="proxy", target="gateway")])
     model.refresh_gateway_scans()
 
@@ -367,6 +388,7 @@ def test_alerts_connector_hook_row_surfaces_connector_and_decision() -> None:
     )
 
     model = AlertsPanelModel()
+    model.show_all_severities = True
     model.set_events([hook_event, plain_event])
 
     rows = {row.alert_id: row for row in model.data_table_row_models()}
@@ -397,6 +419,7 @@ def test_alerts_connector_hook_detail_pairs_expand_kv_into_rows() -> None:
     )
 
     model = AlertsPanelModel()
+    model.show_all_severities = True
     model.set_events([hook_event])
     model.toggle_expand_or_detail()
 
@@ -434,6 +457,7 @@ def test_alerts_connector_hook_blocked_keeps_severity_and_block_flag() -> None:
     )
 
     model = AlertsPanelModel()
+    model.show_all_severities = True
     model.set_events([hook_event])
     model.toggle_expand_or_detail()
 
@@ -461,6 +485,7 @@ def test_alerts_connector_hook_copy_text_uses_structured_rows() -> None:
     )
 
     model = AlertsPanelModel()
+    model.show_all_severities = True
     model.set_events([hook_event])
     model.toggle_expand_or_detail()
 

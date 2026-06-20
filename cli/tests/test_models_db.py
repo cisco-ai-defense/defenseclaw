@@ -119,6 +119,34 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0].severity, "HIGH")
 
+    def test_get_enforcement_counts_skips_alert_count(self):
+        pe = PolicyEngine(self.store)
+        pe.block("skill", "blocked-skill", "test")
+        pe.allow("skill", "allowed-skill", "test")
+        pe.block("mcp", "blocked-mcp", "test")
+        pe.allow("mcp", "allowed-mcp", "test")
+
+        logger = Logger(self.store)
+        logger.log_scan(
+            ScanResult(
+                scanner="skill-scanner",
+                target="/tmp/skill",
+                timestamp=datetime.now(timezone.utc),
+                findings=[],
+                duration=timedelta(milliseconds=50),
+            )
+        )
+        self.store.log_event(Event(action="scan", target="/tmp/skill", severity="HIGH"))
+
+        counts = self.store.get_enforcement_counts()
+
+        self.assertEqual(counts.blocked_skills, 1)
+        self.assertEqual(counts.allowed_skills, 1)
+        self.assertEqual(counts.blocked_mcps, 1)
+        self.assertEqual(counts.allowed_mcps, 1)
+        self.assertEqual(counts.total_scans, 1)
+        self.assertEqual(counts.alerts, 0)
+
     def test_store_init_creates_network_egress_schema_and_counts(self):
         tables = {
             row[0]
@@ -232,6 +260,18 @@ class ModelsDbTests(unittest.TestCase):
         assert full_event is not None
         self.assertEqual(full_event.details, details)
         self.assertEqual(full_event.structured["payload"], "y" * 6000)
+
+    def test_actionable_summary_readers_skip_low_signal_rows(self):
+        self.store.log_event(Event(id="info", action="connector-hook", target="preToolUse", severity="INFO"))
+        self.store.log_event(Event(id="medium", action="scan", target="skill://one", severity="MEDIUM"))
+        self.store.log_event(Event(id="high", action="scan", target="skill://two", severity="HIGH"))
+        self.store.log_event(Event(id="failure", action="sink-failure", target="splunk", severity="ERROR"))
+
+        audit_ids = [event.id for event in self.store.list_actionable_event_summaries(10)]
+        alert_ids = [event.id for event in self.store.list_actionable_alert_summaries(10)]
+
+        self.assertEqual(audit_ids, ["failure", "high"])
+        self.assertEqual(alert_ids, ["failure", "high"])
 
     def test_logger_uses_run_id_from_env(self):
         old = os.environ.get("DEFENSECLAW_RUN_ID")

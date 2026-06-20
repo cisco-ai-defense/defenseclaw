@@ -32,6 +32,7 @@ def test_audit_connector_column_and_filter() -> None:
     """8.13: CONNECTOR column + shared connector filter on the Audit panel."""
 
     model = AuditPanelModel()
+    model.show_all_events = True
     model.set_events(
         [
             Event(id="a", action="connector-hook", target="preToolUse",
@@ -65,6 +66,23 @@ def test_event_connector_helper() -> None:
         Event(id="x", action="connector-hook", target="t", details="connector=codex action=allow")
     ) == "codex"
     assert event_connector(Event(id="y", action="scan", target="t", details="severity=HIGH")) == ""
+
+
+def test_audit_default_hides_low_signal_rows_until_all_opt_in() -> None:
+    panel = AuditPanelModel()
+    panel.set_events(
+        [
+            Event(id="info", action="connector-hook", target="preToolUse", severity="INFO"),
+            Event(id="medium", action="scan", target="skill://one", severity="MEDIUM"),
+            Event(id="high", action="scan", target="skill://two", severity="HIGH"),
+            Event(id="failure", action="sink-failure", target="splunk", severity="INFO"),
+        ]
+    )
+
+    assert [event.id for event in panel.filtered] == ["high", "failure"]
+
+    assert panel.handle_key("1").handled is True
+    assert [event.id for event in panel.filtered] == ["info", "medium", "high", "failure"]
 
 
 def new_store(tmp_path: Path) -> Store:
@@ -130,6 +148,7 @@ def test_audit_refresh_filter_selection_and_detail_enrichment(tmp_path) -> None:
         )
 
         panel = AuditPanelModel(store)
+        panel.show_all_events = True
         panel.refresh()
 
         assert panel.count == 2
@@ -162,6 +181,7 @@ def test_audit_refresh_filter_selection_and_detail_enrichment(tmp_path) -> None:
 
 def test_audit_cursor_scroll_empty_and_no_match_states() -> None:
     panel = AuditPanelModel()
+    panel.show_all_events = True
     base = datetime(2026, 4, 16, 12, 0, 0)
     panel.set_events(
         [

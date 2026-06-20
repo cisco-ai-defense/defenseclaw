@@ -108,6 +108,37 @@ IMPORTANT_PATTERNS: tuple[str, ...] = (
     "started",
     "stopped",
 )
+ACTIONABLE_LOG_PATTERNS: tuple[str, ...] = (
+    "critical",
+    " high ",
+    "severity=high",
+    "severity:high",
+    "error",
+    "fatal",
+    "panic",
+    "warn",
+    "block",
+    "blocked",
+    "deny",
+    "denied",
+    "reject",
+    "rejected",
+    "quarantine",
+    "fail",
+    "failed",
+    "failure",
+)
+LOW_SIGNAL_LOG_PATTERNS: tuple[str, ...] = (
+    " info ",
+    "severity=info",
+    "severity:info",
+    " low ",
+    "severity=low",
+    "severity:low",
+    " medium ",
+    "severity=medium",
+    "severity:medium",
+)
 
 REDACTION_ENV_VAR = "DEFENSECLAW_DISABLE_REDACTION"
 TRUTHY_REDACTION_VALUES = {"1", "true", "yes", "on"}
@@ -881,7 +912,10 @@ class LogsPanelModel:
         if self.filter_mode == FILTER_NONE:
             return True
         if self.filter_mode == FILTER_NO_NOISE:
-            return not any(pattern in lower_line for pattern in NOISE_PATTERNS)
+            return (
+                not any(pattern in lower_line for pattern in NOISE_PATTERNS)
+                and _line_has_actionable_signal(lower_line)
+            )
         if self.filter_mode == FILTER_IMPORTANT:
             return any(pattern in lower_line for pattern in IMPORTANT_PATTERNS)
         if self.filter_mode == FILTER_ERRORS:
@@ -1057,6 +1091,12 @@ def _filter_change(filter_type: str, old: str, new: str) -> LogFilterChange | No
     if old == new:
         return None
     return LogFilterChange(panel="logs", filter_type=filter_type, old=old, new=new)
+
+
+def _line_has_actionable_signal(lower_line: str) -> bool:
+    if any(pattern in lower_line for pattern in ACTIONABLE_LOG_PATTERNS):
+        return True
+    return not any(pattern in lower_line for pattern in LOW_SIGNAL_LOG_PATTERNS)
 
 
 _CONNECTOR_LINE_RE = re.compile(r"connector[=:]\s*\"?([A-Za-z0-9._-]+)\"?", re.IGNORECASE)

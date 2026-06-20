@@ -8395,8 +8395,16 @@ class DefenseClawTUI(App[None]):
     def _load_audit_alerts(self) -> None:
         """Mirror loaded alert counts into Overview without heavy DB scans."""
 
-        active_alerts = sum(self.alerts_model.severity_counts().values())
+        active_alerts = self.alerts_model.alert_count()
         current = self.overview_model.enforcement
+        store = getattr(self.alerts_model, "store", None) or getattr(self.audit_model, "store", None)
+        if store is not None and hasattr(store, "get_enforcement_counts"):
+            try:
+                current = store.get_enforcement_counts()  # type: ignore[attr-defined]
+            except Exception as count_exc:  # noqa: BLE001 - degraded counts must not break alerts.
+                self._write_activity(
+                    f"[#FBBF24]enforcement counts unavailable:[/] {count_exc}"
+                )
         self.overview_model.set_enforcement_counts(
             EnforcementCounts(
                 blocked_skills=current.blocked_skills,

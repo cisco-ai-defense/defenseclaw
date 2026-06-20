@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS target_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
+CREATE INDEX IF NOT EXISTS idx_audit_severity_timestamp ON audit_events(severity, timestamp);
 CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
 CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
@@ -477,6 +478,20 @@ class Store:
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
 
+    def list_actionable_event_summaries(self, limit: int = 100) -> list[Event]:
+        """List high-signal audit rows for the default TUI view."""
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id
+               FROM audit_events
+               WHERE severity IN ('CRITICAL','HIGH','ERROR')
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
     def list_alerts(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
             """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
@@ -497,6 +512,21 @@ class Store:
                       severity, run_id
                FROM audit_events
                WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
+                 AND action NOT LIKE 'dismiss%'
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def list_actionable_alert_summaries(self, limit: int = 100) -> list[Event]:
+        """List high-signal alert rows for the default TUI view."""
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id
+               FROM audit_events
+               WHERE severity IN ('CRITICAL','HIGH','ERROR')
                  AND action NOT LIKE 'dismiss%'
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
@@ -827,6 +857,31 @@ class Store:
             alerts=_count(
                 "SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')"
             ),
+            total_scans=_count("SELECT COUNT(*) FROM scan_results"),
+            blocked_egress_calls=_count(
+                "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"
+            ),
+        )
+
+    def get_enforcement_counts(self) -> Counts:
+        """Return cheap Overview enforcement counters.
+
+        This intentionally leaves ``alerts`` at zero. Exact alert counts scan
+        ``audit_events.severity`` and are still unnecessary for the TUI
+        startup/refresh path. The TUI combines these exact policy/scan counts
+        with the alert summaries it already loaded for the Alerts panel.
+        """
+
+        def _count(sql: str) -> int:
+            return self.db.execute(sql).fetchone()[0]
+
+        q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
+        q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
+        return Counts(
+            blocked_skills=_count(q_skill + "'block'"),
+            allowed_skills=_count(q_skill + "'allow'"),
+            blocked_mcps=_count(q_mcp + "'block'"),
+            allowed_mcps=_count(q_mcp + "'allow'"),
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
             blocked_egress_calls=_count(
                 "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"

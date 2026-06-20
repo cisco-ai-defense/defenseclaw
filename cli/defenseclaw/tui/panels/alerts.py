@@ -36,6 +36,8 @@ SeverityFilter = Literal["", "CRITICAL", "HIGH", "MEDIUM", "LOW"]
 AlertRowKind = Literal["audit", "scan", "scan_finding", "egress"]
 
 SEVERITY_FILTERS: tuple[SeverityFilter, ...] = ("", "CRITICAL", "HIGH", "MEDIUM", "LOW")
+ACTIONABLE_SEVERITIES = {"CRITICAL", "HIGH", "ERROR"}
+LOW_SIGNAL_SEVERITIES = {"INFO", "LOW", "MEDIUM", "WARNING"}
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,7 @@ class AlertsPanelModel:
         self.filter_text = ""
         self.filtering = False
         self.severity_filter: SeverityFilter = ""
+        self.show_all_severities = False
         self.selected_ids: set[str] = set()
         self.detail_open = False
         self.cursor = 0
@@ -264,11 +267,7 @@ class AlertsPanelModel:
         """Refresh external data sources owned by the model."""
 
         if self.store is not None and hasattr(self.store, "list_alerts"):
-            reader = (
-                self.store.list_alert_summaries
-                if hasattr(self.store, "list_alert_summaries")
-                else self.store.list_alerts
-            )
+            reader = self._store_alert_reader()
             try:
                 self.audit_events = [
                     _coerce_alert_event(event)
@@ -318,6 +317,8 @@ class AlertsPanelModel:
             event = row.event
             if self.severity_filter and _severity_bucket(event.severity) != self.severity_filter:
                 continue
+            if not self.severity_filter and not self.show_all_severities and _is_low_signal_alert(row):
+                continue
             ev_connector = parse_kv_details(event.details).get("connector", "").lower()
             # 8.13: the shared connector filter (from the chip) is ANDed with
             # the typed ``connector:`` token so both narrow the same way.
@@ -344,6 +345,8 @@ class AlertsPanelModel:
 
     def set_filter(self, text: str) -> None:
         self.filter_text = text
+        if text:
+            self.show_all_severities = True
         self.apply_filter()
 
     def clear_filter(self) -> None:
@@ -353,10 +356,19 @@ class AlertsPanelModel:
 
     def set_severity_filter_exact(self, severity: SeverityFilter) -> None:
         self.severity_filter = severity
+        self.show_all_severities = True
         self.apply_filter()
 
     def set_severity_filter(self, severity: SeverityFilter) -> None:
-        self.severity_filter = "" if self.severity_filter == severity else severity
+        next_filter = "" if self.severity_filter == severity else severity
+        self.severity_filter = next_filter
+        if severity == "" or next_filter:
+            self.show_all_severities = True
+            if self.store is not None and (
+                severity == "" or next_filter in {"MEDIUM", "LOW"}
+            ):
+                self.refresh()
+                return
         self.apply_filter()
 
     def active_filter_label(self) -> str:
@@ -418,6 +430,11 @@ class AlertsPanelModel:
                 counts[bucket] += 1
         return counts
 
+    def alert_count(self) -> int:
+        """Return the number of top-level rows represented in Alerts."""
+
+        return sum(1 for row in self.filtered if row.kind != "scan_finding")
+
     def critical_count(self) -> int:
         counts = self.severity_counts()
         return counts["CRITICAL"] + counts["HIGH"]
@@ -458,6 +475,9 @@ class AlertsPanelModel:
         if key == "/":
             self.filtering = True
             self.filter_text = ""
+            self.show_all_severities = True
+            if self.store is not None:
+                self.refresh()
             self.apply_filter()
             return AlertPanelAction(True, hint="Type to search alerts. Enter applies; Esc clears.")
         if key == "1":
@@ -548,7 +568,7 @@ class AlertsPanelModel:
 
     def summary_text(self) -> str:
         counts = self.severity_counts()
-        active = self.severity_filter or "All"
+        active = self.severity_filter or ("All" if self.show_all_severities else "Actionable")
         selected = len(self.selected_ids)
         filter_label = f"  search={self.filter_text!r}" if self.filter_text else ""
         # ``filter_text`` is operator-typed search input that may
@@ -634,7 +654,24 @@ class AlertsPanelModel:
             return ""
         if self.filter_text or self.severity_filter:
             return "No alerts match the current filters."
+        if not self.show_all_severities:
+            return "No actionable alerts. Press 1 to show all severities."
         return "No active alerts."
+
+    def _store_alert_reader(self) -> object:
+        if self.show_all_severities or self.filter_text or self.severity_filter in {"MEDIUM", "LOW"}:
+            return (
+                self.store.list_alert_summaries
+                if hasattr(self.store, "list_alert_summaries")
+                else self.store.list_alerts
+            )
+        if hasattr(self.store, "list_actionable_alert_summaries"):
+            return self.store.list_actionable_alert_summaries
+        return (
+            self.store.list_alert_summaries
+            if hasattr(self.store, "list_alert_summaries")
+            else self.store.list_alerts
+        )
 
     def detail_text(self) -> str:
         if not self.detail_open:
@@ -884,6 +921,34 @@ def _severity_bucket(severity: str) -> str:
     if normalized == "WARNING":
         return "MEDIUM"
     return normalized
+
+
+def _is_low_signal_alert(row: AlertRow) -> bool:
+    event = row.event
+    severity = _severity_bucket(event.severity)
+    if severity in ACTIONABLE_SEVERITIES:
+        return False
+    if severity not in LOW_SIGNAL_SEVERITIES:
+        return False
+    haystack = f"{event.action} {event.target} {event.details}".lower()
+    return not any(
+        token in haystack
+        for token in (
+            "block",
+            "blocked",
+            "deny",
+            "denied",
+            "reject",
+            "rejected",
+            "quarantine",
+            "fail",
+            "failed",
+            "failure",
+            "error",
+            "fatal",
+            "panic",
+        )
+    )
 
 
 def _truncate(value: str, width: int) -> str:

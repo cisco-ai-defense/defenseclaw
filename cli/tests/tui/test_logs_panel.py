@@ -18,6 +18,7 @@ from defenseclaw.tui.panels.logs import (
     FILTER_ERRORS,
     FILTER_HOOKS,
     FILTER_LABELS,
+    FILTER_NO_NOISE,
     FILTER_NONE,
     FILTER_PRESETS,
     FILTER_TYPE_PRESET,
@@ -209,6 +210,23 @@ def test_logs_error_empty_and_cursor_scrolling_states(tmp_path) -> None:
     panel.lines["gateway"] = []
     panel.error_messages["gateway"] = ""
     assert "Log file is empty or not yet created" in panel.render_text()
+
+
+def test_logs_no_noise_default_hides_low_signal_severities() -> None:
+    panel = LogsPanelModel()
+    panel.filter_mode = FILTER_NO_NOISE
+    panel.lines["gateway"] = [
+        "12:00:00 INFO connector hook allow",
+        "12:00:01 MEDIUM scan completed",
+        "12:00:02 LOW background sync",
+        "12:00:03 HIGH block policy violation",
+        "12:00:04 INFO sink failure delivering webhook",
+    ]
+
+    assert panel.filtered_lines() == [
+        "12:00:03 HIGH block policy violation",
+        "12:00:04 INFO sink failure delivering webhook",
+    ]
 
 
 def test_logs_chip_cycles_schema_coverage_and_action_intents_are_data() -> None:
