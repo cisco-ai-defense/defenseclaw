@@ -269,10 +269,13 @@ class AlertsPanelModel:
                 if hasattr(self.store, "list_alert_summaries")
                 else self.store.list_alerts
             )
-            self.audit_events = [
-                _coerce_alert_event(event)
-                for event in reader(500)  # type: ignore[misc]
-            ]
+            try:
+                self.audit_events = [
+                    _coerce_alert_event(event)
+                    for event in reader(500)  # type: ignore[misc]
+                ]
+            except Exception:  # noqa: BLE001 - missing/partial audit DBs render empty alerts.
+                self.audit_events = []
         if self.data_dir is None:
             self.apply_filter()
         else:

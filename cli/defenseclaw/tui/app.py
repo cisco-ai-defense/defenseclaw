@@ -43,7 +43,7 @@ from defenseclaw.tui.executor import CommandAlreadyRunningError, CommandExecutor
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
 from defenseclaw.tui.panels.activity import ActivityPanelModel
 from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel, AIUsageSnapshot
-from defenseclaw.tui.panels.alerts import AlertEvent, AlertPanelAction, AlertsPanelModel
+from defenseclaw.tui.panels.alerts import AlertPanelAction, AlertsPanelModel
 from defenseclaw.tui.panels.audit import AuditPanelModel, _parse_kv_details
 from defenseclaw.tui.panels.first_run import FirstRunPanelModel
 from defenseclaw.tui.panels.inventory import FAST_SCAN_CATEGORIES, InventoryPanelModel
@@ -696,7 +696,8 @@ class DefenseClawTUI(App[None]):
         self._diagnose_running = False
         self.commands_run = 0
         self.activity_model = ActivityPanelModel()
-        self.alerts_model = alerts_model or AlertsPanelModel(self.data_dir)
+        audit_store = _audit_store(config)
+        self.alerts_model = alerts_model or AlertsPanelModel(self.data_dir, store=audit_store)
         self.registries_model = registries_model or RegistriesPanelModel(config, data_dir=self.data_dir)
         connector = _active_connector(config)
         self.skills_model = skills_model or SkillsPanelModel(connector=connector)
@@ -704,7 +705,7 @@ class DefenseClawTUI(App[None]):
         self.plugins_model = plugins_model or PluginsPanelModel(connector=connector)
         self.tools_model = tools_model or ToolsPanelModel(_audit_store(config))
         self.logs_model = logs_model or LogsPanelModel(self.data_dir)
-        self.audit_model = audit_model or AuditPanelModel(_audit_store(config))
+        self.audit_model = audit_model or AuditPanelModel(audit_store)
         self.overview_model = overview_model or OverviewPanelModel(_overview_config(config), version=__version__)
         self.inventory_model = inventory_model or InventoryPanelModel(connector=connector)
         self.ai_discovery_model = ai_discovery_model or AIDiscoveryPanelModel()
@@ -8394,54 +8395,20 @@ class DefenseClawTUI(App[None]):
             return (), str(exc)
 
     def _load_audit_alerts(self) -> None:
-        audit_db = str(getattr(self.config, "audit_db", "") or "")
-        if not audit_db or not Path(audit_db).exists():
-            return
-        try:
-            from defenseclaw.db import Store
+        """Mirror loaded alert counts into Overview without heavy DB scans."""
 
-            store = Store(audit_db)
-            try:
-                self.alerts_model.set_events(
-                    [
-                        AlertEvent(
-                            id=event.id,
-                            severity=event.severity,
-                            action=event.action,
-                            target=event.target,
-                            details=event.details,
-                            timestamp=event.timestamp,
-                        )
-                        for event in store.list_alerts(500)
-                    ]
-                )
-                # Mirror Go TUI: Overview ENFORCEMENT counters come from
-                # the same audit Store on every refresh. Without this
-                # call the panel stays pinned at 0/0/0/0 even after
-                # real scans land in the DB. Reusing the already-open
-                # Store keeps this on the same I/O budget as the alerts
-                # query above.
-                try:
-                    counts = store.get_counts()
-                except Exception as count_exc:  # noqa: BLE001 - degraded counts must not break alerts.
-                    self._write_activity(
-                        f"[#FBBF24]enforcement counts unavailable:[/] {count_exc}"
-                    )
-                else:
-                    self.overview_model.set_enforcement_counts(
-                        EnforcementCounts(
-                            blocked_skills=counts.blocked_skills,
-                            allowed_skills=counts.allowed_skills,
-                            blocked_mcps=counts.blocked_mcps,
-                            allowed_mcps=counts.allowed_mcps,
-                            total_scans=counts.total_scans,
-                            active_alerts=counts.alerts,
-                        )
-                    )
-            finally:
-                store.close()
-        except Exception as exc:  # noqa: BLE001 - the TUI must still open when the audit DB is unavailable.
-            self._write_activity(f"[#FBBF24]alerts unavailable:[/] {exc}")
+        active_alerts = sum(self.alerts_model.severity_counts().values())
+        current = self.overview_model.enforcement
+        self.overview_model.set_enforcement_counts(
+            EnforcementCounts(
+                blocked_skills=current.blocked_skills,
+                allowed_skills=current.allowed_skills,
+                blocked_mcps=current.blocked_mcps,
+                allowed_mcps=current.allowed_mcps,
+                total_scans=current.total_scans,
+                active_alerts=active_alerts,
+            )
+        )
 
 
 def _resolve_active_connector(snapshot: HealthSnapshot | None, mode: str) -> str:

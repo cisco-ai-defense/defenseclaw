@@ -2520,6 +2520,66 @@ def test_refresh_cached_config_closes_stale_audit_store(monkeypatch, tmp_path) -
     assert new_store.closed is False, "live store was closed by no-op reload"
 
 
+def test_startup_binds_alerts_model_to_audit_store(monkeypatch, tmp_path) -> None:
+    """Startup alerts refresh must use the summary reader, not a second DB scan."""
+
+    store = object()
+    monkeypatch.setattr("defenseclaw.tui.app._audit_store", lambda _cfg: store)
+
+    app = DefenseClawTUI(
+        config=SimpleNamespace(audit_db=str(tmp_path / "audit.sqlite")),
+        data_dir=tmp_path,
+    )
+
+    assert app.alerts_model.store is store
+
+
+def test_refresh_alerts_mirrors_loaded_alerts_without_count_scan(tmp_path) -> None:
+    """Refreshing alerts should not call Store.get_counts on the hot path."""
+
+    class FakeStore:
+        def list_alert_summaries(self, limit: int) -> list[AlertEvent]:
+            assert limit == 500
+            return [
+                AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one"),
+                AlertEvent(id="a2", severity="LOW", action="proxy", target="gateway"),
+            ]
+
+        def list_alerts(self, _limit: int) -> list[AlertEvent]:
+            raise AssertionError("refresh should use list_alert_summaries")
+
+        def get_counts(self) -> object:
+            raise AssertionError("refresh should not scan counts")
+
+    overview = OverviewPanelModel()
+    overview.set_enforcement_counts(
+        EnforcementCounts(
+            blocked_skills=2,
+            allowed_skills=3,
+            blocked_mcps=4,
+            allowed_mcps=5,
+            total_scans=6,
+            active_alerts=999,
+        )
+    )
+    app = DefenseClawTUI(
+        data_dir=tmp_path,
+        alerts_model=AlertsPanelModel(store=FakeStore()),
+        overview_model=overview,
+    )
+
+    app._refresh_alerts()  # noqa: SLF001 - regression for the startup refresh path.
+
+    assert overview.enforcement == EnforcementCounts(
+        blocked_skills=2,
+        allowed_skills=3,
+        blocked_mcps=4,
+        allowed_mcps=5,
+        total_scans=6,
+        active_alerts=2,
+    )
+
+
 def test_safe_body_renderable_handles_bracketed_status_strings() -> None:
     """``_set_status`` now routes its f-string through ``_safe_body_renderable``.
 
