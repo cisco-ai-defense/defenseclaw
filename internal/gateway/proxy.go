@@ -2061,7 +2061,7 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 	if instanceName != "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: model=%q instance=%q\n", cfgModel, instanceName)
 	} else {
-		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: using configured model %q\n", cfgModel)
+		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: using configured model %q provider=%q base_url=%q\n", cfgModel, p.cfg.LLM.Provider, baseURL)
 	}
 
 	registry, _, _ := providerRegistrySnapshot()
@@ -2353,6 +2353,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 	req.RawBody = body
+	req.ExtraParams = extractExtraParams(body)
 
 	// X-DC-Target-URL is set by the plugin's fetch interceptor and tells the
 	// proxy the real upstream URL the request was originally destined for.
@@ -4986,6 +4987,37 @@ func mergeToolCallChunks(existing json.RawMessage, chunk json.RawMessage) json.R
 		return existing
 	}
 	return out
+}
+
+// extractExtraParams pulls provider-specific fields from the request body
+// so bifrost can forward them to the upstream via MergeExtraParams.
+// Preserves extra_body as a top-level key so it appears verbatim in the
+// outbound request (chat-ai-stage expects extra_body.google.thinking_config,
+// NOT google.thinking_config at the top level).
+func extractExtraParams(body []byte) map[string]any {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(body, &raw) != nil {
+		return nil
+	}
+	extra := map[string]any{}
+	if eb, ok := raw["extra_body"]; ok {
+		var extraBody any
+		if json.Unmarshal(eb, &extraBody) == nil {
+			extra["extra_body"] = extraBody
+		}
+	}
+	for _, key := range []string{"google", "anthropic", "amazon"} {
+		if v, ok := raw[key]; ok {
+			var parsed any
+			if json.Unmarshal(v, &parsed) == nil {
+				extra[key] = parsed
+			}
+		}
+	}
+	if len(extra) == 0 {
+		return nil
+	}
+	return extra
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, msg string) {
