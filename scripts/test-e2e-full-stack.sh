@@ -201,12 +201,19 @@ restart_openclaw_gateway() {
     start_openclaw_gateway
 }
 
+repair_openclaw_gateway_startup_state() {
+    echo "  Repairing OpenClaw gateway startup state..."
+    openclaw doctor --fix >/tmp/openclaw-doctor-fix.log 2>&1 || true
+    prune_openclaw_config_for_prefix || true
+}
+
 ensure_openclaw_gateway_running() {
     local timeout="${1:-45}"
     if wait_for_openclaw_gateway "$timeout" 2; then
         return 0
     fi
     echo "  OpenClaw gateway not reachable — restarting..."
+    repair_openclaw_gateway_startup_state
     restart_openclaw_gateway
     wait_for_openclaw_gateway "$timeout" 2
 }
@@ -1273,7 +1280,12 @@ phase_start() {
     echo "  Starting OpenClaw gateway..."
     start_openclaw_gateway
     if ! wait_for_openclaw_gateway 30 2; then
-        echo "  [diag] OpenClaw gateway did not become reachable before sidecar start"
+        echo "  [diag] OpenClaw gateway did not become reachable; repairing and retrying once"
+        repair_openclaw_gateway_startup_state
+        restart_openclaw_gateway
+        if ! wait_for_openclaw_gateway 30 2; then
+            echo "  [diag] OpenClaw gateway did not become reachable before sidecar start"
+        fi
     fi
 
     echo "  Starting DefenseClaw sidecar (with up to 3 bring-up attempts)..."
