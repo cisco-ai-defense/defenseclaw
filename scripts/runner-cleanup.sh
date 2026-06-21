@@ -80,6 +80,30 @@ prune_stale_openclaw_e2e_artifacts() {
   done
 }
 
+prune_stale_openclaw_channel_plugin_projects() {
+  local project_root project removed
+  removed=0
+  for project_root in /data/openclaw/npm/projects "$HOME/.openclaw/npm/projects"; do
+    [ -d "$project_root" ] || continue
+    while IFS= read -r -d '' project; do
+      if rm -rf -- "$project" 2>/dev/null; then
+        removed=$((removed + 1))
+      elif sudo -n rm -rf -- "$project" 2>/dev/null; then
+        removed=$((removed + 1))
+      else
+        log "WARNING: unable to remove stale OpenClaw channel plugin project $project"
+      fi
+    done < <(find "$project_root" -mindepth 1 -maxdepth 1 -type d \
+      \( -name 'openclaw-discord-*' \
+         -o -name 'openclaw-slack-*' \
+         -o -name 'openclaw-telegram-*' \
+         -o -name 'openclaw-whatsapp-*' \) -print0 2>/dev/null)
+  done
+  if [ "$removed" -gt 0 ]; then
+    log "Removed stale OpenClaw channel plugin project(s) ($removed)"
+  fi
+}
+
 normalize_openclaw_ci_config() {
   local oc_home="$HOME/.openclaw"
   [ -d "$oc_home" ] || return 0
@@ -101,6 +125,8 @@ for pattern in ("openclaw.json", "openclaw.json.*"):
 if not cfg_paths:
     raise SystemExit(0)
 
+stale_channel_plugin_ids = {"discord", "slack", "telegram", "whatsapp"}
+
 
 def is_defenseclaw_load_path(value):
     if isinstance(value, str):
@@ -110,6 +136,25 @@ def is_defenseclaw_load_path(value):
     if isinstance(value, list):
         return any(is_defenseclaw_load_path(item) for item in value)
     return False
+
+
+def is_stale_channel_load_path(value):
+    if isinstance(value, str):
+        lowered = value.lower()
+        return any(
+            f"openclaw-{name}-" in lowered or f"@openclaw/{name}" in lowered
+            for name in stale_channel_plugin_ids
+        )
+    if isinstance(value, dict):
+        return any(is_stale_channel_load_path(item) for item in value.values())
+    if isinstance(value, list):
+        return any(is_stale_channel_load_path(item) for item in value)
+    return False
+
+
+def should_remove_plugin_name(name):
+    value = str(name)
+    return value == "defenseclaw" or value in stale_channel_plugin_ids
 
 
 def normalize_config(cfg_path):
@@ -132,12 +177,12 @@ def normalize_config(cfg_path):
         for section in ("entries", "installs", "allow", "enabled"):
             bucket = plugins.get(section)
             if isinstance(bucket, dict):
-                next_bucket = {name: meta for name, meta in bucket.items() if str(name) != "defenseclaw"}
+                next_bucket = {name: meta for name, meta in bucket.items() if not should_remove_plugin_name(name)}
                 if next_bucket != bucket:
                     plugins[section] = next_bucket
                     changed = True
             elif isinstance(bucket, list):
-                next_bucket = [item for item in bucket if str(item) != "defenseclaw"]
+                next_bucket = [item for item in bucket if not should_remove_plugin_name(item)]
                 if next_bucket != bucket:
                     plugins[section] = next_bucket
                     changed = True
@@ -146,7 +191,11 @@ def normalize_config(cfg_path):
         if isinstance(load, dict):
             paths = load.get("paths")
             if isinstance(paths, list):
-                next_paths = [path for path in paths if not is_defenseclaw_load_path(path)]
+                next_paths = [
+                    path for path in paths
+                    if not is_defenseclaw_load_path(path)
+                    and not is_stale_channel_load_path(path)
+                ]
                 if next_paths != paths:
                     load["paths"] = next_paths
                     changed = True
@@ -203,10 +252,19 @@ elif skipped:
 PY
 }
 
+if [ "${RUNNER_CLEANUP_PERMISSIONS_ONLY:-0}" = "1" ]; then
+  log "Repairing persistent product state permissions only"
+  repair_persistent_state_permissions
+  prune_stale_openclaw_e2e_artifacts
+  prune_stale_openclaw_channel_plugin_projects
+  exit 0
+fi
+
 if [ "${RUNNER_CLEANUP_STATE_ONLY:-0}" = "1" ]; then
   log "Repairing persistent product state permissions and config only"
   repair_persistent_state_permissions
   prune_stale_openclaw_e2e_artifacts
+  prune_stale_openclaw_channel_plugin_projects
   normalize_openclaw_ci_config
   exit 0
 fi
@@ -236,6 +294,7 @@ docker builder prune -a -f 2>/dev/null || true
 # these directories on the next run.
 repair_persistent_state_permissions
 prune_stale_openclaw_e2e_artifacts
+prune_stale_openclaw_channel_plugin_projects
 normalize_openclaw_ci_config
 
 # 3. Runner-level caches. _work/_actions and _tool accumulate from every job

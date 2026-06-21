@@ -196,6 +196,15 @@ wait_for_openclaw_gateway() {
     return 1
 }
 
+repair_ci_product_state() {
+    local mode="${1:-state}"
+    if [ "$mode" = "permissions-only" ]; then
+        RUNNER_CLEANUP_PERMISSIONS_ONLY=1 bash "$REPO_ROOT/scripts/runner-cleanup.sh" || true
+    else
+        RUNNER_CLEANUP_STATE_ONLY=1 bash "$REPO_ROOT/scripts/runner-cleanup.sh" || true
+    fi
+}
+
 restart_openclaw_gateway() {
     openclaw gateway stop 2>/dev/null || true
     sleep 1
@@ -204,9 +213,9 @@ restart_openclaw_gateway() {
 
 repair_openclaw_gateway_startup_state() {
     echo "  Repairing OpenClaw gateway startup state..."
-    RUNNER_CLEANUP_STATE_ONLY=1 bash "$REPO_ROOT/scripts/runner-cleanup.sh" || true
+    repair_ci_product_state
     openclaw doctor --fix >/tmp/openclaw-doctor-fix.log 2>&1 || true
-    RUNNER_CLEANUP_STATE_ONLY=1 bash "$REPO_ROOT/scripts/runner-cleanup.sh" || true
+    repair_ci_product_state
     prune_openclaw_config_for_prefix || true
 }
 
@@ -227,6 +236,41 @@ extract_json() {
 
 count_nonempty_lines() {
     printf '%s\n' "$1" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' '
+}
+
+read_dotenv_value() {
+    local key="$1"
+    local env_path="$HOME/.defenseclaw/.env"
+    local line
+    [ -f "$env_path" ] || return 0
+    line=$(grep -E "^${key}=" "$env_path" 2>/dev/null | tail -n 1 || true)
+    [ -n "$line" ] || return 0
+    printf '%s\n' "${line#*=}" | sed "s/^['\"]//;s/['\"]$//"
+}
+
+sync_gateway_token_env_from_dotenv() {
+    local dc_token oc_token
+    local synced=false
+    dc_token="$(read_dotenv_value DEFENSECLAW_GATEWAY_TOKEN)"
+    oc_token="$(read_dotenv_value OPENCLAW_GATEWAY_TOKEN)"
+    if [ -n "$dc_token" ]; then
+        export DEFENSECLAW_GATEWAY_TOKEN="$dc_token"
+        synced=true
+    fi
+    if [ -n "$oc_token" ]; then
+        export OPENCLAW_GATEWAY_TOKEN="$oc_token"
+        synced=true
+    elif [ -n "$dc_token" ]; then
+        export OPENCLAW_GATEWAY_TOKEN="$dc_token"
+        synced=true
+    fi
+    if [ "$synced" = true ]; then
+        if [ -n "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+            GATEWAY_TOKEN_CACHE="$DEFENSECLAW_GATEWAY_TOKEN"
+        elif [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+            GATEWAY_TOKEN_CACHE="$OPENCLAW_GATEWAY_TOKEN"
+        fi
+    fi
 }
 
 splunk_search() {
@@ -291,8 +335,15 @@ get_gateway_token() {
         return
     fi
 
-    # Strategy 1: canonical sidecar API token from the current process env.
-    GATEWAY_TOKEN_CACHE="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+    # Strategy 1: token persisted by the sidecar/OpenClaw auth repair path.
+    # The CI shell can retain stale exported tokens while the daemon has
+    # already refreshed ~/.defenseclaw/.env after an OpenClaw token mismatch.
+    sync_gateway_token_env_from_dotenv
+    if [ "$GATEWAY_TOKEN_CACHE" != "__unset__" ]; then
+        printf '%s\n' "$GATEWAY_TOKEN_CACHE"
+        return
+    fi
+    GATEWAY_TOKEN_CACHE=""
 
     # Strategy 2: resolve via Python config (loads .env + config.yaml).
     if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
@@ -306,12 +357,17 @@ PY
 )
     fi
 
-    # Strategy 3: legacy OpenClaw token from the current process env.
+    # Strategy 3: canonical sidecar API token from the current process env.
+    if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
+        GATEWAY_TOKEN_CACHE="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+    fi
+
+    # Strategy 4: legacy OpenClaw token from the current process env.
     if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
         GATEWAY_TOKEN_CACHE="${OPENCLAW_GATEWAY_TOKEN:-}"
     fi
 
-    # Strategy 4: read token_env name from config, then check that env var.
+    # Strategy 5: read token_env name from config, then check that env var.
     if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$HOME/.defenseclaw/config.yaml" ]; then
         local token_env_name
         token_env_name=$(grep 'token_env:' "$HOME/.defenseclaw/config.yaml" 2>/dev/null | head -1 | awk '{print $2}' | tr -d "'\"" || true)
@@ -320,15 +376,13 @@ PY
         fi
     fi
 
-    # Strategy 5: parse ~/.defenseclaw/.env directly (same as Go loadDotEnvIntoOS).
-    if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$HOME/.defenseclaw/.env" ]; then
-        GATEWAY_TOKEN_CACHE=$(grep '^DEFENSECLAW_GATEWAY_TOKEN=' "$HOME/.defenseclaw/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" || true)
-        if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
-            GATEWAY_TOKEN_CACHE=$(grep '^OPENCLAW_GATEWAY_TOKEN=' "$HOME/.defenseclaw/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" || true)
-        fi
+    if [ -n "$GATEWAY_TOKEN_CACHE" ]; then
+        export DEFENSECLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN_CACHE"
+        printf '%s\n' "$GATEWAY_TOKEN_CACHE"
+    else
+        GATEWAY_TOKEN_CACHE="__unset__"
+        printf '\n'
     fi
-
-    printf '%s\n' "$GATEWAY_TOKEN_CACHE"
 }
 
 curl_with_gateway_headers() {
@@ -374,6 +428,22 @@ sidecar_api_authenticated() {
         return 1
     fi
     return 0
+}
+
+restart_sidecar_after_openclaw_token_repair() {
+    local log_file="$HOME/.defenseclaw/gateway.log"
+    [ -f "$log_file" ] || return 0
+    if ! tail -n 120 "$log_file" 2>/dev/null | grep -q "gateway token refreshed from openclaw.json"; then
+        return 0
+    fi
+
+    echo "  Detected OpenClaw gateway token repair; restarting sidecar to reload API auth..."
+    sync_gateway_token_env_from_dotenv
+    defenseclaw-gateway restart 2>/dev/null || defenseclaw-gateway start 2>/dev/null || true
+    wait_for_url "$SIDECAR_URL/health" 60 2 || true
+    wait_for_sidecar_subsystems_running 60 || true
+    repair_ci_product_state permissions-only
+    sync_gateway_token_env_from_dotenv
 }
 
 alerts_for_run() {
@@ -1230,6 +1300,7 @@ phase_start() {
         restore_openclaw_model_backup
     fi
 
+    repair_ci_product_state
     cleanup_current_run_artifacts
 
     local stale_skills stale_plugins stale_quarantine cfg_state
@@ -1361,6 +1432,9 @@ phase_start() {
     if [ "$sidecar_healthy" = "1" ]; then
         pass "sidecar health endpoint reachable"
         rm -f "$mem_trace_file"
+        restart_sidecar_after_openclaw_token_repair
+        repair_ci_product_state permissions-only
+        GATEWAY_TOKEN_CACHE="__unset__"
     else
         fail "sidecar health endpoint reachable" "unhealthy after 3 attempts (60s each)"
         echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
@@ -1845,7 +1919,7 @@ phase_skill_scanner() {
 
     local clean_out clean_json clean_findings
     echo "  Scanning clean skill..."
-    clean_out=$(defenseclaw skill scan "$clean_skill" --json 2>&1 || true)
+    clean_out=$(defenseclaw skill scan clean-skill --path "$clean_skill" --json --no-use-llm 2>&1 || true)
     echo "$clean_out"
     clean_json=$(echo "$clean_out" | extract_json || true)
     if [ -n "$clean_json" ]; then
@@ -1861,7 +1935,7 @@ phase_skill_scanner() {
 
     local mal_out mal_json mal_findings mal_severity
     echo "  Scanning malicious skill..."
-    mal_out=$(defenseclaw skill scan "$malicious_skill" --json 2>&1 || true)
+    mal_out=$(defenseclaw skill scan malicious-skill --path "$malicious_skill" --json --no-use-llm 2>&1 || true)
     echo "$mal_out"
     mal_json=$(echo "$mal_out" | extract_json || true)
     if [ -n "$mal_json" ]; then
