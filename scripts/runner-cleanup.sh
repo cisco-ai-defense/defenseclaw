@@ -72,11 +72,15 @@ prune_stale_openclaw_e2e_artifacts() {
   for dir in \
     "$HOME/.openclaw/workspace/skills" \
     "$HOME/.openclaw/skills" \
-    "$HOME/.openclaw/extensions" \
+    "$HOME/.openclaw/extensions"; do
+    [ -d "$dir" ] || continue
+    find "$dir" -mindepth 1 -maxdepth 1 -name 'e2e-*' -exec rm -rf {} + 2>/dev/null || true
+  done
+  for dir in \
     "$HOME/.defenseclaw/quarantine/skills" \
     "$HOME/.defenseclaw/quarantine/plugins"; do
     [ -d "$dir" ] || continue
-    find "$dir" -mindepth 1 -maxdepth 1 -name 'e2e-*' -exec rm -rf {} + 2>/dev/null || true
+    find "$dir" -mindepth 1 -maxdepth 2 -name 'e2e-*' -exec rm -rf {} + 2>/dev/null || true
   done
 }
 
@@ -251,6 +255,12 @@ elif skipped:
     print("[runner-cleanup] OpenClaw config normalization skipped")
 PY
 }
+
+if [ "${RUNNER_CLEANUP_REPAIR_PERMISSIONS_ONLY:-0}" = "1" ]; then
+  log "Repairing persistent product state permissions only"
+  repair_persistent_state_permissions
+  exit 0
+fi
 
 if [ "${RUNNER_CLEANUP_PERMISSIONS_ONLY:-0}" = "1" ]; then
   log "Repairing persistent product state permissions only"

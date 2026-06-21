@@ -205,6 +205,40 @@ repair_ci_product_state() {
     fi
 }
 
+repair_ci_product_permissions() {
+    RUNNER_CLEANUP_REPAIR_PERMISSIONS_ONLY=1 bash "$REPO_ROOT/scripts/runner-cleanup.sh" || true
+}
+
+ensure_openclaw_config_readable() {
+    local reason="${1:-OpenClaw config access}"
+    if [ -e "$HOME/.openclaw/openclaw.json" ] && [ ! -r "$HOME/.openclaw/openclaw.json" ]; then
+        echo "  [diag] repairing unreadable OpenClaw state before $reason..." >&2
+        repair_ci_product_permissions
+    fi
+}
+
+ensure_directory_writable() {
+    local dir="$1"
+    local reason="${2:-writing files}"
+    local probe
+
+    [ -n "$dir" ] || return 1
+    ensure_openclaw_config_readable "$reason"
+
+    if ! mkdir -p "$dir" 2>/dev/null; then
+        echo "  [diag] repairing OpenClaw state permissions before creating $dir..." >&2
+        repair_ci_product_permissions
+        mkdir -p "$dir"
+    fi
+
+    if ! probe=$(mktemp "$dir/.defenseclaw-write-test.XXXXXX" 2>/dev/null); then
+        echo "  [diag] repairing OpenClaw state permissions before writing to $dir..." >&2
+        repair_ci_product_permissions
+        probe=$(mktemp "$dir/.defenseclaw-write-test.XXXXXX")
+    fi
+    rm -f "$probe" 2>/dev/null || true
+}
+
 restart_openclaw_gateway() {
     openclaw gateway stop 2>/dev/null || true
     sleep 1
@@ -681,6 +715,7 @@ cleanup_skill_name() {
         rm -rf "$dir/$name" 2>/dev/null || true
     done < <(get_skill_dirs)
     rm -rf "$HOME/.defenseclaw/quarantine/skills/$name" 2>/dev/null || true
+    rm -rf "$HOME/.defenseclaw/quarantine/skills"/*/"$name" 2>/dev/null || true
 }
 
 cleanup_plugin_name() {
@@ -690,10 +725,21 @@ cleanup_plugin_name() {
         rm -rf "$dir/$name" 2>/dev/null || true
     done < <(get_plugin_dirs)
     rm -rf "$HOME/.defenseclaw/quarantine/plugins/$name" 2>/dev/null || true
+    rm -rf "$HOME/.defenseclaw/quarantine/plugins"/*/"$name" 2>/dev/null || true
 }
 
 skill_list_json() {
-    defenseclaw skill list --json 2>/dev/null || echo "[]"
+    local out
+    if out=$(defenseclaw skill list --json 2>/dev/null) && echo "$out" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        printf '%s\n' "$out"
+        return
+    fi
+    repair_ci_product_permissions
+    if out=$(defenseclaw skill list --json 2>/dev/null) && echo "$out" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        printf '%s\n' "$out"
+    else
+        echo "[]"
+    fi
 }
 
 plugin_list_json() {
@@ -786,6 +832,7 @@ copy_skill_fixture() {
     local fixture_dir="$1"
     local dest_root="$2"
     local dest_name="$3"
+    ensure_directory_writable "$dest_root" "copying skill fixture"
     mkdir -p "$dest_root/$dest_name"
     cp -R "$fixture_dir"/. "$dest_root/$dest_name/"
 }
@@ -948,6 +995,7 @@ PY
 
 openclaw_skill_enabled_state() {
     local name="$1"
+    ensure_openclaw_config_readable "reading OpenClaw skill state"
     E2E_SKILL_NAME="$name" python3 - <<'PY'
 import json
 import os
@@ -959,8 +1007,12 @@ if not cfg_path.exists():
     print("missing")
     raise SystemExit(0)
 
-with cfg_path.open() as f:
-    cfg = json.load(f)
+try:
+    with cfg_path.open() as f:
+        cfg = json.load(f)
+except PermissionError:
+    print("unreadable")
+    raise SystemExit(0)
 
 entry = ((cfg.get("skills") or {}).get("entries") or {}).get(name)
 if not isinstance(entry, dict):
@@ -974,6 +1026,7 @@ PY
 
 openclaw_plugin_enabled_state() {
     local name="$1"
+    ensure_openclaw_config_readable "reading OpenClaw plugin state"
     E2E_PLUGIN_NAME="$name" python3 - <<'PY'
 import json
 import os
@@ -985,8 +1038,12 @@ if not cfg_path.exists():
     print("missing")
     raise SystemExit(0)
 
-with cfg_path.open() as f:
-    cfg = json.load(f)
+try:
+    with cfg_path.open() as f:
+        cfg = json.load(f)
+except PermissionError:
+    print("unreadable")
+    raise SystemExit(0)
 
 plugins = cfg.get("plugins") or {}
 entry = (plugins.get("entries") or {}).get(name)
@@ -1181,6 +1238,8 @@ cleanup_current_run_artifacts() {
 
     rm -rf "$HOME/.defenseclaw/quarantine/skills"/"$E2E_PREFIX"* 2>/dev/null || true
     rm -rf "$HOME/.defenseclaw/quarantine/plugins"/"$E2E_PREFIX"* 2>/dev/null || true
+    find "$HOME/.defenseclaw/quarantine/skills" -mindepth 2 -maxdepth 2 -name "$E2E_PREFIX*" -exec rm -rf {} + 2>/dev/null || true
+    find "$HOME/.defenseclaw/quarantine/plugins" -mindepth 2 -maxdepth 2 -name "$E2E_PREFIX*" -exec rm -rf {} + 2>/dev/null || true
     rm -rf "$HOME/.openclaw/extensions"/"$E2E_PREFIX"* 2>/dev/null || true
     rm -rf /tmp/"$E2E_PREFIX"* 2>/dev/null || true
     prune_openclaw_config_for_prefix
@@ -2048,7 +2107,7 @@ phase_block_allow() {
         phase_timer_end "Phase 4B"
         return
     fi
-    mkdir -p "$skill_dir_root"
+    ensure_directory_writable "$skill_dir_root" "block/allow skill setup"
 
     local blocked_skill="${E2E_PREFIX}-blocked-skill"
     local allowed_skill="${E2E_PREFIX}-allowed-skill"
@@ -2309,7 +2368,7 @@ phase_quarantine() {
     fi
 
     cleanup_skill_name "$skill_name"
-    mkdir -p "$skill_dir_root"
+    ensure_directory_writable "$skill_dir_root" "quarantine skill setup"
     copy_skill_fixture "$malicious_skill" "$skill_dir_root" "$skill_name"
 
     if [ -d "$skill_dir_root/$skill_name" ]; then
@@ -2330,10 +2389,14 @@ phase_quarantine() {
         pass "quarantine: skill removed from watched dir"
     fi
 
-    if [ -d "$HOME/.defenseclaw/quarantine/skills/$skill_name" ]; then
+    local quarantine_root flat_quarantine_path connector_quarantine_path
+    quarantine_root="$HOME/.defenseclaw/quarantine/skills"
+    flat_quarantine_path="$quarantine_root/$skill_name"
+    connector_quarantine_path=$(find "$quarantine_root" -mindepth 2 -maxdepth 2 -type d -name "$skill_name" -print -quit 2>/dev/null || true)
+    if [ -d "$flat_quarantine_path" ] || [ -n "$connector_quarantine_path" ]; then
         pass "quarantine: skill present in quarantine area"
     else
-        fail "quarantine: skill present in quarantine area" "expected $HOME/.defenseclaw/quarantine/skills/$skill_name"
+        fail "quarantine: skill present in quarantine area" "expected $flat_quarantine_path or connector-scoped quarantine entry"
     fi
 
     local r_out
@@ -2370,7 +2433,7 @@ phase_watcher_auto_scan() {
     fi
 
     cleanup_skill_name "$watcher_skill"
-    mkdir -p "$skill_dir_root"
+    ensure_directory_writable "$skill_dir_root" "watcher auto-scan skill setup"
     copy_skill_fixture "$malicious_skill" "$skill_dir_root" "$watcher_skill"
 
     watcher_entry=$(wait_for_skill_scan "$watcher_skill" 90 || true)
@@ -2501,6 +2564,7 @@ phase_aibom() {
     # Capturing multi‑MB JSON into a shell variable and `echo`ing it can hit
     # EAGAIN ("Resource temporarily unavailable") on constrained CI runners.
     out_file="$(mktemp -t dc-aibom.XXXXXX.jsonl)"
+    ensure_openclaw_config_readable "AIBOM inventory"
     defenseclaw aibom scan --json >"$out_file" 2>&1 || true
     sz=$(wc -c <"$out_file" | tr -d ' ')
     echo "[aibom] scan output: ${sz} bytes"
@@ -2580,7 +2644,7 @@ phase_skill_api() {
 
     if [ -n "$skill_dir_root" ] && [ -d "$REPO_ROOT/test/fixtures/skills/clean-skill" ]; then
         cleanup_skill_name "$unique_skill"
-        mkdir -p "$skill_dir_root"
+        ensure_directory_writable "$skill_dir_root" "skill API fixture setup"
         copy_skill_fixture "$REPO_ROOT/test/fixtures/skills/clean-skill" "$skill_dir_root" "$unique_skill"
         if wait_for_skill_entry "$unique_skill" 30 >/dev/null 2>&1; then
             pass "skill api: unique test skill became visible to DefenseClaw"
@@ -3175,7 +3239,7 @@ phase_agent_chat() {
     while IFS= read -r dir; do
         [ -n "$dir" ] || continue
         echo "    - $dir"
-        mkdir -p "$dir"
+        ensure_directory_writable "$dir" "agent chat skill directory setup"
     done <<< "$skill_dirs"
 
     cleanup_skill_name "$install_slug"
@@ -3259,7 +3323,7 @@ phase_agent_chat() {
         fallback_dir=$(first_skill_dir || true)
         fallback_skill="${E2E_PREFIX}-agent-local-skill"
         if [ -d "$fallback_source" ] && [ -n "$fallback_dir" ]; then
-            mkdir -p "$fallback_dir"
+            ensure_directory_writable "$fallback_dir" "agent fallback skill setup"
             echo "  Falling back to agent-managed local skill install: $fallback_skill"
             fallback_out=$(run_agent_prompt \
                 "$(agent_session_id agent-install-local)" \
