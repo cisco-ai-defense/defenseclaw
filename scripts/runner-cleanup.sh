@@ -67,6 +67,19 @@ repair_persistent_state_permissions() {
   done
 }
 
+prune_stale_openclaw_e2e_artifacts() {
+  local dir
+  for dir in \
+    "$HOME/.openclaw/workspace/skills" \
+    "$HOME/.openclaw/skills" \
+    "$HOME/.openclaw/extensions" \
+    "$HOME/.defenseclaw/quarantine/skills" \
+    "$HOME/.defenseclaw/quarantine/plugins"; do
+    [ -d "$dir" ] || continue
+    find "$dir" -mindepth 1 -maxdepth 1 -name 'e2e-*' -exec rm -rf {} + 2>/dev/null || true
+  done
+}
+
 normalize_openclaw_ci_config() {
   local oc_home="$HOME/.openclaw"
   [ -d "$oc_home" ] || return 0
@@ -138,6 +151,10 @@ def normalize_config(cfg_path):
                     load["paths"] = next_paths
                     changed = True
 
+        if plugins.get("allow") != ["defenseclaw"]:
+            plugins["allow"] = ["defenseclaw"]
+            changed = True
+
     gateway = cfg.get("gateway")
     if not isinstance(gateway, dict):
         gateway = {}
@@ -189,6 +206,7 @@ PY
 if [ "${RUNNER_CLEANUP_STATE_ONLY:-0}" = "1" ]; then
   log "Repairing persistent product state permissions and config only"
   repair_persistent_state_permissions
+  prune_stale_openclaw_e2e_artifacts
   normalize_openclaw_ci_config
   exit 0
 fi
@@ -217,6 +235,7 @@ docker builder prune -a -f 2>/dev/null || true
 # service-backed E2E paths. Repair it before workflow cleanup parses or prunes
 # these directories on the next run.
 repair_persistent_state_permissions
+prune_stale_openclaw_e2e_artifacts
 normalize_openclaw_ci_config
 
 # 3. Runner-level caches. _work/_actions and _tool accumulate from every job
