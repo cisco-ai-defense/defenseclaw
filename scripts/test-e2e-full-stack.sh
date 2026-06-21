@@ -166,6 +166,7 @@ start_openclaw_gateway() {
     else
         openclaw gateway --force &
         OPENCLAW_PID=$!
+        sleep "${OPENCLAW_GATEWAY_START_GRACE:-4}"
     fi
 }
 
