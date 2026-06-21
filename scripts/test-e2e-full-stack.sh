@@ -204,7 +204,9 @@ restart_openclaw_gateway() {
 
 repair_openclaw_gateway_startup_state() {
     echo "  Repairing OpenClaw gateway startup state..."
+    RUNNER_CLEANUP_STATE_ONLY=1 bash "$REPO_ROOT/scripts/runner-cleanup.sh" || true
     openclaw doctor --fix >/tmp/openclaw-doctor-fix.log 2>&1 || true
+    RUNNER_CLEANUP_STATE_ONLY=1 bash "$REPO_ROOT/scripts/runner-cleanup.sh" || true
     prune_openclaw_config_for_prefix || true
 }
 
