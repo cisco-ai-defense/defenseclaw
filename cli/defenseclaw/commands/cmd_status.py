@@ -524,7 +524,10 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
             conf = row.get("confidence")
             conf_text = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "?"
             state_text = str(row.get("state") or "active")
-            click.echo(f"                  {_friendly_connector_name(conn)} ({conn}) — confidence={conf_text} state={state_text}")
+            click.echo(
+                f"                  {_friendly_connector_name(conn)} ({conn}) — "
+                f"confidence={conf_text} state={state_text}"
+            )
     if active:
         click.echo("                " + ux.bold("auto-protected"))
         for row in active:
@@ -542,7 +545,10 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
     if isinstance(errors, dict) and errors:
         click.echo("                " + ux.bold("last activation errors"))
         for conn, err in sorted(errors.items()):
-            click.echo(f"                  {_friendly_connector_name(conn)} ({conn}) — {ux._style(str(err), fg='yellow')}")
+            click.echo(
+                f"                  {_friendly_connector_name(conn)} ({conn}) — "
+                f"{ux._style(str(err), fg='yellow')}"
+            )
 
 
 def _application_protection_status(cfg, health: dict | None = None) -> dict:
