@@ -4618,10 +4618,7 @@ def _apply_hook_connector_setup(
             f"{len(_actives)} connectors active: {', '.join(_actives)}"
         )
     else:
-        click.echo(
-            f"  ✓ Connector {connector!r} configured "
-            f"(claw.mode={getattr(cfg.claw, 'mode', '') or connector})"
-        )
+        click.echo(f"  ✓ Connector {connector!r} configured")
     if workspace:
         click.echo(f"  ✓ Workspace root pinned to {workspace}")
     else:
@@ -4711,12 +4708,13 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
     label = _CONNECTOR_META[connector]["label"]
     enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
 
-    # Multi-connector awareness: a singular claw.mode row + a global
+    # Multi-connector awareness: a singular legacy mirror row + a global
     # "setup guardrail --disable" revert line both read as if this one
     # connector IS the whole install. When more than one connector is
     # configured, show the full roster (all connectors are peers) and point
     # revert / mode guidance at the per-connector commands. Single-connector
-    # output is unchanged.
+    # output still uses connector-specific wording rather than exposing
+    # claw.mode.
     actives: list[str] = []
     if cfg is not None and hasattr(cfg, "active_connectors"):
         try:
@@ -4731,7 +4729,7 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
     if multi:
         mode_row = ("connectors", ", ".join(actives))
     else:
-        mode_row = ("claw.mode", connector)
+        mode_row = ("active connector", connector)
     rows = [
         ("connector", f"{label} ({connector})"),
         mode_row,

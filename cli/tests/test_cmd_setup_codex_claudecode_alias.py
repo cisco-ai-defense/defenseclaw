@@ -290,6 +290,8 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertEqual(self.app.cfg.guardrail.scanner_mode, "local")
                 self.assertFalse(self.app.cfg.guardrail.judge.enabled)
                 self.assertIn(f"Connector {connector!r} configured", result.output)
+                self.assertNotIn("claw.mode=", result.output)
+                self.assertNotIn("claw.mode:", result.output)
                 self.assertIn(f"{connector} mode=observe", result.output)
                 self.assertIn(f"defenseclaw setup {connector} --mode action", result.output)
                 self.assertNotIn("Active connector set", result.output)

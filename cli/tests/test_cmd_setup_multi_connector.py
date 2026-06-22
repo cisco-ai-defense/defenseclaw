@@ -261,10 +261,11 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertNotIn("primary:", out)
 
     def test_single_connector_summary_uses_connector_mode_label(self):
-        self._seed_map("cursor")  # single → claw.mode row, not a roster
+        self._seed_map("cursor")
         out = self._capture_summary("cursor")
-        self.assertIn("claw.mode:", out)
+        self.assertIn("active connector:", out)
         self.assertIn("cursor mode:", out)
+        self.assertNotIn("claw.mode:", out)
         self.assertNotIn("guardrail.mode:", out)
         self.assertNotIn("connectors:", out)
         self.assertNotIn("primary:", out)
