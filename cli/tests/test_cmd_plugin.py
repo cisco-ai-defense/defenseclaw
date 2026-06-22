@@ -257,6 +257,20 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertNotIn("connector=claudecode", result.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_connector_flag_json_rows_include_connector(self, _mock_oc):
+        codex_dir = os.path.join(self.tmp_dir, "codex-plugins")
+        os.makedirs(os.path.join(codex_dir, "alpha"))
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [codex_dir] if connector == "codex" else []  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--connector", "codex", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload[0]["id"], "alpha")
+        self.assertEqual(payload[0]["connector"], "codex")
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_table_title_counts_effectively_enabled_plugins(self, _mock_oc):
         codex_dir = os.path.join(self.tmp_dir, "codex-plugins")
         os.makedirs(os.path.join(codex_dir, "dc-plugin-alpha"))
@@ -635,27 +649,120 @@ class TestPluginRuntimeToggleConnectorGuard(PluginCommandTestBase):
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_disable_on_non_openclaw_active_connector_records_advisory(self, mock_cls):
         self.app.cfg.guardrail.connector = "hermes"
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        os.makedirs(os.path.join(hermes_dir, "any-plugin"))
+        self.app.cfg.plugin_dirs = lambda connector=None: [hermes_dir]  # type: ignore[method-assign]
         result = self.invoke(["disable", "any-plugin"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("runtime disable recorded globally", result.output)
+        self.assertIn("runtime disable recorded (connector=hermes)", result.output)
         self.assertIn("advisory", result.output)
         self.assertIn("quarantine", result.output)
         mock_cls.return_value.disable_plugin.assert_not_called()
         self.assertTrue(
+            self.app.store.has_action("plugin", "any-plugin", "runtime", "disable", "hermes")
+        )
+        self.assertFalse(
             self.app.store.has_action("plugin", "any-plugin", "runtime", "disable")
+        )
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_disable_bare_fans_out_to_matching_connector_copies(self, mock_cls):
+        self.app.cfg.active_connectors = lambda: ["antigravity", "codex", "hermes"]  # type: ignore[method-assign]
+        antigravity_dir = os.path.join(self.tmp_dir, "antigravity-plugins")
+        codex_dir = os.path.join(self.tmp_dir, "codex-plugins")
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        os.makedirs(antigravity_dir)
+        os.makedirs(os.path.join(codex_dir, "dc-plugin-scope"))
+        os.makedirs(os.path.join(hermes_dir, "dc-plugin-scope"))
+        mapping = {
+            "antigravity": [antigravity_dir],
+            "codex": [codex_dir],
+            "hermes": [hermes_dir],
+        }
+        self.app.cfg.plugin_dirs = lambda connector=None: mapping.get(connector or "antigravity", [])  # type: ignore[method-assign]
+
+        result = self.invoke(["disable", "dc-plugin-scope"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("runtime disable recorded (connector=codex)", result.output)
+        self.assertIn("runtime disable recorded (connector=hermes)", result.output)
+        self.assertNotIn("connector=antigravity", result.output)
+        self.assertNotIn("globally", result.output)
+        mock_cls.return_value.disable_plugin.assert_not_called()
+        self.assertTrue(
+            self.app.store.has_action("plugin", "dc-plugin-scope", "runtime", "disable", "codex")
+        )
+        self.assertTrue(
+            self.app.store.has_action("plugin", "dc-plugin-scope", "runtime", "disable", "hermes")
+        )
+        self.assertFalse(
+            self.app.store.has_action("plugin", "dc-plugin-scope", "runtime", "disable")
         )
 
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_enable_on_non_openclaw_active_connector_clears_without_gateway(self, mock_cls):
         self.app.cfg.guardrail.connector = "hermes"
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        os.makedirs(os.path.join(hermes_dir, "any-plugin"))
+        self.app.cfg.plugin_dirs = lambda connector=None: [hermes_dir]  # type: ignore[method-assign]
         PolicyEngine(self.app.store).disable("plugin", "any-plugin", "manual")
         result = self.invoke(["enable", "any-plugin"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("global runtime disable cleared", result.output)
+        self.assertIn("runtime disable cleared (connector=hermes)", result.output)
         mock_cls.return_value.enable_plugin.assert_not_called()
         self.assertFalse(
             self.app.store.has_action("plugin", "any-plugin", "runtime", "disable")
         )
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_enable_bare_fans_out_across_matching_connector_copies(self, mock_cls):
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+        codex_dir = os.path.join(self.tmp_dir, "codex-plugins")
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        os.makedirs(os.path.join(codex_dir, "dc-plugin-scope"))
+        os.makedirs(os.path.join(hermes_dir, "dc-plugin-scope"))
+        mapping = {"codex": [codex_dir], "hermes": [hermes_dir]}
+        self.app.cfg.plugin_dirs = lambda connector=None: mapping.get(connector or "codex", [])  # type: ignore[method-assign]
+        pe = PolicyEngine(self.app.store)
+        pe.disable_for_connector("plugin", "dc-plugin-scope", "codex", "manual")
+        pe.disable_for_connector("plugin", "dc-plugin-scope", "hermes", "manual")
+
+        result = self.invoke(["enable", "dc-plugin-scope"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("runtime disable cleared (connector=codex)", result.output)
+        self.assertIn("runtime disable cleared (connector=hermes)", result.output)
+        mock_cls.return_value.enable_plugin.assert_not_called()
+        self.assertFalse(
+            self.app.store.has_action("plugin", "dc-plugin-scope", "runtime", "disable", "codex")
+        )
+        self.assertFalse(
+            self.app.store.has_action("plugin", "dc-plugin-scope", "runtime", "disable", "hermes")
+        )
+        codex_actions = _build_plugin_actions_map(self.app.store, "codex")
+        hermes_actions = _build_plugin_actions_map(self.app.store, "hermes")
+        self.assertNotIn("dc-plugin-scope", codex_actions)
+        self.assertNotIn("dc-plugin-scope", hermes_actions)
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_enable_bare_reports_not_found_without_matching_connector_copy(self, mock_cls):
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+        codex_dir = os.path.join(self.tmp_dir, "codex-plugins")
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        os.makedirs(codex_dir)
+        os.makedirs(hermes_dir)
+        mapping = {"codex": [codex_dir], "hermes": [hermes_dir]}
+        self.app.cfg.plugin_dirs = lambda connector=None: mapping.get(connector or "codex", [])  # type: ignore[method-assign]
+        PolicyEngine(self.app.store).disable("plugin", "missing-plugin", "legacy global")
+
+        result = self.invoke(["enable", "missing-plugin"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("plugin not found", result.output)
+        self.assertTrue(
+            self.app.store.has_action("plugin", "missing-plugin", "runtime", "disable")
+        )
+        mock_cls.return_value.enable_plugin.assert_not_called()
 
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_disable_connector_without_probe_records_scoped_advisory(self, mock_cls):
@@ -695,6 +802,35 @@ class TestPluginRuntimeToggleConnectorGuard(PluginCommandTestBase):
         self.assertFalse(
             self.app.store.has_action("plugin", "any-plugin", "runtime", "disable", "codex")
         )
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_enable_connector_overrides_global_disable_for_that_connector(self, mock_cls):
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+        codex_dir = os.path.join(self.tmp_dir, "codex-plugins")
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        os.makedirs(os.path.join(codex_dir, "dc-plugin-scope"))
+        os.makedirs(os.path.join(hermes_dir, "dc-plugin-scope"))
+        mapping = {"codex": [codex_dir], "hermes": [hermes_dir]}
+        self.app.cfg.plugin_dirs = lambda connector=None: mapping.get(connector or "codex", [])  # type: ignore[method-assign]
+        PolicyEngine(self.app.store).disable("plugin", "dc-plugin-scope", "manual global")
+
+        result = self.invoke(["enable", "dc-plugin-scope", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("runtime disable cleared", result.output)
+        mock_cls.return_value.enable_plugin.assert_not_called()
+        codex_actions = _build_plugin_actions_map(self.app.store, "codex")
+        hermes_actions = _build_plugin_actions_map(self.app.store, "hermes")
+        self.assertEqual(codex_actions["dc-plugin-scope"].actions.runtime, "enable")
+        self.assertEqual(hermes_actions["dc-plugin-scope"].actions.runtime, "disable")
+
+        codex_info = self.invoke(["info", "dc-plugin-scope", "--connector", "codex"])
+        self.assertEqual(codex_info.exit_code, 0, codex_info.output)
+        self.assertNotIn("Actions:     disabled", codex_info.output)
+
+        hermes_info = self.invoke(["info", "dc-plugin-scope", "--connector", "hermes"])
+        self.assertEqual(hermes_info.exit_code, 0, hermes_info.output)
+        self.assertIn("Actions:     disabled", hermes_info.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     @patch("defenseclaw.gateway.OrchestratorClient")
@@ -841,6 +977,21 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         scanned = {call.args[0] for call in mock_scan.call_args_list}
         self.assertEqual(scanned, {codex_path, hermes_path})
 
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scoped_scan_json_includes_connector_metadata(self, mock_scan):
+        codex_path = self._seed_connector_plugin("codex", "shared")
+        self._seed_connector_plugin("hermes", "shared")
+        mock_scan.side_effect = lambda path, **_kwargs: self._clean_scan_result(path)
+
+        result = self.invoke(["scan", "shared", "--connector", "codex", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["connector"], "codex")
+        self.assertEqual(payload["target"], codex_path)
+        self.assertEqual(payload["target_metadata"]["connector"], "codex")
+        self.assertEqual(payload["target_metadata"]["path"], codex_path)
+
     def test_info_shows_real_cards_scoped_actions_and_scans(self):
         codex_path = self._seed_connector_plugin("codex", "shared")
         hermes_path = self._seed_connector_plugin("hermes", "shared")
@@ -859,6 +1010,21 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertIn(hermes_path, result.output)
         self.assertIn("Actions:     -", result.output)
         self.assertIn("Actions:     blocked", result.output)
+
+    def test_scoped_info_labels_connector_for_not_installed_action_card(self):
+        self._seed_connector_plugin("codex", "removed")
+        PolicyEngine(self.app.store).disable_for_connector(
+            "plugin", "removed", "codex", "manual",
+        )
+        remove_result = self.invoke(["remove", "removed", "--connector", "codex"])
+        self.assertEqual(remove_result.exit_code, 0, remove_result.output)
+
+        result = self.invoke(["info", "removed", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector:   codex", result.output)
+        self.assertIn("Installed:   False", result.output)
+        self.assertIn("Actions:     disabled", result.output)
 
     def test_info_global_action_does_not_create_phantom_card(self):
         PolicyEngine(self.app.store).block("plugin", "ghost", "manual")
@@ -885,6 +1051,30 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertTrue(
             self.app.store.has_action("plugin", "shared", "file", "quarantine", "hermes")
         )
+
+        codex_list = self.invoke(["list", "--connector", "codex"])
+        self.assertEqual(codex_list.exit_code, 0, codex_list.output)
+        self.assertIn("shared", codex_list.output)
+        self.assertIn("quarant", codex_list.output)
+
+        hermes_list = self.invoke(["list", "--connector", "hermes"])
+        self.assertEqual(hermes_list.exit_code, 0, hermes_list.output)
+        self.assertIn("shared", hermes_list.output)
+        self.assertIn("quarant", hermes_list.output)
+
+        codex_json = self.invoke(["list", "--connector", "codex", "--json"])
+        self.assertEqual(codex_json.exit_code, 0, codex_json.output)
+        row = next(item for item in json.loads(codex_json.output) if item["id"] == "shared")
+        self.assertEqual(row["status"], "quarantined")
+        self.assertEqual(row["connector"], "codex")
+        self.assertEqual(row["actions"], {"file": "quarantine"})
+        self.assertFalse(row["enabled"])
+
+        rerun = self.invoke(["quarantine", "shared", "--connector", "codex"])
+        self.assertEqual(rerun.exit_code, 0, rerun.output)
+        self.assertIn("already quarantined", rerun.output)
+        self.assertIn("connector=codex", rerun.output)
+        self.assertNotIn("could not locate", rerun.output)
 
         result = self.invoke(["restore", "shared"])
 

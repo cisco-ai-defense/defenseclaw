@@ -264,9 +264,15 @@ def _scan_one_plugin_dir(
         app.logger.log_scan(result)
 
     if as_json:
-        # JSON contract is locked: ScanResult.to_json() — automation
-        # parses it. Don't reshape via render_json_payload here.
-        click.echo(result.to_json())
+        # Preserve the ScanResult keys automation already parses, while adding
+        # connector metadata so scoped JSON callers need not infer it from paths.
+        payload = json.loads(result.to_json())
+        payload["connector"] = connector
+        payload["target_metadata"] = {
+            "connector": connector,
+            "path": result.target,
+        }
+        click.echo(json.dumps(payload, indent=2, default=str))
         return
 
     target_name = os.path.basename(scan_dir)
@@ -1140,6 +1146,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                         _collect_plugins_for_connector(app, c, scan_map),
                         scan_map,
                         _build_plugin_actions_map(app.store, c),
+                        connector=c,
                     ),
                 }
                 for c in connectors
@@ -1148,7 +1155,10 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
         else:
             plugins = _collect_plugins_for_connector(app, connectors[0], scan_map)
             _print_plugin_list_json(
-                plugins, scan_map, _build_plugin_actions_map(app.store, connectors[0]),
+                plugins,
+                scan_map,
+                _build_plugin_actions_map(app.store, connectors[0]),
+                connector=connectors[0],
             )
         return
 
@@ -1190,9 +1200,22 @@ def _collect_plugins_for_connector(
     into a Codex / Claude Code / ZeptoClaw view.
     """
     plugins = _merge_all_plugins(app.cfg.plugin_dir, connector, cfg=app.cfg)
+    known_ids = {p["id"] for p in plugins}
+    for pid, ae in sorted(_build_plugin_actions_map(app.store, connector).items()):
+        if pid in known_ids or ae.actions.file != "quarantine":
+            continue
+        plugins.append({
+            "id": pid,
+            "name": pid,
+            "description": "",
+            "version": "",
+            "origin": "enforcement",
+            "enabled": False,
+            "source": "enforcement",
+        })
+        known_ids.add(pid)
     if connector != "openclaw":
         return plugins
-    known_ids = {p["id"] for p in plugins}
     for scan_id in scan_map:
         if scan_id not in known_ids:
             plugins.append({
@@ -1266,7 +1289,15 @@ def _merge_all_plugins(
 
 
 
-def _plugin_status(p: dict[str, Any]) -> str:
+def _plugin_status(p: dict[str, Any], action_entry: Any = None) -> str:
+    if action_entry and not action_entry.actions.is_empty():
+        a = action_entry.actions
+        if a.file == "quarantine":
+            return "quarantined"
+        if a.install == "block":
+            return "blocked"
+        if a.runtime == "disable":
+            return "disabled"
     if not p.get("enabled"):
         return "disabled"
     return "enabled"
@@ -1298,6 +1329,7 @@ def _plugin_list_json_items(
     plugins: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
+    connector: str = "",
 ) -> list[dict[str, Any]]:
     items = []
     for p in plugins:
@@ -1309,9 +1341,11 @@ def _plugin_list_json_items(
             "version": p.get("version", ""),
             "origin": p.get("origin", ""),
             "source": p.get("source", ""),
-            "status": _plugin_status(p),
-            "enabled": p.get("enabled", False),
+            "status": _plugin_status(p, actions_map.get(pid)),
+            "enabled": _plugin_effectively_enabled(p, actions_map.get(pid)),
         }
+        if connector:
+            item["connector"] = connector
         if pid in scan_map:
             item["scan"] = scan_map[pid]
         if pid in actions_map:
@@ -1328,9 +1362,10 @@ def _print_plugin_list_json(
     plugins: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
+    connector: str = "",
 ) -> None:
     click.echo(json.dumps(
-        _plugin_list_json_items(plugins, scan_map, actions_map),
+        _plugin_list_json_items(plugins, scan_map, actions_map, connector=connector),
         indent=2,
         default=str,
     ))
@@ -1939,6 +1974,9 @@ _CONNECTOR_SCOPE_HELP = (
     "Scope to one connector (default: GLOBAL — applies to every connector). "
     "Pass --connector <name> to narrow to that peer."
 )
+_CONNECTOR_RUNTIME_SCOPE_HELP = (
+    "Scope to one connector. Default: matching plugin copies across active connectors."
+)
 
 
 def _resolve_connector_scope(app: AppContext, connector_flag: str) -> str:
@@ -2229,7 +2267,7 @@ def _warn_plugin_runtime_disable_advisory(plugin_name: str, connector: str, scop
 @plugin.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for disabling")
-@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_RUNTIME_SCOPE_HELP)
 @pass_ctx
 def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Disable a plugin at runtime.
@@ -2239,8 +2277,8 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
     plugin runtime events. This is runtime-only — it does not block install or
     quarantine files.
 
-    Bare records the disable GLOBALLY, ``--connector <name>`` narrows the
-    runtime-disable record to that peer.
+    Bare records a runtime-disable row for every matching active connector copy;
+    ``--connector <name>`` narrows the runtime-disable record to that peer.
     """
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
@@ -2256,6 +2294,39 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
         reason = "manual disable via CLI"
 
     pe = PolicyEngine(app.store)
+    if not connector_flag and (
+        len(_active_plugin_connectors(app)) > 1 or connector != "openclaw"
+    ):
+        targets = _plugin_match_dir_scopes(app, plugin_name)
+        if not targets:
+            click.echo(
+                f"error: plugin not found: {plugin_name} across active connectors",
+                err=True,
+            )
+            raise SystemExit(1)
+        seen_connectors: set[str] = set()
+        for target_connector, _path in targets:
+            target_connector = _normalize_runtime_connector(target_connector)
+            if target_connector in seen_connectors:
+                continue
+            seen_connectors.add(target_connector)
+            pe.disable_for_connector("plugin", plugin_name, target_connector, reason)
+            click.echo(
+                f"[plugin] {plugin_name!r} runtime disable recorded "
+                f"(connector={target_connector})"
+            )
+            if _plugin_runtime_probe_enforced(target_connector):
+                click.echo(
+                    f"  Enforced by hook runtime gate for connector={target_connector}."
+                )
+            else:
+                _warn_plugin_runtime_disable_advisory(plugin_name, target_connector, True)
+        if app.logger:
+            app.logger.log_action(
+                "plugin-disable", plugin_name, f"reason={reason} connector=all",
+            )
+        return
+
     if connector == "openclaw":
         client = _sidecar_client(app)
         try:
@@ -2306,13 +2377,14 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
 
 @plugin.command()
 @click.argument("name")
-@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
+@click.option("--connector", "connector_flag", default="", help=_CONNECTOR_RUNTIME_SCOPE_HELP)
 @pass_ctx
 def enable(app: AppContext, name: str, connector_flag: str) -> None:
     """Enable a previously disabled plugin.
 
-    This is a runtime-only action. ``--connector <name>`` clears only that
-    peer's runtime-disable record (bare clears the global record).
+    This is a runtime-only action. Bare clears runtime-disable rows for every
+    matching active connector copy; ``--connector <name>`` narrows the clear to
+    that peer.
     """
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
@@ -2323,6 +2395,35 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         if connector == "openclaw"
         else os.path.basename(name)
     )
+
+    pe = PolicyEngine(app.store)
+    if not connector_flag and (
+        len(_active_plugin_connectors(app)) > 1 or connector != "openclaw"
+    ):
+        targets = _plugin_match_dir_scopes(app, plugin_name)
+        if not targets:
+            click.echo(
+                f"error: plugin not found: {plugin_name} across active connectors",
+                err=True,
+            )
+            raise SystemExit(1)
+        seen_connectors: set[str] = set()
+        for target_connector, _path in targets:
+            target_connector = _normalize_runtime_connector(target_connector)
+            if target_connector in seen_connectors:
+                continue
+            seen_connectors.add(target_connector)
+            pe.enable_for_connector("plugin", plugin_name, target_connector)
+            click.echo(
+                f"[plugin] {plugin_name!r} runtime disable cleared "
+                f"(connector={target_connector})"
+            )
+        pe.enable("plugin", plugin_name)
+        if app.logger:
+            app.logger.log_action(
+                "plugin-enable", plugin_name, "re-enabled via CLI connector=all",
+            )
+        return
 
     if connector == "openclaw":
         client = _sidecar_client(app)
@@ -2345,9 +2446,17 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
     else:
         click.echo(f"[plugin] {plugin_name!r} global runtime disable cleared")
 
-    pe = PolicyEngine(app.store)
     if connector_flag:
         pe.enable_for_connector("plugin", plugin_name, connector)
+        if app.store and app.store.has_action("plugin", plugin_name, "runtime", "disable"):
+            app.store.set_action_field(
+                "plugin",
+                plugin_name,
+                "runtime",
+                "enable",
+                "manual scoped enable via CLI; overrides global runtime disable",
+                connector,
+            )
     else:
         pe.enable("plugin", plugin_name)
 
@@ -2384,6 +2493,7 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
         click.echo(f"error: invalid plugin name {name!r}", err=True)
         raise SystemExit(1)
 
+    pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
     resolved_connector = _resolve_connector_scope(app, connector_flag)
     scope_roots = (
         _plugin_roots_for_connector(app, resolved_connector)
@@ -2415,10 +2525,29 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
         targets = _plugin_match_dir_scopes(app, plugin_name, connector_flag)
 
     if not targets:
+        if not reason:
+            reason = "manual quarantine via CLI"
+        pe = PolicyEngine(app.store)
+        quarantined_connectors = (
+            [resolved_connector]
+            if resolved_connector and pe_enforcer.is_quarantined(plugin_name, resolved_connector)
+            else [
+                c
+                for c in _active_plugin_connectors(app)
+                if pe_enforcer.is_quarantined(plugin_name, c)
+            ]
+        )
+        if quarantined_connectors:
+            for target_connector in quarantined_connectors:
+                pe.quarantine_for_connector("plugin", plugin_name, target_connector, reason)
+                click.echo(
+                    f"[plugin] {plugin_name!r} is already quarantined "
+                    f"(connector={target_connector})"
+                )
+            return
         click.echo(f"error: could not locate plugin {plugin_name!r}", err=True)
         raise SystemExit(1)
 
-    pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
     if not reason:
         reason = "manual quarantine via CLI"
     pe = PolicyEngine(app.store)
@@ -2615,7 +2744,11 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
     for idx, card in enumerate(cards):
         if idx:
             click.echo()
-        _print_plugin_info_card(card, plugin_name, show_connector=(not connector_flag))
+        _print_plugin_info_card(
+            card,
+            plugin_name,
+            show_connector=(not connector_flag) or not bool(card.get("installed", False)),
+        )
 
 
 def _plugin_metadata_from_path(plugin_name: str, candidate: str) -> dict[str, Any]:
