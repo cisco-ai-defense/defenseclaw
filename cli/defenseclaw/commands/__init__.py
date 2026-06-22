@@ -75,7 +75,7 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     if match is None:
         allowed = ", ".join(sorted(configured)) or active
         raise click.UsageError(
-            f"connector {requested!r} is not configured. Active connectors: {allowed}."
+            f"connector {requested!r} is not configured. Configured connectors: {allowed}."
         )
     return match
 

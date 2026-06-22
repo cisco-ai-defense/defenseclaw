@@ -600,8 +600,11 @@ class TestResolveListConnector(unittest.TestCase):
         from defenseclaw.commands import resolve_list_connector
 
         app = self._app(connector="claudecode", connectors=["codex"])
-        with self.assertRaises(click.UsageError):
+        with self.assertRaises(click.UsageError) as cm:
             resolve_list_connector(app, "nope")
+        message = str(cm.exception)
+        self.assertIn("Configured connectors: codex", message)
+        self.assertNotIn("Active connectors:", message)
 
 
 if __name__ == "__main__":
