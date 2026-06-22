@@ -30,6 +30,7 @@ endif
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
+        security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
@@ -490,6 +491,18 @@ cli-test-snap:
 
 gateway-test: sync-openclaw-extension
 	go test -race ./internal/gateway/ ./test/... -v
+
+# security-suite-test runs the deterministic security + PII coverage suite
+# (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.
+# No LLM key or running gateway required; this is the CI-safe tier and is
+# also covered by `make gateway-test`.
+security-suite-test:
+	go test ./internal/gateway/ -run 'TestSecuritySuiteRegex|TestSecuritySuiteJudge|TestSeverityBenchmark' -count=1 -v
+
+# security-suite-eval scores the judge corpus against a live model and runs
+# the full eval corpus. Requires DEFENSECLAW_LLM_KEY. Not run in CI.
+security-suite-eval:
+	GUARDRAIL_BENCHMARK_LLM=1 go test ./internal/gateway/ -run '^(TestSecuritySuiteJudge|TestEvalInjectionJudge|TestEvalPIIJudge|TestEvalExfilJudge|TestEvalToolInjectionJudge)$$' -count=1 -timeout 120m -v
 
 go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -coverprofile=coverage.out ./...

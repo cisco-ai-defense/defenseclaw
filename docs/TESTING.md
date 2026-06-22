@@ -10,6 +10,8 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | `make cli-test` | Python `unittest` suite under `cli/tests/` |
 | `make cli-test-cov` | Python pytest coverage report |
 | `make gateway-test` | Race-enabled Go tests for gateway and `test/` |
+| `make security-suite-test` | Deterministic security + PII coverage suite (regex + stubbed judge); see [SECURITY-TEST-SUITE.md](SECURITY-TEST-SUITE.md) |
+| `make security-suite-eval` | Live LLM-judge scoring of the security + PII corpus (needs `DEFENSECLAW_LLM_KEY`) |
 | `make go-test-cov` | Race-enabled Go coverage across all packages |
 | `make ts-test` | OpenClaw plugin Vitest suite |
 | `make rego-test` | OPA tests for `policies/rego/` |

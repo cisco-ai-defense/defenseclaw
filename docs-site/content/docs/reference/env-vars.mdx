@@ -176,6 +176,7 @@ This is the canonical list of every environment variable DefenseClaw reads. The 
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEFENSECLAW_FAKE_CLAUDE_LIST` | — | `unset` | `comma-separated mock responses`, `unset` | Test-only stub: comma-separated list of responses the fake claude CLI returns. | — | `internal/gateway/connector/codeguard_native_test.go:90` — Test stub |
 | `DEFENSECLAW_FAKE_CLAUDE_LOG` | — | `unset` | `absolute-path`, `unset` | Test-only stub: path the fake claude CLI logs invocations to. | — | `internal/gateway/connector/codeguard_native_test.go:116` — Test stub |
+| `DEFENSECLAW_GATEWAY_URL` | — | `unset` (in-process e2e server) | `http(s) base URL e.g. http://127.0.0.1:18970`, `unset` | Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E). | — | `internal/gateway/security_suite_test.go:307` — TestSecuritySuiteE2E reads this to locate the gateway; uses an in-process server when unset |
 | `DEFENSECLAW_TEST_KEY` | — | `unset` | `any-string`, `unset` | Placeholder LLM key used in test fixtures only. | — | `cli/tests/test_llm_env.py` — Test fixture |
 | `DEFENSECLAW_TEST_KEY_NOTSET_12345` | — | `unset` | `unset` | Placeholder env var name used to assert 'unset' behavior in tests. | — | `cli/tests/test_llm_env.py` — Test fixture for unset assertions |
 | `DEFENSECLAW_TEST_LLM_KEY` | — | `unset` | `any-string`, `unset` | Placeholder LLM key used in some test setups when DEFENSECLAW_LLM_KEY needs an alternate target. | — | `cli/tests/test_llm_env.py` — Test fixture |
