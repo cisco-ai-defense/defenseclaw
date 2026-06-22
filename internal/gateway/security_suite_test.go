@@ -38,6 +38,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,13 +309,30 @@ type e2eCase struct {
 // http://127.0.0.1:18970). This is the only tier that exercises the real
 // HTTP handlers + audit pipeline end to end.
 func TestSecuritySuiteE2E(t *testing.T) {
-	base := strings.TrimRight(strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_URL")), "/")
-	if base == "" {
-		t.Skip("e2e suite requires DEFENSECLAW_GATEWAY_URL (e.g. http://127.0.0.1:18970)")
-	}
 	cases := readJSONL[e2eCase](t, "e2e", "corpus.jsonl")
 	if len(cases) == 0 {
 		t.Fatal("e2e corpus empty")
+	}
+
+	// When DEFENSECLAW_GATEWAY_URL is set, run against that external,
+	// token-authed gateway. Otherwise stand up an in-process server that
+	// mounts the real inspect handlers (no auth middleware) so the HTTP
+	// request -> verdict path is still exercised end-to-end in CI.
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_URL")), "/")
+	var authHeader string
+	if base == "" {
+		api := testAPIServerWithConfig(t, "action")
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/v1/inspect/request", api.handleInspectRequest)
+		mux.HandleFunc("/api/v1/inspect/response", api.handleInspectResponse)
+		mux.HandleFunc("/api/v1/inspect/tool-response", api.handleInspectToolResponse)
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		base = srv.URL
+		t.Logf("e2e: using in-process inspect server at %s (set DEFENSECLAW_GATEWAY_URL to target an external gateway)", base)
+	} else {
+		authHeader = strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_TOKEN"))
+		t.Logf("e2e: targeting external gateway at %s", base)
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 
@@ -346,6 +364,9 @@ func TestSecuritySuiteE2E(t *testing.T) {
 				t.Fatalf("new request: %v", err)
 			}
 			req.Header.Set("Content-Type", "application/json")
+			if authHeader != "" {
+				req.Header.Set("Authorization", "Bearer "+authHeader)
+			}
 			resp, err := client.Do(req)
 			if err != nil {
 				t.Fatalf("POST %s: %v", url, err)

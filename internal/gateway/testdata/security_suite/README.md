@@ -9,10 +9,10 @@ layer**, or the **end-to-end HTTP** surface.
 
 | Tier | Corpus | Go test | LLM? | CI |
 |------|--------|---------|------|----|
-| Regex / rule layer | `regex/corpus.jsonl` (curated + generated `eval-` rows) | `TestSecuritySuiteRegex` | No (deterministic) | Yes |
+| Regex / rule layer | `regex/corpus.jsonl`| `TestSecuritySuiteRegex` | No (deterministic) | Yes |
 | LLM-judge layer (targeted) | `judge/corpus.jsonl` | `TestSecuritySuiteJudge` | Stubbed by default; live with `GUARDRAIL_BENCHMARK_LLM=1` | Yes (stubbed) |
 | LLM-judge benchmark (broad) | `eval_corpus/{injection,pii,exfil,tool_injection}/corpus.jsonl` | `TestEval*` | Live only | No (opt-in) |
-| End-to-end HTTP | `e2e/corpus.jsonl` | `TestSecuritySuiteE2E` | Live gateway | No (opt-in) |
+| End-to-end HTTP | `e2e/corpus.jsonl` | `TestSecuritySuiteE2E` | in-process (or external gateway) | Yes |
 
 ## Running
 
@@ -24,9 +24,8 @@ go test ./internal/gateway/ -run 'TestSecuritySuite(Regex|Judge)' -v
 GUARDRAIL_BENCHMARK_LLM=1 DEFENSECLAW_LLM_KEY=... \
   go test ./internal/gateway/ -run TestSecuritySuiteJudge -v
 
-# end-to-end against a running gateway:
-DEFENSECLAW_GATEWAY_URL=http://127.0.0.1:18970 \
-  go test ./internal/gateway/ -run TestSecuritySuiteE2E -v
+# end-to-end (in-process by default; set DEFENSECLAW_GATEWAY_URL for an external gateway):
+go test ./internal/gateway/ -run TestSecuritySuiteE2E -v
 ```
 
 ## Schema

@@ -16,7 +16,7 @@ and [`internal/gateway/security_suite_test.go`](../internal/gateway/security_sui
 | Regex | `ScanAllRules` engine (hook + `/inspect` API) and `GuardrailInspector` `regex_only` (proxy + sidecar) | `regex/corpus.jsonl` (curated + generated `eval-` rows) | `TestSecuritySuiteRegex` | No | No | Yes |
 | Judge (targeted) | The LLM-judge layer (`RunJudges` / `RunToolJudge`), including suppressions and severity mapping | `judge/corpus.jsonl` | `TestSecuritySuiteJudge` | Stubbed (deterministic) or live | No | Yes (stubbed) |
 | Judge (broad benchmark) | LLM-judge detection quality scorecard (ADR/FPR/precision) | `eval_corpus/{injection,pii,exfil,tool_injection}/` | `TestEval*` | Live | No | No (opt-in) |
-| E2E | The real HTTP inspect API + audit pipeline on a running gateway | `e2e/corpus.jsonl` | `TestSecuritySuiteE2E` | Live | Yes | No (opt-in) |
+| E2E | The real HTTP inspect API (request -> verdict) over HTTP | `e2e/corpus.jsonl` | `TestSecuritySuiteE2E` | No | in-process (or external) | Yes |
 
 The broad judge benchmark (the 640-item `eval_corpus/`, 160 each for
 injection / PII / exfil / tool-injection) now lives under the suite. It is a
@@ -40,9 +40,9 @@ make security-suite-test
 # Live judge scoring against a real model (needs DEFENSECLAW_LLM_KEY):
 make security-suite-eval
 
-# End-to-end against a running gateway:
-DEFENSECLAW_GATEWAY_URL=http://127.0.0.1:18970 \
-  go test ./internal/gateway/ -run TestSecuritySuiteE2E -v
+# End-to-end (runs in-process by default; set DEFENSECLAW_GATEWAY_URL to
+# target an external gateway, with DEFENSECLAW_GATEWAY_TOKEN for auth):
+go test ./internal/gateway/ -run TestSecuritySuiteE2E -v
 ```
 
 The deterministic tiers are part of `make gateway-test` / `make test`, so

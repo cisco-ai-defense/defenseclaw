@@ -1454,13 +1454,13 @@
     {
       "name": "DEFENSECLAW_GATEWAY_URL",
       "category": "test_fixture",
-      "purpose": "Base URL of a running gateway for the opt-in security-suite e2e tier (TestSecuritySuiteE2E). When set, the test posts to the gateway's /api/v1/inspect/* endpoints; when unset, the e2e tier is skipped.",
-      "default": "unset (e2e tier skipped)",
+      "purpose": "Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E). When set, the test posts to that gateway's /api/v1/inspect/* endpoints; when unset, the tier runs against an in-process inspect server.",
+      "default": "unset (in-process e2e server)",
       "accepted_values": ["http(s) base URL e.g. http://127.0.0.1:18970", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/security_suite_test.go:307", "description": "TestSecuritySuiteE2E reads this to locate the gateway; skips when unset"}
+        {"location": "internal/gateway/security_suite_test.go:307", "description": "TestSecuritySuiteE2E reads this to locate the gateway; uses an in-process server when unset"}
       ],
       "since": "0.7.0"
     }
