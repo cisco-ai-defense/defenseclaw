@@ -1518,7 +1518,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
             return_value=True,
-        ):
+        ) as version_check:
             result = self.runner.invoke(
                 setup,
                 ["guardrail", "--no-restart"],
@@ -1550,7 +1550,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
             return_value=True,
-        ):
+        ) as version_check:
             result = self.runner.invoke(
                 setup,
                 ["guardrail", "--no-restart"],
@@ -1571,10 +1571,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "Per-connector enforcement mode is managed via", result.output
         )
 
-    def test_interactive_multi_connector_skips_picker_and_mode(self):
-        """Two configured connectors: BOTH the picker and the singular
-        observe/action prompt are skipped — a single answer can't express
-        per-connector intent. The wizard still runs all GLOBAL steps."""
+    def test_interactive_multi_connector_uses_per_connector_mode_picker(self):
+        """Two configured connectors: the connector picker and singular
+        observe/action prompt are skipped, but the wizard offers a
+        per-connector action picker before the global policy steps."""
         from defenseclaw.commands.cmd_setup import setup
         from defenseclaw.config import PerConnectorGuardrailConfig
 
@@ -1593,7 +1593,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
             return_value=True,
-        ):
+        ) as version_check:
             result = self.runner.invoke(
                 setup,
                 ["guardrail", "--no-restart"],
@@ -1613,14 +1613,17 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn(
             "Per-connector enforcement mode is managed via", result.output
         )
-        # The singular enforcement-mode prompt is skipped...
-        self.assertIn("Enforcement mode is per-connector here", result.output)
+        # The singular enforcement-mode prompt is skipped in favor of the
+        # per-connector action picker.
+        self.assertIn("Select connector(s) for action mode.", result.output)
         self.assertNotIn("Select mode", result.output)
-        # ...and per-connector modes are left untouched.
+        # Pressing Enter accepts the current per-connector defaults.
         self.assertEqual(self.app.cfg.guardrail.connectors["codex"].mode, "action")
         self.assertEqual(
             self.app.cfg.guardrail.connectors["claudecode"].mode, "observe"
         )
+        checked = {call.args[0] for call in version_check.call_args_list}
+        self.assertEqual(checked, {"codex", "claudecode"})
 
     def test_interactive_multi_connector_offers_hilt_when_any_action(self):
         """In multi-connector mode HILT is gated on whether ANY connector

@@ -117,7 +117,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         # Judge enablement is global + gated; strategy bumped off regex_only.
         self.assertTrue(gc.judge.enabled)
         self.assertNotEqual(gc.detection_strategy, "regex_only")
-        self.assertTrue(gc.judge.hook_connectors == ["*"] or "hermes" in gc.judge.hook_connectors)
+        self.assertEqual(gc.judge.hook_connectors, ["hermes"])
         # Peer left completely untouched (inherits global).
         codex = gc.connectors["codex"]
         self.assertEqual(codex.mode, "")
@@ -197,6 +197,18 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertEqual(gc.detection_strategy, "regex_judge")
         self.assertEqual(gc.connectors["hermes"].block_message, "keep-me")
 
+    def test_enable_judge_adds_connector_to_existing_narrow_gate(self):
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["codex"]
+        gc.detection_strategy = "regex_judge"
+        with _stub_side_effects():
+            res = _invoke(["hermes", "--yes", "--no-restart", "--enable-judge"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertTrue(gc.judge.enabled)
+        self.assertEqual(gc.judge.hook_connectors, ["codex", "hermes"])
+
     def test_no_enable_judge_opts_connector_out_of_concrete_gate(self):
         self._seed_map("codex", "hermes")
         gc = self.app.cfg.guardrail
@@ -226,13 +238,17 @@ class TestInteractiveModeJudgePrompts(_BaseSetup):
         self.assertEqual(self.app.cfg.guardrail.mode, "action")
 
     def test_judge_prompt_enables_judge(self):
+        confirms = iter([True, True, True])
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True), \
-                patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=True), \
-                patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"):
+                patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=lambda *a, **k: next(confirms)), \
+                patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
+                patch("defenseclaw.commands.cmd_setup._prompt_judge_model_config") as model_prompt:
             res = _invoke(["codex", "--no-restart"], self.app)
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertTrue(self.app.cfg.guardrail.judge.enabled)
+        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["codex"])
+        model_prompt.assert_called_once()
 
     def test_non_interactive_does_not_prompt(self):
         # --yes path: no prompts fire (would error on EOF if they did).
@@ -277,6 +293,32 @@ class TestTrustedPrefixObservePrompt(unittest.TestCase):
         _ok, add_mock, confirm_mock = self._run("action")
         self.assertTrue(confirm_mock.called)
         self.assertTrue(add_mock.called)
+
+    def test_noninteractive_observe_suppresses_prompt_but_emits_remediation(self):
+        signal = SimpleNamespace(
+            version="",
+            installed=True,
+            error=cmd_setup.agent_discovery.UNTRUSTED_PREFIX_ERROR,
+            binary_path="/tmp/fake/hermes-bin",
+        )
+        disc = SimpleNamespace(agents={"hermes": signal})
+        contract = SimpleNamespace(status=cmd_setup.STATUS_UNVERSIONED, contract=None, reason="unversioned")
+        hints = []
+        with patch.object(cmd_setup.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_setup, "resolve_connector_contract", return_value=contract), \
+                patch.object(cmd_setup.sys.stdin, "isatty", return_value=True), \
+                patch.object(cmd_setup.sys.stdout, "isatty", return_value=True), \
+                patch.object(cmd_setup, "_add_trusted_bin_prefix", return_value=True) as add_mock, \
+                patch.object(cmd_setup.click, "confirm", side_effect=AssertionError("prompted")), \
+                patch.object(cmd_setup.ux, "subhead", side_effect=lambda message: hints.append(message)):
+            ok = cmd_setup._check_connector_version_supported_for_setup(
+                "hermes",
+                mode="observe",
+                _allow_prompt=False,
+            )
+        self.assertTrue(ok)
+        add_mock.assert_not_called()
+        self.assertIn("trusted-paths add", " ".join(hints))
 
 
 # ---------------------------------------------------------------------------
@@ -364,14 +406,210 @@ class TestBareSetupBatch(_BaseSetup):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True), \
                 patch("defenseclaw.commands.cmd_setup._detect_installed_connectors", return_value=["hermes"]), \
-                patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="2"), \
-                patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=False):
+                patch("defenseclaw.commands.cmd_setup.click.getchar", return_value="\n"):
             res = _invoke(["--yes"], self.app)
-        # --yes => no per-connector prompts; picker prompt (click.prompt) picks
-        # candidate #2. The exact connector depends on sorted order; just assert
-        # exactly one connector was configured from the picker.
+        # --yes => no mode/judge prompts, but bare setup still needs the
+        # connector picker. Enter accepts the detected default selection.
         self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertNotIn("comma-separated", res.output)
         self.assertEqual(len(self.app.cfg.guardrail.connectors), 1)
+        self.assertIn("hermes", self.app.cfg.guardrail.connectors)
+
+    def test_batch_prompts_trusted_prefix_before_judge_picker(self):
+        signal = SimpleNamespace(
+            version="",
+            installed=True,
+            error=cmd_setup.agent_discovery.UNTRUSTED_PREFIX_ERROR,
+            binary_path="/tmp/fake/hermes-bin",
+        )
+        disc = SimpleNamespace(agents={"hermes": signal})
+
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_connector_modes",
+                    return_value={"hermes": "action"},
+                ), \
+                patch.object(cmd_setup.agent_discovery, "discover_agents", return_value=disc), \
+                patch("defenseclaw.commands.cmd_setup._add_trusted_bin_prefix") as add_mock, \
+                patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=True), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_judge_connectors",
+                    side_effect=lambda targets, gc: self.assertTrue(add_mock.called) or set(),
+                ):
+            res = _invoke(["-c", "hermes", "--no-restart"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        add_mock.assert_called_once()
+
+    def test_interactive_batch_selects_judge_connectors_without_strategy_prompt(self):
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["*"]
+
+        def choose_hermes(targets, gc_arg):
+            cmd_setup._merge_batch_judge_selection(gc_arg, targets, {"hermes"})
+            return {"hermes"}
+
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_connector_modes",
+                    return_value={"hermes": "observe", "codex": "action"},
+                ) as mode_picker, \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
+                    side_effect=AssertionError("bare setup should not ask for scan strategy"),
+                ), \
+                patch("defenseclaw.commands.cmd_setup._prompt_batch_trusted_prefixes", return_value={}), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_judge_connectors",
+                    side_effect=choose_hermes,
+                ) as judge_picker, \
+                patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=False) as confirm_mock, \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_judge_model_config",
+                    side_effect=AssertionError("model prompt should be skipped when declined"),
+                ), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_connector_mode",
+                    side_effect=AssertionError("per-connector mode prompt should not run"),
+                ), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_enable_judge",
+                    side_effect=AssertionError("per-connector judge prompt should not run"),
+                ):
+            res = _invoke(["-c", "hermes", "-c", "codex", "--no-restart"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        mode_picker.assert_called_once()
+        judge_picker.assert_called_once()
+        confirm_mock.assert_called_once()
+        self.assertEqual(gc.connectors["hermes"].mode, "observe")
+        self.assertEqual(gc.connectors["codex"].mode, "action")
+        self.assertEqual(gc.detection_strategy, "regex_judge")
+        self.assertEqual(gc.judge.hook_connectors, ["hermes"])
+
+    def test_batch_judge_selection_drops_unselected_existing_connectors(self):
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["*"]
+
+        def choose_hermes(targets, gc_arg):
+            cmd_setup._merge_batch_judge_selection(gc_arg, targets, {"hermes"})
+            return {"hermes"}
+
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_connector_modes",
+                    return_value={"hermes": "observe"},
+                ), \
+                patch("defenseclaw.commands.cmd_setup._prompt_batch_trusted_prefixes", return_value={}), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_judge_connectors",
+                    side_effect=choose_hermes,
+                ), \
+                patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=False):
+            res = _invoke(["-c", "hermes", "--no-restart"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(gc.judge.hook_connectors, ["hermes"])
+        self.assertNotIn("codex", gc.judge.hook_connectors)
+
+    def test_batch_setup_reconciles_active_connectors_to_selected_set(self):
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["codex", "hermes"]
+
+        with _stub_side_effects():
+            res = _invoke(["-c", "hermes", "--yes", "--no-restart"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(sorted(gc.connectors), ["hermes"])
+        self.assertEqual(gc.connector, "hermes")
+        self.assertEqual(self.app.cfg.claw.mode, "hermes")
+        self.assertEqual(gc.judge.hook_connectors, ["hermes"])
+
+    def test_batch_setup_does_not_seed_unselected_legacy_single_connector(self):
+        gc = self.app.cfg.guardrail
+        gc.connector = "codex"
+        self.app.cfg.claw.mode = "codex"
+        gc.connectors = {}
+
+        with _stub_side_effects():
+            res = _invoke(["-c", "hermes", "--yes", "--no-restart"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(sorted(gc.connectors), ["hermes"])
+        self.assertNotIn("codex", gc.connectors)
+        self.assertEqual(gc.connector, "hermes")
+
+    def test_empty_batch_judge_selection_skips_model_and_uses_regex_only(self):
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["hermes"]
+
+        def choose_none(targets, gc_arg):
+            cmd_setup._merge_batch_judge_selection(gc_arg, targets, set())
+            return set()
+
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_connector_modes",
+                    return_value={"hermes": "observe", "codex": "observe"},
+                ), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
+                    side_effect=AssertionError("bare setup should not ask for scan strategy"),
+                ), \
+                patch("defenseclaw.commands.cmd_setup._prompt_batch_trusted_prefixes", return_value={}), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_judge_connectors",
+                    side_effect=choose_none,
+                ), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_judge_model_config",
+                    side_effect=AssertionError("judge model prompt should not run with no judge connectors"),
+                ), \
+                patch(
+                    "defenseclaw.commands.cmd_setup.click.confirm",
+                    side_effect=AssertionError("judge model confirm should not run with no judge connectors"),
+                ):
+            res = _invoke(["-c", "hermes", "-c", "codex", "--no-restart"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertFalse(gc.judge.enabled)
+        self.assertEqual(gc.detection_strategy, "regex_only")
+        self.assertEqual(gc.detection_strategy_completion, "regex_only")
+        self.assertEqual(gc.judge.hook_connectors, [])
+
+    def test_batch_judge_selection_can_configure_model(self):
+        def choose_hermes(targets, gc_arg):
+            cmd_setup._merge_batch_judge_selection(gc_arg, targets, {"hermes"})
+            return {"hermes"}
+
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_connector_modes",
+                    return_value={"hermes": "observe"},
+                ), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
+                    side_effect=AssertionError("bare setup should not ask for scan strategy"),
+                ), \
+                patch("defenseclaw.commands.cmd_setup._prompt_batch_trusted_prefixes", return_value={}), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_judge_connectors",
+                    side_effect=choose_hermes,
+                ), \
+                patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=True) as confirm_mock, \
+                patch("defenseclaw.commands.cmd_setup._prompt_judge_model_config") as model_prompt:
+            res = _invoke(["-c", "hermes", "--no-restart"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        confirm_mock.assert_called_once()
+        model_prompt.assert_called_once()
+        self.assertTrue(self.app.cfg.guardrail.judge.enabled)
+        self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
+        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["hermes"])
 
     def test_flags_ignored_with_subcommand_warns(self):
         with _stub_side_effects():
@@ -415,6 +653,21 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
             )
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_judge")
+
+    def test_judge_strategy_flag_enables_judge_with_all_hook_coverage(self):
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
+            res = _invoke(
+                [
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
+                    "--detection-strategy", "regex_judge",
+                ],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertTrue(self.app.cfg.guardrail.judge.enabled)
+        self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
+        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["*"])
 
     def test_off_by_default_tool_call_unset(self):
         with _stub_side_effects(), \

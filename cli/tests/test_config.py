@@ -1171,6 +1171,36 @@ class TestConfigTopLevelSections(unittest.TestCase):
             self.assertEqual(output.count("privacy.disable_redaction=true"), 1)
             self.assertIn("UNREDACTED prompts", output)
 
+    def test_load_warns_once_for_same_legacy_llm_fields(self):
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_data = {
+                "data_dir": tmpdir,
+                "guardrail": {
+                    "judge": {
+                        "model": "gpt-4o-mini",
+                        "api_key_env": "OPENAI_API_KEY",
+                        "api_base": "https://api.example.test/v1",
+                    }
+                },
+            }
+            with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
+                yaml.dump(config_data, f)
+
+            with (
+                patch("defenseclaw.config.default_data_path") as mock_dp,
+                patch.object(config_mod, "_llm_migration_warned_keys", set()),
+                self.assertLogs("defenseclaw.config", level="WARNING") as logs,
+            ):
+                mock_dp.return_value = Path(tmpdir)
+                config_mod.load()
+                config_mod.load()
+
+            output = "\n".join(logs.output)
+            self.assertEqual(output.count("deprecated v4 LLM fields detected"), 1)
+            self.assertIn("guardrail.judge.{model,api_key_env,api_base}", output)
+
     def test_guardrail_config_has_no_cisco_ai_defense(self):
         """GuardrailConfig no longer nests CiscoAIDefenseConfig."""
         from defenseclaw.config import GuardrailConfig

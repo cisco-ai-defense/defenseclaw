@@ -12,10 +12,9 @@
 """Regression tests for the ``setup codex`` / ``setup claude-code`` aliases.
 
 These aliases configure DefenseClaw for hook-only operation against a
-single connector (Codex / Claude Code) and flip ``claw.mode`` so the
-rest of the CLI/TUI surfaces the matching connector's source-of-truth
-files (``~/.codex`` / ``~/.claude``) instead of the OpenClaw default
-layout.
+connector set (Codex / Claude Code) so the rest of the CLI/TUI surfaces
+the matching connector's source-of-truth files (``~/.codex`` /
+``~/.claude``).
 
 The tests pin two architectural invariants:
 
@@ -290,6 +289,13 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertEqual(self.app.cfg.guardrail.mode, "observe")
                 self.assertEqual(self.app.cfg.guardrail.scanner_mode, "local")
                 self.assertFalse(self.app.cfg.guardrail.judge.enabled)
+                self.assertIn(f"Connector {connector!r} configured", result.output)
+                self.assertIn(f"{connector} mode=observe", result.output)
+                self.assertIn(f"defenseclaw setup {connector} --mode action", result.output)
+                self.assertNotIn("Active connector set", result.output)
+                self.assertNotIn("guardrail.mode=observe", result.output)
+                self.assertNotIn("guardrail.mode:", result.output)
+                self.assertNotIn("set guardrail.mode=action", result.output)
                 restart_mock.assert_not_called()
 
                 hint_path = os.path.join(self.app.cfg.data_dir, "picked_connector")
@@ -324,13 +330,50 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertEqual(self.app.cfg.claw.workspace_dir, "")
                 self.assertTrue(self.app.cfg.guardrail.enabled)
                 self.assertEqual(self.app.cfg.guardrail.mode, "action")
-                self.assertIn("guardrail.mode=action", result.output)
+                self.assertIn(f"{connector} mode=action", result.output)
+                self.assertNotIn("guardrail.mode=action", result.output)
+                self.assertNotIn("guardrail.mode:", result.output)
+                self.assertIn(f"defenseclaw setup {connector} --mode observe", result.output)
+                self.assertNotIn("set guardrail.mode=observe", result.output)
                 version_mock.assert_called_with(
                     connector,
                     mode="action",
                     data_dir=self.app.cfg.data_dir,
+                    _allow_prompt=False,
                 )
                 restart_mock.assert_not_called()
+
+    def test_yes_no_restart_setup_does_not_reference_missing_interactive_flag(self):
+        for connector in ["hermes", "codex", "opencode"]:
+            with (
+                self.subTest(connector=connector),
+                patch(
+                    "defenseclaw.commands.cmd_setup._restart_services",
+                    return_value=None,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                    return_value=None,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    return_value=True,
+                ) as version_mock,
+            ):
+                self.app.cfg.claw.mode = "openclaw"
+                self.app.cfg.guardrail.connector = "openclaw"
+                self.app.cfg.guardrail.connectors = {}
+                result = _invoke([connector, "--yes", "--no-restart"], self.app)
+
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(self.app.cfg.guardrail.connector, connector)
+                self.assertNotIn("NameError", result.output)
+                version_mock.assert_called_with(
+                    connector,
+                    mode="observe",
+                    data_dir=self.app.cfg.data_dir,
+                    _allow_prompt=False,
+                )
 
     def test_alias_workspace_option_pins_workspace(self):
         workspace = os.path.join(self.tmp_dir, "repo")
@@ -376,6 +419,21 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
             self.assertIn(connector, result.output)
+        self.assertIn("codex, claudecode", result.output)
+        self.assertIn("hermes, antigravity", result.output)
+        self.assertIn("OpenClaw/ZeptoClaw use the proxy path", result.output)
+        self.assertNotIn("antigravity, openclaw", result.output)
+        self.assertNotIn("openclaw) tracked under guardrail.connectors", result.output)
+
+    def test_hook_help_uses_connector_set_wording(self):
+        for connector in ["codex", "claude-code", "hermes", "opencode"]:
+            with self.subTest(connector=connector):
+                result = _invoke([connector, "--help"], self.app)
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertIn("hook connector set", result.output)
+                self.assertNotIn("Pins the active connector", result.output)
+                self.assertNotIn("Pins claw.mode", result.output)
+                self.assertNotIn("OpenClaw default layout", result.output)
 
     def test_guardrail_help_mentions_new_connector_choices(self):
         result = _invoke(["guardrail", "--help"], self.app)

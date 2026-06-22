@@ -67,6 +67,7 @@ from defenseclaw.connector_paths import (  # noqa: F401
 
 _log = logging.getLogger(__name__)
 _privacy_disable_redaction_warned = False
+_llm_migration_warned_keys: set[tuple[str, ...]] = set()
 
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
@@ -3139,8 +3140,8 @@ def _migrate_llm_fields(cfg: Config) -> None:
     module, which is wired up to stderr + audit pipeline in
     cli/defenseclaw/__init__.py) when legacy LLM fields are detected
     so operators notice the drift before v6 removes the fallbacks.
-    The warning is emitted at most once per Config instance via a
-    sentinel attribute so reloads don't spam.
+    The warning is emitted at most once per process for the same legacy
+    field set so command-level config reloads don't spam.
     """
     legacy_fields: list[str] = []
     if cfg.inspect_llm.model or cfg.inspect_llm.provider or cfg.inspect_llm.api_key_env:
@@ -3154,16 +3155,15 @@ def _migrate_llm_fields(cfg: Config) -> None:
     if cfg.guardrail.judge.model or cfg.guardrail.judge.api_key_env or cfg.guardrail.judge.api_base:
         legacy_fields.append("guardrail.judge.{model,api_key_env,api_base}")
 
-    if legacy_fields and not getattr(cfg, "_llm_migration_warned", False):
+    legacy_key = tuple(legacy_fields)
+    if legacy_key and legacy_key not in _llm_migration_warned_keys:
         _log.warning(
             "config: deprecated v4 LLM fields detected (%s); values are still honored "
             "but will be removed in a future release. Run `defenseclaw setup migrate-llm` "
             "to rewrite config.yaml to the unified llm: block.",
             ", ".join(legacy_fields),
         )
-        # Stamped once per Config instance so reload()/save() round-trips
-        # don't spam stderr in long-running processes (gateway, TUI).
-        cfg._llm_migration_warned = True  # type: ignore[attr-defined]
+        _llm_migration_warned_keys.add(legacy_key)
     # Top-level.
     if not cfg.llm.api_key_env:
         if cfg.default_llm_api_key_env:

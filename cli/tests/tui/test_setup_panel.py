@@ -654,7 +654,7 @@ def test_guardrail_wizard_inherits_unified_llm_without_forcing_override() -> Non
         },
         "guardrail": {"mode": "observe", "scanner_mode": "local", "judge": {}, "hilt": {}},
     }
-    fields = guardrail_wizard_fields(cfg)
+    fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge"}, cfg)
 
     assert wizard_field_value(fields, "Provider") == "openai"
     assert wizard_field_value(fields, "Model") == "gpt-5"
@@ -667,9 +667,11 @@ def test_guardrail_wizard_inherits_unified_llm_without_forcing_override() -> Non
     assert "openai/gpt-5-mini" in build_wizard_args(SetupWizard.GUARDRAIL, fields)
 
 
-def test_guardrail_wizard_exposes_judge_hook_connectors_without_openclaw_default() -> None:
+def test_guardrail_wizard_omits_judge_hook_connectors_without_openclaw_default() -> None:
     empty_fields = guardrail_wizard_fields({})
     assert wizard_field_value(empty_fields, "Connector") == ""
+    assert wizard_field_value(empty_fields, "Provider") == ""
+    assert wizard_field_value(empty_fields, "Hook Connectors") == ""
     empty_argv = build_wizard_args(SetupWizard.GUARDRAIL, empty_fields)
     assert ("--connector", "openclaw") not in zip(empty_argv, empty_argv[1:])
 
@@ -681,13 +683,10 @@ def test_guardrail_wizard_exposes_judge_hook_connectors_without_openclaw_default
             "judge": {"hook_connectors": ["codex"]},
         },
     }
-    fields = guardrail_wizard_fields(cfg)
-    assert wizard_field_value(fields, "Hook Connectors") == "codex"
-
-    fields = _with_field(fields, "Hook Connectors", "codex,antigravity")
+    fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge"}, cfg)
     argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
-    assert "--judge-hook-connectors" in argv
-    assert _pair_after(argv, "--judge-hook-connectors") == "codex,antigravity"
+    assert wizard_field_value(fields, "Hook Connectors") == ""
+    assert "--judge-hook-connectors" not in argv
 
 
 def test_observability_and_webhook_wizards_pass_positionals_and_defaults() -> None:
@@ -1707,7 +1706,7 @@ def test_setup_panel_recompute_preserves_entered_values() -> None:
 
 
 def test_guardrail_wizard_regional_judge_families_and_llm_role() -> None:
-    fields = _guardrail_wizard_fields_for({"@Provider": "bedrock"}, None)
+    fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge", "@Provider": "bedrock"}, None)
     labels = {f.label for f in fields}
     assert "Judge: Bedrock" in labels
     assert "Judge: Vertex AI" not in labels
@@ -1725,7 +1724,7 @@ def test_guardrail_wizard_regional_judge_families_and_llm_role() -> None:
 
 
 def test_guardrail_wizard_omits_action_only_block_message_and_scopes_bedrock_auth_rows() -> None:
-    fields = _guardrail_wizard_fields_for({"@Provider": "bedrock"}, None)
+    fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge", "@Provider": "bedrock"}, None)
     labels = {f.label for f in fields}
     flags = {f.flag for f in fields}
 
@@ -1738,7 +1737,12 @@ def test_guardrail_wizard_omits_action_only_block_message_and_scopes_bedrock_aut
     iam_flags = {
         f.flag
         for f in _guardrail_wizard_fields_for(
-            {"@Provider": "bedrock", "--judge-bedrock-auth-mode": "iam_credentials"}, None
+            {
+                "--detection-strategy": "regex_judge",
+                "@Provider": "bedrock",
+                "--judge-bedrock-auth-mode": "iam_credentials",
+            },
+            None,
         )
     }
     assert "--judge-bedrock-access-key-env" in iam_flags
@@ -1748,7 +1752,14 @@ def test_guardrail_wizard_omits_action_only_block_message_and_scopes_bedrock_aut
 
     profile_flags = {
         f.flag
-        for f in _guardrail_wizard_fields_for({"@Provider": "bedrock", "--judge-bedrock-auth-mode": "profile"}, None)
+        for f in _guardrail_wizard_fields_for(
+            {
+                "--detection-strategy": "regex_judge",
+                "@Provider": "bedrock",
+                "--judge-bedrock-auth-mode": "profile",
+            },
+            None,
+        )
     }
     assert "--judge-bedrock-profile-name" in profile_flags
     assert "--judge-bedrock-secret-key-env" not in profile_flags

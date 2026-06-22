@@ -157,7 +157,7 @@ def _safe_mtime(path: str | None) -> float | None:
     "-y",
     "batch_yes",
     is_flag=True,
-    help="(no subcommand) Skip the picker and per-connector prompts (use defaults).",
+    help="(no subcommand) Skip batch mode/judge prompts (use defaults).",
 )
 @click.pass_context
 def setup(
@@ -174,7 +174,7 @@ def setup(
     \b
     Multi-connector:
       One gateway enforces N hook connectors (codex, claudecode,
-      antigravity, openclaw) tracked under guardrail.connectors. Add one
+      hermes, antigravity) tracked under guardrail.connectors. Add one
       with 'defenseclaw setup <connector>' (choose Add when prompted),
       remove with 'defenseclaw setup remove <name>'. Scope policy per peer
       with 'defenseclaw guardrail ... --connector X', and inspect the
@@ -184,10 +184,10 @@ def setup(
     \b
     Batch (no subcommand):
       'defenseclaw setup' with no subcommand launches an interactive
-      multi-connector picker (detected connectors pre-checked) with
-      per-connector mode/judge prompts. For scripting, select connectors
-      with repeatable '-c/--connector', '--detected', and/or '--all'
-      (e.g. 'defenseclaw setup -c hermes -c codex --mode action').
+      active-connector picker (detected connectors pre-checked), then
+      batch mode / optional judge connector pickers. For scripting, select
+      connectors with repeatable '-c/--connector', '--detected', and/or
+      '--all' (e.g. 'defenseclaw setup -c hermes -c codex --mode action').
     """
     # Snapshot config.yaml's mtime before the subcommand runs. The
     # result callback below (``_auto_restart_sidecar_after_setup``)
@@ -2862,6 +2862,7 @@ def _check_connector_version_supported_for_setup(
     emit: bool = True,
     data_dir: str | os.PathLike[str] | None = None,
     _allow_prompt: bool = True,
+    _trusted_prompt_cache: dict[str, bool] | None = None,
 ) -> bool:
     """Verify the selected connector's installed version before setup.
 
@@ -2874,6 +2875,8 @@ def _check_connector_version_supported_for_setup(
     It defaults to ``True`` so direct CLI use is unchanged, but callers that
     must never block on stdin — the TUI, or this function's own re-entry after
     trusting a prefix — pass ``False`` to force the non-interactive path.
+    ``_trusted_prompt_cache`` is a flow-local map keyed by trusted directory so
+    batch setup can avoid asking the same yes/no question repeatedly.
     """
     connector = normalize_connector(connector)
     label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
@@ -2947,6 +2950,13 @@ def _check_connector_version_supported_for_setup(
         if is_untrusted_path:
             resolved_bin = os.path.realpath(signal.binary_path)
             parent = os.path.dirname(resolved_bin)
+        already_asked = bool(
+            is_untrusted_path
+            and _trusted_prompt_cache is not None
+            and parent in _trusted_prompt_cache
+        )
+        if already_asked:
+            interactive = False
         if emit and is_untrusted_path and interactive:
             ux.warn(detail)
             ux.subhead(f"  Binary resolves to: {resolved_bin}")
@@ -2957,6 +2967,8 @@ def _check_connector_version_supported_for_setup(
             )
             if click.confirm(f"  Add '{parent}' to trusted binary prefixes?", default=False):
                 _add_trusted_bin_prefix(parent, data_dir or os.path.expanduser("~/.defenseclaw"))
+                if _trusted_prompt_cache is not None:
+                    _trusted_prompt_cache[parent] = True
                 ux.subhead(f"  Trusted '{parent}' (persisted to ~/.defenseclaw/.env); re-checking…")
                 ux.subhead(
                     "  Note: if this path is version-specific it may need re-trusting "
@@ -2975,7 +2987,10 @@ def _check_connector_version_supported_for_setup(
                     emit=emit,
                     data_dir=data_dir,
                     _allow_prompt=False,
+                    _trusted_prompt_cache=_trusted_prompt_cache,
                 )
+            if _trusted_prompt_cache is not None:
+                _trusted_prompt_cache[parent] = False
             # Declined: fall through to the mode-specific handling below.
 
         if action_mode and not allow_drift:
@@ -3017,6 +3032,62 @@ def _check_connector_version_supported_for_setup(
     return True
 
 
+def _guardrail_setup_check_targets(app: AppContext, gc, explicit_connector: str | None) -> list[str]:
+    """Connectors whose binaries should be verified before guardrail setup."""
+    targets: list[str] = []
+
+    def _add(raw: str | None) -> None:
+        if not raw:
+            return
+        try:
+            connector = normalize_connector(raw)
+        except Exception:  # noqa: BLE001 - defensive against unmodeled test stubs.
+            connector = str(raw).strip().lower()
+        if connector and connector not in targets:
+            targets.append(connector)
+
+    if explicit_connector:
+        _add(explicit_connector)
+        return targets
+
+    try:
+        for connector in app.cfg.active_connectors():
+            _add(connector)
+    except Exception:  # noqa: BLE001 - SimpleNamespace tests may omit the method.
+        pass
+
+    if not targets:
+        _add(getattr(gc, "connector", "") or "openclaw")
+    return targets
+
+
+def _check_guardrail_setup_connector_versions(
+    app: AppContext,
+    gc,
+    *,
+    explicit_connector: str | None,
+    allow_prompt: bool,
+) -> bool:
+    """Verify every connector affected by a guardrail setup run."""
+    trusted_prompt_cache: dict[str, bool] | None = {} if allow_prompt else None
+    for connector in _guardrail_setup_check_targets(app, gc, explicit_connector):
+        mode = (
+            gc.effective_mode(connector)
+            if hasattr(gc, "effective_mode")
+            else (getattr(gc, "mode", "") or "observe")
+        )
+        version_check_kwargs = {
+            "mode": mode or "observe",
+            "data_dir": getattr(app.cfg, "data_dir", None),
+            "_allow_prompt": allow_prompt,
+        }
+        if trusted_prompt_cache is not None:
+            version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
+        if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
+            return False
+    return True
+
+
 def _hilt_support_note(connector: str) -> str:
     """Return the operator-facing HILT support note for a connector."""
     if connector == "openclaw":
@@ -3044,15 +3115,25 @@ def _hilt_support_note(connector: str) -> str:
     return "Support depends on the connector surface."
 
 
-def _configure_hilt_interactive(gc) -> None:
+def _configure_hilt_interactive(gc, *, action_connectors: list[str] | None = None) -> None:
     """Prompt for human approval settings from the guardrail advanced section."""
     ux.section("Human Approval (HILT)")
-    if (gc.mode or "observe").lower() != "action":
+    if action_connectors is not None:
+        if not action_connectors:
+            ux.subhead("Human approval is action-mode only.")
+            ux.subhead("No connector is currently in action mode, so approvals are inactive.")
+            return
+        ux.subhead(
+            "Applies to action-mode connector(s): "
+            + ", ".join(action_connectors)
+        )
+        connector = action_connectors[0] if len(action_connectors) == 1 else (gc.connector or "openclaw")
+    elif (gc.mode or "observe").lower() != "action":
         ux.subhead("Human approval is action-mode only.")
         ux.subhead("Current mode is observe, so approvals are inactive and no prompts will appear.")
         return
-
-    connector = gc.connector or "openclaw"
+    else:
+        connector = gc.connector or "openclaw"
     ux.subhead(_hilt_support_note(connector))
     ux.subhead("CRITICAL findings still block. HILT can confirm risky HIGH findings first.")
     enabled = click.confirm("  Human approval for risky actions?", default=gc.hilt.enabled)
@@ -3218,13 +3299,11 @@ def _resolve_judge_hook_gate(
 ) -> list[str] | None:
     """Resolve ``--judge-hook-connectors`` into a new ``judge.hook_connectors`` gate (B2).
 
-    The hook-lane judge is opt-in per connector via
-    ``guardrail.judge.hook_connectors``; the interactive wizard prompts for it
-    (``_prompt_judge_hook_connectors``) but the non-interactive path — which the
-    TUI guardrail wizard drives as a subprocess — had no surface, so a
-    "complete" judge setup left the gate empty and the judge inspected zero hook
-    connectors. This maps the CLI flag onto the same gate the interactive prompt
-    and ``guardrail judge add/list`` speak.
+    The hook-lane judge is tunable per connector via
+    ``guardrail.judge.hook_connectors``. Guardrail-level setup can still opt
+    every hook connector into judge review; direct connector setup defaults to
+    the connector being configured. This flag remains the explicit
+    non-interactive / advanced surface for widening or narrowing that gate.
 
     Accepted values:
       * ``all`` / ``*``  → ``["*"]`` (the all-hook-connectors sentinel)
@@ -3743,6 +3822,21 @@ def setup_guardrail(
                 if (target_connector or gc.connector or "openclaw") in _PROXY_BACKED_CONNECTORS
                 else "judge_only"
             )
+        if detection_strategy is not None:
+            if _strategy_uses_judge(detection_strategy):
+                gc.judge.enabled = True
+            elif detection_strategy == "regex_only":
+                gc.judge.enabled = False
+        if judge_hook_connectors is not None:
+            hook_gate_value = judge_hook_connectors.strip().lower()
+            if hook_gate_value in ("", "none"):
+                gc.judge.enabled = False
+                gc.detection_strategy = "regex_only"
+                gc.detection_strategy_completion = "regex_only"
+            else:
+                gc.judge.enabled = True
+                if not gc.detection_strategy or gc.detection_strategy == "regex_only":
+                    gc.detection_strategy = "regex_judge"
         gc.enabled = True
 
         # Apply sensible strategy defaults when judge is enabled
@@ -3769,7 +3863,10 @@ def setup_guardrail(
         # judge setup never leaves the hook lane silently un-judged.
         new_gate = _resolve_judge_hook_gate(
             judge_hook_connectors,
-            judge_just_enabled=(gc.judge.enabled and not was_judge_enabled),
+            judge_just_enabled=(
+                gc.judge.enabled
+                and (not was_judge_enabled or not list(gc.judge.hook_connectors or []))
+            ),
             current=list(gc.judge.hook_connectors or []),
         )
         if new_gate is not None:
@@ -3804,16 +3901,11 @@ def setup_guardrail(
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
         return
 
-    setup_connector = target_connector if non_interactive else gc.connector
-    enforcement_mode = (
-        gc.effective_mode(setup_connector)
-        if setup_connector and hasattr(gc, "effective_mode")
-        else (gc.mode or "observe")
-    )
-    if not _check_connector_version_supported_for_setup(
-        setup_connector or gc.connector or "openclaw",
-        mode=enforcement_mode or "observe",
-        data_dir=getattr(app.cfg, "data_dir", None),
+    if not _check_guardrail_setup_connector_versions(
+        app,
+        gc,
+        explicit_connector=(target_connector if non_interactive else explicit_connector),
+        allow_prompt=not non_interactive,
     ):
         return
 
@@ -4259,10 +4351,10 @@ def _apply_judge_enablement(
     """Wire setup-time LLM-judge enablement for *connector* (SU-07/B3).
 
     ``enable_judge=True`` turns the judge on globally, bumps the strategy off
-    ``regex_only`` so it actually runs, and ensures *connector* is in the
-    hook-lane gate (``judge.hook_connectors``) — honoring an explicit
-    ``judge_hook_connectors`` spec, else defaulting to all hook connectors
-    (``["*"]``) the first time the judge is enabled (tui.md §10.2).
+    ``regex_only`` so it actually runs, and defaults the hook-lane gate
+    (``judge.hook_connectors``) to this connector. An explicit
+    ``judge_hook_connectors`` spec is still honored for scripted advanced
+    setup.
     ``enable_judge=False`` opts *connector* out of a concrete gate (leaving the
     global ``judge.enabled`` alone — peers may still use it). ``None`` is a
     no-op unless an explicit gate spec was passed.
@@ -4275,17 +4367,22 @@ def _apply_judge_enablement(
         gc.judge.enabled = True
         if not gc.detection_strategy or gc.detection_strategy == "regex_only":
             gc.detection_strategy = "regex_judge"
-        new_gate = _resolve_judge_hook_gate(
-            judge_hook_connectors,
-            judge_just_enabled=not was_enabled,
-            current=list(gc.judge.hook_connectors or []),
-        )
+        if judge_hook_connectors is None:
+            current = list(gc.judge.hook_connectors or []) if was_enabled else []
+            if current == ["*"]:
+                new_gate = current
+            else:
+                new_gate = list(current)
+                if connector not in new_gate:
+                    new_gate.append(connector)
+        else:
+            new_gate = _resolve_judge_hook_gate(
+                judge_hook_connectors,
+                judge_just_enabled=not was_enabled,
+                current=list(gc.judge.hook_connectors or []),
+            )
         if new_gate is not None:
             gc.judge.hook_connectors = new_gate
-        gate = list(gc.judge.hook_connectors or [])
-        if gate != ["*"] and connector not in gate:
-            gate.append(connector)
-            gc.judge.hook_connectors = gate
         return
 
     if judge_hook_connectors is not None:
@@ -4323,6 +4420,8 @@ def _apply_hook_connector_setup(
     hilt_min_severity: str | None = None,
     enable_judge: bool | None = None,
     judge_hook_connectors: str | None = None,
+    allow_trusted_path_prompt: bool = True,
+    trusted_prompt_cache: dict[str, bool] | None = None,
 ) -> bool:
     """Pin DefenseClaw to *connector* in hook-driven mode.
 
@@ -4373,11 +4472,14 @@ def _apply_hook_connector_setup(
     if desired_mode not in ("observe", "action"):
         desired_mode = "observe"
 
-    if not _check_connector_version_supported_for_setup(
-        connector,
-        mode=desired_mode,
-        data_dir=getattr(app.cfg, "data_dir", None),
-    ):
+    version_check_kwargs = {
+        "mode": desired_mode,
+        "data_dir": getattr(app.cfg, "data_dir", None),
+        "_allow_prompt": allow_trusted_path_prompt,
+    }
+    if trusted_prompt_cache is not None:
+        version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
+    if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
         return False
 
     cfg = app.cfg
@@ -4466,13 +4568,12 @@ def _apply_hook_connector_setup(
         hilt=hilt,
         hilt_min_severity=hilt_min_severity,
     )
-    # SU-07 / B3: setup-time LLM-judge enablement for this connector. Flips the
-    # global gc.judge.enabled, opts THIS connector into the hook-lane gate
-    # (judge.hook_connectors), and bumps the strategy off regex_only so the
-    # judge actually runs. Full judge LLM config (model/key) stays the job of
-    # `setup guardrail` / `setup llm`; this only wires setup-time enablement
-    # (SU-07 scope — the tool-output/tool-call Go lane wiring is Round-2
-    # fu/judge-go). Default (enable_judge is None) leaves judge state alone.
+    # SU-07 / B3: setup-time LLM-judge enablement. Flips the global
+    # gc.judge.enabled switch, opts this connector into hook-lane coverage,
+    # and bumps the strategy off regex_only so the judge actually runs. Full
+    # judge LLM config (model/key) stays the job of `setup guardrail` /
+    # `setup llm`; this only wires setup-time enablement. Default
+    # (enable_judge is None) leaves judge state alone.
     _apply_judge_enablement(
         gc,
         connector=connector,
@@ -4518,19 +4619,18 @@ def _apply_hook_connector_setup(
         )
     else:
         click.echo(
-            f"  ✓ Active connector set to {connector!r} "
+            f"  ✓ Connector {connector!r} configured "
             f"(claw.mode={getattr(cfg.claw, 'mode', '') or connector})"
         )
     if workspace:
         click.echo(f"  ✓ Workspace root pinned to {workspace}")
     else:
         click.echo("  ✓ Scope: global user config (no workspace pinned)")
-    # SU-01: echo where the mode actually landed — per-connector override vs the
-    # shared global field — so the summary matches what was written.
-    if write_mode == "add" and connector in gc.connectors:
-        click.echo(f"  ✓ {connector} mode={desired_mode} (per-connector)")
-    else:
-        click.echo(f"  ✓ guardrail.mode={desired_mode}")
+    # Hook connector setup should describe mode in connector terms. The first
+    # connector may still be represented through legacy global fields on disk,
+    # but presenting that as guardrail.mode nudges users toward unsafe global
+    # edits on multi-connector installs.
+    click.echo(f"  ✓ {connector} mode={desired_mode}")
 
     _write_guardrail_runtime(cfg.data_dir, gc)
 
@@ -4596,11 +4696,11 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
         click.echo("    • Notify     — agent-turn-complete events → /api/v1/codex/notify")
     click.echo()
     if mode == "observe":
-        click.echo("  To later turn enforcement on, set guardrail.mode=action")
-        click.echo("  in ~/.defenseclaw/config.yaml and restart the gateway.")
+        click.echo("  To later turn enforcement on:")
+        click.echo(f"    defenseclaw setup {connector} --mode action")
     else:
-        click.echo("  To revert to observe-only, set guardrail.mode=observe")
-        click.echo("  in ~/.defenseclaw/config.yaml and restart the gateway.")
+        click.echo("  To revert to observe-only:")
+        click.echo(f"    defenseclaw setup {connector} --mode observe")
     click.echo()
     _print_connector_mutation_notice(connector)
     click.echo()
@@ -4644,7 +4744,7 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
             ),
         ),
         ("guardrail.enabled", "true"),
-        ("guardrail.mode", mode),
+        (f"{connector} mode", mode),
         ("enforcement", enforcement_label),
         ("ai_discovery", f"enabled ({cfg.ai_discovery.mode})" if cfg else "enabled"),
     ]
@@ -4789,7 +4889,7 @@ def _prompt_connector_mode(connector: str, *, default_mode: str) -> str:
 
 
 def _prompt_enable_judge(connector: str, gc) -> bool:
-    """SU-07: interactive 'enable the LLM judge for this connector?' prompt.
+    """SU-07: interactive setup-time LLM judge prompt.
 
     Returns True when the operator opts in. Default reflects whether the judge
     already covers this connector (so re-running setup with Enter preserves
@@ -4798,12 +4898,17 @@ def _prompt_enable_judge(connector: str, gc) -> bool:
     """
     gate = list(gc.judge.hook_connectors or [])
     already = bool(gc.judge.enabled) and (gate == ["*"] or connector in gate)
-    ux.section("LLM judge")
-    ux.subhead("Adds semantic injection/PII/exfil detection on top of regex.")
+    ux.section("Optional LLM judge")
+    ux.subhead(f"Rule/regex scanning is already enabled for {_CONNECTOR_META[connector]['label']}.")
+    ux.subhead("The judge adds semantic injection/PII/exfil detection on top of those rules.")
     ux.subhead("Judged hook calls add latency (up to the hook timeout) and LLM cost.")
-    ux.subhead("Configure the judge model later via `defenseclaw setup guardrail`.")
+    ux.subhead("These LLM settings are shared by all connectors with judge enabled.")
+    ux.subhead(
+        "This only enables judge scanning; configure provider/model/key with "
+        "`defenseclaw setup guardrail` or `defenseclaw setup llm`."
+    )
     return click.confirm(
-        f"  Enable the LLM judge for {_CONNECTOR_META[connector]['label']}?",
+        "  Add LLM judge on top of rule scanning?",
         default=already,
     )
 
@@ -4921,7 +5026,7 @@ def _setup_observability_alias(
     # SU-07: judge-enable prompt. Asked after the operator commits to
     # proceeding (write_mode resolved, not cancelled). Only when the operator
     # didn't already decide via --enable-judge/--no-enable-judge. On yes,
-    # _apply_hook_connector_setup flips the judge on, gates this connector, and
+    # _apply_hook_connector_setup flips the judge on for this connector and
     # bumps the strategy off regex_only.
     if interactive and enable_judge is None and _prompt_enable_judge(connector, gc):
         enable_judge = True
@@ -4941,9 +5046,24 @@ def _setup_observability_alias(
         hilt_min_severity=hilt_min_severity,
         enable_judge=enable_judge,
         judge_hook_connectors=judge_hook_connectors,
+        allow_trusted_path_prompt=interactive,
     )
     if not ok:
         raise click.ClickException(f"failed to configure {connector} (mode={normalized_mode}) — see errors above")
+
+    if interactive and enable_judge:
+        configure_model = click.confirm(
+            "  Configure LLM judge provider/model/API settings now?",
+            default=_judge_llm_needs_configuration(app),
+        )
+        if configure_model:
+            _prompt_judge_model_config(app, app.cfg.guardrail)
+            try:
+                app.cfg.save()
+                click.echo("  ✓ Judge LLM config saved to ~/.defenseclaw/config.yaml")
+            except OSError as exc:
+                raise click.ClickException(f"failed to save judge LLM config: {exc}") from exc
+
     if not restart:
         ctx = click.get_current_context(silent=True)
         if ctx is not None:
@@ -4957,9 +5077,9 @@ def _run_setup_picker(app: AppContext) -> list[str]:
     """SU-11: interactive multi-connector picker for bare ``setup``.
 
     Lists every supported hook connector with detected/configured tags,
-    pre-selects the detected + already-configured ones, and returns the
-    operator's chosen set (per-connector mode/judge prompts happen later in
-    ``_apply_setup_batch``). Returns an empty list when the operator selects
+    pre-selects the detected + already-configured ones, and returns the active
+    operator's chosen set (batch mode/judge pickers happen later in
+    ``_dispatch_bare_setup``). Returns an empty list when the operator selects
     nothing. Only called on an interactive TTY (the caller falls back to help
     on a non-interactive stream).
     """
@@ -4970,38 +5090,283 @@ def _run_setup_picker(app: AppContext) -> list[str]:
     }
     preselect = detected | configured
 
-    ux.section("Select connectors to configure")
-    ux.subhead("Detected and already-configured connectors are pre-selected.")
-    click.echo()
-    for i, c in enumerate(candidates, 1):
-        mark = "x" if c in preselect else " "
+    display_by_connector: dict[str, str] = {}
+    for c in candidates:
         tags = []
         if c in detected:
             tags.append("detected")
         if c in configured:
             tags.append("configured")
         suffix = f"  {ux.dim('(' + ', '.join(tags) + ')')}" if tags else ""
-        click.echo(f"    [{mark}] {i:>2}. {_CONNECTOR_META[c]['label']}{suffix}")
-    click.echo()
+        display_by_connector[c] = f"{_CONNECTOR_META[c]['label']}{suffix}"
+    connector_by_display = {label: c for c, label in display_by_connector.items()}
 
-    default_sel = ",".join(str(i) for i, c in enumerate(candidates, 1) if c in preselect)
-    raw = click.prompt(
-        "  Enter the numbers to configure (comma-separated)",
-        default=default_sel,
-        show_default=bool(default_sel),
+    ux.section("Select active connectors")
+    ux.subhead("Detected and already-configured connectors are pre-selected.")
+    ux.subhead("Unchecked connectors will not remain active after this setup run.")
+    selected = _prompt_checkbox_selection(
+        [display_by_connector[c] for c in candidates],
+        default_selected=[display_by_connector[c] for c in candidates if c in preselect],
+        title="Use Space to choose active connectors.",
+        empty_ok=True,
     )
-    chosen: list[str] = []
-    for token in str(raw).replace(" ", ",").split(","):
-        token = token.strip()
-        if not token:
+    return [connector_by_display[label] for label in selected]
+
+
+def _connector_display_options(connectors: list[str]) -> tuple[list[str], dict[str, str], dict[str, str]]:
+    """Return checkbox labels plus connector/display lookup maps."""
+    display_by_connector = {c: _CONNECTOR_META[c]["label"] for c in connectors}
+    connector_by_display = {label: c for c, label in display_by_connector.items()}
+    return [display_by_connector[c] for c in connectors], display_by_connector, connector_by_display
+
+
+def _prompt_batch_connector_modes(connectors: list[str], gc, *, default_mode: str) -> dict[str, str]:
+    """Ask once which selected connectors should use action mode."""
+    options, display_by_connector, connector_by_display = _connector_display_options(connectors)
+    default_action = [
+        display_by_connector[c]
+        for c in connectors
+        if (
+            (default_mode or "").strip().lower() == "action"
+            or (hasattr(gc, "effective_mode") and gc.effective_mode(c) == "action")
+        )
+    ]
+    ux.section("Enforcement mode")
+    ux.subhead("Rule/regex scanning applies to every active connector selected above.")
+    ux.subhead("Checked active connectors use action mode; unchecked ones use observe.")
+    ux.subhead("Action blocks matching tool calls. Observe logs and alerts only.")
+    selected = _prompt_checkbox_selection(
+        options,
+        default_selected=default_action,
+        title="Select active connector(s) for action mode.",
+        empty_ok=True,
+    )
+    action_connectors = {connector_by_display[label] for label in selected}
+    return {c: ("action" if c in action_connectors else "observe") for c in connectors}
+
+
+def _write_per_connector_modes(gc, connector_modes: dict[str, str]) -> bool:
+    """Persist per-connector observe/action choices and report whether any changed."""
+    if not connector_modes:
+        return False
+    if not getattr(gc, "connectors", None):
+        gc.connectors = {}
+
+    changed = False
+    for connector, mode in connector_modes.items():
+        current = (
+            gc.effective_mode(connector)
+            if hasattr(gc, "effective_mode")
+            else (getattr(gc, "mode", "") or "observe")
+        )
+        normalized = "action" if str(mode).strip().lower() == "action" else "observe"
+        if connector not in gc.connectors:
+            gc.connectors[connector] = PerConnectorGuardrailConfig()
+        gc.connectors[connector].mode = normalized
+        changed = changed or normalized != current
+    return changed
+
+
+def _existing_connector_override(gc, connector: str):
+    """Return an existing per-connector override matching *connector*, if any."""
+    wanted = normalize_connector(connector)
+    for key, pc in (getattr(gc, "connectors", None) or {}).items():
+        try:
+            normalized_key = normalize_connector(str(key))
+        except Exception:  # noqa: BLE001 - defensive for hand-written configs.
+            normalized_key = str(key).strip().lower()
+        if normalized_key == wanted:
+            return pc
+    return None
+
+
+def _reconcile_batch_active_connectors(cfg, connectors: list[str]) -> list[str]:
+    """Make bare setup's active connector map exactly match the selected set."""
+    selected: list[str] = []
+    for raw in connectors:
+        name = normalize_connector(raw)
+        if name not in selected:
+            selected.append(name)
+    if not selected:
+        return []
+
+    gc = cfg.guardrail
+    before = {
+        normalize_connector(str(c))
+        for c in (getattr(gc, "connectors", None) or {})
+        if str(c).strip()
+    }
+    if not before:
+        current = (getattr(gc, "connector", "") or getattr(cfg.claw, "mode", "") or "").strip()
+        if current:
+            before.add(normalize_connector(current))
+
+    gc.connectors = {
+        name: (_existing_connector_override(gc, name) or PerConnectorGuardrailConfig())
+        for name in selected
+    }
+    primary = sorted(selected)[0]
+    gc.connector = primary
+    cfg.claw.mode = primary
+
+    gate = list(gc.judge.hook_connectors or [])
+    if gate != ["*"]:
+        selected_set = set(selected)
+        gc.judge.hook_connectors = [
+            normalize_connector(c)
+            for c in gate
+            if c and normalize_connector(c) in selected_set
+        ]
+
+    removed = sorted(before - set(selected))
+    if removed:
+        click.echo("  " + ux.dim("Inactive connectors removed from this setup: " + ", ".join(removed)))
+    return removed
+
+
+def _strategy_uses_judge(strategy: str) -> bool:
+    return (strategy or "").strip().lower() in {"regex_judge", "judge_first"}
+
+
+def _prompt_batch_scan_strategy(gc) -> str:
+    """Ask once how hook calls should be scanned for a batch setup."""
+    ux.section("Scan strategy")
+    ux.subhead("Choose the detection strategy for all configured hook connectors.")
+    ux.subhead("Judge strategies use your configured LLM judge; this setup can ask for model settings next.")
+    ux.subhead(
+        "You can also configure provider/model/key later with "
+        "`defenseclaw setup guardrail` or `defenseclaw setup llm`."
+    )
+    click.echo("    " + ux.bold("[1] regex only") + "   — rules and regex scanning, no LLM judge calls")
+    click.echo("    " + ux.bold("[2] regex + judge") + " — rules first, then LLM judge review")
+    click.echo("    " + ux.bold("[3] judge first") + "  — LLM judge first, with regex fallback")
+    current = (getattr(gc, "detection_strategy", "") or "regex_only").strip().lower()
+    default = {"regex_only": "1", "regex_judge": "2", "judge_first": "3"}.get(current, "1")
+    choice = click.prompt(
+        "  Select scan strategy",
+        type=click.Choice(["1", "2", "3"]),
+        default=default,
+    )
+    return {"1": "regex_only", "2": "regex_judge", "3": "judge_first"}[choice]
+
+
+def _set_hook_judge_coverage_all(gc) -> None:
+    gc.judge.hook_connectors = ["*"]
+    click.echo("  " + ux.dim("Hook judge coverage: all configured hook connectors"))
+
+
+def _default_batch_judge_labels(
+    connectors: list[str],
+    gc,
+    display_by_connector: dict[str, str],
+) -> list[str]:
+    if not bool(getattr(gc.judge, "enabled", False)):
+        return []
+    gate = list(getattr(gc.judge, "hook_connectors", []) or [])
+    if gate == ["*"]:
+        selected = set(connectors)
+    else:
+        selected = {c for c in connectors if c in gate}
+    return [display_by_connector[c] for c in connectors if c in selected]
+
+
+def _merge_batch_judge_selection(gc, connectors: list[str], selected_connectors: set[str]) -> list[str]:
+    """Apply a bare-setup judge checkbox selection without a strategy prompt."""
+    targets = set(connectors)
+    # Bare setup is scoped to the connectors selected at the top of the flow.
+    # Do not carry previously configured, unselected connectors into the judge
+    # gate; otherwise the checkbox summary can name connectors the operator
+    # deliberately left out of this setup run.
+    new_gate = sorted(c for c in selected_connectors if c in targets)
+    gc.judge.hook_connectors = new_gate
+    if new_gate:
+        gc.judge.enabled = True
+        if not gc.detection_strategy or gc.detection_strategy == "regex_only":
+            gc.detection_strategy = "regex_judge"
+        _apply_judge_runtime_defaults(gc)
+        click.echo("  " + ux.dim(f"Hook judge connectors: {', '.join(new_gate)}"))
+    else:
+        gc.judge.enabled = False
+        gc.detection_strategy = "regex_only"
+        gc.detection_strategy_completion = "regex_only"
+        click.echo("  " + ux.dim("LLM judge: off (rule/regex scanning only)"))
+    return new_gate
+
+
+def _prompt_batch_judge_connectors(connectors: list[str], gc) -> set[str]:
+    """Ask once which selected connectors should add LLM judge review."""
+    options, display_by_connector, connector_by_display = _connector_display_options(connectors)
+    ux.section("Optional LLM judge")
+    ux.subhead("Rule/regex scanning is enabled by default for every active connector selected above.")
+    ux.subhead("Checked active connectors add LLM judge review on top.")
+    ux.subhead("These LLM settings are shared by all connectors with judge enabled.")
+    selected = _prompt_checkbox_selection(
+        options,
+        default_selected=_default_batch_judge_labels(connectors, gc, display_by_connector),
+        title="Select active connector(s) that should use the LLM judge.",
+        empty_ok=True,
+    )
+    selected_connectors = {connector_by_display[label] for label in selected}
+    _merge_batch_judge_selection(gc, connectors, selected_connectors)
+    return selected_connectors
+
+
+def _prompt_batch_trusted_prefixes(
+    app: AppContext,
+    connector_modes: dict[str, str],
+) -> dict[str, bool]:
+    """Prompt once per untrusted binary directory before batch judge prompts."""
+    cache: dict[str, bool] = {}
+    if not connector_modes:
+        return cache
+
+    try:
+        disc = agent_discovery.discover_agents(
+            use_cache=False,
+            refresh=True,
+            data_dir=getattr(app.cfg, "data_dir", None),
+        )
+    except Exception as exc:  # noqa: BLE001 - final per-connector validation reports details.
+        ux.warn(f"Could not refresh local connector discovery before setup ({exc}); continuing.")
+        return cache
+
+    for connector in connector_modes:
+        signal = disc.agents.get(connector)
+        if (
+            signal is None
+            or not bool(getattr(signal, "installed", False))
+            or getattr(signal, "error", "") != agent_discovery.UNTRUSTED_PREFIX_ERROR
+            or not getattr(signal, "binary_path", "")
+        ):
             continue
-        if not token.isdigit() or not (1 <= int(token) <= len(candidates)):
-            ux.warn(f"  Ignoring invalid selection {token!r}.")
+        resolved_bin = os.path.realpath(signal.binary_path)
+        parent = os.path.dirname(resolved_bin)
+        if parent in cache:
             continue
-        c = candidates[int(token) - 1]
-        if c not in chosen:
-            chosen.append(c)
-    return chosen
+
+        label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+        ux.warn(f"{label}: binary path is outside DefenseClaw's trusted prefixes.")
+        ux.subhead(f"  Binary resolves to: {resolved_bin}")
+        ux.subhead(f"  Directory '{parent}' is not in the trusted prefix list.")
+        ux.subhead(
+            "  Trusting a directory lets DefenseClaw execute any binary placed "
+            "there during discovery — only trust locations you control."
+        )
+        if click.confirm(f"  Add '{parent}' to trusted binary prefixes?", default=False):
+            _add_trusted_bin_prefix(parent, getattr(app.cfg, "data_dir", None) or os.path.expanduser("~/.defenseclaw"))
+            cache[parent] = True
+            ux.subhead(f"  Trusted '{parent}' (persisted to ~/.defenseclaw/.env).")
+        else:
+            cache[parent] = False
+    return cache
+
+
+def _judge_llm_needs_configuration(app: AppContext) -> bool:
+    try:
+        resolved = app.cfg.resolve_llm("guardrail.judge")
+        return not (bool(resolved.model) and bool(resolved.resolved_api_key()))
+    except Exception:  # noqa: BLE001 — prompt conservatively if resolution fails.
+        return True
 
 
 def _apply_setup_batch(
@@ -5012,12 +5377,15 @@ def _apply_setup_batch(
     mode: str,
     restart: bool,
     prompt_per_connector: bool,
+    connector_modes: dict[str, str] | None = None,
+    allow_trusted_path_prompt: bool = True,
+    trusted_prompt_cache: dict[str, bool] | None = None,
 ) -> None:
     """Configure each connector in *connectors* as a multi-connector batch (SU-11).
 
     Each connector is written with the additive (``add``) shape so they all
-    land in ``guardrail.connectors`` as peers, with per-connector mode (and, if
-    prompted, judge) overrides. The gateway is bounced once at the end via the
+    land in ``guardrail.connectors`` as peers, with per-connector mode
+    overrides. The gateway is bounced once at the end via the
     group's auto-restart result callback (suppressed for ``--no-restart``)
     rather than per connector.
     """
@@ -5027,8 +5395,12 @@ def _apply_setup_batch(
     click.echo(f"  Configuring {len(connectors)} connector(s): {', '.join(connectors)}")
 
     applied: list[str] = []
+    if allow_trusted_path_prompt:
+        trusted_prompt_cache = trusted_prompt_cache if trusted_prompt_cache is not None else {}
+    else:
+        trusted_prompt_cache = None
     for c in connectors:
-        connector_mode = default_mode
+        connector_mode = (connector_modes or {}).get(c, default_mode)
         enable_judge: bool | None = None
         if prompt_per_connector:
             connector_mode = _prompt_connector_mode(c, default_mode=connector_mode)
@@ -5041,6 +5413,9 @@ def _apply_setup_batch(
             restart=False,
             write_mode="add",
             enable_judge=enable_judge,
+            judge_hook_connectors=None,
+            allow_trusted_path_prompt=allow_trusted_path_prompt,
+            trusted_prompt_cache=trusted_prompt_cache,
         )
         if ok:
             applied.append(c)
@@ -5119,14 +5494,34 @@ def _dispatch_bare_setup(
             click.echo("  Aborted — no connectors selected.")
             return
 
-    prompt_per_connector = (not yes) and _is_interactive()
+    prompt_batch = (not yes) and _is_interactive()
+    connector_modes: dict[str, str] | None = None
+    judge_connectors: set[str] | None = None
+    trusted_prompt_cache: dict[str, bool] | None = None
+    if prompt_batch:
+        gc = app.cfg.guardrail
+        connector_modes = _prompt_batch_connector_modes(targets, gc, default_mode=mode)
+        trusted_prompt_cache = _prompt_batch_trusted_prefixes(app, connector_modes)
+        judge_connectors = _prompt_batch_judge_connectors(targets, gc)
+        if judge_connectors:
+            configure_model = click.confirm(
+                "  Configure LLM judge provider/model/API settings now?",
+                default=_judge_llm_needs_configuration(app),
+            )
+            if configure_model:
+                _prompt_judge_model_config(app, gc)
+
+    _reconcile_batch_active_connectors(app.cfg, targets)
     _apply_setup_batch(
         ctx,
         app,
         targets,
         mode=mode,
         restart=restart,
-        prompt_per_connector=prompt_per_connector,
+        prompt_per_connector=False,
+        connector_modes=connector_modes,
+        allow_trusted_path_prompt=prompt_batch,
+        trusted_prompt_cache=trusted_prompt_cache,
     )
 
 
@@ -5152,10 +5547,11 @@ def _hook_guardrail_options(fn):
             "enable_judge",
             default=None,
             help=(
-                "Enable the LLM judge for THIS connector (opts it into the "
-                "hook-lane gate guardrail.judge.hook_connectors and bumps the "
-                "detection strategy off regex_only). OFF by default. Configure "
-                "the judge model via `setup guardrail` / `setup llm`."
+                "Enable LLM judge scanning for this connector and bump "
+                "the detection strategy off regex_only. --no-enable-judge "
+                "opts this connector out of a concrete hook-lane gate while "
+                "leaving the global judge switch alone. Configure the judge "
+                "model via `setup guardrail` / `setup llm`."
             ),
         ),
         click.option(
@@ -5164,8 +5560,7 @@ def _hook_guardrail_options(fn):
             help=(
                 "Hook-lane judge gate to write (guardrail.judge.hook_connectors): "
                 "'all'/'*', 'none', or a comma list of hook connectors. When "
-                "--enable-judge is given without this, defaults to all hook "
-                "connectors."
+                "--enable-judge is given without this, defaults to this connector."
             ),
         ),
         click.option(
@@ -5309,9 +5704,9 @@ def setup_codex(
     """Configure DefenseClaw for Codex via the hook bus.
 
     Alias for the hook-driven path of ``setup guardrail`` with
-    ``--connector codex``. Pins ``claw.mode=codex`` so the TUI, skill
-    scanner, MCP scanner, and plugin scanner read from ``~/.codex/``
-    instead of the OpenClaw default layout.
+    ``--connector codex``. Configures Codex in the hook connector set
+    so the TUI, skill scanner, MCP scanner, and plugin scanner read
+    from ``~/.codex/`` for Codex-scoped surfaces.
 
     Wires three telemetry channels at gateway boot:
 
@@ -5457,9 +5852,9 @@ def setup_claude_code(
     """Configure DefenseClaw for Claude Code via the hook bus.
 
     Alias for the hook-driven path of ``setup guardrail`` with
-    ``--connector claudecode``. Pins ``claw.mode=claudecode`` so the
-    TUI, skill scanner, MCP scanner, and plugin scanner read from
-    ``~/.claude/`` instead of the OpenClaw default layout.
+    ``--connector claudecode``. Configures Claude Code in the hook
+    connector set so the TUI, skill scanner, MCP scanner, and plugin
+    scanner read from ``~/.claude/`` for Claude-scoped surfaces.
 
     Wires two telemetry channels at gateway boot:
 
@@ -5707,8 +6102,9 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         connector,
         help=(
             f"Configure DefenseClaw for {label} via the agent's hook bus.\n\n"
-            "Pins the active connector so CLI/TUI scanners read that agent's "
-            "documented local surfaces. Default mode is observe; pass "
+            "Configures this connector in the hook connector set so CLI/TUI "
+            "scanners read that agent's documented local surfaces. Default "
+            "mode is observe; pass "
             "--mode action to enable hook-driven blocking on policy hits "
             "(pre-tool hook deny verdict). No proxy is involved in either mode."
         ),
@@ -5837,8 +6233,9 @@ def _make_observability_setup_command(connector: str) -> click.Command:
     _cmd.__name__ = f"setup_{connector}"
     _cmd.__doc__ = (
         f"Configure DefenseClaw for {label} via the agent's hook bus.\n\n"
-        "Pins the active connector so CLI/TUI scanners read that agent's "
-        "documented local surfaces. Default mode is observe; pass "
+        "Configures this connector in the hook connector set so CLI/TUI "
+        "scanners read that agent's documented local surfaces. Default "
+        "mode is observe; pass "
         "--mode action to enable hook-driven blocking on policy hits."
     )
     return _cmd
@@ -6061,7 +6458,7 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         connector,
         help=(
             f"Configure DefenseClaw guardrail for {label}.\n\n"
-            "Pins claw.mode and guardrail.connector, then runs the "
+            "Configures the proxy-backed connector selection, then runs the "
             "same backend as `defenseclaw setup guardrail --connector ...`."
         ),
         short_help=f"Configure {label} guardrail setup.",
@@ -6738,51 +7135,110 @@ def _prompt_hook_fail_mode(gc) -> None:
     gc.hook_fail_mode = "open" if fail_choice == "1" else "closed"
 
 
-def _prompt_judge_hook_connectors(gc) -> None:
-    """Prompt for the hook-lane judge gate (``judge.hook_connectors``).
+def _apply_judge_runtime_defaults(gc) -> None:
+    gc.judge.injection = True
+    gc.judge.pii = True
+    gc.judge.pii_prompt = True
+    gc.judge.pii_completion = True
+    # Data-exfiltration judge runs alongside injection + PII on every prompt.
+    gc.judge.exfil = True
+    # Completion-side strategy defaults to regex_only (no judge latency).
+    if not getattr(gc, "detection_strategy_completion", None):
+        gc.detection_strategy_completion = "regex_only"
 
-    Only shown when at least one configured connector is hook-enforced —
-    on a proxy-only install the gate is irrelevant (that lane is always
-    judged when the judge is enabled). Fresh installs default to no selected
-    hook connectors; reruns preselect the saved hook gate.
-    """
-    hook_targets = [
-        c for c in _configured_connector_set(gc) if c in _HOOK_ENFORCED_CONNECTORS
-    ]
-    if not hook_targets:
-        return
 
-    current = list(gc.judge.hook_connectors or [])
-    if current == ["*"]:
-        default_selected = list(hook_targets)
-    else:
-        default_selected = [c for c in hook_targets if c in current]
+def _prompt_judge_model_config(app: AppContext, gc) -> None:
+    """Prompt for judge LLM details using the same model UX across setup flows."""
+    ux.subhead("These LLM settings are shared by all connectors with judge enabled.")
 
-    ux.section("Hook-lane judge")
-    ux.subhead("The judge always covers the proxy lane. Hook connectors are")
-    ux.subhead("opt-in per connector — judged calls add latency (up to the")
-    ux.subhead("hook timeout, default 5s) and LLM cost.")
-    click.echo()
-    if current:
-        gate_label = "all configured hook connectors" if current == ["*"] else ", ".join(current)
-        click.echo("  " + ux.dim(f"Current hook judge coverage: {gate_label}"))
-    else:
-        click.echo("  " + ux.dim("Current hook judge coverage: none"))
-    selected = _prompt_checkbox_selection(
-        hook_targets,
-        default_selected=default_selected,
-        title="Select hook connector(s) for judge coverage.",
-        empty_ok=True,
+    # V5 UX: when the operator has already configured the unified top-level
+    # ``llm:`` block, default the judge to INHERIT those values. Empty judge
+    # fields fall through ``Config.resolve_llm("guardrail.judge")`` to the
+    # top-level block and pick up ``DEFENSECLAW_LLM_KEY`` automatically.
+    top_llm = app.cfg.llm
+    has_unified_llm = bool(top_llm.model) and bool(top_llm.resolved_api_key())
+    judge_already_customised = bool(
+        gc.judge.model or gc.judge.api_base or gc.judge.api_key_env,
     )
-    if len(selected) == len(hook_targets):
-        gc.judge.hook_connectors = ["*"]
-        click.echo("  " + ux.dim("Hook judge coverage: all configured hook connectors"))
-    elif not selected:
-        gc.judge.hook_connectors = []
-        click.echo("  " + ux.dim("Hook judge coverage: none"))
+
+    inherit_unified = False
+    if has_unified_llm and not judge_already_customised:
+        click.echo("  Judge can reuse your unified LLM settings:")
+        click.echo(f"    model:       {top_llm.model}")
+        if top_llm.base_url:
+            click.echo(f"    base URL:    {top_llm.base_url}")
+        click.echo(f"    api key:     {top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV} (inherited)")
+        click.echo()
+        inherit_unified = click.confirm(
+            "  Inherit the unified LLM for the judge?",
+            default=True,
+        )
+
+    if inherit_unified:
+        gc.judge.model = ""
+        gc.judge.api_base = ""
+        gc.judge.api_key_env = ""
+        click.echo(f"  ✓ Judge will use {top_llm.model} via {top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV}.")
     else:
-        gc.judge.hook_connectors = selected
-        click.echo("  " + ux.dim(f"Hook judge coverage: {', '.join(selected)}"))
+        # Pre-fill each prompt from the top-level ``llm:`` block so operators
+        # who want to override only have to retype the fields they're changing.
+        default_api_base = gc.judge.api_base or top_llm.base_url or ""
+        gc.judge.api_base = click.prompt(
+            "  LLM API base URL (e.g. http://localhost:8080/v1 for Bifrost)",
+            default=default_api_base,
+            show_default=bool(default_api_base),
+        )
+        default_model = gc.judge.model or top_llm.model or ""
+        gc.judge.model = click.prompt(
+            "  Model (e.g. anthropic/claude-sonnet-4-20250514)",
+            default=default_model,
+            show_default=bool(default_model),
+        )
+
+        default_key_env = gc.judge.api_key_env or top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV
+        gc.judge.api_key_env = click.prompt(
+            "  API key env var name",
+            default=default_key_env,
+        )
+        env_val = os.environ.get(gc.judge.api_key_env, "")
+        if env_val:
+            click.echo(f"    Current value: {_mask(env_val)} (set)")
+        else:
+            click.echo(f"    {gc.judge.api_key_env} is not set in environment")
+
+        # Only prompt for a secret value when the operator picked a custom env
+        # var that is not already satisfied by the unified key.
+        unified_env = top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV
+        if gc.judge.api_key_env != unified_env or not env_val:
+            _prompt_and_save_secret(gc.judge.api_key_env, "", app.cfg.data_dir)
+
+    click.echo()
+    if click.confirm("  Configure fallback models?", default=bool(gc.judge.fallbacks)):
+        fallbacks: list[str] = []
+        for i in range(1, 6):
+            fb = click.prompt(f"    Fallback model {i} (blank to finish)", default="", show_default=False)
+            if not fb:
+                break
+            fallbacks.append(fb)
+        gc.judge.fallbacks = fallbacks
+    else:
+        gc.judge.fallbacks = []
+
+    _apply_judge_runtime_defaults(gc)
+
+    # Share a custom judge key into the v5 top-level LLM block only when that
+    # block is otherwise unset, matching the guardrail wizard's existing rule.
+    custom_judge_key = (
+        gc.judge.api_key_env
+        and gc.judge.api_key_env != DEFENSECLAW_LLM_KEY_ENV
+        and gc.judge.api_key_env != (top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV)
+    )
+    if custom_judge_key and not app.cfg.llm.api_key_env:
+        if click.confirm(
+            f"  Use {gc.judge.api_key_env} as the shared LLM key for all scanners too?",
+            default=True,
+        ):
+            app.cfg.llm.api_key_env = gc.judge.api_key_env
 
 
 def _interactive_guardrail_setup(
@@ -6906,23 +7362,24 @@ def _interactive_guardrail_setup(
     gc.enabled = True
 
     if is_multi:
-        # Per-connector mode is the source of truth in multi-connector
-        # mode; a single observe/action answer cannot express
-        # "codex=action, antigravity=observe". Leave each connector's mode
-        # untouched — it is set via `setup <connector> --mode`. The legacy
-        # singular gc.mode is only a back-compat default here, so editing
-        # it would be misleading.
-        mode_changed = False
-        click.echo()
-        click.echo(
-            "  " + ux.dim(
-                "Enforcement mode is per-connector here — skipping the single "
-                "observe/action prompt. Use `defenseclaw setup <connector> "
-                "--mode observe|action` to change an individual connector."
-            )
+        # Per-connector mode is the source of truth in multi-connector mode;
+        # ask once across the active set instead of writing the legacy global
+        # gc.mode. When --connector scoped this guardrail run, only that peer is
+        # offered here; bare setup guardrail covers the full active set.
+        mode_targets = (
+            [agent_name]
+            if agent_name and agent_name in active_connectors
+            else list(active_connectors)
         )
+        connector_modes = _prompt_batch_connector_modes(
+            mode_targets,
+            gc,
+            default_mode=gc.mode or "observe",
+        )
+        mode_changed = _write_per_connector_modes(gc, connector_modes)
     else:
         ux.section("Enforcement mode")
+        ux.subhead("Rule/regex scanning applies in both modes.")
         click.echo(
             "    " + ux.bold("[1] observe") + " — log and alert only, never block " + ux.dim("(recommended to start)")
         )
@@ -6983,14 +7440,16 @@ def _interactive_guardrail_setup(
     # configured connector resolves to action mode; otherwise fall back
     # to the singular mode for the bootstrap/single-connector path.
     if is_multi:
-        hilt_applicable = any(
-            (gc.effective_mode(c) or "").strip() == "action"
-            for c in active_connectors
-        )
+        hilt_action_connectors = [
+            c for c in active_connectors
+            if (gc.effective_mode(c) or "").strip() == "action"
+        ]
+        hilt_applicable = bool(hilt_action_connectors)
     else:
+        hilt_action_connectors = None
         hilt_applicable = gc.mode == "action"
     if hilt_applicable:
-        _configure_hilt_interactive(gc)
+        _configure_hilt_interactive(gc, action_connectors=hilt_action_connectors)
 
     ux.section("Scanner engine")
     click.echo(
@@ -7060,216 +7519,67 @@ def _interactive_guardrail_setup(
     click.echo("  " + ux.dim("Tool calls additionally run the tool_injection judge."))
     click.echo()
 
-    # Connector-aware LLM role branching.
-    #
-    # Hook-based connectors (Codex, Claude Code, …) keep their own
-    # agent LLM — DefenseClaw only uses an LLM for the judge. Proxy-
-    # backed connectors (OpenClaw, ZeptoClaw) can either share one
-    # LLM for judge + agent or split them. We surface the decision
-    # here so saved configs declare intent rather than relying on
-    # implicit defaults.
-    default_role = gc.llm_role or connector_llm_role(gc.connector or "")
-    if connector_llm_role(gc.connector or "") == "judge_only":
-        click.echo(
-            "  " + ux.dim(
-                "This connector uses its own LLM — DefenseClaw will use the LLM "
-                "you configure here only for the judge."
-            )
+    judge_targets = [
+        c for c in (
+            mode_targets
+            if is_multi
+            else [gc.connector or "openclaw"]
         )
-        gc.llm_role = "judge_only"
+        if c in _HOOK_ENFORCED_CONNECTORS
+    ]
+
+    strategy = _prompt_batch_scan_strategy(gc)
+    gc.detection_strategy = strategy
+    if strategy == "regex_only":
+        gc.judge.enabled = False
+        gc.detection_strategy_completion = "regex_only"
     else:
-        click.echo("  " + ux.bold("How should DefenseClaw use the LLM?"))
-        click.echo(
-            "    " + ux.bold("[1] Judge only          ")
-            + ux.dim("— keep your existing agent LLM, use DefenseClaw only for the judge")
-        )
-        click.echo(
-            "    " + ux.bold("[2] Judge AND agent     ")
-            + ux.dim("— route the agent's LLM through DefenseClaw too (recommended)")
-        )
-        role_default = "2" if default_role == "judge_and_agent" else "1"
-        role_choice = click.prompt(
-            "  Select role", type=click.Choice(["1", "2"]), default=role_default,
-        )
-        gc.llm_role = "judge_only" if role_choice == "1" else "judge_and_agent"
-        click.echo()
-
-    enable_judge = click.confirm("  Enable LLM judge?", default=gc.judge.enabled)
-    gc.judge.enabled = enable_judge
-
-    if enable_judge:
-        # --- Hook-lane judge gate ---
-        #
-        # judge.enabled alone only covers the proxy lane. Hook-enforced
-        # connectors are gated per connector by
-        # ``guardrail.judge.hook_connectors`` (empty = off — deliberate,
-        # the judge adds latency + LLM cost per inspected hook call).
-        # Without this prompt an operator who answers "Enable LLM judge?
-        # y" on a hook-connector install reasonably believes the judge is
-        # running when the hook lane is in fact off. Defaults preserve
-        # the opt-in: "none" on fresh installs, the current gate on
-        # re-runs (so Enter never silently widens or clears it).
-        _prompt_judge_hook_connectors(gc)
-
-        ux.section("Detection strategy")
-        click.echo("    " + ux.bold("[1] regex_only ") + " — regex patterns only, no LLM calls " + ux.dim("(fastest)"))
-        click.echo(
-            "    "
-            + ux.bold("[2] regex_judge")
-            + " — regex triages, LLM verifies ambiguous matches "
-            + ux.dim("(recommended)")
-        )
-        click.echo(
-            "    "
-            + ux.bold("[3] judge_first")
-            + " — LLM runs primary detection, regex as safety net "
-            + ux.dim("(most accurate)")
-        )
-        strategy_map = {"1": "regex_only", "2": "regex_judge", "3": "judge_first"}
-        current_strat = gc.detection_strategy or "regex_judge"
-        strat_default = {"regex_only": "1", "regex_judge": "2", "judge_first": "3"}.get(current_strat, "2")
-        strat_choice = click.prompt(
-            "  Select strategy",
-            type=click.Choice(["1", "2", "3"]),
-            default=strat_default,
-        )
-        gc.detection_strategy = strategy_map[strat_choice]
-
-        click.echo()
-
-        # V5 UX: when the operator has already configured the unified
-        # top-level ``llm:`` block (common after ``make all`` runs
-        # ``scripts/setup-llm.sh``), default the judge to INHERIT those
-        # values — empty judge fields fall through ``Config.resolve_llm``
-        # to the top-level block and pick up ``DEFENSECLAW_LLM_KEY``
-        # automatically. This avoids the legacy UX where the judge
-        # prompted for a separate ``JUDGE_API_KEY`` that diverged from
-        # the unified key.
-        top_llm = app.cfg.llm
-        has_unified_llm = bool(top_llm.model) and bool(top_llm.resolved_api_key())
-        judge_already_customised = bool(
-            gc.judge.model or gc.judge.api_base or gc.judge.api_key_env,
-        )
-
-        inherit_unified = False
-        if has_unified_llm and not judge_already_customised:
-            click.echo("  Judge can reuse your unified LLM settings:")
-            click.echo(f"    model:       {top_llm.model}")
-            if top_llm.base_url:
-                click.echo(f"    base URL:    {top_llm.base_url}")
-            click.echo(f"    api key:     {top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV} (inherited)")
-            click.echo()
-            inherit_unified = click.confirm(
-                "  Inherit the unified LLM for the judge?",
-                default=True,
-            )
-
-        if inherit_unified:
-            # Empty strings on the judge block mean "fall back to the
-            # top-level ``llm:`` block" — see resolve_llm("guardrail.judge").
-            gc.judge.model = ""
-            gc.judge.api_base = ""
-            gc.judge.api_key_env = ""
-            click.echo(f"  ✓ Judge will use {top_llm.model} via {top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV}.")
-        else:
-            # Pre-fill each prompt from the top-level ``llm:`` block so
-            # operators who DO want to override only have to retype the
-            # fields they're actually changing.
-            default_api_base = gc.judge.api_base or top_llm.base_url or ""
-            gc.judge.api_base = click.prompt(
-                "  LLM API base URL (e.g. http://localhost:8080/v1 for Bifrost)",
-                default=default_api_base,
-                show_default=bool(default_api_base),
-            )
-            default_model = gc.judge.model or top_llm.model or ""
-            gc.judge.model = click.prompt(
-                "  Model (e.g. anthropic/claude-sonnet-4-20250514)",
-                default=default_model,
-                show_default=bool(default_model),
-            )
-
-            # Default to the unified ``DEFENSECLAW_LLM_KEY`` — NOT the
-            # legacy ``JUDGE_API_KEY``. The operator can still override
-            # it to a per-component env var; when they do, we'll prompt
-            # for the secret value below. When they accept the default
-            # unified key, the secret is already persisted to ``.env``
-            # via ``scripts/setup-llm.sh`` or ``defenseclaw setup llm``,
-            # so we skip the redundant secret prompt.
-            default_key_env = gc.judge.api_key_env or top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV
-            gc.judge.api_key_env = click.prompt(
-                "  API key env var name",
-                default=default_key_env,
-            )
-            env_val = os.environ.get(gc.judge.api_key_env, "")
-            if env_val:
-                click.echo(f"    Current value: {_mask(env_val)} (set)")
-            else:
-                click.echo(f"    {gc.judge.api_key_env} is not set in environment")
-
-            # Only prompt for a secret value when the operator picked a
-            # custom env var that ISN'T already satisfied by the unified
-            # key. ``DEFENSECLAW_LLM_KEY`` is expected to be wired up by
-            # ``scripts/setup-llm.sh`` before this code runs; re-asking
-            # for it here confuses operators who just set it.
-            unified_env = top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV
-            if gc.judge.api_key_env != unified_env or not env_val:
-                _prompt_and_save_secret(gc.judge.api_key_env, "", app.cfg.data_dir)
-
-        click.echo()
-        if click.confirm("  Configure fallback models?", default=bool(gc.judge.fallbacks)):
-            fallbacks: list[str] = []
-            for i in range(1, 6):
-                fb = click.prompt(f"    Fallback model {i} (blank to finish)", default="", show_default=False)
-                if not fb:
-                    break
-                fallbacks.append(fb)
-            gc.judge.fallbacks = fallbacks
-        else:
-            gc.judge.fallbacks = []
-
-        gc.judge.injection = True
-        gc.judge.pii = True
-        gc.judge.pii_prompt = True
-        gc.judge.pii_completion = True
-        # Data-exfiltration judge runs alongside injection + PII on
-        # every prompt. It exists because polite-tone /etc/passwd-shaped
-        # prompts slip through the injection judge ("not adversarial
-        # phrasing") and the PII judge ("no literal PII emitted yet").
-        # Audit rows for this judge appear with kind=exfil and follow
-        # the same retention / redaction rules as the other kinds.
-        gc.judge.exfil = True
-
-        # Completion-side strategy defaults to regex_only (no judge latency)
+        gc.judge.enabled = True
         if not getattr(gc, "detection_strategy_completion", None):
             gc.detection_strategy_completion = "regex_only"
+        if judge_targets:
+            _set_hook_judge_coverage_all(gc)
 
-        # Only prompt to "share" the judge key across scanners when the
-        # operator chose a CUSTOM env var AND the unified block isn't
-        # already pointing somewhere. If they inherited the unified
-        # ``DEFENSECLAW_LLM_KEY`` there's nothing to share (every
-        # scanner already resolves through it via
-        # ``Config.resolve_llm``); if ``llm.api_key_env`` is already
-        # set to a different value, silently overwriting it would
-        # disrupt the MCP/skill/plugin scanners — so we refuse to
-        # clobber and leave the operator to run ``defenseclaw setup
-        # llm`` explicitly. We write to ``llm.api_key_env`` (v5)
-        # rather than the deprecated ``default_llm_api_key_env`` (v4)
-        # so ``defenseclaw setup migrate-llm`` doesn't silently undo
-        # the change on the next run.
-        custom_judge_key = (
-            gc.judge.api_key_env
-            and gc.judge.api_key_env != DEFENSECLAW_LLM_KEY_ENV
-            and gc.judge.api_key_env != (top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV)
-        )
-        if custom_judge_key and not app.cfg.llm.api_key_env:
-            if click.confirm(
-                f"  Use {gc.judge.api_key_env} as the shared LLM key for all scanners too?",
-                default=True,
-            ):
-                app.cfg.llm.api_key_env = gc.judge.api_key_env
-    else:
-        gc.detection_strategy = "regex_only"
-        gc.detection_strategy_completion = "regex_only"
+        # Connector-aware LLM role branching.
+        #
+        # Hook-based connectors (Codex, Claude Code, …) keep their own
+        # agent LLM — DefenseClaw only uses an LLM for the judge. Proxy-
+        # backed connectors (OpenClaw, ZeptoClaw) can either share one
+        # LLM for judge + agent or split them. We surface the decision
+        # here so saved configs declare intent rather than relying on
+        # implicit defaults.
+        default_role = gc.llm_role or connector_llm_role(gc.connector or "")
+        if connector_llm_role(gc.connector or "") == "judge_only":
+            click.echo(
+                "  " + ux.dim(
+                    "This connector uses its own LLM — DefenseClaw will use the LLM "
+                    "you configure here only for the judge."
+                )
+            )
+            gc.llm_role = "judge_only"
+        else:
+            click.echo("  " + ux.bold("How should DefenseClaw use the LLM?"))
+            click.echo(
+                "    " + ux.bold("[1] Judge only          ")
+                + ux.dim("— keep your existing agent LLM, use DefenseClaw only for the judge")
+            )
+            click.echo(
+                "    " + ux.bold("[2] Judge AND agent     ")
+                + ux.dim("— route the agent's LLM through DefenseClaw too (recommended)")
+            )
+            role_default = "2" if default_role == "judge_and_agent" else "1"
+            role_choice = click.prompt(
+                "  Select role", type=click.Choice(["1", "2"]), default=role_default,
+            )
+            gc.llm_role = "judge_only" if role_choice == "1" else "judge_and_agent"
+            click.echo()
+
+        _apply_judge_runtime_defaults(gc)
+        click.echo()
+        _prompt_judge_model_config(app, gc)
+
+    if bool(gc.judge.enabled):
+        click.echo()
 
     if click.confirm("  Configure advanced options?", default=False):
         gc.port = click.prompt("  Guardrail proxy port", default=gc.port, type=int)

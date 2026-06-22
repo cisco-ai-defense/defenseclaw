@@ -30,6 +30,7 @@ from defenseclaw.config import (
     GatewayConfig,
     GuardrailConfig,
     OpenShellConfig,
+    PerConnectorGuardrailConfig,
 )
 
 
@@ -167,6 +168,52 @@ class ApplyFirstRunChoicesHookFailModeTests(unittest.TestCase):
         self._apply("klosed")
         self.assertEqual(self.cfg.guardrail.hook_fail_mode, "open",
                          "typo must NEVER silently put the agent in a stricter posture than the operator typed")
+
+
+# ---------------------------------------------------------------------------
+# _apply_first_run_choices: judge setup
+#
+# ``init`` and ``quickstart`` expose a single "enable judge" choice. When
+# selected, that choice must be effective for hook connectors without asking
+# for a second coverage list.
+# ---------------------------------------------------------------------------
+
+
+class ApplyFirstRunChoicesJudgeTests(unittest.TestCase):
+    def setUp(self):
+        from defenseclaw.config import default_config
+        self.cfg = default_config()
+
+    def _apply(self, *, with_judge: bool) -> None:
+        from defenseclaw.bootstrap import (
+            FirstRunOptions,
+            _apply_first_run_choices,
+        )
+
+        opts = FirstRunOptions(connector="codex", profile="observe", with_judge=with_judge)
+        _apply_first_run_choices(self.cfg, opts, "codex", "observe", "local")
+
+    def test_with_judge_enables_all_hook_coverage(self):
+        self._apply(with_judge=True)
+        self.assertTrue(self.cfg.guardrail.judge.enabled)
+        self.assertEqual(self.cfg.guardrail.detection_strategy, "regex_judge")
+        self.assertEqual(self.cfg.guardrail.judge.hook_connectors, ["*"])
+
+    def test_with_judge_bumps_regex_only_strategy(self):
+        self.cfg.guardrail.detection_strategy = "regex_only"
+        self._apply(with_judge=True)
+        self.assertEqual(self.cfg.guardrail.detection_strategy, "regex_judge")
+        self.assertEqual(self.cfg.guardrail.judge.hook_connectors, ["*"])
+
+    def test_first_run_choice_clears_stale_multi_connector_map(self):
+        self.cfg.guardrail.connectors = {
+            "codex": PerConnectorGuardrailConfig(),
+            "hermes": PerConnectorGuardrailConfig(),
+        }
+        self._apply(with_judge=False)
+        self.assertEqual(sorted(self.cfg.guardrail.connectors), ["codex"])
+        self.assertNotIn("hermes", self.cfg.guardrail.connectors)
+        self.assertEqual(self.cfg.active_connectors(), ["codex"])
 
 
 # ---------------------------------------------------------------------------

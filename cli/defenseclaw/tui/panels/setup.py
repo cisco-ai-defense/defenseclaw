@@ -2118,8 +2118,8 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
         ),
         WizardGoal(
             "bulk",
-            "Set up multiple connectors",
-            summary="Run bare setup with repeatable connector flags, detected connectors, or all supported hooks.",
+            "Set active connectors",
+            summary="Run bare setup to choose the active hook connector set.",
             presets={"@Action": "batch"},
             fields=(
                 "Connectors (CSV)",
@@ -3727,7 +3727,7 @@ def connector_setup_wizard_fields(
         WizardFormField(
             "Connectors (CSV)",
             "string",
-            hint="Batch setup only: comma-separated connector names, e.g. codex,hermes,antigravity.",
+            hint="Batch setup only: comma-separated active connector names, e.g. codex,hermes,antigravity.",
         ),
         WizardFormField(
             "Action",
@@ -3735,7 +3735,7 @@ def connector_setup_wizard_fields(
             value="setup",
             default="setup",
             options=("setup", "batch", "remove"),
-            hint="Set up/add one connector, batch setup several connectors, or remove one.",
+            hint="Set up/add one connector, choose the active connector set, or remove one.",
         ),
         WizardFormField("Guardrail Mode", "choice", value=mode, default=mode, options=("observe", "action")),
         WizardFormField(
@@ -4226,6 +4226,7 @@ def _guardrail_wizard_fields_for(
     # ``llm.model`` is not emitted as ``--judge-model`` and must not promote.
     if judge and strategy in ("", "regex_only"):
         strategy = "regex_judge"
+    strategy = (overrides.get("--detection-strategy") or strategy).strip() or "regex_only"
     # A live provider change (driver) wins so the conditional Bedrock /
     # Vertex / Azure judge groups re-derive against the new selection.
     judge_provider = (overrides.get("@Provider") or judge_provider).strip().lower() or judge_provider
@@ -4247,11 +4248,25 @@ def _guardrail_wizard_fields_for(
     ).strip().lower() or "api_key"
     hilt = "yes" if bool(get_config_value(cfg, "guardrail.hilt.enabled", False)) else "no"
     redaction = "yes" if bool(get_config_value(cfg, "privacy.disable_redaction", False)) else "no"
-    j_bedrock = _provider_is("bedrock")
-    j_bedrock_iam = _bedrock_auth_mode_is("iam_credentials")
-    j_bedrock_profile = _bedrock_auth_mode_is("profile")
-    j_vertex = _provider_is("vertex_ai", "vertex")
-    j_azure = _provider_is("azure")
+    def j_strategy(dv: Mapping[str, str]) -> bool:
+        return (dv.get("strategy", "") or "").strip().lower() in {"regex_judge", "judge_first"}
+
+    def j_provider_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
+        provider_visible = _provider_is(*names)
+        return lambda dv: j_strategy(dv) and provider_visible(dv)
+
+    def j_bedrock_auth_mode_is(*modes: str) -> Callable[[Mapping[str, str]], bool]:
+        auth_visible = _bedrock_auth_mode_is(*modes)
+        return lambda dv: j_strategy(dv) and auth_visible(dv)
+
+    def j_provider_regional_or_custom(dv: Mapping[str, str]) -> bool:
+        return j_strategy(dv) and _provider_regional_or_custom(dv)
+
+    j_bedrock = j_provider_is("bedrock")
+    j_bedrock_iam = j_bedrock_auth_mode_is("iam_credentials")
+    j_bedrock_profile = j_bedrock_auth_mode_is("profile")
+    j_vertex = j_provider_is("vertex_ai", "vertex")
+    j_azure = j_provider_is("azure")
     j_region_opts = _llm_catalog_regions(judge_provider)
     candidates: tuple[WizardFormField, ...] = (
         WizardFormField("Core", "section"),
@@ -4283,6 +4298,7 @@ def _guardrail_wizard_fields_for(
             value=strategy,
             default="regex_only",
             options=("regex_only", "regex_judge", "judge_first"),
+            hint="Rule/regex scanning is the baseline; judge strategies add LLM review on top.",
         ),
         WizardFormField(
             "Rule Pack",
@@ -4292,24 +4308,46 @@ def _guardrail_wizard_fields_for(
             default="default",
             options=("default", "strict", "permissive"),
         ),
-        WizardFormField("LLM Judge", "section"),
+        WizardFormField("LLM Judge", "section", visible_when=j_strategy),
         WizardFormField(
             "Provider",
             "choice",
             value=judge_provider,
             default=judge_provider_default,
             options=_llm_catalog_provider_choices(),
+            visible_when=j_strategy,
         ),
         WizardFormField(
-            "Model", "string", "--judge-model", value=judge_model, default=judge_model_default, picker="llm"
+            "Model",
+            "string",
+            "--judge-model",
+            value=judge_model,
+            default=judge_model_default,
+            picker="llm",
+            visible_when=j_strategy,
         ),
-        WizardFormField("API Key Env", "string", "--judge-api-key-env", value=judge_key_env, default=judge_key_default),
-        WizardFormField("API Base URL", "string", "--judge-api-base", value=judge_base, default=judge_base_default),
+        WizardFormField(
+            "API Key Env",
+            "string",
+            "--judge-api-key-env",
+            value=judge_key_env,
+            default=judge_key_default,
+            visible_when=j_strategy,
+        ),
+        WizardFormField(
+            "API Base URL",
+            "string",
+            "--judge-api-base",
+            value=judge_base,
+            default=judge_base_default,
+            visible_when=j_strategy,
+        ),
         WizardFormField(
             "Instance Name",
             "string",
             "--judge-instance-name",
             hint="Custom-provider instance for the judge (optional).",
+            visible_when=j_strategy,
         ),
         WizardFormField(
             "LLM Role",
@@ -4319,14 +4357,7 @@ def _guardrail_wizard_fields_for(
             default="judge_only",
             options=GUARDRAIL_JUDGE_LLM_ROLES,
             hint="judge_only=hook connectors; judge_and_agent=proxy connectors.",
-        ),
-        WizardFormField(
-            "Hook Connectors",
-            "string",
-            "--judge-hook-connectors",
-            value=_judge_hook_connectors_wizard_value(cfg),
-            default=_judge_hook_connectors_wizard_value(cfg),
-            hint="'all', 'none', or comma-separated hook connectors for hook-lane judge coverage.",
+            visible_when=j_strategy,
         ),
         WizardFormField(
             "Inherit From",
@@ -4336,6 +4367,7 @@ def _guardrail_wizard_fields_for(
             default="",
             options=GUARDRAIL_JUDGE_INHERIT_PATHS,
             hint="Copy a sibling LLM block onto the judge before flags (optional).",
+            visible_when=j_strategy,
         ),
         WizardFormField("Judge: Bedrock", "section", visible_when=j_bedrock),
         WizardFormField(
@@ -4392,13 +4424,13 @@ def _guardrail_wizard_fields_for(
             hint="model=deployment pairs, comma-separated (repeatable).",
             visible_when=j_azure,
         ),
-        WizardFormField("Judge: TLS", "section", visible_when=_provider_regional_or_custom),
+        WizardFormField("Judge: TLS", "section", visible_when=j_provider_regional_or_custom),
         WizardFormField(
             "TLS CA Cert File",
             "string",
             "--judge-tls-ca-cert-file",
             hint="PEM CA bundle for self-signed judge endpoints.",
-            visible_when=_provider_regional_or_custom,
+            visible_when=j_provider_regional_or_custom,
         ),
         WizardFormField(
             "Insecure Skip Verify",
@@ -4407,7 +4439,7 @@ def _guardrail_wizard_fields_for(
             value="no",
             default="no",
             hint="Disable TLS verification for the judge (lab use only).",
-            visible_when=_provider_regional_or_custom,
+            visible_when=j_provider_regional_or_custom,
         ),
         WizardFormField("Cisco AI Defense", "section"),
         WizardFormField(
@@ -4449,7 +4481,11 @@ def _guardrail_wizard_fields_for(
     return _apply_dynamic_fields(
         candidates,
         overrides,
-        {"provider": judge_provider, "bedrock_auth_mode": judge_bedrock_auth_mode},
+        {
+            "provider": judge_provider,
+            "bedrock_auth_mode": judge_bedrock_auth_mode,
+            "strategy": strategy,
+        },
     )
 
 

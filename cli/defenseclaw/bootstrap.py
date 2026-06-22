@@ -38,6 +38,8 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from defenseclaw.inventory import agent_discovery
+
 if TYPE_CHECKING:
     from defenseclaw.config import Config
     from defenseclaw.logger import Logger
@@ -102,6 +104,7 @@ class FirstRunOptions:
     profile: str = "observe"  # observe | action
     scanner_mode: str = "local"  # local | remote | both
     with_judge: bool = False
+    judge_hook_connectors: list[str] | None = None
     skip_install: bool = False
     sandbox: bool = False
     start_gateway: bool = False
@@ -164,9 +167,10 @@ class FirstRunReport:
     setup: list[StepResult] = field(default_factory=list)
     readiness: list[StepResult] = field(default_factory=list)
     next_commands: list[str] = field(default_factory=list)
+    connector_mode_warnings: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "status": self.status,
             "config_file": self.config_file,
             "data_dir": self.data_dir,
@@ -176,6 +180,9 @@ class FirstRunReport:
             "readiness": [s.to_dict() for s in self.readiness],
             "next_commands": self.next_commands,
         }
+        if self.connector_mode_warnings:
+            data["connector_mode_warnings"] = self.connector_mode_warnings
+        return data
 
 
 def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
@@ -284,6 +291,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     connector = _normalize_connector(options.connector)
     profile = _normalize_profile(options.profile, connector)
     scanner_mode = _normalize_scanner_mode(options.scanner_mode)
+    connector_mode_warnings: list[dict] = []
 
     new_config = not os.path.exists(cfg_mod.config_path())
     try:
@@ -293,6 +301,12 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         new_config = True
 
     cfg.environment = cfg_mod.detect_environment()
+    if profile == "action":
+        mode_warning = _first_run_action_mode_warning(connector, getattr(cfg, "data_dir", ""))
+        if mode_warning:
+            connector_mode_warnings.append(mode_warning)
+            profile = "observe"
+
     _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
 
     try:
@@ -337,6 +351,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     app.logger = logger
 
     setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
+    setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
 
     if options.sandbox:
         setup.append(
@@ -380,6 +395,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         setup=setup,
         readiness=readiness,
         next_commands=next_commands,
+        connector_mode_warnings=connector_mode_warnings,
     )
 
 
@@ -487,6 +503,87 @@ def _normalize_profile(raw: str, connector: str) -> str:
     return "observe"
 
 
+def _first_run_action_mode_warning(connector: str, data_dir: str) -> dict | None:
+    """Return structured action-to-observe remediation for first-run flows."""
+    from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
+
+    if _check_connector_version_supported_for_setup(
+        connector,
+        mode="action",
+        emit=False,
+        data_dir=data_dir,
+        _allow_prompt=False,
+    ):
+        return None
+
+    discovery = None
+    try:
+        discovery = agent_discovery.discover_agents(
+            use_cache=False,
+            refresh=True,
+            data_dir=data_dir,
+        )
+    except Exception:
+        discovery = None
+    return _action_downgrade_record(connector, discovery)
+
+
+def _action_downgrade_record(connector: str, discovery=None) -> dict:
+    """Structured report for an action request that had to fall back to observe."""
+    key = _normalize_connector(connector)
+    record = {
+        "connector": key,
+        "requested_mode": "action",
+        "actual_mode": "observe",
+        "status": "needs_attention",
+        "reason": "connector version could not be verified against a known hook contract",
+        "next_command": f"defenseclaw setup {key} --mode action",
+    }
+    signal = getattr(discovery, "agents", {}).get(key) if discovery is not None else None
+    if (
+        signal is not None
+        and getattr(signal, "error", "") == agent_discovery.UNTRUSTED_PREFIX_ERROR
+        and getattr(signal, "binary_path", "")
+    ):
+        resolved_bin = os.path.realpath(signal.binary_path)
+        parent = os.path.dirname(resolved_bin)
+        record.update(
+            {
+                "reason": "binary path outside trusted prefixes; version was not probed",
+                "binary_path": resolved_bin,
+                "trusted_path": parent,
+                "next_command": f"defenseclaw setup trusted-paths add {parent}",
+            }
+        )
+    elif signal is not None and getattr(signal, "error", ""):
+        record["reason"] = f"connector version could not be verified: {signal.error}"
+    return record
+
+
+def _connector_mode_warning_steps(warnings: list[dict]) -> list[StepResult]:
+    if not warnings:
+        return []
+    from defenseclaw.commands.cmd_setup import _CONNECTOR_META
+
+    steps: list[StepResult] = []
+    for warning in warnings:
+        connector = warning.get("connector", "")
+        label = _CONNECTOR_META.get(connector, {}).get("label", connector or "Connector")
+        detail = (
+            f"requested action, configured observe: "
+            f"{warning.get('reason', 'connector version could not be verified')}"
+        )
+        steps.append(
+            StepResult(
+                f"{label} mode",
+                "fail",
+                detail,
+                warning.get("next_command", ""),
+            )
+        )
+    return steps
+
+
 def _normalize_scanner_mode(raw: str) -> str:
     value = (raw or "").strip().lower()
     return value if value in {"local", "remote", "both"} else "local"
@@ -502,11 +599,42 @@ def _apply_first_run_choices(
     cfg.claw.mode = connector
     cfg.claw.workspace_dir = ""
     cfg.guardrail.connector = connector
+    # A first-run walkthrough that asks for connector selection should not
+    # inherit stale peers from a previous multi-connector config. Preserve the
+    # selected connector's existing override when present, and let
+    # cmd_init._activate_additional_connectors rebuild any selected extras.
+    existing_connectors = getattr(cfg.guardrail, "connectors", None) or {}
+    if existing_connectors:
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        selected_override = None
+        wanted = _normalize_connector(connector)
+        for key, pc in existing_connectors.items():
+            if _normalize_connector(str(key)) == wanted:
+                selected_override = pc
+                break
+        cfg.guardrail.connectors = {
+            connector: selected_override or PerConnectorGuardrailConfig()
+        }
+    else:
+        cfg.guardrail.connectors = {}
     cfg.guardrail.scanner_mode = scanner_mode
-    cfg.guardrail.mode = "action" if profile == "action" else "observe"
+    profile_mode = "action" if profile == "action" else "observe"
+    cfg.guardrail.mode = profile_mode
     cfg.guardrail.enabled = True
-    cfg.guardrail.judge.enabled = bool(options.with_judge)
+    if options.with_judge:
+        cfg.guardrail.judge.enabled = True
+        cfg.guardrail.judge.hook_connectors = (
+            list(options.judge_hook_connectors)
+            if options.judge_hook_connectors is not None
+            else ["*"]
+        )
+        if not cfg.guardrail.detection_strategy or cfg.guardrail.detection_strategy == "regex_only":
+            cfg.guardrail.detection_strategy = "regex_judge"
+    else:
+        cfg.guardrail.judge.enabled = False
     cfg.guardrail.detection_strategy = cfg.guardrail.detection_strategy or "regex_judge"
+    _apply_first_run_connector_override(cfg, connector, profile_mode)
 
     # Honor an explicit operator choice supplied via flag/prompt.
     # Empty string means "leave whatever was loaded alone" — usually
@@ -561,6 +689,31 @@ def _apply_first_run_choices(
         cfg.cisco_ai_defense.endpoint = options.cisco_endpoint.strip()
     if options.cisco_api_key_env:
         cfg.cisco_ai_defense.api_key_env = options.cisco_api_key_env.strip()
+
+
+def _apply_first_run_connector_override(cfg: Config, connector: str, mode: str) -> None:
+    """Keep an existing multi-connector map aligned with first-run choices."""
+    gc = cfg.guardrail
+    if not getattr(gc, "connectors", None):
+        return
+
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    key = connector
+    pc = gc.connectors.get(key)
+    if pc is None:
+        wanted = _normalize_connector(connector)
+        for existing_key, existing_pc in gc.connectors.items():
+            if _normalize_connector(existing_key) == wanted:
+                key = existing_key
+                pc = existing_pc
+                break
+    if pc is None:
+        pc = PerConnectorGuardrailConfig()
+    pc.mode = "action" if mode == "action" else "observe"
+    if pc.enabled is False:
+        pc.enabled = True
+    gc.connectors[key] = pc
 
 
 def _persist_first_run_secrets(cfg: Config, options: FirstRunOptions, steps: list[StepResult]) -> None:
@@ -636,7 +789,12 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
             detail += " | " + buf.getvalue().strip().splitlines()[-1]
         return StepResult("Guardrail", "fail", detail, "defenseclaw setup guardrail")
     if ok and not warnings:
-        return StepResult("Guardrail", "pass", f"{connector}, mode={app.cfg.guardrail.mode}")
+        mode = (
+            app.cfg.guardrail.effective_mode(connector)
+            if hasattr(app.cfg.guardrail, "effective_mode")
+            else app.cfg.guardrail.mode
+        )
+        return StepResult("Guardrail", "pass", f"{connector}, mode={mode}")
     if ok:
         return StepResult("Guardrail", "warn", "; ".join(warnings), "defenseclaw doctor")
     return StepResult("Guardrail", "fail", "setup returned false", "defenseclaw setup guardrail")

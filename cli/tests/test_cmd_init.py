@@ -29,8 +29,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_init import init_cmd
+from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.context import AppContext
+from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 
@@ -156,6 +158,141 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(cfg["guardrail"]["connector"], "codex")
         self.assertTrue(cfg["guardrail"]["enabled"])
         self.assertEqual(cfg["guardrail"]["detection_strategy"], "regex_judge")
+
+    def test_with_judge_defaults_hook_coverage_to_all(self):
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "codex",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--with-judge",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertTrue(cfg["guardrail"]["judge"]["enabled"])
+        self.assertEqual(cfg["guardrail"]["detection_strategy"], "regex_judge")
+        self.assertEqual(cfg["guardrail"]["judge"]["hook_connectors"], ["*"])
+
+    def test_interactive_judge_llm_config_collects_model_settings(self):
+        from defenseclaw.commands import cmd_init
+
+        with patch.object(cmd_init.click, "confirm", return_value=True), \
+                patch("defenseclaw.commands._llm_picker.pick_provider", return_value="openai") as provider, \
+                patch("defenseclaw.commands._llm_picker.pick_model", return_value="gpt-4o") as model, \
+                patch("defenseclaw.commands._llm_picker.pick_key_env", return_value="OPENAI_API_KEY") as key_env, \
+                patch("defenseclaw.commands.cmd_setup._prompt_and_save_secret") as save_secret, \
+                patch.object(cmd_init.click, "prompt", return_value="https://api.example/v1"):
+            got = cmd_init._prompt_first_run_judge_llm_config(
+                data_dir=self.tmp_dir,
+                llm_provider="",
+                llm_model="",
+                llm_api_key="sk-test",
+                llm_api_key_env="DEFENSECLAW_LLM_KEY",
+                llm_base_url="",
+            )
+
+        self.assertEqual(got, ("openai", "gpt-4o", "", "OPENAI_API_KEY", "https://api.example/v1"))
+        provider.assert_called_once()
+        model.assert_called_once()
+        key_env.assert_called_once()
+        save_secret.assert_called_once_with("OPENAI_API_KEY", "sk-test", self.tmp_dir)
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    def test_explicit_action_updates_existing_per_connector_mode(self, _gate):
+        Path(self.tmp_dir, "config.yaml").write_text(
+            "claw:\n"
+            "  mode: codex\n"
+            "guardrail:\n"
+            "  enabled: true\n"
+            "  connector: codex\n"
+            "  mode: observe\n"
+            "  scanner_mode: local\n"
+            "  connectors:\n"
+            "    hermes:\n"
+            "      mode: observe\n",
+            encoding="utf-8",
+        )
+
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "hermes",
+            "--profile",
+            "action",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["profile"], "action")
+        setup = {step["name"]: step for step in summary["setup"]}
+        self.assertIn("hermes, mode=action", setup["Guardrail"]["detail"])
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["guardrail"]["connectors"]["hermes"]["mode"], "action")
+
+    @patch("defenseclaw.bootstrap.agent_discovery.discover_agents")
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=False)
+    def test_single_action_connector_trusted_path_downgrade_is_structured(self, _gate, mock_discover):
+        disc = self._discovery({"hermes"})
+        disc.agents["hermes"].binary_path = "/tmp/fake/hermes-bin"
+        disc.agents["hermes"].error = agent_discovery.UNTRUSTED_PREFIX_ERROR
+        mock_discover.return_value = disc
+
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "hermes",
+            "--profile",
+            "action",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        self.assertEqual(summary["connector"], "hermes")
+        self.assertEqual(summary["profile"], "observe")
+        warning = summary["connector_mode_warnings"][0]
+        self.assertEqual(warning["connector"], "hermes")
+        self.assertEqual(warning["requested_mode"], "action")
+        self.assertEqual(warning["actual_mode"], "observe")
+        self.assertEqual(warning["reason"], "binary path outside trusted prefixes; version was not probed")
+        self.assertEqual(
+            warning["next_command"],
+            f"defenseclaw setup trusted-paths add {os.path.realpath('/tmp/fake')}",
+        )
+        setup = {step["name"]: step for step in summary["setup"]}
+        self.assertEqual(setup["Hermes mode"]["status"], "fail")
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["guardrail"]["connector"], "hermes")
+        self.assertEqual(cfg["guardrail"]["mode"], "observe")
 
     def test_first_run_persists_llm_secret_to_dotenv_not_config(self):
         result = self._invoke([
@@ -1865,6 +2002,11 @@ class TestMultiConnectorInit(unittest.TestCase):
             cfg.claw.mode = "codex"
             cfg.guardrail.mode = "observe"
             cfg.guardrail.enabled = True
+            cfg.guardrail.connectors = {
+                "codex": PerConnectorGuardrailConfig(),
+                "hermes": PerConnectorGuardrailConfig(),
+            }
+            cfg.guardrail.judge.hook_connectors = ["codex", "hermes"]
             cfg.save()
 
             active, sidecar_step = _activate_additional_connectors(
@@ -1881,6 +2023,8 @@ class TestMultiConnectorInit(unittest.TestCase):
             reloaded = cfg_mod.load()
             gc = reloaded.guardrail
             self.assertEqual(sorted(gc.connectors), ["claudecode", "codex"])
+            self.assertNotIn("hermes", gc.connectors)
+            self.assertEqual(gc.judge.hook_connectors, ["codex"])
             self.assertEqual(reloaded.active_connectors(), ["claudecode", "codex"])
             cc = gc.connectors["claudecode"]
             self.assertEqual(cc.mode, "action")
@@ -1966,7 +2110,7 @@ class TestMultiConnectorInit(unittest.TestCase):
         disc = self._disc({"codex", "claudecode"})
         # scanner mode, fail mode, HITL severity
         prompts = iter(["local", "closed", "MEDIUM"])
-        confirms = iter([False, True, False, True])  # judge, action HITL, start_gateway, verify
+        confirms = iter([True, False, True])  # action HITL, start_gateway, verify
 
         with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
                 patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
@@ -1977,11 +2121,11 @@ class TestMultiConnectorInit(unittest.TestCase):
                 patch.object(
                     cmd_init,
                     "_prompt_checkbox_selection",
-                    side_effect=[["codex", "claudecode"], ["claudecode"]],
+                    side_effect=[["codex", "claudecode"], ["claudecode"], []],
                 ), \
                 patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
                 patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
-            settings, scanner_mode, with_judge, start_gateway, verify = cmd_init._prompt_first_run(
+            settings, scanner_mode, with_judge, judge_connectors, start_gateway, verify = cmd_init._prompt_first_run(
                 connector=None, profile=None, scanner_mode="local", with_judge=False,
                 fail_mode=None, human_approval=None, hilt_min_severity=None,
                 start_gateway=False, verify=None, rescan_agents=False,
@@ -2001,6 +2145,7 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertEqual(by_name["claudecode"]["hilt_min_severity"], "MEDIUM")
         self.assertEqual(scanner_mode, "local")
         self.assertFalse(with_judge)
+        self.assertEqual(judge_connectors, [])
         self.assertFalse(start_gateway)
         self.assertTrue(verify)
 
@@ -2011,18 +2156,18 @@ class TestMultiConnectorInit(unittest.TestCase):
 
         disc = self._disc({"codex", "claudecode"})
         prompts = iter(["local"])  # scanner
-        confirms = iter([False, False, True])  # judge, start_gateway, verify
+        confirms = iter([False, True])  # start_gateway, verify
 
         with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
                 patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
                 patch.object(
                     cmd_init,
                     "_prompt_checkbox_selection",
-                    side_effect=[["codex", "claudecode"], []],
+                    side_effect=[["codex", "claudecode"], [], []],
                 ), \
                 patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
                 patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
-            settings, _scanner, _judge, _start, _verify = cmd_init._prompt_first_run(
+            settings, _scanner, _judge, _judge_connectors, _start, _verify = cmd_init._prompt_first_run(
                 connector=None, profile=None, scanner_mode="local", with_judge=False,
                 fail_mode=None, human_approval=None, hilt_min_severity=None,
                 start_gateway=False, verify=None, rescan_agents=False,
@@ -2046,11 +2191,132 @@ class TestMultiConnectorInit(unittest.TestCase):
         with patch.object(cmd_init, "_prompt_checkbox_selection", return_value=[]):
             self.assertEqual(cmd_init._prompt_action_connectors(["codex"]), [])
 
-    def test_single_connector_selection_keeps_legacy_shape(self):
-        from defenseclaw.commands.cmd_init import _prompt_connector_selection
+    def test_single_connector_selection_prompts_trust_without_picker(self):
+        from defenseclaw.commands import cmd_init
+        from defenseclaw.inventory import agent_discovery as ad
 
-        # An explicit single connector short-circuits discovery entirely.
-        self.assertEqual(_prompt_connector_selection("codex", False), ["codex"])
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-bin")
+        codex_dir = os.path.join(self.tmp_dir, "codex-bin")
+        os.makedirs(hermes_dir)
+        os.makedirs(codex_dir)
+        first = self._disc({"codex", "hermes"})
+        first.agents["hermes"].binary_path = os.path.join(hermes_dir, "hermes")
+        first.agents["hermes"].version = ""
+        first.agents["hermes"].error = ad.UNTRUSTED_PREFIX_ERROR
+        first.agents["codex"].binary_path = os.path.join(codex_dir, "codex")
+        first.agents["codex"].version = ""
+        first.agents["codex"].error = ad.UNTRUSTED_PREFIX_ERROR
+        second = self._disc({"codex", "hermes"})
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", side_effect=[first, second]) as discover, \
+                patch.object(cmd_init.click, "confirm", return_value=True), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", side_effect=AssertionError("picker opened")):
+            got = cmd_init._prompt_connector_selection("hermes", False, data_dir=self.tmp_dir)
+
+        self.assertEqual(got, ["hermes"])
+        self.assertEqual(discover.call_count, 2)
+        dotenv = os.path.join(self.tmp_dir, ".env")
+        with open(dotenv, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn(os.path.realpath(hermes_dir), text)
+        self.assertNotIn(os.path.realpath(codex_dir), text)
+
+    def test_prompt_first_run_explicit_action_declined_trust_downgrades_with_remediation(self):
+        from defenseclaw.commands import cmd_init
+        from defenseclaw.inventory import agent_discovery as ad
+
+        bin_dir = os.path.join(self.tmp_dir, "hermes-bin")
+        os.makedirs(bin_dir)
+        bin_path = os.path.join(bin_dir, "hermes")
+        disc = self._disc({"hermes"})
+        disc.agents["hermes"].binary_path = bin_path
+        disc.agents["hermes"].version = ""
+        disc.agents["hermes"].error = ad.UNTRUSTED_PREFIX_ERROR
+        prompts = iter(["local"])
+        confirms = iter([False, False, True])  # early trust, start_gateway, verify
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    return_value=False,
+                ), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", return_value=[]), \
+                patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
+                patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
+            settings, scanner_mode, with_judge, judge_connectors, start_gateway, verify = cmd_init._prompt_first_run(
+                connector="hermes", profile="action", scanner_mode="local", with_judge=False,
+                fail_mode=None, human_approval=None, hilt_min_severity=None,
+                start_gateway=False, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
+            )
+
+        self.assertEqual(scanner_mode, "local")
+        self.assertFalse(with_judge)
+        self.assertEqual(judge_connectors, [])
+        self.assertFalse(start_gateway)
+        self.assertTrue(verify)
+        self.assertEqual(settings[0]["connector"], "hermes")
+        self.assertEqual(settings[0]["profile"], "observe")
+        warning = settings[0]["mode_warning"]
+        self.assertEqual(warning["requested_mode"], "action")
+        self.assertEqual(warning["actual_mode"], "observe")
+        self.assertEqual(warning["trusted_path"], os.path.realpath(bin_dir))
+        self.assertEqual(
+            warning["next_command"],
+            f"defenseclaw setup trusted-paths add {os.path.realpath(bin_dir)}",
+        )
+
+    def test_prompt_first_run_action_trust_retry_keeps_action_mode(self):
+        from defenseclaw.commands import cmd_init
+        from defenseclaw.inventory import agent_discovery as ad
+
+        bin_dir = os.path.join(self.tmp_dir, "hermes-bin")
+        os.makedirs(bin_dir)
+        bin_path = os.path.join(bin_dir, "hermes")
+
+        cached = self._disc({"hermes"})
+        cached.agents["hermes"].binary_path = bin_path
+        cached.agents["hermes"].version = "hermes 1.0"
+        cached.agents["hermes"].error = ""
+
+        untrusted = self._disc({"hermes"})
+        untrusted.agents["hermes"].binary_path = bin_path
+        untrusted.agents["hermes"].version = ""
+        untrusted.agents["hermes"].error = ad.UNTRUSTED_PREFIX_ERROR
+
+        rescanned = self._disc({"hermes"})
+        rescanned.agents["hermes"].binary_path = bin_path
+        rescanned.agents["hermes"].version = "hermes 1.0"
+        rescanned.agents["hermes"].error = ""
+
+        prompts = iter(["local", "open"])
+        confirms = iter([True, False, False, True])  # trust, HITL, start_gateway, verify
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", side_effect=[cached, untrusted, rescanned]), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    side_effect=[False, True],
+                ), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", return_value=[]), \
+                patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
+                patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
+            settings, scanner_mode, with_judge, judge_connectors, start_gateway, verify = cmd_init._prompt_first_run(
+                connector="hermes", profile="action", scanner_mode="local", with_judge=False,
+                fail_mode=None, human_approval=None, hilt_min_severity=None,
+                start_gateway=False, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
+            )
+
+        self.assertEqual(scanner_mode, "local")
+        self.assertFalse(with_judge)
+        self.assertEqual(judge_connectors, [])
+        self.assertFalse(start_gateway)
+        self.assertTrue(verify)
+        self.assertEqual(settings[0]["connector"], "hermes")
+        self.assertEqual(settings[0]["profile"], "action")
+        self.assertIsNone(settings[0]["mode_warning"])
+
+        dotenv = os.path.join(self.tmp_dir, ".env")
+        with open(dotenv, encoding="utf-8") as fh:
+            self.assertIn(os.path.realpath(bin_dir), fh.read())
 
     def test_checkbox_selector_toggles_with_keys(self):
         from defenseclaw.commands import cmd_init
@@ -2237,10 +2503,102 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
             "--no-start-gateway", "--no-verify", "--json-summary",
         ])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        self.assertIn("configuring in observe mode", result.output)
+
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        warning = summary["connector_mode_warnings"][0]
+        self.assertEqual(warning["connector"], "codex")
+        self.assertEqual(warning["requested_mode"], "action")
+        self.assertEqual(warning["actual_mode"], "observe")
+        self.assertIn("version could not be verified", warning["reason"])
+        self.assertEqual(warning["next_command"], "defenseclaw setup codex --mode action")
+        self.assertTrue(
+            any(
+                step["name"] == "Codex mode"
+                and step["status"] == "fail"
+                and "requested action, configured observe" in step["detail"]
+                for step in summary["setup"]
+            ),
+            summary["setup"],
+        )
 
         cfg = self._load_cfg()
         self.assertEqual(cfg["guardrail"]["mode"], "observe")
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=False)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_action_connector_trusted_path_downgrade_is_structured(self, mock_discover, _gate):
+        from defenseclaw.inventory import agent_discovery as ad
+
+        disc = self._disc({"codex", "hermes"})
+        bin_dir = os.path.join(self.tmp_dir, "tool", "bin")
+        bin_path = os.path.join(bin_dir, "hermes")
+        disc.agents["hermes"].binary_path = bin_path
+        disc.agents["hermes"].version = ""
+        disc.agents["hermes"].error = ad.UNTRUSTED_PREFIX_ERROR
+        mock_discover.return_value = disc
+
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--observe-all", "--action-connectors", "hermes",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        self.assertIn("hermes", summary["connectors"])
+        warning = summary["connector_mode_warnings"][0]
+        self.assertEqual(warning["connector"], "hermes")
+        self.assertEqual(warning["requested_mode"], "action")
+        self.assertEqual(warning["actual_mode"], "observe")
+        self.assertEqual(
+            warning["reason"],
+            "binary path outside trusted prefixes; version was not probed",
+        )
+        self.assertEqual(warning["binary_path"], os.path.realpath(bin_path))
+        self.assertEqual(warning["trusted_path"], os.path.realpath(bin_dir))
+        self.assertEqual(
+            warning["next_command"],
+            f"defenseclaw setup trusted-paths add {os.path.realpath(bin_dir)}",
+        )
+        self.assertIn(warning["next_command"], summary["next_commands"])
+
+        cfg = self._load_cfg()
+        self.assertEqual(cfg["guardrail"]["connectors"]["hermes"]["mode"], "observe")
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=False)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_action_connector_downgrade_refreshes_discovery_for_trusted_path_details(self, mock_discover, _gate):
+        from defenseclaw.inventory import agent_discovery as ad
+
+        stale = self._disc({"codex", "hermes"})
+        fresh = self._disc({"codex", "hermes"})
+        bin_dir = os.path.join(self.tmp_dir, "tool", "bin")
+        bin_path = os.path.join(bin_dir, "hermes")
+        fresh.agents["hermes"].binary_path = bin_path
+        fresh.agents["hermes"].version = ""
+        fresh.agents["hermes"].error = ad.UNTRUSTED_PREFIX_ERROR
+        mock_discover.side_effect = [stale, fresh]
+
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--observe-all", "--action-connectors", "hermes",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        summary = json.loads(result.output)
+        warning = summary["connector_mode_warnings"][0]
+        self.assertEqual(
+            warning["reason"],
+            "binary path outside trusted prefixes; version was not probed",
+        )
+        self.assertEqual(warning["binary_path"], os.path.realpath(bin_path))
+        self.assertEqual(warning["trusted_path"], os.path.realpath(bin_dir))
+        self.assertEqual(mock_discover.call_count, 2)
 
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
     def test_no_multi_flags_keeps_single_connector_default(self, mock_discover):

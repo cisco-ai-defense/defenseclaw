@@ -62,6 +62,7 @@ def _make_app(connector: str):
         api_base="",
         api_key_env="",
         fallbacks=[],
+        hook_connectors=[],
     )
     # Human-In-the-Loop (HILT) sub-namespace mirrors GuardrailConfig.hilt.
     # Required because the wizard now asks about HILT inline whenever
@@ -145,6 +146,8 @@ class TestObservabilityWizard(unittest.TestCase):
                    return_value="1"), \
              patch("defenseclaw.commands.cmd_setup._select_connector_interactive",
                    return_value=connector), \
+             patch("defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
+                   return_value="regex_only"), \
              patch("defenseclaw.commands.cmd_setup._print_connector_info",
                    return_value=None), \
              patch("defenseclaw.commands.cmd_setup.click.echo",
@@ -162,8 +165,8 @@ class TestObservabilityWizard(unittest.TestCase):
         self.assertEqual(gc.scanner_mode, "local")
         self.assertEqual(gc.detection_strategy, "regex_only")
         self.assertFalse(gc.judge.enabled,
-                         "Default-accept path declines the judge prompt; "
-                         "operators who want it can opt in on rerun")
+                         "Default scan strategy is regex_only; "
+                         "operators who want judge can opt in on rerun")
         # The observability-only branch now also surfaces the hook
         # fail-mode prompt on initial setup. The mocked ``click.prompt``
         # returns "1" (open), so the persisted value must reflect that —
@@ -177,6 +180,39 @@ class TestObservabilityWizard(unittest.TestCase):
         self.assertEqual(gc.mode, "observe")
         self.assertFalse(gc.judge.enabled)
         self.assertEqual(gc.hook_fail_mode, "open")
+
+    def test_regex_only_strategy_skips_judge_prompts(self):
+        app, gc = _make_app("codex")
+
+        with patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=[True, False]), \
+             patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
+             patch("defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy", return_value="regex_only"), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_judge_model_config",
+                 side_effect=AssertionError("judge model prompt should not run for regex_only"),
+             ), \
+             patch("defenseclaw.commands.cmd_setup._select_connector_interactive", return_value="codex"), \
+             patch("defenseclaw.commands.cmd_setup._print_connector_info", return_value=None), \
+             patch("defenseclaw.commands.cmd_setup.click.echo", return_value=None):
+            _interactive_guardrail_setup(app, gc, agent_name="codex")
+        self.assertFalse(gc.judge.enabled)
+        self.assertEqual(gc.detection_strategy, "regex_only")
+
+    def test_judge_strategy_enables_all_hook_coverage_and_model(self):
+        app, gc = _make_app("codex")
+
+        with patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=[True, False]), \
+             patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
+             patch("defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy", return_value="regex_judge"), \
+             patch("defenseclaw.commands.cmd_setup._prompt_judge_model_config") as model_prompt, \
+             patch("defenseclaw.commands.cmd_setup._select_connector_interactive", return_value="codex"), \
+             patch("defenseclaw.commands.cmd_setup._print_connector_info", return_value=None), \
+             patch("defenseclaw.commands.cmd_setup.click.echo", return_value=None):
+            _interactive_guardrail_setup(app, gc, agent_name="codex")
+        self.assertTrue(gc.judge.enabled)
+        self.assertEqual(gc.detection_strategy, "regex_judge")
+        self.assertEqual(gc.judge.hook_connectors, ["*"])
+        model_prompt.assert_called_once()
 
     def test_observability_decline_disables_connector(self):
         """When the operator declines the single confirm prompt, the

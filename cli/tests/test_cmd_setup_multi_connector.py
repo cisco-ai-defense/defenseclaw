@@ -255,13 +255,17 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertIn("claudecode", out)
         self.assertIn("codex", out)
         self.assertIn("connectors:", out)
+        self.assertIn("codex mode:", out)
+        self.assertNotIn("guardrail.mode:", out)
         # ...and no '(primary: ...)' callout leaks the back-compat pointer.
         self.assertNotIn("primary:", out)
 
-    def test_single_connector_summary_unchanged(self):
+    def test_single_connector_summary_uses_connector_mode_label(self):
         self._seed_map("cursor")  # single → claw.mode row, not a roster
         out = self._capture_summary("cursor")
         self.assertIn("claw.mode:", out)
+        self.assertIn("cursor mode:", out)
+        self.assertNotIn("guardrail.mode:", out)
         self.assertNotIn("connectors:", out)
         self.assertNotIn("primary:", out)
 

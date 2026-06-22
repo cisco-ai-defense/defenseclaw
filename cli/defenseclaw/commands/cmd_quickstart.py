@@ -26,6 +26,7 @@ users who want something different should use ``defenseclaw init`` or
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 import click
@@ -124,9 +125,10 @@ import click
     ),
     default=None,
     help="Agent framework connector (alias: --agent). "
-    "Defaults to <data_dir>/picked_connector when set by the installer, "
-    "else the single auto-detected agent. Quickstart errors (no silent "
-    "default) when no agent is detected or several are present.",
+    "Quickstart configures one connector: an explicit value wins, otherwise "
+    "the single configured/detected connector is used. A picked_connector hint "
+    "is used only when no configured/detected connector exists. Bare quickstart "
+    "errors when the connector choice is ambiguous.",
 )
 @click.option(
     "--skip-gateway",
@@ -164,37 +166,50 @@ def quickstart_cmd(
     )
     from defenseclaw.ux import CLIRenderer
 
+    connector_source: dict[str, str] = {}
     if agent_name:
         connector = agent_name
     else:
         data_dir = str(cfg_mod.default_data_path())
-        # SU-12: never silently configure "codex". Resolve from the installer
-        # hint first, then auto-detect installed agents. Stop with an
-        # actionable error when nothing is detected or when several agents are
-        # present (ambiguous) instead of guessing — the operator disambiguates
-        # with --connector/--agent. Quickstart configures a single connector.
-        connector = _read_picked_connector(data_dir)
-        if not connector:
-            detected = _detect_installed_connectors()
-            if len(detected) == 1:
-                connector = detected[0]
-            elif not detected:
+        picked_path = os.path.join(data_dir, "picked_connector")
+        picked = _read_picked_connector(data_dir)
+        detected = _detect_installed_connectors()
+        configured = _configured_quickstart_connectors(cfg_mod)
+        candidates = sorted({name for name in [*configured, *detected] if name})
+        if len(candidates) > 1:
+            click.echo(
+                "  ✗ Multiple connectors detected/configured: "
+                f"{', '.join(candidates)}.\n"
+                "    Quickstart configures one connector.\n"
+                "    Re-run with --connector <name>.",
+                err=True,
+            )
+            sys.exit(2)
+        if len(candidates) == 1:
+            connector = candidates[0]
+            if picked and picked != connector:
                 click.echo(
-                    "  ✗ Could not detect an agent framework on this host.\n"
-                    "    Re-run with an explicit connector, e.g. "
-                    "`defenseclaw quickstart --connector hermes`.",
+                    "  ✗ Connector choice is ambiguous.\n"
+                    f"    picked_connector says {picked}, but the active/detected connector is {connector}.\n"
+                    "    Re-run with --connector <name>.",
                     err=True,
                 )
                 sys.exit(2)
-            else:
-                click.echo(
-                    "  ✗ Multiple agent frameworks detected "
-                    f"({', '.join(detected)}); quickstart configures one.\n"
-                    "    Pick one explicitly, e.g. "
-                    f"`defenseclaw quickstart --connector {detected[0]}`.",
-                    err=True,
-                )
-                sys.exit(2)
+        elif picked:
+            connector = picked
+            connector_source = {
+                "type": "picked_connector",
+                "connector": connector,
+                "path": picked_path,
+            }
+        else:
+            click.echo(
+                "  ✗ Could not detect an agent framework on this host.\n"
+                "    Re-run with an explicit connector, e.g. "
+                "`defenseclaw quickstart --connector hermes`.",
+                err=True,
+            )
+            sys.exit(2)
 
     profile = mode or "observe"
 
@@ -220,8 +235,34 @@ def quickstart_cmd(
         )
     )
     if json_summary:
-        click.echo(json.dumps(report.to_dict(), indent=2))
+        payload = report.to_dict()
+        if connector_source:
+            payload["connector_source"] = connector_source
+        click.echo(json.dumps(payload, indent=2))
     else:
+        if connector_source:
+            click.echo(
+                f"  Using picked connector hint: {connector} from {connector_source['path']}"
+            )
         _render_first_run_report(report, CLIRenderer())
     if report.status == "needs_attention":
         sys.exit(1)
+
+
+def _configured_quickstart_connectors(cfg_mod) -> list[str]:
+    """Return meaningful active connectors from an existing config, if any."""
+    try:
+        config_file = cfg_mod.config_path()
+        if not os.path.exists(config_file):
+            return []
+        cfg = cfg_mod.load()
+    except Exception:
+        return []
+
+    try:
+        if getattr(cfg.guardrail, "connectors", None):
+            return list(cfg.active_connectors())
+        active = cfg.active_connector()
+    except Exception:
+        return []
+    return [] if active == "openclaw" else [active]

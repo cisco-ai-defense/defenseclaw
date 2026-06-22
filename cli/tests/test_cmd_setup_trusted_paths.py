@@ -271,6 +271,40 @@ class GatePromptContractGateTests(unittest.TestCase):
         self.assertIn(os.path.dirname(os.path.realpath(binpath)), joined)
         self.assertIn("appends to ~/.defenseclaw/.env", joined)
 
+    def test_prompt_cache_avoids_reasking_same_directory(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        binpath = os.path.join(tmp, "bin", "codex")
+        disc = _disc(_signal("", ad.UNTRUSTED_PREFIX_ERROR, binpath))
+        cache: dict[str, bool] = {}
+
+        def contract(_c, v):
+            return _compat(v, STATUS_UNVERSIONED, "codex-hooks-v1")
+
+        with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False), \
+                patch.object(cmd_setup.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_setup, "resolve_connector_contract", side_effect=contract), \
+                patch.object(sys.stdin, "isatty", return_value=True), \
+                patch.object(sys.stdout, "isatty", return_value=True), \
+                patch.object(cmd_setup.click, "confirm", return_value=False) as confirm:
+            first = cmd_setup._check_connector_version_supported_for_setup(
+                "codex",
+                mode="action",
+                data_dir=tmp,
+                _trusted_prompt_cache=cache,
+            )
+            second = cmd_setup._check_connector_version_supported_for_setup(
+                "codex",
+                mode="action",
+                data_dir=tmp,
+                _trusted_prompt_cache=cache,
+            )
+
+        self.assertFalse(first)
+        self.assertFalse(second)
+        confirm.assert_called_once()
+        self.assertEqual(cache, {os.path.dirname(os.path.realpath(binpath)): False})
+
 
 class ValidateTrustedPrefixTests(unittest.TestCase):
     def test_rejects_non_absolute_path(self):

@@ -45,6 +45,7 @@ Antigravity / ZeptoClaw configure themselves.
 from __future__ import annotations
 
 import os
+import shutil
 
 import click
 
@@ -291,21 +292,71 @@ def guardrail() -> None:
 #: as "every hook connector". Mirrored locally so the status readout never
 #: disagrees with what the gateway enforces.
 _JUDGE_ALL_SENTINEL = "*"
+_JUDGE_RUNNING_STRATEGIES = frozenset({"regex_judge", "judge_first"})
 
 
-def _effective_scan_strategy(gc) -> tuple[str, str, str]:
-    """Return ``(global, prompt, completion)`` effective detection strategies.
+def _configured_hook_scan_strategies(gc) -> dict[str, str]:
+    """Return configured hook-lane scan strategies by user-facing lane.
 
-    Detection strategy is a GLOBAL guardrail setting (with per-direction
-    overrides), not per-connector — mirrors Go ``EffectiveStrategy``. An
-    empty per-direction field inherits the global value. Tolerates older /
-    minimal configs that predate the fields via ``getattr`` so ``status``
-    never raises on a trimmed config.
+    Hook connectors expose prompt, tool-call, and tool-output surfaces. The
+    Go config still calls tool output ``completion`` because it shares the
+    proxy lane's output-shaped judge, but the status UI should speak in hook
+    terms. Empty per-lane fields inherit the global strategy.
     """
     base = (getattr(gc, "detection_strategy", "") or "regex_judge").strip() or "regex_judge"
     prompt = (getattr(gc, "detection_strategy_prompt", "") or "").strip() or base
     completion = (getattr(gc, "detection_strategy_completion", "") or "").strip() or base
-    return base, prompt, completion
+    tool_call = (getattr(gc, "detection_strategy_tool_call", "") or "").strip() or base
+    return {
+        "prompt": prompt,
+        "tool-call": tool_call,
+        "tool-output": completion,
+    }
+
+
+def _effective_hook_scan_strategies(gc, connector: str) -> dict[str, str]:
+    """Return the scan strategies that actually apply to one hook connector."""
+    judge_cfg = getattr(gc, "judge", None)
+    judge_enabled = bool(getattr(judge_cfg, "enabled", False))
+    judge_gate = list(getattr(judge_cfg, "hook_connectors", None) or [])
+    judge_selected = _judge_gated(judge_gate, connector)
+    effective: dict[str, str] = {}
+    for lane, strategy in _configured_hook_scan_strategies(gc).items():
+        normalized = (strategy or "").strip().lower() or "regex_judge"
+        if judge_enabled and judge_selected and normalized in _JUDGE_RUNNING_STRATEGIES:
+            effective[lane] = normalized
+        else:
+            effective[lane] = "regex_only"
+    return effective
+
+
+def _style_strategy(strategy: str) -> str:
+    if strategy == "judge_first":
+        return ux._style(strategy, fg="yellow", bold=True)
+    if strategy == "regex_judge":
+        return ux._style(strategy, fg="cyan", bold=True)
+    return ux.dim(strategy)
+
+
+def _scan_value(gc, connector: str) -> str:
+    strategies = _effective_hook_scan_strategies(gc, connector)
+    values = list(strategies.values())
+    if values and all(v == values[0] for v in values):
+        return values[0]
+    return ", ".join(f"{lane}:{strategy}" for lane, strategy in strategies.items())
+
+
+def _style_scan_value(value: str) -> str:
+    if "," not in value and ":" not in value:
+        return _style_strategy(value)
+    parts: list[str] = []
+    for part in value.split(", "):
+        if ":" not in part:
+            parts.append(part)
+            continue
+        lane, strategy = part.split(":", 1)
+        parts.append(f"{lane}:{_style_strategy(strategy)}")
+    return ", ".join(parts)
 
 
 def _judge_gated(gate, name: str) -> bool:
@@ -323,142 +374,104 @@ def _judge_gated(gate, name: str) -> bool:
     return False
 
 
-def _judge_gate_config_label(gate) -> str:
-    entries = list(gate or [])
-    if not entries:
-        return "none"
-    if any((e or "").strip() == _JUDGE_ALL_SENTINEL for e in entries):
-        return "all"
-    return ", ".join((e or "").strip() for e in entries if (e or "").strip()) or "none"
+def _connector_judge_value(gc, name: str) -> str:
+    strategies = _effective_hook_scan_strategies(gc, name)
+    if any(strategy in _JUDGE_RUNNING_STRATEGIES for strategy in strategies.values()):
+        return "on"
+    return "off"
 
 
-def _connector_status_label(name: str) -> str:
-    return f"{_connector_label(name)} ({name})"
+def _style_judge_value(value: str) -> str:
+    if value == "on":
+        return ux._style(value, fg="green", bold=True)
+    return ux.dim(value)
 
 
-def _judge_active_for_connector(
-    *,
-    gate,
-    judge_enabled: bool,
-    prompt_strategy: str,
-    connector: str,
-) -> bool:
-    return (
-        judge_enabled
-        and _judge_gated(gate, connector)
-        and (prompt_strategy or "").strip().lower() != "regex_only"
+def _style_mode(mode: str) -> str:
+    if mode == "action":
+        return ux._style(mode, fg="green", bold=True)
+    return ux._style(mode, fg="yellow") if mode == "observe" else mode
+
+
+def _style_fail_mode(mode: str) -> str:
+    if mode == "closed":
+        return ux._style(mode, fg="yellow", bold=True)
+    if mode == "open":
+        return ux._style(mode, fg="green")
+    return mode
+
+
+def _visible_pad(styled: str, raw: str, width: int) -> str:
+    return styled + (" " * max(width - len(raw), 0))
+
+
+def _terminal_width() -> int:
+    try:
+        return shutil.get_terminal_size((120, 20)).columns
+    except OSError:
+        return 120
+
+
+def _render_connector_table(rows: list[dict[str, tuple[str, str]]]) -> None:
+    columns = [
+        ("label", "Connector"),
+        ("key", "Key"),
+        ("state", "State"),
+        ("mode", "Mode"),
+        ("fail", "Fail"),
+        ("rule_pack", "Rule pack"),
+        ("hilt", "HILT"),
+        ("scan", "Scan"),
+        ("judge", "Judge"),
+    ]
+    widths = {
+        key: max(len(header), *(len(row[key][0]) for row in rows))
+        for key, header in columns
+    }
+    gap = "  "
+    table_width = 6 + sum(widths[key] for key, _ in columns) + len(gap) * (len(columns) - 1)
+    if table_width > _terminal_width():
+        _render_connector_blocks(rows)
+        return
+
+    header = gap.join(
+        _visible_pad(ux._style(header, fg="bright_black", bold=True), header, widths[key])
+        for key, header in columns
     )
-
-
-def _judge_status_label(
-    *,
-    gate,
-    judge_enabled: bool,
-    prompt_strategy: str,
-    connectors: list[str],
-    connector_flag: str | None,
-) -> str:
-    if connector_flag and connectors:
-        name = connectors[0]
-        label = _connector_status_label(name)
-        if _judge_active_for_connector(
-            gate=gate,
-            judge_enabled=judge_enabled,
-            prompt_strategy=prompt_strategy,
-            connector=name,
-        ):
-            return f"on for {label}"
-        if not judge_enabled:
-            return f"off for {label} (disabled globally)"
-        if (prompt_strategy or "").strip().lower() == "regex_only":
-            return f"off for {label} (prompt strategy is regex_only)"
-        if not _judge_gated(gate, name):
-            return f"off for {label} (not selected)"
-        return f"off for {label}"
-    if not judge_enabled:
-        return "off (disabled globally)"
-    if (prompt_strategy or "").strip().lower() == "regex_only":
-        return "off (prompt strategy is regex_only)"
-    active = [
-        name
-        for name in connectors
-        if _judge_active_for_connector(
-            gate=gate,
-            judge_enabled=judge_enabled,
-            prompt_strategy=prompt_strategy,
-            connector=name,
+    separator = gap.join(ux.dim("-" * widths[key]) for key, _ in columns)
+    click.echo(f"      {header}")
+    click.echo(f"      {separator}")
+    for row in rows:
+        click.echo(
+            "      "
+            + gap.join(
+                _visible_pad(row[key][1], row[key][0], widths[key])
+                for key, _ in columns
+            )
         )
+
+
+def _render_connector_blocks(rows: list[dict[str, tuple[str, str]]]) -> None:
+    fields = [
+        ("key", "key"),
+        ("state", "state"),
+        ("mode", "mode"),
+        ("fail", "fail"),
+        ("rule_pack", "rule-pack"),
+        ("hilt", "hilt"),
+        ("scan", "scan"),
+        ("judge", "judge"),
     ]
-    if not active:
-        return "off (no connectors selected)"
-    return "on"
-
-
-def _judge_coverage_label(
-    *,
-    gate,
-    judge_enabled: bool,
-    prompt_strategy: str,
-    connectors: list[str],
-    connector_flag: str | None,
-) -> str:
-    active = [
-        name
-        for name in connectors
-        if _judge_active_for_connector(
-            gate=gate,
-            judge_enabled=judge_enabled,
-            prompt_strategy=prompt_strategy,
-            connector=name,
-        )
-    ]
-    if connector_flag:
-        if not active:
-            if not judge_enabled or (prompt_strategy or "").strip().lower() == "regex_only":
-                return "none active"
-            return "not selected"
-        return "selected"
-    if not active:
-        return "none active"
-    if _judge_gate_config_label(gate) == "all" and len(active) == len(connectors) and connectors:
-        return "all active connectors"
-    return ", ".join(_connector_status_label(name) for name in active)
-
-
-def _saved_judge_gate_label(
-    *,
-    gate,
-    judge_enabled: bool,
-    prompt_strategy: str,
-) -> str:
-    configured = _judge_gate_config_label(gate)
-    if configured == "none":
-        return configured
-    if not judge_enabled:
-        return f"{configured} (inactive until judge is enabled)"
-    if (prompt_strategy or "").strip().lower() == "regex_only":
-        return f"{configured} (inactive while prompt strategy is regex_only)"
-    return configured
-
-
-def _connector_judge_token(gc, name: str, prompt_strategy: str) -> str:
-    """Per-connector hook-lane judge state for the status roster.
-
-    Honest about the J5 overstatement trap: a connector can be in the
-    judge gate AND the judge enabled, yet the judge never runs because the
-    (global) prompt scan strategy is ``regex_only``. We report ``on`` only
-    when the judge would actually execute, ``off (regex_only)`` for the
-    gated-but-strategy-suppressed case, else ``off``.
-    """
-    judge_cfg = getattr(gc, "judge", None)
-    if not getattr(judge_cfg, "enabled", False):
-        return "off"
-    gate = getattr(judge_cfg, "hook_connectors", None) or []
-    if not _judge_gated(gate, name):
-        return "off"
-    if (prompt_strategy or "").strip().lower() == "regex_only":
-        return "off (regex_only)"
-    return "on"
+    label_width = max(len(label) for _, label in fields)
+    for row in rows:
+        click.echo(f"      - {row['label'][1]}")
+        for key, label in fields:
+            label_raw = label + ":"
+            label_styled = ux._style(label_raw, fg="bright_black", bold=True)
+            click.echo(
+                f"          {_visible_pad(label_styled, label_raw, label_width + 1)} "
+                f"{row[key][1]}"
+            )
 
 
 @guardrail.command("status")
@@ -481,12 +494,12 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
     to reason about connector count. There is no separate single-vs-multi
     rendering and no "primary" connector line.
 
-    Also surfaces the global scan strategy and judge posture (with a
-    per-connector ``judge=`` token that never overstates coverage — it
-    reads ``off`` when a regex_only strategy means the judge can't run),
-    and renders an explicit "none configured" state rather than a phantom
-    ``openclaw`` when no connector is set up. ``--connector X`` narrows the
-    roster to one active peer.
+    The connector row is the source of truth for hook posture: enabled state,
+    mode, fail mode, rule pack, HILT, effective hook scan strategy, and judge
+    state are shown together so the scan strategy cannot contradict the judge
+    gate. ``--connector X`` narrows the roster to one active peer. When no
+    connector is set up, status renders an explicit "none configured" state
+    rather than a phantom ``openclaw``.
     """
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
@@ -496,17 +509,6 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
     enabled_val = ux._style(enabled_txt, fg="green") if gc.enabled else ux._style(enabled_txt, fg="yellow")
     click.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
 
-    # Scan strategy + judge posture (G3 / J5). detection_strategy is a GLOBAL
-    # guardrail setting (with per-direction overrides), not per-connector —
-    # surface it so an operator can see whether the LLM judge can run at all
-    # without grepping config.yaml. `guardrail judge list` gives the full
-    # per-lane breakdown; status keeps it to a one-line summary + a
-    # per-connector `judge=` token on each roster block below.
-    base_strategy, prompt_strategy, completion_strategy = _effective_scan_strategy(gc)
-    click.echo(
-        f"  • {ux._style('scan strategy:', fg='bright_black', bold=True)} {base_strategy} "
-        f"{ux.dim(f'(prompt: {prompt_strategy}, completion: {completion_strategy})')}"
-    )
     # Resolve the full active set and render exactly one coherent view: a
     # per-connector block for EACH active connector. active_connectors()
     # returns [connector] on a single-connector install and the full set on
@@ -564,44 +566,7 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
             raise SystemExit(1)
         actives = scoped
 
-    judge_cfg = getattr(gc, "judge", None)
-    judge_enabled = bool(getattr(judge_cfg, "enabled", False))
-    judge_gate = list(getattr(judge_cfg, "hook_connectors", None) or [])
-    judge_state_txt = _judge_status_label(
-        gate=judge_gate,
-        judge_enabled=judge_enabled,
-        prompt_strategy=prompt_strategy,
-        connectors=actives,
-        connector_flag=connector_flag,
-    )
-    judge_state_val = (
-        ux._style(judge_state_txt, fg="green")
-        if judge_state_txt.startswith("on")
-        else ux._style(judge_state_txt, fg="yellow")
-    )
-    coverage_lbl = _judge_coverage_label(
-        gate=judge_gate,
-        judge_enabled=judge_enabled,
-        prompt_strategy=prompt_strategy,
-        connectors=actives,
-        connector_flag=connector_flag,
-    )
-    saved_gate_lbl = _saved_judge_gate_label(
-        gate=judge_gate,
-        judge_enabled=judge_enabled,
-        prompt_strategy=prompt_strategy,
-    )
-    click.echo(f"  • {ux._style('judge:', fg='bright_black', bold=True)}      {judge_state_val}")
-    click.echo(
-        f"  • {ux._style('judge coverage:', fg='bright_black', bold=True)} "
-        f"{ux.dim(coverage_lbl)}"
-    )
-    click.echo(
-        f"  • {ux._style('saved judge gate:', fg='bright_black', bold=True)} "
-        f"{ux.dim(saved_gate_lbl)}"
-    )
-
-    click.echo(f"  • {ux._style('connectors:', fg='bright_black', bold=True)}")
+    rows: list[dict[str, tuple[str, str]]] = []
     for name in actives:
         cmode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else (gc.mode or "observe")
         cfm = (
@@ -624,12 +589,15 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
         # while the top-level line (and the gateway, which tears every
         # connector down when guardrail.enabled is false) report it off.
         if not gc.enabled:
-            state = ux._style("disabled (guardrail off)", fg="yellow")
+            state_raw = "disabled (guardrail off)"
+            state = ux._style(state_raw, fg="yellow")
         elif c_enabled:
-            state = ux._style("enabled", fg="green")
+            state_raw = "enabled"
+            state = ux._style(state_raw, fg="green")
         else:
-            state = ux._style("disabled", fg="yellow")
-        cfm_display = ux._style(cfm, fg="yellow") if cfm == "closed" else cfm
+            state_raw = "disabled"
+            state = ux._style(state_raw, fg="yellow")
+        cfm_display = _style_fail_mode(cfm)
         # Each connector can scan against its OWN rule pack (per-connector
         # override, else the global pack); surface it so the roster shows which
         # policy each peer is enforcing. Empty dir = the built-in default pack.
@@ -638,38 +606,38 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
             if hasattr(gc, "effective_rule_pack_dir")
             else ""
         )
-        rule_pack = os.path.basename(rp_dir.rstrip("/")) if rp_dir.strip() else "default"
+        rule_pack_raw = os.path.basename(rp_dir.rstrip("/")) if rp_dir.strip() else "default"
+        rule_pack = ux.accent(rule_pack_raw) if rule_pack_raw != "default" else ux.dim(rule_pack_raw)
         # Per-connector HILT (human-in-the-loop): on@<min-severity> or off, so
         # the roster reflects `guardrail hilt --connector X` overrides.
         hilt_eff = gc.effective_hilt(name) if hasattr(gc, "effective_hilt") else None
         if hilt_eff is not None and getattr(hilt_eff, "enabled", False):
-            hilt_str = f"hilt=on@{(getattr(hilt_eff, 'min_severity', '') or 'HIGH').upper()}"
+            hilt_raw = f"on@{(getattr(hilt_eff, 'min_severity', '') or 'HIGH').upper()}"
+            hilt_str = (
+                ux._style(hilt_raw, fg="yellow", bold=True)
+            )
         else:
-            hilt_str = "hilt=off"
-        # Per-connector hook-lane judge state (G3 / J5). `on` only when the
-        # judge would actually run for this connector (enabled + gated +
-        # strategy not regex_only) — never overstates coverage.
-        judge_tok = _connector_judge_token(gc, name, prompt_strategy)
-        click.echo(
-            f"      - {_connector_label(name)} ({name}): "
-            f"{state} mode={cmode or 'observe'} fail={cfm_display} "
-            f"rule-pack={rule_pack} {hilt_str} judge={judge_tok}"
+            hilt_raw = "off"
+            hilt_str = ux.dim(hilt_raw)
+        scan_raw = _scan_value(gc, name)
+        judge_raw = _connector_judge_value(gc, name)
+        rows.append(
+            {
+                "label": (_connector_label(name), _connector_label(name)),
+                "key": (name, ux.dim(name)),
+                "state": (state_raw, state),
+                "mode": (cmode or "observe", _style_mode(cmode or "observe")),
+                "fail": (cfm, cfm_display),
+                "rule_pack": (rule_pack_raw, rule_pack),
+                "hilt": (hilt_raw, hilt_str),
+                "scan": (scan_raw, _style_scan_value(scan_raw)),
+                "judge": (judge_raw, _style_judge_value(judge_raw)),
+            }
         )
+    _render_connector_table(rows)
     click.echo(
         f"  • {ux.dim('fail = hook response-layer failures (4xx / bad JSON / missing action)')}"
     )
-
-    # J5 anti-overstatement: the judge can be enabled AND a connector gated,
-    # yet never run because the (global) prompt strategy is regex_only. Say so
-    # once, here, rather than letting `judge=` tokens imply coverage that the
-    # strategy silently suppresses.
-    if judge_enabled and prompt_strategy.strip().lower() == "regex_only":
-        ux.warn(
-            "judge is enabled but scan strategy is 'regex_only' — the judge "
-            "will not run on prompts. Set strategy to regex_judge or "
-            "judge_first to activate it.",
-            indent="  ",
-        )
 
     click.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
     click.echo()

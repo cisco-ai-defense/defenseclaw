@@ -113,7 +113,8 @@ class StatusCommandTests(unittest.TestCase):
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("enabled:    yes", result.output)
-        self.assertIn("OpenClaw (openclaw)", result.output)
+        self.assertIn("OpenClaw", result.output)
+        self.assertIn("openclaw", result.output)
         self.assertIn("disable", result.output)
 
     def test_status_disabled_codex(self):
@@ -122,7 +123,8 @@ class StatusCommandTests(unittest.TestCase):
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("enabled:    no", result.output)
-        self.assertIn("Codex (codex)", result.output)
+        self.assertIn("Codex", result.output)
+        self.assertIn("codex", result.output)
         self.assertIn("Enable with", result.output)
 
     def test_status_surfaces_hook_fail_mode(self):
@@ -133,29 +135,35 @@ class StatusCommandTests(unittest.TestCase):
         # The fail mode is a key posture knob: status MUST surface it so
         # operators can sanity-check their posture without grep-ing
         # config.yaml. It is folded into the (uniform) per-connector
-        # block as ``fail=...``.
-        self.assertIn("fail=closed", result.output)
+        # block as the Fail column.
+        self.assertIn("Fail", result.output)
+        self.assertIn("closed", result.output)
 
     def test_status_single_connector_uses_uniform_per_connector_block(self):
         # A single-connector install renders the SAME per-connector block
-        # layout as a fan-out install: one "connectors:" section with one
-        # tagged block. No singular "connector / mode / fail mode" lines.
+        # layout as a fan-out install: one connector roster table, no
+        # redundant "connectors:" label plus table header.
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="openclaw")
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("connectors:", result.output)
-        # Uniform per-connector block: "<label> (<name>): <state> mode=... fail=...".
-        self.assertIn("OpenClaw (openclaw): ", result.output)
-        self.assertIn("mode=observe", result.output)
+        self.assertNotIn("connectors:", result.output)
+        # Uniform per-connector table: label + key + posture fields.
+        self.assertIn("Connector", result.output)
+        self.assertIn("Key", result.output)
+        self.assertIn("OpenClaw", result.output)
+        self.assertIn("openclaw", result.output)
+        self.assertIn("observe", result.output)
         # Default fail mode is the safer "closed" (response-layer
         # failures block); see _normalize_hook_fail_mode / default_config.
-        self.assertIn("fail=closed", result.output)
+        self.assertIn("closed", result.output)
         # The retired singular lines (and the "multi-connector"-only
         # footer hint) must NOT appear — there is exactly one rendering.
         self.assertNotIn("• connector:", result.output)
         self.assertNotIn("• mode:", result.output)
         self.assertNotIn("• fail mode:", result.output)
+        self.assertNotIn("scan strategy:", result.output)
+        self.assertNotIn("judge coverage:", result.output)
         self.assertNotIn("--connector", result.output)
 
     def test_status_multi_connector_uses_same_layout(self):
@@ -175,16 +183,34 @@ class StatusCommandTests(unittest.TestCase):
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         # Both connectors' blocks are present, each tagged by name.
-        self.assertIn("Claude Code (claudecode): ", result.output)
-        self.assertIn("Codex (codex): ", result.output)
-        self.assertIn("mode=action", result.output)
-        self.assertIn("mode=observe", result.output)
+        self.assertIn("Claude Code", result.output)
+        self.assertIn("claudecode", result.output)
+        self.assertIn("Codex", result.output)
+        self.assertIn("codex", result.output)
+        self.assertIn("action", result.output)
+        self.assertIn("observe", result.output)
         # No count banner, no singular lines, no per-connector footer hint.
         self.assertNotIn("2 active", result.output)
         self.assertNotIn("• connector:", result.output)
         self.assertNotIn("• mode:", result.output)
         self.assertNotIn("• fail mode:", result.output)
+        self.assertNotIn("scan strategy:", result.output)
+        self.assertNotIn("judge coverage:", result.output)
         self.assertNotIn("--connector", result.output)
+
+    def test_status_uses_stacked_connector_blocks_when_narrow(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="codex")
+        app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        with patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=60):
+            result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("- Codex", result.output)
+        self.assertIn("key:       codex", result.output)
+        self.assertNotIn("connector: codex", result.output)
+        self.assertIn("rule-pack:", result.output)
+        self.assertIn("scan:", result.output)
+        self.assertIn("judge:", result.output)
 
 
 class GroupHelpTests(unittest.TestCase):
@@ -589,8 +615,10 @@ class PerConnectorToggleTests(unittest.TestCase):
         # Both connectors get their own block in the uniform roster, each
         # tagged by name with its own effective enabled state: codex was
         # turned off (disabled), claudecode inherits the default (enabled).
-        self.assertIn("Codex (codex): ", result.output)
-        self.assertIn("Claude Code (claudecode): ", result.output)
+        self.assertIn("Codex", result.output)
+        self.assertIn("codex", result.output)
+        self.assertIn("Claude Code", result.output)
+        self.assertIn("claudecode", result.output)
         self.assertIn("disabled", result.output)
         self.assertIn("enabled", result.output)
 
@@ -607,9 +635,10 @@ class PerConnectorToggleTests(unittest.TestCase):
         )
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("rule-pack=strict", result.output)   # codex's own pack
-        self.assertIn("rule-pack=default", result.output)  # claudecode inherits
-        self.assertIn("hilt=on@LOW", result.output)        # codex's own HILT
+        self.assertIn("Rule pack", result.output)
+        self.assertIn("strict", result.output)    # codex's own pack
+        self.assertIn("default", result.output)   # claudecode inherits
+        self.assertIn("on@LOW", result.output)    # codex's own HILT
 
     def test_status_global_disable_overrides_per_connector_enabled(self):
         # Regression: when the GLOBAL guardrail kill switch is off, no
@@ -623,15 +652,17 @@ class PerConnectorToggleTests(unittest.TestCase):
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("enabled:    no", result.output)
-        self.assertIn("Codex (codex): ", result.output)
-        self.assertIn("Claude Code (claudecode): ", result.output)
+        self.assertIn("Codex", result.output)
+        self.assertIn("codex", result.output)
+        self.assertIn("Claude Code", result.output)
+        self.assertIn("claudecode", result.output)
         # The off-because-global reason is shown and NOT a bare green enabled.
         self.assertIn("disabled (guardrail off)", result.output)
         # Sanity: the roster must not render a standalone "enabled" state for
         # any connector while global is off (it would be misleading).
         for line in result.output.splitlines():
-            if "(codex):" in line or "(claudecode):" in line:
-                self.assertNotIn(": enabled ", line, msg=line)
+            if "codex" in line or "claudecode" in line:
+                self.assertNotIn(" enabled ", line, msg=line)
 
 
 class PerConnectorFailModeTests(unittest.TestCase):
@@ -1046,82 +1077,87 @@ class CommandRegistrationTests(unittest.TestCase):
 
 
 class StatusStrategyJudgeTests(unittest.TestCase):
-    """G3 / J5 — status surfaces scan strategy + per-connector judge state."""
+    """G3 / J5 — status surfaces effective scan strategy per connector."""
 
     def _rich(self, *, enabled=True, connector="hermes", judge_enabled=True,
-              gate=None, strategy="regex_judge", prompt="", completion=""):
+              gate=None, strategy="regex_judge", prompt="", completion="", tool_call=""):
         app = make_ctx(enabled=enabled, connector=connector)
         gc = app.cfg.guardrail
         gc.detection_strategy = strategy
         gc.detection_strategy_prompt = prompt
         gc.detection_strategy_completion = completion
+        gc.detection_strategy_tool_call = tool_call
         gc.judge = SimpleNamespace(enabled=judge_enabled, hook_connectors=list(gate or []))
         return app, gc
 
-    def test_status_shows_scan_strategy_line(self):
-        # The global strategy (with per-direction overrides) is surfaced so an
-        # operator can see whether the judge can run at all. completion is the
-        # force-pinned regex_only default in the wild.
-        app, _ = self._rich(strategy="regex_judge", completion="regex_only")
+    def test_status_puts_effective_scan_in_connector_row(self):
+        # Hook status is connector-first: the row shows the effective hook
+        # surfaces once, using hook vocabulary rather than proxy-lane
+        # "completion" wording.
+        app, _ = self._rich(strategy="regex_judge", completion="regex_only", gate=["hermes"])
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("scan strategy: regex_judge", result.output)
-        self.assertIn("completion: regex_only", result.output)
+        self.assertNotIn("scan strategy:", result.output)
+        self.assertNotIn("judge coverage:", result.output)
+        self.assertIn("Hermes", result.output)
+        self.assertIn("hermes", result.output)
+        self.assertIn(
+            "prompt:regex_judge, tool-call:regex_judge, tool-output:regex_only",
+            result.output,
+        )
 
-    def test_status_judge_enabled_and_gate_label(self):
+    def test_status_judge_enabled_and_selected(self):
         app, _ = self._rich(judge_enabled=True, gate=["hermes"])
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("judge:      on", result.output)
-        self.assertIn("judge coverage: Hermes (hermes)", result.output)
-        self.assertIn("saved judge gate: hermes", result.output)
-        # gated + enabled + strategy ok → this connector reports judge=on.
-        self.assertIn("judge=on", result.output)
+        self.assertIn("Hermes", result.output)
+        self.assertIn("hermes", result.output)
+        self.assertIn("regex_judge", result.output)
+        self.assertIn("Judge", result.output)
+        self.assertIn("on", result.output)
 
     def test_status_judge_off_when_disabled(self):
         app, _ = self._rich(judge_enabled=False, gate=["hermes"])
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
-        self.assertIn("judge:      off (disabled globally)", result.output)
-        self.assertIn("judge coverage: none active", result.output)
-        self.assertIn("saved judge gate: hermes (inactive until judge is enabled)", result.output)
-        self.assertIn("judge=off", result.output)
+        self.assertNotIn("judge coverage:", result.output)
+        self.assertIn("regex_only", result.output)
+        self.assertIn("Judge", result.output)
+        self.assertIn("off", result.output)
         self.assertNotIn("judge=on", result.output)
 
     def test_status_judge_off_when_not_gated(self):
-        # Judge enabled globally but this connector isn't in the gate.
+        # Judge enabled globally but this connector isn't selected: the
+        # effective hook strategy is regex_only, so there is no separate
+        # top-level explanation to reconcile.
         app, _ = self._rich(judge_enabled=True, gate=[])
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
-        self.assertIn("judge:      off (no connectors selected)", result.output)
-        self.assertIn("judge coverage: none active", result.output)
-        self.assertIn("saved judge gate: none", result.output)
-        self.assertIn("judge=off", result.output)
+        self.assertIn("Hermes", result.output)
+        self.assertIn("hermes", result.output)
+        self.assertIn("regex_only", result.output)
+        self.assertIn("off", result.output)
 
     def test_status_all_gate_judges_every_connector(self):
         app, _ = self._rich(judge_enabled=True, gate=["*"])
         app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
-        self.assertIn("judge:      on", result.output)
-        self.assertIn("judge coverage: all active connectors", result.output)
-        self.assertIn("saved judge gate: all", result.output)
-        # Both connectors judged — token appears once per roster block.
-        self.assertEqual(result.output.count("judge=on"), 2)
+        self.assertIn("Codex", result.output)
+        self.assertIn("codex", result.output)
+        self.assertIn("Hermes", result.output)
+        self.assertIn("hermes", result.output)
+        self.assertEqual(result.output.count("regex_judge"), 2)
+        self.assertIn("Judge", result.output)
 
-    def test_status_regex_only_does_not_overstate_and_warns(self):
+    def test_status_regex_only_does_not_overstate(self):
         # J5 anti-overstatement: judge enabled AND gated, but the global
-        # prompt strategy is regex_only → the judge never runs. The token must
-        # NOT say "on", and status warns explicitly.
+        # strategy is regex_only → the judge never runs. The row should simply
+        # show the effective strategy and judge state once.
         app, _ = self._rich(judge_enabled=True, gate=["*"], strategy="regex_only")
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("judge:      off (prompt strategy is regex_only)", result.output)
-        self.assertIn("judge coverage: none active", result.output)
-        self.assertIn(
-            "saved judge gate: all (inactive while prompt strategy is regex_only)",
-            result.output,
-        )
-        self.assertIn("judge=off (regex_only)", result.output)
+        self.assertIn("regex_only", result.output)
+        self.assertIn("off", result.output)
         self.assertNotIn("judge=on", result.output)
-        self.assertIn("will not run", result.output)
+        self.assertNotIn("will not run", result.output)
 
 
 class StatusConnectorScopeTests(unittest.TestCase):
@@ -1140,8 +1176,10 @@ class StatusConnectorScopeTests(unittest.TestCase):
             cmd_guardrail.status_cmd, ["--connector", "hermes"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("Hermes (hermes):", result.output)
-        self.assertNotIn("Codex (codex):", result.output)
+        self.assertIn("Hermes", result.output)
+        self.assertIn("hermes", result.output)
+        self.assertNotIn("Codex", result.output)
+        self.assertNotIn("codex", result.output)
 
     def test_scopes_case_insensitively(self):
         app = self._multi()
@@ -1149,7 +1187,8 @@ class StatusConnectorScopeTests(unittest.TestCase):
             cmd_guardrail.status_cmd, ["--connector", "HERMES"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("Hermes (hermes):", result.output)
+        self.assertIn("Hermes", result.output)
+        self.assertIn("hermes", result.output)
 
     def test_scoped_status_does_not_show_other_connector_gate_as_active(self):
         app = self._multi()
@@ -1161,15 +1200,14 @@ class StatusConnectorScopeTests(unittest.TestCase):
             cmd_guardrail.status_cmd, ["--connector", "codex"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("judge:      off for Codex (codex) (disabled globally)", result.output)
-        self.assertIn("judge coverage: none active", result.output)
-        self.assertIn(
-            "saved judge gate: hermes (inactive until judge is enabled)",
-            result.output,
-        )
+        self.assertIn("regex_only", result.output)
+        self.assertIn("off", result.output)
+        self.assertNotIn("judge coverage:", result.output)
         self.assertNotIn("hook gate: hermes", result.output)
-        self.assertIn("Codex (codex):", result.output)
-        self.assertNotIn("Hermes (hermes):", result.output)
+        self.assertIn("Codex", result.output)
+        self.assertIn("codex", result.output)
+        self.assertNotIn("Hermes", result.output)
+        self.assertNotIn("hermes", result.output)
 
     def test_scoped_status_shows_selected_judge_connector(self):
         app = self._multi()
@@ -1181,11 +1219,12 @@ class StatusConnectorScopeTests(unittest.TestCase):
             cmd_guardrail.status_cmd, ["--connector", "hermes"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("judge:      on for Hermes (hermes)", result.output)
-        self.assertIn("judge coverage: selected", result.output)
-        self.assertIn("saved judge gate: hermes", result.output)
-        self.assertIn("Hermes (hermes):", result.output)
-        self.assertNotIn("Codex (codex):", result.output)
+        self.assertIn("regex_judge", result.output)
+        self.assertIn("on", result.output)
+        self.assertIn("Hermes", result.output)
+        self.assertIn("hermes", result.output)
+        self.assertNotIn("Codex", result.output)
+        self.assertNotIn("codex", result.output)
 
     def test_scoped_status_shows_unselected_judge_connector(self):
         app = self._multi()
@@ -1197,11 +1236,13 @@ class StatusConnectorScopeTests(unittest.TestCase):
             cmd_guardrail.status_cmd, ["--connector", "codex"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("judge:      off for Codex (codex) (not selected)", result.output)
-        self.assertIn("judge coverage: not selected", result.output)
-        self.assertIn("saved judge gate: hermes", result.output)
-        self.assertIn("Codex (codex):", result.output)
-        self.assertNotIn("Hermes (hermes):", result.output)
+        self.assertIn("regex_only", result.output)
+        self.assertIn("off", result.output)
+        self.assertNotIn("judge coverage:", result.output)
+        self.assertIn("Codex", result.output)
+        self.assertIn("codex", result.output)
+        self.assertNotIn("Hermes", result.output)
+        self.assertNotIn("hermes", result.output)
 
     def test_unknown_connector_errors(self):
         app = make_ctx(enabled=True, connector="codex")
@@ -1237,7 +1278,8 @@ class StatusPhantomTests(unittest.TestCase):
         app.cfg.has_connector_configured = lambda: True  # type: ignore[method-assign]
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("OpenClaw (openclaw):", result.output)
+        self.assertIn("OpenClaw", result.output)
+        self.assertIn("openclaw", result.output)
         self.assertNotIn("none configured", result.output)
 
 
