@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING
 from defenseclaw.inventory import agent_discovery
 
 if TYPE_CHECKING:
-    from defenseclaw.config import Config
+    from defenseclaw.config import Config, PerConnectorGuardrailConfig
     from defenseclaw.logger import Logger
 
 
@@ -673,6 +673,20 @@ def _apply_first_run_choices(
     if cfg.guardrail.hilt.enabled and not cfg.guardrail.hilt.min_severity:
         cfg.guardrail.hilt.min_severity = "HIGH"
 
+    selected_pc = _first_run_selected_connector_override(cfg, connector)
+    if options.human_approval is not None and selected_pc is not None:
+        from defenseclaw.config import HILTConfig
+
+        min_severity = cfg.guardrail.hilt.min_severity or "HIGH"
+        if not severity and selected_pc.hilt is not None and selected_pc.hilt.min_severity:
+            min_severity = selected_pc.hilt.min_severity
+        selected_pc.hilt = HILTConfig(
+            enabled=bool(options.human_approval),
+            min_severity=min_severity,
+        )
+    elif severity and selected_pc is not None and selected_pc.hilt is not None:
+        selected_pc.hilt.min_severity = cfg.guardrail.hilt.min_severity
+
     if options.llm_provider:
         cfg.llm.provider = options.llm_provider.strip()
     if options.llm_model:
@@ -714,6 +728,24 @@ def _apply_first_run_connector_override(cfg: Config, connector: str, mode: str) 
     if pc.enabled is False:
         pc.enabled = True
     gc.connectors[key] = pc
+
+
+def _first_run_selected_connector_override(
+    cfg: Config,
+    connector: str,
+) -> PerConnectorGuardrailConfig | None:
+    gc = cfg.guardrail
+    connectors = getattr(gc, "connectors", None)
+    if not connectors:
+        return None
+    pc = connectors.get(connector)
+    if pc is not None:
+        return pc
+    wanted = _normalize_connector(connector)
+    for existing_key, existing_pc in connectors.items():
+        if _normalize_connector(existing_key) == wanted:
+            return existing_pc
+    return None
 
 
 def _persist_first_run_secrets(cfg: Config, options: FirstRunOptions, steps: list[StepResult]) -> None:
