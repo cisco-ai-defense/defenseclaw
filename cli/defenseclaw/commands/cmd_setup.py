@@ -5311,6 +5311,39 @@ def _prompt_batch_judge_connectors(connectors: list[str], gc) -> set[str]:
     return selected_connectors
 
 
+def _prompt_guardrail_judge_enablement(gc, judge_targets: list[str]) -> set[str]:
+    """Interactive ``setup guardrail`` judge prompt without scan-strategy jargon."""
+    if judge_targets:
+        options, display_by_connector, connector_by_display = _connector_display_options(judge_targets)
+        ux.subhead("Rule/regex scanning is already enabled for every active connector.")
+        ux.subhead("Checked active connectors add LLM judge review on top.")
+        ux.subhead("These LLM settings are shared by all connectors with judge enabled.")
+        selected = _prompt_checkbox_selection(
+            options,
+            default_selected=_default_batch_judge_labels(judge_targets, gc, display_by_connector),
+            title="Select active connector(s) for LLM judge.",
+            empty_ok=True,
+        )
+        selected_connectors = {connector_by_display[label] for label in selected}
+        _merge_batch_judge_selection(gc, judge_targets, selected_connectors)
+        return selected_connectors
+
+    enabled = click.confirm(
+        "  Add LLM judge on top of rule scanning?",
+        default=bool(gc.judge.enabled),
+    )
+    if enabled:
+        gc.judge.enabled = True
+        if not gc.detection_strategy or gc.detection_strategy == "regex_only":
+            gc.detection_strategy = "regex_judge"
+        _apply_judge_runtime_defaults(gc)
+    else:
+        gc.judge.enabled = False
+        gc.detection_strategy = "regex_only"
+        gc.detection_strategy_completion = "regex_only"
+    return set()
+
+
 def _prompt_batch_trusted_prefixes(
     app: AppContext,
     connector_modes: dict[str, str],
@@ -7508,7 +7541,7 @@ def _interactive_guardrail_setup(
     # exactly the same way the proxy surface stamps it on the
     # response body, which is why the operator's judge config is
     # connector-agnostic.
-    ux.section("LLM Judge (reduces false positives)")
+    ux.section("Optional LLM judge")
     ux.subhead("Uses an LLM to verify detections and catch novel attacks.")
     ux.subhead("Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
     click.echo()
@@ -7528,17 +7561,10 @@ def _interactive_guardrail_setup(
         if c in _HOOK_ENFORCED_CONNECTORS
     ]
 
-    strategy = _prompt_batch_scan_strategy(gc)
-    gc.detection_strategy = strategy
-    if strategy == "regex_only":
-        gc.judge.enabled = False
-        gc.detection_strategy_completion = "regex_only"
-    else:
-        gc.judge.enabled = True
+    _prompt_guardrail_judge_enablement(gc, judge_targets)
+    if gc.judge.enabled:
         if not getattr(gc, "detection_strategy_completion", None):
             gc.detection_strategy_completion = "regex_only"
-        if judge_targets:
-            _set_hook_judge_coverage_all(gc)
 
         # Connector-aware LLM role branching.
         #

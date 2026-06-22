@@ -38,6 +38,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import _interactive_guardrail_setup
 
 
@@ -146,8 +147,14 @@ class TestObservabilityWizard(unittest.TestCase):
                    return_value="1"), \
              patch("defenseclaw.commands.cmd_setup._select_connector_interactive",
                    return_value=connector), \
-             patch("defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
-                   return_value="regex_only"), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
+                 side_effect=AssertionError("setup guardrail should not ask for scan strategy"),
+             ), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_guardrail_judge_enablement",
+                 side_effect=lambda gc_arg, targets: cmd_setup._merge_batch_judge_selection(gc_arg, targets, set()),
+             ), \
              patch("defenseclaw.commands.cmd_setup._print_connector_info",
                    return_value=None), \
              patch("defenseclaw.commands.cmd_setup.click.echo",
@@ -181,15 +188,22 @@ class TestObservabilityWizard(unittest.TestCase):
         self.assertFalse(gc.judge.enabled)
         self.assertEqual(gc.hook_fail_mode, "open")
 
-    def test_regex_only_strategy_skips_judge_prompts(self):
+    def test_empty_judge_selection_skips_judge_model_prompt(self):
         app, gc = _make_app("codex")
 
         with patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=[True, False]), \
              patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
-             patch("defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy", return_value="regex_only"), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
+                 side_effect=AssertionError("setup guardrail should not ask for scan strategy"),
+             ), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_guardrail_judge_enablement",
+                 side_effect=lambda gc_arg, targets: cmd_setup._merge_batch_judge_selection(gc_arg, targets, set()),
+             ), \
              patch(
                  "defenseclaw.commands.cmd_setup._prompt_judge_model_config",
-                 side_effect=AssertionError("judge model prompt should not run for regex_only"),
+                 side_effect=AssertionError("judge model prompt should not run with no judge connectors"),
              ), \
              patch("defenseclaw.commands.cmd_setup._select_connector_interactive", return_value="codex"), \
              patch("defenseclaw.commands.cmd_setup._print_connector_info", return_value=None), \
@@ -198,12 +212,23 @@ class TestObservabilityWizard(unittest.TestCase):
         self.assertFalse(gc.judge.enabled)
         self.assertEqual(gc.detection_strategy, "regex_only")
 
-    def test_judge_strategy_enables_all_hook_coverage_and_model(self):
+    def test_judge_selection_enables_selected_hook_coverage_and_model(self):
         app, gc = _make_app("codex")
 
         with patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=[True, False]), \
              patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
-             patch("defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy", return_value="regex_judge"), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
+                 side_effect=AssertionError("setup guardrail should not ask for scan strategy"),
+             ), \
+             patch(
+                 "defenseclaw.commands.cmd_setup._prompt_guardrail_judge_enablement",
+                 side_effect=lambda gc_arg, targets: cmd_setup._merge_batch_judge_selection(
+                     gc_arg,
+                     targets,
+                     {"codex"},
+                 ),
+             ), \
              patch("defenseclaw.commands.cmd_setup._prompt_judge_model_config") as model_prompt, \
              patch("defenseclaw.commands.cmd_setup._select_connector_interactive", return_value="codex"), \
              patch("defenseclaw.commands.cmd_setup._print_connector_info", return_value=None), \
@@ -211,7 +236,7 @@ class TestObservabilityWizard(unittest.TestCase):
             _interactive_guardrail_setup(app, gc, agent_name="codex")
         self.assertTrue(gc.judge.enabled)
         self.assertEqual(gc.detection_strategy, "regex_judge")
-        self.assertEqual(gc.judge.hook_connectors, ["*"])
+        self.assertEqual(gc.judge.hook_connectors, ["codex"])
         model_prompt.assert_called_once()
 
     def test_observability_decline_disables_connector(self):
