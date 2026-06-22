@@ -2752,7 +2752,7 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
         _print_plugin_info_card(
             card,
             plugin_name,
-            show_connector=(not connector_flag) or not bool(card.get("installed", False)),
+            show_connector=bool(card.get("connector")),
         )
 
 

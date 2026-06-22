@@ -1051,6 +1051,17 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertIn("Actions:     -", result.output)
         self.assertIn("Actions:     blocked", result.output)
 
+    def test_scoped_info_labels_connector_for_installed_plugin(self):
+        codex_path = self._seed_connector_plugin("codex", "shared")
+        self._seed_connector_plugin("hermes", "shared")
+
+        result = self.invoke(["info", "shared", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector:   codex", result.output)
+        self.assertIn(codex_path, result.output)
+        self.assertNotIn("Connector:   hermes", result.output)
+
     def test_scoped_info_labels_connector_for_not_installed_action_card(self):
         self._seed_connector_plugin("codex", "removed")
         PolicyEngine(self.app.store).disable_for_connector(
