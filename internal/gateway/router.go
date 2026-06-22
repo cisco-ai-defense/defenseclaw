@@ -109,6 +109,13 @@ func (r *EventRouter) SetHILTApprovalManager(m *HILTApprovalManager) {
 	r.hilt = m
 }
 
+func (r *EventRouter) SetOTelProvider(p *telemetry.Provider) {
+	if r == nil {
+		return
+	}
+	r.otel = p
+}
+
 func (r *EventRouter) SetGuardrailConfig(cfg *config.GuardrailConfig) {
 	r.guardrailCfg = cfg
 }

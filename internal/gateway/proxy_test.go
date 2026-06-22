@@ -3654,14 +3654,9 @@ func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
 	}
 }
 
-// TestApplyRuntime_HILTHotReload pins the contract that
-// `_write_guardrail_runtime`'s hilt_enabled / hilt_min_severity fields
-// are routed into the inspector via SetHILTConfig. Without this, an
-// operator who flips guardrail.hilt.enabled in config.yaml (and
-// re-runs the wizard or `setup guardrail`) would keep the boot-time
-// HILT view inside the live inspector — the same SSOT staleness the
-// input.hilt change was meant to fix, just relocated to in-memory
-// state.
+// TestApplyRuntime_HILTHotReload pins the legacy map-apply contract that
+// HILT fields are routed into the inspector via SetHILTConfig. Production
+// reloads now flow from config.yaml through ApplyGuardrailConfig.
 func TestApplyRuntime_HILTHotReload(t *testing.T) {
 	dir := t.TempDir()
 	reg := connector.NewDefaultRegistry()

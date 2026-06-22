@@ -111,6 +111,15 @@ func (g *HookConfigGuard) SetHealNotifier(fn func(connectorName string, paths []
 	g.mu.Unlock()
 }
 
+func (g *HookConfigGuard) SetOTelProvider(p *telemetry.Provider) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.otel = p
+	g.mu.Unlock()
+}
+
 // Start begins watching the given connector's config files. It launches a
 // background goroutine bound to ctx and returns immediately. Starting a guard
 // for a connector with no hook config paths (proxy/plugin connectors) is

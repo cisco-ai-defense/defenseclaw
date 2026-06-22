@@ -25,12 +25,15 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/audit/sinkconfig"
+	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
@@ -57,12 +60,23 @@ type Sidecar struct {
 	health      *SidecarHealth
 	shell       *sandbox.OpenShell
 	otel        *telemetry.Provider
+	otelFanout  *runtimeOTelFanout
 	notify      *NotificationQueue
 	opa         *policy.Engine
 	hilt        *HILTApprovalManager
 	webhooks    *WebhookDispatcher
 	aiDiscovery *inventory.ContinuousDiscoveryService
 	osNotifier  *notifier.Dispatcher
+	configMgr   *ConfigManager
+
+	apiMu              sync.RWMutex
+	apiServer          *APIServer
+	proxyMu            sync.RWMutex
+	guardrailProxy     *GuardrailProxy
+	apiRestartCh       chan struct{}
+	watcherRestartCh   chan struct{}
+	guardrailRestartCh chan struct{}
+	aiRestartCh        chan struct{}
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
@@ -308,19 +322,17 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		alertCancel()
 		return nil, fmt.Errorf("sidecar: init gateway event writer: %w", err)
 	}
+	otelFanout := newRuntimeOTelFanout(otel)
 	// Mirror every structured event onto the OTel pipeline so
 	// operators with an OTLP collector already deployed pick up
 	// verdicts / judge latency / errors for free — no extra
 	// config required when telemetry.enabled is true.
-	if otel != nil && otel.Enabled() {
-		events.WithFanoutContext(otel.EmitGatewayEventWithContext)
-		// Route schema-violation drops into the Prometheus counter
-		// so operators can alert on the metric directly without
-		// scraping gateway.jsonl for EventError rows.
-		events.OnSchemaViolation(func(et gatewaylog.EventType, code, _ string) {
-			otel.RecordSchemaViolation(context.Background(), string(et), code)
-		})
-	}
+	events.WithFanoutContext(otelFanout.EmitGatewayEventWithContext)
+	// Route schema-violation drops into the Prometheus counter so operators can
+	// alert on the metric directly without scraping gateway.jsonl for EventError
+	// rows. The runtime fanout no-ops while telemetry is disabled and picks up
+	// provider swaps from config reload.
+	events.OnSchemaViolation(otelFanout.RecordSchemaViolation)
 	if logger != nil {
 		events.WithFanoutContext(logger.ForwardGatewayEventToSinks)
 	}
@@ -451,25 +463,30 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	}
 
 	return &Sidecar{
-		cfg:            cfg,
-		client:         client,
-		router:         router,
-		store:          store,
-		logger:         logger,
-		health:         NewSidecarHealth(),
-		shell:          shell,
-		otel:           otel,
-		notify:         notify,
-		webhooks:       webhooks,
-		hilt:           hilt,
-		aiDiscovery:    aiDiscovery,
-		osNotifier:     osNotifier,
-		alertCtx:       alertCtx,
-		alertCancel:    alertCancel,
-		events:         events,
-		judge:          hookJudge,
-		judgeStore:     judgeStore,
-		judgeBodyStore: judgeBodyStore,
+		cfg:                cfg,
+		client:             client,
+		router:             router,
+		store:              store,
+		logger:             logger,
+		health:             NewSidecarHealth(),
+		shell:              shell,
+		otel:               otel,
+		otelFanout:         otelFanout,
+		notify:             notify,
+		webhooks:           webhooks,
+		hilt:               hilt,
+		aiDiscovery:        aiDiscovery,
+		osNotifier:         osNotifier,
+		apiRestartCh:       make(chan struct{}, 1),
+		watcherRestartCh:   make(chan struct{}, 1),
+		guardrailRestartCh: make(chan struct{}, 1),
+		aiRestartCh:        make(chan struct{}, 1),
+		alertCtx:           alertCtx,
+		alertCancel:        alertCancel,
+		events:             events,
+		judge:              hookJudge,
+		judgeStore:         judgeStore,
+		judgeBodyStore:     judgeBodyStore,
 	}, nil
 }
 
@@ -547,7 +564,21 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 5)
+	errCh := make(chan error, 6)
+
+	configPath := s.cfg.ConfigFilePath
+	if strings.TrimSpace(configPath) == "" {
+		configPath = config.ConfigPath()
+	}
+	s.configMgr = NewConfigManager(configPath, s.cfg, s.logger, s.health, s.applyConfigReload)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.configMgr.Run(ctx); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] config manager exited with error: %v\n", err)
+			errCh <- err
+		}
+	}()
 
 	// Goroutine 1: Gateway connection loop. Runs only when an OpenClaw
 	// fleet is configured (see gatewayShouldConnectForConfiguredConnector).
@@ -569,7 +600,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runWatcher(ctx); err != nil && ctx.Err() == nil {
+		if err := s.runRestartable(ctx, "watcher", s.watcherRestartCh, s.runWatcher); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher exited with error: %v\n", err)
 			errCh <- err
 		}
@@ -579,7 +610,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runAPI(ctx); err != nil && ctx.Err() == nil {
+		if err := s.runRestartable(ctx, "api", s.apiRestartCh, s.runAPI); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] api server exited with error: %v\n", err)
 			errCh <- err
 		}
@@ -589,16 +620,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		// Guarded dispatch: the multi-connector boot loop runs ONLY when
-		// the operator configured more than one connector
-		// (guardrail.connectors has >1 entry). The single-connector path
-		// — every existing install — keeps calling runGuardrail unchanged,
-		// so its behavior is preserved byte-for-byte.
-		runGuardrailFn := s.runGuardrail
-		if len(s.cfg.ActiveConnectors()) > 1 {
-			runGuardrailFn = s.runGuardrailMulti
-		}
-		if err := runGuardrailFn(ctx); err != nil && ctx.Err() == nil {
+		if err := s.runRestartable(ctx, "guardrail", s.guardrailRestartCh, s.runActiveGuardrail); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] guardrail exited with error: %v\n", err)
 			errCh <- err
 		}
@@ -608,7 +630,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runAIDiscovery(ctx); err != nil && ctx.Err() == nil {
+		if err := s.runRestartable(ctx, "ai discovery", s.aiRestartCh, s.runAIDiscovery); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] ai discovery exited with error: %v\n", err)
 			errCh <- err
 		}
@@ -720,6 +742,10 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		SetEgressTelemetry(nil)
 		SetJudgePersistor(nil)
 	}
+	if s.otel != nil {
+		_ = s.otel.Shutdown(context.Background())
+	}
+	telemetry.ActivateProvider(nil)
 
 	// Return the first non-nil error if any subsystem failed before shutdown
 	select {
@@ -728,6 +754,358 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
+	runGuardrailFn := s.runGuardrail
+	if len(s.cfg.ActiveConnectors()) > 1 {
+		runGuardrailFn = s.runGuardrailMulti
+	}
+	return runGuardrailFn(ctx)
+}
+
+func (s *Sidecar) runRestartable(ctx context.Context, name string, restart <-chan struct{}, run func(context.Context) error) error {
+	for {
+		childCtx, cancel := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() {
+			done <- run(childCtx)
+		}()
+		select {
+		case <-ctx.Done():
+			cancel()
+			<-done
+			return ctx.Err()
+		case <-restart:
+			fmt.Fprintf(os.Stderr, "[sidecar] restarting %s after config reload\n", name)
+			cancel()
+			<-done
+			continue
+		case err := <-done:
+			cancel()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+	}
+}
+
+func signalRestart(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff) error {
+	if len(diff.RestartRequired) > 0 {
+		return fmt.Errorf("config reload requires gateway restart for: %s", strings.Join(diff.RestartRequired, ", "))
+	}
+	if s == nil || s.cfg == nil || newCfg == nil {
+		return nil
+	}
+
+	guardrailRestart := guardrailNeedsRestart(oldCfg, newCfg)
+	apiRestart := apiNeedsRestart(oldCfg, newCfg)
+	otelReload := otelNeedsReload(oldCfg, newCfg)
+	auditSinksReload := auditSinksNeedReload(oldCfg, newCfg)
+	watcherRestart := watcherNeedsRestart(oldCfg, newCfg) || otelReload
+	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || otelReload
+
+	next := *newCfg
+	if next.Gateway.Token == "" && s.cfg.Gateway.Token != "" {
+		next.Gateway.Token = s.cfg.Gateway.Token
+	}
+
+	var nextOTel *telemetry.Provider
+	if otelReload {
+		p, err := s.buildReloadOTelProvider(ctx, &next)
+		if err != nil {
+			return err
+		}
+		nextOTel = p
+	}
+
+	var nextSinks *sinks.Manager
+	if auditSinksReload {
+		mgr, err := sinkconfig.BuildAuditSinks(next.AuditSinks, next.Observability, version.Current().BinaryVersion)
+		if err != nil {
+			if mgr != nil {
+				_ = mgr.Close()
+			}
+			if nextOTel != nil {
+				_ = nextOTel.Shutdown(context.Background())
+			}
+			return fmt.Errorf("config reload audit sinks: %w", err)
+		}
+		nextSinks = mgr
+	}
+
+	var nextAIDiscovery *inventory.ContinuousDiscoveryService
+	if aiRestart {
+		tel := s.otel
+		if otelReload {
+			tel = nextOTel
+		}
+		svc, err := inventory.NewContinuousDiscoveryService(&next, tel, s.events)
+		if err != nil {
+			if nextSinks != nil {
+				_ = nextSinks.Close()
+			}
+			if nextOTel != nil {
+				_ = nextOTel.Shutdown(context.Background())
+			}
+			return fmt.Errorf("config reload ai_discovery: %w", err)
+		}
+		nextAIDiscovery = svc
+	}
+
+	*s.cfg = next
+	redaction.SetDisableAll(s.cfg.Privacy.DisableRedaction)
+
+	if otelReload {
+		oldOTel := s.otel
+		s.otel = nextOTel
+		s.applyOTelProvider(nextOTel)
+		if oldOTel != nil && oldOTel != nextOTel {
+			_ = oldOTel.Shutdown(context.Background())
+		}
+	}
+
+	if auditSinksReload {
+		if s.logger != nil {
+			oldSinks := s.logger.SwapSinks(nextSinks)
+			if oldSinks != nil && oldSinks != nextSinks {
+				_ = oldSinks.Close()
+			}
+		} else if nextSinks != nil {
+			_ = nextSinks.Close()
+		}
+		s.reportSinksHealth()
+	}
+
+	if s.router != nil {
+		s.router.SetGuardrailConfig(&s.cfg.Guardrail)
+		s.router.SetDefaultAgentName(string(s.cfg.Claw.Mode))
+		s.router.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
+	}
+
+	if notifierChanged(oldCfg, newCfg) {
+		s.osNotifier = notifier.New(s.cfg.Notifications)
+		if s.hilt != nil {
+			s.hilt.SetNotifier(s.osNotifier)
+		}
+		if api := s.apiSnapshot(); api != nil {
+			api.SetNotifier(s.osNotifier)
+		}
+		if proxy := s.proxySnapshot(); proxy != nil {
+			proxy.SetNotifier(s.osNotifier)
+		}
+	}
+
+	if webhooksChanged(oldCfg, newCfg) {
+		oldWebhooks := s.webhooks
+		s.webhooks = NewWebhookDispatcher(s.cfg.Webhooks, s.cfg.Observability)
+		if s.webhooks != nil {
+			s.webhooks.BindObservability(s.otel)
+		}
+		if proxy := s.proxySnapshot(); proxy != nil {
+			proxy.SetWebhookDispatcher(s.webhooks)
+		}
+		if oldWebhooks != nil {
+			oldWebhooks.Close()
+		}
+	}
+
+	if !guardrailRestart {
+		if proxy := s.proxySnapshot(); proxy != nil {
+			proxy.ApplyGuardrailConfig(&s.cfg.Guardrail)
+			proxy.SetDefaultAgentName(string(s.cfg.Claw.Mode))
+			proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
+		}
+	}
+
+	if aiRestart {
+		s.aiDiscovery = nextAIDiscovery
+		if api := s.apiSnapshot(); api != nil {
+			api.SetAIDiscoveryService(nextAIDiscovery)
+		}
+	}
+
+	if watcherRestart {
+		signalRestart(s.watcherRestartCh)
+	}
+	if apiRestart {
+		signalRestart(s.apiRestartCh)
+	}
+	if guardrailRestart {
+		signalRestart(s.guardrailRestartCh)
+	}
+	if aiRestart {
+		signalRestart(s.aiRestartCh)
+	}
+	return nil
+}
+
+func (s *Sidecar) buildReloadOTelProvider(ctx context.Context, cfg *config.Config) (*telemetry.Provider, error) {
+	p, err := telemetry.NewProviderInactive(ctx, cfg, version.Current().BinaryVersion)
+	if err != nil {
+		return nil, fmt.Errorf("config reload otel: %w", err)
+	}
+	agentInstanceID := ""
+	if s != nil && s.otel != nil {
+		agentInstanceID = s.otel.AgentInstanceID()
+	}
+	if agentInstanceID == "" {
+		agentInstanceID = audit.ProcessAgentInstanceID()
+	}
+	p.SetAgentInstanceID(agentInstanceID)
+	return p, nil
+}
+
+func (s *Sidecar) applyOTelProvider(p *telemetry.Provider) {
+	if s == nil {
+		return
+	}
+	if s.otelFanout != nil {
+		s.otelFanout.SetProvider(p)
+	}
+	telemetry.ActivateProvider(p)
+	SetEgressTelemetry(p)
+	if s.logger != nil {
+		s.logger.SetOTelProvider(p)
+	}
+	if s.router != nil {
+		s.router.SetOTelProvider(p)
+	}
+	if s.hilt != nil {
+		s.hilt.SetOTelProvider(p)
+	}
+	if s.webhooks != nil {
+		s.webhooks.BindObservability(p)
+	}
+	if s.shell != nil {
+		s.shell.BindObservability(p, s.events)
+	}
+	if api := s.apiSnapshot(); api != nil {
+		api.SetOTelProvider(p)
+	}
+	if proxy := s.proxySnapshot(); proxy != nil {
+		proxy.SetOTelProvider(p)
+	}
+	s.reportTelemetryHealth()
+}
+
+func otelNeedsReload(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.OTel, newCfg.OTel) ||
+		oldCfg.Environment != newCfg.Environment ||
+		oldCfg.TenantID != newCfg.TenantID ||
+		oldCfg.WorkspaceID != newCfg.WorkspaceID ||
+		oldCfg.DeploymentMode != newCfg.DeploymentMode ||
+		oldCfg.DiscoverySource != newCfg.DiscoverySource ||
+		oldCfg.Gateway.Host != newCfg.Gateway.Host ||
+		oldCfg.Gateway.Port != newCfg.Gateway.Port ||
+		!reflect.DeepEqual(oldCfg.Claw, newCfg.Claw) ||
+		oldCfg.Guardrail.Connector != newCfg.Guardrail.Connector ||
+		!reflect.DeepEqual(oldCfg.Guardrail.Connectors, newCfg.Guardrail.Connectors)
+}
+
+func auditSinksNeedReload(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.AuditSinks, newCfg.AuditSinks) ||
+		!reflect.DeepEqual(oldCfg.Observability, newCfg.Observability)
+}
+
+func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	oldG, newG := oldCfg.Guardrail, newCfg.Guardrail
+	if oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
+		!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
+		oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
+		oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
+		oldG.Judge.Enabled != newG.Judge.Enabled || !reflect.DeepEqual(oldG.Judge, newG.Judge) {
+		return true
+	}
+	return false
+}
+
+func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return oldCfg.Gateway.APIPort != newCfg.Gateway.APIPort ||
+		oldCfg.Gateway.APIBind != newCfg.Gateway.APIBind ||
+		!reflect.DeepEqual(oldCfg.OpenShell, newCfg.OpenShell) ||
+		oldCfg.Guardrail.Host != newCfg.Guardrail.Host
+}
+
+func watcherNeedsRestart(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.Gateway.Watcher, newCfg.Gateway.Watcher) ||
+		!reflect.DeepEqual(oldCfg.Watch, newCfg.Watch) ||
+		!reflect.DeepEqual(oldCfg.Scanners, newCfg.Scanners) ||
+		!reflect.DeepEqual(oldCfg.SkillActions, newCfg.SkillActions) ||
+		!reflect.DeepEqual(oldCfg.MCPActions, newCfg.MCPActions) ||
+		!reflect.DeepEqual(oldCfg.PluginActions, newCfg.PluginActions) ||
+		!reflect.DeepEqual(oldCfg.AssetPolicy, newCfg.AssetPolicy) ||
+		oldCfg.Claw != newCfg.Claw
+}
+
+func aiDiscoveryNeedsRestart(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.AIDiscovery, newCfg.AIDiscovery) ||
+		!reflect.DeepEqual(oldCfg.Privacy, newCfg.Privacy)
+}
+
+func notifierChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.Notifications, newCfg.Notifications)
+}
+
+func webhooksChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.Webhooks, newCfg.Webhooks) ||
+		!reflect.DeepEqual(oldCfg.Observability, newCfg.Observability)
+}
+
+func (s *Sidecar) setAPIServer(api *APIServer) {
+	s.apiMu.Lock()
+	s.apiServer = api
+	s.apiMu.Unlock()
+}
+
+func (s *Sidecar) apiSnapshot() *APIServer {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	return s.apiServer
+}
+
+func (s *Sidecar) setGuardrailProxy(proxy *GuardrailProxy) {
+	s.proxyMu.Lock()
+	s.guardrailProxy = proxy
+	s.proxyMu.Unlock()
+}
+
+func (s *Sidecar) proxySnapshot() *GuardrailProxy {
+	s.proxyMu.RLock()
+	defer s.proxyMu.RUnlock()
+	return s.guardrailProxy
 }
 
 // runGatewayLoop connects to the gateway and reconnects on disconnect,
@@ -1555,6 +1933,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetWebhookDispatcher(s.webhooks)
 	}
 	if err == nil && proxy != nil {
+		s.setGuardrailProxy(proxy)
+		defer s.setGuardrailProxy(nil)
 		proxy.SetDefaultAgentName(string(s.cfg.Claw.Mode))
 		proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
 		proxy.SetConnectorSwitchState(registry, setupOpts)
@@ -2352,7 +2732,8 @@ func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connec
 func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 	if s.aiDiscovery == nil {
 		s.health.SetAIDiscovery(StateDisabled, "", nil)
-		return nil
+		<-ctx.Done()
+		return ctx.Err()
 	}
 	s.health.SetAIDiscovery(StateStarting, "", map[string]interface{}{
 		"mode":                      s.cfg.AIDiscovery.Mode,
@@ -2409,6 +2790,8 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	addr := fmt.Sprintf("%s:%d", bind, s.cfg.Gateway.APIPort)
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
+	s.setAPIServer(api)
+	defer s.setAPIServer(nil)
 	api.SetOTelProvider(s.otel)
 	api.SetHILTApprovalManager(s.hilt)
 	// Wire the Cisco AI Defense inspector onto the API server so the

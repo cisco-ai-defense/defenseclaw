@@ -1736,8 +1736,184 @@ def _migrate_0_8_0(ctx: MigrationContext) -> None:
     new explicit fields so a clean 0.7.2 -> 0.8.0 upgrade does not silently
     change runtime behavior.
     """
+    _migrate_0_8_0_guardrail_runtime_json(ctx)
     _migrate_0_4_0_seed_hook_fail_mode(ctx)
     _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx)
+
+
+def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
+    """Fold the removed guardrail_runtime.json overlay into config.yaml."""
+    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    runtime_path = os.path.join(ctx.data_dir, "guardrail_runtime.json")
+    if not os.path.isfile(runtime_path):
+        return
+    if not os.path.isfile(cfg_path):
+        ux.warn(
+            f"found {runtime_path} but config.yaml is missing; gateway startup will retry migration",
+            indent="    ",
+        )
+        return
+
+    try:
+        with open(runtime_path, encoding="utf-8") as fh:
+            runtime = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        ux.warn(f"could not read {runtime_path}: {exc}", indent="    ")
+        return
+    if not isinstance(runtime, dict):
+        ux.warn(f"{runtime_path} is not an object; gateway startup will retry migration", indent="    ")
+        return
+
+    updates = _guardrail_runtime_updates(runtime)
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+
+    new_text = _patch_guardrail_runtime_yaml(text, updates)
+    if new_text != text and not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+
+    try:
+        os.remove(runtime_path)
+    except OSError as exc:
+        ux.warn(f"could not delete {runtime_path}: {exc}", indent="    ")
+        return
+
+    migrated = ", ".join(path for path, _ in updates) if updates else "no supported values"
+    ctx.changes.append(f"migrated guardrail_runtime.json into config.yaml ({migrated})")
+
+
+def _guardrail_runtime_updates(runtime: dict) -> list[tuple[str, str]]:
+    updates: list[tuple[str, str]] = []
+    if isinstance(runtime.get("mode"), str):
+        mode = runtime["mode"].strip().lower()
+        if mode in {"observe", "action"}:
+            updates.append(("mode", mode))
+    if isinstance(runtime.get("scanner_mode"), str):
+        scanner_mode = runtime["scanner_mode"].strip().lower()
+        if scanner_mode in {"local", "remote", "both"}:
+            updates.append(("scanner_mode", scanner_mode))
+    if isinstance(runtime.get("block_message"), str):
+        updates.append(("block_message", _yaml_scalar(runtime["block_message"])))
+    if isinstance(runtime.get("connector"), str) and runtime["connector"].strip():
+        updates.append(("connector", _yaml_scalar(runtime["connector"].strip().lower())))
+    if isinstance(runtime.get("hilt_enabled"), bool):
+        updates.append(("hilt.enabled", "true" if runtime["hilt_enabled"] else "false"))
+    if isinstance(runtime.get("hilt_min_severity"), str) and runtime["hilt_min_severity"].strip():
+        updates.append(("hilt.min_severity", _yaml_scalar(runtime["hilt_min_severity"].strip().upper())))
+    return updates
+
+
+def _patch_guardrail_runtime_yaml(text: str, updates: list[tuple[str, str]]) -> str:
+    if not updates:
+        return text
+    eol = _line_ending(text.splitlines(keepends=True)[0]) if text else "\n"
+    block_span = _find_top_level_yaml_block_body_span(text, "guardrail")
+    if block_span is None:
+        prefix = text if not text or text.endswith(("\n", "\r")) else text + eol
+        return prefix + _render_guardrail_block_from_updates(updates, eol)
+
+    body_start, body_end = block_span
+    body = text[body_start:body_end]
+    new_body = _patch_guardrail_body(body, updates, eol)
+    return text[:body_start] + new_body + text[body_end:]
+
+
+def _render_guardrail_block_from_updates(updates: list[tuple[str, str]], eol: str) -> str:
+    simple = [(p, v) for p, v in updates if not p.startswith("hilt.")]
+    hilt = [(p.removeprefix("hilt."), v) for p, v in updates if p.startswith("hilt.")]
+    lines = [f"guardrail:{eol}"]
+    for path, value in simple:
+        lines.append(f"  {path}: {value}{eol}")
+    if hilt:
+        lines.append(f"  hilt:{eol}")
+        for path, value in hilt:
+            lines.append(f"    {path}: {value}{eol}")
+    return "".join(lines)
+
+
+def _patch_guardrail_body(body: str, updates: list[tuple[str, str]], eol: str) -> str:
+    lines = body.splitlines(keepends=True)
+    simple = [(p, v) for p, v in updates if not p.startswith("hilt.")]
+    hilt = [(p.removeprefix("hilt."), v) for p, v in updates if p.startswith("hilt.")]
+    direct_indent = _first_child_indent(lines, 0, "  ")
+    for path, value in simple:
+        _set_direct_yaml_scalar(lines, path, value, direct_indent, eol)
+    if hilt:
+        _patch_hilt_body(lines, hilt, direct_indent, eol)
+    return "".join(lines)
+
+
+def _patch_hilt_body(lines: list[str], updates: list[tuple[str, str]], direct_indent: str, eol: str) -> None:
+    hilt_idx = _find_direct_yaml_key(lines, "hilt", len(direct_indent))
+    if hilt_idx is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += eol
+        lines.append(f"{direct_indent}hilt:{eol}")
+        child_indent = direct_indent + "  "
+        for path, value in updates:
+            lines.append(f"{child_indent}{path}: {value}{eol}")
+        return
+
+    hilt_indent = _parse_yaml_key_line(lines[hilt_idx]).indent
+    child_indent = _first_child_indent(lines[hilt_idx + 1 :], len(hilt_indent), hilt_indent + "  ")
+    end = hilt_idx + 1
+    while end < len(lines):
+        child = _parse_yaml_key_line(lines[end])
+        if child is not None and len(child.indent) <= len(hilt_indent):
+            break
+        end += 1
+
+    body = lines[hilt_idx + 1 : end]
+    for path, value in updates:
+        _set_direct_yaml_scalar(body, path, value, child_indent, eol)
+    lines[hilt_idx + 1 : end] = body
+
+
+def _set_direct_yaml_scalar(lines: list[str], key: str, rendered_value: str, indent: str, eol: str) -> None:
+    idx = _find_direct_yaml_key(lines, key, len(indent))
+    if idx is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += eol
+        lines.append(f"{indent}{key}: {rendered_value}{eol}")
+        return
+    lines[idx] = _replace_yaml_value(lines[idx], rendered_value)
+
+
+def _find_direct_yaml_key(lines: list[str], key: str, indent_len: int) -> int | None:
+    for idx, line in enumerate(lines):
+        parsed = _parse_yaml_key_line(line)
+        if parsed is not None and parsed.key == key and len(parsed.indent) == indent_len:
+            return idx
+    return None
+
+
+def _first_child_indent(lines: list[str], parent_indent_len: int, fallback: str) -> str:
+    for line in lines:
+        parsed = _parse_yaml_key_line(line)
+        if parsed is not None and len(parsed.indent) > parent_indent_len:
+            return parsed.indent
+    return fallback
+
+
+def _replace_yaml_value(line: str, rendered_value: str) -> str:
+    eol = _line_ending(line)
+    body = line.rstrip("\r\n")
+    comment = ""
+    value_start = body.find(":") + 1
+    existing_value = body[value_start:]
+    if "#" in existing_value:
+        before, after = existing_value.split("#", 1)
+        if before.strip():
+            comment = "  #" + after
+    return body[:value_start] + " " + rendered_value + comment + eol
+
+
+def _yaml_scalar(value: str) -> str:
+    if re.match(r"^[A-Za-z0-9_.-]+$", value):
+        return value
+    return json.dumps(value)
 
 
 def _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx: MigrationContext) -> None:

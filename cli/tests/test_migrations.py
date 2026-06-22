@@ -1653,6 +1653,46 @@ class TestMigrate080Compatibility(unittest.TestCase):
         self.assertEqual(self._read(), after)
         self.assertFalse(any("verify_tls=false" in c for c in ctx2.changes))
 
+    def test_migrates_guardrail_runtime_json_into_config_yaml(self):
+        runtime_path = os.path.join(self.data_dir, "guardrail_runtime.json")
+        self._write(
+            "# operator comment\n"
+            "guardrail:\n"
+            "  # existing mode comment\n"
+            "  mode: observe\n"
+            "  scanner_mode: local\n"
+            "  hilt:\n"
+            "    enabled: false\n"
+            "    min_severity: HIGH\n"
+        )
+        _write_json(runtime_path, {
+            "mode": "action",
+            "scanner_mode": "both",
+            "block_message": "Blocked by upgrade migration",
+            "connector": "Codex",
+            "hilt_enabled": True,
+            "hilt_min_severity": "medium",
+        })
+
+        ctx = self._ctx()
+        _migrate_0_8_0(ctx)
+
+        after = self._read()
+        self.assertIn("# existing mode comment", after)
+        self.assertIn("  mode: action\n", after)
+        self.assertIn("  scanner_mode: both\n", after)
+        self.assertIn('  block_message: "Blocked by upgrade migration"\n', after)
+        self.assertIn("  connector: codex\n", after)
+        self.assertIn("    enabled: true\n", after)
+        self.assertIn("    min_severity: MEDIUM\n", after)
+        self.assertFalse(os.path.exists(runtime_path))
+        self.assertTrue(any("guardrail_runtime.json" in c for c in ctx.changes))
+
+        # Idempotent after deletion.
+        ctx2 = self._ctx()
+        _migrate_0_8_0(ctx2)
+        self.assertFalse(any("guardrail_runtime.json" in c for c in ctx2.changes))
+
     def test_preserves_crlf_line_endings_for_sink_tls_insert(self):
         self._write(
             "guardrail:\r\n"
@@ -1714,6 +1754,19 @@ class TestMigrate080Compatibility(unittest.TestCase):
         cursor = _read_json(os.path.join(self.data_dir, ".migration_state.json"))
         self.assertIn("0.7.0", cursor["applied"])
         self.assertIn("0.8.0", cursor["applied"])
+
+    def test_run_migrations_applies_080_runtime_json_cleanup_after_072_bootstrap(self):
+        runtime_path = os.path.join(self.data_dir, "guardrail_runtime.json")
+        self._write("guardrail:\n  enabled: true\n  mode: observe\n")
+        _write_json(runtime_path, {"mode": "action", "scanner_mode": "both"})
+
+        count = run_migrations("0.7.2", "0.8.0", self.tmp, self.data_dir)
+
+        self.assertEqual(count, 1)
+        after = self._read()
+        self.assertIn("  mode: action\n", after)
+        self.assertIn("  scanner_mode: both\n", after)
+        self.assertFalse(os.path.exists(runtime_path))
 
     def test_no_op_when_audit_sinks_absent(self):
         original = "guardrail:\n  hook_fail_mode: closed\n"

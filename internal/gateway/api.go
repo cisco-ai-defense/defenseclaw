@@ -189,6 +189,9 @@ func (a *APIServer) SetHookJudge(j *LLMJudge) {
 // can be recorded as metrics.
 func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 	a.otel = p
+	if a.ciscoInspector != nil {
+		a.ciscoInspector.SetTelemetry(p)
+	}
 }
 
 // otlpPathTokenEntry bundles the cached path-token with the mtime of
@@ -2337,6 +2340,10 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 			a.cfgMu.RLock()
 			cfg["mode"] = a.scannerCfg.Guardrail.Mode
 			cfg["scanner_mode"] = a.scannerCfg.Guardrail.ScannerMode
+			cfg["block_message"] = a.scannerCfg.Guardrail.BlockMessage
+			cfg["connector"] = a.scannerCfg.Guardrail.Connector
+			cfg["hilt_enabled"] = a.scannerCfg.Guardrail.HILT.Enabled
+			cfg["hilt_min_severity"] = a.scannerCfg.Guardrail.HILT.MinSeverity
 			a.cfgMu.RUnlock()
 		}
 		a.writeJSON(w, http.StatusOK, cfg)
@@ -2367,7 +2374,7 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 			}
 		}
 
-		var req map[string]string
+		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 			return
@@ -2378,40 +2385,86 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 			return
 		}
 
-		a.cfgMu.Lock()
-
-		oldMode := a.scannerCfg.Guardrail.Mode
-		oldScannerMode := a.scannerCfg.Guardrail.ScannerMode
-
 		changed := []string{}
-		if mode, ok := req["mode"]; ok && (mode == "observe" || mode == "action") {
-			a.scannerCfg.Guardrail.Mode = mode
+		updates := map[string]any{}
+		if raw, ok := req["mode"]; ok {
+			mode, ok := raw.(string)
+			if !ok || (mode != "observe" && mode != "action") {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mode must be observe or action"})
+				return
+			}
+			updates["guardrail.mode"] = mode
 			changed = append(changed, "mode="+mode)
 		}
-		if sm, ok := req["scanner_mode"]; ok && (sm == "local" || sm == "remote" || sm == "both") {
-			a.scannerCfg.Guardrail.ScannerMode = sm
+		if raw, ok := req["scanner_mode"]; ok {
+			sm, ok := raw.(string)
+			if !ok || (sm != "local" && sm != "remote" && sm != "both") {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "scanner_mode must be local, remote, or both"})
+				return
+			}
+			updates["guardrail.scanner_mode"] = sm
 			changed = append(changed, "scanner_mode="+sm)
 		}
+		if raw, ok := req["block_message"]; ok {
+			bm, ok := raw.(string)
+			if !ok {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "block_message must be a string"})
+				return
+			}
+			updates["guardrail.block_message"] = bm
+			changed = append(changed, "block_message")
+		}
+		if raw, ok := req["connector"]; ok {
+			conn, ok := raw.(string)
+			if !ok || strings.TrimSpace(conn) == "" {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "connector must be a non-empty string"})
+				return
+			}
+			conn = strings.ToLower(strings.TrimSpace(conn))
+			updates["guardrail.connector"] = conn
+			changed = append(changed, "connector="+conn)
+		}
+		if raw, ok := req["hilt_enabled"]; ok {
+			enabled, ok := raw.(bool)
+			if !ok {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hilt_enabled must be a boolean"})
+				return
+			}
+			updates["guardrail.hilt.enabled"] = enabled
+			changed = append(changed, fmt.Sprintf("hilt_enabled=%v", enabled))
+		}
+		if raw, ok := req["hilt_min_severity"]; ok {
+			minSev, ok := raw.(string)
+			if !ok || strings.TrimSpace(minSev) == "" {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hilt_min_severity must be a non-empty string"})
+				return
+			}
+			minSev = strings.ToUpper(strings.TrimSpace(minSev))
+			updates["guardrail.hilt.min_severity"] = minSev
+			changed = append(changed, "hilt_min_severity="+minSev)
+		}
 
-		if len(changed) == 0 {
-			a.cfgMu.Unlock()
+		if len(updates) == 0 {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no valid fields to update"})
 			return
 		}
 
-		if err := a.writeGuardrailRuntime(); err != nil {
-			a.scannerCfg.Guardrail.Mode = oldMode
-			a.scannerCfg.Guardrail.ScannerMode = oldScannerMode
+		a.cfgMu.Lock()
+		configPath := a.configFilePath()
+		if err := a.patchGuardrailConfigFile(configPath, updates); err != nil {
 			a.cfgMu.Unlock()
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		a.applyGuardrailPatchLocked(updates)
 
 		resp := map[string]interface{}{
-			"status":       "updated",
-			"changed":      changed,
-			"mode":         a.scannerCfg.Guardrail.Mode,
-			"scanner_mode": a.scannerCfg.Guardrail.ScannerMode,
+			"status":        "updated",
+			"changed":       changed,
+			"mode":          a.scannerCfg.Guardrail.Mode,
+			"scanner_mode":  a.scannerCfg.Guardrail.ScannerMode,
+			"block_message": a.scannerCfg.Guardrail.BlockMessage,
+			"connector":     a.scannerCfg.Guardrail.Connector,
 		}
 
 		a.cfgMu.Unlock()
@@ -2427,20 +2480,60 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 	}
 }
 
-func (a *APIServer) writeGuardrailRuntime() error {
-	if a.scannerCfg == nil {
-		return fmt.Errorf("api: no config available")
+func (a *APIServer) configFilePath() string {
+	if a != nil && a.scannerCfg != nil {
+		if p := strings.TrimSpace(a.scannerCfg.ConfigFilePath); p != "" {
+			return p
+		}
+		if d := strings.TrimSpace(a.scannerCfg.DataDir); d != "" {
+			return filepath.Join(d, config.DefaultConfigName)
+		}
 	}
-	runtimeFile := filepath.Join(a.scannerCfg.DataDir, "guardrail_runtime.json")
-	data, err := json.Marshal(map[string]string{
-		"mode":          a.scannerCfg.Guardrail.Mode,
-		"scanner_mode":  a.scannerCfg.Guardrail.ScannerMode,
-		"block_message": a.scannerCfg.Guardrail.BlockMessage,
-	})
-	if err != nil {
-		return fmt.Errorf("api: marshal runtime config: %w", err)
+	return config.ConfigPath()
+}
+
+func (a *APIServer) patchGuardrailConfigFile(path string, updates map[string]any) error {
+	original, readErr := os.ReadFile(path)
+	originalExisted := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return fmt.Errorf("api: read config before patch: %w", readErr)
 	}
-	return os.WriteFile(runtimeFile, data, 0o600)
+	if err := config.PatchYAMLFile(path, updates); err != nil {
+		return err
+	}
+	if _, err := config.LoadFromFile(path); err != nil {
+		if originalExisted {
+			if restoreErr := os.WriteFile(path, original, 0o600); restoreErr != nil {
+				return fmt.Errorf("api: patched config invalid: %w; restore failed: %v", err, restoreErr)
+			}
+		} else if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("api: patched config invalid: %w; cleanup failed: %v", err, removeErr)
+		}
+		return fmt.Errorf("api: patched config invalid: %w", err)
+	}
+	return nil
+}
+
+func (a *APIServer) applyGuardrailPatchLocked(updates map[string]any) {
+	if a == nil || a.scannerCfg == nil {
+		return
+	}
+	for key, value := range updates {
+		switch key {
+		case "guardrail.mode":
+			a.scannerCfg.Guardrail.Mode, _ = value.(string)
+		case "guardrail.scanner_mode":
+			a.scannerCfg.Guardrail.ScannerMode, _ = value.(string)
+		case "guardrail.block_message":
+			a.scannerCfg.Guardrail.BlockMessage, _ = value.(string)
+		case "guardrail.connector":
+			a.scannerCfg.Guardrail.Connector, _ = value.(string)
+		case "guardrail.hilt.enabled":
+			a.scannerCfg.Guardrail.HILT.Enabled, _ = value.(bool)
+		case "guardrail.hilt.min_severity":
+			a.scannerCfg.Guardrail.HILT.MinSeverity, _ = value.(string)
+		}
+	}
 }
 
 func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {

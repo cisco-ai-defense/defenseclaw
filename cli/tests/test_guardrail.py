@@ -1338,7 +1338,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn("does not exist", result.output)
         self.assertEqual(self.app.cfg.guardrail.rule_pack_dir, "")
 
-    def test_block_message_written_to_runtime_json(self):
+    def test_block_message_written_to_config_yaml(self):
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.guardrail.model_name = "claude-opus"
@@ -1354,14 +1354,12 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
 
-        runtime_file = os.path.join(self.tmp_dir, "guardrail_runtime.json")
-        self.assertTrue(os.path.isfile(runtime_file))
-        with open(runtime_file) as f:
-            runtime = json.load(f)
-        self.assertEqual(runtime["block_message"], custom_msg)
-        self.assertEqual(runtime["mode"], "action")
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            doc = yaml.safe_load(f)
+        self.assertEqual(doc["guardrail"]["block_message"], custom_msg)
+        self.assertEqual(doc["guardrail"]["mode"], "action")
 
-    def test_block_message_empty_by_default_in_runtime_json(self):
+    def test_block_message_empty_by_default_in_config_yaml(self):
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.guardrail.model_name = "claude-opus"
@@ -1375,11 +1373,9 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
 
-        runtime_file = os.path.join(self.tmp_dir, "guardrail_runtime.json")
-        self.assertTrue(os.path.isfile(runtime_file))
-        with open(runtime_file) as f:
-            runtime = json.load(f)
-        self.assertEqual(runtime["block_message"], "")
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            doc = yaml.safe_load(f)
+        self.assertEqual(doc["guardrail"]["block_message"], "")
 
     def test_help_shows_block_message_option(self):
         from defenseclaw.commands.cmd_setup import setup

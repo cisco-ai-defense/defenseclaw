@@ -13,7 +13,7 @@
 Pre-existing tests (``test_cmd_uninstall.py``) cover the planning surface;
 this module covers the **round-trip** side of the lifecycle for every
 built-in connector. We exercise the Python CLI plumbing — config write,
-guardrail runtime emission, uninstall planning — for every built-in
+config persistence, uninstall planning — for every built-in
 connector without invoking the destructive
 ``scripts/install.sh`` shell installer (that path is reserved for the
 live e2e CI matrix in plan E4).
@@ -21,25 +21,26 @@ live e2e CI matrix in plan E4).
 What we **do not** exercise here:
   * Actually running the Go gateway. Connector ``Setup()`` lives in Go;
     we treat it as out-of-process and assert the Python contracts that
-    feed it (config + runtime JSON) and consume from it (uninstall plan).
+    feed it (config.yaml) and consume from it (uninstall plan).
   * Mutating the dev machine. Every test pins ``DEFENSECLAW_HOME`` to a
     ``tmp_path``; the production ``~/.defenseclaw`` is untouched.
 
 What we **do** exercise:
   * ``execute_guardrail_setup`` writes a config with the right connector.
-  * ``guardrail_runtime.json`` is emitted under the tmp data dir.
+  * Guardrail runtime settings are persisted in ``config.yaml``.
   * The uninstall planner produces a plan referencing the tmp data dir
     (no leakage of the real machine's $HOME).
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+import yaml
 
 CONNECTORS = (
     "openclaw",
@@ -127,7 +128,7 @@ class InstallSmokeMatrixTests(unittest.TestCase):
         with _IsolatedHome() as home:
             app = _build_app_with_connector(home, connector_name)
 
-            # 1. Setup writes config + guardrail_runtime.json.
+            # 1. Setup writes canonical config.yaml.
             ok, warnings = execute_guardrail_setup(app, save_config=True)
             self.assertTrue(
                 ok,
@@ -140,15 +141,11 @@ class InstallSmokeMatrixTests(unittest.TestCase):
                 f"{connector_name}: config.yaml missing under tmp DEFENSECLAW_HOME",
             )
 
-            runtime_path = os.path.join(home, ".defenseclaw", "guardrail_runtime.json")
-            self.assertTrue(
-                os.path.exists(runtime_path),
-                f"{connector_name}: guardrail_runtime.json was not written",
-            )
-            with open(runtime_path) as fh:
-                runtime = json.load(fh)
+            with open(cfg_path) as fh:
+                cfg_doc = yaml.safe_load(fh)
+            guardrail = cfg_doc.get("guardrail", {})
             for key in ("mode", "scanner_mode", "block_message"):
-                self.assertIn(key, runtime, f"{connector_name}: runtime missing {key}")
+                self.assertIn(key, guardrail, f"{connector_name}: guardrail config missing {key}")
 
             # 2. Reload config from disk and assert the connector
             #    selection persisted. config.load() reads from

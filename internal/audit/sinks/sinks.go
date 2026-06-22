@@ -308,7 +308,7 @@ func normalizeConnector(name string) string {
 // marks that connector as having a per-connector override, so its events stop
 // flowing to the global sinks (override semantics). Order is preserved.
 //
-// The composition layer (internal/cli.buildAuditSinks) calls this for each
+// The composition layer (internal/audit/sinkconfig.BuildAuditSinks) calls this for each
 // sink declared under observability.connectors[<name>].audit_sinks. To express
 // the tri-state's empty-list "suppress" case (an override present but with zero
 // sinks), call MarkConnectorOverride instead/as well.

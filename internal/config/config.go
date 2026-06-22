@@ -142,7 +142,8 @@ type AgentConfig struct {
 const CurrentConfigVersion = 6
 
 type Config struct {
-	ConfigVersion int `mapstructure:"config_version"        yaml:"config_version"`
+	ConfigVersion  int    `mapstructure:"config_version"        yaml:"config_version"`
+	ConfigFilePath string `mapstructure:"-" yaml:"-"`
 
 	// LLM is the top-level unified LLM configuration. Every LLM-using
 	// component (guardrail, judge, mcp scanner, skill scanner, plugin
@@ -1944,6 +1945,18 @@ type PluginActionsConfig struct {
 }
 
 func Load() (*Config, error) {
+	return LoadFromFileWithRuntimeMigration(ConfigPath())
+}
+
+func LoadFromFile(configFile string) (*Config, error) {
+	return loadFromFile(configFile, false)
+}
+
+func LoadFromFileWithRuntimeMigration(configFile string) (*Config, error) {
+	return loadFromFile(configFile, true)
+}
+
+func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	// viper holds a process-global keystore. Without resetting it, a
 	// previous Load() (e.g. from another binary path or test case)
 	// leaves stale keys behind — including a legacy `splunk.*` block
@@ -1952,8 +1965,11 @@ func Load() (*Config, error) {
 	// and BindEnv() bindings immediately after.
 	viper.Reset()
 
-	dataDir := DefaultDataPath()
-	configFile := filepath.Join(dataDir, DefaultConfigName)
+	if strings.TrimSpace(configFile) == "" {
+		configFile = ConfigPath()
+	}
+	configFile = filepath.Clean(configFile)
+	dataDir := filepath.Dir(configFile)
 
 	viper.SetConfigFile(configFile)
 	viper.SetConfigType("yaml")
@@ -2027,6 +2043,7 @@ func Load() (*Config, error) {
 		}
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
+	cfg.ConfigFilePath = configFile
 
 	// Reinstate the dot-preserving OTel resource attributes that we
 	// stripped before handing bytes to Viper.
@@ -2169,6 +2186,19 @@ func Load() (*Config, error) {
 	// the file did not exist (first boot / default config) so the
 	// hash is still stable across identical in-memory configs.
 	seedProvenanceOnLoad(configFile, &cfg)
+
+	if migrateRuntime {
+		migrated, err := MigrateGuardrailRuntimeFile(configFile, cfg.DataDir)
+		if err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "guardrail_runtime_migration")
+			}
+			return nil, err
+		}
+		if migrated {
+			return loadFromFile(configFile, false)
+		}
+	}
 
 	return &cfg, nil
 }

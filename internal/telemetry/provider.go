@@ -74,6 +74,7 @@ type Provider struct {
 
 	// capacityShutdown stops the 15s runtime/SQLite metrics goroutine.
 	capacityShutdown context.CancelFunc
+	shutdown         atomic.Bool
 
 	// agentInstanceID is the per-process stable identifier the
 	// sidecar mints at boot. Accessed from multiple goroutines
@@ -86,12 +87,29 @@ type Provider struct {
 // NewProvider initializes the OTel SDK providers and exporters. When
 // cfg.Enabled is false, it returns a no-op provider safe to call.
 func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*Provider, error) {
+	return newProvider(ctx, fullCfg, version, true)
+}
+
+// NewProviderInactive constructs a provider without installing it as the
+// package-global telemetry provider. Config reload uses this to validate and
+// prepare a replacement before committing the new config snapshot.
+func NewProviderInactive(ctx context.Context, fullCfg *config.Config, version string) (*Provider, error) {
+	return newProvider(ctx, fullCfg, version, false)
+}
+
+func newProvider(ctx context.Context, fullCfg *config.Config, version string, install bool) (*Provider, error) {
 	cfg := fullCfg.OTel
 	if !cfg.Enabled {
-		return &Provider{
+		p := &Provider{
 			enabled: false,
 			tracer:  traceNoop.NewTracerProvider().Tracer("defenseclaw"),
-		}, nil
+			logger:  logNoop.NewLoggerProvider().Logger("defenseclaw"),
+			meter:   metricNoop.NewMeterProvider().Meter("defenseclaw"),
+		}
+		if install {
+			installGlobalHooks(p)
+		}
+		return p, nil
 	}
 
 	res := buildResource(fullCfg, version)
@@ -162,9 +180,8 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 		p.emitExporterFailure(context.Background(), "otel_sdk")
 	}))
 
-	setGlobalTelemetryProvider(p)
-	config.ReportConfigLoadError = func(ctx context.Context, reason string) {
-		p.RecordConfigLoadError(ctx, reason)
+	if install {
+		installGlobalHooks(p)
 	}
 
 	if cfg.Metrics.Enabled {
@@ -174,6 +191,21 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 	}
 
 	return p, nil
+}
+
+func ActivateProvider(p *Provider) {
+	installGlobalHooks(p)
+}
+
+func installGlobalHooks(p *Provider) {
+	setGlobalTelemetryProvider(p)
+	if p == nil {
+		config.ReportConfigLoadError = nil
+		return
+	}
+	config.ReportConfigLoadError = func(ctx context.Context, reason string) {
+		p.RecordConfigLoadError(ctx, reason)
+	}
 }
 
 // Enabled reports whether OTel export is active.
@@ -240,7 +272,10 @@ func (p *Provider) AgentInstanceID() string {
 
 // Shutdown flushes pending telemetry and releases resources.
 func (p *Provider) Shutdown(ctx context.Context) error {
-	if !p.Enabled() {
+	if p == nil || !p.Enabled() {
+		return nil
+	}
+	if !p.shutdown.CompareAndSwap(false, true) {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)

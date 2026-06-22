@@ -4675,8 +4675,6 @@ def _apply_hook_connector_setup(
     # edits on multi-connector installs.
     click.echo(f"  ✓ {connector} mode={desired_mode}")
 
-    _write_guardrail_runtime(cfg.data_dir, gc)
-
     if restart:
         click.echo()
         click.echo("  Restarting gateway to wire connector telemetry...")
@@ -7193,7 +7191,7 @@ def execute_guardrail_setup(
     All connector-specific setup (plugin install, config patching, hook
     scripts, subprocess shims/sandbox) is handled by the Go gateway's
     ``Connector.Setup()`` at sidecar startup. This function only persists
-    the Python-side config and writes the guardrail runtime JSON.
+    the Python-side config; config.yaml is the sole runtime source.
     """
     gc = app.cfg.guardrail
     warnings: list[str] = []
@@ -7245,9 +7243,6 @@ def execute_guardrail_setup(
         except OSError as exc:
             ux.err(f"Failed to save config: {exc}")
             warnings.append("Config not saved — settings will be lost on next run")
-
-    # --- Write guardrail_runtime.json ---
-    _write_guardrail_runtime(app.cfg.data_dir, gc)
 
     # --- Mirror HILT into the OPA Rego data file ---
     # The prompt-side guardrail verdict is computed by Rego, which reads
@@ -7798,44 +7793,6 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
 
     if app.logger:
         app.logger.log_action(ACTION_SETUP_GUARDRAIL, "config", f"disabled connector={connector_name}")
-
-
-def _write_guardrail_runtime(data_dir: str, gc) -> None:
-    """Write guardrail_runtime.json so the gateway can hot-reload settings.
-
-    Carries every guardrail field whose runtime change should not require
-    a full sidecar restart. The Go side polls this file with a short TTL
-    (see ``GuardrailProxy.reloadRuntimeConfig``) and applies each known
-    key to the live inspector.
-
-    The HILT block is included so an operator who edits
-    ``config.yaml`` (or runs ``defenseclaw config set
-    guardrail.hilt.enabled ...``) and then re-runs the wizard or restart
-    helper has their HILT view pushed into the running gateway via the
-    same hot-reload path the rest of the runtime uses. Without this, the
-    inspector's HILT cache (set once in ``NewGuardrailProxy``) would
-    drift out of sync with ``config.yaml`` until the next bounce — the
-    same SSOT staleness pattern the input.hilt change was meant to
-    eliminate.
-    """
-    import json
-
-    runtime_file = os.path.join(data_dir, "guardrail_runtime.json")
-    hilt = getattr(gc, "hilt", None)
-    payload = {
-        "mode": gc.mode,
-        "scanner_mode": gc.scanner_mode,
-        "block_message": gc.block_message,
-        "hilt_enabled": bool(getattr(hilt, "enabled", False)),
-        "hilt_min_severity": ((getattr(hilt, "min_severity", "") or "HIGH").upper()),
-    }
-    try:
-        os.makedirs(data_dir, exist_ok=True)
-        with open(runtime_file, "w") as f:
-            json.dump(payload, f)
-        ux.ok(f"Guardrail runtime config written to {runtime_file}")
-    except OSError as exc:
-        ux.warn(f"Failed to write runtime config: {exc}")
 
 
 def _sync_guardrail_hilt_to_opa(policy_dir: str, gc) -> None:

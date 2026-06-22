@@ -63,6 +63,7 @@ type HealthSnapshot struct {
 	UptimeMs    int64           `json:"uptime_ms"`
 	Gateway     SubsystemHealth `json:"gateway"`
 	Watcher     SubsystemHealth `json:"watcher"`
+	Config      SubsystemHealth `json:"config"`
 	API         SubsystemHealth `json:"api"`
 	Guardrail   SubsystemHealth `json:"guardrail"`
 	Telemetry   SubsystemHealth `json:"telemetry"`
@@ -83,6 +84,7 @@ type SidecarHealth struct {
 	mu          sync.RWMutex
 	gateway     SubsystemHealth
 	watcher     SubsystemHealth
+	config      SubsystemHealth
 	api         SubsystemHealth
 	guardrail   SubsystemHealth
 	telemetry   SubsystemHealth
@@ -146,12 +148,24 @@ func NewSidecarHealth() *SidecarHealth {
 	return &SidecarHealth{
 		gateway:     initial,
 		watcher:     initial,
+		config:      initial,
 		api:         initial,
 		guardrail:   disabled,
 		telemetry:   disabled,
 		aiDiscovery: disabled,
 		sinks:       disabled,
 		startedAt:   now,
+	}
+}
+
+func (h *SidecarHealth) SetConfig(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.config = SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
 	}
 }
 
@@ -351,6 +365,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		UptimeMs:    time.Since(h.startedAt).Milliseconds(),
 		Gateway:     h.gateway,
 		Watcher:     h.watcher,
+		Config:      h.config,
 		API:         h.api,
 		Guardrail:   h.guardrail,
 		Telemetry:   h.telemetry,

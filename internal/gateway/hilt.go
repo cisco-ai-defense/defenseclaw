@@ -79,6 +79,13 @@ func (m *HILTApprovalManager) SetNotifier(n *notifier.Dispatcher) {
 	m.notifier = n
 }
 
+func (m *HILTApprovalManager) SetOTelProvider(p *telemetry.Provider) {
+	if m == nil {
+		return
+	}
+	m.otel = p
+}
+
 // HILTApprovalContext carries the optional correlation IDs that
 // surfaces upstream of HILT (proxy guardrail verdict, inspect
 // endpoint, hook handler) attach to a confirm decision so the
