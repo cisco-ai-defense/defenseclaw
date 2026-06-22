@@ -5448,6 +5448,22 @@ def _apply_setup_batch(
             allow_trusted_path_prompt=allow_trusted_path_prompt,
             trusted_prompt_cache=trusted_prompt_cache,
         )
+        if not ok and (connector_mode or "").strip().lower() == "action":
+            label = _CONNECTOR_META.get(c, {}).get("label", c)
+            ux.warn(
+                f"{label}: requested action mode was refused; configuring observe mode instead."
+            )
+            ok = _apply_hook_connector_setup(
+                app,
+                connector=c,
+                mode="observe",
+                restart=False,
+                write_mode="add",
+                enable_judge=enable_judge,
+                judge_hook_connectors=None,
+                allow_trusted_path_prompt=allow_trusted_path_prompt,
+                trusted_prompt_cache=trusted_prompt_cache,
+            )
         if ok:
             applied.append(c)
 

@@ -441,6 +441,48 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertEqual(res.exit_code, 0, msg=res.output)
         add_mock.assert_called_once()
 
+    def test_batch_action_refusal_downgrades_saved_mode_to_observe(self):
+        def version_gate(connector, *, mode="observe", **_kwargs):
+            return (mode or "").strip().lower() != "action"
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None))
+            stack.enter_context(patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True))
+            stack.enter_context(patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None))
+            stack.enter_context(patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True))
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_connector_modes",
+                    return_value={"geminicli": "action", "windsurf": "action"},
+                )
+            )
+            stack.enter_context(patch("defenseclaw.commands.cmd_setup._prompt_batch_trusted_prefixes", return_value={}))
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_judge_connectors",
+                    return_value=set(),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    side_effect=version_gate,
+                )
+            )
+            res = _invoke(
+                ["-c", "geminicli", "-c", "windsurf", "--no-restart"],
+                self.app,
+            )
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertIn("Gemini CLI: requested action mode was refused", res.output)
+        self.assertIn("Windsurf: requested action mode was refused", res.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.effective_mode("geminicli"), "observe")
+        self.assertEqual(gc.effective_mode("windsurf"), "observe")
+        self.assertEqual(gc.connectors["geminicli"].mode, "observe")
+        self.assertEqual(gc.connectors["windsurf"].mode, "observe")
+
     def test_interactive_batch_selects_judge_connectors_without_strategy_prompt(self):
         gc = self.app.cfg.guardrail
         gc.judge.enabled = True
