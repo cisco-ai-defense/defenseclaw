@@ -306,10 +306,13 @@ func (a *APIServer) codexEnabled() bool {
 	// still calls in. EffectiveEnabled defaults to true, so this is a
 	// no-op for single-connector installs and any connector never
 	// explicitly disabled.
-	if !a.scannerCfg.Guardrail.EffectiveEnabled("codex") {
+	if a.scannerCfg.ManualConnectorConfigured("codex") && !a.scannerCfg.Guardrail.EffectiveEnabled("codex") {
 		return false
 	}
 	if a.scannerCfg.ConnectorHookConfig("codex").Enabled {
+		return true
+	}
+	if a.health != nil && a.health.HasConnector("codex") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("codex") {
 		return true
 	}
 	// Multi-connector: membership in guardrail.connectors opts codex in
@@ -326,7 +329,7 @@ func (a *APIServer) codexMode() string {
 		mode = strings.TrimSpace(a.scannerCfg.ConnectorHookConfig("codex").Mode)
 		if mode == "" || mode == "inherit" {
 			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(a.scannerCfg.Guardrail.EffectiveMode("codex"))
+			mode = strings.TrimSpace(a.scannerCfg.EffectiveGuardrailModeForConnector("codex"))
 		}
 	}
 	return normalizeAgentHookMode(mode)

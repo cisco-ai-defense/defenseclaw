@@ -38,6 +38,8 @@ from click.testing import CliRunner
 from defenseclaw.commands import cmd_status
 from defenseclaw.commands.cmd_status import _print_agents
 from defenseclaw.commands.cmd_status import status as status_cmd
+from defenseclaw.config import ApplicationProtectionConfig
+from defenseclaw.config import GuardrailConfig
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -49,6 +51,8 @@ def _cfg(actives, *, modes=None, disabled=None):
     cfg.active_connectors.return_value = list(actives)
     cfg.guardrail.effective_mode.side_effect = lambda c: modes.get(c, "observe")
     cfg.guardrail.effective_enabled.side_effect = lambda c: c not in disabled
+    cfg.application_protection = ApplicationProtectionConfig()
+    cfg.data_dir = ""
     return cfg
 
 
@@ -160,6 +164,68 @@ class TestPrintAgentsLiveCounters(unittest.TestCase):
         cfg = _cfg(["codex", "cursor"])
         out = _render_live(cfg, health)
         self.assertIn("requests: 7", out)
+
+    def test_automatic_connector_from_health_is_listed_with_source(self):
+        health = {
+            "connectors": [
+                {"name": "codex", "state": "running", "source": "automatic", "requests": 2},
+            ]
+        }
+        cfg = _cfg([])
+        out = _render_live(cfg, health)
+        self.assertIn("Agents", out)
+        self.assertIn("Codex (codex)", out)
+        self.assertIn("source=automatic", out)
+        self.assertIn("requests: 2", out)
+
+
+class TestApplicationProtectionStatus(unittest.TestCase):
+    def test_loads_persisted_state_when_sidecar_down(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            state_path = os.path.join(td, "application_protection_state.json")
+            with open(state_path, "w") as f:
+                json.dump(
+                    {
+                        "enabled": True,
+                        "discovered": [{"connector": "codex", "confidence": 0.93}],
+                        "active": [{"connector": "codex", "source": "automatic"}],
+                        "skipped": [{"connector": "openclaw", "reason": "proxy_connector_setup_only"}],
+                        "last_activation_errors": {"cursor": "setup failed"},
+                    },
+                    f,
+                )
+            cfg = _cfg([])
+            cfg.data_dir = td
+            cfg.guardrail = GuardrailConfig()
+            cfg.application_protection = ApplicationProtectionConfig()
+
+            state = cmd_status._application_protection_status(cfg)
+            self.assertTrue(state["enabled"])
+            self.assertEqual(state["active"][0]["connector"], "codex")
+            self.assertEqual(state["skipped"][0]["reason"], "proxy_connector_setup_only")
+            self.assertEqual(state["last_activation_errors"]["cursor"], "setup failed")
+
+    def test_live_health_details_override_persisted_state(self):
+        cfg = _cfg([])
+        cfg.guardrail = GuardrailConfig()
+        cfg.application_protection = ApplicationProtectionConfig()
+        health = {
+            "application_protection": {
+                "state": "running",
+                "details": {
+                    "enabled": True,
+                    "active": [{"connector": "cursor", "source": "automatic"}],
+                    "skipped": [{"connector": "openclaw", "reason": "proxy_connector_setup_only"}],
+                    "last_errors": {"codex": "activation failed"},
+                },
+            }
+        }
+        state = cmd_status._application_protection_status(cfg, health=health)
+        self.assertEqual(state["health_state"], "running")
+        self.assertEqual(state["active"][0]["connector"], "cursor")
+        self.assertEqual(state["last_activation_errors"]["codex"], "activation failed")
 
 
 class TestStatusDbErrorSurfacing(unittest.TestCase):

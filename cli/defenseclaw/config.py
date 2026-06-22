@@ -1855,6 +1855,140 @@ class AIDiscoveryConfig:
 
 
 @dataclass
+class ApplicationProtectionAssetPolicyConfig:
+    mode: str = ""
+
+
+@dataclass
+class ApplicationProtectionConnectorConfig:
+    enabled: bool | None = None
+    min_confidence: float | None = None
+    guardrail: PerConnectorGuardrailConfig = field(default_factory=PerConnectorGuardrailConfig)
+    asset_policy: ApplicationProtectionAssetPolicyConfig = field(
+        default_factory=ApplicationProtectionAssetPolicyConfig,
+    )
+
+
+@dataclass
+class ApplicationProtectionConfig:
+    enabled: bool = True
+    min_confidence: float = 0.80
+    remove_when_gone: bool = False
+    gone_after_min: int = 60
+    include_connectors: list[str] = field(default_factory=list)
+    exclude_connectors: list[str] = field(default_factory=list)
+    connectors: dict[str, ApplicationProtectionConnectorConfig] = field(default_factory=dict)
+
+    def effective_enabled(self, connector: str) -> bool:
+        if not self.enabled:
+            return False
+        pc = self._connector_override(connector)
+        if pc is not None and pc.enabled is not None:
+            return pc.enabled
+        return True
+
+    def effective_min_confidence(self, connector: str) -> float:
+        pc = self._connector_override(connector)
+        if pc is not None and pc.min_confidence is not None:
+            return pc.min_confidence
+        return self.min_confidence or 0.80
+
+    def allows_connector(self, connector: str) -> bool:
+        name = _normalize_connector_key(connector)
+        if not name:
+            return False
+        if any(_normalize_connector_key(c) == name for c in self.exclude_connectors):
+            return False
+        if not self.include_connectors:
+            return True
+        return any(_normalize_connector_key(c) == name for c in self.include_connectors)
+
+    def _connector_override(self, connector: str) -> ApplicationProtectionConnectorConfig | None:
+        if not connector or not self.connectors:
+            return None
+        pc = self.connectors.get(connector)
+        if pc is not None:
+            return pc
+        want = _normalize_connector_key(connector)
+        for name, entry in self.connectors.items():
+            if _normalize_connector_key(name) == want:
+                return entry
+        return None
+
+    def validate(self) -> None:
+        _validate_confidence("application_protection.min_confidence", self.min_confidence)
+        if self.gone_after_min < 0:
+            raise ValueError("application_protection.gone_after_min must be >= 0")
+        _validate_connector_name_list(
+            "application_protection.include_connectors",
+            self.include_connectors,
+        )
+        _validate_connector_name_list(
+            "application_protection.exclude_connectors",
+            self.exclude_connectors,
+        )
+        seen: dict[str, str] = {}
+        for name in sorted(self.connectors):
+            if not name.strip():
+                raise ValueError(
+                    "application_protection.connectors: empty connector name is not allowed"
+                )
+            norm = _normalize_connector_key(name)
+            if norm in seen:
+                raise ValueError(
+                    f"application_protection.connectors: {seen[norm]!r} and "
+                    f"{name!r} refer to the same connector {norm!r}; keep only one"
+                )
+            seen[norm] = name
+            pc = self.connectors[name]
+            if pc.min_confidence is not None:
+                _validate_confidence(
+                    f"application_protection.connectors[{name!r}].min_confidence",
+                    pc.min_confidence,
+                )
+            try:
+                _validate_guardrail_mode(pc.guardrail.mode)
+                _validate_guardrail_hook_fail_mode(pc.guardrail.hook_fail_mode)
+                if pc.guardrail.hilt is not None:
+                    _validate_guardrail_min_severity(pc.guardrail.hilt.min_severity)
+                _validate_asset_policy_mode(pc.asset_policy.mode)
+            except ValueError as exc:
+                raise ValueError(
+                    f"application_protection.connectors[{name!r}]: {exc}"
+                ) from exc
+
+
+def _validate_confidence(path: str, value: float) -> None:
+    if value < 0 or value > 1:
+        raise ValueError(f"{path} must be between 0 and 1")
+
+
+def _validate_connector_name_list(path: str, names: list[str]) -> None:
+    seen: dict[str, str] = {}
+    for name in names:
+        if not str(name).strip():
+            raise ValueError(f"{path}: empty connector name is not allowed")
+        norm = _normalize_connector_key(str(name))
+        if norm in seen:
+            raise ValueError(
+                f"{path}: {seen[norm]!r} and {name!r} refer to the same "
+                f"connector {norm!r}; keep only one"
+            )
+        seen[norm] = str(name)
+
+
+def _normalize_connector_key(name: str | None) -> str:
+    n = (name or "").strip().lower()
+    if n in {"open-hands", "open_hands"}:
+        return "openhands"
+    if n in {"claude-code", "claude_code"}:
+        return "claudecode"
+    if n in {"gemini-cli", "gemini_cli", "gemini"}:
+        return "geminicli"
+    return n
+
+
+@dataclass
 class Config:
     data_dir: str = ""
     # Unified v5 LLM configuration. Every LLM-using component resolves
@@ -1905,6 +2039,7 @@ class Config:
     # dict-shaped authoritative paths.
     _loaded_owned_nested_values: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
+    application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
 
     # -- Claw-mode path resolution (mirrors claw.go) --
@@ -2518,6 +2653,10 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         d.pop("privacy", None)
     if d.get("ai_discovery") == _disabled_ai_discovery_dict():
         d.pop("ai_discovery", None)
+    if d.get("application_protection") == _default_application_protection_dict():
+        d.pop("application_protection", None)
+    else:
+        _serialize_application_protection(cfg, d.get("application_protection"))
     # Mirror Go's ``yaml:"notifications,omitempty"`` — when the
     # block is at full defaults (master switch off, every category /
     # source still on, default throttles) drop it so legacy configs
@@ -2681,6 +2820,11 @@ _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset({
     # saving must propagate to disk rather than being rescued by the
     # non-authoritative merge from the prior file.
     "asset_policy.connectors",
+    # Per-connector automatic application-protection overrides map. Same
+    # authoritative-merge rationale as guardrail.connectors: the dataclass is
+    # the modeled source of truth, so cleared connector overrides must not be
+    # resurrected from the prior file.
+    "application_protection.connectors",
     # Per-connector observability overrides map (D5b). Same rationale: the
     # dataclass is the single source of truth for the configured per-connector
     # routing set, so clearing a connector's sinks/webhooks override in-memory
@@ -2993,6 +3137,47 @@ def _serialize_observability(cfg: Config, observability: Any, d: dict[str, Any])
 def _disabled_ai_discovery_dict() -> dict[str, Any]:
     from dataclasses import asdict
     return asdict(AIDiscoveryConfig(enabled=False))
+
+
+def _default_application_protection_dict() -> dict[str, Any]:
+    from dataclasses import asdict
+    return asdict(ApplicationProtectionConfig())
+
+
+def _serialize_application_protection(cfg: Config, block: Any) -> None:
+    if not isinstance(block, dict):
+        return
+    conns = block.get("connectors")
+    if not conns:
+        had_connectors = bool(
+            (getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get(
+                "application_protection.connectors"
+            )
+        )
+        if had_connectors:
+            block["connectors"] = {}
+        else:
+            block.pop("connectors", None)
+        return
+    if isinstance(conns, dict):
+        for entry in conns.values():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("enabled") is None:
+                entry.pop("enabled", None)
+            if entry.get("min_confidence") is None:
+                entry.pop("min_confidence", None)
+            guard = entry.get("guardrail")
+            if isinstance(guard, dict):
+                if guard.get("enabled") is None:
+                    guard.pop("enabled", None)
+                if guard.get("hilt") is None:
+                    guard.pop("hilt", None)
+                if not any(guard.values()):
+                    entry.pop("guardrail", None)
+            asset = entry.get("asset_policy")
+            if isinstance(asset, dict) and not any(asset.values()):
+                entry.pop("asset_policy", None)
 
 
 def _merge_severity_action(raw: dict[str, Any] | None) -> SeverityAction:
@@ -4170,6 +4355,7 @@ def load() -> Config:
         observability=_merge_observability(raw.get("observability")),
         privacy=_merge_privacy(raw.get("privacy")),
         ai_discovery=_merge_ai_discovery(raw.get("ai_discovery")),
+        application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
     )
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
@@ -4189,6 +4375,7 @@ def load() -> Config:
     # empty / alias-duplicate connector names. The sink/webhook payloads are
     # validated by their respective writers at write time.
     cfg.observability.validate()
+    cfg.application_protection.validate()
     return cfg
 
 
@@ -4227,6 +4414,74 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         emit_otel=bool(raw.get("emit_otel", True)),
         store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),
         confidence_policy_path=str(raw.get("confidence_policy_path", "") or ""),
+    )
+
+
+def _merge_application_protection(raw: dict[str, Any] | None) -> ApplicationProtectionConfig:
+    if not isinstance(raw, dict):
+        return ApplicationProtectionConfig()
+    min_confidence = _optional_float(raw.get("min_confidence"))
+    return ApplicationProtectionConfig(
+        enabled=bool(raw.get("enabled", True)),
+        min_confidence=0.80 if min_confidence is None else min_confidence,
+        remove_when_gone=bool(raw.get("remove_when_gone", False)),
+        gone_after_min=int(raw.get("gone_after_min", 60) or 0),
+        include_connectors=[str(v) for v in (raw.get("include_connectors", []) or [])],
+        exclude_connectors=[str(v) for v in (raw.get("exclude_connectors", []) or [])],
+        connectors=_merge_application_protection_connectors(raw.get("connectors")),
+    )
+
+
+def _merge_application_protection_connectors(
+    raw: Any,
+) -> dict[str, ApplicationProtectionConnectorConfig]:
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    out: dict[str, ApplicationProtectionConnectorConfig] = {}
+    for name, entry in raw.items():
+        entry = entry if isinstance(entry, dict) else {}
+        enabled_raw = entry.get("enabled")
+        min_confidence = _optional_float(entry.get("min_confidence"))
+        out[str(name)] = ApplicationProtectionConnectorConfig(
+            enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
+            min_confidence=min_confidence,
+            guardrail=_merge_application_protection_guardrail(entry.get("guardrail")),
+            asset_policy=_merge_application_protection_asset_policy(entry.get("asset_policy")),
+        )
+    return out
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _merge_application_protection_guardrail(raw: Any) -> PerConnectorGuardrailConfig:
+    if not isinstance(raw, dict):
+        return PerConnectorGuardrailConfig()
+    hilt_entry = raw.get("hilt")
+    if hilt_entry is None:
+        hilt_entry = raw.get("hitl")
+    enabled_raw = raw.get("enabled")
+    return PerConnectorGuardrailConfig(
+        mode=str(raw.get("mode", "") or ""),
+        hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
+        hook_fail_mode=str(raw.get("hook_fail_mode", "") or ""),
+        block_message=str(raw.get("block_message", "") or ""),
+        rule_pack_dir=str(raw.get("rule_pack_dir", "") or ""),
+        enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
+    )
+
+
+def _merge_application_protection_asset_policy(raw: Any) -> ApplicationProtectionAssetPolicyConfig:
+    if not isinstance(raw, dict):
+        return ApplicationProtectionAssetPolicyConfig()
+    return ApplicationProtectionAssetPolicyConfig(
+        mode=str(raw.get("mode", "") or ""),
     )
 
 

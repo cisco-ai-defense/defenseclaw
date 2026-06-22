@@ -289,11 +289,14 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if !a.scannerCfg.Guardrail.EffectiveEnabled("claudecode") {
+	if a.scannerCfg.ManualConnectorConfigured("claudecode") && !a.scannerCfg.Guardrail.EffectiveEnabled("claudecode") {
 		return false
 	}
 	hookCfg := a.scannerCfg.ConnectorHookConfig("claudecode")
 	if hookCfg.Enabled {
+		return true
+	}
+	if a.health != nil && a.health.HasConnector("claudecode") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("claudecode") {
 		return true
 	}
 	// Multi-connector: membership in guardrail.connectors opts claudecode
@@ -311,7 +314,7 @@ func (a *APIServer) claudeCodeMode() string {
 		mode = strings.TrimSpace(hookCfg.Mode)
 		if mode == "" || mode == "inherit" {
 			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(a.scannerCfg.Guardrail.EffectiveMode("claudecode"))
+			mode = strings.TrimSpace(a.scannerCfg.EffectiveGuardrailModeForConnector("claudecode"))
 		}
 	}
 	return normalizeAgentHookMode(mode)

@@ -220,10 +220,11 @@ type Config struct {
 	// goes through the ObservabilityConfig.Effective* resolvers. Mirrors the
 	// Python `observability:` block written by `defenseclaw setup
 	// observability/webhook --connector`.
-	Observability ObservabilityConfig `mapstructure:"observability"    yaml:"observability,omitempty"`
-	Privacy       PrivacyConfig       `mapstructure:"privacy"          yaml:"privacy,omitempty"`
-	AIDiscovery   AIDiscoveryConfig   `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
-	Notifications NotificationsConfig `mapstructure:"notifications"    yaml:"notifications,omitempty"`
+	Observability         ObservabilityConfig         `mapstructure:"observability"    yaml:"observability,omitempty"`
+	Privacy               PrivacyConfig               `mapstructure:"privacy"          yaml:"privacy,omitempty"`
+	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
+	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
+	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
 }
 
 // PrivacyConfig groups privacy/redaction toggles. Today it carries
@@ -2148,6 +2149,12 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
 	}
+	if err := cfg.ApplicationProtection.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "application_protection_invalid")
+		}
+		return nil, fmt.Errorf("config: application_protection: %w", err)
+	}
 
 	// Validate registry source kind/content shapes. The Python CLI
 	// is the authoritative writer for ``registries.sources`` (it
@@ -2833,6 +2840,14 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("ai_discovery.emit_otel", true)
 	viper.SetDefault("ai_discovery.store_raw_local_paths", false)
 	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
+
+	viper.SetDefault("application_protection.enabled", true)
+	viper.SetDefault("application_protection.min_confidence", DefaultApplicationProtectionMinConfidence)
+	viper.SetDefault("application_protection.remove_when_gone", false)
+	viper.SetDefault("application_protection.gone_after_min", DefaultApplicationProtectionGoneAfterMin)
+	viper.SetDefault("application_protection.include_connectors", []string{})
+	viper.SetDefault("application_protection.exclude_connectors", []string{})
+	viper.SetDefault("application_protection.connectors", map[string]any{})
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")

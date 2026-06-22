@@ -123,6 +123,17 @@ func TestDiffConfigsMarksOpenShellChanged(t *testing.T) {
 	}
 }
 
+func TestDiffConfigsMarksApplicationProtectionChanged(t *testing.T) {
+	oldCfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
+	newCfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
+	newCfg.ApplicationProtection.Enabled = !oldCfg.ApplicationProtection.Enabled
+
+	diff := diffConfigs(oldCfg, newCfg)
+	if !slices.Contains(diff.Changed, "application_protection") {
+		t.Fatalf("changed = %v, missing application_protection", diff.Changed)
+	}
+}
+
 func TestReloadPredicatesRestartLLMConsumers(t *testing.T) {
 	oldCfg := &config.Config{}
 	newCfg := &config.Config{}

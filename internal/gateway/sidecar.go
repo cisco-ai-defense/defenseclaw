@@ -56,22 +56,23 @@ var launchConfigRestartHelper = defaultLaunchConfigRestartHelper
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
-	cfg         *config.Config
-	client      *Client
-	router      *EventRouter
-	store       *audit.Store
-	logger      *audit.Logger
-	health      *SidecarHealth
-	shell       *sandbox.OpenShell
-	otel        *telemetry.Provider
-	otelFanout  *runtimeOTelFanout
-	notify      *NotificationQueue
-	opa         *policy.Engine
-	hilt        *HILTApprovalManager
-	webhooks    *WebhookDispatcher
-	aiDiscovery *inventory.ContinuousDiscoveryService
-	osNotifier  *notifier.Dispatcher
-	configMgr   *ConfigManager
+	cfg           *config.Config
+	client        *Client
+	router        *EventRouter
+	store         *audit.Store
+	logger        *audit.Logger
+	health        *SidecarHealth
+	shell         *sandbox.OpenShell
+	otel          *telemetry.Provider
+	otelFanout    *runtimeOTelFanout
+	notify        *NotificationQueue
+	opa           *policy.Engine
+	hilt          *HILTApprovalManager
+	webhooks      *WebhookDispatcher
+	aiDiscovery   *inventory.ContinuousDiscoveryService
+	appProtection *applicationProtectionController
+	osNotifier    *notifier.Dispatcher
+	configMgr     *ConfigManager
 
 	apiMu              sync.RWMutex
 	apiServer          *APIServer
@@ -547,12 +548,16 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	//
 	// If token synthesis fails here we cannot proceed — the API server
 	// authenticates inbound hook calls with this token. Fail loudly.
-	if apiToken, tokErr := s.ensureGatewayTokenSynthesis(); tokErr != nil {
+	apiToken, tokErr := s.ensureGatewayTokenSynthesis()
+	if tokErr != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] FATAL: failed to synthesize gateway token: %v\n", tokErr)
 		emitError(runCtx, "sidecar", "token-synthesis-failed", "fatal", tokErr)
 		return fmt.Errorf("sidecar: gateway token synthesis: %w", tokErr)
-	} else {
-		inventory.SetPathHashKey(deriveAIInventoryHashKey(apiToken))
+	}
+	inventory.SetPathHashKey(deriveAIInventoryHashKey(apiToken))
+
+	if err := s.attachApplicationProtectionObserver(runCtx, apiToken); err != nil {
+		return err
 	}
 
 	var wg sync.WaitGroup
@@ -746,6 +751,55 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiToken string) error {
+	if s == nil || s.cfg == nil || s.health == nil {
+		return nil
+	}
+	if s.aiDiscovery == nil {
+		s.health.SetApplicationProtection(StateDisabled, "ai discovery disabled", map[string]interface{}{
+			"enabled": s.cfg.ApplicationProtection.Enabled,
+		})
+		return nil
+	}
+	if strings.TrimSpace(apiToken) == "" {
+		var err error
+		apiToken, err = s.ensureGatewayTokenSynthesis()
+		if err != nil {
+			return fmt.Errorf("application protection gateway token: %w", err)
+		}
+	}
+
+	registry := connector.NewDefaultRegistry()
+	if s.cfg.PluginDir != "" {
+		if err := registry.DiscoverPlugins(s.cfg.PluginDir); err != nil {
+			fmt.Fprintf(os.Stderr, "[application-protection] plugin discovery: %v\n", err)
+		}
+	}
+	apiBind := "127.0.0.1"
+	if s.cfg.Gateway.APIBind != "" {
+		apiBind = s.cfg.Gateway.APIBind
+	} else if s.cfg.OpenShell.IsStandalone() && s.cfg.Guardrail.Host != "" && s.cfg.Guardrail.Host != "localhost" {
+		apiBind = s.cfg.Guardrail.Host
+	}
+	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.cfg.Gateway.APIPort)
+	proxyAddr := guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host)
+	masterKey := deriveMasterKey(s.cfg.DataDir)
+	if s.appProtection == nil {
+		s.appProtection = newApplicationProtectionController(s, registry, apiToken, proxyAddr, apiAddr, masterKey)
+	} else {
+		s.appProtection.UpdateRuntime(registry, apiToken, proxyAddr, apiAddr, masterKey)
+	}
+	controller := s.appProtection
+	s.aiDiscovery.AddReportObserver(func(reportCtx context.Context, report inventory.AIDiscoveryReport) {
+		controller.OnDiscoveryReport(reportCtx, report)
+	})
+	s.health.SetApplicationProtection(StateStarting, "", map[string]interface{}{
+		"enabled":    s.cfg.ApplicationProtection.Enabled,
+		"state_file": filepath.Join(s.cfg.DataDir, applicationProtectionStateFile),
+	})
+	return nil
 }
 
 func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
@@ -1090,6 +1144,9 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 		s.aiDiscovery = nextAIDiscovery
 		if api := s.apiSnapshot(); api != nil {
 			api.SetAIDiscoveryService(nextAIDiscovery)
+		}
+		if err := s.attachApplicationProtectionObserver(ctx, ""); err != nil {
+			return err
 		}
 	}
 
@@ -1927,7 +1984,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// somehow not blocking anything" sidecar.
 		return err
 	}
-	rp = guardrail.LoadRulePack(s.cfg.Guardrail.EffectiveRulePackDir(conn.Name()))
+	rp = guardrail.LoadRulePack(s.cfg.EffectiveRulePackDirForConnector(conn.Name()))
 	rp.Validate()
 	fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded for %s: %s\n", conn.Name(), rp)
 	if s.router != nil {
@@ -2493,8 +2550,8 @@ func (s *Sidecar) connectorSetupOpts(conn connector.Connector, apiToken, proxyAd
 		APIAddr:          apiAddr,
 		APIToken:         apiToken,
 		WorkspaceDir:     s.cfg.ConnectorWorkspaceDir(),
-		HookFailMode:     s.cfg.Guardrail.EffectiveHookFailModeFor(conn.Name()),
-		HILTEnabled:      s.cfg.Guardrail.EffectiveHILT(conn.Name()).Enabled,
+		HookFailMode:     s.cfg.EffectiveHookFailModeForConnector(conn.Name()),
+		HILTEnabled:      s.cfg.EffectiveHILTForConnector(conn.Name()).Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,
 		HookContractID:   contractResolution.Contract.ContractID,
@@ -2513,7 +2570,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 
 	// Load + validate this connector's effective rule pack through the
 	// shared cache. Connectors sharing a profile read disk once.
-	rp := cache.Load(s.cfg.Guardrail.EffectiveRulePackDir(conn.Name()))
+	rp := cache.Load(s.cfg.EffectiveRulePackDirForConnector(conn.Name()))
 	if rp != nil {
 		rp.Validate()
 	}
@@ -2535,14 +2592,14 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	// shipping an unverified enforcing hook.
 	contractResolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)
 	if connector.HookContractNeedsActionOverride(contractResolution) &&
-		strings.EqualFold(s.cfg.Guardrail.Mode, "action") &&
+		strings.EqualFold(s.cfg.EffectiveGuardrailModeForConnector(conn.Name()), "action") &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), opts.AgentVersion, contractResolution.Reason)
 	}
 	if previous := connector.LoadHookContractLockEntry(s.cfg.DataDir, conn.Name()); previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
 		if connector.HookContractLockDrifted(previous, current) &&
-			strings.EqualFold(s.cfg.Guardrail.Mode, "action") &&
+			strings.EqualFold(s.cfg.EffectiveGuardrailModeForConnector(conn.Name()), "action") &&
 			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 			return fmt.Errorf("connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
 		}

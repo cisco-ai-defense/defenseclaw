@@ -195,7 +195,7 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 		return out
 	}
 
-	mode := normalizeAssetMode(c.AssetPolicy.EffectiveMode(in.Connector))
+	mode := normalizeAssetMode(c.EffectiveAssetPolicyModeForConnector(in.Connector))
 	registryConfigured := assetRegistryConfigured(p.Registry)
 	out.Enabled = true
 	out.Mode = mode

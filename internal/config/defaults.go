@@ -180,6 +180,7 @@ func DefaultConfig() *Config {
 			StoreRawLocalPaths:       false,
 			ConfidencePolicyPath:     filepath.Join(dataDir, "confidence.yaml"),
 		},
+		ApplicationProtection: DefaultApplicationProtectionConfig(),
 		Firewall: FirewallConfig{
 			ConfigFile: filepath.Join(dataDir, "firewall.yaml"),
 			RulesFile:  filepath.Join(dataDir, "firewall.pf.conf"),
