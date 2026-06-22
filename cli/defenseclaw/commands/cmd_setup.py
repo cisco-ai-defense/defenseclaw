@@ -4871,10 +4871,11 @@ def _prompt_connector_mode(connector: str, *, default_mode: str) -> str:
     """
     ux.section(f"Enforcement mode for {_CONNECTOR_META[connector]['label']}")
     click.echo(
-        "    " + ux.bold("[1] observe") + " — log and alert only, never block " + ux.dim("(recommended to start)")
+        "    " + ux.bold("[1] observe") + " — scan and report findings, never block "
+        + ux.dim("(recommended to start)")
     )
     click.echo(
-        "    " + ux.bold("[2] action ") + " — block tool calls that match security policies "
+        "    " + ux.bold("[2] action ") + " — scan and block/confirm when policy requires "
         + ux.dim("(PreToolUse deny)")
     )
     mode_default = "2" if default_mode == "action" else "1"
@@ -5129,14 +5130,14 @@ def _prompt_batch_connector_modes(connectors: list[str], gc, *, default_mode: st
             or (hasattr(gc, "effective_mode") and gc.effective_mode(c) == "action")
         )
     ]
-    ux.section("Enforcement mode")
-    ux.subhead("Rule/regex scanning applies to every active connector selected above.")
-    ux.subhead("Checked active connectors use action mode; unchecked ones use observe.")
-    ux.subhead("Action blocks matching tool calls. Observe logs and alerts only.")
+    ux.section("Action enforcement")
+    ux.subhead("Rule/regex scanning applies to every selected connector.")
+    ux.subhead("Checked connectors run in action mode and can block.")
+    ux.subhead("Unchecked connectors stay in observe mode and only report findings.")
     selected = _prompt_checkbox_selection(
         options,
         default_selected=default_action,
-        title="Select active connector(s) for action mode.",
+        title="Select connector(s) for action enforcement.",
         empty_ok=True,
     )
     action_connectors = {connector_by_display[label] for label in selected}
@@ -7428,9 +7429,10 @@ def _interactive_guardrail_setup(
         ux.section("Enforcement mode")
         ux.subhead("Rule/regex scanning applies in both modes.")
         click.echo(
-            "    " + ux.bold("[1] observe") + " — log and alert only, never block " + ux.dim("(recommended to start)")
+            "    " + ux.bold("[1] observe") + " — scan and report findings, never block "
+            + ux.dim("(recommended to start)")
         )
-        click.echo("    " + ux.bold("[2] action ") + " — block requests that match security policies")
+        click.echo("    " + ux.bold("[2] action ") + " — scan and block/confirm when policy requires")
         current_mode = gc.mode or "observe"
         mode_default = "1" if current_mode == "observe" else "2"
         mode_choice = click.prompt(

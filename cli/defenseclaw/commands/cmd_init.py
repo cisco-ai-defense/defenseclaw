@@ -1008,20 +1008,18 @@ def _note_proxy_connectors(disc) -> None:
 def _prompt_action_connectors(connectors: list[str]) -> list[str]:
     """Ask which of the selected active connectors should run in ACTION mode.
 
-    Every selected connector defaults to observe (log-only). The operator
+    Every selected connector defaults to observe. The operator
     names the subset to enforce; a blank answer keeps everything in observe.
     The reply is intersected with the selected active list so a typo can't
     enable a connector that isn't being set up."""
-    ux.section("Enforcement mode")
-    ux.subhead(
-        "All selected active connectors start in observe (log-only). Select the ones that should "
-        "ACTION (block/enforce); leave every box clear to keep everything in observe.",
-    )
-    ux.subhead("Active connectors: " + ", ".join(connectors))
+    ux.section("Action enforcement")
+    ux.subhead("Rule/regex scanning applies to every selected connector.")
+    ux.subhead("Checked connectors run in action mode and can block.")
+    ux.subhead("Unchecked connectors stay in observe mode and only report findings.")
     requested = _prompt_checkbox_selection(
         connectors,
         default_selected=[],
-        title="Select active connector(s) to run in action mode.",
+        title="Select connector(s) for action enforcement.",
         empty_ok=True,
     )
     allowed = set(connectors)

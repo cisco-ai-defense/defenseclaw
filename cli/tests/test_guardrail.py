@@ -1615,7 +1615,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         # The singular enforcement-mode prompt is skipped in favor of the
         # per-connector action picker.
-        self.assertIn("Select connector(s) for action mode.", result.output)
+        self.assertIn("Select connector(s) for action enforcement.", result.output)
         self.assertNotIn("Select mode", result.output)
         # Pressing Enter accepts the current per-connector defaults.
         self.assertEqual(self.app.cfg.guardrail.connectors["codex"].mode, "action")
