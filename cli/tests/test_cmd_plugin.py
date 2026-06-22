@@ -175,6 +175,43 @@ class TestPluginInstall(PluginCommandTestBase):
 class TestPluginInstallConnectorHelp(unittest.TestCase):
     """``install --connector`` narrows placement and policy to one peer."""
 
+    def test_plugin_help_describes_bare_connector_fan_out(self):
+        runner = CliRunner()
+        result = runner.invoke(plugin, ["--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        normalized = " ".join(result.output.split())
+        self.assertIn(
+            "With no --connector, commands that operate on plugin copies run "
+            "across configured connectors where the plugin or plugin directory applies",
+            normalized,
+        )
+        self.assertNotIn("active connector", normalized)
+        self.assertNotIn("global when bare", normalized)
+
+    def test_connector_scoped_help_avoids_legacy_scope_wording(self):
+        runner = CliRunner()
+        help_commands = [
+            "scan",
+            "install",
+            "list",
+            "remove",
+            "block",
+            "unblock",
+            "allow",
+            "disable",
+            "enable",
+            "quarantine",
+            "restore",
+        ]
+        for command in help_commands:
+            with self.subTest(command=command):
+                result = runner.invoke(plugin, [command, "--help"])
+                self.assertEqual(result.exit_code, 0, result.output)
+                normalized = " ".join(result.output.split())
+                self.assertNotIn("active connector", normalized)
+                self.assertNotIn("active connectors", normalized)
+                self.assertNotIn("global when bare", normalized)
+
     def test_install_connector_help_clarifies_scope_not_location(self):
         runner = CliRunner()
         result = runner.invoke(plugin, ["install", "--help"])
@@ -183,7 +220,10 @@ class TestPluginInstallConnectorHelp(unittest.TestCase):
         # regardless of where the help column breaks them.
         normalized = " ".join(result.output.split())
         self.assertIn("Install into one configured connector", normalized)
-        self.assertIn("Default: every active connector", normalized)
+        self.assertIn(
+            "Default: every configured connector that exposes a plugin directory",
+            normalized,
+        )
 
 
 class TestPluginList(PluginCommandTestBase):
