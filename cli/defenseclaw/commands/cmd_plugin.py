@@ -1286,6 +1286,14 @@ def _plugin_status_display(p: dict[str, Any], action_entry: Any = None) -> str:
     return "\u2717 disabled"
 
 
+def _plugin_effectively_enabled(p: dict[str, Any], action_entry: Any = None) -> bool:
+    if action_entry and not action_entry.actions.is_empty():
+        a = action_entry.actions
+        if a.file == "quarantine" or a.install == "block" or a.runtime == "disable":
+            return False
+    return bool(p.get("enabled"))
+
+
 def _plugin_list_json_items(
     plugins: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
@@ -1339,7 +1347,9 @@ def _print_plugin_list_table(
 
     from defenseclaw.commands import list_scope_title
 
-    enabled_count = sum(1 for p in plugins if p.get("enabled"))
+    enabled_count = sum(
+        1 for p in plugins if _plugin_effectively_enabled(p, actions_map.get(p["id"]))
+    )
 
     detail = f"({enabled_count}/{len(plugins)} enabled)"
     title = (

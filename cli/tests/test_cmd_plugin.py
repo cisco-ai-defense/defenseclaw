@@ -257,6 +257,27 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertNotIn("connector=claudecode", result.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_table_title_counts_effectively_enabled_plugins(self, _mock_oc):
+        codex_dir = os.path.join(self.tmp_dir, "codex-plugins")
+        os.makedirs(os.path.join(codex_dir, "dc-plugin-alpha"))
+        os.makedirs(os.path.join(codex_dir, "dc-plugin-scope"))
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [codex_dir]  # type: ignore[method-assign]
+        PolicyEngine(self.app.store).disable_for_connector(
+            "plugin",
+            "dc-plugin-scope",
+            "codex",
+            "test runtime disable",
+        )
+
+        result = self.invoke(["list", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Plugins (connector=codex) (1/2 enabled)", result.output)
+        self.assertIn("\u2717", result.output)
+        self.assertIn("disabl", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_single_connector_install_keeps_flat_json(self, _mock_oc):
         os.makedirs(os.path.join(self.app.cfg.plugin_dir, "alpha"))
         self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
