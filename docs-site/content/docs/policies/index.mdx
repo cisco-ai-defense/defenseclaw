@@ -232,7 +232,7 @@ For each category a judge flags, it also emits a `signal_strength` label derived
 | ✗ | ✓ | `needs_review` |
 | ✗ | ✗ | `weak_signal` |
 
-The Go-side verdict aggregation uses these labels to keep weakly-corroborated flags from stacking to CRITICAL. A `weak_signal` on a single category downgrades to MEDIUM/alert; `strong_signal` on a structural category (destructive command, exfil channel) escalates to CRITICAL. The calibration metrics for this path are reproducible via `go test -run TestEval` — see the [evaluation corpus README](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/testdata/eval_corpus/README.md) for the scorecard.
+The Go-side verdict aggregation uses these labels to keep weakly-corroborated flags from stacking to CRITICAL. A `weak_signal` on a single category downgrades to MEDIUM/alert; `strong_signal` on a structural category (destructive command, exfil channel) escalates to CRITICAL. The calibration metrics for this path are reproducible via `go test -run TestEval` — see the [evaluation corpus README](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/testdata/security_suite/eval_corpus/README.md) for the scorecard.
 
 Configuration lives in `judge.yaml` inside each rule pack:
 
