@@ -2528,6 +2528,27 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=False)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_json_summary_suppresses_missing_action_connector_prose(self, mock_discover, _gate):
+        mock_discover.return_value = self._disc({"codex"})
+
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--observe-all", "--action-connectors", "copilot",
+            "--scanner-mode", "local", "--skip-install",
+            "--no-start-gateway", "--no-verify", "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertTrue(result.output.lstrip().startswith("{"), result.output)
+        self.assertNotIn("not detected as installed", result.output)
+        self.assertNotIn("not detected as installed", result.stderr or "")
+
+        summary = json.loads(result.output)
+        warning = summary["connector_mode_warnings"][0]
+        self.assertEqual(warning["connector"], "copilot")
+        self.assertEqual(warning["actual_mode"], "observe")
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=False)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
     def test_action_connector_trusted_path_downgrade_is_structured(self, mock_discover, _gate):
         from defenseclaw.inventory import agent_discovery as ad
 

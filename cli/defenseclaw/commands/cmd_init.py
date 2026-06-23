@@ -1341,17 +1341,19 @@ def _build_noninteractive_connector_settings(
         configured.extend(detected)
     for name in action_list:
         if name not in _HOOK_ENFORCED_CONNECTORS:
-            click.echo(
-                f"  ⚠ {name}: not a hook-enforced connector; skipping --action-connectors entry.",
-                err=True,
-            )
+            if not quiet:
+                click.echo(
+                    f"  ⚠ {name}: not a hook-enforced connector; skipping --action-connectors entry.",
+                    err=True,
+                )
             continue
         if name not in detected:
-            click.echo(
-                f"  ⚠ {name}: not detected as installed; configuring anyway "
-                "(use --rescan-agents to refresh discovery).",
-                err=True,
-            )
+            if not quiet:
+                click.echo(
+                    f"  ⚠ {name}: not detected as installed; configuring anyway "
+                    "(use --rescan-agents to refresh discovery).",
+                    err=True,
+                )
         if name not in configured:
             configured.append(name)
 
