@@ -2913,6 +2913,11 @@ def _check_connector_version_supported_for_setup(
     contract = compatibility.contract.contract_id if compatibility.contract else "none"
 
     if not installed:
+        if action_mode and compatibility.status != STATUS_NOT_GATED:
+            if emit:
+                ux.err(f"{label}: connector was not detected locally; refusing action-mode hook setup.")
+                ux.subhead("Install the connector locally, or use observe mode until it is available.")
+            return False
         if emit:
             ux.warn(_connector_not_detected_message(label))
         return True
@@ -3084,7 +3089,7 @@ def _check_guardrail_setup_connector_versions(
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
-            if allow_prompt and (mode or "").strip().lower() == "action":
+            if (mode or "").strip().lower() == "action":
                 _downgrade_guardrail_setup_action_connector(gc, connector)
                 continue
             return False
@@ -5071,6 +5076,7 @@ def _setup_observability_alias(
     if interactive and enable_judge is None and _prompt_enable_judge(connector, gc):
         enable_judge = True
 
+    trusted_prompt_cache: dict[str, bool] | None = {} if interactive else None
     ok = _apply_hook_connector_setup(
         app,
         connector=connector,
@@ -5087,7 +5093,30 @@ def _setup_observability_alias(
         enable_judge=enable_judge,
         judge_hook_connectors=judge_hook_connectors,
         allow_trusted_path_prompt=interactive,
+        trusted_prompt_cache=trusted_prompt_cache,
     )
+    if not ok and normalized_mode == "action":
+        label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+        ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
+        normalized_mode = "observe"
+        ok = _apply_hook_connector_setup(
+            app,
+            connector=connector,
+            mode=normalized_mode,
+            restart=restart,
+            workspace_dir=workspace_dir,
+            write_mode=write_mode,
+            rule_pack=rule_pack,
+            rule_pack_dir=rule_pack_dir,
+            block_message=block_message,
+            fail_mode=fail_mode,
+            hilt=human_approval,
+            hilt_min_severity=hilt_min_severity,
+            enable_judge=enable_judge,
+            judge_hook_connectors=judge_hook_connectors,
+            allow_trusted_path_prompt=interactive,
+            trusted_prompt_cache=trusted_prompt_cache,
+        )
     if not ok:
         raise click.ClickException(f"failed to configure {connector} (mode={normalized_mode}) — see errors above")
 

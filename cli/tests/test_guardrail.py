@@ -25,6 +25,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import yaml
@@ -1012,24 +1013,69 @@ class TestSetupGuardrailCommand(unittest.TestCase):
     def test_non_interactive_claudecode_action_enables_enforcement(self):
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.claw.home_dir = self.tmp_dir
-
-        result = self.runner.invoke(
-            setup,
-            [
-                "guardrail",
-                "--non-interactive",
-                "--connector",
-                "claudecode",
-                "--mode",
-                "action",
-                "--no-restart",
-            ],
-            obj=self.app,
+        signal = SimpleNamespace(
+            version="2.1.160 (Claude Code)",
+            installed=True,
+            error="",
+            binary_path="/usr/bin/claude",
         )
+        disc = SimpleNamespace(agents={"claudecode": signal})
+
+        with patch(
+            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+            return_value=disc,
+        ):
+            result = self.runner.invoke(
+                setup,
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--connector",
+                    "claudecode",
+                    "--mode",
+                    "action",
+                    "--no-restart",
+                ],
+                obj=self.app,
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
         self.assertEqual(self.app.cfg.guardrail.mode, "action")
+
+    def test_non_interactive_missing_action_connector_downgrades_to_observe(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        signal = SimpleNamespace(version="", installed=False, error="", binary_path="")
+        disc = SimpleNamespace(agents={"copilot": signal})
+
+        with patch(
+            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+            return_value=disc,
+        ), patch(
+            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+            return_value=(True, []),
+        ):
+            result = self.runner.invoke(
+                setup,
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--connector",
+                    "copilot",
+                    "--mode",
+                    "action",
+                    "--no-restart",
+                ],
+                obj=self.app,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("GitHub Copilot CLI: connector was not detected locally", result.output)
+        self.assertIn("GitHub Copilot CLI: requested action mode was refused", result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "copilot")
+        self.assertEqual(self.app.cfg.guardrail.mode, "observe")
 
     def test_non_interactive_codex_observe_flag_enables_enforcement(self):
         from defenseclaw.commands.cmd_setup import setup

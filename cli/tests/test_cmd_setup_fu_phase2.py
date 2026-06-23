@@ -262,6 +262,28 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertNotIn("hermes", gc.judge.hook_connectors)
         self.assertIn("codex", gc.judge.hook_connectors)
 
+    def test_direct_action_missing_connector_falls_back_to_observe(self):
+        signal = SimpleNamespace(version="", installed=False, error="", binary_path="")
+        disc = SimpleNamespace(agents={"copilot": signal})
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None))
+            stack.enter_context(patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True))
+            stack.enter_context(patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None))
+            stack.enter_context(
+                patch("defenseclaw.commands.cmd_setup.agent_discovery.discover_agents", return_value=disc)
+            )
+            res = _invoke(
+                ["copilot", "--yes", "--no-restart", "--mode", "action"],
+                self.app,
+            )
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertIn("GitHub Copilot CLI: connector was not detected locally", res.output)
+        self.assertIn("GitHub Copilot CLI: requested action mode was refused", res.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "copilot")
+        self.assertEqual(self.app.cfg.guardrail.mode, "observe")
+
 
 # ---------------------------------------------------------------------------
 # SU-06 / SU-07 — interactive mode + judge prompts
@@ -472,6 +494,19 @@ class TestNotDetectedMessage(unittest.TestCase):
             ok = cmd_setup._check_connector_version_supported_for_setup("hermes", mode="observe")
         self.assertTrue(ok)
         self.assertIn(cmd_setup._connector_not_detected_message("Hermes"), captured)
+
+    def test_check_refuses_action_when_not_installed(self):
+        signal = SimpleNamespace(version="", installed=False, error="", binary_path="")
+        disc = SimpleNamespace(agents={"hermes": signal})
+        captured = []
+        with patch.object(cmd_setup.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_setup.ux, "err", side_effect=lambda m: captured.append(m)):
+            ok = cmd_setup._check_connector_version_supported_for_setup("hermes", mode="action")
+        self.assertFalse(ok)
+        self.assertIn(
+            "Hermes: connector was not detected locally; refusing action-mode hook setup.",
+            captured,
+        )
 
 
 # ---------------------------------------------------------------------------
