@@ -219,6 +219,12 @@ def validate_config() -> ValidationResult:
             res.warnings.append(
                 f"gateway.port ({gw.port}) equals gateway.api_port ({gw.api_port}) — one will fail to bind"
             )
+        reload_mode = getattr(getattr(gw, "config_reload", None), "mode", "hot") or "hot"
+        if str(reload_mode).strip().lower() not in ("hot", "restart"):
+            res.errors.append(
+                "gateway.config_reload.mode must be 'hot' or 'restart' "
+                f"(got '{reload_mode}')"
+            )
 
     # Legacy plain-text secrets: already emitted as logger warnings on
     # load. We surface the same info in the validate report for

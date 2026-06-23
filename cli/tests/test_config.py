@@ -39,6 +39,7 @@ from defenseclaw.config import (
     ClawConfig,
     Config,
     GatewayConfig,
+    GatewayConfigReloadConfig,
     GatewayWatcherPluginConfig,
     GuardrailConfig,
     InspectLLMConfig,
@@ -474,6 +475,31 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(raw["environment"], "macos")
             self.assertEqual(raw["data_dir"], tmpdir)
             self.assertEqual(raw["gateway"]["api_bind"], "10.0.0.8")
+            self.assertNotIn("config_reload", raw["gateway"])
+
+    def test_gateway_config_reload_restart_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                gateway=GatewayConfig(
+                    config_reload=GatewayConfigReloadConfig(mode="restart"),
+                ),
+            )
+            cfg.save()
+
+            import yaml
+            config_file = os.path.join(tmpdir, "config.yaml")
+            with open(config_file) as f:
+                raw = yaml.safe_load(f)
+            self.assertEqual(raw["gateway"]["config_reload"]["mode"], "restart")
+
+            with patch("defenseclaw.config.default_data_path", return_value=Path(tmpdir)):
+                reloaded = load()
+            self.assertEqual(reloaded.gateway.config_reload.mode, "restart")
 
     def test_save_and_reload_preserves_watch_rescan_fields(self):
         import yaml

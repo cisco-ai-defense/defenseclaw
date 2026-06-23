@@ -10,34 +10,37 @@ one, and which code path consumes it.
 USER runs: defenseclaw setup guardrail
   │
   ├─ WRITES ──► ~/.defenseclaw/config.yaml         (all settings, including guardrail.*)
-  ├─ WRITES ──► ~/.defenseclaw/.env                 (API key values, mode 0600)
-  └─ WRITES ──► ~/.defenseclaw/guardrail_runtime.json (initial mode + scanner_mode)
+  └─ WRITES ──► ~/.defenseclaw/.env                 (API key values, mode 0600)
 
 
-GO SIDECAR boots: reads config.yaml once
+GO SIDECAR boots: reads config.yaml
   │
-  ├─ Runs guardrail proxy (goroutine; internal/gateway/sidecar.go:352–375):
+  ├─ Starts central config watcher/reconciler
+  │    ├─ Watches the active config.yaml path with fsnotify
+  │    ├─ Reloads and validates the full YAML on change
+  │    └─ Hot-applies safe changes or requests configured restart behavior
+  │
+  ├─ Runs guardrail proxy (goroutine):
   │    ├─ Loads guardrail.* and cisco_ai_defense.* from in-memory config
   │    ├─ Resolves API keys via ~/.defenseclaw/.env (ResolveAPIKey + loadDotEnv)
   │    └─ Listens on guardrail.port for OpenAI-compatible traffic
   │
-  └─ API server handles PATCH /api/v1/guardrail/config
-       └─ WRITES ──► ~/.defenseclaw/guardrail_runtime.json  (mode + scanner_mode)
-          (does NOT update config.yaml)
+  └─ API server handles PATCH /v1/guardrail/config
+       └─ PATCHES ─► ~/.defenseclaw/config.yaml  (supported guardrail fields)
 
 
 GUARDRAIL PROXY:
   │
-  ├─ Reads config.yaml indirectly (struct from sidecar config load)
-  ├─ Reads guardrail_runtime.json with a TTL cache (internal/gateway/proxy.go:550–577) ◄─ hot-reload
+  ├─ Reads config.yaml indirectly (validated snapshots from the sidecar)
+  ├─ Receives hot-applied guardrail updates from the config reconciler
   ├─ Resolves upstream API keys (internal/gateway/provider.go:798–809, loadDotEnv in dotenv.go:28)
   ├─ Authenticates clients with deriveMasterKey (internal/gateway/proxy.go:521–535)
   └─ Runs inspection in Go (GuardrailInspector — local patterns, Cisco AI Defense, LLM judge, OPA)
 ```
 
-> **Note on redundancy:** `mode` and `scanner_mode` live in both `config.yaml`
-> and `guardrail_runtime.json`. The PATCH endpoint only updates the runtime JSON
-> without writing back to `config.yaml`, so the two can drift after a hot-reload.
+> `config.yaml` is the single source of truth. On upgrade, any legacy
+> `guardrail_runtime.json` values are migrated into `config.yaml` once and the
+> runtime JSON file is deleted.
 
 ---
 
@@ -212,24 +215,23 @@ for the user-facing behavior.
 
 ---
 
-### `~/.defenseclaw/guardrail_runtime.json`
+### Legacy `~/.defenseclaw/guardrail_runtime.json`
 
-Small JSON file for hot-reloading guardrail mode and scanner mode without
-restarting the guardrail proxy. Contains only two fields.
+Removed in 0.8.0. During gateway startup, DefenseClaw migrates any legacy
+runtime values into `config.yaml`, then deletes `guardrail_runtime.json`. If the
+migration or deletion fails, startup fails instead of running with split-brain
+guardrail config.
 
-Example contents:
+Migrated keys:
 
-```json
-{"mode": "observe", "scanner_mode": "local"}
-```
-
-| | |
+| Legacy JSON key | New YAML key |
 |---|---|
-| **Created by** | **Go sidecar** API server via `writeGuardrailRuntime()` (`internal/gateway/api.go:1051–1063`), called from the `PATCH /api/v1/guardrail/config` handler (line 1023). |
-| **Read by** | **Guardrail proxy** via `reloadRuntimeConfig()` (`internal/gateway/proxy.go:550–577`) with a 5-second TTL cache before handling requests. |
-| **Path derivation (writer)** | `filepath.Join(a.scannerCfg.DataDir, "guardrail_runtime.json")` — uses `DataDir` from Go config. |
-| **Path derivation (reader)** | `filepath.Join(p.dataDir, "guardrail_runtime.json")` — `dataDir` from sidecar config (`internal/gateway/proxy.go:559`). |
-| **Caveat** | The PATCH handler updates the in-memory Go config but does **not** call `cfg.Save()`, so `config.yaml` drifts out of sync after a PATCH. |
+| `mode` | `guardrail.mode` |
+| `scanner_mode` | `guardrail.scanner_mode` |
+| `block_message` | `guardrail.block_message` |
+| `connector` | `guardrail.connector` |
+| `hilt_enabled` | `guardrail.hilt.enabled` |
+| `hilt_min_severity` | `guardrail.hilt.min_severity` |
 
 ---
 
@@ -241,7 +243,7 @@ The sidecar **runs the guardrail proxy in-process** (`internal/gateway/sidecar.g
 
 | Concern | Where it comes from |
 |---|---|
-| **`guardrail.mode`**, **`guardrail.scanner_mode`** | YAML at startup; hot-reload from `guardrail_runtime.json` (`reloadRuntimeConfig` / `applyRuntime`, `internal/gateway/proxy.go:550–592`). |
+| **`guardrail.mode`**, **`guardrail.scanner_mode`** | YAML at startup and config watcher reload; PATCH `/v1/guardrail/config` persists supported runtime changes back into `config.yaml`. |
 | **Upstream LLM API key** | Resolved via `Config.ResolveLLM("guardrail").ResolvedAPIKey()` (`internal/config/config.go`). The unified top-level `llm.api_key_env` (default `DEFENSECLAW_LLM_KEY`) is read from `~/.defenseclaw/.env` via `loadDotEnv` (`internal/gateway/dotenv.go:28`) and consumed in `NewGuardrailProxy` (`internal/gateway/proxy.go`). A `guardrail.llm` override block can set a different key/model per component. The legacy `guardrail.api_key_env` field remains as a read-only fallback until operators run `defenseclaw setup migrate-llm`. |
 | **Cisco AI Defense** | `cisco_ai_defense` on the loaded `config.Config`; `NewCiscoInspectClient` (`internal/gateway/cisco_inspect.go:53–88`) resolves the API key with the same `dotenvPath` as the proxy. |
 | **LLM judge** | `guardrail.judge` (strategy/thresholds) + `Config.ResolveLLM("guardrail.judge")` (model, key, base URL) feed `NewLLMJudge` (`internal/gateway/llm_judge.go`). The judge inherits every field from the top-level `llm:` block unless `guardrail.judge.llm` overrides it. |
@@ -256,7 +258,7 @@ The sidecar **runs the guardrail proxy in-process** (`internal/gateway/sidecar.g
 
 ### Legacy `DEFENSECLAW_*` variables
 
-**The built-in Go guardrail proxy does not set or depend on** `DEFENSECLAW_GUARDRAIL_MODE`, `DEFENSECLAW_SCANNER_MODE`, `DEFENSECLAW_API_PORT`, `DEFENSECLAW_DATA_DIR`, or `PYTHONPATH` for inspection. Mode and scanner mode come from `config.yaml` and `guardrail_runtime.json` as described above.
+**The built-in Go guardrail proxy does not set or depend on** `DEFENSECLAW_GUARDRAIL_MODE`, `DEFENSECLAW_SCANNER_MODE`, `DEFENSECLAW_API_PORT`, `DEFENSECLAW_DATA_DIR`, or `PYTHONPATH` for inspection. Mode and scanner mode come from `config.yaml` as described above.
 
 ---
 
@@ -464,8 +466,9 @@ defenseclaw setup notifications-set guardrail off
 defenseclaw setup notifications-set asset_policy off
 ```
 
-Throttle fields (`dedup_window`, `max_per_minute`) remain config-only
-— flip them in `config.yaml` and restart the gateway.
+Throttle fields (`dedup_window`, `max_per_minute`) remain config-only — flip
+them in `config.yaml`; the running gateway reloads the file and reconciles the
+notification dispatcher.
 
 ### YAML
 

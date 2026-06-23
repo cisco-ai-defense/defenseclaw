@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -181,6 +182,103 @@ func TestApplyConfigReloadRebuildsSharedJudge(t *testing.T) {
 	}
 	if api.hookJudge != sidecar.judge {
 		t.Fatal("API hook judge was not updated to the rebuilt shared judge")
+	}
+}
+
+func TestApplyConfigReloadHotRejectsRestartRequiredChange(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := *oldCfg
+	newCfg.DataDir = filepath.Join(t.TempDir(), "next")
+
+	sidecar := &Sidecar{cfg: oldCfg}
+	err := sidecar.applyConfigReload(context.Background(), oldCfg, &newCfg, diffConfigs(oldCfg, &newCfg))
+	if err == nil {
+		t.Fatal("applyConfigReload succeeded for restart-required change in hot mode")
+	}
+	if !strings.Contains(err.Error(), "data_dir") {
+		t.Fatalf("error = %v, want data_dir", err)
+	}
+}
+
+func TestApplyConfigReloadRestartModeRequestsProcessRestart(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := *oldCfg
+	newCfg.DataDir = filepath.Join(t.TempDir(), "next")
+	newCfg.Gateway.ConfigReload.Mode = "restart"
+
+	helperCalled := false
+	oldHelper := launchConfigRestartHelper
+	launchConfigRestartHelper = func() error {
+		helperCalled = true
+		return nil
+	}
+	t.Cleanup(func() { launchConfigRestartHelper = oldHelper })
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	sidecar := &Sidecar{cfg: oldCfg}
+	sidecar.setRunCancel(cancel)
+
+	if err := sidecar.applyConfigReload(context.Background(), oldCfg, &newCfg, diffConfigs(oldCfg, &newCfg)); err != nil {
+		t.Fatalf("applyConfigReload: %v", err)
+	}
+	if !helperCalled {
+		t.Fatal("restart helper was not launched")
+	}
+	select {
+	case <-runCtx.Done():
+	default:
+		t.Fatal("run context was not cancelled")
+	}
+	if got := sidecar.cfg.DataDir; got != newCfg.DataDir {
+		t.Fatalf("sidecar cfg DataDir = %q, want %q", got, newCfg.DataDir)
+	}
+}
+
+func TestApplyConfigReloadArmsRestartModeWithoutImmediateRestart(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := *oldCfg
+	newCfg.Gateway.ConfigReload.Mode = "restart"
+
+	helperCalled := false
+	oldHelper := launchConfigRestartHelper
+	launchConfigRestartHelper = func() error {
+		helperCalled = true
+		return nil
+	}
+	t.Cleanup(func() { launchConfigRestartHelper = oldHelper })
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sidecar := &Sidecar{cfg: oldCfg}
+	sidecar.setRunCancel(cancel)
+
+	if err := sidecar.applyConfigReload(context.Background(), oldCfg, &newCfg, diffConfigs(oldCfg, &newCfg)); err != nil {
+		t.Fatalf("applyConfigReload: %v", err)
+	}
+	if helperCalled {
+		t.Fatal("restart helper launched when only config_reload.mode changed")
+	}
+	select {
+	case <-runCtx.Done():
+		t.Fatal("run context was cancelled when only config_reload.mode changed")
+	default:
+	}
+	if got := sidecar.cfg.Gateway.ConfigReload.Mode; got != "restart" {
+		t.Fatalf("reload mode = %q, want restart", got)
+	}
+}
+
+func TestConfigRestartHelperArgsPreservesOnlySafeRootFlags(t *testing.T) {
+	got := configRestartHelperArgs([]string{
+		"defenseclaw-gateway",
+		"--host", "10.0.0.5",
+		"--token", "secret",
+		"--port=18790",
+		"--log-level", "debug",
+	})
+	want := []string{"restart", "--host", "10.0.0.5", "--port=18790"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("configRestartHelperArgs = %v, want %v", got, want)
 	}
 }
 

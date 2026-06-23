@@ -167,7 +167,8 @@ The `/api/v1/inspect/*` family is the hot path that connector hooks and the Open
 | --- | --- | --- |
 | `POST` | `/v1/guardrail/event` | Submit a guardrail event (used by the LiteLLM bridge for upstream-triggered events). |
 | `POST` | `/v1/guardrail/evaluate` | Evaluate the guardrail rule pack against arbitrary content. |
-| `GET` | `/v1/guardrail/config` | Return the active guardrail config the gateway resolved at boot — handy for verifying `setup guardrail` actually wrote what you thought. |
+| `GET` | `/v1/guardrail/config` | Return the active guardrail config snapshot. |
+| `PATCH` | `/v1/guardrail/config` | Patch supported guardrail runtime fields into `~/.defenseclaw/config.yaml`, validate the full YAML file, and let the config watcher/reconciler apply the latest config. Body is JSON, not raw YAML. Supported fields: `mode`, `scanner_mode`, `block_message`, `connector`, `hilt_enabled`, `hilt_min_severity`. |
 
 ### Enforcement logging
 
@@ -201,7 +202,7 @@ Audit export includes the legacy `details` text and, when present, first-class `
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/config/patch` | Apply a JSON-Patch-style update to a single config key (used by the TUI's quick-edit panel). For full reloads, restart the gateway — see [`setup guardrail`](/docs/setup/guardrail) which restarts when needed. |
+| `POST` | `/config/patch` | Apply a JSON-Patch-style update to a single config key (used by the TUI's quick-edit panel). The gateway watches `config.yaml` and reconciles valid changes; set `gateway.config_reload.mode: restart` when a deployment should use a fresh process for substantive config edits. |
 
 ### AI usage / discovery (AIBOM)
 

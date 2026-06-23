@@ -304,8 +304,8 @@ forwards to the upstream LLM provider.
    `127.0.0.1:{port}` (OpenAI-compatible routes and `/health/*`).
 2. **Configuration**: Mode (`observe` | `action`), model aliases, Cisco AI
    Defense, and optional LLM judge settings come from `guardrail` in
-   `~/.defenseclaw/config.yaml` and optional runtime overrides via the local
-   API.
+   `~/.defenseclaw/config.yaml`. The local guardrail config API patches
+   supported guardrail fields back into the same YAML file.
 3. **Health check**: After the server binds, a short grace period elapses;
    then health transitions to `running`. Callers can probe
    `GET http://127.0.0.1:{port}/health/liveliness` as a guardrail proxy
@@ -326,8 +326,8 @@ The sidecar runs LLM inspection entirely in Go: `GuardrailInspector` in
 optional LLM judge, OPA policy via `policy.Engine.EvaluateGuardrail`) is invoked
 from `GuardrailProxy` in `internal/gateway/proxy.go` on each request and
 response (including streaming). Mode and `scanner_mode` come from the loaded
-config and from `guardrail_runtime.json` hot-reload, not from a Python module
-or `DEFENSECLAW_*` env vars.
+`config.yaml` snapshot and subsequent config watcher reloads, not from a Python
+module, `guardrail_runtime.json`, or `DEFENSECLAW_*` env vars.
 
 ### Configuration
 

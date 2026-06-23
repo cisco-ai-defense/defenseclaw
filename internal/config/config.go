@@ -1793,11 +1793,20 @@ type GatewayConfig struct {
 	// in gatewayShouldConnectForConfiguredConnector — unknown values
 	// fall through to "auto" so a typo doesn't accidentally disable
 	// fleet integration on production.
-	FleetMode   string               `mapstructure:"fleet_mode"        yaml:"fleet_mode,omitempty"`
-	Watcher     GatewayWatcherConfig `mapstructure:"watcher"            yaml:"watcher"`
-	Watchdog    WatchdogConfig       `mapstructure:"watchdog"           yaml:"watchdog"`
-	SandboxHome string               `mapstructure:"-"                  yaml:"-"`
-	ClawHome    string               `mapstructure:"-"                  yaml:"-"`
+	FleetMode    string                    `mapstructure:"fleet_mode"        yaml:"fleet_mode,omitempty"`
+	ConfigReload GatewayConfigReloadConfig `mapstructure:"config_reload"     yaml:"config_reload,omitempty"`
+	Watcher      GatewayWatcherConfig      `mapstructure:"watcher"           yaml:"watcher"`
+	Watchdog     WatchdogConfig            `mapstructure:"watchdog"          yaml:"watchdog"`
+	SandboxHome  string                    `mapstructure:"-"                 yaml:"-"`
+	ClawHome     string                    `mapstructure:"-"                 yaml:"-"`
+}
+
+type GatewayConfigReloadConfig struct {
+	// Mode controls what the running gateway does after config.yaml changes.
+	// "hot" validates and reconciles in process. "restart" validates the new
+	// file, records the reload, then shuts down so an external supervisor can
+	// start a fresh process with the full config.
+	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
 }
 
 // WatchdogConfig controls the health watchdog that notifies users when the
@@ -2058,6 +2067,13 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
+		}
+		return nil, err
+	}
+
+	if err := validateGatewayConfigReloadMode(cfg.Gateway.ConfigReload.Mode); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "gateway_config_reload_invalid")
 		}
 		return nil, err
 	}
@@ -2609,6 +2625,14 @@ func validateDeploymentMode(mode string) error {
 	return fmt.Errorf("config: deployment_mode=%q is invalid (allowed: managed_enterprise, unmanaged_byod, ci_cd, sandboxed, server, saas)", mode)
 }
 
+func validateGatewayConfigReloadMode(mode string) error {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "hot", "restart":
+		return nil
+	}
+	return fmt.Errorf("config: gateway.config_reload.mode=%q is invalid (allowed: hot, restart)", mode)
+}
+
 func normalizeDeploymentMode(mode string) string {
 	switch strings.TrimSpace(mode) {
 	case "managed":
@@ -2889,6 +2913,7 @@ func setDefaults(dataDir string) {
 	// in gatewayShouldConnectForConfiguredConnector. See the field
 	// doc on GatewayConfig.FleetMode for the override semantics.
 	viper.SetDefault("gateway.fleet_mode", "auto")
+	viper.SetDefault("gateway.config_reload.mode", "hot")
 	viper.SetDefault("gateway.device_key_file", filepath.Join(dataDir, "device.key"))
 	viper.SetDefault("gateway.auto_approve_safe", false)
 	viper.SetDefault("gateway.reconnect_ms", 800)

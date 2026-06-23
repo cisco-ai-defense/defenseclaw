@@ -201,6 +201,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Gateway.APIPort != 18970 {
 		t.Errorf("expected gateway api_port 18970, got %d", cfg.Gateway.APIPort)
 	}
+	if cfg.Gateway.ConfigReload.Mode != "hot" {
+		t.Errorf("expected gateway config_reload.mode hot, got %q", cfg.Gateway.ConfigReload.Mode)
+	}
 	if !cfg.Gateway.Watcher.Enabled {
 		t.Error("expected gateway watcher enabled by default")
 	}
@@ -427,6 +430,19 @@ func TestValidateDeploymentMode_Valid(t *testing.T) {
 func TestValidateDeploymentMode_Invalid(t *testing.T) {
 	if err := validateDeploymentMode("freeform"); err == nil {
 		t.Fatal("expected validateDeploymentMode to reject free-form value")
+	}
+}
+
+func TestValidateGatewayConfigReloadMode(t *testing.T) {
+	for _, mode := range []string{"", "hot", "restart", "HOT", " Restart "} {
+		t.Run(mode, func(t *testing.T) {
+			if err := validateGatewayConfigReloadMode(mode); err != nil {
+				t.Fatalf("validateGatewayConfigReloadMode(%q) returned unexpected error: %v", mode, err)
+			}
+		})
+	}
+	if err := validateGatewayConfigReloadMode("reload"); err == nil {
+		t.Fatal("expected validateGatewayConfigReloadMode to reject reload")
 	}
 }
 

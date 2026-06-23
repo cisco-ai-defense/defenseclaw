@@ -221,6 +221,9 @@ func DefaultConfig() *Config {
 			MaxReconnectMs:  15000,
 			ApprovalTimeout: 30,
 			APIPort:         18970,
+			ConfigReload: GatewayConfigReloadConfig{
+				Mode: "hot",
+			},
 			Watcher: GatewayWatcherConfig{
 				Enabled: true,
 				Skill: GatewayWatcherSkillConfig{

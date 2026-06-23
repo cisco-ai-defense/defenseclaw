@@ -815,6 +815,11 @@ class GatewayWatcherConfig:
 
 
 @dataclass
+class GatewayConfigReloadConfig:
+    mode: str = "hot"
+
+
+@dataclass
 class GatewayConfig:
     host: str = "127.0.0.1"
     port: int = 18789
@@ -827,6 +832,7 @@ class GatewayConfig:
     max_reconnect_ms: int = 15000
     approval_timeout_s: int = 30
     api_port: int = 18970
+    config_reload: GatewayConfigReloadConfig = field(default_factory=GatewayConfigReloadConfig)
     watcher: GatewayWatcherConfig = field(default_factory=GatewayWatcherConfig)
 
     def resolved_token(self) -> str:
@@ -2432,6 +2438,10 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
+    if gw:
+        config_reload = gw.get("config_reload")
+        if isinstance(config_reload, dict) and (config_reload.get("mode") or "hot") == "hot":
+            gw.pop("config_reload", None)
     _strip_empty_llm(d, "llm")
     scanners = d.get("scanners") or {}
     _strip_empty_llm(scanners.get("skill_scanner"), "llm")
@@ -3839,6 +3849,12 @@ def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
     )
 
 
+def _merge_gateway_config_reload(raw: dict[str, Any] | None) -> GatewayConfigReloadConfig:
+    if not raw:
+        return GatewayConfigReloadConfig()
+    return GatewayConfigReloadConfig(mode=str(raw.get("mode", "hot") or "hot"))
+
+
 def _apply_instance_overlay(out: LLMConfig, data_dir: str) -> None:
     """Fold a custom-providers.json instance entry into a resolved LLMConfig.
 
@@ -4142,6 +4158,7 @@ def load() -> Config:
             max_reconnect_ms=gw_raw.get("max_reconnect_ms", 15000),
             approval_timeout_s=gw_raw.get("approval_timeout_s", 30),
             api_port=gw_raw.get("api_port", 18970),
+            config_reload=_merge_gateway_config_reload(gw_raw.get("config_reload")),
             watcher=_merge_gateway_watcher(gw_raw.get("watcher")),
         ),
         skill_actions=_merge_skill_actions(raw.get("skill_actions")),

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -35,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinkconfig"
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -48,6 +50,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 	"github.com/google/uuid"
 )
+
+var launchConfigRestartHelper = defaultLaunchConfigRestartHelper
 
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
@@ -77,6 +81,8 @@ type Sidecar struct {
 	watcherRestartCh   chan struct{}
 	guardrailRestartCh chan struct{}
 	aiRestartCh        chan struct{}
+	runCancelMu        sync.Mutex
+	runCancel          context.CancelFunc
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
@@ -475,10 +481,15 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 // in its own goroutine so that a gateway disconnect does not stop the watcher
 // or API server. Run blocks until ctx is cancelled, then shuts everything down.
 func (s *Sidecar) Run(ctx context.Context) error {
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+	s.setRunCancel(runCancel)
+	defer s.setRunCancel(nil)
+
 	runID := gatewaylog.ProcessRunID()
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
 		s.cfg.Gateway.AutoApprove, s.cfg.Gateway.Watcher.Enabled, s.cfg.Gateway.APIPort, s.cfg.Guardrail.Enabled, runID)
-	emitLifecycle(ctx, "sidecar", "start", map[string]string{
+	emitLifecycle(runCtx, "sidecar", "start", map[string]string{
 		"run_id":       runID,
 		"auto_approve": fmt.Sprintf("%v", s.cfg.Gateway.AutoApprove),
 		"watcher":      fmt.Sprintf("%v", s.cfg.Gateway.Watcher.Enabled),
@@ -505,14 +516,14 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			if compileErr := engine.Compile(); compileErr == nil {
 				s.opa = engine
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", s.cfg.PolicyDir)
-				emitLifecycle(ctx, "opa", "ready", map[string]string{"policy_dir": s.cfg.PolicyDir})
+				emitLifecycle(runCtx, "opa", "ready", map[string]string{"policy_dir": s.cfg.PolicyDir})
 			} else {
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA compile error (falling back to built-in): %v\n", compileErr)
-				emitError(ctx, "opa", "compile-failed", "falling back to built-in policies", compileErr)
+				emitError(runCtx, "opa", "compile-failed", "falling back to built-in policies", compileErr)
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
-			emitError(ctx, "opa", "init-failed", "falling back to built-in policies", err)
+			emitError(runCtx, "opa", "init-failed", "falling back to built-in policies", err)
 		}
 	}
 
@@ -538,7 +549,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	// authenticates inbound hook calls with this token. Fail loudly.
 	if apiToken, tokErr := s.ensureGatewayTokenSynthesis(); tokErr != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] FATAL: failed to synthesize gateway token: %v\n", tokErr)
-		emitError(ctx, "sidecar", "token-synthesis-failed", "fatal", tokErr)
+		emitError(runCtx, "sidecar", "token-synthesis-failed", "fatal", tokErr)
 		return fmt.Errorf("sidecar: gateway token synthesis: %w", tokErr)
 	} else {
 		inventory.SetPathHashKey(deriveAIInventoryHashKey(apiToken))
@@ -555,7 +566,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.configMgr.Run(ctx); err != nil && ctx.Err() == nil {
+		if err := s.configMgr.Run(runCtx); err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] config manager exited with error: %v\n", err)
 			errCh <- err
 		}
@@ -571,7 +582,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runGatewayLoop(ctx); err != nil && ctx.Err() == nil {
+		if err := s.runGatewayLoop(runCtx); err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] gateway loop exited with error: %v\n", err)
 			errCh <- err
 		}
@@ -581,7 +592,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runRestartable(ctx, "watcher", s.watcherRestartCh, s.runWatcher); err != nil && ctx.Err() == nil {
+		if err := s.runRestartable(runCtx, "watcher", s.watcherRestartCh, s.runWatcher); err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher exited with error: %v\n", err)
 			errCh <- err
 		}
@@ -591,7 +602,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runRestartable(ctx, "api", s.apiRestartCh, s.runAPI); err != nil && ctx.Err() == nil {
+		if err := s.runRestartable(runCtx, "api", s.apiRestartCh, s.runAPI); err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] api server exited with error: %v\n", err)
 			errCh <- err
 		}
@@ -601,7 +612,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runRestartable(ctx, "guardrail", s.guardrailRestartCh, s.runActiveGuardrail); err != nil && ctx.Err() == nil {
+		if err := s.runRestartable(runCtx, "guardrail", s.guardrailRestartCh, s.runActiveGuardrail); err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] guardrail exited with error: %v\n", err)
 			errCh <- err
 		}
@@ -611,7 +622,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runRestartable(ctx, "ai discovery", s.aiRestartCh, s.runAIDiscovery); err != nil && ctx.Err() == nil {
+		if err := s.runRestartable(runCtx, "ai discovery", s.aiRestartCh, s.runAIDiscovery); err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] ai discovery exited with error: %v\n", err)
 			errCh <- err
 		}
@@ -620,17 +631,17 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	// Report telemetry (OTel) health — not a goroutine, just state
 	s.reportTelemetryHealth()
 	if s.otel != nil {
-		s.otel.EmitStartupSpan(ctx)
+		s.otel.EmitStartupSpan(runCtx)
 	}
 
 	// Report aggregate audit-sink health — not a goroutine, just state
 	s.reportSinksHealth()
 
 	// Report sandbox health — only present when standalone mode is active
-	s.reportSandboxHealth(ctx)
+	s.reportSandboxHealth(runCtx)
 
 	// Wait for context cancellation (signal handler in CLI layer)
-	<-ctx.Done()
+	<-runCtx.Done()
 	fmt.Fprintf(os.Stderr, "[sidecar] context cancelled, waiting for subsystems to stop ...\n")
 	wg.Wait()
 
@@ -638,7 +649,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.alertWg.Wait()
 
 	// Shutdown — ctx is already Done, but still carries correlation values.
-	emitLifecycle(ctx, "gateway", "stop", nil)
+	emitLifecycle(runCtx, "gateway", "stop", nil)
 	_ = s.logger.LogAction(string(audit.ActionSidecarStop), "", "all subsystems stopped")
 	if s.webhooks != nil {
 		s.webhooks.Close()
@@ -655,7 +666,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		// Detach from the global so any post-drain emit path sees a
 		// nil store instead of racing the worker.
 		SetJudgeResponseStore(nil)
-		if err := s.judgeStore.Shutdown(ctx); err != nil {
+		if err := s.judgeStore.Shutdown(runCtx); err != nil {
 			if s.logger != nil {
 				_ = s.logger.LogEvent(audit.Event{
 					Action:   string(audit.ActionGatewayJudgeStoreDrainTimeout),
@@ -779,6 +790,85 @@ func signalRestart(ch chan struct{}) {
 	}
 }
 
+func (s *Sidecar) setRunCancel(cancel context.CancelFunc) {
+	if s == nil {
+		return
+	}
+	s.runCancelMu.Lock()
+	defer s.runCancelMu.Unlock()
+	s.runCancel = cancel
+}
+
+func (s *Sidecar) requestProcessRestart() {
+	if s == nil {
+		return
+	}
+	s.runCancelMu.Lock()
+	cancel := s.runCancel
+	s.runCancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func configReloadMode(cfg *config.Config) string {
+	if cfg == nil {
+		return "hot"
+	}
+	mode := strings.ToLower(strings.TrimSpace(cfg.Gateway.ConfigReload.Mode))
+	if mode == "" {
+		return "hot"
+	}
+	return mode
+}
+
+func onlyConfigReloadModeChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	oldCopy := *oldCfg
+	oldCopy.Gateway.ConfigReload = newCfg.Gateway.ConfigReload
+	return reflect.DeepEqual(&oldCopy, newCfg)
+}
+
+func defaultLaunchConfigRestartHelper() error {
+	if !daemon.IsDaemonChild() {
+		return nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("config reload restart: resolve executable: %w", err)
+	}
+	cmd := exec.Command(exe, configRestartHelperArgs(os.Args)...)
+	cmd.Env = os.Environ()
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("config reload restart: launch helper: %w", err)
+	}
+	return nil
+}
+
+func configRestartHelperArgs(argv []string) []string {
+	args := []string{"restart"}
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		switch {
+		case arg == "--host" && i+1 < len(argv):
+			args = append(args, "--host", argv[i+1])
+			i++
+		case strings.HasPrefix(arg, "--host="):
+			args = append(args, arg)
+		case arg == "--port" && i+1 < len(argv):
+			args = append(args, "--port", argv[i+1])
+			i++
+		case strings.HasPrefix(arg, "--port="):
+			args = append(args, arg)
+		}
+	}
+	return args
+}
+
 func loadSidecarRulePack(cfg *config.Config) *guardrail.RulePack {
 	rp := guardrail.LoadRulePack(cfg.Guardrail.RulePackDir)
 	rp.Validate()
@@ -813,6 +903,30 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) *LLMJudge {
 }
 
 func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff) error {
+	if configReloadMode(newCfg) == "restart" && !onlyConfigReloadModeChanged(oldCfg, newCfg) {
+		if s == nil || s.cfg == nil || newCfg == nil {
+			return nil
+		}
+		next := *newCfg
+		if next.Gateway.Token == "" && s.cfg.Gateway.Token != "" {
+			next.Gateway.Token = s.cfg.Gateway.Token
+		}
+		*s.cfg = next
+		redaction.SetDisableAll(s.cfg.Privacy.DisableRedaction)
+		fmt.Fprintf(os.Stderr, "[sidecar] config reload mode=restart: validated config change; requesting process restart\n")
+		if launchConfigRestartHelper != nil {
+			if err := launchConfigRestartHelper(); err != nil {
+				return err
+			}
+		}
+		if s.health != nil {
+			s.health.SetConfig(StateStopped, "restart requested by config reload", map[string]interface{}{
+				"changed": diff.Changed,
+			})
+		}
+		s.requestProcessRestart()
+		return nil
+	}
 	if len(diff.RestartRequired) > 0 {
 		return fmt.Errorf("config reload requires gateway restart for: %s", strings.Join(diff.RestartRequired, ", "))
 	}

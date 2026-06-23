@@ -322,12 +322,13 @@ POST /v1/guardrail/evaluate
 
 ### GET/PATCH /v1/guardrail/config
 
-Read or update guardrail runtime configuration (mode and scanner_mode).
-Changes are persisted to `~/.defenseclaw/guardrail_runtime.json` and
-take effect immediately without restarting the sidecar.
+Read or update selected guardrail runtime configuration. PATCH writes the
+supported fields into `~/.defenseclaw/config.yaml`, validates the full YAML
+config, updates the API server's in-memory guardrail view, and lets the central
+config watcher/reconciler apply the latest effective config.
 
-**Callers:** No production callers currently. Available for runtime
-toggling between observe and action mode.
+**Callers:** No production callers currently. Available for runtime toggling of
+guardrail mode, scanner mode, connector, block message, and HILT settings.
 
 **GET response:**
 
@@ -346,6 +347,15 @@ toggling between observe and action mode.
   "scanner_mode": "both"
 }
 ```
+
+Supported PATCH fields are `mode`, `scanner_mode`, `block_message`,
+`connector`, `hilt_enabled`, and `hilt_min_severity`. The request body is JSON,
+not a raw `config.yaml` upload.
+
+With the default `gateway.config_reload.mode: hot`, simple guardrail changes are
+applied without a process restart. If `gateway.config_reload.mode: restart` is
+configured, substantive config changes are validated and then the gateway
+performs or requests a full `defenseclaw-gateway` restart.
 
 ---
 

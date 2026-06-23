@@ -9,7 +9,7 @@ keywords:
   - DEFENSECLAW_LLM_KEY
 ---
 
-`~/.defenseclaw/config.yaml` is the single source of truth for operator-owned configuration. Most fields are managed by `defenseclaw setup *` commands; you can also hand-edit, then run `defenseclaw-gateway restart` (or `defenseclaw setup guardrail --restart`). Note `restart` is on the **Go sidecar binary** — the Python `defenseclaw` CLI has no top-level `gateway` group.
+`~/.defenseclaw/config.yaml` is the single source of truth for operator-owned configuration. Most fields are managed by `defenseclaw setup *` commands; you can also hand-edit the file. The running gateway watches the active `config.yaml`, validates the full file on change, and reconciles supported updates without a full process restart. Some storage identity fields still require a real `defenseclaw-gateway restart`.
 
 ## On-disk layout
 
@@ -60,6 +60,8 @@ gateway:
   port: 18789                  # gateway proxy port (sidecar -> upstream LLM traffic)
   api_port: 18970              # gateway REST API port (hooks + TUI dial this)
   api_bind: ""                 # optional override for the REST API bind address
+  config_reload:
+    mode: hot                  # hot | restart; omitted means hot
 
 # Top-level OTel exporter — wires the sidecar to a collector. Written by
 # `setup local-observability up` or `setup observability add <preset>`.
@@ -222,6 +224,18 @@ webhooks:
     secret_env: ""             # optional HMAC for `type: generic`
     min_severity: HIGH
 ```
+
+`gateway.config_reload.mode` controls what happens after a valid `config.yaml`
+change:
+
+| Mode | Behavior |
+| --- | --- |
+| `hot` | Default. Reload, validate, diff, and reconcile in the running gateway. Simple guardrail settings are hot-applied; affected in-process loops are restarted only when needed. |
+| `restart` | Validate first, then use a fresh gateway process for substantive config edits. Built-in daemon mode launches the normal `defenseclaw-gateway restart` path; service-supervised foreground runs exit cleanly for the supervisor to restart. Changing only this mode arms the behavior and does not immediately restart. |
+
+Live reload rejects storage identity changes such as `data_dir`, audit DB path,
+judge bodies DB path, and `gateway.device_key_file` unless restart mode is
+enabled or the operator restarts the gateway manually.
 
 The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/setup/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
 

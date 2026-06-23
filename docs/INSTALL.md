@@ -439,7 +439,7 @@ What guardrail setup does:
 3. Installs the DefenseClaw OpenClaw plugin
 4. Patches `openclaw.json` to route LLM calls through the proxy
 5. Saves settings to `config.yaml` and API keys to `.env`
-6. Writes `guardrail_runtime.json` for live mode toggling
+6. Uses the gateway config watcher to apply supported `config.yaml` changes at runtime
 
 ```bash
 # Non-interactive with specific mode

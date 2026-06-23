@@ -244,7 +244,7 @@ The guardrail still performs both PRE-CALL and POST-CALL inspection. Request ove
 │  Owns:                                                              │
 │  ├── guardrail proxy process (start, monitor health, restart)        │
 │  ├── Config: guardrail.enabled, mode, port, model                  │
-│  ├── Loads guardrail.* from config; proxy hot-reloads mode from guardrail_runtime.json │
+│  ├── Loads guardrail.* from config.yaml; reconciler hot-applies supported changes │
 │  └── Health tracking: guardrail subsystem state                    │
 │                                                                     │
 │  Does NOT:                                                          │
@@ -276,7 +276,7 @@ The guardrail still performs both PRE-CALL and POST-CALL inspection. Request ove
 │  ├── Cisco AI Defense client (HTTP, in gateway package)             │
 │  ├── Streaming response inspection (mid-stream + final assembly)   │
 │  ├── OPA policy evaluation in-process (policy.Engine)              │
-│  ├── Hot-reload (proxy reads guardrail_runtime.json with TTL)      │
+│  ├── Hot-reload (config.yaml watcher + reconciler)                │
 │  ├── Multi-turn context tracking (ContextTracker)                  │
 │  ├── Security notification injection (NotificationQueue)           │
 │  ├── Rule pack + suppression engine (internal/guardrail/)          │
@@ -322,9 +322,9 @@ The guardrail still performs both PRE-CALL and POST-CALL inspection. Request ove
 | `observe` | Log all findings with severity and matched patterns. Never block. | Initial deployment, SOC monitoring, tuning false positives |
 | `action` | Block prompts/responses that match HIGH/CRITICAL patterns. MEDIUM/LOW are logged only. | Production enforcement after tuning |
 
-Mode is set in `~/.defenseclaw/config.yaml` (`guardrail.mode`) and passed into
-`NewGuardrailProxy` when the sidecar starts the guardrail proxy; hot-reload
-updates come from `guardrail_runtime.json`.
+Mode is set in `~/.defenseclaw/config.yaml` (`guardrail.mode`). The running
+gateway watches that file, validates the full config on change, and hot-applies
+supported guardrail updates through the central reconciler.
 
 ### Per-connector overrides (`guardrail.connectors`)
 
@@ -367,8 +367,9 @@ curl -X PATCH http://127.0.0.1:18970/v1/guardrail/config \
   -d '{"mode": "action"}'
 ```
 
-The Go sidecar writes `~/.defenseclaw/guardrail_runtime.json` and the guardrail
-proxy reads it with a 5-second TTL cache, applying changes without restart.
+The PATCH endpoint updates `~/.defenseclaw/config.yaml`; the config watcher
+then reloads and reconciles the updated guardrail snapshot without a full
+gateway restart in the default hot-reload mode.
 
 ### `judge_sweep` — NO_SIGNAL escalation (default: **on** as of v7.1)
 
@@ -548,7 +549,8 @@ See [CLI Reference — upgrade](CLI.md#upgrade) for full options.
 
 The guardrail supports three scanner modes, configured via
 `guardrail.scanner_mode` in `config.yaml` (loaded into the sidecar and passed
-to `NewGuardrailProxy` / `GuardrailInspector`; hot-reload via `guardrail_runtime.json`):
+to `NewGuardrailProxy` / `GuardrailInspector`; hot-reloaded through the
+config watcher/reconciler):
 
 | Mode | Behavior |
 |------|----------|
@@ -815,7 +817,7 @@ All suppression patterns are compiled through a global LRU regex cache
 │  Owns:                                                              │
 │  ├── guardrail proxy process (start, monitor health, restart)        │
 │  ├── Config: guardrail.enabled, mode, scanner_mode, port, model    │
-│  ├── Loads guardrail.* from config; proxy hot-reloads from guardrail_runtime.json │
+│  ├── Loads guardrail.* from config.yaml; reconciler hot-applies supported changes │
 │  ├── Health tracking: guardrail subsystem state                    │
 │  ├── REST API: POST /v1/guardrail/evaluate (optional HTTP OPA)      │
 │  └── OTel metrics: scanner attribution, latency, token counts      │
@@ -1061,10 +1063,27 @@ curl -X PATCH http://127.0.0.1:18970/v1/guardrail/config \
 curl http://127.0.0.1:18970/v1/guardrail/config
 ```
 
-The PATCH endpoint updates the in-memory config and writes
-`guardrail_runtime.json`. The guardrail proxy reads this file with a
-5-second TTL cache and applies updated `mode` and `scanner_mode` without
-restart (including Cisco client enable/disable when scanner mode changes).
+The PATCH endpoint patches `~/.defenseclaw/config.yaml`, validates the full
+YAML file, updates the API server's live guardrail view, and lets the central
+config watcher/reconciler apply the latest config. The request body is JSON, not
+raw YAML.
+
+By default (`gateway.config_reload.mode: hot`), simple guardrail changes such as
+`mode`, `scanner_mode`, block message, connector, and HILT settings are applied
+without a full gateway restart. Operators who want every substantive config edit
+to use a fresh process can opt in:
+
+```yaml
+gateway:
+  config_reload:
+    mode: restart # hot | restart
+```
+
+With `restart`, DefenseClaw validates the changed config first. In built-in
+daemon mode it launches the normal `defenseclaw-gateway restart` path; in
+foreground/service-supervised mode it exits cleanly for the external supervisor
+to restart it. Changing only `gateway.config_reload.mode` arms the behavior for
+the next edit and does not immediately restart.
 
 ## Setup Wizard
 

@@ -169,7 +169,7 @@ only component with direct access to all subsystems.
 | Telemetry | OpenTelemetry tracing and metrics (spans for tools, approvals, LLM calls, guardrail stages, agent lifecycle) |
 | TUI dashboard | 12-panel Bubbletea terminal UI (Overview, Alerts, Skills, MCPs, Plugins, Inventory, Policy, Logs, Audit, Activity, Tools, Setup) |
 | PII redaction | Two-layer redaction: `<redacted len=N sha=8hex>` — sink layer always redacts regardless of reveal flag |
-| Hot reload | `guardrail_runtime.json` checked every 5s; updates mode and blockMessage under RWMutex |
+| Hot reload | `config.yaml` watched with fsnotify; full config is reloaded, validated, diffed, and reconciled in-process. `gateway.config_reload.mode: restart` opts into a validated full gateway restart instead. |
 
 ### 4. SQLite Database
 

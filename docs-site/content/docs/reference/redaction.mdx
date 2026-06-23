@@ -57,7 +57,7 @@ defenseclaw setup redaction off --yes  # CI / TUI form (no confirmation)
 defenseclaw setup redaction on         # turn it back ON
 ```
 
-`setup redaction` updates `privacy.disable_redaction` in `~/.defenseclaw/config.yaml`, restarts the gateway by default (the kill-switch is read at sidecar boot), and logs an audit entry. Use `--no-restart` only when the sidecar is offline.
+`setup redaction` updates `privacy.disable_redaction` in `~/.defenseclaw/config.yaml` and logs an audit entry. The gateway config watcher hot-applies the kill-switch in the default reload mode; deployments using `gateway.config_reload.mode: restart` apply it through the full restart path.
 
 For a one-shell ephemeral reveal during incident triage:
 
