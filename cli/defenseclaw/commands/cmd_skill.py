@@ -193,6 +193,9 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
 
     output = result.stdout.strip()
     if not output:
+        if as_json:
+            click.echo(json.dumps([]))
+            return
         click.echo(f"No skills found matching {query!r} in the ClawHub registry")
         return
 
@@ -360,8 +363,8 @@ def _get_openclaw_skill_info(
     directories — there is no per-connector ``info`` subcommand.
 
     ``connector`` overrides the resolved connector so a multi-connector
-    caller (``skill info/scan --connector <name>``) can inspect a
-    non-primary connector's skill; defaults to the resolved connector context.
+    caller (``skill info/scan --connector <name>``) can inspect the selected
+    configured connector's skill; defaults to the resolved connector context.
     """
     if app is not None:
         resolved = connector or (
@@ -1712,7 +1715,7 @@ def _scan_all(
         sources = sorted({os.path.dirname(p) for _, p in targets if p})
     else:
         # Fall back to directory scan — resolve the target connector's
-        # skill dirs so a non-primary connector's skills are scanned.
+        # skill dirs so the selected configured connector's skills are scanned.
         from defenseclaw.safety import is_symlink, is_within_roots
         dirs = app.cfg.skill_dirs(connector)
         sources = list(dirs)
@@ -1980,10 +1983,10 @@ def _scan_skill_roots(app: AppContext, connector_flag: str) -> list[str]:
 def _all_active_skill_dirs(app: AppContext) -> list[str]:
     """Union of skill directories across every configured connector.
 
-    Quarantine/restore resolve and validate against this union so a skill that
-    lives in a NON-primary connector can still be managed; single-connector
-    installs collapse to that one connector's dirs, so their behavior is
-    unchanged. Order-preserving and de-duplicated.
+    Quarantine/restore resolve and validate against this union so each
+    configured connector's skill can still be managed; single-connector installs
+    collapse to that one connector's dirs, so their behavior is unchanged.
+    Order-preserving and de-duplicated.
     """
     cfg = app.cfg
     if hasattr(cfg, "active_connectors"):
@@ -3458,7 +3461,7 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
     Use --path to override the restore destination.
 
     The destination is validated against every configured connector's skill
-    directories (so a non-primary connector's skill restores correctly);
+    directories (so each configured connector's skill restores correctly);
     pass --connector to scope the validation to one connector.
     """
     from defenseclaw.enforce import PolicyEngine

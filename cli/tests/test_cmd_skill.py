@@ -1553,6 +1553,16 @@ class TestSkillSearch(SkillCommandTestBase):
 
     @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_skill.subprocess.run")
+    def test_search_json_no_results_outputs_empty_array(self, mock_run, _which):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        result = self.invoke(["search", "dc-skill-does-not-exist", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(result.output), [])
+        self.assertNotIn("No skills found", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value=None)
+    @patch("defenseclaw.commands.cmd_skill.subprocess.run")
     def test_search_json_output(self, mock_run, _which):
         mock_run.return_value = MagicMock(
             returncode=0,
