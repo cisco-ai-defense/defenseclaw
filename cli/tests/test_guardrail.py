@@ -1625,6 +1625,47 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         checked = {call.args[0] for call in version_check.call_args_list}
         self.assertEqual(checked, {"codex", "claudecode"})
 
+    def test_interactive_multi_connector_downgrades_refused_action_mode(self):
+        """Action connectors refused by setup guardrail validation fall back
+        to observe so status reflects effective posture after the run."""
+        from defenseclaw.commands.cmd_setup import setup
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.connector = "cursor"
+        gc.connectors = {
+            "cursor": PerConnectorGuardrailConfig(mode="action"),
+            "claudecode": PerConnectorGuardrailConfig(mode="action"),
+        }
+
+        def version_gate(connector, *, mode="observe", **_kwargs):
+            return not (connector == "cursor" and mode == "action")
+
+        with patch(
+            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+            return_value=(True, []),
+        ) as execute_setup, patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            side_effect=version_gate,
+        ):
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--no-restart"],
+                obj=self.app,
+                input="\n" * 15,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(
+            "Cursor: requested action mode was refused; configuring observe mode instead.",
+            result.output,
+        )
+        execute_setup.assert_called_once()
+        self.assertEqual(gc.connectors["cursor"].mode, "observe")
+        self.assertEqual(gc.connectors["claudecode"].mode, "action")
+
     def test_interactive_multi_connector_offers_hilt_when_any_action(self):
         """In multi-connector mode HILT is gated on whether ANY connector
         resolves to action mode (not the legacy singular gc.mode), since

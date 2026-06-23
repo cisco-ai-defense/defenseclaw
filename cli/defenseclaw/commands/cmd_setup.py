@@ -3084,8 +3084,33 @@ def _check_guardrail_setup_connector_versions(
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
+            if allow_prompt and (mode or "").strip().lower() == "action":
+                _downgrade_guardrail_setup_action_connector(gc, connector)
+                continue
             return False
     return True
+
+
+def _downgrade_guardrail_setup_action_connector(gc, connector: str) -> None:
+    """Persist an observe fallback when guardrail setup refuses action mode."""
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
+    ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
+
+    connectors = getattr(gc, "connectors", None)
+    if connectors:
+        key = connector
+        if key not in connectors:
+            wanted = normalize_connector(connector)
+            for existing_key in connectors:
+                if normalize_connector(str(existing_key)) == wanted:
+                    key = existing_key
+                    break
+        if key not in connectors:
+            connectors[key] = PerConnectorGuardrailConfig()
+        connectors[key].mode = "observe"
+        return
+
+    gc.mode = "observe"
 
 
 def _hilt_support_note(connector: str) -> str:
