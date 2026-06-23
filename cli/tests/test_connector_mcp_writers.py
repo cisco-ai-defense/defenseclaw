@@ -304,12 +304,14 @@ class TestAntigravityWrites:
         assert demo["serverUrl"] == "https://new.example/mcp"
         assert "url" not in demo
         assert "httpUrl" not in demo
-        assert "transport" not in demo
+        assert demo["transport"] == "sse"
         assert demo["headers"] == {"Authorization": "Bearer ${AGY_MCP_TOKEN}"}
         assert demo["authProviderType"] == "oauth"
         assert demo["oauth"] == {"issuer": "https://accounts.example.com"}
         assert demo["x-antigravity"] == {"keep": True}
         assert demo["futureField"] == {"enabled": True}
+        entries = connector_paths.mcp_servers("antigravity")
+        assert entries[0].transport == "sse"
 
     def test_set_local_supports_native_fields(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -389,6 +391,7 @@ class TestAntigravityWrites:
         entries = connector_paths.mcp_servers("antigravity")
         assert [e.name for e in entries] == ["demo"]
         assert entries[0].url == "https://x.example/mcp"
+        assert entries[0].transport == "http"
 
         unset_mcp_server("antigravity", "demo")
         assert connector_paths.mcp_servers("antigravity") == []

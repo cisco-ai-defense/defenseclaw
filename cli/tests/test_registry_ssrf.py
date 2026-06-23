@@ -106,12 +106,28 @@ class TestPrivateRanges(unittest.TestCase):
                         resolver=stub({"loop.example": [ip]}),
                     )
 
+    def test_loopback_allowed_when_opted_in(self):
+        for ip in ("127.0.0.1", "::1"):
+            with self.subTest(ip=ip):
+                guard_url(
+                    "https://loop.example/m",
+                    allow_private=True,
+                    resolver=stub({"loop.example": [ip]}),
+                )
+
     def test_link_local_blocked(self):
         with self.assertRaises(SSRFError):
             guard_url(
                 "https://ll.example/m",
                 resolver=stub({"ll.example": ["169.254.169.254"]}),
             )
+
+    def test_link_local_allowed_when_opted_in(self):
+        guard_url(
+            "https://ll.example/m",
+            allow_private=True,
+            resolver=stub({"ll.example": ["fe80::1"]}),
+        )
 
     def test_rfc1918_blocked_by_default(self):
         for ip in ("10.0.0.1", "192.168.1.1", "172.16.0.1"):

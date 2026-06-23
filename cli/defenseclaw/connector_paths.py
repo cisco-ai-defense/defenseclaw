@@ -142,6 +142,26 @@ class MCPServerEntry:
     disabled_tools: list[str] = field(default_factory=list)
 
 
+def infer_mcp_transport(
+    transport: Any = "", *, url: Any = "", command: Any = "",
+) -> str:
+    """Return an MCP transport label without misclassifying URL entries.
+
+    Older config files often omit ``transport``. A missing value on a remote
+    URL-backed server must not display as ``stdio``; use ``http`` as the
+    generic URL transport unless the config supplied a more specific value
+    such as ``sse`` or ``streamable-http``.
+    """
+    explicit = str(transport or "").strip()
+    if explicit:
+        return explicit
+    if str(url or "").strip():
+        return "http"
+    if str(command or "").strip():
+        return "stdio"
+    return "stdio"
+
+
 # ---------------------------------------------------------------------------
 # Connector-name normalization
 # ---------------------------------------------------------------------------
@@ -1264,7 +1284,11 @@ def _parse_mcp_servers_dict(servers: dict[str, Any]) -> list[MCPServerEntry]:
                 env=dict(cfg.get("env", {}) or {}),
                 cwd=cfg.get("cwd", "") or "",
                 url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
-                transport=cfg.get("transport", "") or "",
+                transport=infer_mcp_transport(
+                    cfg.get("transport", ""),
+                    url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
+                    command=cfg.get("command", "") or "",
+                ),
                 headers=dict(cfg.get("headers", {}) or {}),
                 auth_provider_type=cfg.get("authProviderType", "") or "",
                 oauth=dict(cfg.get("oauth", {}) or {}),
@@ -1292,7 +1316,11 @@ def _parse_mcp_servers_list(servers: list[Any]) -> list[MCPServerEntry]:
                 env=dict(cfg.get("env", {}) or {}),
                 cwd=cfg.get("cwd", "") or "",
                 url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
-                transport=cfg.get("transport", "") or "",
+                transport=infer_mcp_transport(
+                    cfg.get("transport", ""),
+                    url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
+                    command=cfg.get("command", "") or "",
+                ),
                 headers=dict(cfg.get("headers", {}) or {}),
                 auth_provider_type=cfg.get("authProviderType", "") or "",
                 oauth=dict(cfg.get("oauth", {}) or {}),
@@ -1706,7 +1734,7 @@ def _antigravity_mcp_entry_from_generic(
         "oauth",
         "transport",
     }
-    for key in ("command", "cwd", "authProviderType"):
+    for key in ("command", "cwd", "authProviderType", "transport"):
         if key in entry:
             value = entry.get(key)
             if value is None:
@@ -1754,7 +1782,6 @@ def _antigravity_mcp_entry_from_generic(
         # spelling; `httpUrl` is legacy migration input only.
         out.pop("url", None)
         out.pop("httpUrl", None)
-        out.pop("transport", None)
 
     for key, value in entry.items():
         if key not in handled:

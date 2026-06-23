@@ -148,10 +148,11 @@ def test_f0321_remote_scan_blocks_private_and_loopback_targets():
     with pytest.raises(ValueError, match="refusing to scan remote MCP target"):
         wrapper.scan("http://10.20.30.40:9/mcp")
 
-    # Loopback is rejected even with the private opt-in (loopback is
-    # unconditionally unsafe).
-    with pytest.raises(ValueError, match="refusing to scan remote MCP target"):
-        wrapper.scan("http://127.0.0.1:9/admin", allow_private=True)
+    # --allow-private also opts in to loopback scans. Patch the SDK leg so the
+    # test proves the guard lets the URL through without touching the network.
+    with patch.object(MCPScannerWrapper, "_scan_remote", return_value=[]):
+        result = wrapper.scan("http://127.0.0.1:9/admin", allow_private=True)
+    assert result.is_clean()
 
     # --allow-private lets an explicit private target through the guard;
     # patch the SDK leg so the test never touches the network.

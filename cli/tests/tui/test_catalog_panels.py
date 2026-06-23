@@ -176,6 +176,7 @@ def test_mcp_parse_filter_actions_and_registry_focus() -> None:
             [
                 {
                     "name": "context7",
+                    "connector": "antigravity",
                     "transport": "stdio",
                     "command": "uvx",
                     "url": "https://example.invalid/mcp",
@@ -188,6 +189,7 @@ def test_mcp_parse_filter_actions_and_registry_focus() -> None:
         )
     )
     assert rows[0].status == "allowed"
+    assert rows[0].connector == "antigravity"
     assert rows[0].url == "context7"
     assert rows[0].server_url == "https://example.invalid/mcp"
     assert rows[1].status == "blocked"
@@ -206,6 +208,23 @@ def test_mcp_parse_filter_actions_and_registry_focus() -> None:
     assert panel.handle_key("n").open_mcp_set_form is True
     assert panel.handle_key("+").open_mcp_set_form is True
     assert panel.handle_key("u").intent.args == ("mcp", "unblock", "filesystem")
+
+
+def test_mcp_parse_scoped_group_and_empty_group() -> None:
+    scoped = parse_mcp_list_json(
+        json.dumps(
+            {
+                "connector": "claudecode",
+                "mcp_servers": [
+                    {"name": "ctx7", "transport": "stdio", "command": "uvx"},
+                ],
+            }
+        )
+    )
+    assert scoped[0].name == "ctx7"
+    assert scoped[0].connector == "claudecode"
+
+    assert parse_mcp_list_json(json.dumps({"connector": "claudecode", "mcp_servers": []})) == ()
 
 
 def test_mcp_actions_name_connector_specific_unset_targets() -> None:

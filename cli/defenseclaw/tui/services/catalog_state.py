@@ -1084,7 +1084,39 @@ def skill_list_to_row(raw: Mapping[str, Any]) -> SkillRow:
 
 
 def parse_mcp_list_json(text: str) -> tuple[MCPRow, ...]:
-    raw = _decode_json_list(text, "mcp list")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"parse mcp list: {exc}") from exc
+
+    def _rows_from_group(group: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        connector = str(group.get("connector") or "")
+        raw_servers = group.get("mcp_servers")
+        if not isinstance(raw_servers, list):
+            raise ValueError("parse mcp list: expected mcp_servers list")
+        rows: list[Mapping[str, Any]] = []
+        for server in raw_servers:
+            if not isinstance(server, Mapping):
+                raise ValueError("parse mcp list: expected mcp_servers objects")
+            if connector and not server.get("connector"):
+                rows.append({**server, "connector": connector})
+            else:
+                rows.append(server)
+        return rows
+
+    raw: list[Mapping[str, Any]] = []
+    if isinstance(payload, Mapping):
+        raw.extend(_rows_from_group(payload))
+    elif isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, Mapping):
+                raise ValueError("parse mcp list: expected list objects")
+            if "mcp_servers" in item:
+                raw.extend(_rows_from_group(item))
+            else:
+                raw.append(item)
+    else:
+        raise ValueError("parse mcp list: expected a JSON list or connector group")
     return tuple(mcp_list_to_row(item) for item in raw)
 
 
@@ -1102,6 +1134,7 @@ def mcp_list_to_row(raw: Mapping[str, Any]) -> MCPRow:
         status = "allowed"
     return MCPRow(
         name=str(raw.get("name") or ""),
+        connector=str(raw.get("connector") or ""),
         status=status,
         actions=actions.summary(),
         transport=str(raw.get("transport") or ""),

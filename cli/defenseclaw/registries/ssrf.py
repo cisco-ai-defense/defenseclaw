@@ -107,10 +107,10 @@ def guard_url(
 
     * scheme outside :data:`ALLOWED_SCHEMES`
     * empty / non-DNS-resolvable host
-    * resolved IP in the loopback / link-local / multicast / unspecified
-      range (always blocked)
-    * resolved IP in RFC1918 / ULA / shared-CGNAT / RFC6598 ranges
-      when *allow_private* is False (the default).
+    * resolved IP in multicast / unspecified / reserved ranges
+    * resolved IP in loopback / link-local / RFC1918 / ULA /
+      shared-CGNAT / RFC6598 ranges when *allow_private* is False
+      (the default).
 
     The default fail-closed posture matches the project guidance for
     operator-provided URLs (codeguard-0-api-web-services).
@@ -150,8 +150,8 @@ def resolve_and_pin(
     if not host:
         raise SSRFError("URL is missing a host component")
 
-    if host in {"localhost", "ip6-localhost"}:
-        raise SSRFError("refusing to fetch from localhost")
+    if host in {"localhost", "ip6-localhost"} and not allow_private:
+        raise SSRFError("refusing to fetch from localhost (use --allow-private to opt in)")
 
     resolve = resolver or _default_resolver
     addrs = resolve(host)
@@ -164,15 +164,15 @@ def resolve_and_pin(
             ip = ipaddress.ip_address(addr)
         except ValueError:
             continue
-        if (
-            ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_unspecified
-            or ip.is_reserved
-        ):
+        privateish = ip.is_loopback or ip.is_link_local or ip.is_private
+        if ip.is_multicast or ip.is_unspecified or (ip.is_reserved and not privateish):
             raise SSRFError(
                 f"host {host!r} resolves to disallowed address {addr}"
+            )
+        if not allow_private and (ip.is_loopback or ip.is_link_local):
+            raise SSRFError(
+                f"host {host!r} resolves to disallowed address {addr} "
+                "(use --allow-private to opt in)"
             )
         if not allow_private and ip.is_private:
             raise SSRFError(

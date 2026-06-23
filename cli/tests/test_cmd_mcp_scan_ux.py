@@ -118,6 +118,16 @@ class TestSingleTargetUX(_MCPScanUXBase):
         self.assertIn("blocked=0", result.output)
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_clean_target_terminal_hint_is_mcp_specific(self, mock_scan) -> None:
+        mock_scan.return_value = self._clean_result("http://localhost:3000")
+
+        with patch("defenseclaw.commands.hint") as mock_hint:
+            result = self.invoke(["scan", "http://localhost:3000"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_hint.assert_called_once_with("Scan MCP servers:  defenseclaw mcp scan --all")
+
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_blocked_target_shows_severity(self, mock_scan) -> None:
         mock_scan.return_value = self._blocked_result("http://localhost:3000")
         result = self.invoke(["scan", "http://localhost:3000"])
@@ -186,6 +196,45 @@ class TestScanAllUX(_MCPScanUXBase):
         self.assertIn("Summary: 3 MCP servers scanned", result.output)
         self.assertIn("clean=2", result.output)
         self.assertIn("blocked=1", result.output)
+        self.assertNotIn("Scan skills:", result.output)
+
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_clean_scan_all_omits_cross_domain_skill_hint(self, mock_scan) -> None:
+        self._patch_servers([
+            ("alpha", "http://a.example/mcp"),
+            ("beta", "http://b.example/mcp"),
+        ])
+        mock_scan.side_effect = lambda target, server_entry=None, **kwargs: self._clean_result(target)
+
+        with patch("defenseclaw.commands.hint") as mock_hint:
+            result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Summary: 2 MCP servers scanned", result.output)
+        self.assertIn("clean=2", result.output)
+        self.assertNotIn("Scan skills:", result.output)
+        self.assertNotIn("defenseclaw skill scan all", result.output)
+        self.assertNotIn("Scan MCP servers:", result.output)
+        mock_hint.assert_not_called()
+
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_scan_all_json_is_one_array_document(self, mock_scan) -> None:
+        self._patch_servers([
+            ("alpha", "http://a.example/mcp"),
+            ("beta", "http://b.example/mcp"),
+        ])
+        mock_scan.side_effect = lambda target, server_entry=None, **kwargs: self._clean_result(target)
+
+        result = self.invoke(["scan", "--all", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Scanning ", result.output)
+        self.assertNotIn("Summary:", result.output)
+        import json as _json
+        payload = _json.loads(result.output)
+        self.assertEqual(len(payload), 2)
+        self.assertEqual({row["connector"] for row in payload}, {"openclaw"})
+        self.assertEqual({row["target"] for row in payload}, {"http://a.example/mcp", "http://b.example/mcp"})
 
     @patch("defenseclaw.commands.cmd_mcp._run_scan", return_value=None)
     def test_scan_all_counts_run_scan_failures_as_errored(self, _mock_run) -> None:
