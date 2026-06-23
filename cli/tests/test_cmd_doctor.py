@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -1021,6 +1023,37 @@ class DoctorJsonOutputTests(unittest.TestCase):
         self.assertEqual(len(d["checks"]), 3)
         self.assertEqual(d["checks"][0]["label"], "Config")
 
+    def test_llm_reachability_suppresses_probe_stdout_when_json_mode(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = SimpleNamespace(
+            guardrail=SimpleNamespace(enabled=True),
+            resolve_llm=lambda _scope: SimpleNamespace(model="openai/test"),
+        )
+        result = _DoctorResult()
+
+        def noisy_ping(_llm, *, timeout):
+            del timeout
+            print("Give Feedback / Get Help: https://github.com/BerriAI/litellm/issues/new")
+            return (False, "auth: LiteLLM probe failed")
+
+        stdout = io.StringIO()
+        previous = cmd_doctor._json_mode
+        cmd_doctor._json_mode = True
+        try:
+            with (
+                patch("defenseclaw.llm.ping", side_effect=noisy_ping),
+                contextlib.redirect_stdout(stdout),
+            ):
+                cmd_doctor._check_llm_reachable(cfg, result)
+        finally:
+            cmd_doctor._json_mode = previous
+
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(result.warned, 1)
+        self.assertEqual(result.checks[0]["label"], "LLM reachable")
+        self.assertIn("LiteLLM probe failed", result.checks[0]["detail"])
+
 
 class VerifyBedrockTests(unittest.TestCase):
     """Regression tests for :func:`_verify_bedrock` (M3).
@@ -1312,11 +1345,61 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         freshness = [c for c in result.checks if c["label"] == "Codex hooks freshness"]
         self.assertEqual(len(freshness), 1, result.checks)
         self.assertEqual(freshness[0]["status"], "warn")
-        self.assertIn("defenseclaw-gateway restart", freshness[0]["detail"])
+        self.assertIn("defenseclaw setup codex --yes --restart", freshness[0]["detail"])
         # Warning is advisory only — it must NOT promise `doctor --fix` will
         # repair it (the fixer was intentionally removed; the real remedy is
-        # updating DefenseClaw and restarting the gateway).
+        # rerunning setup so hooks are regenerated and re-registered).
         self.assertNotIn("doctor --fix", freshness[0]["detail"])
+
+    def test_claude_freshness_checks_registered_hook_path(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(os.path.join(tmp, "current-dc-home"))
+            home = os.path.join(tmp, "home")
+            settings_dir = os.path.join(home, ".claude")
+            os.makedirs(settings_dir, exist_ok=True)
+            old_hook_dir = os.path.join(tmp, "old-dc-home", "hooks")
+            os.makedirs(old_hook_dir, exist_ok=True)
+            old_hook = os.path.join(old_hook_dir, "claude-code-hook.sh")
+            with open(old_hook, "w", encoding="utf-8") as fh:
+                fh.write("fail_response() { echo \"$1\"; }\n")
+            with open(os.path.join(old_hook_dir, "_hardening.sh"), "w", encoding="utf-8") as fh:
+                fh.write("defenseclaw_read_stdin_capped() { cat; }\n")
+            with open(os.path.join(settings_dir, "settings.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": old_hook,
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    },
+                    fh,
+                )
+            result = _DoctorResult()
+
+            with patch.object(
+                cmd_doctor.os.path,
+                "expanduser",
+                side_effect=lambda p: p.replace("~", home, 1) if p.startswith("~") else p,
+            ):
+                cmd_doctor._check_claudecode_hooks(cfg, result)
+
+        freshness = [c for c in result.checks if c["label"] == "Claude Code hooks freshness"]
+        self.assertEqual(len(freshness), 1, result.checks)
+        self.assertEqual(freshness[0]["status"], "warn")
+        self.assertIn(old_hook, freshness[0]["detail"])
+        self.assertIn("expected", freshness[0]["detail"])
+        self.assertIn("defenseclaw setup claude-code --yes --restart", freshness[0]["detail"])
+        self.assertNotIn("defenseclaw-gateway restart", freshness[0]["detail"])
 
 
 class DoctorGatewayHomeMismatchTests(unittest.TestCase):
@@ -1544,6 +1627,14 @@ class DoctorFixDryRunTests(unittest.TestCase):
         opts = {p.name: p for p in doctor.params}
         self.assertIn("dry_run", opts)
         self.assertTrue(opts["dry_run"].is_flag)
+
+    def test_dry_run_banner_discloses_restart_and_no_teardown(self):
+        from defenseclaw.commands import cmd_doctor
+
+        banner = cmd_doctor._auto_fix_hint(True)
+        self.assertIn("nothing on disk changes", banner)
+        self.assertIn("may restart the gateway sidecar", banner)
+        self.assertIn("doctor never runs connector teardown", banner)
 
 
 class CustomProviderOverlayChecksTests(unittest.TestCase):

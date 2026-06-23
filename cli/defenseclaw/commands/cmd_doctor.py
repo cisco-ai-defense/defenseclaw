@@ -23,9 +23,11 @@ misconfiguration before the user discovers them at runtime.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import re
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -199,6 +201,21 @@ _label_suffix = ""
 
 
 @contextlib.contextmanager
+def _capture_stdout_when_json():
+    """Keep third-party probe chatter from corrupting ``--json-output``.
+
+    Some optional provider SDKs print helper text directly to stdout instead
+    of returning it to us. In JSON mode stdout is the machine-readable result
+    channel, so the final ``json.dumps`` below must be the only stdout write.
+    """
+    if not _json_mode:
+        yield
+        return
+    with contextlib.redirect_stdout(io.StringIO()):
+        yield
+
+
+@contextlib.contextmanager
 def _doctor_label_suffix(suffix: str):
     """Append ``suffix`` to every :func:`_emit` row label within the block."""
     global _label_suffix
@@ -299,7 +316,55 @@ _GENERATED_HOOK_SENTINELS: dict[str, dict[str, tuple[str, ...]]] = {
 }
 
 
-def _stale_generated_hook_reasons(cfg, connector: str) -> list[str]:
+_GENERATED_HOOK_REGEN_COMMANDS: dict[str, str] = {
+    "codex": "defenseclaw setup codex --yes --restart",
+    "claudecode": "defenseclaw setup claude-code --yes --restart",
+}
+
+
+def _registered_hook_script_paths(
+    settings: dict,
+    script_name: str,
+) -> list[str]:
+    """Extract registered hook script paths from an agent settings object."""
+    paths: list[str] = []
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return paths
+
+    for entries in hooks.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            hook_list = entry.get("hooks", []) if isinstance(entry, dict) else []
+            if not isinstance(hook_list, list):
+                continue
+            for hook in hook_list:
+                cmd = hook.get("command", "") if isinstance(hook, dict) else ""
+                if not isinstance(cmd, str) or script_name not in cmd:
+                    continue
+                try:
+                    tokens = shlex.split(cmd)
+                except ValueError:
+                    tokens = [cmd]
+                match = next((tok for tok in tokens if script_name in tok), cmd)
+                paths.append(os.path.abspath(os.path.expanduser(match)))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            deduped.append(path)
+    return deduped
+
+
+def _stale_generated_hook_reasons(
+    cfg,
+    connector: str,
+    *,
+    hook_script_paths: list[str] | None = None,
+) -> list[str]:
     """Return stale/missing generated-hook diagnostics for *connector*.
 
     Generated hooks live outside the package in ``cfg.data_dir/hooks``.
@@ -316,21 +381,41 @@ def _stale_generated_hook_reasons(cfg, connector: str) -> list[str]:
 
     hook_dir = os.path.join(getattr(cfg, "data_dir", "") or "", "hooks")
     reasons: list[str] = []
-    for filename, needles in sentinels.items():
-        path = os.path.join(hook_dir, filename)
-        try:
-            with open(path, encoding="utf-8") as fh:
-                text = fh.read()
-        except FileNotFoundError:
-            reasons.append(f"{filename} missing")
-            continue
-        except OSError as exc:
-            reasons.append(f"{filename} unreadable: {exc}")
-            continue
 
-        missing = [needle for needle in needles if needle not in text]
-        if missing:
-            reasons.append(f"{filename} missing {', '.join(missing)}")
+    expected_script_paths = {
+        filename: os.path.abspath(os.path.join(hook_dir, filename))
+        for filename in sentinels
+        if filename.endswith(".sh") and filename != "_hardening.sh"
+    }
+    script_path_overrides = [os.path.abspath(p) for p in (hook_script_paths or []) if p]
+
+    for filename, needles in sentinels.items():
+        expected_path = os.path.abspath(os.path.join(hook_dir, filename))
+        if filename in expected_script_paths and script_path_overrides:
+            paths = script_path_overrides
+        elif filename == "_hardening.sh" and script_path_overrides:
+            paths = [os.path.join(os.path.dirname(path), filename) for path in script_path_overrides]
+        else:
+            paths = [expected_path]
+
+        for path in paths:
+            path = os.path.abspath(path)
+            display = filename if path == expected_path else f"{filename} at {path}"
+            if filename in expected_script_paths and path != expected_path:
+                reasons.append(f"{filename} registered at {path}; expected {expected_path}")
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+            except FileNotFoundError:
+                reasons.append(f"{display} missing")
+                continue
+            except OSError as exc:
+                reasons.append(f"{display} unreadable: {exc}")
+                continue
+
+            missing = [needle for needle in needles if needle not in text]
+            if missing:
+                reasons.append(f"{display} missing {', '.join(missing)}")
     return reasons
 
 
@@ -339,8 +424,10 @@ def _check_generated_hook_freshness(
     connector: str,
     label: str,
     r: _DoctorResult,
+    *,
+    hook_script_paths: list[str] | None = None,
 ) -> None:
-    reasons = _stale_generated_hook_reasons(cfg, connector)
+    reasons = _stale_generated_hook_reasons(cfg, connector, hook_script_paths=hook_script_paths)
     if not reasons:
         _emit("pass", f"{label} freshness", "generated scripts include latest diagnostics", r=r)
         return
@@ -348,11 +435,15 @@ def _check_generated_hook_freshness(
     detail = "; ".join(reasons[:2])
     if len(reasons) > 2:
         detail += f"; +{len(reasons) - 2} more"
+    regen = _GENERATED_HOOK_REGEN_COMMANDS.get(
+        (connector or "").lower(),
+        "defenseclaw-gateway restart",
+    )
     _emit(
         "warn",
         f"{label} freshness",
-        f"stale generated script ({detail}); update DefenseClaw, then run "
-        "`defenseclaw-gateway restart` to regenerate",
+        f"stale generated script ({detail}); run `{regen}` to regenerate "
+        "and re-register hooks",
         r=r,
     )
 
@@ -1067,6 +1158,7 @@ def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
     if not hooks:
         _emit("fail", "Claude Code hooks", "no hooks registered in settings.json", r=r)
         return
+    hook_script_paths = _registered_hook_script_paths(settings, "claude-code-hook.sh")
     dc_hooks = 0
     for _event, entries in hooks.items():
         if not isinstance(entries, list):
@@ -1079,7 +1171,13 @@ def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
                     dc_hooks += 1
     if dc_hooks > 0:
         _emit("pass", "Claude Code hooks", f"{dc_hooks} DefenseClaw hook(s) registered", r=r)
-        _check_generated_hook_freshness(cfg, "claudecode", "Claude Code hooks", r)
+        _check_generated_hook_freshness(
+            cfg,
+            "claudecode",
+            "Claude Code hooks",
+            r,
+            hook_script_paths=hook_script_paths,
+        )
     else:
         _emit("fail", "Claude Code hooks", "no DefenseClaw hooks found in settings.json", r=r)
 
@@ -1696,7 +1794,8 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     except Exception as exc:
         _emit("warn", "LLM reachable", f"llm.ping unavailable: {exc}", r=r)
         return
-    ok, msg = _llm.ping(llm, timeout=5)
+    with _capture_stdout_when_json():
+        ok, msg = _llm.ping(llm, timeout=5)
     if ok:
         _emit("pass", "LLM reachable", msg, r=r)
     else:
@@ -3014,14 +3113,7 @@ def doctor(
             # Blast-radius banner (D8): one fixer restarts the sidecar, so make
             # the cost of a real --fix run explicit before it runs, and point
             # at --dry-run as the safe preview.
-            if dry_run:
-                _emit_hint("dry-run: previewing fixers; nothing on disk changes.")
-            else:
-                _emit_hint(
-                    "blast radius: the token-drift fixer may RESTART the gateway "
-                    "sidecar (interrupts in-flight requests); teardown is never "
-                    "run. Re-run with --dry-run to preview without mutating."
-                )
+            _emit_hint(_auto_fix_hint(dry_run))
         _run_fixers(
             cfg,
             r,
@@ -3110,6 +3202,23 @@ def _check_registry_credentials(cfg, r: _DoctorResult) -> None:
 # ---------------------------------------------------------------------------
 # --fix auto-repair
 # ---------------------------------------------------------------------------
+
+_AUTO_FIX_DRY_RUN_HINT = (
+    "dry-run: previewing fixers; nothing on disk changes. A real --fix --yes "
+    "may restart the gateway sidecar for token drift; doctor never runs "
+    "connector teardown."
+)
+
+_AUTO_FIX_REAL_HINT = (
+    "blast radius: the token-drift fixer may RESTART the gateway sidecar "
+    "(interrupts in-flight requests); teardown is never run. Re-run with "
+    "--dry-run to preview without mutating."
+)
+
+
+def _auto_fix_hint(dry_run: bool) -> str:
+    return _AUTO_FIX_DRY_RUN_HINT if dry_run else _AUTO_FIX_REAL_HINT
+
 
 def _run_fixers(
     cfg,
