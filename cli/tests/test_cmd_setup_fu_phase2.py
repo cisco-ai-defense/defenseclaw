@@ -508,6 +508,19 @@ class TestNotDetectedMessage(unittest.TestCase):
             captured,
         )
 
+    def test_contract_drift_override_allows_action_when_not_installed(self):
+        signal = SimpleNamespace(version="", installed=False, error="", binary_path="")
+        disc = SimpleNamespace(agents={"hermes": signal})
+        contract = SimpleNamespace(status=cmd_setup.STATUS_UNVERSIONED, contract=None, reason="")
+        captured = []
+        with patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1"}), \
+                patch.object(cmd_setup.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_setup, "resolve_connector_contract", return_value=contract), \
+                patch.object(cmd_setup.ux, "warn", side_effect=lambda m: captured.append(m)):
+            ok = cmd_setup._check_connector_version_supported_for_setup("hermes", mode="action")
+        self.assertTrue(ok)
+        self.assertIn(cmd_setup._connector_not_detected_message("Hermes"), captured)
+
 
 # ---------------------------------------------------------------------------
 # SU-10 — option parity / help epilog

@@ -2913,7 +2913,7 @@ def _check_connector_version_supported_for_setup(
     contract = compatibility.contract.contract_id if compatibility.contract else "none"
 
     if not installed:
-        if action_mode and compatibility.status != STATUS_NOT_GATED:
+        if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:
             if emit:
                 ux.err(f"{label}: connector was not detected locally; refusing action-mode hook setup.")
                 ux.subhead("Install the connector locally, or use observe mode until it is available.")

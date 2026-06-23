@@ -303,6 +303,36 @@ func TestBifrostProvider_NewTenantAccountVLLM(t *testing.T) {
 	}
 }
 
+func TestBifrostProvider_NewTenantAccountOllama(t *testing.T) {
+	keyID := bifrostKeyID(schemas.Ollama, "ollama-key")
+	acc := newTenantAccount(
+		schemas.Ollama,
+		"ollama-key",
+		keyID,
+		"http://127.0.0.1:11434/v1",
+		"llama3.1",
+		tlsOverrides{},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	if len(acc.keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(acc.keys))
+	}
+	key := acc.keys[0]
+	if key.Value.Val != "ollama-key" {
+		t.Errorf("Ollama key value = %q, want ollama-key", key.Value.Val)
+	}
+	if key.OllamaKeyConfig == nil {
+		t.Fatal("Ollama keys must include OllamaKeyConfig")
+	}
+	if key.OllamaKeyConfig.URL.Val != "http://127.0.0.1:11434" {
+		t.Errorf("Ollama URL = %q, want http://127.0.0.1:11434", key.OllamaKeyConfig.URL.Val)
+	}
+}
+
 func TestVLLMServerURL(t *testing.T) {
 	tests := []struct {
 		name string

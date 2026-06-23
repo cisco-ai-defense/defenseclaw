@@ -285,6 +285,11 @@ func newTenantAccount(
 			URL: schemas.EnvVar{Val: vllmServerURL(baseURL)},
 		}
 	}
+	if providerKey == schemas.Ollama {
+		key.OllamaKeyConfig = &schemas.OllamaKeyConfig{
+			URL: schemas.EnvVar{Val: ollamaServerURL(baseURL)},
+		}
+	}
 
 	// Bedrock posture → Bifrost BedrockKeyConfig. Auth modes:
 	//   - "api_key":         key.Value carries the API key (already set).
@@ -379,6 +384,10 @@ func vllmServerURL(baseURL string) string {
 		return strings.TrimSuffix(trimmed, "/v1")
 	}
 	return trimmed
+}
+
+func ollamaServerURL(baseURL string) string {
+	return vllmServerURL(baseURL)
 }
 
 func deploymentAliasesToBifrost(aliases map[string]string) schemas.KeyAliases {
