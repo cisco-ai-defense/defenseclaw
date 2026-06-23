@@ -62,7 +62,7 @@ type RuleFinding struct {
 // ---------------------------------------------------------------------------
 
 var secretRules = []PatternRule{
-	{ID: "SEC-AWS-KEY", Pattern: regexp.MustCompile(`(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}`), Title: "AWS access key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
+	{ID: "SEC-AWS-KEY", Pattern: regexp.MustCompile(`\b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}`), Title: "AWS access key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 	{ID: "SEC-AWS-SECRET", Pattern: regexp.MustCompile(`(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+=]{30,}`), Title: "AWS secret access key", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
 	{ID: "SEC-ANTHROPIC", Pattern: regexp.MustCompile(`sk-ant-[a-zA-Z0-9\-_]{20,}`), Title: "Anthropic API key", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential"}},
 	{ID: "SEC-OPENAI", Pattern: regexp.MustCompile(`sk-proj-[a-zA-Z0-9]{20,}`), Title: "OpenAI project key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
@@ -138,7 +138,7 @@ var commandRules = []PatternRule{
 	{ID: "CMD-CURL-UPLOAD", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)`), Title: "curl file upload", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
 	{ID: "CMD-WGET-POST", Pattern: regexp.MustCompile(`(?i)\bwget\b\s+.*--post-(?:data|file)`), Title: "wget POST data exfil", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
 	{ID: "CMD-SOCAT-EXEC", Pattern: regexp.MustCompile(`(?i)\bsocat\b\s+.*\bEXEC\b`), Title: "socat with EXEC (reverse shell)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
-	{ID: "CMD-ENV-DUMP", Pattern: regexp.MustCompile(`(?:^|[^A-Za-z0-9_./-])(?:env|printenv|export\s+-p)\b`), Title: "Environment variable dump", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
+	{ID: "CMD-ENV-DUMP", Pattern: regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_./-])(?:printenv\b|export\s+-p\b|env\s*[|>])`), Title: "Environment variable dump", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
 }
 
 // ---------------------------------------------------------------------------
