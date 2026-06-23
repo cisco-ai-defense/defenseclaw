@@ -278,6 +278,27 @@ class JudgeAddTests(unittest.TestCase):
         self.assertNotIn("no effect", result.output)
 
     @patch.object(cmd_setup, "_restart_services")
+    def test_add_enable_repairs_empty_completion_strategy_under_all_gate(self, restart):
+        # Legacy configs can have an empty completion strategy even when the
+        # hook gate is already broad. Re-running the explicit judge-enable
+        # command must still persist tool-output judge coverage.
+        app = make_ctx(
+            judge_enabled=True,
+            hook_connectors=["*"],
+            detection_strategy="regex_judge",
+            detection_strategy_completion="",
+        )
+        result = invoke(app, ["add", "hermes", "--enable", "--no-restart"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.judge.hook_connectors, ["*"])
+        self.assertEqual(app.cfg.guardrail.detection_strategy, "regex_judge")
+        self.assertEqual(app.cfg.guardrail.detection_strategy_completion, "regex_judge")
+        app.cfg.save.assert_called_once()
+        restart.assert_not_called()
+        self.assertNotIn("nothing to do", result.output)
+        self.assertIn("detection_strategy", result.output)
+
+    @patch.object(cmd_setup, "_restart_services")
     def test_add_without_enable_leaves_judge_disabled(self, restart):
         # Default is preserved: add never flips judge.enabled, and the inert
         # warning still fires so the operator knows the gate is dormant.
@@ -290,8 +311,13 @@ class JudgeAddTests(unittest.TestCase):
     @patch.object(cmd_setup, "_restart_services")
     def test_add_enable_when_already_enabled_is_idempotent(self, restart):
         # --enable on an already-enabled judge is not itself a change: with
-        # the gate also a no-op there is nothing to save or restart.
-        app = make_ctx(judge_enabled=True, hook_connectors=["hermes"])
+        # the gate and strategies also no-op there is nothing to save or restart.
+        app = make_ctx(
+            judge_enabled=True,
+            hook_connectors=["hermes"],
+            detection_strategy="regex_judge",
+            detection_strategy_completion="regex_judge",
+        )
         result = invoke(app, ["add", "hermes", "--enable"])
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertTrue(app.cfg.guardrail.judge.enabled)

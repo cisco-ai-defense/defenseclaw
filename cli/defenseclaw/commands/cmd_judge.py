@@ -237,11 +237,11 @@ def _ensure_enabled_hook_judge_strategies(gc) -> bool:
     """Promote saved hook-lane strategies when judge coverage is enabled."""
     changed = False
     base = (getattr(gc, "detection_strategy", "") or "").strip().lower()
-    if base == "regex_only":
+    if not base or base == "regex_only":
         gc.detection_strategy = "regex_judge"
         changed = True
     completion = (getattr(gc, "detection_strategy_completion", "") or "").strip().lower()
-    if completion == "regex_only":
+    if not completion or completion == "regex_only":
         gc.detection_strategy_completion = "regex_judge"
         changed = True
     return changed

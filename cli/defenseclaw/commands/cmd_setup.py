@@ -3761,6 +3761,17 @@ def setup_guardrail(
             gc.connectors[target_connector].block_message = block_message
         elif block_message is not None:
             gc.block_message = block_message
+            block_message_targets = (
+                _guardrail_setup_check_targets(app, gc, None)
+                if getattr(gc, "connectors", None)
+                else []
+            )
+            for connector in block_message_targets:
+                entry = gc.connectors.get(connector)
+                if entry is None:
+                    entry = PerConnectorGuardrailConfig()
+                    gc.connectors[connector] = entry
+                entry.block_message = block_message
         if detection_strategy is not None:
             gc.detection_strategy = detection_strategy
         _apply_guardrail_extra_options(

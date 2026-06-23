@@ -208,6 +208,30 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             self.assertEqual(gc.connectors[connector].mode, "observe")
             self.assertEqual(gc.effective_mode(connector), "observe")
 
+    def test_setup_guardrail_unscoped_block_message_updates_all_active_overrides(self):
+        self._seed_map("geminicli", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.block_message = "Global block"
+        gc.connectors["geminicli"].block_message = "Gemini scoped block"
+
+        with _stub_side_effects():
+            res = _invoke(
+                [
+                    "guardrail",
+                    "--yes",
+                    "--no-restart",
+                    "--no-verify",
+                    "--block-message",
+                    "Global block 2",
+                ],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(gc.block_message, "Global block 2")
+        for connector in ("geminicli", "hermes"):
+            self.assertEqual(gc.connectors[connector].block_message, "Global block 2")
+            self.assertEqual(gc.effective_block_message(connector), "Global block 2")
+
     def test_setup_guardrail_unscoped_without_mode_preserves_active_overrides(self):
         self._seed_map("codex", "hermes")
         gc = self.app.cfg.guardrail
