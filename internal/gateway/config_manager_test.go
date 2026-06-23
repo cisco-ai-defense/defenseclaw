@@ -111,6 +111,79 @@ func TestDiffConfigsMarksStorageIdentityRestartRequired(t *testing.T) {
 	}
 }
 
+func TestDiffConfigsMarksOpenShellChanged(t *testing.T) {
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{}
+	newCfg.OpenShell.Mode = "standalone"
+
+	diff := diffConfigs(oldCfg, newCfg)
+	if !slices.Contains(diff.Changed, "openshell") {
+		t.Fatalf("changed = %v, missing openshell", diff.Changed)
+	}
+}
+
+func TestReloadPredicatesRestartLLMConsumers(t *testing.T) {
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{}
+	oldCfg.LLM.Model = "openai/gpt-4o-mini"
+	newCfg.LLM.Model = "openai/gpt-4.1-mini"
+
+	if !guardrailNeedsRestart(oldCfg, newCfg) {
+		t.Fatal("guardrailNeedsRestart returned false for llm change")
+	}
+	if !watcherNeedsRestart(oldCfg, newCfg) {
+		t.Fatal("watcherNeedsRestart returned false for llm change")
+	}
+}
+
+func TestApplyConfigReloadRebuildsSharedJudge(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	oldCfg.DataDir = t.TempDir()
+	oldCfg.LLM = config.LLMConfig{
+		Provider: "openai",
+		Model:    "openai/gpt-4o-mini",
+		APIKey:   "test-key",
+	}
+	oldCfg.Guardrail.Judge.Enabled = true
+	oldCfg.Guardrail.Judge.PII = true
+	oldCfg.Guardrail.Judge.Timeout = 1
+
+	newCfg := *oldCfg
+	newCfg.Guardrail.Judge.HookConnectors = []string{"codex"}
+
+	oldJudge := &LLMJudge{model: "old"}
+	router := NewEventRouter(nil, nil, nil, false, nil)
+	router.SetJudge(oldJudge)
+	api := &APIServer{}
+	api.SetHookJudge(oldJudge)
+
+	sidecar := &Sidecar{
+		cfg:    oldCfg,
+		router: router,
+		judge:  oldJudge,
+	}
+	sidecar.setAPIServer(api)
+
+	if err := sidecar.applyConfigReload(context.Background(), oldCfg, &newCfg, diffConfigs(oldCfg, &newCfg)); err != nil {
+		t.Fatalf("applyConfigReload: %v", err)
+	}
+	if sidecar.judge == nil {
+		t.Fatal("shared judge was cleared, want rebuilt judge")
+	}
+	if sidecar.judge == oldJudge {
+		t.Fatal("shared judge was not replaced")
+	}
+	if sidecar.judge.model != "openai/gpt-4o-mini" {
+		t.Fatalf("judge model = %q, want openai/gpt-4o-mini", sidecar.judge.model)
+	}
+	if router.judge != sidecar.judge {
+		t.Fatal("router judge was not updated to the rebuilt shared judge")
+	}
+	if api.hookJudge != sidecar.judge {
+		t.Fatal("API hook judge was not updated to the rebuilt shared judge")
+	}
+}
+
 func writeConfigForManagerTest(t *testing.T, path, dataDir, mode string) {
 	t.Helper()
 	raw := "config_version: 6\n" +

@@ -248,6 +248,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("watch", oldCfg.Watch, newCfg.Watch)
 	add("guardrail", oldCfg.Guardrail, newCfg.Guardrail)
 	add("gateway", oldCfg.Gateway, newCfg.Gateway)
+	add("openshell", oldCfg.OpenShell, newCfg.OpenShell)
 	add("skill_actions", oldCfg.SkillActions, newCfg.SkillActions)
 	add("mcp_actions", oldCfg.MCPActions, newCfg.MCPActions)
 	add("plugin_actions", oldCfg.PluginActions, newCfg.PluginActions)

@@ -222,9 +222,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	router.SetDefaultPolicyID(cfg.Guardrail.Mode)
 
 	// Load guardrail rule pack for judge prompts, suppressions, etc.
-	rp := guardrail.LoadRulePack(cfg.Guardrail.RulePackDir)
-	rp.Validate()
-	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", rp)
+	rp := loadSidecarRulePack(cfg)
 	router.SetRulePack(rp)
 	ApplyRulePackOverrides(rp)
 	// local-patterns.yaml replaces the compiled-in local pattern set
@@ -244,26 +242,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// detection AND tool-result PII inspection (via inspectToolResult),
 	// so it must be initialized whenever judge is enabled — not only when
 	// tool_injection is on.
-	var hookJudge *LLMJudge
-	if cfg.Guardrail.Judge.Enabled {
-		dotenvPath := filepath.Join(cfg.DataDir, ".env")
-		judgeLLM := cfg.ResolveLLM("guardrail.judge")
-		providers, _, _ := providerRegistrySnapshot()
-		judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, providers)
-		if judge != nil {
-			router.SetJudge(judge)
-			hookJudge = judge
-			features := "tool-result-pii"
-			if cfg.Guardrail.Judge.ToolInjection {
-				features += ", tool-injection"
-			}
-			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge enabled (%s) (model=%s)\n",
-				features, judgeLLM.Model)
-			if hooks := cfg.Guardrail.Judge.HookConnectors; len(hooks) > 0 {
-				fmt.Fprintf(os.Stderr, "[sidecar] LLM judge hook lane enabled for: %s\n",
-					strings.Join(hooks, ", "))
-			}
-		}
+	hookJudge := buildSharedJudge(cfg, rp)
+	if hookJudge != nil {
+		router.SetJudge(hookJudge)
 	}
 
 	client.OnEvent = router.Route
@@ -798,6 +779,39 @@ func signalRestart(ch chan struct{}) {
 	}
 }
 
+func loadSidecarRulePack(cfg *config.Config) *guardrail.RulePack {
+	rp := guardrail.LoadRulePack(cfg.Guardrail.RulePackDir)
+	rp.Validate()
+	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", rp)
+	return rp
+}
+
+func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) *LLMJudge {
+	if cfg == nil || !cfg.Guardrail.Judge.Enabled {
+		return nil
+	}
+	if rp == nil {
+		rp = loadSidecarRulePack(cfg)
+	}
+	dotenvPath := filepath.Join(cfg.DataDir, ".env")
+	judgeLLM := cfg.ResolveLLM("guardrail.judge")
+	providers, _, _ := providerRegistrySnapshot()
+	judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, providers)
+	if judge == nil {
+		return nil
+	}
+
+	features := "tool-result-pii"
+	if cfg.Guardrail.Judge.ToolInjection {
+		features += ", tool-injection"
+	}
+	fmt.Fprintf(os.Stderr, "[sidecar] LLM judge enabled (%s) (model=%s)\n", features, judgeLLM.Model)
+	if hooks := cfg.Guardrail.Judge.HookConnectors; len(hooks) > 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar] LLM judge hook lane enabled for: %s\n", strings.Join(hooks, ", "))
+	}
+	return judge
+}
+
 func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff) error {
 	if len(diff.RestartRequired) > 0 {
 		return fmt.Errorf("config reload requires gateway restart for: %s", strings.Join(diff.RestartRequired, ", "))
@@ -812,6 +826,8 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	auditSinksReload := auditSinksNeedReload(oldCfg, newCfg)
 	watcherRestart := watcherNeedsRestart(oldCfg, newCfg) || otelReload
 	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || otelReload
+	rulePackReload := rulePackNeedsReload(oldCfg, newCfg)
+	judgeReload := judgeNeedsReload(oldCfg, newCfg)
 
 	next := *newCfg
 	if next.Gateway.Token == "" && s.cfg.Gateway.Token != "" {
@@ -861,6 +877,21 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 		nextAIDiscovery = svc
 	}
 
+	var nextRulePack *guardrail.RulePack
+	if rulePackReload || judgeReload {
+		nextRulePack = loadSidecarRulePack(&next)
+	}
+
+	var nextJudge *LLMJudge
+	if judgeReload {
+		if strings.TrimSpace(next.LLM.BaseURL) != "" {
+			if err := SeedCustomProvidersFromLLMBaseURL(next.LLM.BaseURL); err != nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] custom-providers seed warning: %v\n", err)
+			}
+		}
+		nextJudge = buildSharedJudge(&next, nextRulePack)
+	}
+
 	*s.cfg = next
 	redaction.SetDisableAll(s.cfg.Privacy.DisableRedaction)
 
@@ -886,9 +917,24 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if s.router != nil {
+		if nextRulePack != nil {
+			s.router.SetRulePack(nextRulePack)
+			ApplyRulePackOverrides(nextRulePack)
+			ApplyLocalPatternsOverride(nextRulePack.LocalPatterns)
+		}
 		s.router.SetGuardrailConfig(&s.cfg.Guardrail)
 		s.router.SetDefaultAgentName(string(s.cfg.Claw.Mode))
 		s.router.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
+	}
+
+	if judgeReload {
+		s.judge = nextJudge
+		if s.router != nil {
+			s.router.SetJudge(nextJudge)
+		}
+		if api := s.apiSnapshot(); api != nil {
+			api.SetHookJudge(nextJudge)
+		}
 	}
 
 	if notifierChanged(oldCfg, newCfg) {
@@ -1022,12 +1068,29 @@ func auditSinksNeedReload(oldCfg, newCfg *config.Config) bool {
 		!reflect.DeepEqual(oldCfg.Observability, newCfg.Observability)
 }
 
+func rulePackNeedsReload(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return oldCfg.Guardrail.RulePackDir != newCfg.Guardrail.RulePackDir
+}
+
+func judgeNeedsReload(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
+		rulePackNeedsReload(oldCfg, newCfg) ||
+		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
+}
+
 func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
 	oldG, newG := oldCfg.Guardrail, newCfg.Guardrail
 	if oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
+		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
 		oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
 		oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
@@ -1052,6 +1115,7 @@ func watcherNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		return false
 	}
 	return !reflect.DeepEqual(oldCfg.Gateway.Watcher, newCfg.Gateway.Watcher) ||
+		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldCfg.Watch, newCfg.Watch) ||
 		!reflect.DeepEqual(oldCfg.Scanners, newCfg.Scanners) ||
 		!reflect.DeepEqual(oldCfg.SkillActions, newCfg.SkillActions) ||
