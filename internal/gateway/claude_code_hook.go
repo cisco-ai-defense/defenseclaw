@@ -296,7 +296,7 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	if hookCfg.Enabled {
 		return true
 	}
-	if a.health != nil && a.health.HasConnector("claudecode") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("claudecode") {
+	if a.health != nil && a.health.HasConnectorSource("claudecode", "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("claudecode") {
 		return true
 	}
 	// Multi-connector: membership in guardrail.connectors opts claudecode

@@ -1596,7 +1596,7 @@ func (a *APIServer) agentHookEnabled(name string) bool {
 	if a.scannerCfg.ConnectorHookConfig(name).Enabled {
 		return true
 	}
-	if a.health != nil && a.health.HasConnector(name) && a.scannerCfg.ApplicationProtection.EffectiveEnabled(name) {
+	if a.health != nil && a.health.HasConnectorSource(name, "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled(name) {
 		return true
 	}
 	// Multi-connector: every member of guardrail.connectors is active

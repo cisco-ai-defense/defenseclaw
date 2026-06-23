@@ -80,6 +80,15 @@ func TestApplicationProtectionPolicyOverlay(t *testing.T) {
 	}
 }
 
+func TestApplicationProtectionEffectiveMinConfidenceHonorsExplicitZero(t *testing.T) {
+	cfg := DefaultApplicationProtectionConfig()
+	cfg.MinConfidence = 0
+
+	if got := cfg.EffectiveMinConfidence("codex"); got != 0 {
+		t.Errorf("EffectiveMinConfidence(codex) = %v, want explicit zero", got)
+	}
+}
+
 func TestApplicationProtectionManualGuardrailPrecedence(t *testing.T) {
 	cfg := &Config{}
 	cfg.Guardrail.Mode = "observe"

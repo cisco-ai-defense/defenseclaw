@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -73,6 +74,22 @@ func TestEvaluateCodexHook_ActiveConnectorImpliesEnabled(t *testing.T) {
 	}
 	if resp.Severity != "CRITICAL" {
 		t.Errorf("Severity = %q, want CRITICAL", resp.Severity)
+	}
+}
+
+func TestCodexEnabled_AutomaticSourceNotLazyHealthCounter(t *testing.T) {
+	cfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
+	health := NewSidecarHealth()
+	health.RecordConnectorRequestFor("codex")
+	api := &APIServer{scannerCfg: cfg, health: health}
+
+	if api.codexEnabled() {
+		t.Fatal("lazy health counter enabled codex without automatic activation")
+	}
+
+	health.RegisterConnectorWithSource("codex", connector.ToolModeBoth, connector.SubprocessNone, "automatic")
+	if !api.codexEnabled() {
+		t.Fatal("source=automatic registration should enable codex inspection")
 	}
 }
 

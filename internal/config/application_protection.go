@@ -92,7 +92,7 @@ func (a *ApplicationProtectionConfig) EffectiveMinConfidence(connector string) f
 	if pc, ok := a.connectorOverride(connector); ok && pc.MinConfidence != nil {
 		return *pc.MinConfidence
 	}
-	if a.MinConfidence > 0 {
+	if a.MinConfidence >= 0 {
 		return a.MinConfidence
 	}
 	return DefaultApplicationProtectionMinConfidence

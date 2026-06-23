@@ -334,6 +334,18 @@ func (h *SidecarHealth) HasConnector(name string) bool {
 	return s != nil && s.state == StateRunning
 }
 
+func (h *SidecarHealth) HasConnectorSource(name, source string) bool {
+	key := connName(name)
+	wantSource := strings.ToLower(strings.TrimSpace(source))
+	if key == "" || wantSource == "" {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	s := h.connStats[key]
+	return s != nil && s.state == StateRunning && strings.EqualFold(strings.TrimSpace(s.source), wantSource)
+}
+
 // statsFor returns the counter bucket for a connector, lazily creating it so
 // counts are never lost if a hook fires before the connector is registered.
 // An empty name routes to the primary connector (back-compat).

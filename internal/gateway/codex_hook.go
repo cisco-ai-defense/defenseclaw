@@ -312,7 +312,7 @@ func (a *APIServer) codexEnabled() bool {
 	if a.scannerCfg.ConnectorHookConfig("codex").Enabled {
 		return true
 	}
-	if a.health != nil && a.health.HasConnector("codex") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("codex") {
+	if a.health != nil && a.health.HasConnectorSource("codex", "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("codex") {
 		return true
 	}
 	// Multi-connector: membership in guardrail.connectors opts codex in
