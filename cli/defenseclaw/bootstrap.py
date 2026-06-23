@@ -631,6 +631,11 @@ def _apply_first_run_choices(
         )
         if not cfg.guardrail.detection_strategy or cfg.guardrail.detection_strategy == "regex_only":
             cfg.guardrail.detection_strategy = "regex_judge"
+        completion_strategy = (
+            getattr(cfg.guardrail, "detection_strategy_completion", "") or ""
+        ).strip().lower()
+        if completion_strategy in ("", "regex_only"):
+            cfg.guardrail.detection_strategy_completion = "regex_judge"
     else:
         cfg.guardrail.judge.enabled = False
     cfg.guardrail.detection_strategy = cfg.guardrail.detection_strategy or "regex_judge"

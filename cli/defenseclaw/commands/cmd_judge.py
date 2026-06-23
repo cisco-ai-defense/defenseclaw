@@ -233,6 +233,20 @@ def _judged_directions(gc) -> list[str]:
     ]
 
 
+def _ensure_enabled_hook_judge_strategies(gc) -> bool:
+    """Promote saved hook-lane strategies when judge coverage is enabled."""
+    changed = False
+    base = (getattr(gc, "detection_strategy", "") or "").strip().lower()
+    if base == "regex_only":
+        gc.detection_strategy = "regex_judge"
+        changed = True
+    completion = (getattr(gc, "detection_strategy_completion", "") or "").strip().lower()
+    if completion == "regex_only":
+        gc.detection_strategy_completion = "regex_judge"
+        changed = True
+    return changed
+
+
 def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str) -> None:
     try:
         app.cfg.save()
@@ -395,7 +409,11 @@ def judge_add(
         gc.judge.hook_connectors = gate
         gate_changed = True
 
-    if not gate_changed and not timeout_changed and not enable_changed:
+    strategy_changed = False
+    if bool(gc.judge.enabled) and (enable or gate_changed or enable_changed):
+        strategy_changed = _ensure_enabled_hook_judge_strategies(gc)
+
+    if not gate_changed and not timeout_changed and not enable_changed and not strategy_changed:
         click.echo("  " + ux.dim(f"{noop_reason} — nothing to do."))
         _warn_if_inert(app, gc)
         click.echo()
@@ -404,6 +422,8 @@ def judge_add(
         saved = []
         if enable_changed:
             saved.append("judge.enabled")
+        if strategy_changed:
+            saved.append("detection_strategy")
         if timeout_changed:
             saved.append("hook_timeout")
         click.echo("  " + ux.dim(f"{noop_reason} — saving {' + '.join(saved)} only."))

@@ -1009,6 +1009,18 @@ def _set_connector_fail_mode(
         )
 
 
+def _multi_connector_fail_mode_targets(app: AppContext) -> list[str]:
+    """Return active connectors for bare fail-mode writes in multi installs."""
+    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
+    if not conns:
+        return []
+    return [
+        name
+        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
+        if name in conns
+    ]
+
+
 @guardrail.command("fail-mode")
 @click.argument("mode", required=False, type=click.Choice(["open", "closed"]))
 @click.option(
@@ -1114,12 +1126,43 @@ def fail_mode_cmd(
         click.echo()
         return
 
-    if mode == current:
+    fail_mode_targets = _multi_connector_fail_mode_targets(app)
+    target_modes: dict[str, str] = {}
+    if fail_mode_targets:
+        target_modes = {
+            name: (
+                gc.effective_hook_fail_mode(name)
+                if hasattr(gc, "effective_hook_fail_mode")
+                else current
+            ).lower()
+            for name in fail_mode_targets
+        }
+
+    if fail_mode_targets and all(value == mode for value in target_modes.values()):
+        click.echo(
+            f"  {ux.dim('Hook fail mode is already')} {mode!r} "
+            f"{ux.dim('for all active connectors — nothing to do.')}"
+        )
+        return
+    if not fail_mode_targets and mode == current:
         click.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
         return
 
     click.echo()
-    click.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
+    if fail_mode_targets:
+        click.echo(
+            f"  {ux.bold('Changing hook fail mode for active connectors:')} "
+            f"{ux.accent(mode)}"
+        )
+        for name in fail_mode_targets:
+            old = target_modes.get(name, current)
+            if old != mode:
+                click.echo(
+                    f"      - {_connector_label(name)} ({name}): "
+                    f"{old} {ux.dim('→')} {ux.accent(mode)}"
+                )
+    else:
+        click.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
     if mode == "closed":
         ux.warn(
             "Response-layer failures will now BLOCK the agent.",
@@ -1147,10 +1190,26 @@ def fail_mode_cmd(
         # SystemExit bypasses that machinery.
         raise click.Abort()
 
-    gc.hook_fail_mode = mode
+    if fail_mode_targets:
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        for name in fail_mode_targets:
+            entry = gc.connectors.get(name)
+            if entry is None:
+                entry = PerConnectorGuardrailConfig()
+                gc.connectors[name] = entry
+            entry.hook_fail_mode = mode
+    else:
+        gc.hook_fail_mode = mode
     try:
         app.cfg.save()
-        ux.ok(f"Config saved (guardrail.hook_fail_mode = {mode})", indent="  ")
+        if fail_mode_targets:
+            ux.ok(
+                f"Config saved ({len(fail_mode_targets)} connector hook_fail_mode overrides = {mode})",
+                indent="  ",
+            )
+        else:
+            ux.ok(f"Config saved (guardrail.hook_fail_mode = {mode})", indent="  ")
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort()
@@ -1180,7 +1239,11 @@ def fail_mode_cmd(
         app.logger.log_action(
             "guardrail-fail-mode",
             "config",
-            f"old={current} new={mode} restart={restart}",
+            (
+                f"scope=active-connectors count={len(fail_mode_targets)} new={mode} restart={restart}"
+                if fail_mode_targets
+                else f"old={current} new={mode} restart={restart}"
+            ),
         )
 
 
@@ -1333,6 +1396,18 @@ def _set_connector_hilt(
         )
 
 
+def _multi_connector_hilt_targets(app: AppContext) -> list[str]:
+    """Return active connectors for bare HILT writes in multi installs."""
+    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
+    if not conns:
+        return []
+    return [
+        name
+        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
+        if name in conns
+    ]
+
+
 @guardrail.command("hilt")
 @click.argument("state", required=False, type=click.Choice(["on", "off"]))
 @click.option(
@@ -1430,10 +1505,34 @@ def hilt_cmd(
         click.echo()
         return
 
+    hilt_targets = _multi_connector_hilt_targets(app)
+    target_hilts: dict[str, tuple[bool, str, bool, str]] = {}
+    if hilt_targets:
+        for name in hilt_targets:
+            eff = (
+                gc.effective_hilt(name)
+                if hasattr(gc, "effective_hilt")
+                else gc.hilt
+            )
+            old_enabled = bool(getattr(eff, "enabled", False))
+            old_min = (getattr(eff, "min_severity", "") or "HIGH").upper()
+            desired_enabled = old_enabled if state is None else (state == "on")
+            desired_min = old_min if min_severity is None else min_severity.upper()
+            target_hilts[name] = (old_enabled, old_min, desired_enabled, desired_min)
+
     new_enabled = cur_enabled if state is None else (state == "on")
     new_min = cur_min if min_severity is None else min_severity.upper()
 
-    if new_enabled == cur_enabled and new_min == cur_min:
+    if hilt_targets and all(
+        old_enabled == desired_enabled and old_min == desired_min
+        for old_enabled, old_min, desired_enabled, desired_min in target_hilts.values()
+    ):
+        click.echo(
+            f"  {ux.dim('HILT is already')} "
+            f"{ux.dim('in the requested state for all active connectors — nothing to do.')}"
+        )
+        return
+    if not hilt_targets and new_enabled == cur_enabled and new_min == cur_min:
         click.echo(
             f"  {ux.dim('HILT is already')} "
             f"enabled={str(new_enabled).lower()} min_severity={new_min} "
@@ -1442,27 +1541,57 @@ def hilt_cmd(
         return
 
     click.echo()
-    click.echo(
-        f"  {ux.bold('Updating HILT:')} "
-        f"enabled={str(cur_enabled).lower()} {ux.dim('→')} "
-        f"{ux.accent(str(new_enabled).lower())}, "
-        f"min_severity={cur_min} {ux.dim('→')} {ux.accent(new_min)}"
-    )
+    if hilt_targets:
+        click.echo(f"  {ux.bold('Updating HILT for active connectors:')}")
+        for name in hilt_targets:
+            old_enabled, old_min, desired_enabled, desired_min = target_hilts[name]
+            if old_enabled == desired_enabled and old_min == desired_min:
+                continue
+            click.echo(
+                f"      - {_connector_label(name)} ({name}): "
+                f"enabled={str(old_enabled).lower()} {ux.dim('→')} "
+                f"{ux.accent(str(desired_enabled).lower())}, "
+                f"min_severity={old_min} {ux.dim('→')} {ux.accent(desired_min)}"
+            )
+    else:
+        click.echo(
+            f"  {ux.bold('Updating HILT:')} "
+            f"enabled={str(cur_enabled).lower()} {ux.dim('→')} "
+            f"{ux.accent(str(new_enabled).lower())}, "
+            f"min_severity={cur_min} {ux.dim('→')} {ux.accent(new_min)}"
+        )
     click.echo()
 
     if not yes and not click.confirm("  Proceed?", default=True):
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise click.Abort()
 
-    gc.hilt.enabled = new_enabled
-    gc.hilt.min_severity = new_min
+    if hilt_targets:
+        from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig
+
+        for name in hilt_targets:
+            _, _, desired_enabled, desired_min = target_hilts[name]
+            entry = gc.connectors.get(name)
+            if entry is None:
+                entry = PerConnectorGuardrailConfig()
+                gc.connectors[name] = entry
+            entry.hilt = HILTConfig(enabled=desired_enabled, min_severity=desired_min)
+    else:
+        gc.hilt.enabled = new_enabled
+        gc.hilt.min_severity = new_min
     try:
         app.cfg.save()
-        ux.ok(
-            f"Config saved (guardrail.hilt: enabled={str(new_enabled).lower()} "
-            f"min_severity={new_min})",
-            indent="  ",
-        )
+        if hilt_targets:
+            ux.ok(
+                f"Config saved ({len(hilt_targets)} connector HILT overrides updated)",
+                indent="  ",
+            )
+        else:
+            ux.ok(
+                f"Config saved (guardrail.hilt: enabled={str(new_enabled).lower()} "
+                f"min_severity={new_min})",
+                indent="  ",
+            )
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort()
@@ -1474,7 +1603,8 @@ def hilt_cmd(
     # and intentionally not mirrored (data.json is global).
     from defenseclaw.commands import cmd_setup
 
-    cmd_setup._sync_guardrail_hilt_to_opa(getattr(app.cfg, "policy_dir", ""), gc)
+    if not hilt_targets:
+        cmd_setup._sync_guardrail_hilt_to_opa(getattr(app.cfg, "policy_dir", ""), gc)
 
     if restart and gc.enabled:
         cmd_setup._restart_services(
@@ -1497,7 +1627,12 @@ def hilt_cmd(
         app.logger.log_action(
             "guardrail-hilt",
             "config",
-            f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}",
+            (
+                f"scope=active-connectors count={len(hilt_targets)} "
+                f"state={state or 'preserve'} min_severity={min_severity or 'preserve'} restart={restart}"
+                if hilt_targets
+                else f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}"
+            ),
         )
 
 
@@ -1623,6 +1758,18 @@ def _set_connector_block_message(
         )
 
 
+def _multi_connector_block_message_targets(app: AppContext) -> list[str]:
+    """Return active connectors for bare block-message writes in multi installs."""
+    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
+    if not conns:
+        return []
+    return [
+        name
+        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
+        if name in conns
+    ]
+
+
 @guardrail.command("block-message")
 @click.argument("message", required=False)
 @click.option(
@@ -1710,13 +1857,55 @@ def block_message_cmd(
         click.echo()
         return
 
+    block_message_targets = _multi_connector_block_message_targets(app)
+    target_messages: dict[str, str] = {}
+    if block_message_targets:
+        target_messages = {
+            name: (
+                gc.effective_block_message(name)
+                if hasattr(gc, "effective_block_message")
+                else current
+            )
+            for name in block_message_targets
+        }
+
     new_msg = "" if clear else message
-    if new_msg == current:
+    if (
+        block_message_targets
+        and new_msg == current
+        and all(value == new_msg for value in target_messages.values())
+    ):
+        click.echo(
+            f"  {ux.dim('Block message unchanged for all active connectors — nothing to do.')}"
+        )
+        return
+    if not block_message_targets and new_msg == current:
         click.echo(f"  {ux.dim('Block message unchanged — nothing to do.')}")
         return
 
     click.echo()
-    if new_msg:
+    if block_message_targets:
+        if new_msg:
+            click.echo(
+                f"  {ux.bold('Setting block message for active connectors:')} "
+                f"{ux.accent(new_msg)}"
+            )
+        else:
+            click.echo(
+                f"  {ux.bold('Clearing block message for active connectors')} "
+                f"{ux.dim('(revert to built-in default)')}"
+            )
+        for name in block_message_targets:
+            old = target_messages.get(name, current)
+            if old == new_msg:
+                continue
+            old_label = old if old else "(built-in default)"
+            new_label = new_msg if new_msg else "(built-in default)"
+            click.echo(
+                f"      - {_connector_label(name)} ({name}): "
+                f"{old_label} {ux.dim('→')} {ux.accent(new_label)}"
+            )
+    elif new_msg:
         click.echo(f"  {ux.bold('Setting block message:')} {ux.accent(new_msg)}")
     else:
         click.echo(
@@ -1729,9 +1918,25 @@ def block_message_cmd(
         raise click.Abort()
 
     gc.block_message = new_msg
+    if block_message_targets:
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        for name in block_message_targets:
+            entry = gc.connectors.get(name)
+            if entry is None:
+                entry = PerConnectorGuardrailConfig()
+                gc.connectors[name] = entry
+            entry.block_message = new_msg
     try:
         app.cfg.save()
-        ux.ok("Config saved (guardrail.block_message updated)", indent="  ")
+        if block_message_targets:
+            ux.ok(
+                f"Config saved (guardrail.block_message and {len(block_message_targets)} "
+                "connector block_message overrides updated)",
+                indent="  ",
+            )
+        else:
+            ux.ok("Config saved (guardrail.block_message updated)", indent="  ")
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort()
@@ -1759,7 +1964,12 @@ def block_message_cmd(
         app.logger.log_action(
             "guardrail-block-message",
             "config",
-            f"cleared={clear} restart={restart}",
+            (
+                f"scope=active-connectors count={len(block_message_targets)} "
+                f"cleared={clear} restart={restart}"
+                if block_message_targets
+                else f"cleared={clear} restart={restart}"
+            ),
         )
 
 

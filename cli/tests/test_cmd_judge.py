@@ -261,11 +261,17 @@ class JudgeAddTests(unittest.TestCase):
     def test_add_enable_flips_judge_enabled(self, restart):
         # J1: --enable turns the judge on as part of the add, so a freshly
         # gated connector isn't left inert behind judge.enabled=false.
-        app = make_ctx(judge_enabled=False)
+        app = make_ctx(
+            judge_enabled=False,
+            detection_strategy="regex_only",
+            detection_strategy_completion="regex_only",
+        )
         result = invoke(app, ["add", "hermes", "--enable"])
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertTrue(app.cfg.guardrail.judge.enabled)
         self.assertEqual(app.cfg.guardrail.judge.hook_connectors, ["hermes"])
+        self.assertEqual(app.cfg.guardrail.detection_strategy, "regex_judge")
+        self.assertEqual(app.cfg.guardrail.detection_strategy_completion, "regex_judge")
         app.cfg.save.assert_called_once()
         restart.assert_called_once()
         # With the judge now on, the inert "no effect" warning must not fire.
@@ -298,13 +304,21 @@ class JudgeAddTests(unittest.TestCase):
         # Gate no-op (already gated) but judge was off + --enable: a real
         # change (judge.enabled off→on), so it saves and reports the enable,
         # never "nothing to do" right before a save+restart.
-        app = make_ctx(judge_enabled=False, hook_connectors=["hermes"])
+        app = make_ctx(
+            judge_enabled=False,
+            hook_connectors=["hermes"],
+            detection_strategy="regex_only",
+            detection_strategy_completion="regex_only",
+        )
         result = invoke(app, ["add", "hermes", "--enable"])
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertTrue(app.cfg.guardrail.judge.enabled)
+        self.assertEqual(app.cfg.guardrail.detection_strategy, "regex_judge")
+        self.assertEqual(app.cfg.guardrail.detection_strategy_completion, "regex_judge")
         app.cfg.save.assert_called_once()
         self.assertNotIn("nothing to do", result.output)
         self.assertIn("judge.enabled", result.output)
+        self.assertIn("detection_strategy", result.output)
 
 
 class JudgeRemoveTests(unittest.TestCase):

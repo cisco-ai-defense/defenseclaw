@@ -236,6 +236,7 @@ class TestObservabilityWizard(unittest.TestCase):
             _interactive_guardrail_setup(app, gc, agent_name="codex")
         self.assertTrue(gc.judge.enabled)
         self.assertEqual(gc.detection_strategy, "regex_judge")
+        self.assertEqual(gc.detection_strategy_completion, "regex_judge")
         self.assertEqual(gc.judge.hook_connectors, ["codex"])
         model_prompt.assert_called_once()
 

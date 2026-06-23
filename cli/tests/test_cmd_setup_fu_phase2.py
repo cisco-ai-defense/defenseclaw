@@ -117,6 +117,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         # Judge enablement is global + gated; strategy bumped off regex_only.
         self.assertTrue(gc.judge.enabled)
         self.assertNotEqual(gc.detection_strategy, "regex_only")
+        self.assertEqual(gc.detection_strategy_completion, "regex_judge")
         self.assertEqual(gc.judge.hook_connectors, ["hermes"])
         # Peer left completely untouched (inherits global).
         codex = gc.connectors["codex"]
@@ -181,6 +182,47 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertEqual(hermes.block_message, "")
         self.assertEqual(hermes.rule_pack_dir, "")
         self.assertIsNone(hermes.hilt)
+
+    def test_setup_guardrail_unscoped_mode_updates_all_active_overrides(self):
+        self._seed_map("claudecode", "hermes", "opencode", "openhands")
+        gc = self.app.cfg.guardrail
+        gc.mode = "action"
+        for connector in gc.connectors:
+            gc.connectors[connector].mode = "action"
+
+        with _stub_side_effects():
+            res = _invoke(
+                [
+                    "guardrail",
+                    "--yes",
+                    "--no-restart",
+                    "--no-verify",
+                    "--mode",
+                    "observe",
+                ],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(gc.mode, "observe")
+        for connector in ("claudecode", "hermes", "opencode", "openhands"):
+            self.assertEqual(gc.connectors[connector].mode, "observe")
+            self.assertEqual(gc.effective_mode(connector), "observe")
+
+    def test_setup_guardrail_unscoped_without_mode_preserves_active_overrides(self):
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.mode = "observe"
+        gc.connectors["codex"].mode = "action"
+        gc.connectors["hermes"].mode = "observe"
+
+        with _stub_side_effects():
+            res = _invoke(
+                ["guardrail", "--yes", "--no-restart", "--no-verify"],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(gc.connectors["codex"].mode, "action")
+        self.assertEqual(gc.connectors["hermes"].mode, "observe")
 
     def test_omitting_flags_preserves_existing(self):
         # SU-02/J1 preserve-don't-clobber: a re-run without flags keeps judge.
@@ -249,6 +291,95 @@ class TestInteractiveModeJudgePrompts(_BaseSetup):
         self.assertTrue(self.app.cfg.guardrail.judge.enabled)
         self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["codex"])
         model_prompt.assert_called_once()
+
+    def test_scoped_guardrail_setup_preserves_unscoped_judge_gate(self):
+        targets = ["antigravity", "claudecode", "hermes", "openhands"]
+        self._seed_map(*targets)
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "observe"
+        for connector in targets:
+            gc.connectors[connector].mode = "observe"
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = list(targets)
+        gc.detection_strategy = "regex_judge"
+        gc.detection_strategy_completion = "regex_judge"
+
+        confirms = iter([True, False])
+
+        def confirm(*_args, **kwargs):
+            try:
+                return next(confirms)
+            except StopIteration:
+                return kwargs.get("default", False)
+
+        def accept_defaults(_options, *, default_selected=None, **_kwargs):
+            return list(default_selected or [])
+
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=confirm), \
+                patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._prompt_batch_connector_modes",
+                    return_value={"hermes": "action"},
+                ), \
+                patch("defenseclaw.commands.cmd_setup._prompt_hook_fail_mode", return_value=None), \
+                patch("defenseclaw.commands.cmd_setup._configure_hilt_interactive", return_value=None), \
+                patch("defenseclaw.commands.cmd_setup._prompt_checkbox_selection", side_effect=accept_defaults), \
+                patch("defenseclaw.commands.cmd_setup._prompt_judge_model_config") as model_prompt, \
+                patch("defenseclaw.commands.cmd_setup._print_connector_info", return_value=None):
+            cmd_setup._interactive_guardrail_setup(self.app, gc, agent_name="hermes")
+
+        self.assertEqual(gc.connectors["hermes"].mode, "action")
+        self.assertEqual(gc.connectors["antigravity"].mode, "observe")
+        self.assertTrue(gc.judge.enabled)
+        self.assertEqual(gc.judge.hook_connectors, sorted(targets))
+        model_prompt.assert_called_once()
+
+    def test_multi_guardrail_setup_action_defaults_ignore_stale_global_mode(self):
+        targets = ["antigravity", "claudecode", "geminicli", "hermes", "opencode", "openhands", "windsurf"]
+        self._seed_map(*targets)
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "action"
+        for connector in targets:
+            gc.connectors[connector].mode = "observe"
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["antigravity", "claudecode", "hermes", "openhands"]
+        gc.detection_strategy = "regex_judge"
+        gc.detection_strategy_completion = "regex_judge"
+
+        default_selections: list[list[str]] = []
+        confirms = iter([True, False, False])
+
+        def confirm(*_args, **kwargs):
+            try:
+                return next(confirms)
+            except StopIteration:
+                return kwargs.get("default", False)
+
+        def checkbox(_options, *, default_selected=None, title="", **_kwargs):
+            if title == "Select connector(s) for action enforcement.":
+                default_selections.append(list(default_selected or []))
+                return []
+            return list(default_selected or [])
+
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=confirm), \
+                patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
+                patch("defenseclaw.commands.cmd_setup._prompt_checkbox_selection", side_effect=checkbox), \
+                patch("defenseclaw.commands.cmd_setup._prompt_judge_model_config", return_value=None), \
+                patch("defenseclaw.commands.cmd_setup._print_connector_info", return_value=None):
+            cmd_setup._interactive_guardrail_setup(self.app, gc)
+
+        self.assertEqual(default_selections, [[]])
+        for connector in targets:
+            self.assertEqual(gc.connectors[connector].mode, "observe")
+            self.assertEqual(gc.effective_mode(connector), "observe")
+        self.assertEqual(
+            gc.judge.hook_connectors,
+            ["antigravity", "claudecode", "hermes", "openhands"],
+        )
 
     def test_non_interactive_does_not_prompt(self):
         # --yes path: no prompts fire (would error on EOF if they did).
@@ -528,6 +659,7 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertEqual(gc.connectors["hermes"].mode, "observe")
         self.assertEqual(gc.connectors["codex"].mode, "action")
         self.assertEqual(gc.detection_strategy, "regex_judge")
+        self.assertEqual(gc.detection_strategy_completion, "regex_judge")
         self.assertEqual(gc.judge.hook_connectors, ["hermes"])
 
     def test_batch_judge_selection_drops_unselected_existing_connectors(self):
@@ -556,6 +688,63 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertEqual(gc.judge.hook_connectors, ["hermes"])
         self.assertNotIn("codex", gc.judge.hook_connectors)
+
+    def test_scoped_judge_selection_preserves_outside_existing_gate(self):
+        targets = ["antigravity", "claudecode", "hermes", "openhands"]
+        self._seed_map(*targets)
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = list(targets)
+        gc.detection_strategy = "regex_judge"
+        gc.detection_strategy_completion = "regex_judge"
+
+        cmd_setup._merge_batch_judge_selection(
+            gc,
+            ["hermes"],
+            {"hermes"},
+            preserve_outside_targets=True,
+        )
+
+        self.assertTrue(gc.judge.enabled)
+        self.assertEqual(gc.judge.hook_connectors, sorted(targets))
+        self.assertEqual(gc.detection_strategy, "regex_judge")
+        self.assertEqual(gc.detection_strategy_completion, "regex_judge")
+
+    def test_scoped_judge_selection_removes_only_unchecked_target(self):
+        targets = ["antigravity", "claudecode", "hermes", "openhands"]
+        self._seed_map(*targets)
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = list(targets)
+        gc.detection_strategy = "regex_judge"
+        gc.detection_strategy_completion = "regex_judge"
+
+        cmd_setup._merge_batch_judge_selection(
+            gc,
+            ["hermes"],
+            set(),
+            preserve_outside_targets=True,
+        )
+
+        self.assertTrue(gc.judge.enabled)
+        self.assertEqual(gc.judge.hook_connectors, ["antigravity", "claudecode", "openhands"])
+        self.assertEqual(gc.detection_strategy, "regex_judge")
+        self.assertEqual(gc.detection_strategy_completion, "regex_judge")
+
+    def test_scoped_judge_selection_preserves_wildcard_when_target_checked(self):
+        self._seed_map("antigravity", "claudecode", "hermes", "openhands")
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["*"]
+
+        cmd_setup._merge_batch_judge_selection(
+            gc,
+            ["hermes"],
+            {"hermes"},
+            preserve_outside_targets=True,
+        )
+
+        self.assertEqual(gc.judge.hook_connectors, ["*"])
 
     def test_batch_setup_reconciles_active_connectors_to_selected_set(self):
         self._seed_map("codex", "hermes")
@@ -651,6 +840,7 @@ class TestBareSetupBatch(_BaseSetup):
         model_prompt.assert_called_once()
         self.assertTrue(self.app.cfg.guardrail.judge.enabled)
         self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
+        self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_judge")
         self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["hermes"])
 
     def test_flags_ignored_with_subcommand_warns(self):
@@ -709,6 +899,24 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertTrue(self.app.cfg.guardrail.judge.enabled)
         self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
+        self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_judge")
+        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["*"])
+
+    def test_explicit_completion_regex_only_preserved_when_judge_enabled(self):
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
+            res = _invoke(
+                [
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
+                    "--detection-strategy", "regex_judge",
+                    "--detection-strategy-completion", "regex_only",
+                ],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertTrue(self.app.cfg.guardrail.judge.enabled)
+        self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
+        self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_only")
         self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["*"])
 
     def test_off_by_default_tool_call_unset(self):

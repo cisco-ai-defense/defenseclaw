@@ -182,6 +182,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
             cfg = yaml.safe_load(fh)
         self.assertTrue(cfg["guardrail"]["judge"]["enabled"])
         self.assertEqual(cfg["guardrail"]["detection_strategy"], "regex_judge")
+        self.assertEqual(cfg["guardrail"]["detection_strategy_completion"], "regex_judge")
         self.assertEqual(cfg["guardrail"]["judge"]["hook_connectors"], ["*"])
 
     def test_interactive_judge_llm_config_collects_model_settings(self):

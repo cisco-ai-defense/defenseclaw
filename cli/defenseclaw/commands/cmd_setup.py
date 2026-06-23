@@ -3699,11 +3699,20 @@ def setup_guardrail(
                 gc.connector = picked
         target_connector = target_connector or gc.connector
         per_connector_target = bool(
-            target_connector
+            explicit_connector
+            and target_connector
             and getattr(gc, "connectors", None)
             and target_connector in gc.connectors
         )
-        if per_connector_target:
+        if guard_mode and not explicit_connector:
+            mode_targets = _guardrail_setup_check_targets(app, gc, None)
+            gc.mode = guard_mode
+            if getattr(gc, "connectors", None) and mode_targets:
+                _write_per_connector_modes(
+                    gc,
+                    {connector: guard_mode for connector in mode_targets},
+                )
+        elif per_connector_target:
             if guard_mode:
                 gc.connectors[target_connector].mode = guard_mode
             elif not gc.mode:
@@ -3846,10 +3855,9 @@ def setup_guardrail(
             if not getattr(gc, "detection_strategy_completion", None):
                 gc.detection_strategy_completion = "regex_only"
 
-        # J3: explicit per-direction strategy overrides win over the auto-seeded
-        # defaults above. Opt-in (each flag defaults None → leave that direction
-        # inheriting the base strategy), so the tool-output/tool-call judge
-        # lanes stay OFF unless the operator asks for them.
+        # J3: explicit per-direction strategy overrides win over auto-seeded
+        # defaults. A regex_only completion flag remains the operator's opt-out
+        # from tool-output judge coverage.
         if detection_strategy_prompt is not None:
             gc.detection_strategy_prompt = detection_strategy_prompt
         if detection_strategy_completion is not None:
@@ -3871,6 +3879,13 @@ def setup_guardrail(
         )
         if new_gate is not None:
             gc.judge.hook_connectors = new_gate
+
+        if (
+            gc.judge.enabled
+            and list(gc.judge.hook_connectors or [])
+            and detection_strategy_completion is None
+        ):
+            _default_hook_judge_completion_strategy(gc)
 
         if gc.scanner_mode in ("remote", "both"):
             key_env = aid.api_key_env or "CISCO_AI_DEFENSE_API_KEY"
@@ -4367,6 +4382,7 @@ def _apply_judge_enablement(
         gc.judge.enabled = True
         if not gc.detection_strategy or gc.detection_strategy == "regex_only":
             gc.detection_strategy = "regex_judge"
+        _default_hook_judge_completion_strategy(gc)
         if judge_hook_connectors is None:
             current = list(gc.judge.hook_connectors or []) if was_enabled else []
             if current == ["*"]:
@@ -5119,7 +5135,7 @@ def _connector_display_options(connectors: list[str]) -> tuple[list[str], dict[s
     return [display_by_connector[c] for c in connectors], display_by_connector, connector_by_display
 
 
-def _prompt_batch_connector_modes(connectors: list[str], gc, *, default_mode: str) -> dict[str, str]:
+def _prompt_batch_connector_modes(connectors: list[str], gc, *, default_mode: str | None) -> dict[str, str]:
     """Ask once which selected connectors should use action mode."""
     options, display_by_connector, connector_by_display = _connector_display_options(connectors)
     default_action = [
@@ -5227,6 +5243,13 @@ def _strategy_uses_judge(strategy: str) -> bool:
     return (strategy or "").strip().lower() in {"regex_judge", "judge_first"}
 
 
+def _default_hook_judge_completion_strategy(gc) -> None:
+    """Default opted-in hook connectors to judge-capable tool-output scans."""
+    current = (getattr(gc, "detection_strategy_completion", "") or "").strip().lower()
+    if current in ("", "regex_only"):
+        gc.detection_strategy_completion = "regex_judge"
+
+
 def _prompt_batch_scan_strategy(gc) -> str:
     """Ask once how hook calls should be scanned for a batch setup."""
     ux.section("Scan strategy")
@@ -5269,19 +5292,48 @@ def _default_batch_judge_labels(
     return [display_by_connector[c] for c in connectors if c in selected]
 
 
-def _merge_batch_judge_selection(gc, connectors: list[str], selected_connectors: set[str]) -> list[str]:
-    """Apply a bare-setup judge checkbox selection without a strategy prompt."""
-    targets = set(connectors)
-    # Bare setup is scoped to the connectors selected at the top of the flow.
-    # Do not carry previously configured, unselected connectors into the judge
-    # gate; otherwise the checkbox summary can name connectors the operator
-    # deliberately left out of this setup run.
-    new_gate = sorted(c for c in selected_connectors if c in targets)
+def _merge_batch_judge_selection(
+    gc,
+    connectors: list[str],
+    selected_connectors: set[str],
+    *,
+    preserve_outside_targets: bool = False,
+) -> list[str]:
+    """Apply a judge checkbox selection without exposing strategy jargon."""
+    targets = {normalize_connector(c) for c in connectors if c}
+    selected = {normalize_connector(c) for c in selected_connectors if c}
+    if preserve_outside_targets:
+        current_gate = [
+            normalize_connector(str(c))
+            for c in (getattr(gc.judge, "hook_connectors", []) or [])
+            if str(c).strip()
+        ]
+        if "*" in current_gate:
+            removed_targets = targets - selected
+            if removed_targets:
+                configured_hook_connectors = {
+                    normalize_connector(c)
+                    for c in _configured_connector_set(gc)
+                    if normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS
+                }
+                new_gate = sorted(configured_hook_connectors - removed_targets)
+            else:
+                new_gate = ["*"]
+        else:
+            preserved = {c for c in current_gate if c not in targets}
+            new_gate = sorted(preserved | {c for c in selected if c in targets})
+    else:
+        # Bare setup is scoped to the connectors selected at the top of the flow.
+        # Do not carry previously configured, unselected connectors into the judge
+        # gate; otherwise the checkbox summary can name connectors the operator
+        # deliberately left out of this setup run.
+        new_gate = sorted(c for c in selected if c in targets)
     gc.judge.hook_connectors = new_gate
     if new_gate:
         gc.judge.enabled = True
         if not gc.detection_strategy or gc.detection_strategy == "regex_only":
             gc.detection_strategy = "regex_judge"
+        _default_hook_judge_completion_strategy(gc)
         _apply_judge_runtime_defaults(gc)
         click.echo("  " + ux.dim(f"Hook judge connectors: {', '.join(new_gate)}"))
     else:
@@ -5310,7 +5362,12 @@ def _prompt_batch_judge_connectors(connectors: list[str], gc) -> set[str]:
     return selected_connectors
 
 
-def _prompt_guardrail_judge_enablement(gc, judge_targets: list[str]) -> set[str]:
+def _prompt_guardrail_judge_enablement(
+    gc,
+    judge_targets: list[str],
+    *,
+    preserve_outside_targets: bool = False,
+) -> set[str]:
     """Interactive ``setup guardrail`` judge prompt without scan-strategy jargon."""
     if judge_targets:
         options, display_by_connector, connector_by_display = _connector_display_options(judge_targets)
@@ -5324,7 +5381,12 @@ def _prompt_guardrail_judge_enablement(gc, judge_targets: list[str]) -> set[str]
             empty_ok=True,
         )
         selected_connectors = {connector_by_display[label] for label in selected}
-        _merge_batch_judge_selection(gc, judge_targets, selected_connectors)
+        _merge_batch_judge_selection(
+            gc,
+            judge_targets,
+            selected_connectors,
+            preserve_outside_targets=preserve_outside_targets,
+        )
         return selected_connectors
 
     enabled = click.confirm(
@@ -7422,7 +7484,7 @@ def _interactive_guardrail_setup(
         connector_modes = _prompt_batch_connector_modes(
             mode_targets,
             gc,
-            default_mode=gc.mode or "observe",
+            default_mode=None,
         )
         mode_changed = _write_per_connector_modes(gc, connector_modes)
     else:
@@ -7577,7 +7639,8 @@ def _interactive_guardrail_setup(
         if c in _HOOK_ENFORCED_CONNECTORS
     ]
 
-    _prompt_guardrail_judge_enablement(gc, judge_targets)
+    judge_kwargs = {"preserve_outside_targets": True} if agent_name and is_multi else {}
+    _prompt_guardrail_judge_enablement(gc, judge_targets, **judge_kwargs)
     if gc.judge.enabled:
         if not getattr(gc, "detection_strategy_completion", None):
             gc.detection_strategy_completion = "regex_only"

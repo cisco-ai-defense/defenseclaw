@@ -734,8 +734,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertIn("not configured", result.output)
         app.cfg.save.assert_not_called()
 
-    def test_global_fail_mode_unchanged_without_flag(self):
-        # Regression: omitting --connector must keep the legacy global path.
+    def test_bare_set_fans_out_to_all_active_connectors(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
         with patch("defenseclaw.commands.cmd_setup._restart_services"):
@@ -743,7 +742,28 @@ class PerConnectorFailModeTests(unittest.TestCase):
                 cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "closed")
+        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "open")
+        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "closed")
+        self.assertEqual(app.cfg.guardrail.connectors["claudecode"].hook_fail_mode, "closed")
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("codex"), "closed")
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "closed")
+
+    def test_bare_set_open_reconciles_closed_connector_override(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "geminicli": None})
+        app.cfg.guardrail.hook_fail_mode = "open"
+        app.cfg.guardrail.connectors["geminicli"].hook_fail_mode = "closed"
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("nothing to do", result.output)
+        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
+        self.assertEqual(app.cfg.guardrail.connectors["geminicli"].hook_fail_mode, "open")
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("geminicli"), "open")
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_called_once()
 
     def test_bare_show_fans_out_to_all_active_connectors(self):
         # No value AND no --connector: the bare read MUST show EVERY active
@@ -836,6 +856,51 @@ class HILTCommandTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("nothing to do", result.output)
         app.cfg.save.assert_not_called()
+
+    def test_bare_set_on_fans_out_to_all_active_connectors(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "geminicli": None})
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, patch(
+            "defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"
+        ) as sync_mock:
+            result = runner.invoke(
+                cmd_guardrail.hilt_cmd,
+                ["on", "--min-severity", "MEDIUM", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.guardrail.hilt.enabled)
+        for connector in ("codex", "geminicli"):
+            eff = app.cfg.guardrail.effective_hilt(connector)
+            self.assertTrue(eff.enabled)
+            self.assertEqual(eff.min_severity, "MEDIUM")
+        app.cfg.save.assert_called_once()
+        sync_mock.assert_not_called()
+        restart_mock.assert_called_once()
+
+    def test_bare_set_off_reconciles_enabled_connector_override(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "geminicli": None})
+        from defenseclaw import config as dcconfig
+
+        app.cfg.guardrail.hilt.enabled = False
+        app.cfg.guardrail.hilt.min_severity = "HIGH"
+        app.cfg.guardrail.connectors["geminicli"].hilt = dcconfig.HILTConfig(
+            enabled=True, min_severity="MEDIUM"
+        )
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, patch(
+            "defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"
+        ) as sync_mock:
+            result = runner.invoke(cmd_guardrail.hilt_cmd, ["off", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("nothing to do", result.output)
+        for connector in ("codex", "geminicli"):
+            eff = app.cfg.guardrail.effective_hilt(connector)
+            self.assertFalse(eff.enabled)
+        self.assertEqual(app.cfg.guardrail.connectors["geminicli"].hilt.min_severity, "MEDIUM")
+        app.cfg.save.assert_called_once()
+        sync_mock.assert_not_called()
+        restart_mock.assert_called_once()
 
     def test_set_one_connector_persists_and_restarts_only_it(self):
         runner = CliRunner()
@@ -951,6 +1016,25 @@ class BlockMessageCommandTests(unittest.TestCase):
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
 
+    def test_bare_set_message_fans_out_to_all_active_connectors(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "geminicli": None})
+        app.cfg.guardrail.block_message = "Old global"
+        app.cfg.guardrail.connectors["geminicli"].block_message = "Gemini scoped block"
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.block_message_cmd,
+                ["Global block", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.block_message, "Global block")
+        for connector in ("codex", "geminicli"):
+            self.assertEqual(app.cfg.guardrail.connectors[connector].block_message, "Global block")
+            self.assertEqual(app.cfg.guardrail.effective_block_message(connector), "Global block")
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_called_once()
+
     def test_clear_global_message(self):
         runner = CliRunner()
         app = make_multi_ctx({})
@@ -962,6 +1046,26 @@ class BlockMessageCommandTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(app.cfg.guardrail.block_message, "")
         app.cfg.save.assert_called_once()
+
+    def test_bare_clear_message_fans_out_to_all_active_connectors(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "geminicli": None})
+        app.cfg.guardrail.block_message = "Global block"
+        app.cfg.guardrail.connectors["codex"].block_message = "Codex scoped block"
+        app.cfg.guardrail.connectors["geminicli"].block_message = "Gemini scoped block"
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.block_message_cmd,
+                ["--clear", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.block_message, "")
+        for connector in ("codex", "geminicli"):
+            self.assertEqual(app.cfg.guardrail.connectors[connector].block_message, "")
+            self.assertEqual(app.cfg.guardrail.effective_block_message(connector), "")
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_called_once()
 
     def test_message_and_clear_are_mutually_exclusive(self):
         runner = CliRunner()
@@ -1091,9 +1195,9 @@ class StatusStrategyJudgeTests(unittest.TestCase):
         return app, gc
 
     def test_status_puts_effective_scan_in_connector_row(self):
-        # Hook status is connector-first: the row shows the effective hook
-        # surfaces once, using hook vocabulary rather than proxy-lane
-        # "completion" wording.
+        # Explicit completion regex_only remains visible as partial hook-lane
+        # coverage, using hook vocabulary rather than proxy-lane "completion"
+        # wording.
         app, _ = self._rich(strategy="regex_judge", completion="regex_only", gate=["hermes"])
         result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -1105,6 +1209,14 @@ class StatusStrategyJudgeTests(unittest.TestCase):
             "prompt:regex_judge, tool-call:regex_judge, tool-output:regex_only",
             result.output,
         )
+
+    def test_status_collapses_full_hook_judge_coverage(self):
+        app, _ = self._rich(strategy="regex_judge", completion="regex_judge", gate=["hermes"])
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Hermes", result.output)
+        self.assertIn("regex_judge", result.output)
+        self.assertNotIn("tool-output:", result.output)
 
     def test_status_judge_enabled_and_selected(self):
         app, _ = self._rich(judge_enabled=True, gate=["hermes"])
