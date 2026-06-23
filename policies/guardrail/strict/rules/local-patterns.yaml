@@ -68,22 +68,14 @@ pii_requests:
 
 pii_data_regexes:
   - '\b\d{3}-\d{2}-\d{4}\b'
-  - '\b\d{9}\b'
   - '\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'
 
 secrets:
-  - "sk-"
   - "sk-ant-"
   - "sk-proj-"
-  - "api_key="
-  - "apikey="
   - "-----begin rsa"
   - "-----begin private"
   - "-----begin openssh"
-  - "aws_access_key"
-  - "aws_secret_access"
-  - "password="
-  - "bearer "
   - "ghp_"
   - "gho_"
   - "github_pat_"

@@ -989,17 +989,15 @@ var piiRequestPatterns = append([]string(nil), defaultPIIRequestPatterns...)
 
 var defaultPIIDataRegexSources = []string{
 	`\b\d{3}-\d{2}-\d{4}\b`,
-	`\b\d{9}\b`,
 	`\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`,
 }
 
 var piiDataRegexes = compileBaseline(defaultPIIDataRegexSources)
 
 var defaultSecretPatterns = []string{
-	"sk-", "sk-ant-", "sk-proj-", "api_key=", "apikey=",
+	"sk-ant-", "sk-proj-",
 	"-----begin rsa", "-----begin private", "-----begin openssh",
-	"aws_access_key", "aws_secret_access", "password=",
-	"bearer ", "ghp_", "gho_", "github_pat_",
+	"ghp_", "gho_", "github_pat_",
 }
 
 var secretPatterns = append([]string(nil), defaultSecretPatterns...)
@@ -1093,6 +1091,12 @@ func ApplyLocalPatternsOverride(lp *guardrail.LocalPatterns) {
 // (20+ chars) to avoid matching conversational "reply with this token: XYZ".
 var secretPatternRegexes = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`),
+	// Require an actual secret-shaped VALUE after the key name, so prose
+	// that merely mentions "password" / "api_key" / "bearer" is not flagged.
+	regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)\s*[:=]\s*["']?[^\s"']{8,}`),
+	regexp.MustCompile(`(?i)\bapi[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}`),
+	regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}`),
+	regexp.MustCompile(`(?i)\baws_(?:access_key_id|secret_access_key)\s*[:=]\s*["']?[A-Za-z0-9/+]{16,}`),
 }
 
 var defaultExfilPatterns = []string{

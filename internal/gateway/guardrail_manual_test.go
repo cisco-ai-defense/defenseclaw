@@ -986,7 +986,7 @@ func TestRegexJudge_CompletionSecrets_SentToJudge(t *testing.T) {
 
 func TestRegexJudge_CompletionSecrets_JudgeDismisses_Allows(t *testing.T) {
 	adjResp := `{
-		"findings": [{"pattern": "sk-", "verdict": "false_positive", "reasoning": "example in docs"}],
+		"findings": [{"pattern": "sk-ant-", "verdict": "false_positive", "reasoning": "example in docs"}],
 		"overall_threat": false,
 		"severity": "NONE"
 	}`
@@ -1002,7 +1002,7 @@ func TestRegexJudge_CompletionSecrets_JudgeDismisses_Allows(t *testing.T) {
 	g := NewGuardrailInspector("local", nil, j, "")
 	g.SetDetectionStrategy("regex_judge", "", "", "", false)
 
-	v := g.Inspect(context.Background(), "completion", "Example: sk-test in documentation", nil, "model", "observe")
+	v := g.Inspect(context.Background(), "completion", "Example: sk-ant-test in documentation", nil, "model", "observe")
 
 	if len(mock.captured) == 0 {
 		t.Fatal("expected judge to be called for completion-side secret")
