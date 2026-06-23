@@ -1085,6 +1085,74 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("not found", result.output)
 
+    def test_bare_allow_and_unblock_clear_scoped_final_state(self):
+        self._seed_connector_plugin("codex", "dc-plugin-final-state")
+        self._seed_connector_plugin("hermes", "dc-plugin-final-state")
+
+        scoped_disable = self.invoke(
+            ["disable", "dc-plugin-final-state", "--connector", "codex"]
+        )
+        self.assertEqual(scoped_disable.exit_code, 0, scoped_disable.output)
+        self.assertIn("connector=codex", scoped_disable.output)
+
+        hermes_after_disable = self.invoke(
+            ["info", "dc-plugin-final-state", "--connector", "hermes"]
+        )
+        self.assertEqual(hermes_after_disable.exit_code, 0, hermes_after_disable.output)
+        self.assertIn("Actions:     -", hermes_after_disable.output)
+
+        bare_enable = self.invoke(["enable", "dc-plugin-final-state"])
+        self.assertEqual(bare_enable.exit_code, 0, bare_enable.output)
+        self.assertIn("runtime disable cleared (connector=codex)", bare_enable.output)
+        self.assertIn("runtime disable cleared (connector=hermes)", bare_enable.output)
+
+        scoped_block = self.invoke(
+            ["block", "dc-plugin-final-state", "--connector", "codex"]
+        )
+        self.assertEqual(scoped_block.exit_code, 0, scoped_block.output)
+        self.assertIn("connector=codex", scoped_block.output)
+
+        bare_allow = self.invoke(["allow", "dc-plugin-final-state"])
+        self.assertEqual(bare_allow.exit_code, 0, bare_allow.output)
+        self.assertIn("added to allow list (connector=codex)", bare_allow.output)
+        self.assertIn("added to allow list (connector=hermes)", bare_allow.output)
+
+        bare_unblock = self.invoke(["unblock", "dc-plugin-final-state"])
+        self.assertEqual(bare_unblock.exit_code, 0, bare_unblock.output)
+        self.assertIn("all enforcement state cleared (connector=codex)", bare_unblock.output)
+        self.assertIn("all enforcement state cleared (connector=hermes)", bare_unblock.output)
+
+        codex_info = self.invoke(
+            ["info", "dc-plugin-final-state", "--connector", "codex"]
+        )
+        self.assertEqual(codex_info.exit_code, 0, codex_info.output)
+        self.assertIn("Connector:   codex", codex_info.output)
+        self.assertIn("Actions:     -", codex_info.output)
+
+        hermes_info = self.invoke(
+            ["info", "dc-plugin-final-state", "--connector", "hermes"]
+        )
+        self.assertEqual(hermes_info.exit_code, 0, hermes_info.output)
+        self.assertIn("Connector:   hermes", hermes_info.output)
+        self.assertIn("Actions:     -", hermes_info.output)
+
+    def test_bare_unblock_clears_all_scoped_enforcement_fields(self):
+        self._seed_connector_plugin("codex", "shared")
+        self._seed_connector_plugin("hermes", "shared")
+        pe = PolicyEngine(self.app.store)
+        pe.block_for_connector("plugin", "shared", "codex", "manual block")
+        pe.disable_for_connector("plugin", "shared", "codex", "manual disable")
+        pe.allow_for_connector("plugin", "shared", "hermes", "manual allow")
+        pe.quarantine_for_connector("plugin", "shared", "hermes", "manual quarantine")
+
+        result = self.invoke(["unblock", "shared"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("all enforcement state cleared (connector=codex)", result.output)
+        self.assertIn("all enforcement state cleared (connector=hermes)", result.output)
+        self.assertIsNone(self.app.store.get_action("plugin", "shared", "codex"))
+        self.assertIsNone(self.app.store.get_action("plugin", "shared", "hermes"))
+
     def test_bare_quarantine_and_restore_apply_to_every_connector_copy(self):
         codex_path = self._seed_connector_plugin("codex", "shared")
         hermes_path = self._seed_connector_plugin("hermes", "shared")

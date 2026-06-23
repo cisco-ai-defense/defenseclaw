@@ -2021,6 +2021,54 @@ def _resolve_plugin_quarantine_restore_scopes(
     return [("", global_entry)]
 
 
+def _plugin_policy_fanout_connectors(
+    app: AppContext, pe: Any, plugin_name: str,
+) -> list[str]:
+    """Connectors where a bare plugin policy command should apply.
+
+    The set includes installed matching connector copies plus any connector
+    that already has scoped enforcement for the plugin, so bare allow/unblock
+    can clean stale connector-scoped rows even after a copy was removed.
+    """
+    active_order = {
+        _normalize_runtime_connector(connector): idx
+        for idx, connector in enumerate(_active_plugin_connectors(app))
+    }
+    seen: set[str] = set()
+    connectors: list[str] = []
+
+    def add(connector: str) -> None:
+        normalized = _normalize_runtime_connector(connector)
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        connectors.append(normalized)
+
+    for connector, _path in _plugin_match_dir_scopes(app, plugin_name):
+        add(connector)
+
+    if pe is not None:
+        for entry in pe.list_by_type("plugin"):
+            if entry.target_name == plugin_name and entry.connector:
+                add(entry.connector)
+
+    return sorted(connectors, key=lambda c: active_order.get(c, len(active_order)))
+
+
+def _plugin_has_connector_enforcement(
+    app: AppContext, plugin_name: str, connector: str,
+) -> bool:
+    if app.store is None:
+        return False
+    return (
+        app.store.has_action("plugin", plugin_name, "install", "block", connector)
+        or app.store.has_action("plugin", plugin_name, "install", "allow", connector)
+        or app.store.has_action("plugin", plugin_name, "file", "quarantine", connector)
+        or app.store.has_action("plugin", plugin_name, "runtime", "disable", connector)
+        or app.store.has_action("plugin", plugin_name, "runtime", "enable", connector)
+    )
+
+
 @plugin.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for blocking")
@@ -2086,7 +2134,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 @click.option(
     "--connector", "connector_flag", default="",
     help=(
-        "Scope to one connector. Default: clears unscoped enforcement state. "
+        "Scope to one connector. Default: clear matching connector copies and unscoped state. "
         "Pass --connector <name> to clear only that peer's per-connector state; "
         "an unscoped block stays in force."
     ),
@@ -2120,6 +2168,34 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         if app.logger:
             app.logger.log_action(
                 "plugin-unblock", plugin_name, f"manual unblock via CLI connector={connector}",
+            )
+        return
+
+    targets = _plugin_policy_fanout_connectors(app, pe, plugin_name)
+    has_unscoped_state = bool(app.store) and (
+        pe.is_blocked("plugin", plugin_name)
+        or pe.is_allowed("plugin", plugin_name)
+        or pe.is_quarantined("plugin", plugin_name)
+        or app.store.has_action("plugin", plugin_name, "runtime", "disable")
+        or app.store.has_action("plugin", plugin_name, "runtime", "enable")
+    )
+    has_scoped_state = any(
+        _plugin_has_connector_enforcement(app, plugin_name, target_connector)
+        for target_connector in targets
+    )
+    if targets and (has_unscoped_state or has_scoped_state):
+        for target_connector in targets:
+            pe.remove_action_for_connector("plugin", plugin_name, target_connector)
+            click.secho(
+                f"[plugin] {plugin_name!r} all enforcement state cleared "
+                f"(connector={target_connector}) (allow/block/quarantine/disable)",
+                fg="green",
+            )
+        if has_unscoped_state:
+            pe.remove_action("plugin", plugin_name)
+        if app.logger:
+            app.logger.log_action(
+                "plugin-unblock", plugin_name, "manual unblock via CLI connector=all",
             )
         return
 
@@ -2158,7 +2234,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     Allow-listed plugins skip the scan gate during install.
     Adding a plugin also removes it from the block list.
 
-    Bare ``plugin allow <name>`` creates an unscoped allow entry;
+    Bare ``plugin allow <name>`` allows matching configured connector copies;
     ``--connector <name>`` narrows the allow to one peer.
     """
     from defenseclaw.enforce import PolicyEngine
@@ -2200,14 +2276,34 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
             )
         return
 
-    entry = pe.get_action("plugin", plugin_name)
-    runtime_entry = entry
     connector = (
         app.cfg.active_connector()
         if hasattr(app.cfg, "active_connector")
         else getattr(getattr(app.cfg, "guardrail", None), "connector", "")
     )
     connector = _normalize_runtime_connector(connector)
+    targets = _plugin_policy_fanout_connectors(app, pe, plugin_name)
+    if targets and (len(_active_plugin_connectors(app)) > 1 or connector != "openclaw"):
+        for target_connector in targets:
+            pe.allow_for_connector("plugin", plugin_name, target_connector, reason)
+            plugin_path = _resolve_plugin_path(app, plugin_name, target_connector)
+            if plugin_path:
+                pe.set_source_path("plugin", plugin_name, plugin_path, target_connector)
+            click.secho(
+                f"[plugin] {plugin_name!r} added to allow list "
+                f"(connector={target_connector})",
+                fg="green",
+            )
+        if app.store and pe.get_action("plugin", plugin_name) is not None:
+            pe.remove_action("plugin", plugin_name)
+        if app.logger:
+            app.logger.log_action(
+                "plugin-allow", plugin_name, f"reason={reason} connector=all",
+            )
+        return
+
+    entry = pe.get_action("plugin", plugin_name)
+    runtime_entry = entry
     for candidate in _plugin_runtime_candidates(name, connector):
         resolved_entry = pe.get_action("plugin", candidate)
         if resolved_entry is not None and resolved_entry.actions.runtime == "disable":
