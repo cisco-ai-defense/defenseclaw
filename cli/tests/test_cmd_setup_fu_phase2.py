@@ -974,6 +974,39 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_judge")
         self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["*"])
 
+    def test_scoped_mode_update_preserves_empty_judge_gate(self):
+        self._seed_map("antigravity", "hermes", "opencode")
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "observe"
+        gc.connectors["antigravity"].mode = "observe"
+        gc.connectors["hermes"].mode = "action"
+        gc.connectors["opencode"].mode = "action"
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = []
+        gc.detection_strategy = "regex_judge"
+        gc.detection_strategy_completion = "regex_judge"
+
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
+            res = _invoke(
+                [
+                    "guardrail", "--non-interactive", "--connector", "hermes",
+                    "--mode", "observe", "--no-restart", "--no-verify",
+                ],
+                self.app,
+            )
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(gc.effective_mode("antigravity"), "observe")
+        self.assertEqual(gc.effective_mode("hermes"), "observe")
+        self.assertEqual(gc.effective_mode("opencode"), "action")
+        self.assertEqual(sorted(gc.connectors), ["antigravity", "hermes", "opencode"])
+        self.assertTrue(gc.judge.enabled)
+        self.assertEqual(gc.judge.hook_connectors, [])
+        self.assertEqual(gc.detection_strategy, "regex_judge")
+        self.assertEqual(gc.detection_strategy_completion, "regex_judge")
+
     def test_explicit_completion_regex_only_preserved_when_judge_enabled(self):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):

@@ -3703,7 +3703,7 @@ def setup_guardrail(
         # B2: snapshot the judge gate state BEFORE the judge config below can
         # flip ``gc.judge.enabled`` on, so the hook-gate default only fires when
         # this run actually turns the judge on (not on every re-run).
-        was_judge_enabled = bool(gc.judge.enabled)
+        judge_enabled_by_this_run = False
         # Connector resolution order in non-interactive mode:
         #   1. explicit --connector / --agent flag (operator intent always wins)
         #   2. existing gc.connector if already set to a non-default value
@@ -3797,6 +3797,7 @@ def setup_guardrail(
             gc.judge.model = judge_model
             gc.judge.llm.model = judge_model
             gc.judge.enabled = True
+            judge_enabled_by_this_run = True
         if judge_api_base is not None:
             gc.judge.api_base = judge_api_base
             gc.judge.llm.base_url = judge_api_base
@@ -3875,6 +3876,7 @@ def setup_guardrail(
         if detection_strategy is not None:
             if _strategy_uses_judge(detection_strategy):
                 gc.judge.enabled = True
+                judge_enabled_by_this_run = True
             elif detection_strategy == "regex_only":
                 gc.judge.enabled = False
         if judge_hook_connectors is not None:
@@ -3885,6 +3887,7 @@ def setup_guardrail(
                 gc.detection_strategy_completion = "regex_only"
             else:
                 gc.judge.enabled = True
+                judge_enabled_by_this_run = True
                 if not gc.detection_strategy or gc.detection_strategy == "regex_only":
                     gc.detection_strategy = "regex_judge"
         gc.enabled = True
@@ -3914,7 +3917,8 @@ def setup_guardrail(
             judge_hook_connectors,
             judge_just_enabled=(
                 gc.judge.enabled
-                and (not was_judge_enabled or not list(gc.judge.hook_connectors or []))
+                and judge_enabled_by_this_run
+                and not list(gc.judge.hook_connectors or [])
             ),
             current=list(gc.judge.hook_connectors or []),
         )
