@@ -27,6 +27,7 @@ from defenseclaw.tui.services.catalog_state import (
     friendly_connector_name,
     parse_mcp_list_json,
     parse_plugin_list_json,
+    parse_skill_list_json,
     skill_list_to_row,
 )
 from rich.text import Text
@@ -570,6 +571,27 @@ def test_skill_list_to_row_parses_severity_counts() -> None:
     )
 
     assert row.severity_counts == {"critical": 1, "high": 2, "low": 3}
+
+
+def test_skill_parse_scoped_group_and_empty_group() -> None:
+    rows = parse_skill_list_json(
+        json.dumps(
+            {
+                "connector": "codex",
+                "skills": [
+                    {
+                        "name": "alpha",
+                        "eligible": True,
+                        "status": "active",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert rows[0].name == "alpha"
+    assert rows[0].connector == "codex"
+    assert parse_skill_list_json(json.dumps({"connector": "codex", "skills": []})) == ()
 
 
 def test_skill_list_to_row_without_severity_counts_is_empty() -> None:

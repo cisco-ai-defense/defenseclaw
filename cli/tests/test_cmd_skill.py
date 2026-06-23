@@ -559,6 +559,15 @@ class TestSkillInstall(SkillCommandTestBase):
         with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
             f.write(f"# {skill_name}\n")
 
+    def test_install_help_describes_configured_connector_targets(self):
+        result = self.invoke(["install", "--help"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        output = re.sub(r"\s+", " ", result.output)
+        self.assertIn("configured connector skill dirs", output)
+        self.assertIn("default: every configured connector", output)
+        self.assertNotIn("OpenClaw skill", output)
+
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
     @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
@@ -719,6 +728,8 @@ class TestSkillInstall(SkillCommandTestBase):
     def test_scan_json_output(self, mock_scanner_cls, _mock_info):
         skill_dir = os.path.join(self.tmp_dir, "json-skill")
         os.makedirs(skill_dir)
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
 
         mock_scanner = MagicMock()
         mock_scanner.scan.return_value = ScanResult(
@@ -734,6 +745,7 @@ class TestSkillInstall(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.output)
         self.assertEqual(data["scanner"], "skill-scanner")
+        self.assertEqual(data["connector"], "codex")
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     def test_scan_unresolvable_skill_errors(self, _mock_info):
@@ -1179,6 +1191,35 @@ class TestSkillInfo(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Hermes only", result.output)
         self.assertIn("/hermes/peer-skill", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
+    def test_info_connector_scope_still_prints_connector_label(self, mock_info):
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+
+        def info_impl(_name, app=None, connector=None):
+            return {
+                "name": "dup-skill",
+                "description": f"{connector} copy",
+                "baseDir": f"/{connector}/dup-skill",
+                "eligible": True,
+                "bundled": False,
+            }
+
+        mock_info.side_effect = info_impl
+
+        codex = self.invoke(["info", "dup-skill", "--connector", "codex"])
+        hermes = self.invoke(["info", "dup-skill", "--connector", "hermes"])
+
+        self.assertEqual(codex.exit_code, 0, codex.output)
+        self.assertIn("Connector:   codex", codex.output)
+        self.assertIn("codex copy", codex.output)
+        self.assertNotIn("Connector:   hermes", codex.output)
+
+        self.assertEqual(hermes.exit_code, 0, hermes.output)
+        self.assertIn("Connector:   hermes", hermes.output)
+        self.assertIn("hermes copy", hermes.output)
+        self.assertNotIn("Connector:   codex", hermes.output)
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
     def test_info_bare_name_shows_every_connector_copy(self, mock_info):
@@ -1812,6 +1853,8 @@ class TestSkillListConnectorFlag(SkillCommandTestBase):
         result = self.invoke(["list", "--connector", active, "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(mock_full.call_args.kwargs.get("connector"), active)
+        data = json.loads(result.output)
+        self.assertEqual(data, {"connector": active, "skills": []})
 
 
 class TestSkillListMultiConnectorDefault(SkillCommandTestBase):
@@ -1864,7 +1907,9 @@ class TestSkillListMultiConnectorDefault(SkillCommandTestBase):
         data = json.loads(result.output)
         self.assertEqual([g["connector"] for g in data], ["claudecode", "codex"])
         self.assertEqual(data[0]["skills"][0]["name"], "claudecode-skill")
+        self.assertEqual(data[0]["skills"][0]["connector"], "claudecode")
         self.assertEqual(data[1]["skills"][0]["name"], "codex-skill")
+        self.assertEqual(data[1]["skills"][0]["connector"], "codex")
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_connector_flag_still_narrows_to_one(self, mock_list):
@@ -1878,6 +1923,19 @@ class TestSkillListMultiConnectorDefault(SkillCommandTestBase):
         self.assertNotIn("claudecode-skill", result.output)
         fetched = {c.kwargs.get("connector") for c in mock_list.call_args_list}
         self.assertEqual(fetched, {"codex"})
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_connector_flag_json_uses_envelope(self, mock_list):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        mock_list.side_effect = self._per_connector_skills
+
+        result = self.invoke(["list", "--json", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.output)
+        self.assertEqual(data["connector"], "codex")
+        self.assertEqual(data["skills"][0]["name"], "codex-skill")
+        self.assertEqual(data["skills"][0]["connector"], "codex")
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_single_connector_install_keeps_flat_json(self, mock_list):
@@ -1901,7 +1959,11 @@ class TestSkillListOpencodeEmpty(SkillCommandTestBase):
     itself lives in connector_paths (already returns []); this guards the
     CLI-visible behaviour from regressing."""
 
-    def test_opencode_lists_no_skills_not_openclaw_paths(self):
+    @patch(
+        "defenseclaw.commands.cmd_skill._list_openclaw_skills_full",
+        return_value={"skills": []},
+    )
+    def test_opencode_lists_no_skills_not_openclaw_paths(self, _mock_list):
         self.app.cfg.active_connector = lambda: "opencode"  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["opencode"]  # type: ignore[method-assign]
 
@@ -1972,6 +2034,62 @@ class TestSkillDisableHonesty(SkillCommandTestBase):
         )
         mock_client.assert_not_called()
 
+    def test_disable_bare_name_records_every_matching_connector_copy(self):
+        self.app.cfg.active_connectors = lambda: ["hermes", "codex"]  # type: ignore[method-assign]
+        hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")
+        codex_root = os.path.join(self.tmp_dir, "codex", "skills")
+        os.makedirs(os.path.join(hermes_root, "sample"))
+        os.makedirs(os.path.join(codex_root, "sample"))
+        self.app.cfg.skill_dirs = lambda connector=None: {  # type: ignore[method-assign]
+            "hermes": [hermes_root],
+            "codex": [codex_root],
+        }.get(connector, [hermes_root])
+
+        with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
+            result = self.invoke(["disable", "sample"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=hermes", result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertTrue(
+            self.app.store.has_action("skill", "sample", "runtime", "disable", "hermes")
+        )
+        self.assertTrue(
+            self.app.store.has_action("skill", "sample", "runtime", "disable", "codex")
+        )
+        self.assertFalse(self.app.store.has_action("skill", "sample", "runtime", "disable"))
+        mock_client.assert_not_called()
+
+    def test_enable_bare_name_clears_every_matching_connector_copy(self):
+        self.app.cfg.active_connectors = lambda: ["hermes", "codex"]  # type: ignore[method-assign]
+        hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")
+        codex_root = os.path.join(self.tmp_dir, "codex", "skills")
+        os.makedirs(os.path.join(hermes_root, "sample"))
+        os.makedirs(os.path.join(codex_root, "sample"))
+        self.app.cfg.skill_dirs = lambda connector=None: {  # type: ignore[method-assign]
+            "hermes": [hermes_root],
+            "codex": [codex_root],
+        }.get(connector, [hermes_root])
+        pe = PolicyEngine(self.app.store)
+        pe.disable("skill", "sample", "legacy global")
+        pe.disable_for_connector("skill", "sample", "hermes", "manual")
+        pe.disable_for_connector("skill", "sample", "codex", "manual")
+
+        with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
+            result = self.invoke(["enable", "sample"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=hermes", result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertFalse(
+            self.app.store.has_action("skill", "sample", "runtime", "disable", "hermes")
+        )
+        self.assertFalse(
+            self.app.store.has_action("skill", "sample", "runtime", "disable", "codex")
+        )
+        self.assertFalse(self.app.store.has_action("skill", "sample", "runtime", "disable"))
+        mock_client.assert_not_called()
+
     @patch("defenseclaw.commands.cmd_skill._sidecar_client")
     def test_disable_on_openclaw_still_calls_gateway(self, mock_client):
         self.app.cfg.active_connector = lambda: "openclaw"  # type: ignore[method-assign]
@@ -1997,6 +2115,75 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         self.assertIn("allow/block/quarantine/disable", result.output)
         self.assertFalse(self.app.store.has_action("skill", "sample", "install", "allow"))
         self.assertIsNone(self.app.store.get_action("skill", "sample"))
+
+    def test_bare_block_output_names_matching_connector_copies(self):
+        hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")
+        codex_root = os.path.join(self.tmp_dir, "codex", "skills")
+        os.makedirs(os.path.join(hermes_root, "sample"))
+        os.makedirs(os.path.join(codex_root, "sample"))
+        self.app.cfg.skill_dirs = lambda connector=None: {  # type: ignore[method-assign]
+            "hermes": [hermes_root],
+            "codex": [codex_root],
+        }.get(connector, [hermes_root])
+
+        result = self.invoke(["block", "sample"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(
+            "[skill] 'sample' added to block list for connector=hermes, connector=codex",
+            result.output,
+        )
+        self.assertTrue(self.app.store.has_action("skill", "sample", "install", "block"))
+        self.assertFalse(
+            self.app.store.has_action("skill", "sample", "install", "block", "hermes")
+        )
+        self.assertFalse(
+            self.app.store.has_action("skill", "sample", "install", "block", "codex")
+        )
+
+    def test_bare_allow_fans_out_to_matching_connector_copies(self):
+        hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")
+        codex_root = os.path.join(self.tmp_dir, "codex", "skills")
+        os.makedirs(os.path.join(hermes_root, "sample"))
+        os.makedirs(os.path.join(codex_root, "sample"))
+        self.app.cfg.skill_dirs = lambda connector=None: {  # type: ignore[method-assign]
+            "hermes": [hermes_root],
+            "codex": [codex_root],
+        }.get(connector, [hermes_root])
+        pe = PolicyEngine(self.app.store)
+        pe.block_for_connector("skill", "sample", "hermes", "bad")
+        pe.block_for_connector("skill", "sample", "codex", "bad")
+
+        result = self.invoke(["allow", "sample"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=hermes", result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertTrue(self.app.store.has_action("skill", "sample", "install", "allow", "hermes"))
+        self.assertTrue(self.app.store.has_action("skill", "sample", "install", "allow", "codex"))
+        self.assertFalse(self.app.store.has_action("skill", "sample", "install", "allow"))
+
+    def test_bare_unblock_clears_scoped_rows_for_matching_connector_copies(self):
+        hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")
+        codex_root = os.path.join(self.tmp_dir, "codex", "skills")
+        os.makedirs(os.path.join(hermes_root, "sample"))
+        os.makedirs(os.path.join(codex_root, "sample"))
+        self.app.cfg.skill_dirs = lambda connector=None: {  # type: ignore[method-assign]
+            "hermes": [hermes_root],
+            "codex": [codex_root],
+        }.get(connector, [hermes_root])
+        pe = PolicyEngine(self.app.store)
+        pe.block_for_connector("skill", "sample", "hermes", "bad")
+        pe.quarantine_for_connector("skill", "sample", "codex", "bad")
+        pe.disable_for_connector("skill", "sample", "codex", "bad")
+
+        result = self.invoke(["unblock", "sample"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=hermes", result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertIsNone(self.app.store.get_action("skill", "sample", "hermes"))
+        self.assertIsNone(self.app.store.get_action("skill", "sample", "codex"))
 
     def test_policy_verbs_reject_unknown_connector_without_writing_rows(self):
         commands = [

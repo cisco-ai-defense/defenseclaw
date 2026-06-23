@@ -155,6 +155,21 @@ class TestRenderPerTargetStatus(unittest.TestCase):
         self.assertIn("(1 finding)", out)
         self.assertNotIn("findings", out)
 
+    def test_warn_and_info_glyphs(self):
+        ctx = _scan_ui.ScanContext.for_skill(connector="codex", paths=[])
+        out = self._capture(
+            lambda: (
+                _scan_ui.render_per_target_status(
+                    ctx, target="high-risk", verdict=_scan_ui.VERDICT_WARN, findings=2,
+                ),
+                _scan_ui.render_per_target_status(
+                    ctx, target="note", verdict=_scan_ui.VERDICT_INFO, findings=1,
+                ),
+            )
+        )
+        self.assertIn("[WARN] high-risk (2 findings)", out)
+        self.assertIn("[INFO] note (1 finding)", out)
+
     def test_detail_appended(self):
         ctx = _scan_ui.ScanContext.for_plugin(connector="codex", paths=[])
         out = self._capture(
@@ -212,6 +227,16 @@ class TestRenderSummary(unittest.TestCase):
             )
         )
         self.assertIn("errored=1", out)
+
+    def test_findings_shown_when_positive(self):
+        ctx = _scan_ui.ScanContext.for_skill(connector="codex", paths=[])
+        out = self._capture(
+            lambda: _scan_ui.render_summary(
+                ctx, clean=0, blocked=0, errored=0, total=1, findings=1,
+            )
+        )
+        self.assertIn("blocked=0", out)
+        self.assertIn("findings=1", out)
 
     def test_singular_when_one(self):
         ctx = _scan_ui.ScanContext.for_mcp(connector="openclaw", paths=[])

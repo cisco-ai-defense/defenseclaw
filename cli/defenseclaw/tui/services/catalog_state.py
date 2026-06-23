@@ -1024,7 +1024,39 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
 
 
 def parse_skill_list_json(text: str) -> tuple[SkillRow, ...]:
-    raw = _decode_json_list(text, "skill list")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"parse skill list: {exc}") from exc
+
+    def _rows_from_group(group: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        connector = str(group.get("connector") or "")
+        raw_skills = group.get("skills")
+        if not isinstance(raw_skills, list):
+            raise ValueError("parse skill list: expected skills list")
+        rows: list[Mapping[str, Any]] = []
+        for skill in raw_skills:
+            if not isinstance(skill, Mapping):
+                raise ValueError("parse skill list: expected skills objects")
+            if connector and not skill.get("connector"):
+                rows.append({**skill, "connector": connector})
+            else:
+                rows.append(skill)
+        return rows
+
+    raw: list[Mapping[str, Any]] = []
+    if isinstance(payload, Mapping):
+        raw.extend(_rows_from_group(payload))
+    elif isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, Mapping):
+                raise ValueError("parse skill list: expected list objects")
+            if "skills" in item:
+                raw.extend(_rows_from_group(item))
+            else:
+                raw.append(item)
+    else:
+        raise ValueError("parse skill list: expected a JSON list or connector group")
     return tuple(skill_list_to_row(item) for item in raw)
 
 
@@ -1080,6 +1112,7 @@ def skill_list_to_row(raw: Mapping[str, Any]) -> SkillRow:
         file_action=actions.file,
         install_action=actions.install,
         runtime_action=actions.runtime,
+        connector=str(raw.get("connector") or ""),
     )
 
 
