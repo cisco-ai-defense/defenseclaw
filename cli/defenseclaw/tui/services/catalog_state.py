@@ -909,18 +909,25 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
 class ToolsPanelModel(CatalogListModel[ToolRow]):
     """Pure Tools panel state backed by audit-store tool action rows."""
 
-    def __init__(self, store: object | None = None) -> None:
+    def __init__(self, store: object | None = None, *, connector: str = "") -> None:
         super().__init__()
         self.store = store
+        self.connector = connector
 
     def load_intent(self) -> CatalogCommandIntent:
         return CatalogCommandIntent(
-            label="tool list",
-            args=("tool", "list"),
+            label="tool list --json",
+            args=("tool", "list", "--json", *self._connector_focus_args()),
             origin="tools",
             category="info",
             hint="Loading tools...",
         )
+
+    def apply_json(self, text: str) -> None:
+        self.apply_loaded(parse_tool_list_json(text))
+
+    def _parse_rows(self, text: str) -> Sequence[ToolRow]:
+        return parse_tool_list_json(text)
 
     def refresh(self) -> None:
         if self.store is None:
@@ -1201,6 +1208,93 @@ def plugin_list_to_row(raw: Mapping[str, Any]) -> PluginRow:
         enabled=bool(raw.get("enabled")),
         verdict=str(raw.get("verdict") or ""),
         scan=PluginScanSummary.from_mapping(_mapping_or_none(raw.get("scan"))),
+    )
+
+
+def parse_tool_list_json(text: str) -> tuple[ToolRow, ...]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"parse tool list: {exc}") from exc
+
+    def _rows_from_group(group: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        connector = str(group.get("connector") or "")
+        raw_tools = group.get("tools")
+        if not isinstance(raw_tools, list):
+            raise ValueError("parse tool list: expected tools list")
+        rows: list[Mapping[str, Any]] = []
+        for tool in raw_tools:
+            if not isinstance(tool, Mapping):
+                raise ValueError("parse tool list: expected tools objects")
+            if connector and not tool.get("connector"):
+                rows.append({**tool, "connector": connector})
+            else:
+                rows.append(tool)
+        return rows
+
+    raw: list[Mapping[str, Any]] = []
+    if isinstance(payload, Mapping):
+        raw.extend(_rows_from_group(payload))
+    elif isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, Mapping):
+                raise ValueError("parse tool list: expected list objects")
+            if "tools" in item:
+                raw.extend(_rows_from_group(item))
+            else:
+                raw.append(item)
+    else:
+        raise ValueError("parse tool list: expected a JSON list or connector group")
+    return tuple(tool_list_to_row(item) for item in raw)
+
+
+def tool_list_to_row(raw: Mapping[str, Any]) -> ToolRow:
+    raw_name = str(raw.get("name") or "")
+    raw_scope = str(raw.get("scope") or "")
+    connector = normalized_connector(str(raw.get("connector") or ""))
+    target_name = str(raw.get("target_name") or "")
+
+    name = raw_name
+    scope = raw_scope
+    if not target_name:
+        if raw_scope == "connector" and connector:
+            target_name = f"@{connector}/{raw_name}"
+        else:
+            target_name = raw_name
+
+    if raw_scope == "source":
+        parsed_name, parsed_scope, parsed_connector = parse_tool_target(target_name)
+        name = parsed_name
+        scope = parsed_scope
+        if parsed_connector and not connector:
+            connector = parsed_connector
+    elif raw_scope == "global":
+        scope = "global"
+    elif raw_scope == "connector":
+        scope = "connector"
+    elif target_name:
+        parsed_name, parsed_scope, parsed_connector = parse_tool_target(target_name)
+        name = parsed_name
+        scope = parsed_scope
+        if parsed_connector and not connector:
+            connector = parsed_connector
+
+    raw_status = str(raw.get("status") or "")
+    if raw_status == "block":
+        status = "blocked"
+    elif raw_status == "allow":
+        status = "allowed"
+    else:
+        status = raw_status or "active"
+
+    return ToolRow(
+        name=name,
+        scope=scope,
+        status=status,
+        reason=str(raw.get("reason") or ""),
+        time=format_tool_time(raw.get("updated_at")),
+        target_name=target_name,
+        connector=connector,
     )
 
 

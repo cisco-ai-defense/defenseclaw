@@ -22,16 +22,19 @@ Scoping is one of two ORTHOGONAL, mutually exclusive encodings:
 
 * ``--connector C`` → ``@C/<tool>``  — the runtime-enforceable scope for a
   configured connector. Both gateway lanes (hook + sidecar) resolve
-  connector-scoped rows then fall back to the bare global row.
-* ``--source S``    → ``S/<tool>``   — audit/global only. The runtime payload
-  carries no source, so a ``block --source`` fail-closes to a GLOBAL block and
+  connector-scoped rows then fall back to the bare unscoped row.
+* ``--source S``    → ``S/<tool>``   — audit/fallback only. The runtime payload
+  carries no source, so a ``block --source`` fail-closes to an unscoped block and
   an ``allow --source`` row is recorded for visibility but never enforced.
 
-Bare (global) rows apply to every connector as the fallback tier.
+Bare rows apply to every configured connector as the fallback tier. Bare
+block/allow/unblock also clear connector-specific install overrides for the
+same tool so an older ``@connector/tool`` row cannot silently defeat the
+all-connectors intent.
 
-Global:     defenseclaw tool block delete_file
-Connector:  defenseclaw tool block delete_file --connector hermes
-Source:     defenseclaw tool block delete_file --source filesystem
+Bare:       defenseclaw tool block delete_file
+Connector: defenseclaw tool block delete_file --connector hermes
+Source:    defenseclaw tool block delete_file --source filesystem
 """
 
 from __future__ import annotations
@@ -73,6 +76,36 @@ def _resolve_connector_scope(app: AppContext, connector: str) -> str:
         return ""
     from defenseclaw.commands import resolve_list_connector
     return resolve_list_connector(app, connector)
+
+
+def _active_tool_connectors(app: AppContext) -> list[str]:
+    """Return configured connectors for human output without forcing setup."""
+    cfg = getattr(app, "cfg", None)
+    try:
+        if cfg is not None and hasattr(cfg, "active_connectors"):
+            names = [name for name in cfg.active_connectors() if name]
+            if names:
+                return names
+    except Exception:  # noqa: BLE001 - fall back to the singular connector.
+        pass
+    try:
+        if cfg is not None and hasattr(cfg, "active_connector"):
+            active = cfg.active_connector()
+            return [active] if active else []
+    except Exception:  # noqa: BLE001 - output decoration only.
+        return []
+    return []
+
+
+def _format_connector_scope_list(connectors: list[str]) -> str:
+    return ", ".join(f"connector={connector}" for connector in connectors)
+
+
+def _connector_coverage_note(app: AppContext) -> str:
+    connectors = _active_tool_connectors(app)
+    if not connectors:
+        return " (unscoped fallback)"
+    return f" (covers {_format_connector_scope_list(connectors)})"
 
 
 def _reject_connector_with_source(connector: str, source: str) -> None:
@@ -131,6 +164,39 @@ def _entry_json(entry) -> dict | None:
     }
 
 
+def _tool_connector_policy_connectors(pe, name: str) -> list[str]:
+    """Connector-scoped install rows for ``name`` in active/stale order."""
+    seen: set[str] = set()
+    connectors: list[str] = []
+    for entry in pe.list_by_type("tool"):
+        connector, display_name = _parse_target(entry.target_name)
+        if not connector or display_name != name:
+            continue
+        if not entry.actions.install:
+            continue
+        if connector in seen:
+            continue
+        seen.add(connector)
+        connectors.append(connector)
+    return connectors
+
+
+def _clear_tool_connector_install_overrides(pe, name: str) -> list[str]:
+    connectors = _tool_connector_policy_connectors(pe, name)
+    for connector in connectors:
+        pe.unblock_tool_for_connector(name, connector)
+    return connectors
+
+
+def _echo_cleared_connector_overrides(connectors: list[str]) -> None:
+    if not connectors:
+        return
+    click.echo(
+        f"  Cleared connector-specific overrides for "
+        f"{_format_connector_scope_list(connectors)}."
+    )
+
+
 # ---------------------------------------------------------------------------
 # tool group
 # ---------------------------------------------------------------------------
@@ -144,9 +210,9 @@ def tool() -> None:
     \b
     Scoping (--connector and --source are mutually exclusive):
       --connector C   runtime-enforceable; applies only to connector C (@C/<tool>)
-      --source S      audit/global only — a source block fail-closes to a GLOBAL
+      --source S      audit/fallback only — a source block writes an unscoped
                       block; a source allow is recorded but never enforced
-      (neither)       global; applies to every connector as the fallback tier
+      (neither)       applies to every configured connector as the fallback tier
 
     \b
     Runtime resolution (request connector C, tool T):
@@ -173,7 +239,7 @@ def tool() -> None:
 @tool.command()
 @click.argument("name")
 @click.option("--connector", default="", help="Scope to a connector (runtime-enforceable: @<connector>/<tool>)")
-@click.option("--source", default="", help="Audit scope to a skill/MCP server (block fail-closes to global)")
+@click.option("--source", default="", help="Audit scope to a skill/MCP server (block fail-closes to unscoped)")
 @click.option("--reason", default="", help="Reason for blocking")
 @pass_ctx
 def block(app: AppContext, name: str, connector: str, source: str, reason: str) -> None:
@@ -184,9 +250,9 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
       --connector C   blocks the tool for connector C only (writes @C/<tool>);
                       the runtime enforces it per connector.
       --source S      audit only: the runtime payload carries no source, so a
-                      scoped block fail-closes to a GLOBAL block and a scoped
+                      scoped block fail-closes to an unscoped block and a scoped
                       audit row is kept for operator visibility.
-      (neither)       global block, applies to every connector.
+      (neither)       block every configured connector through the fallback row.
 
     \b
     Examples:
@@ -214,34 +280,37 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
     elif source:
         # the gateway runtime carries no source on the
         # request, so a scoped entry like `filesystem/write_file` was never
-        # enforced. Honor a --source block by ALSO writing the global block
+        # enforced. Honor a --source block by ALSO writing the unscoped block
         # (fail-closed); keep the scoped row as an audit record. Use
         # --connector for runtime-scoped blocks.
         pe.block("tool", name, reason)
         pe.block(
             "tool", _target_name(name, source),
-            f"{reason} (scoped audit; runtime enforces globally)",
+            f"{reason} (scoped audit; runtime enforces as unscoped fallback)",
         )
         log_scope = _target_name(name, source)
         click.echo(
             f"{ux._style('[tool]', fg='red', bold=True)} {name!r} "
-            f"{ux._style('added to block list', fg='red')} (global; "
+            f"{ux._style('added to block list', fg='red')} (unscoped fallback; "
             f"--source {source!r} kept for audit but is not runtime-enforced — "
             f"use --connector to scope a block)"
         )
     else:
+        cleared_connectors = _clear_tool_connector_install_overrides(pe, name)
         pe.block("tool", name, reason)
         log_scope = name
         click.echo(
-            f"{ux._style('[tool]', fg='red', bold=True)} {name!r} (global) "
+            f"{ux._style('[tool]', fg='red', bold=True)} {name!r} "
             f"{ux._style('added to block list', fg='red')}"
+            f"{_connector_coverage_note(app)}"
         )
+        _echo_cleared_connector_overrides(cleared_connectors)
 
     if app.logger:
         app.logger.log_action(
             "tool-block", log_scope,
             f"reason={reason} effective_target={log_scope} "
-            f"requested_scope={connector or source or 'global'}",
+            f"requested_scope={connector or source or 'unscoped'}",
         )
 
 
@@ -268,7 +337,7 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
                       runtime-enforceable.
       --source S      audit only — a source allow is recorded but never read at
                       runtime (the payload carries no source). Use --connector.
-      (neither)       global allow, applies to every connector.
+      (neither)       allow every configured connector through the fallback row.
 
     \b
     Examples:
@@ -291,11 +360,14 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
     else:
         # Global, or source-scoped audit row (never read at runtime).
         target = _target_name(name, source)
+        cleared_connectors = []
+        if not source:
+            cleared_connectors = _clear_tool_connector_install_overrides(pe, name)
         pe.allow("tool", target, reason)
         if source:
             scope_note = f" (source {source!r}; audit-only — not runtime-enforced)"
         else:
-            scope_note = " (global)"
+            scope_note = _connector_coverage_note(app)
 
     if app.logger:
         app.logger.log_action("tool-allow", target, f"reason={reason}")
@@ -304,6 +376,8 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
         f"{ux._style('[tool]', fg='green', bold=True)} {name!r}{scope_note} "
         f"{ux._style('added to allow list', fg='green')}"
     )
+    if not connector and not source:
+        _echo_cleared_connector_overrides(cleared_connectors)
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +393,8 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
     """Remove a tool from the block/allow list.
 
     Pass --connector or --source to remove the matching scoped entry; without
-    either, removes the global entry.
+    either, removes the fallback entry and connector-specific overrides for
+    this tool.
 
     \b
     Examples:
@@ -340,11 +415,29 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
         scope_note = f" (source {source!r})"
     else:
         target = name
-        scope_note = " (global)"
+        scope_note = _connector_coverage_note(app)
 
     pe = PolicyEngine(app.store)
     if connector:
         pe.unblock_tool_for_connector(name, connector)
+    elif not source:
+        global_entry = pe.get_action("tool", name)
+        cleared_connectors = _clear_tool_connector_install_overrides(pe, name)
+        pe.unblock("tool", target)
+        if not global_entry and not cleared_connectors:
+            click.echo(f"{ux.dim('[tool]')} {name!r} has no block/allow state to clear")
+            return
+        if app.logger:
+            app.logger.log_action(
+                "tool-unblock", target,
+                "removed from block/allow list connector=all",
+            )
+
+        click.echo(
+            f"{ux.dim('[tool]')} {name!r}{scope_note} removed from block/allow list"
+        )
+        _echo_cleared_connector_overrides(cleared_connectors)
+        return
     else:
         pe.unblock("tool", target)
 
@@ -381,7 +474,7 @@ def list_tools(
 
     By default shows rows in effect for every active connector. Use --blocked
     or --allowed to filter by status, and --connector to narrow to one
-    connector (its connector-scoped rows plus the global fallback rows).
+    connector (its connector-scoped rows plus the unscoped fallback rows).
 
     \b
     Examples:
@@ -410,7 +503,13 @@ def list_tools(
         if as_json:
             click.echo(
                 json.dumps(
-                    _tool_rows_json(decorated, effective_connector=connector),
+                    {
+                        "connector": connector,
+                        "tools": _tool_rows_json(
+                            decorated,
+                            effective_connector=connector,
+                        ),
+                    },
                     indent=2,
                     default=str,
                 )
@@ -419,10 +518,16 @@ def list_tools(
 
         if not decorated:
             label = "blocked " if filter_blocked else "allowed " if filter_allowed else ""
-            click.echo(f"No {label}tools in the block/allow list.")
+            click.echo(
+                f"No {label}tools in the block/allow list for connector={connector!r}."
+            )
             return
 
-        _print_tool_rows(decorated, effective_connector=connector)
+        _print_tool_rows(
+            decorated,
+            effective_connector=connector,
+            title=f"Tools (connector={connector})",
+        )
         return
 
     audit_rows = _tool_source_audit_rows(entries)
@@ -585,7 +690,7 @@ def status(app: AppContext, name: str, connector: str, source: str, as_json: boo
     """Show the block/allow status of a tool.
 
     The "Effective" line mirrors the gateway's real resolution order
-    (connector-scoped action first, then global fallback; allow skips the scan
+    (connector-scoped action first, then unscoped fallback; allow skips the scan
     gate but write tools still run CodeGuard). A --source row is audit-only and
     never decides the effective verdict.
 

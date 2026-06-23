@@ -21,7 +21,13 @@ from defenseclaw.config import AssetPolicyRule
 from defenseclaw.tui.panels.mcps import MCPsPanelModel, mcp_actions, mcp_unset_target_for_connector
 from defenseclaw.tui.panels.plugins import PluginRow, PluginsPanelModel, plugin_actions
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel, registry_attribution_from_rules, skill_actions
-from defenseclaw.tui.panels.tools import ToolRow, ToolsPanelModel, split_tool_target, tool_actions
+from defenseclaw.tui.panels.tools import (
+    ToolRow,
+    ToolsPanelModel,
+    parse_tool_list_json,
+    split_tool_target,
+    tool_actions,
+)
 from defenseclaw.tui.services.catalog_state import (
     connector_source_label,
     friendly_connector_name,
@@ -418,6 +424,75 @@ def test_tools_connector_filter_shows_selected_connector_plus_global_fallback() 
         "global_tool",
         "audit_only",
     ]
+
+
+def test_tool_parse_scoped_group_and_flat_list() -> None:
+    rows = parse_tool_list_json(
+        json.dumps(
+            {
+                "connector": "hermes",
+                "tools": [
+                    {
+                        "name": "search",
+                        "connector": "hermes",
+                        "scope": "connector",
+                        "status": "block",
+                        "reason": "scoped",
+                        "updated_at": "2026-04-18T11:12:13",
+                    },
+                    {
+                        "name": "read_file",
+                        "connector": "hermes",
+                        "scope": "global",
+                        "status": "allow",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert rows[0] == ToolRow(
+        name="search",
+        scope="connector",
+        status="blocked",
+        reason="scoped",
+        time="2026-04-18 11:12",
+        target_name="@hermes/search",
+        connector="hermes",
+    )
+    assert rows[1].connector == "hermes"
+    assert rows[1].display_scope == "global"
+    assert rows[1].status == "allowed"
+
+    flat = parse_tool_list_json(
+        json.dumps(
+            [
+                {
+                    "name": "filesystem/write_file",
+                    "scope": "source",
+                    "status": "block",
+                }
+            ]
+        )
+    )
+    assert flat[0].name == "write_file"
+    assert flat[0].scope == "filesystem"
+    assert flat[0].connector == ""
+
+
+def test_tools_load_intent_uses_json_and_connector_focus() -> None:
+    panel = ToolsPanelModel(connector="codex")
+
+    assert panel.load_intent().args == ("tool", "list", "--json")
+
+    panel.connector_focus_enabled = True
+    assert panel.load_intent().args == (
+        "tool",
+        "list",
+        "--json",
+        "--connector",
+        "codex",
+    )
 
 
 def test_tools_actions_use_selected_connector_filter_for_policy_mutations() -> None:

@@ -61,6 +61,8 @@ class TestToolBlock(ToolCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("delete_file", result.output)
         self.assertIn("block list", result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertIn("connector=hermes", result.output)
         self.assertTrue(self.pe().is_tool_blocked("delete_file"))
 
     def test_block_scoped_writes_both_global_and_scoped_audit(self):
@@ -113,6 +115,8 @@ class TestToolAllow(ToolCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("search", result.output)
         self.assertIn("allow list", result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertIn("connector=hermes", result.output)
         self.assertTrue(self.pe().is_tool_allowed("search"))
 
     def test_allow_scoped(self):
@@ -368,15 +372,17 @@ class TestToolConnectorScoping(ToolCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertFalse(self.pe().is_tool_blocked_for_connector("delete_file", "hermes"))
 
-    def test_unblock_global_keeps_connector_scoped_row(self):
+    def test_unblock_global_clears_connector_scoped_rows(self):
         self.pe().block_tool("delete_file", "", "global")
         self.pe().block_tool_for_connector("delete_file", "hermes", "scoped")
 
         result = self.invoke(["unblock", "delete_file"])
 
         self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertIn("connector=hermes", result.output)
         self.assertFalse(self.pe().is_tool_blocked("delete_file"))
-        self.assertTrue(self.app.store.has_action("tool", "@hermes/delete_file", "install", "block"))
+        self.assertFalse(self.app.store.has_action("tool", "@hermes/delete_file", "install", "block"))
 
     def test_connector_normalized(self):
         """A connector value is canonicalized (e.g. 'Hermes' → 'hermes') so the
@@ -433,6 +439,7 @@ class TestToolConnectorScoping(ToolCommandTestBase):
 
         # --connector hermes: its own rows + global, never another connector's.
         result = self.invoke(["list", "--connector", "hermes"])
+        self.assertIn("Tools (connector=hermes)", result.output)
         self.assertIn("delete_file", result.output)   # @hermes/ row
         self.assertIn("exec_cmd", result.output)       # global applies to hermes
         self.assertIn("global", result.output)
@@ -457,10 +464,39 @@ class TestToolConnectorScoping(ToolCommandTestBase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.output)
-        row = next(r for r in data if r["name"] == "exec_cmd")
+        self.assertEqual(data["connector"], "hermes")
+        row = next(r for r in data["tools"] if r["name"] == "exec_cmd")
         self.assertEqual(row["connector"], "hermes")
         self.assertEqual(row["scope"], "global")
         self.assertEqual(row["status"], "block")
+
+    def test_list_connector_empty_names_connector(self):
+        result = self.invoke(["list", "--connector", "hermes"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector='hermes'", result.output)
+
+    def test_bare_allow_clears_connector_specific_block_override(self):
+        self.pe().block_tool_for_connector("search", "hermes", "scoped block")
+
+        result = self.invoke(["allow", "search"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Cleared connector-specific overrides for connector=hermes", result.output)
+        self.assertTrue(self.pe().is_tool_allowed("search"))
+        self.assertTrue(self.pe().is_tool_allowed_for_connector("search", "hermes"))
+        self.assertFalse(self.app.store.has_action("tool", "@hermes/search", "install", "block"))
+
+    def test_bare_block_clears_connector_specific_allow_override(self):
+        self.pe().allow_tool_for_connector("search", "hermes", "scoped allow")
+
+        result = self.invoke(["block", "search"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Cleared connector-specific overrides for connector=hermes", result.output)
+        self.assertTrue(self.pe().is_tool_blocked("search"))
+        self.assertTrue(self.pe().is_tool_blocked_for_connector("search", "hermes"))
+        self.assertFalse(self.app.store.has_action("tool", "@hermes/search", "install", "allow"))
 
 
 if __name__ == "__main__":
