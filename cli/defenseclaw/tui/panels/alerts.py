@@ -315,7 +315,8 @@ class AlertsPanelModel:
         filtered: list[AlertRow] = []
         for row in self.flat_rows():
             event = row.event
-            if self.severity_filter and _severity_bucket(event.severity) != self.severity_filter:
+            effective_severity = _event_severity_bucket(event)
+            if self.severity_filter and effective_severity != self.severity_filter:
                 continue
             if not self.severity_filter and not self.show_all_severities and _is_low_signal_alert(row):
                 continue
@@ -327,7 +328,7 @@ class AlertsPanelModel:
             if connector_value and connector_value not in ev_connector:
                 continue
             if remaining:
-                haystack = f"{event.severity} {event.action} {event.target} {event.details}".lower()
+                haystack = f"{effective_severity} {event.severity} {event.action} {event.target} {event.details}".lower()
                 if remaining not in haystack:
                     continue
             filtered.append(row)
@@ -425,7 +426,7 @@ class AlertsPanelModel:
         for row in self.flat_rows():
             if row.kind == "scan_finding":
                 continue
-            bucket = _severity_bucket(row.event.severity)
+            bucket = _event_severity_bucket(row.event)
             if bucket in counts:
                 counts[bucket] += 1
         return counts
@@ -605,6 +606,7 @@ class AlertsPanelModel:
         rows: list[AlertTableRow] = []
         for index, row in enumerate(self.filtered):
             event = row.event
+            severity_cell = _event_display_severity(event)
             marker = "*" if event.id in self.selected_ids else ""
             if row.kind == "scan":
                 marker = "+" if row.scan_id not in self.expanded else "-"
@@ -616,7 +618,7 @@ class AlertsPanelModel:
                 connector_cell = parse_kv_details(event.details).get("connector", "").strip() or "—"
                 cells = (
                     marker,
-                    event.severity,
+                    severity_cell,
                     event.timestamp.strftime("%b %d %H:%M"),
                     event.action,
                     connector_cell,
@@ -626,7 +628,7 @@ class AlertsPanelModel:
             else:
                 cells = (
                     marker,
-                    event.severity,
+                    severity_cell,
                     event.timestamp.strftime("%b %d %H:%M"),
                     event.action,
                     target_cell,
@@ -689,8 +691,9 @@ class AlertsPanelModel:
         if _is_hook_event(event):
             lines = _hook_detail_lines(event)
         else:
+            display_severity = _event_display_severity(event)
             lines = [
-                f"[bold #22D3EE]{event.severity} {event.action}[/]",
+                f"[bold #22D3EE]{display_severity} {event.action}[/]",
                 f"Target: {event.target}",
                 f"Time: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
             ]
@@ -767,8 +770,9 @@ class AlertsPanelModel:
         if info is None:
             return ()
         event = info.event
+        display_severity = _event_display_severity(event)
         pairs: list[tuple[str, str]] = [
-            ("Severity", event.severity),
+            ("Severity", display_severity),
             ("Action", event.action),
             ("Target", event.target),
             ("Timestamp", event.timestamp.isoformat()),
@@ -821,8 +825,9 @@ class AlertsPanelModel:
         if info is None:
             return ""
         event = info.event
+        display_severity = _event_display_severity(event)
         lines = [
-            f"Severity: {event.severity}",
+            f"Severity: {display_severity}",
             f"Action: {event.action}",
             f"Target: {event.target}",
             f"Timestamp: {event.timestamp.isoformat()}",
@@ -923,9 +928,25 @@ def _severity_bucket(severity: str) -> str:
     return normalized
 
 
+def _event_severity_bucket(event: AlertEvent) -> str:
+    bucket = _severity_bucket(event.severity)
+    if bucket in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+        return bucket
+    if _is_hook_event(event):
+        detail_bucket = _severity_bucket(parse_kv_details(event.details).get("severity", ""))
+        if detail_bucket in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+            return detail_bucket
+    return bucket
+
+
+def _event_display_severity(event: AlertEvent) -> str:
+    bucket = _event_severity_bucket(event)
+    return bucket or event.severity
+
+
 def _is_low_signal_alert(row: AlertRow) -> bool:
     event = row.event
-    severity = _severity_bucket(event.severity)
+    severity = _event_severity_bucket(event)
     if severity in ACTIONABLE_SEVERITIES:
         return False
     if severity not in LOW_SIGNAL_SEVERITIES:
@@ -1201,13 +1222,14 @@ def _hook_detail_lines(event: AlertEvent) -> list[str]:
     elif phase:
         title = f"[bold #22D3EE]{phase}[/]"
     else:
-        title = f"[bold #22D3EE]{event.severity} {event.action}[/]"
+        title = f"[bold #22D3EE]{_event_display_severity(event)} {event.action}[/]"
     lines = [
         title,
         f"Time: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
     ]
-    if event.severity and event.severity.upper() not in {"", "NONE", "INFO"}:
-        lines.append(f"Severity: {event.severity}")
+    display_severity = _event_display_severity(event)
+    if display_severity and display_severity.upper() not in {"", "NONE", "INFO"}:
+        lines.append(f"Severity: {display_severity}")
     rows = structured_detail_rows(event.details)
     if rows:
         for label, value in rows:

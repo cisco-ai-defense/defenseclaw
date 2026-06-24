@@ -486,11 +486,98 @@ class Store:
                       substr(COALESCE(details, ''), 1, ?) AS details,
                       severity, run_id
                FROM audit_events
-               WHERE severity IN ('CRITICAL','HIGH','ERROR')
+               WHERE (
+                   severity IN ('CRITICAL','HIGH','ERROR')
+                   OR (
+                       action = 'connector-hook'
+                       AND (
+                           details LIKE '%severity=CRITICAL%'
+                           OR details LIKE '%severity=HIGH%'
+                       )
+                   )
+               )
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+        """List recent connector-hook rows without the actionable filter."""
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id
+               FROM audit_events
+               WHERE action = 'connector-hook'
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
+        """Return all-time connector-hook counters grouped by connector.
+
+        The Overview chart still uses a bounded event window for sparklines
+        and target breakdowns, but the CONNECTORS table's ``CALLS`` column
+        must not look frozen just because that window is full. Newer sidecar
+        schemas populate ``audit_events.connector`` and index it, so use a
+        grouped aggregate instead of loading every hook row into the TUI.
+        """
+
+        columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
+        }
+        if "connector" not in columns:
+            return {}
+        details_expr = "' ' || COALESCE(details, '') || ' '"
+        cur = self.db.execute(
+            f"""SELECT LOWER(COALESCE(connector, '')) AS connector_name,
+                       COUNT(*) AS calls,
+                       SUM(CASE
+                             WHEN {details_expr} LIKE '% action=block %'
+                               OR {details_expr} LIKE '% action=deny %'
+                             THEN 1 ELSE 0
+                           END) AS blocks,
+                       SUM(CASE
+                             WHEN {details_expr} LIKE '% action=alert %'
+                               OR {details_expr} LIKE '% action=warn %'
+                             THEN 1 ELSE 0
+                           END) AS alerts,
+                       MAX(timestamp) AS newest
+                FROM audit_events
+                WHERE action = 'connector-hook'
+                  AND COALESCE(connector, '') <> ''
+                GROUP BY LOWER(connector)"""
+        )
+        stats: dict[str, dict[str, Any]] = {}
+        for connector, calls, blocks, alerts, newest in cur.fetchall():
+            key = str(connector or "").strip().lower()
+            if not key:
+                continue
+            stats[key] = {
+                "calls": int(calls or 0),
+                "blocks": int(blocks or 0),
+                "alerts": int(alerts or 0),
+                "newest": newest or "",
+            }
+        return stats
+
+    def count_scan_results_since(self, since: datetime | None) -> int:
+        """Count scan results in the active Overview session window."""
+
+        if since is None:
+            return int(
+                self.db.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0] or 0
+            )
+        return int(
+            self.db.execute(
+                "SELECT COUNT(*) FROM scan_results WHERE datetime(timestamp) >= datetime(?)",
+                (since.isoformat(),),
+            ).fetchone()[0]
+            or 0
+        )
 
     def list_alerts(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
@@ -526,7 +613,16 @@ class Store:
                       substr(COALESCE(details, ''), 1, ?) AS details,
                       severity, run_id
                FROM audit_events
-               WHERE severity IN ('CRITICAL','HIGH','ERROR')
+               WHERE (
+                   severity IN ('CRITICAL','HIGH','ERROR')
+                   OR (
+                       action = 'connector-hook'
+                       AND (
+                           details LIKE '%severity=CRITICAL%'
+                           OR details LIKE '%severity=HIGH%'
+                       )
+                   )
+               )
                  AND action NOT LIKE 'dismiss%'
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
@@ -989,9 +1085,16 @@ def _parse_ts(val: Any) -> datetime:
     if isinstance(val, datetime):
         return val
     if isinstance(val, str):
+        text = val.strip()
+        if text:
+            iso_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+            try:
+                return datetime.fromisoformat(iso_text)
+            except ValueError:
+                pass
         for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
             try:
-                return datetime.strptime(val, fmt)
+                return datetime.strptime(text, fmt)
             except ValueError:
                 continue
     return datetime.now(timezone.utc)

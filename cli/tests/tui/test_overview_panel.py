@@ -372,6 +372,52 @@ def test_overview_ai_discovery_box_states_sort_and_cap() -> None:
     assert box.overflow == 3
 
 
+def test_overview_ai_discovery_box_dedupes_agent_signals_before_cap() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    signals = (
+        AIUsageSignal(
+            name="Claude Code",
+            vendor="Anthropic",
+            supported_connector="claudecode",
+            category="ai_cli",
+            state="seen",
+            confidence=0.98,
+            last_seen=now,
+        ),
+        AIUsageSignal(
+            name="Claude Code",
+            vendor="Anthropic",
+            supported_connector="claudecode",
+            category="shell_history_match",
+            state="seen",
+            confidence=0.98,
+            last_seen=now,
+        ),
+        AIUsageSignal(
+            name="Codex",
+            vendor="OpenAI",
+            supported_connector="codex",
+            category="ai_cli",
+            state="seen",
+            confidence=0.98,
+            last_seen=now,
+        ),
+    )
+    model.set_ai_usage(
+        AIUsageSnapshot(
+            enabled=True,
+            summary=AIUsageSummary(scanned_at=now, active_signals=len(signals)),
+            signals=signals,
+        )
+    )
+
+    box = model.ai_discovery_box(now=now)
+
+    assert [row.name for row in box.rows] == ["Claude Code", "Codex"]
+    assert box.overflow == 0
+
+
 def test_sort_ai_discovery_signals_for_overview_tiebreakers() -> None:
     now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
     signals = (

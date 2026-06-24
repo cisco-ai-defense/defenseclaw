@@ -135,6 +135,40 @@ def test_alerts_connector_column_and_shared_filter() -> None:
     assert {row.event.id for row in model.filtered} == {"a1", "a2"}
 
 
+def test_alerts_connector_hook_uses_detail_severity_for_observe_findings() -> None:
+    """Observe-mode hook findings store INFO rows but carry policy severity in details."""
+
+    now = datetime(2026, 6, 24, 17, 46, tzinfo=timezone.utc)
+    model = AlertsPanelModel()
+    model.set_events(
+        [
+            AlertEvent(
+                id="plain",
+                timestamp=now,
+                severity="INFO",
+                action="connector-hook",
+                target="PostToolUse",
+                details="connector=codex action=allow raw_action=allow severity=NONE mode=observe",
+            ),
+            AlertEvent(
+                id="finding",
+                timestamp=now + timedelta(seconds=1),
+                severity="INFO",
+                action="connector-hook",
+                target="PostToolUse",
+                details="connector=codex action=allow raw_action=alert severity=HIGH mode=observe",
+            ),
+        ]
+    )
+
+    assert [row.event.id for row in model.filtered] == ["finding"]
+    assert model.severity_counts()["HIGH"] == 1
+    assert model.data_table_row_models()[0].cells[1] == "HIGH"
+
+    model.set_severity_filter_exact("HIGH")
+    assert [row.event.id for row in model.filtered] == ["finding"]
+
+
 def test_alerts_connector_token_filters_by_connector() -> None:
     # E5: the Alerts panel honors the same ``connector:<name>`` search token
     # as Audit, matching the kv connector in the event details. Free text in

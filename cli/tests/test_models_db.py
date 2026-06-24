@@ -238,6 +238,36 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(events[0].structured["schema"], "defenseclaw.hook.v1")
         self.assertEqual(events[0].structured["connector"], "codex")
 
+    def test_event_reader_parses_zulu_timestamps(self):
+        self.store.db.execute(
+            """INSERT INTO audit_events (
+                id, timestamp, action, target, actor, details, severity, run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "evt-zulu",
+                "2026-06-24T16:46:56.1105Z",
+                "connector-hook",
+                "PostToolUse",
+                "defenseclaw",
+                "connector=codex action=block mode=action",
+                "INFO",
+                "",
+            ),
+        )
+        self.store.db.commit()
+
+        event = self.store.list_connector_hook_event_summaries(1)[0]
+
+        self.assertEqual(event.id, "evt-zulu")
+        self.assertEqual(event.timestamp.year, 2026)
+        self.assertEqual(event.timestamp.month, 6)
+        self.assertEqual(event.timestamp.day, 24)
+        self.assertEqual(event.timestamp.hour, 16)
+        self.assertEqual(event.timestamp.minute, 46)
+        self.assertEqual(event.timestamp.second, 56)
+        self.assertEqual(event.timestamp.microsecond, 110500)
+        self.assertEqual(event.timestamp.tzinfo, timezone.utc)
+
     def test_summary_readers_avoid_heavy_payloads_but_get_event_hydrates_full_row(self):
         details = "connector=codex " + ("x" * 6000)
         evt = Event(
@@ -263,6 +293,15 @@ class ModelsDbTests(unittest.TestCase):
 
     def test_actionable_summary_readers_skip_low_signal_rows(self):
         self.store.log_event(Event(id="info", action="connector-hook", target="preToolUse", severity="INFO"))
+        self.store.log_event(
+            Event(
+                id="hook-high",
+                action="connector-hook",
+                target="preToolUse",
+                severity="INFO",
+                details="connector=codex action=allow raw_action=alert severity=HIGH mode=observe",
+            )
+        )
         self.store.log_event(Event(id="medium", action="scan", target="skill://one", severity="MEDIUM"))
         self.store.log_event(Event(id="high", action="scan", target="skill://two", severity="HIGH"))
         self.store.log_event(Event(id="failure", action="sink-failure", target="splunk", severity="ERROR"))
@@ -270,8 +309,8 @@ class ModelsDbTests(unittest.TestCase):
         audit_ids = [event.id for event in self.store.list_actionable_event_summaries(10)]
         alert_ids = [event.id for event in self.store.list_actionable_alert_summaries(10)]
 
-        self.assertEqual(audit_ids, ["failure", "high"])
-        self.assertEqual(alert_ids, ["failure", "high"])
+        self.assertEqual(audit_ids, ["failure", "high", "hook-high"])
+        self.assertEqual(alert_ids, ["failure", "high", "hook-high"])
 
     def test_logger_uses_run_id_from_env(self):
         old = os.environ.get("DEFENSECLAW_RUN_ID")

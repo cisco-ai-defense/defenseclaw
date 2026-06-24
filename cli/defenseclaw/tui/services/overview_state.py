@@ -604,7 +604,9 @@ class OverviewPanelModel:
                 summary_parts=tuple(parts),
             )
 
-        rows = self.ai_usage_sorted or sort_ai_discovery_signals_for_overview(self.ai_usage.signals)
+        rows = unique_ai_discovery_signals_for_overview(
+            self.ai_usage_sorted or sort_ai_discovery_signals_for_overview(self.ai_usage.signals)
+        )
         overflow = max(len(rows) - MAX_AI_DISCOVERY_OVERVIEW_ROWS, 0)
         rendered = tuple(
             OverviewAIDiscoveryRow(
@@ -1155,6 +1157,34 @@ def sort_ai_discovery_signals_for_overview(signals: tuple[AIUsageSignal, ...]) -
         return (state_rank, -signal.confidence, -last_seen, display_ai_discovery_name(signal).lower())
 
     return tuple(sorted(signals, key=rank))
+
+
+def unique_ai_discovery_signals_for_overview(signals: tuple[AIUsageSignal, ...]) -> tuple[AIUsageSignal, ...]:
+    """Collapse multiple evidence signals into one Overview row per agent."""
+
+    seen: set[tuple[str, str]] = set()
+    rows: list[AIUsageSignal] = []
+    for signal in signals:
+        key = _ai_discovery_overview_key(signal)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(signal)
+    return tuple(rows)
+
+
+def _ai_discovery_overview_key(signal: AIUsageSignal) -> tuple[str, str]:
+    connector = signal.supported_connector.strip().lower()
+    if connector:
+        return ("connector", connector)
+    if signal.component is not None:
+        ecosystem = signal.component.ecosystem.strip().lower()
+        name = signal.component.name.strip().lower()
+        if ecosystem or name:
+            return ("component", f"{ecosystem}:{name}")
+    name = display_ai_discovery_name(signal).strip().lower()
+    vendor = display_ai_discovery_vendor(signal).strip().lower()
+    return ("display", f"{vendor}:{name}")
 
 
 def ai_discovery_state_badge(state: str) -> str:
