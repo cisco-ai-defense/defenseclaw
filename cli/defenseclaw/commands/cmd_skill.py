@@ -387,9 +387,12 @@ def _get_openclaw_skill_info(
     if out is None:
         return None
     try:
-        return json.loads(out)
+        data = json.loads(out)
     except json.JSONDecodeError:
         return None
+    if isinstance(data, dict) and data.get("error"):
+        return None
+    return data
 
 
 # ---------------------------------------------------------------------------
