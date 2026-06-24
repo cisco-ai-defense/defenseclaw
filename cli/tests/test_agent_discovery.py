@@ -273,6 +273,41 @@ def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(link)) is True
 
 
+def test_operator_prefix_still_applies_after_default_prefix_ownership_failure(
+    monkeypatch,
+    tmp_path,
+):
+    """A default prefix match must not mask a later operator-added prefix."""
+    default_prefix = tmp_path / "homebrew"
+    operator_prefix = (
+        default_prefix
+        / "lib"
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "bin"
+    )
+    binary = operator_prefix / "codex.js"
+    operator_prefix.mkdir(parents=True)
+    binary.write_text("#!/usr/bin/env node\n")
+    binary.chmod(0o755)
+    operator_prefix.chmod(0o755)
+
+    monkeypatch.setattr(
+        ad,
+        "_trusted_bin_prefixes",
+        lambda: (str(default_prefix), str(operator_prefix)),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_default_trusted_bin_prefixes",
+        lambda: frozenset({str(default_prefix)}),
+    )
+    monkeypatch.setattr(ad, "_bin_chain_is_system_owned", lambda _resolved, _prefix: False)
+
+    assert ad._is_trusted_binary_path(str(binary)) is True
+
+
 def test_trust_check_accepts_claude_local_share_target(monkeypatch, tmp_path):
     real = tmp_path / ".local" / "share" / "claude" / "versions" / "2.1.139"
     real.parent.mkdir(parents=True, exist_ok=True)
