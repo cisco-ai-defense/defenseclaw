@@ -1447,7 +1447,11 @@ func TestSkillsUpdateParamsSerialization(t *testing.T) {
 func TestConfigPatchRawParamsSerialization(t *testing.T) {
 	allowList := []string{"existing-a"}
 	rawJSON, _ := json.Marshal(pluginConfigRaw("my-plugin", false, allowList))
-	params := ConfigPatchRawParams{Raw: string(rawJSON), BaseHash: "abc123"}
+	params := ConfigPatchRawParams{
+		Raw:          string(rawJSON),
+		BaseHash:     "abc123",
+		ReplacePaths: []string{"plugins.allow"},
+	}
 	data, err := json.Marshal(params)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -1462,6 +1466,10 @@ func TestConfigPatchRawParamsSerialization(t *testing.T) {
 	}
 	if parsed["baseHash"] != "abc123" {
 		t.Errorf("baseHash = %v, want abc123", parsed["baseHash"])
+	}
+	replacePaths, ok := parsed["replacePaths"].([]interface{})
+	if !ok || len(replacePaths) != 1 || replacePaths[0] != "plugins.allow" {
+		t.Errorf("replacePaths = %v, want [plugins.allow]", parsed["replacePaths"])
 	}
 	var nested map[string]interface{}
 	if err := json.Unmarshal([]byte(rawStr), &nested); err != nil {
