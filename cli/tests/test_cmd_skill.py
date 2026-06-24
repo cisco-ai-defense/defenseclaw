@@ -2278,8 +2278,8 @@ class TestSkillSearchUX(SkillCommandTestBase):
 
 
 class TestSkillBareNameResolution(SkillCommandTestBase):
-    """ND-1: a bare ``skill scan <name>`` resolves across every active
-    connector, and refuses (asking for --connector) when a name is ambiguous."""
+    """ND-1: a bare ``skill scan <name>`` resolves across every configured
+    connector and scans every matching copy."""
 
     def _fake_dirs(self, mapping: dict, active: str):
         def skill_dirs(connector=None):
@@ -2364,6 +2364,61 @@ class TestSkillBareNameResolution(SkillCommandTestBase):
         self.assertIn("── connector: hermes ──", result.output)
         self.assertIn("Scanning 1 skill on hermes", result.output)
         self.assertEqual(mock_scan.call_count, 2)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    def test_bare_name_duplicate_fans_out_before_active_info(
+        self, mock_scan, mock_info,
+    ):
+        a_root = os.path.join(self.tmp_dir, "antigravity", "skills")
+        h_root = os.path.join(self.tmp_dir, "hermes", "skills")
+        o_root = os.path.join(self.tmp_dir, "opencode", "skills")
+        a_skill = os.path.join(a_root, "dc-skill-final")
+        h_skill = os.path.join(h_root, "dc-skill-final")
+        o_skill = os.path.join(o_root, "dc-skill-final")
+        os.makedirs(a_skill)
+        os.makedirs(h_skill)
+        os.makedirs(o_skill)
+
+        self.app.cfg.active_connector = lambda: "antigravity"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: [  # type: ignore[method-assign]
+            "antigravity",
+            "hermes",
+            "opencode",
+        ]
+        self.app.cfg.skill_dirs = self._fake_dirs(  # type: ignore[method-assign]
+            {
+                "antigravity": [a_root],
+                "hermes": [h_root],
+                "opencode": [o_root],
+            },
+            "antigravity",
+        )
+        mock_info.return_value = {
+            "name": "dc-skill-final",
+            "baseDir": a_skill,
+            "eligible": True,
+        }
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner", target="dc-skill-final",
+            timestamp=datetime.now(timezone.utc), findings=[],
+            duration=timedelta(seconds=0.1),
+        )
+
+        result = self.invoke(["scan", "dc-skill-final", "--no-use-llm"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("── connector: antigravity ──", result.output)
+        self.assertIn("Scanning 1 skill on antigravity", result.output)
+        self.assertIn("── connector: hermes ──", result.output)
+        self.assertIn("Scanning 1 skill on hermes", result.output)
+        self.assertIn("── connector: opencode ──", result.output)
+        self.assertIn("Scanning 1 skill on opencode", result.output)
+        self.assertEqual(
+            [call.args[0] for call in mock_scan.call_args_list],
+            [os.path.realpath(a_skill), os.path.realpath(h_skill), os.path.realpath(o_skill)],
+        )
+        mock_info.assert_not_called()
 
 
 if __name__ == "__main__":
