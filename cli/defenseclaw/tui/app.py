@@ -5132,7 +5132,7 @@ class DefenseClawTUI(App[None]):
             self.connector_filter, self._active_connector_names()
         )
 
-    def _set_connector_filter(self, connector: str, *, defer_overview: bool = False) -> None:
+    def _set_connector_filter(self, connector: str) -> None:
         """Set the shared connector filter to ``connector`` (``""`` = All).
 
         8.13 pass 2: the catalog/inventory panels load *every* active connector
@@ -5174,7 +5174,8 @@ class DefenseClawTUI(App[None]):
         # model filters during render, and hidden panels sync when opened.
         # Eagerly refiltering Logs/Audit/catalog data here made an Overview
         # chip click pay for every table in the app.
-        if defer_overview and self.active_panel == "overview" and not self.help_open:
+        overview_active = self.active_panel == "overview" and not self.help_open
+        if overview_active:
             self._render_overview_scope_indicator()
             self._render_overview_metrics()
             self._schedule_overview_deferred_render()
@@ -8832,18 +8833,12 @@ class DefenseClawTUI(App[None]):
             return
         index = int(choice)
         if index == 0:
-            self._set_connector_filter(
-                "",
-                defer_overview=self.active_panel == "overview" and not self.help_open,
-            )
+            self._set_connector_filter("")
             return
         index -= 1
         if not (0 <= index < len(connectors)):
             return
-        self._set_connector_filter(
-            connectors[index],
-            defer_overview=self.active_panel == "overview" and not self.help_open,
-        )
+        self._set_connector_filter(connectors[index])
 
     async def _open_redaction_toggle(self) -> None:
         currently_disabled = _redaction_currently_disabled(self.config)
