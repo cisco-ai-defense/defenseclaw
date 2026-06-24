@@ -447,6 +447,27 @@ sidecar_post() {
     curl_with_gateway_headers POST "$SIDECAR_URL$path" "$body"
 }
 
+sidecar_post_retry_config_patch_rate_limit() {
+    local path="$1"
+    local body="${2:-}"
+    local attempts="${3:-3}"
+    local resp wait_s
+    for attempt in $(seq 1 "$attempts"); do
+        resp=$(sidecar_post "$path" "$body" 2>&1 || true)
+        if ! echo "$resp" | grep -Eqi 'rate limit exceeded for config\.patch|UNAVAILABLE'; then
+            printf '%s\n' "$resp"
+            return 0
+        fi
+        wait_s=$(echo "$resp" | sed -nE 's/.*retry after ([0-9]+)s.*/\1/p' | head -1)
+        wait_s="${wait_s:-20}"
+        if [ "$attempt" -lt "$attempts" ]; then
+            echo "  config.patch rate-limited for ${path}; retrying in ${wait_s}s (attempt $((attempt + 1))/${attempts})" >&2
+            sleep "$wait_s"
+        fi
+    done
+    printf '%s\n' "$resp"
+}
+
 # sidecar_api_authenticated performs a lightweight authenticated GET to
 # /alerts?limit=1 and returns 0 if successful, 1 if unauthorized.
 # Call early (e.g. in phase_start) to detect token mismatches before
@@ -3597,7 +3618,7 @@ phase_plugin_lifecycle() {
     fi
 
     payload=$(jq -cn --arg pluginName "$clean_plugin" '{pluginName: $pluginName}')
-    resp=$(sidecar_post "/plugin/disable" "$payload" 2>&1 || true)
+    resp=$(sidecar_post_retry_config_patch_rate_limit "/plugin/disable" "$payload" 3)
     echo "$resp"
     if echo "$resp" | jq -e '.status == "disabled"' >/dev/null 2>&1 && wait_for_openclaw_plugin_enabled_state "$clean_plugin" "false" 45 && wait_for_sidecar_subsystems_running 60; then
         pass "plugin lifecycle: API disable updated OpenClaw plugin state"
@@ -3605,7 +3626,7 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: API disable updated OpenClaw plugin state" "$resp"
     fi
 
-    resp=$(sidecar_post "/plugin/enable" "$payload" 2>&1 || true)
+    resp=$(sidecar_post_retry_config_patch_rate_limit "/plugin/enable" "$payload" 3)
     echo "$resp"
     if echo "$resp" | jq -e '.status == "enabled"' >/dev/null 2>&1 && wait_for_openclaw_plugin_enabled_state "$clean_plugin" "true" 45 && wait_for_sidecar_subsystems_running 60; then
         pass "plugin lifecycle: API enable updated OpenClaw plugin state"
