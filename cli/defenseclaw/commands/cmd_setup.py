@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import json as _json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +71,7 @@ from defenseclaw.connector_contracts import (
 )
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory import agent_discovery
-from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
+from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.safety import reject_symlink, sanitize_dotenv_value
 
 # Key used to stash the pre-invocation config.yaml mtime in the Click
@@ -8393,6 +8395,8 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
     "sourcetype": "defenseclaw:json",
 }
 
+_SPLUNK_BRIDGE_ENV_REL = os.path.join("splunk-bridge", "env", ".env")
+
 
 @click.group("splunk", invoke_without_command=True)
 @click.pass_context
@@ -9259,7 +9263,11 @@ def _resolve_bridge_bin(data_dir: str) -> str | None:
     return splunk_bridge_bin(data_dir)
 
 
-def _refresh_and_maybe_restart_splunk_bridge(data_dir: str) -> RefreshResult:
+def _refresh_and_maybe_restart_splunk_bridge(
+    data_dir: str,
+    *,
+    env_file: str | None = None,
+) -> RefreshResult:
     """Refresh the seeded Splunk bridge, stopping any running stack first.
 
     Sequence (all best-effort — refresh failures don't abort the parent
@@ -9287,8 +9295,11 @@ def _refresh_and_maybe_restart_splunk_bridge(data_dir: str) -> RefreshResult:
         bridge = _resolve_bridge_bin(data_dir)
         if bridge:
             try:
+                down_args = [bridge, "down"]
+                if env_file:
+                    down_args.extend(["--env-file", env_file])
                 subprocess.run(
-                    [bridge, "down"],
+                    down_args,
                     capture_output=True,
                     text=True,
                     timeout=120,
@@ -9345,8 +9356,9 @@ def _bootstrap_bridge(
     volumes survive ``down``, so user data is preserved) so the new
     bundle is what gets brought back up.
     """
+    env_file = _ensure_private_splunk_bridge_env(data_dir)
     if refresh_bundle:
-        _refresh_and_maybe_restart_splunk_bridge(data_dir)
+        _refresh_and_maybe_restart_splunk_bridge(data_dir, env_file=env_file)
 
     bridge = _resolve_bridge_bin(data_dir)
     if not bridge:
@@ -9376,7 +9388,7 @@ def _bootstrap_bridge(
         if env is not None:
             run_kwargs["env"] = env
         result = subprocess.run(
-            [bridge, "up", "--output", "json"],
+            [bridge, "up", "--env-file", env_file, "--output", "json"],
             **run_kwargs,
         )
         if result.returncode != 0:
@@ -9419,6 +9431,72 @@ def _bootstrap_bridge(
         if result is not None:
             _echo_bridge_output_tail(result)
         return None
+
+
+def _ensure_private_splunk_bridge_env(data_dir: str) -> str:
+    """Create the private bridge env file used by the local Splunk stack.
+
+    The bridge intentionally refuses to fall back to the checked-in
+    ``.env.example`` because it contains public placeholders. The CLI
+    setup path is responsible for creating an operator-owned copy with
+    fresh local credentials, then passing it explicitly to the bridge.
+    Existing files are preserved.
+    """
+    env_file = os.path.join(data_dir, _SPLUNK_BRIDGE_ENV_REL)
+    reject_symlink(env_file, what="Splunk bridge env file")
+    if os.path.isfile(env_file):
+        _chmod_private_best_effort(env_file)
+        return env_file
+
+    example = _load_splunk_bridge_example_env(data_dir)
+    if not example.get("SPLUNK_IMAGE"):
+        raise click.ClickException("Splunk bridge env template is missing SPLUNK_IMAGE")
+
+    env_dir = os.path.dirname(env_file)
+    os.makedirs(env_dir, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(env_dir, 0o700)
+    except OSError:
+        pass
+
+    hec_token = str(uuid.uuid4())
+    entries = dict(example)
+    entries.update({
+        "SPLUNK_START_ARGS": "--accept-license",
+        "SPLUNK_LICENSE_URI": "Free",
+        "SPLUNK_GENERAL_TERMS": "--accept-sgt-current-at-splunk-com",
+        "SPLUNK_PASSWORD": f"DefenseClawLocal-{secrets.token_hex(16)}!",
+        "SPLUNK_HEC_TOKEN": hec_token,
+        "DEFENSECLAW_HEC_URL": entries.get(
+            "DEFENSECLAW_HEC_URL",
+            "https://127.0.0.1:8088/services/collector/event",
+        ),
+        "DEFENSECLAW_HEC_TOKEN": hec_token,
+        "DEFENSECLAW_INDEX": entries.get("DEFENSECLAW_INDEX", "defenseclaw_local"),
+        "DEFENSECLAW_SOURCETYPE": entries.get("DEFENSECLAW_SOURCETYPE", "defenseclaw:json"),
+        "DEFENSECLAW_SOURCE": entries.get("DEFENSECLAW_SOURCE", "defenseclaw"),
+        "DEFENSECLAW_INTEGRATION_ENABLED": "true",
+    })
+    _write_dotenv(env_file, entries)
+    return env_file
+
+
+def _load_splunk_bridge_example_env(data_dir: str) -> dict[str, str]:
+    candidates = (
+        os.path.join(data_dir, "splunk-bridge", "env", ".env.example"),
+        str(bundled_splunk_bridge_dir() / "env" / ".env.example"),
+    )
+    for path in candidates:
+        if os.path.isfile(path):
+            return _load_dotenv(path)
+    return {}
+
+
+def _chmod_private_best_effort(path: str) -> None:
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _echo_bridge_output_tail(

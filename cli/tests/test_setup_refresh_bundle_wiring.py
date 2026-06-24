@@ -31,8 +31,10 @@ from __future__ import annotations
 import io
 import json
 import os
+import stat
 import tempfile
 import unittest
+import uuid
 from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
@@ -48,6 +50,22 @@ def _make_app() -> tuple[AppContext, str]:
     app = AppContext()
     app.cfg = cfg
     return app, tmp_dir
+
+
+def _bridge_env_file(data_dir: str) -> str:
+    return os.path.join(data_dir, "splunk-bridge", "env", ".env")
+
+
+def _read_dotenv(path: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            entries[key] = value
+    return entries
 
 
 class TestSetupSplunkRefreshWiring(unittest.TestCase):
@@ -109,7 +127,21 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_refresh.assert_called_once_with(self.tmp_dir)
+        env_file = _bridge_env_file(self.tmp_dir)
+        mock_refresh.assert_called_once_with(self.tmp_dir, env_file=env_file)
+        mock_run.assert_called_once()
+        self.assertEqual(
+            mock_run.call_args.args[0],
+            ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
+        )
+
+        self.assertEqual(stat.S_IMODE(os.stat(env_file).st_mode), 0o600)
+        entries = _read_dotenv(env_file)
+        self.assertEqual(entries["SPLUNK_HEC_TOKEN"], entries["DEFENSECLAW_HEC_TOKEN"])
+        uuid.UUID(entries["SPLUNK_HEC_TOKEN"])
+        self.assertEqual(entries["DEFENSECLAW_INTEGRATION_ENABLED"], "true")
+        self.assertTrue(entries["SPLUNK_PASSWORD"].startswith("DefenseClawLocal-"))
+        self.assertTrue(entries["SPLUNK_PASSWORD"].endswith("!"))
 
     @patch(
         "defenseclaw.commands.cmd_setup._refresh_and_maybe_restart_splunk_bridge",
@@ -159,6 +191,12 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_not_called()
+        env_file = _bridge_env_file(self.tmp_dir)
+        mock_run.assert_called_once()
+        self.assertEqual(
+            mock_run.call_args.args[0],
+            ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
+        )
 
 
 class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
@@ -197,14 +235,15 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         )
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        result = _refresh_and_maybe_restart_splunk_bridge("/data")
+        env_file = "/data/splunk-bridge/env/.env"
+        result = _refresh_and_maybe_restart_splunk_bridge("/data", env_file=env_file)
 
         self.assertTrue(result.was_running)
         self.assertTrue(result.stopped)
         # The down call must precede the refresh call. Pull the
         # subprocess args to confirm we asked the bridge for `down`.
         self.assertTrue(any(
-            call.args[0] == ["/fake/bin/splunk-claw-bridge", "down"]
+            call.args[0] == ["/fake/bin/splunk-claw-bridge", "down", "--env-file", env_file]
             for call in mock_run.call_args_list
         ))
         mock_refresh.assert_called_once_with("/data")
