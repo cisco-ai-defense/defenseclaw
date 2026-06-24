@@ -44,7 +44,7 @@ from typing import Any
 
 import yaml
 
-from defenseclaw.config import locked_config_yaml, write_config_yaml_secure
+from defenseclaw.config import config_path_for_data_dir, locked_config_yaml, write_config_yaml_secure
 from defenseclaw.observability.presets import Preset, Signal, resolve_preset
 from defenseclaw.safety import sanitize_dotenv_value
 
@@ -185,7 +185,7 @@ def apply_preset(
             f"destination name {dest_name!r} must match {_NAME_RE.pattern}"
         )
 
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     with locked_config_yaml(cfg_path):
         raw = _load_yaml(cfg_path)
         before = copy.deepcopy(raw)
@@ -243,7 +243,7 @@ def list_destinations(data_dir: str) -> list[Destination]:
     then audit sinks in file order (matching the Go Manager
     dispatch order).
     """
-    raw = _load_yaml(os.path.join(data_dir, CONFIG_FILE_NAME))
+    raw = _load_yaml(str(config_path_for_data_dir(data_dir)))
     out: list[Destination] = []
 
     otel = raw.get("otel") or {}
@@ -296,7 +296,7 @@ def set_destination_enabled(
     ``name == "otel"`` targets the top-level ``otel:`` block. Any other
     name must match an existing ``audit_sinks[].name``.
     """
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     with locked_config_yaml(cfg_path):
         raw = _load_yaml(cfg_path)
         changes: list[str] = []
@@ -333,7 +333,7 @@ def remove_destination(name: str, data_dir: str) -> WriteResult:
     while iterating, and re-enabling requires all fields to remain. Use
     ``disable otel`` explicitly to keep the config stable.
     """
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     with locked_config_yaml(cfg_path):
         raw = _load_yaml(cfg_path)
         changes: list[str] = []

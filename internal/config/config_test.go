@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -155,6 +156,30 @@ func TestConfigPath(t *testing.T) {
 	cp := ConfigPath()
 	if filepath.Base(cp) != DefaultConfigName {
 		t.Errorf("expected config file %q, got %q", DefaultConfigName, filepath.Base(cp))
+	}
+}
+
+func TestConfigPath_ExplicitEnvOverride(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "managed.yaml")
+	t.Setenv("DEFENSECLAW_CONFIG", want)
+	if got := ConfigPath(); got != want {
+		t.Fatalf("ConfigPath() = %q, want %q", got, want)
+	}
+}
+
+func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DefaultConfigName)
+	data := []byte("config_version: 6\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := LoadFromFile(path)
+	if err == nil {
+		t.Fatal("LoadFromFile succeeded for untrusted managed_enterprise config path")
+	}
+	if !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
+		t.Fatalf("LoadFromFile error = %v, want managed trust check failure", err)
 	}
 }
 

@@ -72,6 +72,7 @@ _llm_migration_warned_keys: set[tuple[str, ...]] = set()
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
 CONFIG_FILE_NAME = "config.yaml"
+CONFIG_PATH_ENV = "DEFENSECLAW_CONFIG"
 VALID_DEPLOYMENT_MODES = {
     "managed_enterprise",
     "unmanaged_byod",
@@ -184,7 +185,19 @@ def default_data_path() -> Path:
 
 
 def config_path() -> Path:
+    override = os.environ.get(CONFIG_PATH_ENV)
+    if override:
+        return Path(override)
     return default_data_path() / CONFIG_FILE_NAME
+
+
+def config_path_for_data_dir(data_dir: str | os.PathLike[str] | None = None) -> Path:
+    """Return the active config path for a caller-scoped data directory."""
+    if os.environ.get(CONFIG_PATH_ENV):
+        return config_path()
+    if data_dir:
+        return Path(data_dir) / CONFIG_FILE_NAME
+    return config_path()
 
 
 def _expand(p: str) -> str:
@@ -228,6 +241,43 @@ def _validate_deployment_mode(mode: str) -> str:
             "ci_cd, sandboxed, server, saas)"
         )
     return mode
+
+
+def _is_admin_process() -> bool:
+    if hasattr(os, "geteuid"):
+        return os.geteuid() == 0
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    return False
+
+
+def _is_managed_enterprise_doc(data: dict[str, Any] | None) -> bool:
+    if not isinstance(data, dict):
+        return False
+    try:
+        return _validate_deployment_mode(str(data.get("deployment_mode", "") or "")) == "managed_enterprise"
+    except ValueError:
+        return False
+
+
+def _assert_config_write_allowed(path: str, data: dict[str, Any] | None = None) -> None:
+    managed = _is_managed_enterprise_doc(data)
+    if not managed:
+        try:
+            managed = _is_managed_enterprise_doc(_load_existing_config_yaml(path))
+        except Exception:
+            managed = False
+    if managed and not _is_admin_process():
+        raise PermissionError(
+            "managed_enterprise config changes require operating-system "
+            "administrator privileges; use the enterprise managed config path "
+            "or rerun this command with admin elevation"
+        )
 
 
 _sandbox_mode_cache: bool | None = None
@@ -2405,7 +2455,7 @@ class Config:
         leave a half-written ``config.yaml`` that the Go gateway
         refuses to reload.
         """
-        path = os.path.join(self.data_dir, CONFIG_FILE_NAME)
+        path = str(config_path_for_data_dir(self.data_dir))
         dataclass_data = _config_to_dict(self)
         owned_keys = _owned_top_level_keys(self)
         with locked_config_yaml(path):
@@ -2450,6 +2500,7 @@ def locked_config_yaml(path: str):
 
 def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
     """Atomically write YAML without widening config.yaml permissions."""
+    _assert_config_write_allowed(path, data)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     existing_mode: int | None = None
@@ -2464,8 +2515,8 @@ def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
         os.unlink(tmp)
     except FileNotFoundError:
         pass
-    except OSError:
-        pass
+    except OSError as exc:
+        _log.debug("config: cannot remove stale temp file %s: %s", tmp, exc)
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(tmp, flags, 0o600)
@@ -2482,7 +2533,7 @@ def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
         raise
 
     if existing_mode is not None and existing_mode != 0o600:
-        target_mode = existing_mode & 0o600
+        target_mode = existing_mode & 0o644
         if target_mode == 0:
             target_mode = 0o600
         try:
@@ -4183,6 +4234,8 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                     os.environ[key] = value
     except FileNotFoundError:
         pass
+    except OSError as exc:
+        _log.debug("config: cannot read %s: %s", env_path, exc)
 
 
 def _warn_plaintext_secrets(cfg: Config) -> None:
@@ -4252,7 +4305,7 @@ def load() -> Config:
     """Load config from ~/.defenseclaw/config.yaml, applying defaults."""
     data_dir = str(default_data_path())
     _load_dotenv_into_os(data_dir)
-    cfg_file = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_file = str(config_path())
 
     raw: dict[str, Any] = {}
     try:

@@ -32,18 +32,18 @@ than hand-editing YAML.
 
 from __future__ import annotations
 
-import contextlib
 import copy
 import ipaddress
 import os
 import re
 import socket
-import tempfile
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 import yaml
+
+from defenseclaw.config import config_path_for_data_dir, write_config_yaml_secure
 
 # ---------------------------------------------------------------------------
 # Constants mirrored with internal/gateway/webhook.go and internal/config
@@ -192,7 +192,7 @@ def apply_webhook(
             f"webhook name {derived_name!r} must match {_NAME_RE.pattern}",
         )
 
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     raw = _load_yaml(cfg_path)
     before = copy.deepcopy(raw)
 
@@ -276,7 +276,7 @@ def apply_webhook(
 
 def list_webhooks(data_dir: str) -> list[WebhookView]:
     """Return every configured webhook entry in file order."""
-    raw = _load_yaml(os.path.join(data_dir, CONFIG_FILE_NAME))
+    raw = _load_yaml(str(config_path_for_data_dir(data_dir)))
     out: list[WebhookView] = []
     for entry in raw.get("webhooks") or []:
         if not isinstance(entry, dict):
@@ -313,7 +313,7 @@ def list_webhooks(data_dir: str) -> list[WebhookView]:
 
 def set_webhook_enabled(name: str, enabled: bool, data_dir: str) -> WebhookWriteResult:
     """Flip the ``enabled`` flag on a named webhook."""
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     raw = _load_yaml(cfg_path)
     webhooks = raw.get("webhooks")
     if not isinstance(webhooks, list):
@@ -337,7 +337,7 @@ def set_webhook_enabled(name: str, enabled: bool, data_dir: str) -> WebhookWrite
 
 def remove_webhook(name: str, data_dir: str) -> WebhookWriteResult:
     """Delete the webhook entry with ``name``."""
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     raw = _load_yaml(cfg_path)
     webhooks = raw.get("webhooks")
     if not isinstance(webhooks, list):
@@ -558,27 +558,7 @@ def _load_yaml(path: str) -> dict[str, Any]:
 
 
 def _write_yaml(path: str, data: dict[str, Any]) -> None:
-    """Atomically write *data* as YAML to *path* with 0600 permissions.
-
-    The staging file is created via :func:`tempfile.mkstemp` (``O_EXCL``)
-    in the target directory rather than a predictable ``<path>.tmp``. A
-    predictable temp name lets a local attacker pre-create or symlink it
-    to hijack the write or read the secret-bearing config mid-flight, and
-    a plain ``open()`` would also leave the file world-readable; we force
-    0600 since this config embeds webhook secrets (F-0441).
-    """
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".webhooks.", suffix=".tmp", dir=directory)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as f:
-            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+    write_config_yaml_secure(path, data)
 
 
 # ---------------------------------------------------------------------------

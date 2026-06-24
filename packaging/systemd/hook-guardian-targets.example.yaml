@@ -1,0 +1,5 @@
+version: 1
+targets:
+  - user: ubuntu
+    connector: codex
+    agent_version: "codex-cli 0.142.0"

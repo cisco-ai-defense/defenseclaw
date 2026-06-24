@@ -19,9 +19,12 @@ package gateway
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -295,5 +298,138 @@ func TestRunGuardrailMulti_FailFastProxyGuard(t *testing.T) {
 	}
 	if want := "requires a proxy binding"; !strings.Contains(err.Error(), want) {
 		t.Errorf("error %q does not mention %q", err.Error(), want)
+	}
+}
+
+func TestRunGuardrailManagedEnterpriseSingleHookSkipsServiceHomeLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
+	prevCodex := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = codexConfig
+	t.Cleanup(func() { connector.CodexConfigPathOverride = prevCodex })
+
+	s := &Sidecar{
+		cfg: &config.Config{
+			DataDir:        dir,
+			DeploymentMode: string(config.DeploymentModeManagedEnterprise),
+			Gateway: config.GatewayConfig{
+				APIPort: 18970,
+			},
+			Guardrail: config.GuardrailConfig{
+				Enabled:      true,
+				Connector:    "codex",
+				Mode:         "observe",
+				HookSelfHeal: true,
+			},
+		},
+		health: NewSidecarHealth(),
+		router: NewEventRouter(nil, nil, nil, false, nil),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.runGuardrail(ctx) }()
+	waitForGuardrailState(t, s, errCh, StateRunning)
+	cancel()
+	requireGuardrailExitCleanly(t, errCh)
+
+	assertPathMissing(t, codexConfig)
+	assertPathMissing(t, filepath.Join(dir, "hooks", "codex-hook.sh"))
+	snap := s.health.Snapshot()
+	if got := snap.Guardrail.Details["lifecycle_manager"]; got != "enterprise_hook_guardian" {
+		t.Fatalf("lifecycle_manager = %v, want enterprise_hook_guardian", got)
+	}
+}
+
+func TestRunGuardrailMultiManagedEnterpriseSkipsServiceHomeLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
+	claudeSettings := filepath.Join(t.TempDir(), ".claude", "settings.json")
+	prevCodex := connector.CodexConfigPathOverride
+	prevClaude := connector.ClaudeCodeSettingsPathOverride
+	connector.CodexConfigPathOverride = codexConfig
+	connector.ClaudeCodeSettingsPathOverride = claudeSettings
+	t.Cleanup(func() {
+		connector.CodexConfigPathOverride = prevCodex
+		connector.ClaudeCodeSettingsPathOverride = prevClaude
+	})
+
+	s := &Sidecar{
+		cfg: &config.Config{
+			DataDir:        dir,
+			DeploymentMode: string(config.DeploymentModeManagedEnterprise),
+			Gateway: config.GatewayConfig{
+				APIPort: 18971,
+			},
+			Guardrail: config.GuardrailConfig{
+				Enabled: true,
+				Mode:    "observe",
+				Connectors: map[string]config.PerConnectorGuardrailConfig{
+					"codex":      {},
+					"claudecode": {},
+				},
+			},
+		},
+		health: NewSidecarHealth(),
+		router: NewEventRouter(nil, nil, nil, false, nil),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.runGuardrailMulti(ctx) }()
+	waitForGuardrailState(t, s, errCh, StateRunning)
+	cancel()
+	requireGuardrailExitCleanly(t, errCh)
+
+	assertPathMissing(t, codexConfig)
+	assertPathMissing(t, claudeSettings)
+	assertPathMissing(t, filepath.Join(dir, "hooks", "codex-hook.sh"))
+	assertPathMissing(t, filepath.Join(dir, "hooks", "claudecode-hook.sh"))
+	snap := s.health.Snapshot()
+	if got := snap.Guardrail.Details["lifecycle_manager"]; got != "enterprise_hook_guardian" {
+		t.Fatalf("lifecycle_manager = %v, want enterprise_hook_guardian", got)
+	}
+	if len(snap.Connectors) != 2 {
+		t.Fatalf("registered connectors = %d, want 2", len(snap.Connectors))
+	}
+}
+
+func waitForGuardrailState(t *testing.T, s *Sidecar, errCh <-chan error, want SubsystemState) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case err := <-errCh:
+			t.Fatalf("guardrail exited before state %s: %v", want, err)
+		case <-deadline:
+			t.Fatalf("timed out waiting for guardrail state %s; snapshot=%+v", want, s.health.Snapshot().Guardrail)
+		case <-tick.C:
+			if s.health.Snapshot().Guardrail.State == want {
+				return
+			}
+		}
+	}
+}
+
+func requireGuardrailExitCleanly(t *testing.T, errCh <-chan error) {
+	t.Helper()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("guardrail returned error after cancellation: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("guardrail did not exit after cancellation")
+	}
+}
+
+func assertPathMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err == nil {
+		t.Fatalf("path %s exists; managed enterprise gateway must not create service-account hook files", path)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat %s: %v", path, err)
 	}
 }

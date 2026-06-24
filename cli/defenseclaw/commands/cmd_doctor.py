@@ -499,8 +499,11 @@ def _http_probe(
 
 
 def _check_config(cfg, r: _DoctorResult) -> None:
-    if os.path.isfile(os.path.join(cfg.data_dir, "config.yaml")):
-        _emit("pass", "Config file", cfg.data_dir + "/config.yaml", r=r)
+    from defenseclaw.config import config_path_for_data_dir
+
+    cfg_path = str(config_path_for_data_dir(cfg.data_dir))
+    if os.path.isfile(cfg_path):
+        _emit("pass", "Config file", cfg_path, r=r)
     else:
         _emit("fail", "Config file", "not found — run 'defenseclaw init'", r=r)
 
@@ -2585,10 +2588,11 @@ def _truthy_config_bool(value) -> bool:
 
 def _splunk_hec_tls_verify_enabled(cfg, d) -> bool:
     """Resolve effective TLS verification for a Splunk HEC doctor probe."""
-    from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.observability.writer import _load_yaml
 
     try:
-        doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
+        doc = _load_yaml(str(config_path_for_data_dir(cfg.data_dir)))
     except Exception:
         doc = {}
 
@@ -2616,10 +2620,11 @@ def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
     """
     import os
 
-    from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.observability.writer import _load_yaml
 
     try:
-        doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
+        doc = _load_yaml(str(config_path_for_data_dir(cfg.data_dir)))
     except Exception:
         return
     sinks = doc.get("audit_sinks") or []
@@ -2708,11 +2713,12 @@ def _resolve_audit_sink_endpoint_and_token(cfg, d) -> tuple[str, str]:
     # Late import: this module is loaded on every CLI invocation, but
     # the YAML read only matters for operators who have audit sinks.
     # _load_yaml takes a full file path, not a data_dir — mirror the
-    # writer's layout (CONFIG_FILE_NAME under data_dir).
-    from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
+    # writer's layout, respecting explicit managed config overrides.
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.observability.writer import _load_yaml
 
     try:
-        doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
+        doc = _load_yaml(str(config_path_for_data_dir(cfg.data_dir)))
     except Exception:
         return d.endpoint, ""
 

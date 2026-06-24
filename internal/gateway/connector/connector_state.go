@@ -306,13 +306,9 @@ func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
 	if previous.ContractID != "" && current.ContractID != "" && previous.ContractID != current.ContractID {
 		return true
 	}
-	if len(previous.HookScriptDigests) > 0 && len(current.HookScriptDigests) > 0 {
-		for name, digest := range previous.HookScriptDigests {
-			if current.HookScriptDigests[name] != "" && current.HookScriptDigests[name] != digest {
-				return true
-			}
-		}
-	}
+	// Hook script digests are intentionally not a boot/reconcile drift gate:
+	// changed script bytes are the thing setup/guardian repair is supposed to
+	// overwrite. Treat only agent/contract identity changes as contract drift.
 	return false
 }
 

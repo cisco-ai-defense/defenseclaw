@@ -1,0 +1,220 @@
+---
+title: Enterprise deployment
+description: Run DefenseClaw as a managed operating-system service with admin-owned configuration, binaries, and runtime state.
+keywords:
+  - DefenseClaw enterprise deployment
+  - managed_enterprise
+  - systemd
+  - launchd
+  - privileged service
+  - config.yaml
+---
+
+Enterprise deployment is for endpoints where DefenseClaw policy must be controlled by administrators, not by the interactive user running Codex, Claude Code, Cursor, Antigravity, or another AI agent.
+
+<Callout title="Managed mode boundary">
+Set `deployment_mode: managed_enterprise` when DefenseClaw is installed as an operating-system service. In this mode, `config.yaml` is treated as an administrator-owned policy file and runtime HTTP PATCH changes are rejected.
+</Callout>
+
+## What moves to system scope
+
+| Surface | Linux path | macOS path | Owner |
+| --- | --- | --- | --- |
+| Binaries | `/opt/defenseclaw/bin` | `/Library/DefenseClaw/bin` | root/admin |
+| Config | `/etc/defenseclaw/config.yaml` | `/Library/Application Support/DefenseClaw/config.yaml` | root/admin |
+| Runtime state | `/var/lib/defenseclaw` | `/Library/Application Support/DefenseClaw` | service identity |
+| Logs | `/var/log/defenseclaw` | `/Library/Logs/DefenseClaw` | service identity |
+| Linux service | `/etc/systemd/system/defenseclaw-gateway.service` | n/a | root |
+| macOS service | n/a | `/Library/LaunchDaemons/com.defenseclaw.gateway.plist` | root |
+
+User-owned agent configuration remains in user space. Examples include `~/.codex/config.toml`, `~/.claude/settings.json`, and `~/.gemini/config/hooks.json`. DefenseClaw can only harden those files by installing and repairing hooks through a privileged enterprise controller; users still own the agent's native configuration file.
+
+## Linux systemd layout
+
+Create a service user and the managed directories:
+
+```bash
+sudo useradd --system --home /var/lib/defenseclaw --shell /usr/sbin/nologin defenseclaw
+sudo install -d -o root -g defenseclaw -m 0750 /etc/defenseclaw
+sudo install -d -o root -g root -m 0755 /opt/defenseclaw/bin
+sudo install -d -o defenseclaw -g defenseclaw -m 0750 /var/lib/defenseclaw /var/log/defenseclaw
+```
+
+Install the binaries and service files:
+
+```bash
+sudo install -o root -g root -m 0755 defenseclaw-gateway /opt/defenseclaw/bin/defenseclaw-gateway
+sudo install -o root -g root -m 0755 defenseclaw /opt/defenseclaw/bin/defenseclaw
+sudo install -D -o root -g root -m 0644 packaging/systemd/defenseclaw-gateway.service /etc/systemd/system/defenseclaw-gateway.service
+sudo install -D -o root -g root -m 0644 packaging/systemd/defenseclaw-hook-guardian@.service /etc/systemd/system/defenseclaw-hook-guardian@.service
+sudo install -D -o root -g root -m 0644 packaging/systemd/defenseclaw-hook-guardian.service /etc/systemd/system/defenseclaw-hook-guardian.service
+sudo install -D -o root -g root -m 0644 packaging/systemd/defenseclaw-hook-guardian.timer /etc/systemd/system/defenseclaw-hook-guardian.timer
+```
+
+Create `/etc/defenseclaw/config.yaml`:
+
+```yaml
+config_version: 6
+deployment_mode: managed_enterprise
+data_dir: /var/lib/defenseclaw
+audit_db: /var/lib/defenseclaw/audit.db
+judge_bodies_db: /var/lib/defenseclaw/judge_bodies.db
+plugin_dir: /var/lib/defenseclaw/plugins
+policy_dir: /var/lib/defenseclaw/policies
+gateway:
+  device_key_file: /var/lib/defenseclaw/device.key
+  api_bind: 127.0.0.1
+  api_port: 18970
+  config_reload:
+    mode: hot
+guardrail:
+  enabled: true
+  mode: action
+  scanner_mode: both
+application_protection:
+  enabled: false
+```
+
+Set ownership and start the service:
+
+```bash
+sudo chown root:defenseclaw /etc/defenseclaw/config.yaml
+sudo chmod 0640 /etc/defenseclaw/config.yaml
+sudo systemctl daemon-reload
+sudo systemctl enable --now defenseclaw-gateway.service
+```
+
+The packaged unit sets:
+
+```bash
+DEFENSECLAW_HOME=/var/lib/defenseclaw
+DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
+```
+
+`DEFENSECLAW_CONFIG` lets the service keep administrator policy in `/etc` while runtime state remains in `/var/lib`.
+
+The unit also pins `StateDirectoryMode=0750`, `RuntimeDirectoryMode=0750`, and `LogsDirectoryMode=0750`; do not rely on systemd's default directory modes for secret-bearing runtime state. It enables a restrictive service sandbox (`ProtectSystem=strict`, `ProtectHome=true`, private devices/tmp, kernel and control-group protections, hidden non-service `/proc` entries, the `@system-service` syscall allow-list, no realtime scheduling, no SUID/namespace escalation, and an empty capability bounding set). If your deployment needs host-wide user discovery or hook repair, run that as the enterprise guardian component rather than widening the gateway service sandbox.
+
+## Per-user hook guardian
+
+The managed gateway service must not write directly to `/home`. To install or repair hook-native connectors for real interactive users, run the short-lived guardian command as an administrator:
+
+```bash
+sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml \
+  /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks install \
+  --user ubuntu \
+  --connector codex \
+  --agent-version "codex-cli 0.142.0"
+```
+
+The guardian command:
+
+- targets an explicit user via `--user` or `--user-home`;
+- rejects proxy/plugin connectors;
+- refuses first-time install when the agent hook config file is missing;
+- rejects hook config paths outside the target home, including unsafe symlink escapes;
+- writes a connector-scoped hook token, not the gateway administrator token, into the user's hook runtime;
+- preserves the user's ownership on patched hook files and per-user hook scripts;
+- applies the same action-mode hook-contract validation as gateway startup.
+
+For scheduled repair, create `/etc/defenseclaw/hook-guardian/<user>.env`:
+
+```bash
+DEFENSECLAW_GUARDIAN_CONNECTOR=codex
+DEFENSECLAW_GUARDIAN_AGENT_VERSION="codex-cli 0.142.0"
+```
+
+Then run the template unit:
+
+```bash
+sudo systemctl start defenseclaw-hook-guardian@ubuntu.service
+```
+
+Run one guardian invocation per user and connector. The template intentionally has narrower scope than a full root shell: it runs as root so it can repair user-owned files, sets `UMask=0077`, and limits its capability bounding set to ownership and DAC file access (`CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`). It needs write access to user homes so it can repair hook files and to `/var/lib/defenseclaw` so the shared CLI startup can open the audit DB and write guardian state. Do not remove `ProtectHome=true` from the always-on gateway service to solve per-user hooks.
+
+For periodic multi-user repair, create an explicit allow-list at `/etc/defenseclaw/hook-guardian/targets.yaml`:
+
+```yaml
+version: 1
+targets:
+  - user: ubuntu
+    connector: codex
+    agent_version: "codex-cli 0.142.0"
+  - user: alice
+    connector: claudecode
+    agent_version: "Claude Code v2.1.144"
+```
+
+Then run reconcile manually or enable the timer:
+
+```bash
+sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml \
+  /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks reconcile \
+  --manifest /etc/defenseclaw/hook-guardian/targets.yaml
+
+sudo systemctl enable --now defenseclaw-hook-guardian.timer
+```
+
+The manifest is an administrator-owned allow-list. The guardian does not enumerate every local user by default, so it will not write into service accounts, stale profiles, or users outside the enterprise policy.
+
+Each reconcile run writes `/var/lib/defenseclaw/hook_guardian_state.json`. `defenseclaw status` reads that file and reports the last manifest path, run time, target counts, and per-user repair failures under `Hook guardian`.
+
+## macOS LaunchDaemon layout
+
+Install the binary under `/Library/DefenseClaw/bin`, create `/Library/Application Support/DefenseClaw/config.yaml`, then install `packaging/launchd/com.defenseclaw.gateway.plist` into `/Library/LaunchDaemons/`.
+
+```bash
+sudo install -d -o root -g wheel -m 0755 /Library/DefenseClaw/bin
+sudo install -d -o root -g wheel -m 0750 "/Library/Application Support/DefenseClaw"
+sudo install -d -o root -g wheel -m 0750 /Library/Logs/DefenseClaw
+sudo install -o root -g wheel -m 0755 defenseclaw-gateway /Library/DefenseClaw/bin/defenseclaw-gateway
+sudo install -o root -g wheel -m 0644 packaging/launchd/com.defenseclaw.gateway.plist /Library/LaunchDaemons/com.defenseclaw.gateway.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.defenseclaw.gateway.plist
+sudo launchctl enable system/com.defenseclaw.gateway
+```
+
+The LaunchDaemon pins `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, `WorkingDirectory`, and `Umask=077`. It should be installed in the system domain from an administrator shell so standard users cannot unload it or replace its plist.
+
+## Security behavior
+
+Managed mode changes the runtime contract:
+
+- `config.yaml` is the only live configuration source.
+- The gateway validates managed config ownership and permissions before loading.
+- `/v1/guardrail/config` PATCH is rejected in managed mode; administrators edit the managed config file and let hot reload apply it.
+- Standard users cannot stop a system service, edit root-owned binaries, or write to administrator-owned config and policy files.
+- Hook credentials written into user-space agent configs must be scoped to hook submission only; never use a machine admin token in user-readable hook files.
+- The gateway service sandbox intentionally prevents broad host mutation. Per-user hook installation and repair belong to the guardian, MDM, or endpoint-management layer.
+
+## Automatic application protection
+
+Automatic application protection remains hook-native only. First activation requires a real hook config surface, such as an existing `~/.codex/config.toml`.
+
+In managed enterprise mode, automatic multi-user hook installation is intentionally fail-safe inside the gateway service. Leave `application_protection.enabled: false` in managed service configs and use the guardian command or endpoint-management tooling for user hooks. The gateway service account is not the Codex/Claude Code user, and it usually has a `nologin` shell; installing hooks into the service account's home does not protect real interactive users.
+
+Expected managed behavior:
+
+- Discover supported apps for each real login user.
+- Skip users without an existing hook config surface.
+- Patch eligible user hook files through the privileged guardian.
+- Preserve original file owner, group, and mode.
+- Store authoritative application-protection state under the managed data directory.
+- Report per-user hook drift and repair failures in `defenseclaw status`.
+
+## Per-user hook connectors
+
+The hardened gateway runs at system scope, but Codex, Claude Code, Cursor, and similar agents still read hook configuration from the interactive user's home directory. A working enterprise deployment therefore has two layers:
+
+1. The system service owns `/etc/defenseclaw/config.yaml`, `/opt/defenseclaw/bin`, and `/var/lib/defenseclaw`.
+2. A privileged installer or endpoint-management policy writes the hook entry into each targeted user's native agent config, such as `/home/alice/.codex/config.toml`.
+
+Do not use the service account's home directory as the hook target for user protection. The hook script may live in the user's DefenseClaw home or another managed per-user location, but it must post only to the local gateway hook endpoint using a hook-scoped token. The gateway accepts that token only for the matching connector hook/notify routes; it does not authorize status, policy reload, config mutation, scans, or other sidecar APIs. Standard users can still edit files they own; preventing hook removal requires the enterprise guardian, MDM profile, filesystem ACL policy, or equivalent endpoint-control mechanism.
+
+## Verify
+
+```bash
+systemctl status defenseclaw-gateway.service
+DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml DEFENSECLAW_HOME=/var/lib/defenseclaw defenseclaw status
+```
+
+Run full status from an administrator shell or from a support account that is allowed to read the managed config. Standard users should not need read access to secret-bearing `/etc/defenseclaw/config.yaml`; expose limited health through your endpoint-management tooling if users need self-service visibility. Configuration and service management require administrator privileges.

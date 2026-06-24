@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -2072,6 +2073,14 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
 		}
 		return nil, err
+	}
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+			}
+			return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
+		}
 	}
 
 	if err := validateGatewayConfigReloadMode(cfg.Gateway.ConfigReload.Mode); err != nil {

@@ -1,0 +1,13 @@
+[Unit]
+Description=Run DefenseClaw per-user hook guardian reconcile periodically
+Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=defenseclaw-hook-guardian.service
+
+[Install]
+WantedBy=timers.target

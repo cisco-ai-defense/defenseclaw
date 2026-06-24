@@ -59,6 +59,7 @@ from defenseclaw.config import (
     DEFENSECLAW_LLM_KEY_ENV,
     HILTConfig,
     PerConnectorGuardrailConfig,
+    config_path_for_data_dir,
 )
 from defenseclaw.config import (
     load as load_config,
@@ -91,7 +92,7 @@ _SETUP_RESTART_HANDLED_KEY = "defenseclaw._setup_restart_handled"
 
 
 def _config_yaml_path_from_ctx(ctx: click.Context) -> str | None:
-    """Return ``<data_dir>/config.yaml`` when the AppContext is loaded.
+    """Return the active config path when the AppContext is loaded.
 
     Some setup subcommands (notably ``setup migrate-llm``) are invoked
     before :func:`defenseclaw.main.cli` populates ``app.cfg``; in that
@@ -105,7 +106,7 @@ def _config_yaml_path_from_ctx(ctx: click.Context) -> str | None:
     data_dir = getattr(app.cfg, "data_dir", None)
     if not data_dir:
         return None
-    return os.path.join(data_dir, "config.yaml")
+    return str(config_path_for_data_dir(data_dir))
 
 
 def _safe_mtime(path: str | None) -> float | None:
@@ -409,7 +410,7 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
     # Backup before we mutate. We use the app's configured data_dir
     # rather than os.path.expanduser so this works inside sandboxed
     # tests and portable installs.
-    cfg_path = os.path.join(cfg.data_dir, "config.yaml")
+    cfg_path = str(config_path_for_data_dir(cfg.data_dir))
     if not no_backup and os.path.exists(cfg_path):
         backup_path = cfg_path + ".bak"
         shutil.copy2(cfg_path, backup_path)
@@ -740,7 +741,7 @@ def setup_llm(
         cfg.save()
 
         click.echo()
-        ux.ok(f"Saved to {os.path.join(cfg.data_dir, 'config.yaml')}")
+        ux.ok(f"Saved to {config_path_for_data_dir(cfg.data_dir)}")
         resolved = cfg.resolve_llm(target_path)
         key_env = resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
         key_state = _mask(os.environ.get(key_env, "")) if os.environ.get(key_env, "") else "(not set)"
@@ -792,7 +793,7 @@ def setup_llm(
     cfg.save()
 
     click.echo()
-    ux.ok(f"Saved to {os.path.join(cfg.data_dir, 'config.yaml')}")
+    ux.ok(f"Saved to {config_path_for_data_dir(cfg.data_dir)}")
     click.echo()
     ux.subhead("Next: defenseclaw doctor       # verify the unified LLM is reachable")
     if run_ping:

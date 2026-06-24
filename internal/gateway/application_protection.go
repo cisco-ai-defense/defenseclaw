@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -130,6 +131,18 @@ func (c *applicationProtectionController) OnDiscoveryReport(ctx context.Context,
 	defer c.mu.Unlock()
 
 	cfg := c.sidecar.cfg
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		state := applicationProtectionState{
+			Version:    1,
+			UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+			Enabled:    cfg.ApplicationProtection.Enabled,
+			LastScan:   formatTimeRFC3339(report.Summary.ScannedAt),
+			Active:     c.activeRowsLocked(),
+			LastErrors: copyStringMap(c.lastErrors),
+		}
+		c.publishStateLocked(state, StateDisabled, "managed_enterprise automatic protection is handled by the enterprise hooks guardian; the sandboxed gateway will not write user homes")
+		return
+	}
 	if !cfg.ApplicationProtection.Enabled {
 		state := applicationProtectionState{
 			Version:    1,
