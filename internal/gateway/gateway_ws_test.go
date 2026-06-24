@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -223,6 +224,9 @@ func assertPluginConfigPatch(t *testing.T, rawParams json.RawMessage, pluginName
 	json.Unmarshal(rawParams, &params)
 	if params.BaseHash == "" {
 		t.Error("baseHash should not be empty")
+	}
+	if !slices.Equal(params.ReplacePaths, []string{"plugins.allow"}) {
+		t.Errorf("replacePaths = %v, want [plugins.allow]", params.ReplacePaths)
 	}
 	var nested map[string]interface{}
 	if err := json.Unmarshal([]byte(params.Raw), &nested); err != nil {
