@@ -273,6 +273,32 @@ def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(link)) is True
 
 
+def test_trust_check_operator_prefix_wins_over_failed_default_ownership(monkeypatch, tmp_path):
+    # Regression: Homebrew npm globals live under a default prefix
+    # (/opt/homebrew/lib/node_modules) that fails F-0421 root-ownership on
+    # user-owned installs. Setup's "trust this directory?" prompt adds only
+    # the package bin dir; _is_trusted_binary_path must not return False
+    # when that narrower operator prefix matches after the default fails.
+    homebrew = tmp_path / "homebrew"
+    real = homebrew / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_text("#!/usr/bin/env node\n")
+    real.chmod(0o755)
+    real.parent.chmod(0o755)
+    link_dir = homebrew / "bin"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / "codex"
+    link.symlink_to(real)
+
+    monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+    monkeypatch.setenv(
+        "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
+        str(homebrew / "lib" / "node_modules" / "@openai" / "codex" / "bin"),
+    )
+
+    assert ad._is_trusted_binary_path(str(link)) is True
+
+
 def test_trust_check_accepts_claude_local_share_target(monkeypatch, tmp_path):
     real = tmp_path / ".local" / "share" / "claude" / "versions" / "2.1.139"
     real.parent.mkdir(parents=True, exist_ok=True)

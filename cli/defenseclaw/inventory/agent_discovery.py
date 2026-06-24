@@ -513,7 +513,11 @@ def _is_trusted_binary_path(binary_path: str) -> bool:
             # during passive discovery. Operator opt-in prefixes
             # (DEFENSECLAW_TRUSTED_BIN_PREFIXES) keep the looser checks.
             if prefix in default_prefixes and not _bin_chain_is_system_owned(resolved, prefix):
-                return False
+                # A user-owned Homebrew tree can fail the default-prefix
+                # ownership gate while a narrower operator opt-in prefix
+                # (DEFENSECLAW_TRUSTED_BIN_PREFIXES) still matches — keep
+                # scanning instead of rejecting early.
+                continue
             return True
     return False
 
