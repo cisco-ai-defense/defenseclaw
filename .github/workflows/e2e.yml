@@ -12,7 +12,7 @@ concurrency:
   # Pull-request E2E runs share a scarce self-hosted runner. Keep them queued
   # rather than canceling an in-flight PR job when another stacked PR updates or
   # is rerun; branch/manual/scheduled runs still collapse to the newest ref.
-  group: e2e-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'pull_request' }}
 
 jobs:
