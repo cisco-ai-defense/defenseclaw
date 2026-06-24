@@ -159,6 +159,32 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertTrue(cfg["guardrail"]["enabled"])
         self.assertEqual(cfg["guardrail"]["detection_strategy"], "regex_judge")
 
+    def test_sandbox_flag_reports_explicit_scope(self):
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "openclaw",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--sandbox",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        summary = json.loads(result.output)
+        sandbox_steps = [s for s in summary["setup"] if s["name"] == "Sandbox"]
+        self.assertEqual(len(sandbox_steps), 1, summary["setup"])
+        self.assertEqual(sandbox_steps[0]["status"], "warn")
+        self.assertIn("Linux-only", sandbox_steps[0]["detail"])
+        self.assertIn("OpenClaw/OpenShell-only", sandbox_steps[0]["detail"])
+        self.assertEqual(sandbox_steps[0]["next_command"], "defenseclaw sandbox setup")
+
     def test_with_judge_defaults_hook_coverage_to_all(self):
         result = self._invoke([
             "--non-interactive",

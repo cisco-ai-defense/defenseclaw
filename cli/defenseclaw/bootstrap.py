@@ -358,7 +358,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             StepResult(
                 "Sandbox",
                 "warn",
-                "sandbox bootstrap remains Linux-only; run the dedicated sandbox setup",
+                "sandbox setup is experimental, Linux-only, and OpenClaw/OpenShell-only",
                 "defenseclaw sandbox setup",
             )
         )
