@@ -222,6 +222,8 @@ The Go gateway tags every admission decision with `Reason="registry:<id>"` (or `
 | `--non-interactive` | off | Required for CI; missing required flags exit non-zero with a clear `error: --foo is required`. |
 | SHA-256 on `source_url` | required for `http_yaml` / `http_json` / `git` / `file` | Per-entry integrity; the scanner refuses to download an entry whose computed digest does not match. |
 
+Registry fetches use the same hardened URL path in `test` and `sync`: loopback, link-local, cloud-metadata, and private-network destinations are refused by default, including DNS resolutions that rebind into a reserved range. Use `--allow-private` only for a registry mirror you intentionally run on an internal network. Local `file` registries must use absolute paths, and remote entry downloads must pass the per-entry SHA-256 check before scanner promotion can happen.
+
 ## Inspect what landed
 
 ```bash

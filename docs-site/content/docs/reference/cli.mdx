@@ -57,6 +57,10 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage audit-log fan-out destinations (OTLP logs, Splunk HEC, generic HTTP JSONL). Distinct from `setup webhook`, which manages notifier webhooks. |
 | `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and persists to `~/.defenseclaw/.env`; `remove` only touches operator-added entries. All verbs accept `--json`. |
 
+<Callout title="Safety gates are intentional">
+Commands that execute local binaries or fetch remote content fail closed when the trust boundary is unclear. Connector version probes only run from trusted path prefixes; registry and scanner fetches reject loopback, link-local, cloud-metadata, and private-network targets unless explicitly allowed; `defenseclaw upgrade` verifies release artifacts before stopping the running gateway.
+</Callout>
+
 ## Guardrail
 
 Per-connector guardrail controls. `--connector X` is the explicit scope selector on a **multi-connector** install: reads narrow to one active connector, and writes land in `guardrail.connectors.<name>`. Omit `--connector` for the broad path. Reads show the full active roster; global enable/disable affects the whole guardrail; fail-mode, HILT, and block-message writes reconcile active connector posture where supported. On a single-connector install `--connector` is rejected because there is only one posture. All of these are on the Python `defenseclaw` CLI.
@@ -154,6 +158,12 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw tui` | Open the interactive operator UI. Pending-approvals panel, audit stream, settings. |
+
+## Upgrade
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw upgrade [--version X] [--yes]` | Upgrade the Python CLI and Go gateway from GitHub release artifacts without a source checkout. The command downloads and verifies the release checksum manifest, gateway archive, Python wheel, and upgrade manifest before stopping the gateway. macOS/Linux use the release tarball; Windows uses the release ZIP and installs `defenseclaw-gateway.exe`. `--allow-unverified` is an explicit unsafe override when a release cannot be cryptographically verified. |
 
 ## Uninstall / disable
 

@@ -1,14 +1,15 @@
 ---
 title: Install
-description: Install DefenseClaw with one curl command or build it from source. Covers macOS and Linux; pins Python 3.10+ and Go 1.26+ for source builds.
+description: Install DefenseClaw with curl on macOS/Linux, PowerShell on Windows, or build it from source. Pins Python 3.10+ and Go 1.26+ for source builds.
 keywords:
   - install DefenseClaw
   - defenseclaw curl install
+  - defenseclaw PowerShell install
   - defenseclaw source build
   - defenseclaw make all
 ---
 
-DefenseClaw ships pre-built binaries for macOS and Linux. The installer drops the `defenseclaw` CLI and `defenseclaw-gateway` sidecar into `~/.local/bin/`, creates `~/.defenseclaw/`, and sets up a virtualenv under `~/.defenseclaw/.venv/`.
+DefenseClaw ships pre-built binaries for macOS, Linux, and Windows. The macOS/Linux installer drops the `defenseclaw` CLI and `defenseclaw-gateway` sidecar into `~/.local/bin/`, creates `~/.defenseclaw/`, and sets up a virtualenv under `~/.defenseclaw/.venv/`. The Windows installer uses the same per-user layout under `%USERPROFILE%`: `defenseclaw-gateway.exe` plus a `defenseclaw.cmd` CLI shim in `%USERPROFILE%\.local\bin`, with the virtualenv under `%USERPROFILE%\.defenseclaw\.venv`.
 
 <Callout>
 Installing as `root` is supported but discouraged — DefenseClaw is per-user by design so each operator's audit DB and connector state stays isolated.
@@ -18,9 +19,10 @@ Installing as `root` is supported but discouraged — DefenseClaw is per-user by
 
 | Requirement | Version |
 | --- | --- |
-| Python | 3.10+ |
+| Python | 3.10+ for source builds; Windows installer manages Python 3.12 through `uv` |
 | Go | 1.26.2+ (only for source builds) |
 | Node.js | 18+ (only for the OpenClaw plugin, source builds) |
+| PowerShell | Windows PowerShell 5.1+ or PowerShell 7+ for the Windows installer |
 | Docker | Optional, for local observability and Splunk bundles |
 
 ## What's bundled (LLM backends)
@@ -37,9 +39,9 @@ The base install ships everything DefenseClaw needs to talk to the major LLM bac
 
 ## Pick an install path
 
-<Tabs items={['curl (recommended)', 'From source']}>
+<Tabs items={['macOS/Linux curl', 'Windows PowerShell', 'From source']}>
 
-<Tab value="curl (recommended)">
+<Tab value="macOS/Linux curl">
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash
@@ -52,6 +54,23 @@ If you'd rather skip the wizard entirely (CI, scripted demos), use the zero-prom
 
 ```bash
 defenseclaw quickstart --connector codex
+```
+
+</Tab>
+
+<Tab value="Windows PowerShell">
+
+```powershell
+irm https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.ps1 | iex
+defenseclaw init
+```
+
+The PowerShell installer downloads the Windows release ZIP for your architecture, verifies it against the release checksums, installs `defenseclaw-gateway.exe`, creates the CLI shim, and adds `%USERPROFILE%\.local\bin` to the user `PATH`. It also installs `uv` when needed so the Python CLI can run from the per-user virtualenv.
+
+For non-interactive demos or CI, download the script and pass flags directly:
+
+```powershell
+.\install.ps1 -Connector codex -Quickstart -Yes
 ```
 
 </Tab>
@@ -99,6 +118,8 @@ defenseclaw init
     <File name="defenseclaw-gateway" />
   </Folder>
 </Files>
+
+On Windows, read the same tree under `%USERPROFILE%`: `%USERPROFILE%\.defenseclaw\` for config, audit state, hooks, and the virtualenv; `%USERPROFILE%\.local\bin\` for `defenseclaw.cmd` and `defenseclaw-gateway.exe`.
 
 ## Verify
 
