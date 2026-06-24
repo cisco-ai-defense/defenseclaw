@@ -536,6 +536,11 @@ def _skill_info_card(
     suppress_global_action_only: bool = False,
 ) -> dict[str, Any] | None:
     """Build the rendered ``skill info`` payload for one connector scope."""
+    if (
+        isinstance(info_map, dict)
+        and "not found" in str(info_map.get("error") or "").lower()
+    ):
+        info_map = None
     scan_map = _build_scan_map(app.store)
     scan_entry: dict[str, Any] | None = None
     if (
