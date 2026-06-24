@@ -21,6 +21,7 @@ import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -91,6 +92,20 @@ class SeverityCountsInScanMapTests(unittest.TestCase):
         data = json.loads(result.output.strip())
         self.assertIn("scan", data)
         self.assertEqual(data["scan"]["severity_counts"]["critical"], 1)
+
+    @patch("defenseclaw.commands.cmd_skill._list_skills_via_sidecar", return_value=None)
+    @patch(
+        "defenseclaw.commands.cmd_skill._run_openclaw",
+        return_value=json.dumps({"error": "not found", "skill": "myskill", "connector": "openclaw"}),
+    )
+    def test_skill_info_json_ignores_openclaw_not_found_payload(self, _mock_openclaw, _mock_sidecar):
+        result = self.runner.invoke(
+            skill, ["info", "myskill", "--json"], obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.output.strip())
+        self.assertIn("scan", data)
+        self.assertEqual(data["scan"]["severity_counts"]["high"], 2)
 
 
 if __name__ == "__main__":
