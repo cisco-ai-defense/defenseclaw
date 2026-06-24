@@ -59,6 +59,8 @@ from defenseclaw.config import (
     DEFENSECLAW_LLM_KEY_ENV,
     HILTConfig,
     PerConnectorGuardrailConfig,
+)
+from defenseclaw.config import (
     load as load_config,
 )
 from defenseclaw.connector_contracts import (
