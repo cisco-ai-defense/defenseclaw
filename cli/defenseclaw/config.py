@@ -188,7 +188,7 @@ def config_path() -> Path:
     override = os.environ.get(CONFIG_PATH_ENV)
     if override:
         return Path(override)
-    return default_data_path() / CONFIG_FILE_NAME
+    return Path(default_data_path()) / CONFIG_FILE_NAME
 
 
 def config_path_for_data_dir(data_dir: str | os.PathLike[str] | None = None) -> Path:
@@ -2533,8 +2533,10 @@ def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
         raise
 
     if existing_mode is not None and existing_mode != 0o600:
-        target_mode = existing_mode & 0o644
-        if target_mode == 0:
+        target_mode = existing_mode & 0o600
+        if target_mode == 0o600 and existing_mode & 0o077 == 0o040:
+            target_mode = 0o640
+        elif target_mode == 0:
             target_mode = 0o600
         try:
             os.chmod(tmp, target_mode)

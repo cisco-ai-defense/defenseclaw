@@ -2618,8 +2618,6 @@ def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
     doctor so operators are nudged toward token_env before it becomes a
     security finding.
     """
-    import os
-
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.observability.writer import _load_yaml
 

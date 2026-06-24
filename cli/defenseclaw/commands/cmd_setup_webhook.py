@@ -62,7 +62,6 @@ from defenseclaw.webhooks import (
     validate_webhook_url,
 )
 from defenseclaw.webhooks.writer import (
-    CONFIG_FILE_NAME,
     DEFAULT_MIN_SEVERITY,
     DEFAULT_TIMEOUT_SECONDS,
     VALID_EVENT_CATEGORIES,

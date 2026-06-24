@@ -75,9 +75,6 @@ from defenseclaw.observability.writer import _NAME_RE as _SINK_NAME_RE
 # re-implemented) because the writer module is outside this lane's edit
 # surface; the per-connector routing target is the only difference.
 from defenseclaw.observability.writer import (
-    CONFIG_FILE_NAME as _OBS_CONFIG_FILE_NAME,
-)
-from defenseclaw.observability.writer import (
     _apply_secret,
     _build_sink_entry,
     _destination_name,
