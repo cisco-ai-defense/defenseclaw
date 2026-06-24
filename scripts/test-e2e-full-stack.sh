@@ -832,17 +832,39 @@ copy_skill_fixture() {
     local fixture_dir="$1"
     local dest_root="$2"
     local dest_name="$3"
+    local stage_parent stage_dir
     ensure_directory_writable "$dest_root" "copying skill fixture"
-    mkdir -p "$dest_root/$dest_name"
-    cp -R "$fixture_dir"/. "$dest_root/$dest_name/"
+    stage_parent=$(dirname "$dest_root")
+    stage_dir=$(mktemp -d "$stage_parent/.defenseclaw-skill-fixture.XXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/defenseclaw-skill-fixture.XXXXXX")
+    if ! cp -R "$fixture_dir"/. "$stage_dir/"; then
+        rm -rf "$stage_dir"
+        return 1
+    fi
+    chmod -R u+rwX,go+rX "$stage_dir" 2>/dev/null || true
+    rm -rf "$dest_root/$dest_name" 2>/dev/null || true
+    if ! mv "$stage_dir" "$dest_root/$dest_name"; then
+        rm -rf "$stage_dir"
+        return 1
+    fi
 }
 
 copy_plugin_fixture() {
     local fixture_dir="$1"
     local dest_root="$2"
     local dest_name="$3"
-    mkdir -p "$dest_root/$dest_name"
-    cp -R "$fixture_dir"/. "$dest_root/$dest_name/"
+    local stage_parent stage_dir
+    stage_parent=$(dirname "$dest_root")
+    stage_dir=$(mktemp -d "$stage_parent/.defenseclaw-plugin-fixture.XXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/defenseclaw-plugin-fixture.XXXXXX")
+    if ! cp -R "$fixture_dir"/. "$stage_dir/"; then
+        rm -rf "$stage_dir"
+        return 1
+    fi
+    chmod -R u+rwX,go+rX "$stage_dir" 2>/dev/null || true
+    rm -rf "$dest_root/$dest_name" 2>/dev/null || true
+    if ! mv "$stage_dir" "$dest_root/$dest_name"; then
+        rm -rf "$stage_dir"
+        return 1
+    fi
     if [ -f "$dest_root/$dest_name/package.json" ]; then
         PLUGIN_FIXTURE_PATH="$dest_root/$dest_name/package.json" PLUGIN_FIXTURE_NAME="$dest_name" python3 - <<'PY'
 import json
