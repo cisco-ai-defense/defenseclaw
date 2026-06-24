@@ -1,6 +1,6 @@
 ---
 title: Disabling guardrail
-description: defenseclaw setup guardrail --disable rolls everything back. Connector hooks are removed (or restored from the byte-for-byte backup), the proxy stops, and the agent talks directly to its native upstream again.
+description: defenseclaw setup guardrail --disable is the global rollback. Connector hooks are removed (or restored from the byte-for-byte backup), the proxy stops, and agents talk directly to their native upstreams again.
 keywords:
   - disable DefenseClaw guardrail
   - DefenseClaw uninstall connector
@@ -11,11 +11,18 @@ keywords:
 defenseclaw setup guardrail --disable
 ```
 
-This is the safe rollback. It runs the active connector's `Teardown()`, removes DefenseClaw-owned hook entries (or restores agent files from the hash-checked backup), stops the guardrail proxy, and clears the `guardrail.enabled` flag in `~/.defenseclaw/config.yaml`.
+This is the safe rollback. It runs teardown for the configured connector wiring, removes DefenseClaw-owned hook entries (or restores agent files from the hash-checked backup), stops the guardrail proxy, and clears the `guardrail.enabled` flag in `~/.defenseclaw/config.yaml`.
 
 <Callout>
 `--disable` always restarts the gateway. Leaving the proxy running defeats the purpose of disabling.
 </Callout>
+
+On a multi-connector install, `setup guardrail --disable` is intentionally broad: it unwires the active connector roster, stops the gateway path, and clears the global guardrail enable flag. To retire only one connector while keeping the rest protected, use the scoped kill switch instead:
+
+```bash
+defenseclaw guardrail disable --connector codex
+defenseclaw guardrail enable  --connector codex
+```
 
 ## What it touches
 

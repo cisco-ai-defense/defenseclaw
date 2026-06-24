@@ -60,7 +60,7 @@ X-DefenseClaw-Client: cli
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/health` | exempt | Liveness + uptime + version. Used by k8s probes and `defenseclaw doctor`. |
-| `GET` | `/status` | required | Active connector + enforcement flags + `connector_mode` (active connector) + `connector_modes` (one entry per active connector: `connector`, `mode`, `telemetry`, `proxy_intercept`) + provenance. Used by `defenseclaw status` and the TUI. |
+| `GET` | `/status` | required | Active connector roster + enforcement flags + legacy `connector_mode` + `connector_modes` (one entry per active connector: `connector`, `mode`, `telemetry`, `proxy_intercept`) + provenance. Used by `defenseclaw status` and the TUI. |
 | `GET` | `/v1/connectors` | required | Lists every connector registered in the gateway (name, description, source, hook capabilities, tool inspection mode). |
 
 `GET /status` carries both a singular and a plural connector field so old and new clients keep working on a multi-connector install:
@@ -85,7 +85,7 @@ X-DefenseClaw-Client: cli
 }
 ```
 
-- **`connector_mode`** (singular) is the **active connector's** mode — kept for back-compat with clients written before multi-connector existed. On a single-connector install it's the only posture; on a fan-out install it reflects the active connector only.
+- **`connector_mode`** (singular) is a legacy compatibility value for clients written before multi-connector existed. On a fan-out install it is not the authoritative roster view; use `connector_modes` instead.
 - **`connector_modes`** (plural) is the authoritative per-connector view: one entry per **active** connector, each with `connector` (name), `mode` (`observe` / `action`), `telemetry` (the signal sources wired for it), and `proxy_intercept` (whether it owns a proxy listener — `true` only for the proxy connectors). `defenseclaw-gateway status` renders its per-connector **"Connector Mode"** section directly from this array.
 
 ### Connector hooks
@@ -149,7 +149,7 @@ The `/api/v1/inspect/*` family is the hot path that connector hooks and the Open
 | --- | --- | --- |
 | `GET` | `/skills` | List discovered skills with admission state. |
 | `GET` | `/mcps` | List discovered MCP servers with admission state. |
-| `GET` | `/tools/catalog` | Aggregate tool catalogue across the active connector. |
+| `GET` | `/tools/catalog` | Aggregate tool catalogue across the active connector roster. |
 
 ### Policy
 

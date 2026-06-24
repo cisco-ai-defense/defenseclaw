@@ -36,6 +36,7 @@ The CLI auto-discovers MCP server lists from the connectors you've set up, so yo
 
 ```bash
 defenseclaw mcp scan --all
+defenseclaw mcp scan --connector cursor
 ```
 
 The default sources include:
@@ -47,7 +48,7 @@ The default sources include:
 - `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json` → `mcpServers` (Antigravity)
 - Connector-specific paths registered by `defenseclaw setup guardrail`.
 
-Each server is scanned independently and findings are tagged with the connector that discovered them.
+Each server is scanned independently and findings are tagged with the connector that discovered them. Use `--connector <name>` on list, scan, set, unset, block, allow, and unblock commands when you want one connector's MCP source instead of the full configured roster. Without `--connector`, `mcp set` writes the server into every configured connector's MCP source, and `mcp unset` removes it from every configured connector that has it.
 
 ## One-shot scans
 
@@ -57,7 +58,7 @@ Each server is scanned independently and findings are tagged with the connector 
 defenseclaw mcp scan --all --json | jq -s '[.[].findings[]]'
 ```
 
-CI-friendly. Walks every server discovered across **all active connectors'** config files — not just `openclaw.json`, but every connector's MCP source (`claude_desktop_config.json`, `~/.cursor/mcp.json`, Codex, Copilot, …) — and emits **one JSON object per server** as a stream of top-level values (NDJSON-shaped, not wrapped in an array). `jq -s` slurps the stream into an array so a single pipeline can iterate findings across servers; for line-oriented tools use `--json | jq -c '.findings[]'` instead.
+CI-friendly. Walks every server discovered across **all configured connectors'** config files — not just `openclaw.json`, but every connector's MCP source (`claude_desktop_config.json`, `~/.cursor/mcp.json`, Codex, Copilot, …) — and emits **one JSON object per server** as a stream of top-level values (NDJSON-shaped, not wrapped in an array). `jq -s` slurps the stream into an array so a single pipeline can iterate findings across servers; for line-oriented tools use `--json | jq -c '.findings[]'` instead.
   </Tab>
   <Tab value="Specific server">
 ```bash
@@ -158,7 +159,11 @@ defenseclaw policy activate permissive
 The watcher's verdict is the default. Operators always have manual override (block / allow act on the **whole server**, not on individual tools — the CLI doesn't take a `--tool` flag):
 
 ```bash
-defenseclaw mcp list                                         # what is configured + state
+defenseclaw mcp list                                         # what is configured + state across configured connectors
+defenseclaw mcp list --connector opencode                    # one connector's MCP source
+defenseclaw mcp set context7 --command uvx --args context7-mcp
+defenseclaw mcp set context7 --command uvx --args context7-mcp --connector opencode
+defenseclaw mcp unset context7 --connector opencode
 defenseclaw mcp block untrusted-fs --reason "exfil tool found"
 defenseclaw mcp allow cisco-internal --reason "first-party"
 ```

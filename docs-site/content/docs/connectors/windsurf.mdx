@@ -15,7 +15,7 @@ The Windsurf connector wires DefenseClaw into [Codeium's Cascade hooks](https://
 defenseclaw setup windsurf
 ```
 
-Pins `claw.mode=windsurf`, wires hooks against `~/.codeium/windsurf/hooks.json`. DefenseClaw discovers existing MCP / rules but never auto-creates workspace configuration. **There is no proxy-enforcement path** for Windsurf — blocking happens hook-side via Cascade's `pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, and `pre_mcp_tool_use` events. Windsurf has no native ask surface, so HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI.
+`setup windsurf` is shorthand for `setup guardrail --connector windsurf`: it adds or reconfigures Windsurf and wires hooks against `~/.codeium/windsurf/hooks.json`. DefenseClaw discovers existing MCP / rules but never auto-creates workspace configuration. **There is no proxy-enforcement path** for Windsurf — blocking happens hook-side via Cascade's `pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, and `pre_mcp_tool_use` events. Windsurf has no native ask surface, so HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI.
 
 #### What `setup windsurf` actually does
 
@@ -27,7 +27,7 @@ The wrapper accepts exactly three flags. The underlying guardrail config falls b
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
 
-Pinned by the alias regardless of flags: `claw.mode=windsurf`, `guardrail.connector=windsurf`, `guardrail.mode=observe`, `guardrail.scanner_mode=local`, `guardrail.judge.enabled=false`, `guardrail.detection_strategy=regex_only`. To tune any of those after install, use [`defenseclaw setup guardrail --connector windsurf`](/docs/setup/guardrail) — see the variations below.
+The alias defaults Windsurf to observe mode and can join an existing hook-connector roster when you choose **Add**. To tune Windsurf after install, keep using [`defenseclaw setup guardrail --connector windsurf`](/docs/setup/guardrail) — see the variations below.
 
 #### Common variations — pick the recipe that fits your phase
 
@@ -69,7 +69,7 @@ defenseclaw setup guardrail \
   --restart
 ```
 
-The alias keeps the connector pinned; the follow-up `setup guardrail` swaps in the strict rule pack, runs both local + [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) scanners, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events.
+The alias selects Windsurf; the follow-up `setup guardrail --connector windsurf` swaps in the strict rule pack, runs both local + [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) scanners, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events.
 
 </Tab>
 
@@ -95,7 +95,7 @@ Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Ca
 
 <Cards>
   <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Windsurf downgrades to confirm verdicts in the TUI / audit log since it has no native ask." />
-  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector windsurf` after the alias has pinned things." />
+  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector windsurf` when tuning Windsurf." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
 </Cards>

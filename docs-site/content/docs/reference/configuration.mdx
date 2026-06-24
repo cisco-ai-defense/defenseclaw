@@ -49,7 +49,7 @@ The shape below mirrors the dataclasses in `cli/defenseclaw/config.py` and the m
 
 ```yaml
 claw:
-  mode: claudecode             # active connector; pinned by setup aliases.
+  mode: claudecode             # single-connector mode; setup aliases select this with --connector.
                                # Set to `multi` automatically when more than one
                                # connector is active (see guardrail.connectors below).
                                # This value is mirrored to the OTel resource attr

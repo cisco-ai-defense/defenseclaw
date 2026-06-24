@@ -30,19 +30,21 @@ Run `defenseclaw setup guardrail` once. Reach for the auxiliary verbs only when 
 
 ## Connector aliases (thin wrappers around `setup guardrail`)
 
-Each alias pre-fills the connector flag and inherits every guardrail option. Pass `--mode observe` to run any of them in audit-only mode.
+Each alias pre-fills `setup guardrail --connector <name>` and inherits every guardrail option. Pass `--mode observe` to run any of them in audit-only mode. On a host with another hook connector already active, the setup flow can add the new connector to the roster instead of replacing the old one.
 
 <Cards>
-  <Card title="setup openclaw" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=openclaw, installs the fetch interceptor + before_tool_call plugin." />
-  <Card title="setup zeptoclaw" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=zeptoclaw, redirects api_base, runs scan + response-scan." />
-  <Card title="setup claude-code" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=claudecode and installs the PreToolUse / Stop hooks into Claude Code's settings.json." />
-  <Card title="setup codex" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=codex and installs the inspect-request / inspect-response hooks." />
-  <Card title="setup cursor" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=cursor and writes hooks.json plus MCP/skills/rules surfaces." />
-  <Card title="setup windsurf" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=windsurf — Cascade hooks plus local config discovery." />
-  <Card title="setup gemini-cli" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=geminicli and configures settings.json hooks plus native OTLP export." />
-  <Card title="setup copilot" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=copilot and writes global Copilot hook config." />
-  <Card title="setup hermes" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=hermes and wires config.yaml hooks for MCP, skills, and plugins." />
-  <Card title="setup opencode" href="/docs/setup/guardrail/aliases" description="Pins claw.mode=opencode and writes the auto-loaded DefenseClaw bridge plugin." />
+  <Card title="setup openclaw" href="/docs/setup/guardrail/aliases" description="Selects OpenClaw with --connector openclaw and installs the fetch interceptor + before_tool_call plugin." />
+  <Card title="setup zeptoclaw" href="/docs/setup/guardrail/aliases" description="Selects ZeptoClaw with --connector zeptoclaw, redirects api_base, runs scan + response-scan." />
+  <Card title="setup claude-code" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Claude Code with --connector claudecode and installs its hooks." />
+  <Card title="setup codex" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Codex with --connector codex and installs hooks, OTel, and notify wiring." />
+  <Card title="setup cursor" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Cursor with --connector cursor and writes hooks.json plus MCP/skills/rules surfaces." />
+  <Card title="setup windsurf" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Windsurf with --connector windsurf for Cascade hooks plus local config discovery." />
+  <Card title="setup gemini-cli" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Gemini CLI with --connector geminicli and configures hooks plus native OTLP export." />
+  <Card title="setup copilot" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures GitHub Copilot CLI with --connector copilot and writes hook config." />
+  <Card title="setup openhands" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures OpenHands with --connector openhands and writes lifecycle hooks." />
+  <Card title="setup antigravity" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Antigravity with --connector antigravity and writes agy lifecycle hooks." />
+  <Card title="setup hermes" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Hermes with --connector hermes and wires config.yaml hooks." />
+  <Card title="setup opencode" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures OpenCode with --connector opencode and writes the bridge plugin." />
 </Cards>
 
 ## Auxiliary setup verbs

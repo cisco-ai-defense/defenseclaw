@@ -119,7 +119,7 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 
 | Prompt (default) | Flag equivalent | Note |
 | --- | --- | --- |
-| **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `openclaw`, `zeptoclaw`. |
+| **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Explicitly selects the connector being configured. Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `openclaw`, `zeptoclaw`. |
 | **Hook connector quick setup** *(default: observe)* | `defenseclaw setup <hook-connector> --mode observe\|action` | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Copilot CLI, Hermes, OpenHands, Antigravity, and OpenCode all have one-line hook setup aliases. |
 | **Enable guardrail?** *(default: Y)* | implicit when `--connector` is set | Pass `--disable` to roll the guardrail back. |
 | **Select mode** *(default: observe)* | `--mode observe\|action` | `observe` logs; `action` enforces. |
@@ -138,6 +138,8 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | **Guardrail proxy port** *(default: 4000)* | `--port` | — |
 | **Custom block message?** *(action mode only)* | `--block-message` | — |
 | **Disable redaction?** *(default: current)* | `--disable-redaction` / `--enable-redaction` | Only disable inside trusted, single-tenant environments. |
+
+On a multi-connector install, `--connector <name>` scopes this setup run to that connector. When `--block-message` is supplied without `--connector`, setup treats it as broad operator intent: it updates the shared block message and reconciles active connector overrides so one connector does not keep stale block text.
 
 <Callout type="warn">
 **Two genuinely interactive-only choices** on this command: hook fail mode (use `defenseclaw guardrail fail-mode` afterward), and judge fallback models (edit `config.yaml`). Everything else round-trips through flags.
@@ -387,7 +389,7 @@ If the same Bedrock / Vertex / Azure posture is already configured on a custom-p
     },
     "--restart / --no-restart": {
       type: "flag",
-      description: "Restart the gateway and the active connector after setup.",
+      description: "Restart the gateway and reconcile the selected connector wiring after setup.",
       default: "--restart",
     },
     "--verify / --no-verify": {
@@ -431,7 +433,7 @@ defenseclaw status
 defenseclaw alerts --limit 25
 ```
 
-`doctor` prints the full health report. `status` shows enforcement flags plus a per-connector block for every active connector (it has no flags of its own — it always reports the full Agents roster from config and `/health`, identical layout whether one or N connectors are wired). `alerts` lists recent decisions as a table; pass `--show <n>` to expand a specific row. For a live stream, open `defenseclaw tui` (interactive) or `tail -f ~/.defenseclaw/gateway.jsonl | jq` (scripted).
+`doctor` prints the full health report. `status` shows enforcement flags plus a per-connector block for every active connector (it has no flags of its own — it always reports the full Agents roster from config and `/health`, identical layout whether one or N connectors are wired). `alerts` lists recent decisions as a table; pass `--connector <name>` to filter by connector attribution and `--show <n>` to expand a specific row. For a live stream, open `defenseclaw tui` (interactive) or `tail -f ~/.defenseclaw/gateway.jsonl | jq` (scripted).
 
 ## Interactive vs non-interactive — every command
 
@@ -446,7 +448,7 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 | `defenseclaw setup guardrail` | ✓ default | ✓ `--non-interactive` + flags | Two prompts have **no flag** — see callout above. |
 | [`defenseclaw setup claude-code`](/docs/connectors/claudecode) | ✓ confirm prompt | ✓ `--yes` | Light wrapper that only configures observability. Full guardrail still goes through `setup guardrail`. |
 | [`defenseclaw setup codex`](/docs/connectors/codex) | ✓ confirm prompt | ✓ `--yes` | Same shape as `setup claude-code`. |
-| `defenseclaw setup cursor` / `setup windsurf` / `setup geminicli` / `setup copilot` / `setup hermes` / `setup opencode` | ✓ confirm prompt | ✓ `--yes` | Generated wrappers — confirmation only, then delegate. |
+| `defenseclaw setup cursor` / `setup windsurf` / `setup geminicli` / `setup copilot` / `setup openhands` / `setup antigravity` / `setup hermes` / `setup opencode` | ✓ confirm prompt | ✓ `--yes` | Generated wrappers — confirmation only, then delegate. |
 | `defenseclaw setup openclaw` / `setup zeptoclaw` | ✓ confirm prompt | ✓ `--yes` | Confirm is skippable; the **full** guardrail wizard is **not** available here — pass `setup guardrail` flags after the confirm. |
 | [`defenseclaw setup splunk`](/docs/observability/splunk) | ✓ wizard when no mode flag | ✓ `--non-interactive` + `--logs` / `--enterprise` / `--o11y` | |
 | [`defenseclaw setup local-observability`](/docs/observability/local-observability) | ✗ no prompts | ✓ flags only | Compose-style up/down/logs subcommands; never asks. |

@@ -23,7 +23,7 @@ defenseclaw setup claude-code                # observe (default) — record only
 defenseclaw setup claude-code --mode action  # block on policy hits via PreToolUse deny
 ```
 
-Pins `claw.mode=claudecode`, wires hooks + native OTel. No proxy listener binds for Claude Code in either mode.
+`setup claude-code` is shorthand for `setup guardrail --connector claudecode`: it adds or reconfigures Claude Code, wires hooks + native OTel, and can join an existing hook-connector roster when you choose **Add**. No proxy listener binds for Claude Code in either mode.
 
 #### What this command sets vs. leaves at defaults
 
