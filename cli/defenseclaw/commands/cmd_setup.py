@@ -7775,6 +7775,10 @@ def _interactive_guardrail_setup(
     else:
         judge_kwargs = {"preserve_outside_targets": True} if agent_name and is_multi else {}
         _prompt_guardrail_judge_enablement(gc, judge_targets, **judge_kwargs)
+    if not getattr(gc, "detection_strategy", None):
+        gc.detection_strategy = "regex_only"
+    if not getattr(gc, "detection_strategy_completion", None):
+        gc.detection_strategy_completion = "regex_only"
     if gc.judge.enabled:
         if not getattr(gc, "detection_strategy_completion", None):
             gc.detection_strategy_completion = "regex_only"

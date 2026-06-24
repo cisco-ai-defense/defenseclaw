@@ -6353,7 +6353,7 @@ class DefenseClawTUI(App[None]):
         """Fingerprint Overview content without volatile clock-only labels."""
 
         stable_text = re.sub(r"\buptime=\d+s\b", "uptime=<live>", self.body_text)
-        stable_text = re.sub(r"\b\d+[smhd] ago\b", "<live> ago", stable_text)
+        stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
         return ("overview", self.help_open, stable_text)
 
     def _overview_connectors_panel(

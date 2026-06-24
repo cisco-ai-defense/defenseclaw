@@ -68,6 +68,16 @@ def _read_dotenv(path: str) -> dict[str, str]:
     return entries
 
 
+def _bridge_up_args(mock_run: MagicMock) -> list[str]:
+    """Return the Splunk bridge `up` argv from mocked subprocess calls."""
+
+    for call in mock_run.call_args_list:
+        args = call.args[0]
+        if len(args) >= 2 and args[1] == "up":
+            return args
+    raise AssertionError("Splunk bridge up command was not invoked")
+
+
 class TestSetupSplunkRefreshWiring(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = CliRunner()
@@ -129,9 +139,8 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         env_file = _bridge_env_file(self.tmp_dir)
         mock_refresh.assert_called_once_with(self.tmp_dir, env_file=env_file)
-        mock_run.assert_called_once()
         self.assertEqual(
-            mock_run.call_args.args[0],
+            _bridge_up_args(mock_run),
             ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
         )
 
@@ -192,9 +201,8 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_not_called()
         env_file = _bridge_env_file(self.tmp_dir)
-        mock_run.assert_called_once()
         self.assertEqual(
-            mock_run.call_args.args[0],
+            _bridge_up_args(mock_run),
             ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
         )
 

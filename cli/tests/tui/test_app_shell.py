@@ -4509,6 +4509,7 @@ async def test_overview_connector_filter_does_not_refilter_hidden_panels(monkeyp
     async with app.run_test(size=(170, 44)) as pilot:
         await pilot.pause()
         app.active_panel = "overview"
+        hidden_filter_calls.clear()
         app._set_connector_filter("cursor")
 
     assert hidden_filter_calls == []

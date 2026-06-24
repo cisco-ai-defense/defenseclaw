@@ -1332,9 +1332,10 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         self.assertEqual(contract["hec_token"], "bootstrap-token")
         mock_run.assert_called_once()
+        env_file = os.path.join(self.tmp_dir, "splunk-bridge", "env", ".env")
         self.assertEqual(
             mock_run.call_args.args[0],
-            ["/tmp/fake-splunk-claw-bridge", "up", "--output", "json"],
+            ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
         )
         kwargs = mock_run.call_args.kwargs
         self.assertEqual(kwargs["capture_output"], True)
