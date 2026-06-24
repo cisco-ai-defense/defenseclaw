@@ -708,6 +708,20 @@ find_runtime_plugin_path() {
     return 1
 }
 
+find_quarantined_plugin_path() {
+    local name="$1"
+    local candidate
+    for candidate in \
+        "$HOME/.defenseclaw/quarantine/plugins/$name" \
+        "$HOME/.defenseclaw/quarantine/plugins"/*/"$name"; do
+        if [ -d "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 cleanup_skill_name() {
     local name="$1"
     while IFS= read -r dir; do
@@ -3458,14 +3472,14 @@ phase_plugin_lifecycle() {
 
     agent_out=$(run_agent_prompt "$(agent_session_id plugin-install)" "Run this exact command: DEFENSECLAW_RUN_ID=$DEFENSECLAW_RUN_ID defenseclaw plugin install $clean_source. Reply with exactly INSTALLED once the command succeeds." 180)
     echo "$agent_out"
-    clean_path=$(find_governance_plugin_path "$clean_plugin" || true)
+    clean_path=$(find_plugin_path "$clean_plugin" || true)
     if [ -n "$clean_path" ]; then
         pass "plugin lifecycle: agent installed clean plugin"
     else
         skip_or_fail "$E2E_REQUIRE_PLUGIN_LIFECYCLE" "plugin lifecycle: agent install" "agent-admin install could not be verified"
         install_out=$(defenseclaw plugin install "$clean_source" 2>&1 || true)
         echo "$install_out"
-        clean_path=$(find_governance_plugin_path "$clean_plugin" || true)
+        clean_path=$(find_plugin_path "$clean_plugin" || true)
         if [ -n "$clean_path" ]; then
             pass "plugin lifecycle: clean plugin installed via CLI fallback"
         else
@@ -3507,7 +3521,7 @@ phase_plugin_lifecycle() {
     defenseclaw plugin allow "$malicious_plugin" --reason "E2E governance fixture: deliberately malicious" >/dev/null 2>&1 || true
     install_out=$(defenseclaw plugin install "$malicious_source" --force 2>&1 || true)
     echo "$install_out"
-    malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
+    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
     if [ -n "$malicious_path" ]; then
         pass "plugin lifecycle: malicious plugin installed for governance checks"
     else
@@ -3599,10 +3613,10 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: API enable updated OpenClaw plugin state" "$resp"
     fi
 
-    malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
+    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
     install_out=$(defenseclaw plugin quarantine "$malicious_plugin" --reason "E2E plugin quarantine" 2>&1 || true)
     echo "$install_out"
-    if [ -n "$malicious_path" ] && [ ! -d "$malicious_path" ] && [ -d "$HOME/.defenseclaw/quarantine/plugins/$malicious_plugin" ]; then
+    if [ -n "$malicious_path" ] && [ ! -d "$malicious_path" ] && [ -n "$(find_quarantined_plugin_path "$malicious_plugin" || true)" ]; then
         pass "plugin lifecycle: plugin quarantine moved files"
     else
         fail "plugin lifecycle: plugin quarantine moved files" "$install_out"
@@ -3610,7 +3624,7 @@ phase_plugin_lifecycle() {
 
     install_out=$(defenseclaw plugin restore "$malicious_plugin" 2>&1 || true)
     echo "$install_out"
-    malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
+    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
     if [ -n "$malicious_path" ] && [ -d "$malicious_path" ]; then
         pass "plugin lifecycle: plugin restore restored files"
     else
@@ -3619,7 +3633,7 @@ phase_plugin_lifecycle() {
 
     install_out=$(defenseclaw plugin remove "$clean_plugin" 2>&1 || true)
     echo "$install_out"
-    if [ -z "$(find_governance_plugin_path "$clean_plugin" || true)" ]; then
+    if [ -z "$(find_plugin_path "$clean_plugin" || true)" ]; then
         pass "plugin lifecycle: plugin remove removed clean plugin"
     else
         fail "plugin lifecycle: plugin remove removed clean plugin" "$install_out"
