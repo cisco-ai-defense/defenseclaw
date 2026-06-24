@@ -1469,7 +1469,12 @@ def _prompt_first_run(
             hilt_min_severity=hilt_min_severity,
         )
 
-    judge_hook_connectors = _prompt_first_run_judge_connectors(connectors, default_all=with_judge)
+    judge_candidates = [c for c in connectors if c in action_set]
+    if judge_candidates:
+        judge_hook_connectors = _prompt_first_run_judge_connectors(judge_candidates, default_all=with_judge)
+    else:
+        judge_hook_connectors = []
+        ux.subhead("LLM judge: skipped because no selected connector is in action mode.")
     with_judge = bool(judge_hook_connectors)
 
     connector_settings: list[dict] = []
@@ -1498,16 +1503,16 @@ def _prompt_first_run(
 
 
 def _prompt_first_run_judge_connectors(connectors: list[str], *, default_all: bool) -> list[str]:
-    """Ask which first-run connectors should get the optional LLM judge."""
+    """Ask which first-run action connectors should get the optional LLM judge."""
     ux.section("Optional LLM judge")
     ux.subhead("Rule/regex scanning is already enabled for every active connector selected above.")
-    ux.subhead("Select active connectors that should add LLM judge review on top.")
+    ux.subhead("Only action-mode connectors can add LLM judge review in this setup flow.")
     ux.subhead("Leave every box clear for rules-only scanning with no LLM judge calls.")
     ux.subhead("Configure provider/model/key later with `defenseclaw setup guardrail` or `defenseclaw setup llm`.")
     return _prompt_checkbox_selection(
         connectors,
         default_selected=(connectors if default_all else []),
-        title="Select active connector(s) for LLM judge.",
+        title="Select action connector(s) for LLM judge.",
         empty_ok=True,
     )
 

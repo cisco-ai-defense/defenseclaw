@@ -5090,7 +5090,12 @@ def _setup_observability_alias(
     # didn't already decide via --enable-judge/--no-enable-judge. On yes,
     # _apply_hook_connector_setup flips the judge on for this connector and
     # bumps the strategy off regex_only.
-    if interactive and enable_judge is None and _prompt_enable_judge(connector, gc):
+    if (
+        interactive
+        and normalized_mode == "action"
+        and enable_judge is None
+        and _prompt_enable_judge(connector, gc)
+    ):
         enable_judge = True
 
     trusted_prompt_cache: dict[str, bool] | None = {} if interactive else None
@@ -5137,7 +5142,10 @@ def _setup_observability_alias(
     if not ok:
         raise click.ClickException(f"failed to configure {connector} (mode={normalized_mode}) — see errors above")
 
-    if interactive and enable_judge:
+    if interactive:
+        _prune_judge_gate_to_action_scope(app.cfg.guardrail, [connector])
+
+    if interactive and enable_judge and normalized_mode == "action":
         configure_model = click.confirm(
             "  Configure LLM judge provider/model/API settings now?",
             default=_judge_llm_needs_configuration(app),
@@ -5415,17 +5423,58 @@ def _merge_batch_judge_selection(
     return new_gate
 
 
+def _prune_judge_gate_to_action_scope(gc, connectors: list[str]) -> list[str]:
+    """Remove observe-mode connectors in this interactive setup scope from judge."""
+    targets = {
+        normalize_connector(c)
+        for c in connectors
+        if c and normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS
+    }
+    if not targets:
+        return list(getattr(gc.judge, "hook_connectors", []) or [])
+
+    action_targets = {
+        c
+        for c in targets
+        if (gc.effective_mode(c) if hasattr(gc, "effective_mode") else getattr(gc, "mode", "observe")) == "action"
+    }
+    current_gate = [
+        normalize_connector(str(c))
+        for c in (getattr(gc.judge, "hook_connectors", []) or [])
+        if str(c).strip()
+    ]
+    if not current_gate:
+        return []
+
+    if current_gate == ["*"]:
+        configured_hook_connectors = {
+            normalize_connector(c)
+            for c in _configured_connector_set(gc)
+            if normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS
+        }
+        new_gate = sorted((configured_hook_connectors - targets) | action_targets)
+    else:
+        new_gate = sorted(c for c in current_gate if c not in targets or c in action_targets)
+
+    gc.judge.hook_connectors = new_gate
+    if not new_gate:
+        gc.judge.enabled = False
+        gc.detection_strategy = "regex_only"
+        gc.detection_strategy_completion = "regex_only"
+    return new_gate
+
+
 def _prompt_batch_judge_connectors(connectors: list[str], gc) -> set[str]:
-    """Ask once which selected connectors should add LLM judge review."""
+    """Ask once which selected action connectors should add LLM judge review."""
     options, display_by_connector, connector_by_display = _connector_display_options(connectors)
     ux.section("Optional LLM judge")
     ux.subhead("Rule/regex scanning is enabled by default for every active connector selected above.")
-    ux.subhead("Checked active connectors add LLM judge review on top.")
+    ux.subhead("Only action-mode connectors can add LLM judge review in this setup flow.")
     ux.subhead("These LLM settings are shared by all connectors with judge enabled.")
     selected = _prompt_checkbox_selection(
         options,
         default_selected=_default_batch_judge_labels(connectors, gc, display_by_connector),
-        title="Select active connector(s) that should use the LLM judge.",
+        title="Select action connector(s) that should use the LLM judge.",
         empty_ok=True,
     )
     selected_connectors = {connector_by_display[label] for label in selected}
@@ -5443,12 +5492,12 @@ def _prompt_guardrail_judge_enablement(
     if judge_targets:
         options, display_by_connector, connector_by_display = _connector_display_options(judge_targets)
         ux.subhead("Rule/regex scanning is already enabled for every active connector.")
-        ux.subhead("Checked active connectors add LLM judge review on top.")
+        ux.subhead("Only action-mode connectors can add LLM judge review in this setup flow.")
         ux.subhead("These LLM settings are shared by all connectors with judge enabled.")
         selected = _prompt_checkbox_selection(
             options,
             default_selected=_default_batch_judge_labels(judge_targets, gc, display_by_connector),
-            title="Select active connector(s) for LLM judge.",
+            title="Select action connector(s) for LLM judge.",
             empty_ok=True,
         )
         selected_connectors = {connector_by_display[label] for label in selected}
@@ -5683,7 +5732,15 @@ def _dispatch_bare_setup(
         gc = app.cfg.guardrail
         connector_modes = _prompt_batch_connector_modes(targets, gc, default_mode=mode)
         trusted_prompt_cache = _prompt_batch_trusted_prefixes(app, connector_modes)
-        judge_connectors = _prompt_batch_judge_connectors(targets, gc)
+        judge_targets = [
+            c for c in targets
+            if (connector_modes.get(c, "observe") or "").strip().lower() == "action"
+        ]
+        if judge_targets:
+            judge_connectors = _prompt_batch_judge_connectors(judge_targets, gc)
+        else:
+            judge_connectors = set()
+            click.echo("  " + ux.dim("LLM judge: skipped because no selected connector is in action mode."))
         if judge_connectors:
             configure_model = click.confirm(
                 "  Configure LLM judge provider/model/API settings now?",
@@ -5704,6 +5761,8 @@ def _dispatch_bare_setup(
         allow_trusted_path_prompt=prompt_batch,
         trusted_prompt_cache=trusted_prompt_cache,
     )
+    if prompt_batch:
+        _prune_judge_gate_to_action_scope(app.cfg.guardrail, targets)
 
 
 def _hook_guardrail_options(fn):
@@ -7683,13 +7742,9 @@ def _interactive_guardrail_setup(
     # --- LLM Judge section ---
     #
     # The judge is a gateway-side verification layer that runs on
-    # any inspectable payload — proxy responses for the proxy data
-    # path, AND hook events (UserPromptSubmit, PreToolUse) for the
-    # hook-enforced connectors. So we offer it for every connector
-    # type. The hook surface stamps the verdict on the deny verdict
-    # exactly the same way the proxy surface stamps it on the
-    # response body, which is why the operator's judge config is
-    # connector-agnostic.
+    # inspectable payloads. Proxy connectors can still opt in here directly;
+    # hook connectors only see judge choices for connectors currently in action
+    # mode, so the wizard does not imply observe-mode judge enforcement.
     ux.section("Optional LLM judge")
     ux.subhead("Uses an LLM to verify detections and catch novel attacks.")
     ux.subhead("Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
@@ -7701,7 +7756,7 @@ def _interactive_guardrail_setup(
     click.echo("  " + ux.dim("Tool calls additionally run the tool_injection judge."))
     click.echo()
 
-    judge_targets = [
+    hook_judge_scope = [
         c for c in (
             mode_targets
             if is_multi
@@ -7709,9 +7764,17 @@ def _interactive_guardrail_setup(
         )
         if c in _HOOK_ENFORCED_CONNECTORS
     ]
+    judge_targets = [
+        c for c in hook_judge_scope
+        if (gc.effective_mode(c) if hasattr(gc, "effective_mode") else gc.mode) == "action"
+    ]
 
-    judge_kwargs = {"preserve_outside_targets": True} if agent_name and is_multi else {}
-    _prompt_guardrail_judge_enablement(gc, judge_targets, **judge_kwargs)
+    if hook_judge_scope and not judge_targets:
+        _prune_judge_gate_to_action_scope(gc, hook_judge_scope)
+        click.echo("  " + ux.dim("LLM judge: skipped because no selected connector is in action mode."))
+    else:
+        judge_kwargs = {"preserve_outside_targets": True} if agent_name and is_multi else {}
+        _prompt_guardrail_judge_enablement(gc, judge_targets, **judge_kwargs)
     if gc.judge.enabled:
         if not getattr(gc, "detection_strategy_completion", None):
             gc.detection_strategy_completion = "regex_only"

@@ -2112,6 +2112,12 @@ class TestMultiConnectorInit(unittest.TestCase):
         # scanner mode, fail mode, HITL severity
         prompts = iter(["local", "closed", "MEDIUM"])
         confirms = iter([True, False, True])  # action HITL, start_gateway, verify
+        checkbox_returns = iter([["codex", "claudecode"], ["claudecode"], []])
+        checkbox_calls: list[tuple[list[str], str]] = []
+
+        def checkbox(options, **kwargs):
+            checkbox_calls.append((list(options), kwargs.get("title", "")))
+            return next(checkbox_returns)
 
         with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
                 patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
@@ -2119,11 +2125,7 @@ class TestMultiConnectorInit(unittest.TestCase):
                     "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
                     return_value=True,
                 ), \
-                patch.object(
-                    cmd_init,
-                    "_prompt_checkbox_selection",
-                    side_effect=[["codex", "claudecode"], ["claudecode"], []],
-                ), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", side_effect=checkbox), \
                 patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
                 patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
             settings, scanner_mode, with_judge, judge_connectors, start_gateway, verify = cmd_init._prompt_first_run(
@@ -2149,6 +2151,7 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertEqual(judge_connectors, [])
         self.assertFalse(start_gateway)
         self.assertTrue(verify)
+        self.assertEqual(checkbox_calls[2], (["claudecode"], "Select action connector(s) for LLM judge."))
 
     def test_prompt_first_run_blank_action_keeps_all_observe(self):
         """Pressing Enter at the action prompt keeps every connector observe
@@ -2164,7 +2167,7 @@ class TestMultiConnectorInit(unittest.TestCase):
                 patch.object(
                     cmd_init,
                     "_prompt_checkbox_selection",
-                    side_effect=[["codex", "claudecode"], [], []],
+                    side_effect=[["codex", "claudecode"], []],
                 ), \
                 patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
                 patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
