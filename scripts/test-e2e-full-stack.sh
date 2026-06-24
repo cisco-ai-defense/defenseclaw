@@ -41,6 +41,7 @@ E2E_REQUIRE_RECOVERY="${E2E_REQUIRE_RECOVERY:-false}"
 OPENCLAW_MODEL_PATCHED="${OPENCLAW_MODEL_PATCHED:-false}"
 OPENCLAW_MODEL_BACKUP_PATH="${OPENCLAW_MODEL_BACKUP_PATH:-/tmp/defenseclaw-openclaw.full-live.backup.json}"
 ANTHROPIC_PASSTHROUGH_RAN="${ANTHROPIC_PASSTHROUGH_RAN:-false}"
+RUNTIME_TOOL_INSPECTION_EXERCISED=false
 
 sanitize_name() {
     printf '%s' "$1" | tr -cs '[:alnum:]._-' '-'
@@ -1193,6 +1194,12 @@ run_agent_prompt() {
     timeout "$timeout_s" openclaw agent --session-id "$session_id" -m "$prompt" 2>&1 || true
 }
 
+agent_backend_unavailable_output() {
+    local output="$1"
+    echo "$output" | grep -Eqi \
+        'LLM request failed|Smithy package patch skipped|could not resolve @smithy|AWS_BEDROCK_FORCE_HTTP1|BadRequestError|rate limit|too many requests|credit balance|model.*not.*found|provider.*not provided|temporar(y|ily)'
+}
+
 guardrail_prompt_strategy() {
     python3 - <<'PY'
 import os
@@ -2248,7 +2255,10 @@ phase_block_allow() {
         echo "$allow_out"
         allow_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
         if [ -f "$tool_file" ] && grep -Fxq "$tool_expected" "$tool_file" && [ "${allow_after:-0}" -gt "${allow_before:-0}" ]; then
+            RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent could use exec before block"
+        elif agent_backend_unavailable_output "$allow_out"; then
+            skip "block/allow: agent could use exec before block" "live agent backend unavailable"
         else
             fail "block/allow: agent could use exec before block" "$allow_out"
         fi
@@ -2269,7 +2279,10 @@ phase_block_allow() {
         echo "$block_out"
         block_after=$(alerts_action_count "inspect-tool-block" "$tool_name")
         if { [ ! -f "$tool_file" ] || ! grep -Fxq "$tool_expected" "$tool_file"; } && [ "${block_after:-0}" -gt "${block_before:-0}" ]; then
+            RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent was blocked from exec after block"
+        elif agent_backend_unavailable_output "$block_out"; then
+            skip "block/allow: agent was blocked from exec after block" "live agent backend unavailable"
         else
             fail "block/allow: agent was blocked from exec after block" "$block_out"
         fi
@@ -2298,7 +2311,10 @@ phase_block_allow() {
         echo "$recover_out"
         recover_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
         if [ -f "$tool_file" ] && grep -Fxq "$tool_expected" "$tool_file" && [ "${recover_after:-0}" -gt "${recover_before:-0}" ]; then
+            RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent recovered exec after unblock"
+        elif agent_backend_unavailable_output "$recover_out"; then
+            skip "block/allow: agent recovered exec after unblock" "live agent backend unavailable"
         else
             fail "block/allow: agent recovered exec after unblock" "$recover_out"
         fi
@@ -3273,6 +3289,7 @@ phase_agent_chat() {
     local skill_dirs disk_before skills_before before_names
     local ping_out install_out installed_skill installed_path dc_entry
     local install_verified=false used_local_fallback=false
+    local install_backend_unavailable=false
 
     skill_dirs=$(get_skill_dirs)
     echo "  Skill directories watched by DefenseClaw:"
@@ -3353,6 +3370,9 @@ phase_agent_chat() {
             sleep $((attempt * 15))
             continue
         fi
+        if agent_backend_unavailable_output "$install_out"; then
+            install_backend_unavailable=true
+        fi
 
         break
     done
@@ -3377,12 +3397,18 @@ phase_agent_chat() {
                 used_local_fallback=true
                 pass "agent chat: fallback skill '$installed_skill' installed on disk"
                 install_verified=true
+            elif agent_backend_unavailable_output "$fallback_out"; then
+                install_backend_unavailable=true
             fi
         fi
     fi
 
     if [ "$install_verified" = false ]; then
-        skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: skill install" "agent install could not be verified"
+        if [ "$install_backend_unavailable" = true ]; then
+            skip "agent chat: skill install" "live agent backend unavailable"
+        else
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: skill install" "agent install could not be verified"
+        fi
     fi
 
     if [ -n "${installed_skill:-}" ]; then
@@ -3938,7 +3964,11 @@ phase_splunk() {
             skip "Splunk: guardrail passthrough events present" "Anthropic passthrough was not exercised in this run"
         fi
         splunk_assert_results "Splunk: agent lifecycle events present" '(action=gateway-agent-start OR action=gateway-agent-end) | head 5'
-        splunk_assert_results "Splunk: runtime tool inspection events present" '(action=inspect-tool-allow OR action=inspect-tool-block) | head 5'
+        if [ "${RUNTIME_TOOL_INSPECTION_EXERCISED:-false}" = "true" ]; then
+            splunk_assert_results "Splunk: runtime tool inspection events present" '(action=inspect-tool-allow OR action=inspect-tool-block) | head 5'
+        else
+            skip "Splunk: runtime tool inspection events present" "live agent tool calls were not exercised"
+        fi
         if is_true "$E2E_ENABLE_PLUGIN_LIFECYCLE"; then
             splunk_assert_results "Splunk: plugin scan events present" 'action=scan details="*scanner=plugin-scanner*" | head 5'
             splunk_assert_results "Splunk: plugin block/allow events present" '(action=plugin-block OR action=plugin-allow) | head 5'
