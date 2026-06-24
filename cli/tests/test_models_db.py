@@ -237,6 +237,33 @@ class ModelsDbTests(unittest.TestCase):
         events = self.store.list_events(1)
         self.assertEqual(events[0].structured["schema"], "defenseclaw.hook.v1")
         self.assertEqual(events[0].structured["connector"], "codex")
+        self.assertEqual(events[0].connector, "codex")
+
+    def test_connector_hook_stats_aggregate_normalized_connector_names(self):
+        self.store.log_event(
+            Event(
+                id="codex-structured",
+                action="connector-hook",
+                target="PreToolUse",
+                severity="INFO",
+                structured={"connector": "Codex"},
+                details="action=allow",
+            )
+        )
+        self.store.log_event(
+            Event(
+                id="codex-details",
+                action="connector-hook",
+                target="PreToolUse",
+                severity="HIGH",
+                details="connector=codex action=block",
+            )
+        )
+
+        stats = self.store.connector_hook_event_stats()
+
+        self.assertEqual(stats["codex"]["calls"], 2)
+        self.assertEqual(stats["codex"]["blocks"], 1)
 
     def test_event_reader_parses_zulu_timestamps(self):
         self.store.db.execute(

@@ -169,6 +169,7 @@ class Event:
     structured: dict[str, Any] = field(default_factory=dict)
     severity: str = ""
     run_id: str = ""
+    connector: str = ""
 
 
 @dataclass
