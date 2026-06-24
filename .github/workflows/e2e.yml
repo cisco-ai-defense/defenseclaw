@@ -598,6 +598,11 @@ jobs:
 
   full-live:
     name: Full Live E2E
+    # Core and full-live both mutate persistent self-hosted runner state
+    # (~/.defenseclaw, ~/.openclaw, docker/systemd user services, and shared
+    # cleanup scripts). Run full-live only after core so their setup/cleanup
+    # phases cannot cancel or corrupt each other on the same runner.
+    needs: core
     if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 45
