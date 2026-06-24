@@ -296,7 +296,7 @@ def _resolve_data_dir(config: object | Mapping[str, Any] | None) -> str:
 
 
 def trusted_paths_rows_from_config(config: object | Mapping[str, Any] | None) -> tuple[TrustedPathRow, ...]:
-    """Build editor rows from the live trusted-prefix view (defaults + .env + env).
+    """Build editor rows from the live trusted-prefix view.
 
     Reuses ``cmd_setup._collect_trusted_prefixes`` so the editor shows exactly
     what ``defenseclaw setup trusted-paths list`` shows.
@@ -332,7 +332,7 @@ def trusted_paths_rows_from_config(config: object | Mapping[str, Any] | None) ->
 
 
 def _refresh_trusted_prefix_env(data_dir: str | None) -> None:
-    """Merge persisted-``.env`` trusted prefixes into the live environment.
+    """Merge persisted trusted prefixes into the live environment.
 
     The TUI reads ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` into ``os.environ`` once
     at launch (``config.load()``). A prefix trusted *after* launch — via the CLI
@@ -346,19 +346,27 @@ def _refresh_trusted_prefix_env(data_dir: str | None) -> None:
 
     from defenseclaw.commands.cmd_setup import _load_dotenv  # noqa: PLC0415
     from defenseclaw.config import default_data_path  # noqa: PLC0415
+    from defenseclaw.inventory import agent_discovery  # noqa: PLC0415
 
     resolved_dir = data_dir or str(default_data_path())
+    pieces: list[str] = []
+    try:
+        _require_trusted, config_prefixes = agent_discovery._ai_discovery_trust_config(resolved_dir)
+        pieces.extend(config_prefixes)
+    except Exception:
+        pass
     try:
         persisted = _load_dotenv(os.path.join(resolved_dir, ".env")).get(
             "DEFENSECLAW_TRUSTED_BIN_PREFIXES", ""
         )
     except Exception:
-        return
-    if not persisted:
+        persisted = ""
+    pieces.extend(persisted.split(os.pathsep))
+    if not any(piece.strip() for piece in pieces):
         return
     current = os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
     merged: list[str] = []
-    for piece in (*current.split(os.pathsep), *persisted.split(os.pathsep)):
+    for piece in (*current.split(os.pathsep), *pieces):
         piece = piece.strip()
         if piece and piece not in merged:
             merged.append(piece)
@@ -372,15 +380,16 @@ def _trust_state_token(data_dir: str | None) -> str:
     """Fingerprint persisted + live trust state for short-lived routing cache."""
     import os  # noqa: PLC0415
 
-    from defenseclaw.config import default_data_path  # noqa: PLC0415
+    from defenseclaw.config import CONFIG_FILE_NAME, default_data_path  # noqa: PLC0415
 
     resolved_dir = data_dir or str(default_data_path())
-    dotenv = os.path.join(resolved_dir, ".env")
-    try:
-        mtime = str(os.path.getmtime(dotenv))
-    except OSError:
-        mtime = "0"
-    return f"{mtime}:{os.environ.get('DEFENSECLAW_TRUSTED_BIN_PREFIXES', '')}"
+    mtimes: list[str] = []
+    for name in (".env", CONFIG_FILE_NAME):
+        try:
+            mtimes.append(str(os.path.getmtime(os.path.join(resolved_dir, name))))
+        except OSError:
+            mtimes.append("0")
+    return f"{':'.join(mtimes)}:{os.environ.get('DEFENSECLAW_TRUSTED_BIN_PREFIXES', '')}"
 
 
 def untrusted_connector_dir(connector: str, data_dir: str | None = None) -> str | None:

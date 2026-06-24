@@ -38,6 +38,7 @@ from click.testing import CliRunner
 from defenseclaw.commands import cmd_status
 from defenseclaw.commands.cmd_status import _print_agents
 from defenseclaw.commands.cmd_status import status as status_cmd
+from defenseclaw.config import AIDiscoveryConfig
 from defenseclaw.config import ApplicationProtectionConfig
 from defenseclaw.config import GuardrailConfig
 
@@ -52,6 +53,7 @@ def _cfg(actives, *, modes=None, disabled=None):
     cfg.guardrail.effective_mode.side_effect = lambda c: modes.get(c, "observe")
     cfg.guardrail.effective_enabled.side_effect = lambda c: c not in disabled
     cfg.application_protection = ApplicationProtectionConfig()
+    cfg.ai_discovery = AIDiscoveryConfig()
     cfg.data_dir = ""
     return cfg
 
@@ -206,6 +208,9 @@ class TestApplicationProtectionStatus(unittest.TestCase):
             self.assertEqual(state["active"][0]["connector"], "codex")
             self.assertEqual(state["skipped"][0]["reason"], "proxy_connector_setup_only")
             self.assertEqual(state["last_activation_errors"]["cursor"], "setup failed")
+            self.assertEqual(state["guardrail_mode"], "observe")
+            self.assertEqual(state["asset_policy_mode"], "observe")
+            self.assertFalse(state["require_trusted_binary_paths"])
 
     def test_live_health_details_override_persisted_state(self):
         cfg = _cfg([])
@@ -219,6 +224,10 @@ class TestApplicationProtectionStatus(unittest.TestCase):
                     "active": [{"connector": "cursor", "source": "automatic"}],
                     "skipped": [{"connector": "openclaw", "reason": "proxy_connector_setup_only"}],
                     "last_errors": {"codex": "activation failed"},
+                    "guardrail_mode": "action",
+                    "asset_policy_mode": "action",
+                    "require_trusted_binary_paths": True,
+                    "trusted_binary_prefixes": ["/opt/tools"],
                 },
             }
         }
@@ -226,6 +235,10 @@ class TestApplicationProtectionStatus(unittest.TestCase):
         self.assertEqual(state["health_state"], "running")
         self.assertEqual(state["active"][0]["connector"], "cursor")
         self.assertEqual(state["last_activation_errors"]["codex"], "activation failed")
+        self.assertEqual(state["guardrail_mode"], "action")
+        self.assertEqual(state["asset_policy_mode"], "action")
+        self.assertTrue(state["require_trusted_binary_paths"])
+        self.assertEqual(state["trusted_binary_prefixes"], ["/opt/tools"])
 
 
 class TestStatusDbErrorSurfacing(unittest.TestCase):
@@ -290,6 +303,8 @@ class TestStatusJson(unittest.TestCase):
         for key in ("environment", "scanners", "enforcement", "activity", "connectors", "sidecar"):
             self.assertIn(key, doc)
         self.assertFalse(doc["sidecar"]["running"])
+        self.assertEqual(doc["application_protection"]["guardrail_mode"], "observe")
+        self.assertFalse(doc["application_protection"]["require_trusted_binary_paths"])
 
     def test_json_roster_has_per_connector_mode(self):
         result = self._invoke_json()

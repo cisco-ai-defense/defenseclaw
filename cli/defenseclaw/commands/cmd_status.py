@@ -440,9 +440,8 @@ def _effective_status_mode(cfg, connector: str, source: str = "manual") -> str:
     if source == "automatic":
         try:
             app = getattr(cfg, "application_protection", None)
-            pc = app._connector_override(connector) if app is not None else None
-            if pc is not None and pc.guardrail.mode.strip():
-                return pc.guardrail.mode.strip()
+            if app is not None and hasattr(app, "effective_guardrail_mode"):
+                return app.effective_guardrail_mode(connector)
         except Exception:
             pass
     gc = getattr(cfg, "guardrail", None)
@@ -508,6 +507,16 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
     if health_state:
         status_text += ux.dim(f" ({health_state})")
     _status_row("App protect", status_text)
+    guardrail_mode = str(state.get("guardrail_mode") or "observe")
+    asset_mode = str(state.get("asset_policy_mode") or "observe")
+    trust_check = "on" if bool(state.get("require_trusted_binary_paths")) else "off"
+    click.echo(
+        "                "
+        + ux.dim(
+            f"auto guardrail={guardrail_mode} asset_policy={asset_mode} "
+            f"trusted-path-check={trust_check}"
+        )
+    )
 
     discovered = [r for r in state.get("discovered") or [] if isinstance(r, dict)]
     active = [r for r in state.get("active") or [] if isinstance(r, dict)]
@@ -559,6 +568,24 @@ def _application_protection_status(cfg, health: dict | None = None) -> dict:
         state.setdefault("min_confidence", getattr(app_cfg, "min_confidence", 0.80))
         state.setdefault("remove_when_gone", getattr(app_cfg, "remove_when_gone", False))
         state.setdefault("gone_after_min", getattr(app_cfg, "gone_after_min", 60))
+        if hasattr(app_cfg, "effective_guardrail_mode"):
+            state.setdefault("guardrail_mode", app_cfg.effective_guardrail_mode("__automatic__"))
+        else:
+            state.setdefault("guardrail_mode", "observe")
+        if hasattr(app_cfg, "effective_asset_policy_mode"):
+            state.setdefault("asset_policy_mode", app_cfg.effective_asset_policy_mode("__automatic__"))
+        else:
+            state.setdefault("asset_policy_mode", "observe")
+    ai_cfg = getattr(cfg, "ai_discovery", None)
+    if ai_cfg is not None:
+        state.setdefault(
+            "require_trusted_binary_paths",
+            bool(getattr(ai_cfg, "require_trusted_binary_paths", False)),
+        )
+        state.setdefault(
+            "trusted_binary_prefixes",
+            list(getattr(ai_cfg, "trusted_binary_prefixes", []) or []),
+        )
 
     live = None
     if isinstance(health, dict):
@@ -569,7 +596,17 @@ def _application_protection_status(cfg, health: dict | None = None) -> dict:
             state["last_error"] = live.get("last_error")
         details = live.get("details")
         if isinstance(details, dict):
-            for key in ("enabled", "last_scan", "discovered", "active", "skipped"):
+            for key in (
+                "enabled",
+                "last_scan",
+                "discovered",
+                "active",
+                "skipped",
+                "guardrail_mode",
+                "asset_policy_mode",
+                "require_trusted_binary_paths",
+                "trusted_binary_prefixes",
+            ):
                 if key in details:
                     state[key] = details[key]
             if "last_errors" in details:
@@ -582,6 +619,10 @@ def _application_protection_status(cfg, health: dict | None = None) -> dict:
     state.setdefault("active", [])
     state.setdefault("skipped", [])
     state.setdefault("last_activation_errors", {})
+    state.setdefault("guardrail_mode", "observe")
+    state.setdefault("asset_policy_mode", "observe")
+    state.setdefault("require_trusted_binary_paths", False)
+    state.setdefault("trusted_binary_prefixes", [])
     return state
 
 

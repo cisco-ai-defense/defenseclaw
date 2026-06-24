@@ -420,14 +420,24 @@ func (c *applicationProtectionController) publishStateLocked(state applicationPr
 		lastErr = err.Error()
 		healthState = StateError
 	}
+	guardrailMode := "observe"
+	assetPolicyMode := "observe"
+	if c.sidecar.cfg.ApplicationProtection.Enabled {
+		guardrailMode = c.sidecar.cfg.EffectiveGuardrailModeForConnector("__automatic__")
+		assetPolicyMode = c.sidecar.cfg.EffectiveAssetPolicyModeForConnector("__automatic__")
+	}
 	details := map[string]interface{}{
-		"enabled":     state.Enabled,
-		"last_scan":   state.LastScan,
-		"discovered":  state.Discovered,
-		"active":      state.Active,
-		"skipped":     state.Skipped,
-		"last_errors": state.LastErrors,
-		"state_file":  filepath.Join(c.sidecar.cfg.DataDir, applicationProtectionStateFile),
+		"enabled":                      state.Enabled,
+		"last_scan":                    state.LastScan,
+		"discovered":                   state.Discovered,
+		"active":                       state.Active,
+		"skipped":                      state.Skipped,
+		"last_errors":                  state.LastErrors,
+		"state_file":                   filepath.Join(c.sidecar.cfg.DataDir, applicationProtectionStateFile),
+		"guardrail_mode":               guardrailMode,
+		"asset_policy_mode":            assetPolicyMode,
+		"require_trusted_binary_paths": c.sidecar.cfg.AIDiscovery.RequireTrustedBinaryPaths,
+		"trusted_binary_prefixes":      append([]string{}, c.sidecar.cfg.AIDiscovery.TrustedBinaryPrefixes...),
 	}
 	c.sidecar.health.SetApplicationProtection(healthState, lastErr, details)
 }

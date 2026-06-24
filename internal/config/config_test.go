@@ -189,6 +189,12 @@ func TestDefaultConfig(t *testing.T) {
 	if got, want := cfg.AIDiscovery.ConfidencePolicyPath, filepath.Join(cfg.DataDir, "confidence.yaml"); got != want {
 		t.Errorf("ai_discovery.confidence_policy_path = %q, want %q", got, want)
 	}
+	if cfg.AIDiscovery.RequireTrustedBinaryPaths {
+		t.Error("ai_discovery.require_trusted_binary_paths = true, want false")
+	}
+	if len(cfg.AIDiscovery.TrustedBinaryPrefixes) != 0 {
+		t.Errorf("ai_discovery.trusted_binary_prefixes = %v, want empty", cfg.AIDiscovery.TrustedBinaryPrefixes)
+	}
 	if cfg.Claw.Mode != ClawOpenClaw {
 		t.Errorf("expected mode %q, got %q", ClawOpenClaw, cfg.Claw.Mode)
 	}

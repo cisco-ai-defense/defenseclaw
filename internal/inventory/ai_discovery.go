@@ -117,23 +117,25 @@ var allowedAISignalCategories = map[string]bool{
 
 // AIDiscoveryOptions is the sidecar-local runtime view of config.AIDiscoveryConfig.
 type AIDiscoveryOptions struct {
-	Enabled                  bool
-	Mode                     string
-	ScanInterval             time.Duration
-	ProcessInterval          time.Duration
-	ScanRoots                []string
-	SignaturePacks           []string
-	AllowWorkspaceSignatures bool
-	DisabledSignatureIDs     []string
-	IncludeShellHistory      bool
-	IncludePackageManifests  bool
-	IncludeEnvVarNames       bool
-	IncludeNetworkDomains    bool
-	MaxFilesPerScan          int
-	MaxFileBytes             int64
-	EmitOTel                 bool
-	StoreRawLocalPaths       bool
-	ConfidencePolicyPath     string
+	Enabled                   bool
+	Mode                      string
+	ScanInterval              time.Duration
+	ProcessInterval           time.Duration
+	ScanRoots                 []string
+	SignaturePacks            []string
+	AllowWorkspaceSignatures  bool
+	DisabledSignatureIDs      []string
+	IncludeShellHistory       bool
+	IncludePackageManifests   bool
+	IncludeEnvVarNames        bool
+	IncludeNetworkDomains     bool
+	MaxFilesPerScan           int
+	MaxFileBytes              int64
+	EmitOTel                  bool
+	StoreRawLocalPaths        bool
+	ConfidencePolicyPath      string
+	RequireTrustedBinaryPaths bool
+	TrustedBinaryPrefixes     []string
 	// DisableRedaction mirrors config.Privacy.DisableRedaction. When
 	// true, on-the-wire AIDiscovery payloads (gateway events, OTel
 	// logs) carry full Evidence rows including the raw_path field
@@ -473,23 +475,25 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 	home, _ := os.UserHomeDir()
 	ad := cfg.AIDiscovery
 	return normalizeAIDiscoveryOptions(AIDiscoveryOptions{
-		Enabled:                  ad.Enabled,
-		Mode:                     ad.Mode,
-		ScanInterval:             time.Duration(ad.ScanIntervalMin) * time.Minute,
-		ProcessInterval:          time.Duration(ad.ProcessIntervalSec) * time.Second,
-		ScanRoots:                append([]string{}, ad.ScanRoots...),
-		SignaturePacks:           append([]string{}, ad.SignaturePacks...),
-		AllowWorkspaceSignatures: ad.AllowWorkspaceSignatures,
-		DisabledSignatureIDs:     append([]string{}, ad.DisabledSignatureIDs...),
-		IncludeShellHistory:      ad.IncludeShellHistory,
-		IncludePackageManifests:  ad.IncludePackageManifests,
-		IncludeEnvVarNames:       ad.IncludeEnvVarNames,
-		IncludeNetworkDomains:    ad.IncludeNetworkDomains,
-		MaxFilesPerScan:          ad.MaxFilesPerScan,
-		MaxFileBytes:             int64(ad.MaxFileBytes),
-		EmitOTel:                 ad.EmitOTel,
-		StoreRawLocalPaths:       ad.StoreRawLocalPaths,
-		ConfidencePolicyPath:     ad.ConfidencePolicyPath,
+		Enabled:                   ad.Enabled,
+		Mode:                      ad.Mode,
+		ScanInterval:              time.Duration(ad.ScanIntervalMin) * time.Minute,
+		ProcessInterval:           time.Duration(ad.ProcessIntervalSec) * time.Second,
+		ScanRoots:                 append([]string{}, ad.ScanRoots...),
+		SignaturePacks:            append([]string{}, ad.SignaturePacks...),
+		AllowWorkspaceSignatures:  ad.AllowWorkspaceSignatures,
+		DisabledSignatureIDs:      append([]string{}, ad.DisabledSignatureIDs...),
+		IncludeShellHistory:       ad.IncludeShellHistory,
+		IncludePackageManifests:   ad.IncludePackageManifests,
+		IncludeEnvVarNames:        ad.IncludeEnvVarNames,
+		IncludeNetworkDomains:     ad.IncludeNetworkDomains,
+		MaxFilesPerScan:           ad.MaxFilesPerScan,
+		MaxFileBytes:              int64(ad.MaxFileBytes),
+		EmitOTel:                  ad.EmitOTel,
+		StoreRawLocalPaths:        ad.StoreRawLocalPaths,
+		ConfidencePolicyPath:      ad.ConfidencePolicyPath,
+		RequireTrustedBinaryPaths: ad.RequireTrustedBinaryPaths,
+		TrustedBinaryPrefixes:     append([]string{}, ad.TrustedBinaryPrefixes...),
 		// Mirror the global redaction kill-switch so detectors and
 		// emitters know whether they should scrub raw_path / full
 		// evidence before a payload leaves the local process.

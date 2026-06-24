@@ -138,10 +138,10 @@ func TestApplicationProtectionControllerSkipsUnverifiedHookContractInActionMode(
 		DataDir:               dir,
 		ApplicationProtection: config.DefaultApplicationProtectionConfig(),
 		Guardrail: config.GuardrailConfig{
-			Mode:         "action",
 			HookSelfHeal: false,
 		},
 	}
+	cfg.ApplicationProtection.Guardrail.Mode = "action"
 	sidecar := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
 	registry := connector.NewRegistry()
 	conn := &appProtectionHookStub{

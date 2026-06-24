@@ -34,6 +34,8 @@ type ApplicationProtectionConfig struct {
 	GoneAfterMin      int                                             `mapstructure:"gone_after_min"     yaml:"gone_after_min"`
 	IncludeConnectors []string                                        `mapstructure:"include_connectors" yaml:"include_connectors,omitempty"`
 	ExcludeConnectors []string                                        `mapstructure:"exclude_connectors" yaml:"exclude_connectors,omitempty"`
+	Guardrail         PerConnectorGuardrailConfig                     `mapstructure:"guardrail"          yaml:"guardrail,omitempty"`
+	AssetPolicy       ApplicationProtectionAssetPolicyConfig          `mapstructure:"asset_policy"       yaml:"asset_policy,omitempty"`
 	Connectors        map[string]ApplicationProtectionConnectorConfig `mapstructure:"connectors"         yaml:"connectors,omitempty"`
 }
 
@@ -62,6 +64,12 @@ func DefaultApplicationProtectionConfig() ApplicationProtectionConfig {
 		MinConfidence:  DefaultApplicationProtectionMinConfidence,
 		RemoveWhenGone: false,
 		GoneAfterMin:   DefaultApplicationProtectionGoneAfterMin,
+		Guardrail: PerConnectorGuardrailConfig{
+			Mode: "observe",
+		},
+		AssetPolicy: ApplicationProtectionAssetPolicyConfig{
+			Mode: AssetPolicyModeObserve,
+		},
 	}
 }
 
@@ -150,6 +158,20 @@ func (a *ApplicationProtectionConfig) Validate() error {
 	}
 	if err := validateConnectorList("application_protection.exclude_connectors", a.ExcludeConnectors); err != nil {
 		return err
+	}
+	if err := validateGuardrailMode(a.Guardrail.Mode); err != nil {
+		return fmt.Errorf("application_protection.guardrail: %w", err)
+	}
+	if err := validateGuardrailHookFailMode(a.Guardrail.HookFailMode); err != nil {
+		return fmt.Errorf("application_protection.guardrail: %w", err)
+	}
+	if a.Guardrail.HILT != nil {
+		if err := validateGuardrailMinSeverity(a.Guardrail.HILT.MinSeverity); err != nil {
+			return fmt.Errorf("application_protection.guardrail: %w", err)
+		}
+	}
+	if err := validateAssetPolicyMode(a.AssetPolicy.Mode); err != nil {
+		return fmt.Errorf("application_protection.asset_policy: %w", err)
 	}
 
 	names := make([]string, 0, len(a.Connectors))
@@ -247,13 +269,13 @@ func (c *Config) ManualConnectorConfigured(connector string) bool {
 }
 
 func (c *Config) appProtectionGuardrailOverride(connector string) (PerConnectorGuardrailConfig, bool) {
-	if c == nil || c.manualConnectorConfigured(connector) {
+	if c == nil || !c.ApplicationProtection.Enabled || c.manualConnectorConfigured(connector) {
 		return PerConnectorGuardrailConfig{}, false
 	}
 	if pc, ok := c.ApplicationProtection.connectorOverride(connector); ok {
 		return pc.Guardrail, true
 	}
-	return PerConnectorGuardrailConfig{}, false
+	return c.ApplicationProtection.Guardrail, true
 }
 
 // EffectiveGuardrailModeForConnector resolves manual per-connector guardrail
@@ -267,6 +289,7 @@ func (c *Config) EffectiveGuardrailModeForConnector(connector string) string {
 		if m := strings.TrimSpace(pc.Mode); m != "" {
 			return m
 		}
+		return "observe"
 	}
 	return c.Guardrail.EffectiveMode(connector)
 }
@@ -340,12 +363,18 @@ func (c *Config) EffectiveAssetPolicyModeForConnector(connector string) string {
 			return m
 		}
 	}
+	if !c.ApplicationProtection.Enabled || c.manualConnectorConfigured(connector) {
+		if m := strings.TrimSpace(c.AssetPolicy.Mode); m != "" {
+			return m
+		}
+		return AssetPolicyModeObserve
+	}
 	if pc, ok := c.ApplicationProtection.connectorOverride(connector); ok {
 		if m := strings.TrimSpace(pc.AssetPolicy.Mode); m != "" {
 			return m
 		}
 	}
-	if m := strings.TrimSpace(c.AssetPolicy.Mode); m != "" {
+	if m := strings.TrimSpace(c.ApplicationProtection.AssetPolicy.Mode); m != "" {
 		return m
 	}
 	return AssetPolicyModeObserve

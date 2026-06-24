@@ -32,6 +32,12 @@ func TestDefaultConfigApplicationProtection(t *testing.T) {
 	if cfg.ApplicationProtection.GoneAfterMin != DefaultApplicationProtectionGoneAfterMin {
 		t.Errorf("GoneAfterMin = %d, want %d", cfg.ApplicationProtection.GoneAfterMin, DefaultApplicationProtectionGoneAfterMin)
 	}
+	if cfg.ApplicationProtection.Guardrail.Mode != "observe" {
+		t.Errorf("ApplicationProtection.Guardrail.Mode = %q, want observe", cfg.ApplicationProtection.Guardrail.Mode)
+	}
+	if cfg.ApplicationProtection.AssetPolicy.Mode != AssetPolicyModeObserve {
+		t.Errorf("ApplicationProtection.AssetPolicy.Mode = %q, want observe", cfg.ApplicationProtection.AssetPolicy.Mode)
+	}
 }
 
 func TestApplicationProtectionPolicyOverlay(t *testing.T) {
@@ -86,6 +92,36 @@ func TestApplicationProtectionEffectiveMinConfidenceHonorsExplicitZero(t *testin
 
 	if got := cfg.EffectiveMinConfidence("codex"); got != 0 {
 		t.Errorf("EffectiveMinConfidence(codex) = %v, want explicit zero", got)
+	}
+}
+
+func TestApplicationProtectionAutomaticModesDefaultObserve(t *testing.T) {
+	cfg := &Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.AssetPolicy.Mode = AssetPolicyModeAction
+	cfg.ApplicationProtection = DefaultApplicationProtectionConfig()
+
+	if got := cfg.EffectiveGuardrailModeForConnector("codex"); got != "observe" {
+		t.Errorf("EffectiveGuardrailModeForConnector(codex) = %q, want observe", got)
+	}
+	if got := cfg.EffectiveAssetPolicyModeForConnector("codex"); got != AssetPolicyModeObserve {
+		t.Errorf("EffectiveAssetPolicyModeForConnector(codex) = %q, want observe", got)
+	}
+}
+
+func TestApplicationProtectionTopLevelActionOptIn(t *testing.T) {
+	cfg := &Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.AssetPolicy.Mode = AssetPolicyModeObserve
+	cfg.ApplicationProtection = DefaultApplicationProtectionConfig()
+	cfg.ApplicationProtection.Guardrail.Mode = "action"
+	cfg.ApplicationProtection.AssetPolicy.Mode = AssetPolicyModeAction
+
+	if got := cfg.EffectiveGuardrailModeForConnector("codex"); got != "action" {
+		t.Errorf("EffectiveGuardrailModeForConnector(codex) = %q, want action", got)
+	}
+	if got := cfg.EffectiveAssetPolicyModeForConnector("codex"); got != AssetPolicyModeAction {
+		t.Errorf("EffectiveAssetPolicyModeForConnector(codex) = %q, want action", got)
 	}
 }
 

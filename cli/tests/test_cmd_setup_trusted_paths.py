@@ -30,6 +30,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -98,7 +99,7 @@ def _compat(version: str, status: str, contract_id: str | None = None, reason: s
 
 
 class AddTrustedBinPrefixTests(unittest.TestCase):
-    def test_append_dedupe_persist_0600_and_environ(self):
+    def test_append_dedupe_persist_to_config_yaml(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
                 added1 = cmd_setup._add_trusted_bin_prefix("/opt/tools", tmp)
@@ -107,17 +108,12 @@ class AddTrustedBinPrefixTests(unittest.TestCase):
                 self.assertTrue(added1)
                 self.assertFalse(added2, "second add of same prefix should be a no-op")
                 self.assertTrue(added3)
-                # os.environ reflects both, separated by os.pathsep.
-                val = os.environ["DEFENSECLAW_TRUSTED_BIN_PREFIXES"]
-                parts = val.split(os.pathsep)
-                self.assertEqual(parts.count("/opt/tools"), 1)
-                self.assertIn("/opt/more", parts)
-            dotenv = os.path.join(tmp, ".env")
-            self.assertTrue(os.path.isfile(dotenv))
-            self.assertEqual(os.stat(dotenv).st_mode & 0o777, 0o600)
-            body = open(dotenv, encoding="utf-8").read()
-            self.assertIn("/opt/tools", body)
-            self.assertIn("/opt/more", body)
+            cfg_path = os.path.join(tmp, "config.yaml")
+            self.assertTrue(os.path.isfile(cfg_path))
+            body = yaml.safe_load(open(cfg_path, encoding="utf-8")) or {}
+            prefixes = body["ai_discovery"]["trusted_binary_prefixes"]
+            self.assertEqual(prefixes.count("/opt/tools"), 1)
+            self.assertIn("/opt/more", prefixes)
 
     def test_embedded_newline_prefix_is_rejected_and_no_entry_injected(self):
         """F-1401: a trusted-path NAME with an embedded newline must not be
@@ -141,19 +137,10 @@ class AddTrustedBinPrefixTests(unittest.TestCase):
                 with self.assertRaises(DotenvValueError):
                     cmd_setup._add_trusted_bin_prefix(malicious, tmp)
 
-            dotenv = os.path.join(tmp, ".env")
-            body = open(dotenv, encoding="utf-8").read()
-            # The injected entry never made it into the file...
+            cfg_path = os.path.join(tmp, "config.yaml")
+            body = yaml.safe_load(open(cfg_path, encoding="utf-8")) or {}
             self.assertNotIn("DEFENSECLAW_DISABLE_REDACTION", body)
-            # ...and the file is exactly the prior single legit entry: no
-            # multi-line corruption, only the one expected key.
-            self.assertIn("/opt/legit", body)
-            keys = [
-                ln.split("=", 1)[0].strip()
-                for ln in body.splitlines()
-                if ln.strip() and not ln.strip().startswith("#") and "=" in ln
-            ]
-            self.assertEqual(keys, ["DEFENSECLAW_TRUSTED_BIN_PREFIXES"])
+            self.assertEqual(body["ai_discovery"]["trusted_binary_prefixes"], ["/opt/legit"])
 
     def test_dotenv_writer_refuses_symlink_target(self):
         """Secret/trusted-prefix writes must not follow a symlinked .env."""
@@ -223,8 +210,11 @@ class GatePromptContractGateTests(unittest.TestCase):
         self.assertEqual(mock_disc.call_count, 2, "should re-discover after trusting (full gate re-run)")
         # The path WAS trusted (persisted) — proving we refused on the
         # contract, not because trusting failed.
-        body = open(os.path.join(tmp, ".env"), encoding="utf-8").read()
-        self.assertIn(os.path.dirname(os.path.realpath(binpath)), body)
+        body = yaml.safe_load(open(os.path.join(tmp, "config.yaml"), encoding="utf-8")) or {}
+        self.assertIn(
+            os.path.dirname(os.path.realpath(binpath)),
+            body["ai_discovery"]["trusted_binary_prefixes"],
+        )
 
     def test_trusted_and_supported_version_is_accepted(self):
         def contract(_c, v):
@@ -247,9 +237,10 @@ class GatePromptContractGateTests(unittest.TestCase):
         )
         self.assertFalse(result)
         self.assertEqual(mock_disc.call_count, 1, "declining must not trigger a re-discovery")
-        dotenv = os.path.join(tmp, ".env")
-        if os.path.isfile(dotenv):
-            self.assertNotIn("DEFENSECLAW_TRUSTED_BIN_PREFIXES", open(dotenv, encoding="utf-8").read())
+        cfg_path = os.path.join(tmp, "config.yaml")
+        if os.path.isfile(cfg_path):
+            body = yaml.safe_load(open(cfg_path, encoding="utf-8")) or {}
+            self.assertNotIn(os.path.dirname(os.path.realpath(_bin)), body.get("ai_discovery", {}).get("trusted_binary_prefixes", []))
 
     def test_declined_prompt_still_emits_trusted_paths_hint(self):
         """Review follow-up: declining the trust prompt must still show remediation."""
@@ -269,7 +260,7 @@ class GatePromptContractGateTests(unittest.TestCase):
         joined = " ".join(hints)
         self.assertIn("trusted-paths add", joined)
         self.assertIn(os.path.dirname(os.path.realpath(binpath)), joined)
-        self.assertIn("appends to ~/.defenseclaw/.env", joined)
+        self.assertIn("writes ~/.defenseclaw/config.yaml", joined)
 
     def test_prompt_cache_avoids_reasking_same_directory(self):
         tmp = tempfile.mkdtemp()
@@ -360,10 +351,10 @@ class TrustedPathsCliTests(unittest.TestCase):
                 self.assertTrue(json.loads(add.output)["ok"])
                 listing = self.runner.invoke(cmd_setup.trusted_paths, ["list", "--json"], obj=app)
                 rows = {r["resolved"]: r for r in json.loads(listing.output)}
-            dotenv_body = open(os.path.join(tmp, ".env"), encoding="utf-8").read()
-            self.assertIn(resolved, dotenv_body)
+            body = yaml.safe_load(open(os.path.join(tmp, "config.yaml"), encoding="utf-8")) or {}
+            self.assertIn(resolved, body["ai_discovery"]["trusted_binary_prefixes"])
             self.assertTrue(rows[resolved]["removable"])
-            self.assertEqual(rows[resolved]["source"], ".env")
+            self.assertEqual(rows[resolved]["source"], "config")
 
     def test_add_world_writable_refused_without_force(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -407,7 +398,8 @@ class TrustedPathsCliTests(unittest.TestCase):
                 result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", newdir, "--json"], obj=app)
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertTrue(json.loads(result.output)["ok"])
-            self.assertNotIn(newdir, open(os.path.join(tmp, ".env"), encoding="utf-8").read())
+            body = yaml.safe_load(open(os.path.join(tmp, "config.yaml"), encoding="utf-8")) or {}
+            self.assertNotIn(newdir, body.get("ai_discovery", {}).get("trusted_binary_prefixes", []))
 
     def test_remove_builtin_default_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

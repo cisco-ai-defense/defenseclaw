@@ -59,6 +59,7 @@ from defenseclaw.config import (
     DEFENSECLAW_LLM_KEY_ENV,
     HILTConfig,
     PerConnectorGuardrailConfig,
+    load as load_config,
 )
 from defenseclaw.connector_contracts import (
     STATUS_KNOWN,
@@ -70,7 +71,7 @@ from defenseclaw.connector_contracts import (
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
-from defenseclaw.safety import reject_symlink, sanitize_dotenv_value
+from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 
 # Key used to stash the pre-invocation config.yaml mtime in the Click
 # context so the post-invocation hook can tell whether a `setup`
@@ -1678,28 +1679,53 @@ def _write_dotenv(path: str, entries: dict[str, str]) -> None:
         pass
 
 
-def _add_trusted_bin_prefix(prefix: str, data_dir: str) -> bool:
-    """Add a directory to DEFENSECLAW_TRUSTED_BIN_PREFIXES in .env and os.environ.
+def _load_config_for_data_dir(data_dir: str):
+    old_home = os.environ.get("DEFENSECLAW_HOME")
+    os.environ["DEFENSECLAW_HOME"] = data_dir
+    try:
+        return load_config()
+    finally:
+        if old_home is None:
+            os.environ.pop("DEFENSECLAW_HOME", None)
+        else:
+            os.environ["DEFENSECLAW_HOME"] = old_home
 
-    Entries are separated by ``os.pathsep`` (``:`` on POSIX, ``;`` on
-    Windows) so a Windows drive-qualified path like ``C:\\Tools`` is not
-    mangled by a hard-coded colon split. Returns ``True`` when the prefix
-    was newly added, ``False`` when it was already present (idempotent).
-    """
-    dotenv_path = os.path.join(data_dir, ".env")
-    existing = _load_dotenv(dotenv_path)
-    current = existing.get(
-        "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
-        os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", ""),
-    )
-    parts = [p.strip() for p in current.split(os.pathsep) if p.strip()]
-    added = prefix not in parts
+
+def _config_trusted_bin_prefixes(cfg) -> list[str]:
+    ai = getattr(cfg, "ai_discovery", None)
+    values = getattr(ai, "trusted_binary_prefixes", []) if ai is not None else []
+    return [str(p).strip() for p in (values or []) if str(p).strip()]
+
+
+def _set_config_trusted_bin_prefixes(cfg, prefixes: list[str]) -> None:
+    ai = getattr(cfg, "ai_discovery", None)
+    if ai is None:
+        return
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw in prefixes:
+        resolved, _err = agent_discovery.validate_trusted_prefix(raw)
+        key = resolved or str(raw).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    ai.trusted_binary_prefixes = deduped
+    cfg.save()
+
+
+def _add_trusted_bin_prefix(prefix: str, data_dir: str, cfg=None) -> bool:
+    """Add a directory to ai_discovery.trusted_binary_prefixes in config.yaml."""
+    if any(ch in prefix for ch in ("\n", "\r", "\x00")):
+        raise DotenvValueError("trusted binary prefix contains a control character")
+    cfg = cfg or _load_config_for_data_dir(data_dir)
+    parts = _config_trusted_bin_prefixes(cfg)
+    resolved, _err = agent_discovery.validate_trusted_prefix(prefix)
+    entry = resolved or prefix
+    added = entry not in parts
     if added:
-        parts.append(prefix)
-    new_val = os.pathsep.join(parts)
-    existing["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = new_val
-    _write_dotenv(dotenv_path, existing)
-    os.environ["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = new_val
+        parts.append(entry)
+        _set_config_trusted_bin_prefixes(cfg, parts)
     return added
 
 
@@ -1707,10 +1733,9 @@ def _add_trusted_bin_prefix(prefix: str, data_dir: str) -> bool:
 # `defenseclaw setup trusted-paths` — manage the binary-discovery allow-list.
 #
 # Built-in defaults live in agent_discovery._TRUSTED_BIN_PREFIXES_DEFAULT and
-# are read-only here. Operator additions persist to ~/.defenseclaw/.env via
-# the same _add_trusted_bin_prefix() the interactive prompt uses, validated by
-# the same agent_discovery.validate_trusted_prefix() guard the discovery gate
-# trusts — so the CLI, the prompt, and the gate can never disagree.
+# are read-only here. New operator additions persist to config.yaml under
+# ai_discovery.trusted_binary_prefixes. Legacy .env / process env entries are
+# still listed and honored for backward compatibility.
 # ---------------------------------------------------------------------------
 
 
@@ -1738,19 +1763,16 @@ def _default_resolved_prefixes() -> set[str]:
     return out
 
 
-def _collect_trusted_prefixes(data_dir: str) -> list[dict[str, object]]:
-    """Unified trusted-prefix view: built-in defaults + .env + exported env.
-
-    Source attribution: ``default`` (built-in), ``.env`` (operator-added,
-    removable), ``env`` (exported in the process environment but not in
-    .env — we can't rewrite the parent shell, so it is shown read-only).
-    """
+def _collect_trusted_prefixes(data_dir: str, cfg=None) -> list[dict[str, object]]:
+    """Unified trusted-prefix view: built-in defaults + config + legacy env."""
+    cfg = cfg or _load_config_for_data_dir(data_dir)
     dotenv_path = os.path.join(data_dir, ".env")
+    config_file = _config_trusted_bin_prefixes(cfg)
     env_file_raw = _load_dotenv(dotenv_path).get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
     env_file = [p.strip() for p in env_file_raw.split(os.pathsep) if p.strip()]
     proc_raw = os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
     proc = [p.strip() for p in proc_raw.split(os.pathsep) if p.strip()]
-    env_only = [p for p in proc if p not in env_file]
+    env_only = [p for p in proc if p not in env_file and p not in config_file]
 
     rows: list[dict[str, object]] = []
     seen: set[str] = set()
@@ -1772,8 +1794,10 @@ def _collect_trusted_prefixes(data_dir: str) -> list[dict[str, object]]:
 
     for raw in agent_discovery._TRUSTED_BIN_PREFIXES_DEFAULT:
         _push(raw, "default", False)
+    for raw in config_file:
+        _push(raw, "config", True)
     for raw in env_file:
-        _push(raw, ".env", True)
+        _push(raw, "legacy .env", True)
     for raw in env_only:
         _push(raw, "env", False)
     return rows
@@ -1797,7 +1821,7 @@ def trusted_paths() -> None:
     only when that binary lives under a trusted prefix — a guard against a
     hostile binary planted on $PATH. Built-in defaults cover system and
     Homebrew locations; trust additional roots here for bespoke installs.
-    Additions persist to ~/.defenseclaw/.env (DEFENSECLAW_TRUSTED_BIN_PREFIXES).
+    Additions persist to ~/.defenseclaw/config.yaml under ai_discovery.trusted_binary_prefixes.
     """
 
 
@@ -1806,7 +1830,7 @@ def trusted_paths() -> None:
 @pass_ctx
 def trusted_paths_list(app: AppContext, as_json: bool) -> None:
     """List trusted binary prefixes (built-in defaults + operator-added)."""
-    rows = _collect_trusted_prefixes(app.cfg.data_dir)
+    rows = _collect_trusted_prefixes(app.cfg.data_dir, cfg=app.cfg)
     if as_json:
         click.echo(_json.dumps(rows, indent=2))
         return
@@ -1835,7 +1859,7 @@ def trusted_paths_list(app: AppContext, as_json: bool) -> None:
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON instead of text.")
 @pass_ctx
 def trusted_paths_add(app: AppContext, directory: str, force: bool, as_json: bool) -> None:
-    """Trust DIRECTORY for connector-binary discovery (persisted to .env)."""
+    """Trust DIRECTORY for connector-binary discovery (persisted to config.yaml)."""
     resolved, err = agent_discovery.validate_trusted_prefix(directory)
     if not resolved:
         _emit_trusted_path_result(as_json, ok=False, path=directory, message=f"invalid path ({err})")
@@ -1853,7 +1877,7 @@ def trusted_paths_add(app: AppContext, directory: str, force: bool, as_json: boo
             message=f"refusing to trust ({err}); re-run with --force to override",
         )
         click.get_current_context().exit(1)
-    added = _add_trusted_bin_prefix(resolved, app.cfg.data_dir)
+    added = _add_trusted_bin_prefix(resolved, app.cfg.data_dir, cfg=app.cfg)
     message = "added to trusted prefixes" if added else "already an operator-added trusted prefix"
     if err and force:
         message += f" (forced despite: {err})"
@@ -1873,11 +1897,22 @@ def trusted_paths_remove(app: AppContext, directory: str, as_json: bool) -> None
         )
         click.get_current_context().exit(1)
     data_dir = app.cfg.data_dir
+    config_entries = _config_trusted_bin_prefixes(app.cfg)
+    target = (directory or "").strip()
+    kept_config = [
+        e
+        for e in config_entries
+        if e != target and agent_discovery.validate_trusted_prefix(e)[0] != resolved
+    ]
+    if len(kept_config) != len(config_entries):
+        _set_config_trusted_bin_prefixes(app.cfg, kept_config)
+        _emit_trusted_path_result(as_json, ok=True, path=resolved, message="removed from trusted prefixes")
+        return
+
     dotenv_path = os.path.join(data_dir, ".env")
     existing = _load_dotenv(dotenv_path)
     current = existing.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
     entries = [p.strip() for p in current.split(os.pathsep) if p.strip()]
-    target = (directory or "").strip()
     kept = [
         e
         for e in entries
@@ -1888,7 +1923,7 @@ def trusted_paths_remove(app: AppContext, directory: str, as_json: bool) -> None
             as_json,
             ok=False,
             path=resolved,
-            message="not an operator-added (.env) trusted prefix; nothing to remove",
+            message="not an operator-added trusted prefix; nothing to remove",
         )
         click.get_current_context().exit(1)
     new_val = os.pathsep.join(kept)
@@ -1907,8 +1942,8 @@ def _emit_untrusted_prefix_setup_hints(resolved_binary: str, parent: str) -> Non
     ux.subhead(f"  Binary resolves to: {resolved_binary}")
     ux.subhead(f"  Trust it with: defenseclaw setup trusted-paths add {parent}")
     ux.subhead(
-        "  `trusted-paths add` appends to ~/.defenseclaw/.env "
-        f"(DEFENSECLAW_TRUSTED_BIN_PREFIXES entries are {os.pathsep!r}-separated)."
+        "  `trusted-paths add` writes ~/.defenseclaw/config.yaml "
+        "(ai_discovery.trusted_binary_prefixes)."
     )
 
 

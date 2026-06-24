@@ -190,6 +190,8 @@ class TestAIDiscoveryConfig(unittest.TestCase):
             cfg.ai_discovery.confidence_policy_path,
             os.path.join(cfg.data_dir, "confidence.yaml"),
         )
+        self.assertFalse(cfg.ai_discovery.require_trusted_binary_paths)
+        self.assertEqual(cfg.ai_discovery.trusted_binary_prefixes, [])
 
     def test_disabled_default_is_omitted_on_save_round_trip(self):
         cfg = Config(data_dir=tempfile.mkdtemp(), ai_discovery=AIDiscoveryConfig(enabled=False))
@@ -201,6 +203,34 @@ class TestAIDiscoveryConfig(unittest.TestCase):
             {"enabled": True, "confidence_policy_path": "/tmp/custom-confidence.yaml"}
         )
         self.assertEqual(cfg.confidence_policy_path, "/tmp/custom-confidence.yaml")
+
+    def test_merge_trusted_binary_policy(self):
+        cfg = config_mod._merge_ai_discovery(
+            {
+                "enabled": True,
+                "require_trusted_binary_paths": True,
+                "trusted_binary_prefixes": ["/opt/tools"],
+            }
+        )
+        self.assertTrue(cfg.require_trusted_binary_paths)
+        self.assertEqual(cfg.trusted_binary_prefixes, ["/opt/tools"])
+
+
+class TestApplicationProtectionConfig(unittest.TestCase):
+    def test_default_auto_modes_are_observe(self):
+        cfg = config_mod.ApplicationProtectionConfig()
+        self.assertEqual(cfg.effective_guardrail_mode("codex"), "observe")
+        self.assertEqual(cfg.effective_asset_policy_mode("codex"), "observe")
+
+    def test_top_level_action_opt_in(self):
+        cfg = config_mod._merge_application_protection(
+            {
+                "guardrail": {"mode": "action"},
+                "asset_policy": {"mode": "action"},
+            }
+        )
+        self.assertEqual(cfg.effective_guardrail_mode("codex"), "action")
+        self.assertEqual(cfg.effective_asset_policy_mode("codex"), "action")
 
 
 class TestHookJudgeGateRoundTrip(unittest.TestCase):

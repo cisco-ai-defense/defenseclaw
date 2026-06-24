@@ -260,23 +260,25 @@ type PrivacyConfig struct {
 // telemetry is sanitized by the inventory service; this config only controls
 // which local metadata sources are inspected.
 type AIDiscoveryConfig struct {
-	Enabled                  bool     `mapstructure:"enabled"                   yaml:"enabled"`
-	Mode                     string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
-	ScanIntervalMin          int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
-	ProcessIntervalSec       int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
-	ScanRoots                []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
-	SignaturePacks           []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
-	AllowWorkspaceSignatures bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
-	DisabledSignatureIDs     []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
-	IncludeShellHistory      bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
-	IncludePackageManifests  bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
-	IncludeEnvVarNames       bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
-	IncludeNetworkDomains    bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
-	MaxFilesPerScan          int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
-	MaxFileBytes             int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
-	EmitOTel                 bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
-	StoreRawLocalPaths       bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
-	ConfidencePolicyPath     string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
+	Enabled                   bool     `mapstructure:"enabled"                   yaml:"enabled"`
+	Mode                      string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
+	ScanIntervalMin           int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
+	ProcessIntervalSec        int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
+	ScanRoots                 []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
+	SignaturePacks            []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
+	AllowWorkspaceSignatures  bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
+	DisabledSignatureIDs      []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
+	IncludeShellHistory       bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
+	IncludePackageManifests   bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
+	IncludeEnvVarNames        bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
+	IncludeNetworkDomains     bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	MaxFilesPerScan           int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
+	MaxFileBytes              int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
+	EmitOTel                  bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
+	StoreRawLocalPaths        bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
+	ConfidencePolicyPath      string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
+	RequireTrustedBinaryPaths bool     `mapstructure:"require_trusted_binary_paths" yaml:"require_trusted_binary_paths"`
+	TrustedBinaryPrefixes     []string `mapstructure:"trusted_binary_prefixes" yaml:"trusted_binary_prefixes,omitempty"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -2840,6 +2842,8 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("ai_discovery.emit_otel", true)
 	viper.SetDefault("ai_discovery.store_raw_local_paths", false)
 	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
+	viper.SetDefault("ai_discovery.require_trusted_binary_paths", false)
+	viper.SetDefault("ai_discovery.trusted_binary_prefixes", []string{})
 
 	viper.SetDefault("application_protection.enabled", true)
 	viper.SetDefault("application_protection.min_confidence", DefaultApplicationProtectionMinConfidence)
@@ -2847,6 +2851,8 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("application_protection.gone_after_min", DefaultApplicationProtectionGoneAfterMin)
 	viper.SetDefault("application_protection.include_connectors", []string{})
 	viper.SetDefault("application_protection.exclude_connectors", []string{})
+	viper.SetDefault("application_protection.guardrail.mode", "observe")
+	viper.SetDefault("application_protection.asset_policy.mode", AssetPolicyModeObserve)
 	viper.SetDefault("application_protection.connectors", map[string]any{})
 
 	viper.SetDefault("guardrail.enabled", false)

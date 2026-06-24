@@ -1852,6 +1852,8 @@ class AIDiscoveryConfig:
     emit_otel: bool = True
     store_raw_local_paths: bool = False
     confidence_policy_path: str = ""
+    require_trusted_binary_paths: bool = False
+    trusted_binary_prefixes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1877,6 +1879,12 @@ class ApplicationProtectionConfig:
     gone_after_min: int = 60
     include_connectors: list[str] = field(default_factory=list)
     exclude_connectors: list[str] = field(default_factory=list)
+    guardrail: PerConnectorGuardrailConfig = field(
+        default_factory=lambda: PerConnectorGuardrailConfig(mode="observe"),
+    )
+    asset_policy: ApplicationProtectionAssetPolicyConfig = field(
+        default_factory=lambda: ApplicationProtectionAssetPolicyConfig(mode="observe"),
+    )
     connectors: dict[str, ApplicationProtectionConnectorConfig] = field(default_factory=dict)
 
     def effective_enabled(self, connector: str) -> bool:
@@ -1892,6 +1900,22 @@ class ApplicationProtectionConfig:
         if pc is not None and pc.min_confidence is not None:
             return pc.min_confidence
         return self.min_confidence or 0.80
+
+    def effective_guardrail_mode(self, connector: str) -> str:
+        pc = self._connector_override(connector)
+        if pc is not None and pc.guardrail.mode.strip():
+            return pc.guardrail.mode.strip()
+        if self.guardrail.mode.strip():
+            return self.guardrail.mode.strip()
+        return "observe"
+
+    def effective_asset_policy_mode(self, connector: str) -> str:
+        pc = self._connector_override(connector)
+        if pc is not None and pc.asset_policy.mode.strip():
+            return pc.asset_policy.mode.strip()
+        if self.asset_policy.mode.strip():
+            return self.asset_policy.mode.strip()
+        return "observe"
 
     def allows_connector(self, connector: str) -> bool:
         name = _normalize_connector_key(connector)
@@ -1927,6 +1951,14 @@ class ApplicationProtectionConfig:
             "application_protection.exclude_connectors",
             self.exclude_connectors,
         )
+        try:
+            _validate_guardrail_mode(self.guardrail.mode)
+            _validate_guardrail_hook_fail_mode(self.guardrail.hook_fail_mode)
+            if self.guardrail.hilt is not None:
+                _validate_guardrail_min_severity(self.guardrail.hilt.min_severity)
+            _validate_asset_policy_mode(self.asset_policy.mode)
+        except ValueError as exc:
+            raise ValueError(f"application_protection: {exc}") from exc
         seen: dict[str, str] = {}
         for name in sorted(self.connectors):
             if not name.strip():
@@ -3147,6 +3179,22 @@ def _default_application_protection_dict() -> dict[str, Any]:
 def _serialize_application_protection(cfg: Config, block: Any) -> None:
     if not isinstance(block, dict):
         return
+    guard = block.get("guardrail")
+    if isinstance(guard, dict):
+        if guard.get("enabled") is None:
+            guard.pop("enabled", None)
+        if guard.get("hilt") is None:
+            guard.pop("hilt", None)
+        if guard == {"mode": "observe"}:
+            block.pop("guardrail", None)
+        elif not any(guard.values()):
+            block.pop("guardrail", None)
+    asset = block.get("asset_policy")
+    if isinstance(asset, dict):
+        if asset == {"mode": "observe"}:
+            block.pop("asset_policy", None)
+        elif not any(asset.values()):
+            block.pop("asset_policy", None)
     conns = block.get("connectors")
     if not conns:
         had_connectors = bool(
@@ -4414,6 +4462,8 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         emit_otel=bool(raw.get("emit_otel", True)),
         store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),
         confidence_policy_path=str(raw.get("confidence_policy_path", "") or ""),
+        require_trusted_binary_paths=bool(raw.get("require_trusted_binary_paths", False)),
+        trusted_binary_prefixes=[str(v) for v in (raw.get("trusted_binary_prefixes", []) or [])],
     )
 
 
@@ -4421,6 +4471,12 @@ def _merge_application_protection(raw: dict[str, Any] | None) -> ApplicationProt
     if not isinstance(raw, dict):
         return ApplicationProtectionConfig()
     min_confidence = _optional_float(raw.get("min_confidence"))
+    guardrail = _merge_application_protection_guardrail(raw.get("guardrail"))
+    if not guardrail.mode.strip():
+        guardrail.mode = "observe"
+    asset_policy = _merge_application_protection_asset_policy(raw.get("asset_policy"))
+    if not asset_policy.mode.strip():
+        asset_policy.mode = "observe"
     return ApplicationProtectionConfig(
         enabled=bool(raw.get("enabled", True)),
         min_confidence=0.80 if min_confidence is None else min_confidence,
@@ -4428,6 +4484,8 @@ def _merge_application_protection(raw: dict[str, Any] | None) -> ApplicationProt
         gone_after_min=int(raw.get("gone_after_min", 60) or 0),
         include_connectors=[str(v) for v in (raw.get("include_connectors", []) or [])],
         exclude_connectors=[str(v) for v in (raw.get("exclude_connectors", []) or [])],
+        guardrail=guardrail,
+        asset_policy=asset_policy,
         connectors=_merge_application_protection_connectors(raw.get("connectors")),
     )
 
