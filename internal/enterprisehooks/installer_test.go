@@ -209,6 +209,88 @@ func TestInstallRefusesDataDirSymlink(t *testing.T) {
 	}
 }
 
+func TestInstallRefusesExistingHookScriptSymlinkBeforeSetup(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hook dir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.sh")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\necho outside\n"), 0o700); err != nil {
+		t.Fatalf("write outside target: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(hookDir, "codex-hook.sh")); err != nil {
+		t.Fatalf("symlink hook script: %v", err)
+	}
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		AgentVersion:  "codex-cli 0.142.0",
+		GuardrailMode: "action",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing symlink") {
+		t.Fatalf("Install error = %v, want symlink footprint file refusal", err)
+	}
+	if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "#!/bin/sh\necho outside\n" {
+		t.Fatalf("outside hook target changed: data=%q err=%v", string(got), readErr)
+	}
+}
+
+func TestInstallRefusesExistingHookTokenSymlinkBeforeSetup(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hook dir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-token")
+	if err := os.WriteFile(outside, []byte("sentinel\n"), 0o600); err != nil {
+		t.Fatalf("write outside token target: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(hookDir, ".token")); err != nil {
+		t.Fatalf("symlink hook token: %v", err)
+	}
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		AgentVersion:  "codex-cli 0.142.0",
+		GuardrailMode: "action",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing symlink") {
+		t.Fatalf("Install error = %v, want symlink token sidecar refusal", err)
+	}
+	if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "sentinel\n" {
+		t.Fatalf("outside token target changed: data=%q err=%v", string(got), readErr)
+	}
+}
+
 func TestInstallRefusesHomeOwnerMismatch(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)

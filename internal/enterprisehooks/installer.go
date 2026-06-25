@@ -140,6 +140,13 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
 			return err
 		}
+		footprint := connector.AgentPaths{}
+		if ap, ok := conn.(connector.AgentPathProvider); ok {
+			footprint = ap.AgentPaths(setupOpts)
+		}
+		if err := validateInstallFootprintBeforeSetup(home, dataDir, uid, footprint); err != nil {
+			return err
+		}
 
 		return withOwnerCredentials(uid, gid, func() error {
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
@@ -161,10 +168,6 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				return fmt.Errorf("enterprise hooks: save hook contract lock: %w", err)
 			}
 
-			footprint := connector.AgentPaths{}
-			if ap, ok := conn.(connector.AgentPathProvider); ok {
-				footprint = ap.AgentPaths(setupOpts)
-			}
 			if err := hardenInstallFootprint(uid, gid, home, dataDir, footprint, paths); err != nil {
 				_ = conn.Teardown(ctx, setupOpts)
 				return err
@@ -275,14 +278,18 @@ func validateExistingUserFile(home, path string, uid int, label string) error {
 }
 
 func validateExistingUserPathPrefix(home, path string, uid int, label string) error {
-	return validateUserPathPrefix(home, path, uid, label, true)
+	return validateUserPathPrefix(home, path, uid, label, true, false)
 }
 
 func validateExistingUserParentPrefix(home, path string, uid int, label string) error {
-	return validateUserPathPrefix(home, path, uid, label, false)
+	return validateUserPathPrefix(home, path, uid, label, false, false)
 }
 
-func validateUserPathPrefix(home, path string, uid int, label string, includeLeaf bool) error {
+func validateOptionalUserPathPrefix(home, path string, uid int, label string, includeLeaf bool) error {
+	return validateUserPathPrefix(home, path, uid, label, includeLeaf, true)
+}
+
+func validateUserPathPrefix(home, path string, uid int, label string, includeLeaf bool, allowMissing bool) error {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("enterprise hooks: %s path %q is not absolute", label, path)
@@ -313,7 +320,7 @@ func validateUserPathPrefix(home, path string, uid int, label string, includeLea
 		info, err := os.Lstat(cur)
 		if err != nil {
 			if os.IsNotExist(err) {
-				if i == len(parts)-1 {
+				if allowMissing || i == len(parts)-1 {
 					return nil
 				}
 				return fmt.Errorf("enterprise hooks: %s parent missing: %s", label, cur)
@@ -335,6 +342,69 @@ func validateUserPathPrefix(home, path string, uid int, label string, includeLea
 	return nil
 }
 
+func validateOptionalExistingUserFile(home, path string, uid int, label string) error {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" {
+		return nil
+	}
+	if err := validateOptionalUserPathPrefix(home, path, uid, label, true); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("enterprise hooks: inspect %s %s: %w", label, path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("enterprise hooks: refusing symlink %s: %s", label, path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("enterprise hooks: %s path is a directory: %s", label, path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("enterprise hooks: %s %s is group/other writable", label, path)
+	}
+	if ok, actual := fileOwnerMatches(path, uid); !ok {
+		return fmt.Errorf("enterprise hooks: %s %s owner uid=%d does not match target uid=%d", label, path, actual, uid)
+	}
+	return nil
+}
+
+func validateOptionalExistingUserDir(home, path string, uid int, label string) error {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" {
+		return nil
+	}
+	if !pathInside(home, path) {
+		return fmt.Errorf("enterprise hooks: refusing %s outside user home: %s", label, path)
+	}
+	if err := validateOptionalUserPathPrefix(home, path, uid, label, true); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("enterprise hooks: inspect %s %s: %w", label, path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("enterprise hooks: refusing symlink %s: %s", label, path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("enterprise hooks: %s is not a directory: %s", label, path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("enterprise hooks: %s %s is group/other writable", label, path)
+	}
+	if ok, actual := fileOwnerMatches(path, uid); !ok {
+		return fmt.Errorf("enterprise hooks: %s %s owner uid=%d does not match target uid=%d", label, path, actual, uid)
+	}
+	return nil
+}
+
 func validateExistingUserDir(path string, uid int, label string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -351,6 +421,30 @@ func validateExistingUserDir(path string, uid int, label string) error {
 	}
 	if ok, actual := fileOwnerMatches(path, uid); !ok {
 		return fmt.Errorf("enterprise hooks: %s %s owner uid=%d does not match target uid=%d", label, path, actual, uid)
+	}
+	return nil
+}
+
+func validateInstallFootprintBeforeSetup(home, dataDir string, uid int, footprint connector.AgentPaths) error {
+	for _, dir := range sortedUnique(append([]string{filepath.Join(dataDir, "hooks")}, footprint.CreatedDirs...)) {
+		if err := validateOptionalExistingUserDir(home, dir, uid, "footprint dir"); err != nil {
+			return err
+		}
+	}
+	files := append([]string{}, footprint.PatchedFiles...)
+	files = append(files, footprint.BackupFiles...)
+	files = append(files, footprint.HookScripts...)
+	files = append(files, hookSidecarFiles(dataDir)...)
+	for _, path := range sortedUnique(files) {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		if !pathInside(home, filepath.Clean(path)) {
+			return fmt.Errorf("enterprise hooks: refusing footprint file outside user home: %s", filepath.Clean(path))
+		}
+		if err := validateOptionalExistingUserFile(home, path, uid, "footprint file"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -395,7 +489,10 @@ func hardenInstallFootprint(uid, gid int, home, dataDir string, footprint connec
 			return err
 		}
 	}
-	for _, path := range sortedUnique(append(append([]string{}, footprint.BackupFiles...), footprint.HookScripts...)) {
+	footprintFiles := append([]string{}, footprint.BackupFiles...)
+	footprintFiles = append(footprintFiles, footprint.HookScripts...)
+	footprintFiles = append(footprintFiles, hookSidecarFiles(dataDir)...)
+	for _, path := range sortedUnique(footprintFiles) {
 		path = strings.TrimSpace(path)
 		if path == "" {
 			continue
@@ -421,6 +518,14 @@ func hardenInstallFootprint(uid, gid int, home, dataDir string, footprint connec
 		}
 	}
 	return lchownInstallFootprint(uid, gid, dataDir, footprint, hookConfigPaths)
+}
+
+func hookSidecarFiles(dataDir string) []string {
+	hookDir := filepath.Join(dataDir, "hooks")
+	return []string{
+		filepath.Join(hookDir, ".token"),
+		filepath.Join(hookDir, ".hookcfg"),
+	}
 }
 
 func validateHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) error {
