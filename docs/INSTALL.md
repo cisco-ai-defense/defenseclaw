@@ -113,7 +113,7 @@ Python 3.11+ is recommended if you need the MCP scanner
 ### Clone and Build Everything
 
 ```bash
-git clone https://github.com/defenseclaw/defenseclaw.git
+git clone https://github.com/cisco-ai-defense/defenseclaw.git
 cd defenseclaw
 
 # Build all three components (does not install)
@@ -319,7 +319,7 @@ make clean        # Full clean (binaries, venv, node_modules, coverage)
 End users can install a released version without cloning the repo:
 
 ```bash
-curl -LsSf https://github.com/defenseclaw/defenseclaw/releases/latest/download/install.sh | bash
+curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash
 ```
 
 The installer detects the platform, downloads the correct gateway
@@ -330,7 +330,7 @@ confirmations.
 Pin a specific version:
 
 ```bash
-VERSION=0.2.0 curl -LsSf .../install.sh | bash
+VERSION=0.8.0 curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash
 ```
 
 #### Picking an agent connector at install time
@@ -340,20 +340,22 @@ OpenClaw runtime and the DefenseClaw plugin). You can pick a different
 connector — or skip connector setup entirely — with `--connector`:
 
 ```bash
+INSTALL_URL=https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh
+
 # Codex (no OpenClaw, no plugin tarball; patches ~/.codex/config.toml + hooks)
-curl -LsSf .../install.sh | bash -s -- --connector codex
+curl -LsSf "$INSTALL_URL" | bash -s -- --connector codex
 
 # Claude Code (no OpenClaw; patches ~/.claude/settings.json hooks)
-curl -LsSf .../install.sh | bash -s -- --connector claudecode
+curl -LsSf "$INSTALL_URL" | bash -s -- --connector claudecode
 
 # ZeptoClaw (no OpenClaw; patches ~/.zeptoclaw/config.json)
-curl -LsSf .../install.sh | bash -s -- --connector zeptoclaw
+curl -LsSf "$INSTALL_URL" | bash -s -- --connector zeptoclaw
 
 # Lay binaries only — pick a connector later
-curl -LsSf .../install.sh | bash -s -- --connector none
+curl -LsSf "$INSTALL_URL" | bash -s -- --connector none
 
 # Shortcut for "skip OpenClaw" without naming another connector
-curl -LsSf .../install.sh | bash -s -- --no-openclaw
+curl -LsSf "$INSTALL_URL" | bash -s -- --no-openclaw
 ```
 
 Run interactively (without `--yes` and without `--connector`) and the
