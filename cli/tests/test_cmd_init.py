@@ -807,8 +807,9 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
     def test_init_no_token_shows_local(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which, _mock_gw):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
-        os.environ.pop("DEFENSECLAW_GATEWAY_TOKEN", None)
-        os.environ.pop("OPENCLAW_GATEWAY_TOKEN", None)
+        for k in list(os.environ.keys()):
+            if k.startswith("DEFENSECLAW_") or k.startswith("OPENCLAW_"):
+                os.environ.pop(k, None)
 
         app = AppContext()
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
