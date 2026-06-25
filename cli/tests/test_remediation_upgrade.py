@@ -8,8 +8,8 @@ Findings covered:
 
 * F-0201 / F-0703 — abort the upgrade when no integrity metadata is available.
 * F-0202        — refuse an unsigned/unverifiable checksum manifest.
-* F-0704        — refuse to downgrade signed checksums to unsigned when cosign
-                  is missing.
+* F-0704        — warn and continue with checksum validation when cosign is
+                  missing but signed checksum assets are present.
 * F-0203        — fail closed when the release upgrade manifest cannot be
                   fetched.
 * F-0701        — never send the gateway bearer token to a non-loopback probe
@@ -336,11 +336,10 @@ class TestUnsignedChecksumManifestRejected(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 1)
 
 
-class TestSigstoreCosignMissingFailsClosed(unittest.TestCase):
-    """F-0704: signed checksums must not be downgraded to unsigned just
-    because cosign is unavailable on the host."""
+class TestSigstoreCosignMissingWarns(unittest.TestCase):
+    """Signed checksums remain usable when cosign is unavailable locally."""
 
-    def test_missing_cosign_with_signature_fails_closed(self):
+    def test_missing_cosign_with_signature_warns_and_continues(self):
         with TemporaryDirectory() as tmp:
             checksums = os.path.join(tmp, "checksums.txt")
             sig = os.path.join(tmp, "checksums.txt.sig")
@@ -357,11 +356,14 @@ class TestSigstoreCosignMissingFailsClosed(unittest.TestCase):
                 return_value=None,
             ), patch(
                 "defenseclaw.commands.cmd_upgrade.subprocess.run"
-            ) as run_mock, self.assertRaises(SystemExit) as ctx:
+            ) as run_mock, patch(
+                "defenseclaw.commands.cmd_upgrade.ux.warn"
+            ) as warn_mock:
                 _verify_checksums_sigstore("9.9.9", tmp, checksums)
 
-        self.assertEqual(ctx.exception.code, 1)
         run_mock.assert_not_called()
+        warn_mock.assert_called_once()
+        self.assertIn("continuing with checksum verification only", warn_mock.call_args.args[0])
 
 
 class TestUpgradeManifestFailsClosed(unittest.TestCase):

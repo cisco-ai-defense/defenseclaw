@@ -399,10 +399,15 @@ upgrade_supports_allow_unverified() {
         defenseclaw upgrade --help 2>/dev/null | grep -q -- "--allow-unverified"
 }
 
+candidate_has_checksum_signature() {
+    local dir="${RELEASE_ROOT}/${TARGET_VERSION}"
+    [[ -f "${dir}/checksums.txt.sig" && -f "${dir}/checksums.txt.pem" ]]
+}
+
 run_upgrade() {
     log "Running upgrade ${FROM_VERSION} -> ${TARGET_VERSION}"
     local -a args=(upgrade --version "${TARGET_VERSION}" --yes --health-timeout "${HEALTH_TIMEOUT}")
-    if upgrade_supports_allow_unverified; then
+    if upgrade_supports_allow_unverified && ! candidate_has_checksum_signature; then
         args+=(--allow-unverified)
     fi
 

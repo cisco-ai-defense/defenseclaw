@@ -457,6 +457,12 @@ by 0.2.0's guardrail setup) while preserving plugin registration.
 **Flags:**
 - `--yes`, `-y` — skip confirmation prompts
 - `--version VERSION` — upgrade to a specific release (default: latest)
+- `--allow-unverified` — unsafe override for releases whose checksum manifest
+  is missing, unsigned, incomplete, or otherwise unverifiable
+
+Signed releases can be upgraded on hosts without `cosign`; the command warns
+and continues with SHA-256 checksum validation only. Install `cosign` to verify
+Sigstore provenance in addition to checksums.
 
 **Examples:**
 

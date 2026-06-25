@@ -64,7 +64,7 @@ _UPGRADE_MANIFEST_FILENAME = "upgrade-manifest.json"
     default=False,
     help=(
         "Proceed even when release artifacts cannot be cryptographically "
-        "verified (missing/unsigned checksums.txt, missing cosign, or "
+        "verified (missing/unsigned checksums.txt, invalid signature, or "
         "missing upgrade-manifest.json). UNSAFE: only use when you knowingly "
         "accept the supply-chain risk."
     ),
@@ -145,7 +145,8 @@ def upgrade(
         )
         if checksums is None:
             # F-0581 (BREAKING CHANGE): the only signed integrity manifest is
-            # the Sigstore-verified checksums.txt. GitHub's per-asset `digest`
+            # checksums.txt when it is either Sigstore-verified or accepted
+            # with an explicit missing-cosign warning. GitHub's per-asset `digest`
             # values come from the same (untrusted, remote) release service and
             # are UNSIGNED metadata — a compromised/spoofed release endpoint can
             # serve matching bytes + digest, so they are NOT a substitute for a
@@ -159,7 +160,7 @@ def upgrade(
             # verification (we do not pretend unsigned digests are trusted).
             if not allow_unverified:
                 ux.err(
-                    "No Sigstore-verified checksums.txt is available for this "
+                    "No trusted checksums.txt is available for this "
                     "release — refusing to install release artifacts that "
                     "cannot be cryptographically integrity-verified. GitHub "
                     "per-asset digests are unsigned metadata and are NOT "
@@ -181,7 +182,7 @@ def upgrade(
                 indent="  ",
             )
         else:
-            ux.ok("Checksum manifest verified (checksums.txt)")
+            ux.ok("Checksum manifest accepted (checksums.txt)")
             # F-0582 (BREAKING CHANGE): do NOT silently fill missing artifact
             # entries from unsigned GitHub asset digests. Doing so would
             # downgrade those artifacts from signed to unsigned authentication
@@ -531,10 +532,13 @@ def _download_checksums(
     parse, not just download, because a 200 with garbage body would
     otherwise look "verified" to the caller.
 
-    F-0202: a downloaded ``checksums.txt`` is only trusted once its
-    Sigstore signature verifies. ``_verify_checksums_sigstore`` fails
-    closed when the manifest is unsigned/unverifiable unless the operator
-    passed ``allow_unverified``.
+    F-0202: a downloaded ``checksums.txt`` is trusted when either its
+    Sigstore signature verifies or the release shipped signature assets but
+    the local host cannot run cosign. The latter is a deliberate operator-UX
+    compromise: checksum validation still protects against a corrupt or
+    swapped payload, and the command prints a warning naming the missing
+    verifier. Other unsigned/unverifiable states still fail closed unless the
+    operator passed ``allow_unverified``.
     """
     dest = _download_optional_release_asset(version, _CHECKSUMS_FILENAME, staging_dir)
     if not dest:
@@ -597,14 +601,17 @@ def _verify_checksums_sigstore(
 ) -> None:
     """Verify checksums.txt with its Sigstore cert/signature.
 
-    Fails closed (``SystemExit``) when the manifest cannot be
-    cryptographically authenticated, unless ``allow_unverified`` is set:
+    Fails closed (``SystemExit``) when the manifest cannot be trusted, unless
+    ``allow_unverified`` is set:
 
     * F-0202: an unsigned manifest (no ``.sig``/``.pem`` assets, or only
       one of them) is untrusted — a checksum match against an unsigned
       manifest proves nothing about provenance.
-    * F-0704: a manifest that ships Sigstore assets but cannot be verified
-      because ``cosign`` is missing must not be downgraded to "unsigned".
+    * Bad Sigstore signatures are untrusted.
+    * Missing local ``cosign`` is a warning, not a hard stop, when both
+      Sigstore assets are present. The operator still gets SHA-256 checksum
+      validation and an explicit reminder to install cosign for provenance
+      verification.
     """
     sig_path = _download_optional_release_asset(version, f"{_CHECKSUMS_FILENAME}.sig", staging_dir)
     cert_path = _download_optional_release_asset(version, f"{_CHECKSUMS_FILENAME}.pem", staging_dir)
@@ -627,11 +634,11 @@ def _verify_checksums_sigstore(
 
     cosign = shutil.which("cosign")
     if not cosign:
-        _fail_unsigned_checksums(
+        ux.warn(
             "checksums.txt Sigstore signature is present, but cosign was "
-            "not found on PATH — refusing to downgrade signed verification "
-            "to unsigned.",
-            allow_unverified,
+            "not found on PATH; continuing with checksum verification only. "
+            "Install cosign to verify release provenance.",
+            indent="  ",
         )
         return
 

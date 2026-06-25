@@ -52,6 +52,7 @@ Before cutting a release, run the upgrade smoke on at least macOS and Linux. It 
 - CLI and gateway versions match the candidate version
 - known regression markers such as `Traceback`, `AttributeError`, missing required migrations, and component drift are absent
 - the Textual metric tile refresh path works in the installed environment
+- signed candidates run the default upgrade path; `--allow-unverified` is only added automatically for unsigned local smoke artifacts
 
 ```bash
 # Current platform, building candidate artifacts from the working tree.
