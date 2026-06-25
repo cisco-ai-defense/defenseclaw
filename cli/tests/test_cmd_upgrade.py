@@ -532,10 +532,9 @@ class TestChecksumVerification(unittest.TestCase):
 
         self.assertEqual(ctx.exception.code, 1)
 
-    def test_checksums_sigstore_fails_closed_without_cosign(self):
-        """F-0704: a release that ships Sigstore assets must NOT be downgraded
-        to unsigned verification just because cosign is missing. The default
-        (no --allow-unverified) now fails closed."""
+    def test_checksums_sigstore_warns_without_cosign(self):
+        """A release that ships Sigstore assets should still be upgradeable on
+        hosts without cosign; checksum validation continues after a warning."""
         with TemporaryDirectory() as tmp:
             checksums = os.path.join(tmp, "checksums.txt")
             sig = os.path.join(tmp, "checksums.txt.sig")
@@ -552,15 +551,48 @@ class TestChecksumVerification(unittest.TestCase):
                 return_value=None,
             ), patch(
                 "defenseclaw.commands.cmd_upgrade.subprocess.run"
-            ) as run_mock, self.assertRaises(SystemExit) as ctx:
+            ) as run_mock, patch(
+                "defenseclaw.commands.cmd_upgrade.ux.warn"
+            ) as warn_mock:
                 _verify_checksums_sigstore("9.9.9", tmp, checksums)
 
-        self.assertEqual(ctx.exception.code, 1)
         run_mock.assert_not_called()
+        warn_mock.assert_called_once()
+        self.assertIn("continuing with checksum verification only", warn_mock.call_args.args[0])
+
+    def test_download_checksums_accepts_signed_manifest_without_cosign(self):
+        """Regression for 0.8.0 -> 0.8.1: signed release assets must not
+        require cosign to be installed before checksum validation can proceed."""
+        with TemporaryDirectory() as tmp:
+            checksums = os.path.join(tmp, "checksums.txt")
+            sig = os.path.join(tmp, "checksums.txt.sig")
+            cert = os.path.join(tmp, "checksums.txt.pem")
+            sha = "a" * 64
+            with open(checksums, "w", encoding="utf-8") as f:
+                f.write(f"{sha}  defenseclaw-9.9.9-py3-none-any.whl\n")
+            for path in (sig, cert):
+                with open(path, "wb") as f:
+                    f.write(b"release asset")
+
+            with patch(
+                "defenseclaw.commands.cmd_upgrade._download_optional_release_asset",
+                side_effect=[checksums, sig, cert],
+            ), patch(
+                "defenseclaw.commands.cmd_upgrade.shutil.which",
+                return_value=None,
+            ), patch(
+                "defenseclaw.commands.cmd_upgrade.subprocess.run"
+            ) as run_mock, patch(
+                "defenseclaw.commands.cmd_upgrade.ux.warn"
+            ) as warn_mock:
+                result = _download_checksums("9.9.9", tmp)
+
+        self.assertEqual(result, {"defenseclaw-9.9.9-py3-none-any.whl": sha})
+        run_mock.assert_not_called()
+        warn_mock.assert_called_once()
 
     def test_checksums_sigstore_allow_unverified_skips_cosign(self):
-        """With the explicit operator opt-in, a missing cosign degrades to a
-        warning instead of aborting (F-0704 escape hatch)."""
+        """The explicit operator opt-in still permits the missing-cosign path."""
         with TemporaryDirectory() as tmp:
             checksums = os.path.join(tmp, "checksums.txt")
             sig = os.path.join(tmp, "checksums.txt.sig")

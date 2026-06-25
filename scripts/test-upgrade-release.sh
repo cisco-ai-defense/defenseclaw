@@ -62,7 +62,7 @@ Options:
 Examples:
   make upgrade-smoke
   scripts/test-upgrade-release.sh --from-version 0.7.2
-  scripts/test-upgrade-release.sh --from-versions "0.7.2,0.7.1,0.6.6,0.6.0,0.5.0,0.4.0"
+  scripts/test-upgrade-release.sh --from-versions "0.8.1,0.8.0,0.7.2,0.7.1,0.6.6,0.6.0,0.5.0,0.4.0"
   scripts/test-upgrade-release.sh --release-dir dist --baseline-mode seed
 
 For a Linux host without the repo's Go toolchain, build/copy artifacts first:
@@ -202,10 +202,27 @@ normalize_baseline_versions() {
         [[ -n "${version}" ]] || continue
         [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
             || die "invalid baseline version: ${version}"
+        if ! version_lte "${version}" "${TARGET_VERSION}"; then
+            warn "Skipping baseline ${version}; target ${TARGET_VERSION} is older"
+            continue
+        fi
         FROM_VERSION_LIST+=("${version}")
     done
     [[ "${#FROM_VERSION_LIST[@]}" -gt 0 ]] || die "no baseline versions provided"
     FROM_VERSION="${FROM_VERSION_LIST[0]}"
+}
+
+version_lte() {
+    python3 - "$1" "$2" <<'PY'
+import sys
+
+
+def parse(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+raise SystemExit(0 if parse(sys.argv[1]) <= parse(sys.argv[2]) else 1)
+PY
 }
 
 validate_inputs() {
@@ -399,10 +416,15 @@ upgrade_supports_allow_unverified() {
         defenseclaw upgrade --help 2>/dev/null | grep -q -- "--allow-unverified"
 }
 
+candidate_has_checksum_signature() {
+    local dir="${RELEASE_ROOT}/${TARGET_VERSION}"
+    [[ -f "${dir}/checksums.txt.sig" && -f "${dir}/checksums.txt.pem" ]]
+}
+
 run_upgrade() {
     log "Running upgrade ${FROM_VERSION} -> ${TARGET_VERSION}"
     local -a args=(upgrade --version "${TARGET_VERSION}" --yes --health-timeout "${HEALTH_TIMEOUT}")
-    if upgrade_supports_allow_unverified; then
+    if upgrade_supports_allow_unverified && ! candidate_has_checksum_signature; then
         args+=(--allow-unverified)
     fi
 
