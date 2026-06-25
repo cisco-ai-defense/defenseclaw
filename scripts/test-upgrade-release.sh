@@ -435,7 +435,12 @@ run_upgrade() {
         die "upgrade command failed"
     fi
 
-    if grep -E "Traceback|AttributeError|Required migration\\(s\\).*not recorded|Component drift detected" \
+    # The upgrade command runs inside the already-installed baseline process.
+    # Baselines that perform an in-process post-upgrade drift check can still
+    # have the old CLI version cached in sys.modules after replacing the wheel
+    # on disk. Do not fail on that warning here; verify_upgrade launches the
+    # freshly installed CLI/gateway as new processes and catches real drift.
+    if grep -E "Traceback|AttributeError|Required migration\\(s\\).*not recorded" \
         "${SMOKE_HOME}/upgrade.log" >/dev/null; then
         tail_log "${SMOKE_HOME}/upgrade.log"
         die "upgrade log contains a known regression marker"
