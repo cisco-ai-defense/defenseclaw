@@ -325,8 +325,8 @@ func (c *CodexConnector) AgentPaths(opts SetupOpts) AgentPaths {
 			filepath.Join(opts.DataDir, "codex_config_backup.json"),
 			filepath.Join(opts.DataDir, "codex_backup.json"),
 		},
-		HookScripts: hookScriptPathsForConnector(opts, c),
-		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
+		HookScripts:          hookScriptPathsForConnector(opts, c),
+		GeneratedExecutables: []string{filepath.Join(opts.DataDir, "notify-bridge.sh")},
 	}
 }
 

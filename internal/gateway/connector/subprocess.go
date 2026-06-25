@@ -149,6 +149,37 @@ func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
 	return nil
 }
 
+func subprocessGeneratedFiles(opts SetupOpts) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	return []string{
+		filepath.Join(opts.DataDir, "shims", ".token"),
+		filepath.Join(opts.DataDir, "policies", "defenseclaw-policy.yaml"),
+	}
+}
+
+func subprocessGeneratedExecutables(opts SetupOpts) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	out := make([]string, 0, len(shimBinaries))
+	for _, name := range shimBinaries {
+		out = append(out, filepath.Join(opts.DataDir, "shims", name))
+	}
+	return out
+}
+
+func subprocessCreatedDirs(opts SetupOpts) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	return []string{
+		filepath.Join(opts.DataDir, "shims"),
+		filepath.Join(opts.DataDir, "policies"),
+	}
+}
+
 // genericHookScripts are agent-agnostic inspection scripts generated for
 // every connector.
 var genericHookScripts = []string{

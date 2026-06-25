@@ -6017,6 +6017,22 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 					t.Errorf("%s: backup file %q is not under DataDir %q", c.name, bf, dataDir)
 				}
 			}
+			for _, gf := range paths.GeneratedFiles {
+				if !filepath.IsAbs(gf) {
+					t.Errorf("%s: generated file %q is not absolute", c.name, gf)
+				}
+				if !strings.HasPrefix(gf, dataDir) {
+					t.Errorf("%s: generated file %q is not under DataDir %q", c.name, gf, dataDir)
+				}
+			}
+			for _, gf := range paths.GeneratedExecutables {
+				if !filepath.IsAbs(gf) {
+					t.Errorf("%s: generated executable %q is not absolute", c.name, gf)
+				}
+				if !strings.HasPrefix(gf, dataDir) {
+					t.Errorf("%s: generated executable %q is not under DataDir %q", c.name, gf, dataDir)
+				}
+			}
 		})
 	}
 }
@@ -6273,6 +6289,9 @@ func TestCodex_AgentPaths_Specifics(t *testing.T) {
 			}
 		}
 	}
+	if !slices.Contains(paths.GeneratedExecutables, filepath.Join(dataDir, "notify-bridge.sh")) {
+		t.Errorf("GeneratedExecutables = %v, missing notify bridge", paths.GeneratedExecutables)
+	}
 }
 
 // TestClaudeCode_AgentPaths_Specifics pins the Claude Code footprint:
@@ -6327,6 +6346,12 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("CreatedDirs = %v, missing %q", paths.CreatedDirs, wantDir)
+	}
+	if !slices.Contains(paths.GeneratedFiles, filepath.Join(dataDir, "shims", ".token")) {
+		t.Errorf("GeneratedFiles = %v, missing shim token", paths.GeneratedFiles)
+	}
+	if !slices.Contains(paths.GeneratedExecutables, filepath.Join(dataDir, "shims", "curl")) {
+		t.Errorf("GeneratedExecutables = %v, missing curl shim", paths.GeneratedExecutables)
 	}
 }
 

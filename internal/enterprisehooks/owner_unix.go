@@ -154,6 +154,14 @@ func lchownInstallFootprint(uid, gid int, dataDir string, footprint connector.Ag
 			return fmt.Errorf("enterprise hooks: lchown %s: %w", path, err)
 		}
 	}
+	for _, path := range append(append([]string{}, footprint.GeneratedFiles...), footprint.GeneratedExecutables...) {
+		if path == "" {
+			continue
+		}
+		if err := os.Lchown(path, uid, gid); err != nil {
+			return fmt.Errorf("enterprise hooks: lchown %s: %w", path, err)
+		}
+	}
 	for _, path := range footprint.CreatedDirs {
 		if path == "" {
 			continue

@@ -519,6 +519,19 @@ type AgentPaths struct {
 	// PatchedFiles.
 	HookScripts []string
 
+	// GeneratedFiles are DefenseClaw-owned non-executable files written
+	// under opts.DataDir at Setup time that are not backups. They are
+	// declared separately so privileged enterprise repair can preflight
+	// an existing file before writing through it.
+	GeneratedFiles []string
+
+	// GeneratedExecutables are DefenseClaw-owned executable files written
+	// under opts.DataDir at Setup time that are not native hook scripts
+	// under hooks/. For example Codex's notify bridge is invoked by
+	// Codex's notify integration, not by the hook event bus, but still
+	// carries hook credentials and must be preflighted/hardened.
+	GeneratedExecutables []string
+
 	// CreatedDirs are directories the connector creates and owns
 	// (e.g. ~/.openclaw/extensions/defenseclaw/). Distinct from
 	// PatchedFiles because the entire directory is owned by

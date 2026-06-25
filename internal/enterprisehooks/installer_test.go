@@ -323,6 +323,115 @@ func TestInstallRefusesExistingHookTokenSymlinkBeforeSetup(t *testing.T) {
 	}
 }
 
+func TestInstallRefusesExistingHookHelperSymlinkBeforeSetup(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hook dir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-hardening.sh")
+	if err := os.WriteFile(outside, []byte("# helper\n"), 0o600); err != nil {
+		t.Fatalf("write outside helper target: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(hookDir, "_hardening.sh")); err != nil {
+		t.Fatalf("symlink hook helper: %v", err)
+	}
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		AgentVersion:  "codex-cli 0.142.0",
+		GuardrailMode: "action",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing symlink") {
+		t.Fatalf("Install error = %v, want hook helper symlink refusal", err)
+	}
+	if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "# helper\n" {
+		t.Fatalf("outside helper target changed: data=%q err=%v", string(got), readErr)
+	}
+}
+
+func TestInstallRefusesExistingGeneratedExecutableSymlinkBeforeSetup(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-notify.sh")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\necho outside\n"), 0o700); err != nil {
+		t.Fatalf("write outside target: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dataDir, "notify-bridge.sh")); err != nil {
+		t.Fatalf("symlink notify bridge: %v", err)
+	}
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		AgentVersion:  "codex-cli 0.142.0",
+		GuardrailMode: "action",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing symlink") {
+		t.Fatalf("Install error = %v, want generated executable symlink refusal", err)
+	}
+	if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "#!/bin/sh\necho outside\n" {
+		t.Fatalf("outside notify target changed: data=%q err=%v", string(got), readErr)
+	}
+}
+
+func TestValidateInstallFootprintRefusesGeneratedFileSymlinkBeforeSetup(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	generatedPath := filepath.Join(dataDir, "policies", "defenseclaw-policy.yaml")
+	if err := os.MkdirAll(filepath.Dir(generatedPath), 0o700); err != nil {
+		t.Fatalf("mkdir generated file dir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-policy.yaml")
+	if err := os.WriteFile(outside, []byte("sentinel: true\n"), 0o600); err != nil {
+		t.Fatalf("write outside policy target: %v", err)
+	}
+	if err := os.Symlink(outside, generatedPath); err != nil {
+		t.Fatalf("symlink policy: %v", err)
+	}
+
+	err := validateInstallFootprintBeforeSetup(home, dataDir, os.Getuid(), connector.AgentPaths{
+		GeneratedFiles: []string{generatedPath},
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing symlink") {
+		t.Fatalf("validateInstallFootprintBeforeSetup error = %v, want generated file symlink refusal", err)
+	}
+	if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "sentinel: true\n" {
+		t.Fatalf("outside policy target changed: data=%q err=%v", string(got), readErr)
+	}
+}
+
 func TestInstallRefusesHomeOwnerMismatch(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)

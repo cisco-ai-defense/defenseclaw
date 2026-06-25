@@ -470,6 +470,8 @@ func validateInstallFootprintBeforeSetup(home, dataDir string, uid int, footprin
 	files := append([]string{}, footprint.PatchedFiles...)
 	files = append(files, footprint.BackupFiles...)
 	files = append(files, footprint.HookScripts...)
+	files = append(files, footprint.GeneratedFiles...)
+	files = append(files, footprint.GeneratedExecutables...)
 	files = append(files, hookSidecarFiles(dataDir)...)
 	for _, path := range sortedUnique(files) {
 		if strings.TrimSpace(path) == "" {
@@ -527,6 +529,8 @@ func hardenInstallFootprint(uid, gid int, home, dataDir string, footprint connec
 	}
 	footprintFiles := append([]string{}, footprint.BackupFiles...)
 	footprintFiles = append(footprintFiles, footprint.HookScripts...)
+	footprintFiles = append(footprintFiles, footprint.GeneratedFiles...)
+	footprintFiles = append(footprintFiles, footprint.GeneratedExecutables...)
 	footprintFiles = append(footprintFiles, hookSidecarFiles(dataDir)...)
 	for _, path := range sortedUnique(footprintFiles) {
 		path = strings.TrimSpace(path)
@@ -549,6 +553,12 @@ func hardenInstallFootprint(uid, gid int, home, dataDir string, footprint connec
 				break
 			}
 		}
+		for _, script := range footprint.GeneratedExecutables {
+			if filepath.Clean(script) == filepath.Clean(path) {
+				mode = 0o700
+				break
+			}
+		}
 		if err := chmodOwnedPath(path, mode); err != nil {
 			return err
 		}
@@ -561,6 +571,7 @@ func hookSidecarFiles(dataDir string) []string {
 	return []string{
 		filepath.Join(hookDir, ".token"),
 		filepath.Join(hookDir, ".hookcfg"),
+		filepath.Join(hookDir, "_hardening.sh"),
 	}
 }
 

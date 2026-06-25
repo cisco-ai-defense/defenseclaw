@@ -229,7 +229,6 @@ func (c *ClaudeCodeConnector) AgentPaths(opts SetupOpts) AgentPaths {
 			managedFileBackupPath(opts.DataDir, c.Name(), "settings.json"),
 		},
 		HookScripts: hookScriptPathsForConnector(opts, c),
-		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
 	}
 }
 
