@@ -1205,6 +1205,7 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	oldG, newG := oldCfg.Guardrail, newCfg.Guardrail
 	if oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
+		oldG.Connector != newG.Connector ||
 		!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
 		oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
 		oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||

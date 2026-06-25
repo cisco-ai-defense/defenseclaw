@@ -137,6 +137,17 @@ func TestReloadPredicatesRestartLLMConsumers(t *testing.T) {
 	}
 }
 
+func TestReloadPredicatesRestartGuardrailConnectorChange(t *testing.T) {
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{}
+	oldCfg.Guardrail.Connector = "openclaw"
+	newCfg.Guardrail.Connector = "codex"
+
+	if !guardrailNeedsRestart(oldCfg, newCfg) {
+		t.Fatal("guardrailNeedsRestart returned false for guardrail.connector change")
+	}
+}
+
 func TestApplyConfigReloadRebuildsSharedJudge(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	oldCfg.DataDir = t.TempDir()
