@@ -794,7 +794,9 @@ esac
 record_picked_connector
 
 if [[ "${INSTALL_SANDBOX}" == true ]]; then
-    if [[ "${OS}" != "linux" ]]; then
+    if [[ "${CONNECTOR}" != "openclaw" ]]; then
+        warn "Sandbox setup is experimental and currently applies to the OpenClaw/OpenShell path only — skipping openshell-sandbox"
+    elif [[ "${OS}" != "linux" ]]; then
         warn "Sandbox mode requires Linux — skipping openshell-sandbox"
     else
         local script_dir
