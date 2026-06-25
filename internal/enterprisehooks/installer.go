@@ -51,6 +51,13 @@ type InstallOptions struct {
 	HookContractID string
 	WorkspaceDir   string
 	Registry       *connector.Registry
+
+	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
+	// native hook config file only after an administrator-owned caller has
+	// established that this target was previously protected. First-time
+	// installs must leave this false so broad discovery cannot create new app
+	// profiles from scratch.
+	AllowMissingHookConfigRepair bool
 }
 
 type InstallResult struct {
@@ -134,7 +141,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
 		paths := connector.HookConfigPathsForConnector(conn, setupOpts)
-		if err := validateActivationSurfaces(home, paths, uid); err != nil {
+		if err := validateActivationSurfaces(home, paths, uid, opts.AllowMissingHookConfigRepair); err != nil {
 			return err
 		}
 		if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
@@ -221,7 +228,7 @@ func validateUserHome(raw string) (string, error) {
 	return clean, nil
 }
 
-func validateActivationSurfaces(home string, paths []string, uid int) error {
+func validateActivationSurfaces(home string, paths []string, uid int, allowMissing bool) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("enterprise hooks: connector does not expose a hook config path")
 	}
@@ -230,9 +237,38 @@ func validateActivationSurfaces(home string, paths []string, uid int) error {
 		if path == "" {
 			continue
 		}
-		if err := validateExistingUserFile(home, path, uid, "hook config"); err != nil {
+		if err := validateHookConfigSurface(home, path, uid, allowMissing); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateHookConfigSurface(home, path string, uid int, allowMissing bool) error {
+	if !allowMissing {
+		return validateExistingUserFile(home, path, uid, "hook config")
+	}
+	if err := validateOptionalUserPathPrefix(home, path, uid, "hook config", true); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("enterprise hooks: inspect hook config %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("enterprise hooks: refusing symlink hook config: %s", path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("enterprise hooks: hook config path is a directory: %s", path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("enterprise hooks: hook config %s is group/other writable", path)
+	}
+	if ok, actual := fileOwnerMatches(path, uid); !ok {
+		return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d", path, actual, uid)
 	}
 	return nil
 }

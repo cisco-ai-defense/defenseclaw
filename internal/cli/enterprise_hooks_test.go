@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -58,6 +59,54 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 	err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", nil, 0)
 	if err == nil || !strings.Contains(err.Error(), "refusing to write through symlink") {
 		t.Fatalf("writeEnterpriseHookGuardianState error = %v, want symlink refusal", err)
+	}
+}
+
+func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod state dir: %v", err)
+	}
+	successRows := []enterpriseHookReconcileRow{{
+		User:      "alice",
+		UserHome:  "/home/alice",
+		Connector: "codex",
+		OK:        true,
+		Result: &enterprisehooks.InstallResult{
+			Connector: "codex",
+			UserHome:  "/home/alice",
+		},
+	}}
+	if err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", successRows, 0); err != nil {
+		t.Fatalf("write initial state: %v", err)
+	}
+	if !previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "codex") {
+		t.Fatal("previousEnterpriseHookSuccess = false after successful state")
+	}
+
+	failureRows := []enterpriseHookReconcileRow{{
+		User:      "alice",
+		UserHome:  "/home/alice",
+		Connector: "codex",
+		OK:        false,
+		Error:     "temporary tamper failure",
+	}}
+	if err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", failureRows, 1); err != nil {
+		t.Fatalf("write failure state: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, hookGuardianStateFile))
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	var state enterpriseHookGuardianState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("unmarshal state: %v", err)
+	}
+	if len(state.ProtectedTargets) != 1 || state.ProtectedTargets[0].Connector != "codex" {
+		t.Fatalf("ProtectedTargets = %+v, want preserved codex target", state.ProtectedTargets)
+	}
+	if !previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "codex") {
+		t.Fatal("previousEnterpriseHookSuccess = false after failed state overwrote results")
 	}
 }
 

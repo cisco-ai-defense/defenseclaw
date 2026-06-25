@@ -82,6 +82,38 @@ func TestInstallRefusesMissingHookConfig(t *testing.T) {
 	}
 }
 
+func TestInstallRepairsMissingHookConfigWhenPreviouslyProtected(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+
+	result, err := Install(context.Background(), InstallOptions{
+		ConnectorName:                "codex",
+		UserHome:                     home,
+		OwnerUID:                     os.Getuid(),
+		OwnerGID:                     os.Getgid(),
+		APIAddr:                      "127.0.0.1:18970",
+		APIToken:                     "test-token",
+		AgentVersion:                 "codex-cli 0.142.0",
+		GuardrailMode:                "action",
+		AllowMissingHookConfigRepair: true,
+		Registry:                     connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("Install repair missing config: %v", err)
+	}
+	if result.Connector != "codex" {
+		t.Fatalf("result.Connector = %q, want codex", result.Connector)
+	}
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read repaired config: %v", err)
+	}
+	if !strings.Contains(string(data), "defenseclaw") || !strings.Contains(string(data), "codex-hook.sh") {
+		t.Fatalf("repaired config missing DefenseClaw hook:\n%s", string(data))
+	}
+}
+
 func TestInstallRefusesHookConfigSymlinkOutsideHome(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)

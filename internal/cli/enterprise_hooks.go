@@ -20,8 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -149,20 +151,21 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	}
 
 	opts := enterprisehooks.InstallOptions{
-		ConnectorName: enterpriseHookConnector,
-		UserHome:      target.home,
-		OwnerUID:      target.uid,
-		OwnerGID:      target.gid,
-		DataDir:       enterpriseHookDataDir,
-		APIAddr:       apiAddr,
-		ProxyAddr:     proxyAddr,
-		APIToken:      token,
-		HookFailMode:  cfg.EffectiveHookFailModeForConnector(enterpriseHookConnector),
-		GuardrailMode: cfg.EffectiveGuardrailModeForConnector(enterpriseHookConnector),
-		HILTEnabled:   cfg.EffectiveHILTForConnector(enterpriseHookConnector).Enabled,
-		AgentVersion:  enterpriseHookAgentVersion,
-		WorkspaceDir:  cfg.ConnectorWorkspaceDir(),
-		Registry:      newConnectorRegistryWithPlugins(),
+		ConnectorName:                enterpriseHookConnector,
+		UserHome:                     target.home,
+		OwnerUID:                     target.uid,
+		OwnerGID:                     target.gid,
+		DataDir:                      enterpriseHookDataDir,
+		APIAddr:                      apiAddr,
+		ProxyAddr:                    proxyAddr,
+		APIToken:                     token,
+		HookFailMode:                 cfg.EffectiveHookFailModeForConnector(enterpriseHookConnector),
+		GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(enterpriseHookConnector),
+		HILTEnabled:                  cfg.EffectiveHILTForConnector(enterpriseHookConnector).Enabled,
+		AgentVersion:                 enterpriseHookAgentVersion,
+		WorkspaceDir:                 cfg.ConnectorWorkspaceDir(),
+		Registry:                     newConnectorRegistryWithPlugins(),
+		AllowMissingHookConfigRepair: previousEnterpriseHookSuccess(cfg.DataDir, enterpriseHookUser, target.home, enterpriseHookConnector),
 	}
 
 	ctx, cancel := context.WithCancel(cmd.Context())
@@ -244,20 +247,21 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 		}
 		if err == nil {
 			opts := enterprisehooks.InstallOptions{
-				ConnectorName: target.Connector,
-				UserHome:      resolved.home,
-				OwnerUID:      resolved.uid,
-				OwnerGID:      resolved.gid,
-				DataDir:       strings.TrimSpace(target.DataDir),
-				APIAddr:       apiAddr,
-				ProxyAddr:     proxyAddr,
-				APIToken:      token,
-				HookFailMode:  cfg.EffectiveHookFailModeForConnector(target.Connector),
-				GuardrailMode: cfg.EffectiveGuardrailModeForConnector(target.Connector),
-				HILTEnabled:   cfg.EffectiveHILTForConnector(target.Connector).Enabled,
-				AgentVersion:  strings.TrimSpace(target.AgentVersion),
-				WorkspaceDir:  cfg.ConnectorWorkspaceDir(),
-				Registry:      registry,
+				ConnectorName:                target.Connector,
+				UserHome:                     resolved.home,
+				OwnerUID:                     resolved.uid,
+				OwnerGID:                     resolved.gid,
+				DataDir:                      strings.TrimSpace(target.DataDir),
+				APIAddr:                      apiAddr,
+				ProxyAddr:                    proxyAddr,
+				APIToken:                     token,
+				HookFailMode:                 cfg.EffectiveHookFailModeForConnector(target.Connector),
+				GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(target.Connector),
+				HILTEnabled:                  cfg.EffectiveHILTForConnector(target.Connector).Enabled,
+				AgentVersion:                 strings.TrimSpace(target.AgentVersion),
+				WorkspaceDir:                 cfg.ConnectorWorkspaceDir(),
+				Registry:                     registry,
+				AllowMissingHookConfigRepair: previousEnterpriseHookSuccess(cfg.DataDir, target.User, resolved.home, target.Connector),
 			}
 			var result enterprisehooks.InstallResult
 			result, err = enterprisehooks.Install(ctx, opts)
@@ -321,14 +325,15 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 }
 
 type enterpriseHookGuardianState struct {
-	Version      int                          `json:"version"`
-	UpdatedAt    string                       `json:"updated_at"`
-	Manifest     string                       `json:"manifest"`
-	OK           bool                         `json:"ok"`
-	TargetCount  int                          `json:"target_count"`
-	SuccessCount int                          `json:"success_count"`
-	FailureCount int                          `json:"failure_count"`
-	Results      []enterpriseHookReconcileRow `json:"results"`
+	Version          int                          `json:"version"`
+	UpdatedAt        string                       `json:"updated_at"`
+	Manifest         string                       `json:"manifest"`
+	OK               bool                         `json:"ok"`
+	TargetCount      int                          `json:"target_count"`
+	SuccessCount     int                          `json:"success_count"`
+	FailureCount     int                          `json:"failure_count"`
+	Results          []enterpriseHookReconcileRow `json:"results"`
+	ProtectedTargets []enterpriseHookReconcileRow `json:"protected_targets,omitempty"`
 }
 
 func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpriseHookReconcileRow, failures int) error {
@@ -343,14 +348,15 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 		}
 	}
 	state := enterpriseHookGuardianState{
-		Version:      1,
-		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
-		Manifest:     strings.TrimSpace(manifest),
-		OK:           failures == 0,
-		TargetCount:  len(rows),
-		SuccessCount: successes,
-		FailureCount: failures,
-		Results:      rows,
+		Version:          1,
+		UpdatedAt:        time.Now().UTC().Format(time.RFC3339),
+		Manifest:         strings.TrimSpace(manifest),
+		OK:               failures == 0,
+		TargetCount:      len(rows),
+		SuccessCount:     successes,
+		FailureCount:     failures,
+		Results:          rows,
+		ProtectedTargets: mergeProtectedEnterpriseHookTargets(loadProtectedEnterpriseHookTargets(dataDir), rows),
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -362,6 +368,113 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
+}
+
+func previousEnterpriseHookSuccess(dataDir, userName, userHome, connectorName string) bool {
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	userName = strings.TrimSpace(userName)
+	userHome = filepath.Clean(strings.TrimSpace(userHome))
+	if dataDir == "" || connectorName == "" {
+		return false
+	}
+	for _, row := range loadProtectedEnterpriseHookTargets(dataDir) {
+		if !enterpriseHookRowMatches(row, userName, userHome, connectorName) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func loadProtectedEnterpriseHookTargets(dataDir string) []enterpriseHookReconcileRow {
+	path := filepath.Join(strings.TrimSpace(dataDir), hookGuardianStateFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var state enterpriseHookGuardianState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil
+	}
+	var rows []enterpriseHookReconcileRow
+	for _, row := range state.ProtectedTargets {
+		if row.OK {
+			rows = append(rows, row)
+		}
+	}
+	for _, row := range state.Results {
+		if row.OK {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {
+	merged := map[string]enterpriseHookReconcileRow{}
+	for _, row := range previous {
+		if !row.OK {
+			continue
+		}
+		if key := enterpriseHookProtectedTargetKey(row); key != "" {
+			merged[key] = row
+		}
+	}
+	for _, row := range current {
+		if !row.OK {
+			continue
+		}
+		if key := enterpriseHookProtectedTargetKey(row); key != "" {
+			merged[key] = row
+		}
+	}
+	out := make([]enterpriseHookReconcileRow, 0, len(merged))
+	for _, row := range merged {
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return enterpriseHookProtectedTargetKey(out[i]) < enterpriseHookProtectedTargetKey(out[j])
+	})
+	return out
+}
+
+func enterpriseHookProtectedTargetKey(row enterpriseHookReconcileRow) string {
+	connectorName := strings.ToLower(strings.TrimSpace(row.Connector))
+	if connectorName == "" && row.Result != nil {
+		connectorName = strings.ToLower(strings.TrimSpace(row.Result.Connector))
+	}
+	if connectorName == "" {
+		return ""
+	}
+	if userName := strings.TrimSpace(row.User); userName != "" {
+		return connectorName + "\x00user\x00" + userName
+	}
+	home := strings.TrimSpace(row.UserHome)
+	if home == "" && row.Result != nil {
+		home = row.Result.UserHome
+	}
+	if home == "" {
+		return ""
+	}
+	return connectorName + "\x00home\x00" + filepath.Clean(home)
+}
+
+func enterpriseHookRowMatches(row enterpriseHookReconcileRow, userName, userHome, connectorName string) bool {
+	rowConnector := strings.ToLower(strings.TrimSpace(row.Connector))
+	if rowConnector == "" && row.Result != nil {
+		rowConnector = strings.ToLower(strings.TrimSpace(row.Result.Connector))
+	}
+	if rowConnector != connectorName {
+		return false
+	}
+	if userName != "" && strings.TrimSpace(row.User) == userName {
+		return true
+	}
+	rowHome := strings.TrimSpace(row.UserHome)
+	if rowHome == "" && row.Result != nil {
+		rowHome = row.Result.UserHome
+	}
+	return userHome != "" && filepath.Clean(rowHome) == userHome
 }
 
 type enterpriseHookTarget struct {
