@@ -2081,6 +2081,12 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 			}
 			return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
 		}
+		if err := managed.ValidateTrustedRuntimeDir(cfg.DataDir, "managed data_dir"); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
+			}
+			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
+		}
 	}
 
 	if err := validateGatewayConfigReloadMode(cfg.Gateway.ConfigReload.Mode); err != nil {

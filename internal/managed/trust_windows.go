@@ -47,6 +47,28 @@ func ValidateTrustedFilePath(path, label string) error {
 	return validateTrustedWindowsPathElement(filepath.VolumeName(clean)+string(filepath.Separator), true, label)
 }
 
+func ValidateTrustedRuntimeDir(path, label string) error {
+	if label == "" {
+		label = "managed runtime dir"
+	}
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	for cur := clean; ; cur = filepath.Dir(cur) {
+		if err := validateTrustedWindowsPathElement(cur, true, label); err != nil {
+			return err
+		}
+		if cur == filepath.Dir(cur) {
+			break
+		}
+	}
+	return nil
+}
+
 func validateTrustedWindowsPathElement(path string, wantDir bool, label string) error {
 	info, err := os.Lstat(path)
 	if err != nil {

@@ -178,3 +178,24 @@ func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
 		t.Fatalf("runEnterpriseHooksReconcile error = %v, want trust check failure", err)
 	}
 }
+
+func TestEnterpriseHookManagedRuntimeRejectsUserOwnedDataDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root-owned temp dirs are valid managed runtime dirs")
+	}
+	origCfg := cfg
+	t.Cleanup(func() {
+		cfg = origCfg
+	})
+
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod data dir: %v", err)
+	}
+	cfg = &config.Config{DataDir: dir, DeploymentMode: "managed_enterprise"}
+
+	err := validateEnterpriseHookManagedRuntime()
+	if err == nil || !strings.Contains(err.Error(), "data_dir trust check failed") {
+		t.Fatalf("validateEnterpriseHookManagedRuntime error = %v, want data_dir trust check failure", err)
+	}
+}

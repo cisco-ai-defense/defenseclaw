@@ -133,6 +133,9 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {
 		return enterpriseHooksInstallError(cmd, fmt.Errorf("enterprise hooks install: config is not loaded"))
 	}
+	if err := validateEnterpriseHookManagedRuntime(); err != nil {
+		return enterpriseHooksInstallError(cmd, err)
+	}
 	target, err := resolveEnterpriseHookTarget()
 	if err != nil {
 		return enterpriseHooksInstallError(cmd, err)
@@ -207,6 +210,9 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if err := managed.ValidateTrustedFilePath(enterpriseHookManifest, "hook guardian manifest"); err != nil {
 			return fmt.Errorf("enterprise hooks reconcile: manifest trust check failed: %w", err)
+		}
+		if err := validateEnterpriseHookManagedRuntime(); err != nil {
+			return err
 		}
 	}
 	manifest, err := enterprisehooks.LoadManifest(enterpriseHookManifest)
@@ -320,6 +326,16 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 	}
 	if failures > 0 {
 		return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", failures)
+	}
+	return nil
+}
+
+func validateEnterpriseHookManagedRuntime() error {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+	if err := managed.ValidateTrustedRuntimeDir(cfg.DataDir, "hook guardian state data_dir"); err != nil {
+		return fmt.Errorf("enterprise hooks: data_dir trust check failed: %w", err)
 	}
 	return nil
 }
