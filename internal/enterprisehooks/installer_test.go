@@ -62,6 +62,44 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	}
 }
 
+func TestWatchDirsIncludesHookConfigAndRuntimeDirs(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hook dir: %v", err)
+	}
+
+	dirs, err := WatchDirs(InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      "test-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "codex-cli 0.142.0",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("WatchDirs: %v", err)
+	}
+	for _, want := range []string{filepath.Join(home, ".codex"), filepath.Join(home, ".defenseclaw"), hookDir} {
+		if !sliceContains(dirs, want) {
+			t.Fatalf("WatchDirs = %v, missing %s", dirs, want)
+		}
+	}
+}
+
 func TestInstallRefusesMissingHookConfig(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)
@@ -111,6 +149,48 @@ func TestInstallRepairsMissingHookConfigWhenPreviouslyProtected(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "defenseclaw") || !strings.Contains(string(data), "codex-hook.sh") {
 		t.Fatalf("repaired config missing DefenseClaw hook:\n%s", string(data))
+	}
+}
+
+func TestInstallRepairsHookConfigSymlinkWhenPreviouslyProtected(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	outside := filepath.Join(t.TempDir(), "outside.toml")
+	if err := os.WriteFile(outside, []byte("outside = true\n"), 0o600); err != nil {
+		t.Fatalf("write outside target: %v", err)
+	}
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.Symlink(outside, codexConfig); err != nil {
+		t.Fatalf("symlink codex config: %v", err)
+	}
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName:                "codex",
+		UserHome:                     home,
+		OwnerUID:                     os.Getuid(),
+		OwnerGID:                     os.Getgid(),
+		APIAddr:                      "127.0.0.1:18970",
+		APIToken:                     "test-token",
+		AgentVersion:                 "codex-cli 0.142.0",
+		GuardrailMode:                "action",
+		AllowMissingHookConfigRepair: true,
+		Registry:                     connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("Install repair symlink config: %v", err)
+	}
+	info, err := os.Lstat(codexConfig)
+	if err != nil {
+		t.Fatalf("lstat repaired config: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("codex config is still a symlink")
+	}
+	if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "outside = true\n" {
+		t.Fatalf("outside target changed: data=%q err=%v", string(got), readErr)
 	}
 }
 
@@ -282,6 +362,56 @@ func TestInstallRefusesExistingHookScriptSymlinkBeforeSetup(t *testing.T) {
 	}
 }
 
+func TestInstallRepairsExistingHookScriptSymlinkWhenPreviouslyProtected(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hook dir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.sh")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\necho outside\n"), 0o700); err != nil {
+		t.Fatalf("write outside target: %v", err)
+	}
+	hookPath := filepath.Join(hookDir, "codex-hook.sh")
+	if err := os.Symlink(outside, hookPath); err != nil {
+		t.Fatalf("symlink hook script: %v", err)
+	}
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName:                "codex",
+		UserHome:                     home,
+		OwnerUID:                     os.Getuid(),
+		OwnerGID:                     os.Getgid(),
+		APIAddr:                      "127.0.0.1:18970",
+		APIToken:                     "test-token",
+		AgentVersion:                 "codex-cli 0.142.0",
+		GuardrailMode:                "action",
+		AllowMissingHookConfigRepair: true,
+		Registry:                     connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("Install repair hook script symlink: %v", err)
+	}
+	info, err := os.Lstat(hookPath)
+	if err != nil {
+		t.Fatalf("lstat repaired hook script: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("hook script is still a symlink")
+	}
+	if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "#!/bin/sh\necho outside\n" {
+		t.Fatalf("outside symlink target changed: data=%q err=%v", string(got), readErr)
+	}
+}
+
 func TestInstallRefusesExistingHookTokenSymlinkBeforeSetup(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)
@@ -423,7 +553,7 @@ func TestValidateInstallFootprintRefusesGeneratedFileSymlinkBeforeSetup(t *testi
 
 	err := validateInstallFootprintBeforeSetup(home, dataDir, os.Getuid(), connector.AgentPaths{
 		GeneratedFiles: []string{generatedPath},
-	})
+	}, false)
 	if err == nil || !strings.Contains(err.Error(), "refusing symlink") {
 		t.Fatalf("validateInstallFootprintBeforeSetup error = %v, want generated file symlink refusal", err)
 	}
@@ -568,4 +698,13 @@ func newTestHome(t *testing.T) string {
 		t.Fatalf("chmod test home: %v", err)
 	}
 	return home
+}
+
+func sliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

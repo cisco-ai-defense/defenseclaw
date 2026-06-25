@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -37,17 +38,19 @@ import (
 )
 
 var (
-	enterpriseHookConnector    string
-	enterpriseHookUser         string
-	enterpriseHookUserHome     string
-	enterpriseHookUID          int
-	enterpriseHookGID          int
-	enterpriseHookDataDir      string
-	enterpriseHookAPIAddr      string
-	enterpriseHookProxyAddr    string
-	enterpriseHookAgentVersion string
-	enterpriseHookManifest     string
-	enterpriseHookJSON         bool
+	enterpriseHookConnector     string
+	enterpriseHookUser          string
+	enterpriseHookUserHome      string
+	enterpriseHookUID           int
+	enterpriseHookGID           int
+	enterpriseHookDataDir       string
+	enterpriseHookAPIAddr       string
+	enterpriseHookProxyAddr     string
+	enterpriseHookAgentVersion  string
+	enterpriseHookManifest      string
+	enterpriseHookJSON          bool
+	enterpriseHookWatchInterval time.Duration
+	enterpriseHookWatchDebounce time.Duration
 )
 
 const defaultEnterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
@@ -92,6 +95,18 @@ command reports every result and exits non-zero when any target fails.`,
 	RunE: runEnterpriseHooksReconcile,
 }
 
+var enterpriseHooksWatchCmd = &cobra.Command{
+	Use:   "watch",
+	Short: "Continuously repair per-user hook targets from a manifest",
+	Long: `Continuously watch manifest-scoped per-user hook targets and repair
+tamper events through the hardened enterprise hook installer.
+
+This command is intended for a root-owned system service. It watches only
+directories derived from the administrator-owned manifest and keeps the
+periodic reconcile interval as a backstop for missed filesystem events.`,
+	RunE: runEnterpriseHooksWatch,
+}
+
 func init() {
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
 		"Hook-native connector to install or repair (for example codex or claudecode)")
@@ -123,8 +138,20 @@ func init() {
 	enterpriseHooksReconcileCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
 		"Emit machine-readable JSON")
 
+	enterpriseHooksWatchCmd.Flags().StringVar(&enterpriseHookManifest, "manifest", defaultEnterpriseHookManifest,
+		"YAML manifest of per-user hook targets")
+	enterpriseHooksWatchCmd.Flags().StringVar(&enterpriseHookAPIAddr, "api-addr", "",
+		"Local gateway API host:port used by hook scripts (default: 127.0.0.1:<gateway.api_port>)")
+	enterpriseHooksWatchCmd.Flags().StringVar(&enterpriseHookProxyAddr, "proxy-addr", "",
+		"Local guardrail proxy host:port (default: 127.0.0.1:<guardrail.port>)")
+	enterpriseHooksWatchCmd.Flags().DurationVar(&enterpriseHookWatchInterval, "interval", time.Minute,
+		"Periodic reconcile backstop interval")
+	enterpriseHooksWatchCmd.Flags().DurationVar(&enterpriseHookWatchDebounce, "debounce", 750*time.Millisecond,
+		"Filesystem-event debounce before reconcile")
+
 	enterpriseHooksCmd.AddCommand(enterpriseHooksInstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksReconcileCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksWatchCmd)
 	enterpriseCmd.AddCommand(enterpriseHooksCmd)
 	rootCmd.AddCommand(enterpriseCmd)
 }
@@ -203,21 +230,77 @@ type enterpriseHookReconcileRow struct {
 	Result    *enterprisehooks.InstallResult `json:"result,omitempty"`
 }
 
+type enterpriseHookReconcileRun struct {
+	Manifest  string
+	Rows      []enterpriseHookReconcileRow
+	Failures  int
+	StateErr  error
+	WatchDirs []string
+}
+
 func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
+	run, err := runEnterpriseHookReconcileOnce(cmd.Context())
+	if err != nil {
+		return err
+	}
+	if enterpriseHookJSON {
+		payload := map[string]any{
+			"ok":       run.Failures == 0 && run.StateErr == nil,
+			"manifest": run.Manifest,
+			"results":  run.Rows,
+		}
+		if run.StateErr != nil {
+			payload["state_error"] = run.StateErr.Error()
+		}
+		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
+		if run.Failures > 0 || run.StateErr != nil {
+			if run.StateErr != nil {
+				return fmt.Errorf("enterprise hooks reconcile state write failed: %w", run.StateErr)
+			}
+			return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", run.Failures)
+		}
+		return nil
+	}
+
+	for _, row := range run.Rows {
+		label := row.Connector
+		if row.User != "" {
+			label += "@" + row.User
+		} else if row.UserHome != "" {
+			label += "@" + row.UserHome
+		}
+		if row.OK {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s reconciled\n", Style("✓", "fg=green", "bold"), label)
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), label, row.Error)
+		}
+	}
+	if run.StateErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  %s hook guardian state: %s\n", Style("✗", "fg=red", "bold"), run.StateErr.Error())
+		return fmt.Errorf("enterprise hooks reconcile state write failed: %w", run.StateErr)
+	}
+	if run.Failures > 0 {
+		return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", run.Failures)
+	}
+	return nil
+}
+
+func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcileRun, error) {
+	run := enterpriseHookReconcileRun{Manifest: enterpriseHookManifest}
 	if cfg == nil {
-		return fmt.Errorf("enterprise hooks reconcile: config is not loaded")
+		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
 	}
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if err := managed.ValidateTrustedFilePath(enterpriseHookManifest, "hook guardian manifest"); err != nil {
-			return fmt.Errorf("enterprise hooks reconcile: manifest trust check failed: %w", err)
+			return run, fmt.Errorf("enterprise hooks reconcile: manifest trust check failed: %w", err)
 		}
 		if err := validateEnterpriseHookManagedRuntime(); err != nil {
-			return err
+			return run, err
 		}
 	}
 	manifest, err := enterprisehooks.LoadManifest(enterpriseHookManifest)
 	if err != nil {
-		return err
+		return run, err
 	}
 	apiAddr := strings.TrimSpace(enterpriseHookAPIAddr)
 	if apiAddr == "" {
@@ -228,11 +311,10 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 		proxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
 	registry := newConnectorRegistryWithPlugins()
-	ctx, cancel := context.WithCancel(cmd.Context())
-	defer cancel()
 
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
+	watchDirs := map[string]struct{}{}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -269,6 +351,11 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 				Registry:                     registry,
 				AllowMissingHookConfigRepair: previousEnterpriseHookSuccess(cfg.DataDir, target.User, resolved.home, target.Connector),
 			}
+			if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
+				for _, dir := range dirs {
+					watchDirs[dir] = struct{}{}
+				}
+			}
 			var result enterprisehooks.InstallResult
 			result, err = enterprisehooks.Install(ctx, opts)
 			if err == nil {
@@ -287,47 +374,160 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 	}
 
 	stateErr := writeEnterpriseHookGuardianState(cfg.DataDir, enterpriseHookManifest, rows, failures)
+	run.Rows = rows
+	run.Failures = failures
+	run.StateErr = stateErr
+	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
+	return run, nil
+}
 
-	if enterpriseHookJSON {
-		payload := map[string]any{
-			"ok":       failures == 0 && stateErr == nil,
-			"manifest": enterpriseHookManifest,
-			"results":  rows,
+func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
+	if enterpriseHookWatchInterval <= 0 {
+		return fmt.Errorf("enterprise hooks watch: --interval must be positive")
+	}
+	if enterpriseHookWatchDebounce <= 0 {
+		return fmt.Errorf("enterprise hooks watch: --debounce must be positive")
+	}
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks watch: create fsnotify watcher: %w", err)
+	}
+	defer fsw.Close()
+
+	watched := map[string]struct{}{}
+	reconcile := func(reason string) error {
+		run, err := runEnterpriseHookReconcileOnce(cmd.Context())
+		if err != nil {
+			return err
 		}
-		if stateErr != nil {
-			payload["state_error"] = stateErr.Error()
+		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
+		syncEnterpriseHookWatchDirs(cmd, fsw, watched, dirs)
+		status := "ok"
+		if run.Failures > 0 || run.StateErr != nil {
+			status = "attention"
 		}
-		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
-		if failures > 0 || stateErr != nil {
-			if stateErr != nil {
-				return fmt.Errorf("enterprise hooks reconcile state write failed: %w", stateErr)
-			}
-			return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", failures)
+		fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d failures=%d watch_dirs=%d\n", reason, status, len(run.Rows), run.Failures, len(watched))
+		if run.StateErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] state write failed: %s\n", run.StateErr)
 		}
 		return nil
 	}
 
-	for _, row := range rows {
-		label := row.Connector
-		if row.User != "" {
-			label += "@" + row.User
-		} else if row.UserHome != "" {
-			label += "@" + row.UserHome
+	if err := reconcile("startup"); err != nil {
+		return err
+	}
+
+	ticker := time.NewTicker(enterpriseHookWatchInterval)
+	defer ticker.Stop()
+	debounce := time.NewTimer(time.Hour)
+	if !debounce.Stop() {
+		<-debounce.C
+	}
+	debouncePending := false
+
+	for {
+		select {
+		case <-cmd.Context().Done():
+			return cmd.Context().Err()
+		case event, ok := <-fsw.Events:
+			if !ok {
+				return nil
+			}
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove|fsnotify.Chmod) == 0 {
+				continue
+			}
+			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
+			debouncePending = true
+		case err, ok := <-fsw.Errors:
+			if !ok {
+				return nil
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] fsnotify error: %s\n", err)
+		case <-debounce.C:
+			if debouncePending {
+				debouncePending = false
+				if err := reconcile("fsnotify"); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after fsnotify failed: %s\n", err)
+				}
+			}
+		case <-ticker.C:
+			if err := reconcile("interval"); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
+			}
 		}
-		if row.OK {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s reconciled\n", Style("✓", "fg=green", "bold"), label)
-		} else {
-			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), label, row.Error)
+	}
+}
+
+func syncEnterpriseHookWatchDirs(cmd *cobra.Command, fsw *fsnotify.Watcher, watched map[string]struct{}, dirs []string) {
+	next := map[string]struct{}{}
+	for _, dir := range sortedEnterpriseHookStrings(dirs) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		dir = filepath.Clean(dir)
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		next[dir] = struct{}{}
+		if _, ok := watched[dir]; ok {
+			continue
+		}
+		if err := fsw.Add(dir); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] watch %s failed: %s\n", dir, err)
+			delete(next, dir)
+			continue
 		}
 	}
-	if stateErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "  %s hook guardian state: %s\n", Style("✗", "fg=red", "bold"), stateErr.Error())
-		return fmt.Errorf("enterprise hooks reconcile state write failed: %w", stateErr)
+	for dir := range watched {
+		if _, ok := next[dir]; ok {
+			continue
+		}
+		_ = fsw.Remove(dir)
 	}
-	if failures > 0 {
-		return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", failures)
+	for dir := range watched {
+		delete(watched, dir)
 	}
-	return nil
+	for dir := range next {
+		watched[dir] = struct{}{}
+	}
+}
+
+func resetEnterpriseHookWatchTimer(timer *time.Timer, d time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(d)
+}
+
+func sortedEnterpriseHookWatchDirs(values map[string]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for v := range values {
+		out = append(out, v)
+	}
+	return sortedEnterpriseHookStrings(out)
+}
+
+func sortedEnterpriseHookStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func validateEnterpriseHookManagedRuntime() error {

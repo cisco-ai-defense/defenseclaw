@@ -151,7 +151,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		if ap, ok := conn.(connector.AgentPathProvider); ok {
 			footprint = ap.AgentPaths(setupOpts)
 		}
-		if err := validateInstallFootprintBeforeSetup(home, dataDir, uid, footprint); err != nil {
+		if err := validateInstallFootprintBeforeSetup(home, dataDir, uid, footprint, opts.AllowMissingHookConfigRepair); err != nil {
 			return err
 		}
 
@@ -248,7 +248,7 @@ func validateHookConfigSurface(home, path string, uid int, allowMissing bool) er
 	if !allowMissing {
 		return validateExistingUserFile(home, path, uid, "hook config")
 	}
-	if err := validateOptionalUserPathPrefix(home, path, uid, "hook config", true); err != nil {
+	if err := validateOptionalUserPathPrefix(home, path, uid, "hook config", false); err != nil {
 		return err
 	}
 	info, err := os.Lstat(path)
@@ -259,7 +259,10 @@ func validateHookConfigSurface(home, path string, uid int, allowMissing bool) er
 		return fmt.Errorf("enterprise hooks: inspect hook config %s: %w", path, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("enterprise hooks: refusing symlink hook config: %s", path)
+		if err := removeRepairSymlink(path, uid, "hook config"); err != nil {
+			return err
+		}
+		return nil
 	}
 	if info.IsDir() {
 		return fmt.Errorf("enterprise hooks: hook config path is a directory: %s", path)
@@ -379,11 +382,15 @@ func validateUserPathPrefix(home, path string, uid int, label string, includeLea
 }
 
 func validateOptionalExistingUserFile(home, path string, uid int, label string) error {
+	return validateOptionalExistingUserFileRepair(home, path, uid, label, false)
+}
+
+func validateOptionalExistingUserFileRepair(home, path string, uid int, label string, allowRepairSymlink bool) error {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if path == "" {
 		return nil
 	}
-	if err := validateOptionalUserPathPrefix(home, path, uid, label, true); err != nil {
+	if err := validateOptionalUserPathPrefix(home, path, uid, label, false); err != nil {
 		return err
 	}
 	info, err := os.Lstat(path)
@@ -394,6 +401,9 @@ func validateOptionalExistingUserFile(home, path string, uid int, label string) 
 		return fmt.Errorf("enterprise hooks: inspect %s %s: %w", label, path, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
+		if allowRepairSymlink {
+			return removeRepairSymlink(path, uid, label)
+		}
 		return fmt.Errorf("enterprise hooks: refusing symlink %s: %s", label, path)
 	}
 	if info.IsDir() {
@@ -409,6 +419,10 @@ func validateOptionalExistingUserFile(home, path string, uid int, label string) 
 }
 
 func validateOptionalExistingUserDir(home, path string, uid int, label string) error {
+	return validateOptionalExistingUserDirRepair(home, path, uid, label, false)
+}
+
+func validateOptionalExistingUserDirRepair(home, path string, uid int, label string, allowRepairSymlink bool) error {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if path == "" {
 		return nil
@@ -416,7 +430,7 @@ func validateOptionalExistingUserDir(home, path string, uid int, label string) e
 	if !pathInside(home, path) {
 		return fmt.Errorf("enterprise hooks: refusing %s outside user home: %s", label, path)
 	}
-	if err := validateOptionalUserPathPrefix(home, path, uid, label, true); err != nil {
+	if err := validateOptionalUserPathPrefix(home, path, uid, label, false); err != nil {
 		return err
 	}
 	info, err := os.Lstat(path)
@@ -427,6 +441,9 @@ func validateOptionalExistingUserDir(home, path string, uid int, label string) e
 		return fmt.Errorf("enterprise hooks: inspect %s %s: %w", label, path, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
+		if allowRepairSymlink {
+			return removeRepairSymlink(path, uid, label)
+		}
 		return fmt.Errorf("enterprise hooks: refusing symlink %s: %s", label, path)
 	}
 	if !info.IsDir() {
@@ -461,9 +478,9 @@ func validateExistingUserDir(path string, uid int, label string) error {
 	return nil
 }
 
-func validateInstallFootprintBeforeSetup(home, dataDir string, uid int, footprint connector.AgentPaths) error {
+func validateInstallFootprintBeforeSetup(home, dataDir string, uid int, footprint connector.AgentPaths, allowRepairSymlink bool) error {
 	for _, dir := range sortedUnique(append([]string{filepath.Join(dataDir, "hooks")}, footprint.CreatedDirs...)) {
-		if err := validateOptionalExistingUserDir(home, dir, uid, "footprint dir"); err != nil {
+		if err := validateOptionalExistingUserDirRepair(home, dir, uid, "footprint dir", allowRepairSymlink); err != nil {
 			return err
 		}
 	}
@@ -480,9 +497,19 @@ func validateInstallFootprintBeforeSetup(home, dataDir string, uid int, footprin
 		if !pathInside(home, filepath.Clean(path)) {
 			return fmt.Errorf("enterprise hooks: refusing footprint file outside user home: %s", filepath.Clean(path))
 		}
-		if err := validateOptionalExistingUserFile(home, path, uid, "footprint file"); err != nil {
+		if err := validateOptionalExistingUserFileRepair(home, path, uid, "footprint file", allowRepairSymlink); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func removeRepairSymlink(path string, uid int, label string) error {
+	if ok, actual := fileOwnerMatches(path, uid); !ok {
+		return fmt.Errorf("enterprise hooks: symlink %s %s owner uid=%d does not match target uid=%d", label, path, actual, uid)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("enterprise hooks: remove symlink %s %s: %w", label, path, err)
 	}
 	return nil
 }

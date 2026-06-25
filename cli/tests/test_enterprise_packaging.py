@@ -66,11 +66,13 @@ def test_systemd_hook_guardian_is_oneshot_and_keeps_gateway_config_read_only():
 def test_systemd_hook_guardian_reconcile_timer_and_manifest_contract():
     root = Path(__file__).resolve().parents[2]
     service = root / "packaging" / "systemd" / "defenseclaw-hook-guardian.service"
+    watch = root / "packaging" / "systemd" / "defenseclaw-hook-guardian-watch.service"
     timer = root / "packaging" / "systemd" / "defenseclaw-hook-guardian.timer"
     tmpfiles = root / "packaging" / "systemd" / "defenseclaw.conf"
     sample = root / "packaging" / "systemd" / "hook-guardian-targets.example.yaml"
 
     service_text = service.read_text(encoding="utf-8")
+    watch_text = watch.read_text(encoding="utf-8")
     timer_text = timer.read_text(encoding="utf-8")
     tmpfiles_text = tmpfiles.read_text(encoding="utf-8")
     sample_text = sample.read_text(encoding="utf-8")
@@ -81,6 +83,11 @@ def test_systemd_hook_guardian_reconcile_timer_and_manifest_contract():
     assert "ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw" in service_text
     assert "ReadWritePaths=/home -/var/home /var/lib/defenseclaw" in service_text
     assert "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER" in service_text
+    assert "enterprise hooks watch --manifest /etc/defenseclaw/hook-guardian/targets.yaml --interval 1m" in watch_text
+    assert "Restart=always" in watch_text
+    assert "ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw" in watch_text
+    assert "ReadWritePaths=/home -/var/home /var/lib/defenseclaw" in watch_text
+    assert "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER" in watch_text
     assert "OnUnitActiveSec=5min" in timer_text
     assert "Persistent=true" in timer_text
     assert "Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment" in timer_text

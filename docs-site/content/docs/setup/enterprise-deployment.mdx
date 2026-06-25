@@ -48,6 +48,7 @@ sudo install -o root -g root -m 0755 defenseclaw /opt/defenseclaw/bin/defensecla
 sudo install -D -o root -g root -m 0644 packaging/systemd/defenseclaw-gateway.service /etc/systemd/system/defenseclaw-gateway.service
 sudo install -D -o root -g root -m 0644 packaging/systemd/defenseclaw-hook-guardian@.service /etc/systemd/system/defenseclaw-hook-guardian@.service
 sudo install -D -o root -g root -m 0644 packaging/systemd/defenseclaw-hook-guardian.service /etc/systemd/system/defenseclaw-hook-guardian.service
+sudo install -D -o root -g root -m 0644 packaging/systemd/defenseclaw-hook-guardian-watch.service /etc/systemd/system/defenseclaw-hook-guardian-watch.service
 sudo install -D -o root -g root -m 0644 packaging/systemd/defenseclaw-hook-guardian.timer /etc/systemd/system/defenseclaw-hook-guardian.timer
 ```
 
@@ -145,17 +146,20 @@ targets:
     agent_version: "Claude Code v2.1.144"
 ```
 
-Then run reconcile manually or enable the timer:
+Then run reconcile manually, enable the event-driven watcher, and keep the timer as a periodic backstop:
 
 ```bash
 sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml \
   /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks reconcile \
   --manifest /etc/defenseclaw/hook-guardian/targets.yaml
 
+sudo systemctl enable --now defenseclaw-hook-guardian-watch.service
 sudo systemctl enable --now defenseclaw-hook-guardian.timer
 ```
 
 The manifest is an administrator-owned allow-list. The guardian does not enumerate every local user by default, so it will not write into service accounts, stale profiles, or users outside the enterprise policy.
+
+`defenseclaw-hook-guardian-watch.service` watches only directories derived from the manifest and each connector's declared hook/runtime footprint. When a user edits or deletes a watched hook config, hook script, token sidecar, or generated helper, the watcher debounces the event and re-runs the same hardened reconcile path. It still refuses symlink paths, bad owners, group/other-writable files, and missing first-time app configs. The timer keeps a periodic repair backstop for missed filesystem events, reboot catch-up, and deployments that choose not to run the watcher.
 
 Each reconcile run writes `/var/lib/defenseclaw/hook_guardian_state.json`. `defenseclaw status` reads that file and reports the last manifest path, run time, target counts, and per-user repair failures under `Hook guardian`.
 
@@ -185,6 +189,7 @@ Managed mode changes the runtime contract:
 - Standard users cannot stop a system service, edit root-owned binaries, or write to administrator-owned config and policy files.
 - Hook credentials written into user-space agent configs must be scoped to hook submission only; never use a machine admin token in user-readable hook files.
 - The gateway service sandbox intentionally prevents broad host mutation. Per-user hook installation and repair belong to the guardian, MDM, or endpoint-management layer.
+- User-owned native agent config files are repair-enforced, not immutable. The event-driven guardian closes the normal edit/delete window by repairing watched tamper events quickly, and the timer provides a periodic backstop. If your deployment requires prevention rather than repair, pair DefenseClaw with an endpoint-control mechanism that can lock the native agent config surface.
 
 ## Automatic application protection
 
