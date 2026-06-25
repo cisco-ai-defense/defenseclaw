@@ -60,7 +60,7 @@ type ApplicationProtectionAssetPolicyConfig struct {
 // by both DefaultConfig() and viper defaults.
 func DefaultApplicationProtectionConfig() ApplicationProtectionConfig {
 	return ApplicationProtectionConfig{
-		Enabled:        true,
+		Enabled:        false,
 		MinConfidence:  DefaultApplicationProtectionMinConfidence,
 		RemoveWhenGone: false,
 		GoneAfterMin:   DefaultApplicationProtectionGoneAfterMin,

@@ -1873,7 +1873,7 @@ class ApplicationProtectionConnectorConfig:
 
 @dataclass
 class ApplicationProtectionConfig:
-    enabled: bool = True
+    enabled: bool = False
     min_confidence: float = 0.80
     remove_when_gone: bool = False
     gone_after_min: int = 60
@@ -4478,7 +4478,7 @@ def _merge_application_protection(raw: dict[str, Any] | None) -> ApplicationProt
     if not asset_policy.mode.strip():
         asset_policy.mode = "observe"
     return ApplicationProtectionConfig(
-        enabled=bool(raw.get("enabled", True)),
+        enabled=bool(raw.get("enabled", False)),
         min_confidence=0.80 if min_confidence is None else min_confidence,
         remove_when_gone=bool(raw.get("remove_when_gone", False)),
         gone_after_min=int(raw.get("gone_after_min", 60) or 0),

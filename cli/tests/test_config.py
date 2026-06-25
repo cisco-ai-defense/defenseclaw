@@ -217,6 +217,20 @@ class TestAIDiscoveryConfig(unittest.TestCase):
 
 
 class TestApplicationProtectionConfig(unittest.TestCase):
+    def test_default_is_opt_in(self):
+        cfg = config_mod.ApplicationProtectionConfig()
+        self.assertFalse(cfg.enabled)
+        self.assertFalse(cfg.effective_enabled("codex"))
+
+    def test_merge_absent_block_is_disabled(self):
+        cfg = config_mod._merge_application_protection(None)
+        self.assertFalse(cfg.enabled)
+
+    def test_merge_explicit_enabled_opt_in(self):
+        cfg = config_mod._merge_application_protection({"enabled": True})
+        self.assertTrue(cfg.enabled)
+        self.assertTrue(cfg.effective_enabled("codex"))
+
     def test_default_auto_modes_are_observe(self):
         cfg = config_mod.ApplicationProtectionConfig()
         self.assertEqual(cfg.effective_guardrail_mode("codex"), "observe")

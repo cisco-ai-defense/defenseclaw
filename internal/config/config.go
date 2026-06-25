@@ -2845,7 +2845,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("ai_discovery.require_trusted_binary_paths", false)
 	viper.SetDefault("ai_discovery.trusted_binary_prefixes", []string{})
 
-	viper.SetDefault("application_protection.enabled", true)
+	viper.SetDefault("application_protection.enabled", false)
 	viper.SetDefault("application_protection.min_confidence", DefaultApplicationProtectionMinConfidence)
 	viper.SetDefault("application_protection.remove_when_gone", false)
 	viper.SetDefault("application_protection.gone_after_min", DefaultApplicationProtectionGoneAfterMin)
