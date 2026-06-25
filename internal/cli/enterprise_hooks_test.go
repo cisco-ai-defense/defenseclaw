@@ -63,6 +63,9 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 
 func TestEnterpriseHookScopedTokenUsesManagedDataDir(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod managed data dir: %v", err)
+	}
 	token, err := enterpriseHookScopedToken(dir, "codex")
 	if err != nil {
 		t.Fatalf("enterpriseHookScopedToken: %v", err)

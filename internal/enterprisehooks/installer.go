@@ -74,6 +74,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if err != nil {
 		return InstallResult{}, err
 	}
+	if err := validateHomeOwner(home, uid); err != nil {
+		return InstallResult{}, err
+	}
 	dataDir := strings.TrimSpace(opts.DataDir)
 	if dataDir == "" {
 		dataDir = filepath.Join(home, ".defenseclaw")
@@ -81,6 +84,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	dataDir, err = filepath.Abs(dataDir)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
+	}
+	if err := validateUserDataDir(home, dataDir, uid); err != nil {
+		return InstallResult{}, err
 	}
 
 	reg := opts.Registry
@@ -135,41 +141,47 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			return err
 		}
 
-		conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
-		if err := conn.Setup(ctx, setupOpts); err != nil {
-			return fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)
-		}
-		present, err := connector.OwnedHooksPresent(conn, setupOpts)
-		if err != nil {
-			_ = conn.Teardown(ctx, setupOpts)
-			return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err)
-		}
-		if !present {
-			_ = conn.Teardown(ctx, setupOpts)
-			return fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name())
-		}
-		lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
-		if err := connector.SaveHookContractLockEntry(dataDir, lockEntry); err != nil {
-			_ = conn.Teardown(ctx, setupOpts)
-			return fmt.Errorf("enterprise hooks: save hook contract lock: %w", err)
-		}
+		return withOwnerCredentials(uid, gid, func() error {
+			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
+			if err := conn.Setup(ctx, setupOpts); err != nil {
+				return fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)
+			}
+			present, err := connector.OwnedHooksPresent(conn, setupOpts)
+			if err != nil {
+				_ = conn.Teardown(ctx, setupOpts)
+				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err)
+			}
+			if !present {
+				_ = conn.Teardown(ctx, setupOpts)
+				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name())
+			}
+			lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
+			if err := connector.SaveHookContractLockEntry(dataDir, lockEntry); err != nil {
+				_ = conn.Teardown(ctx, setupOpts)
+				return fmt.Errorf("enterprise hooks: save hook contract lock: %w", err)
+			}
 
-		footprint := connector.AgentPaths{}
-		if ap, ok := conn.(connector.AgentPathProvider); ok {
-			footprint = ap.AgentPaths(setupOpts)
-		}
-		result = InstallResult{
-			Connector:       conn.Name(),
-			UserHome:        home,
-			DataDir:         dataDir,
-			HookConfigPaths: sortedUnique(paths),
-			HookScripts:     sortedUnique(footprint.HookScripts),
-			BackupFiles:     sortedUnique(footprint.BackupFiles),
-			CreatedDirs:     sortedUnique(footprint.CreatedDirs),
-			AgentVersion:    setupOpts.AgentVersion,
-			HookContractID:  lockEntry.ContractID,
-		}
-		return chownInstallFootprint(uid, gid, dataDir, footprint, paths)
+			footprint := connector.AgentPaths{}
+			if ap, ok := conn.(connector.AgentPathProvider); ok {
+				footprint = ap.AgentPaths(setupOpts)
+			}
+			if err := hardenInstallFootprint(uid, gid, home, dataDir, footprint, paths); err != nil {
+				_ = conn.Teardown(ctx, setupOpts)
+				return err
+			}
+			result = InstallResult{
+				Connector:       conn.Name(),
+				UserHome:        home,
+				DataDir:         dataDir,
+				HookConfigPaths: sortedUnique(paths),
+				HookScripts:     sortedUnique(footprint.HookScripts),
+				BackupFiles:     sortedUnique(footprint.BackupFiles),
+				CreatedDirs:     sortedUnique(footprint.CreatedDirs),
+				AgentVersion:    setupOpts.AgentVersion,
+				HookContractID:  lockEntry.ContractID,
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return InstallResult{}, err
@@ -200,6 +212,9 @@ func validateUserHome(raw string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("enterprise hooks: user home %s is not a directory", clean)
 	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return "", fmt.Errorf("enterprise hooks: user home %s is group/other writable", clean)
+	}
 	return clean, nil
 }
 
@@ -212,45 +227,200 @@ func validateActivationSurfaces(home string, paths []string, uid int) error {
 		if path == "" {
 			continue
 		}
-		if !filepath.IsAbs(path) {
-			return fmt.Errorf("enterprise hooks: hook config path %q is not absolute", raw)
-		}
-		if !pathInside(home, path) {
-			return fmt.Errorf("enterprise hooks: refusing hook config outside user home: %s", path)
-		}
-		resolved := path
-		info, err := os.Lstat(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return fmt.Errorf("enterprise hooks: hook config file missing: %s", path)
-			}
-			return fmt.Errorf("enterprise hooks: inspect hook config %s: %w", path, err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			resolved, err = filepath.EvalSymlinks(path)
-			if err != nil {
-				return fmt.Errorf("enterprise hooks: resolve hook config symlink %s: %w", path, err)
-			}
-			resolved = filepath.Clean(resolved)
-			if !pathInside(home, resolved) {
-				return fmt.Errorf("enterprise hooks: refusing hook config symlink %s -> %s outside user home", path, resolved)
-			}
-			info, err = os.Stat(resolved)
-			if err != nil {
-				return fmt.Errorf("enterprise hooks: inspect hook config target %s: %w", resolved, err)
-			}
-		}
-		if info.IsDir() {
-			return fmt.Errorf("enterprise hooks: hook config path is a directory: %s", resolved)
-		}
-		if info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("enterprise hooks: hook config %s is group/other writable", resolved)
-		}
-		if ok, actual := fileOwnerMatches(resolved, uid); !ok {
-			return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d", resolved, actual, uid)
+		if err := validateExistingUserFile(home, path, uid, "hook config"); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func validateUserDataDir(home, dataDir string, uid int) error {
+	dataDir = filepath.Clean(strings.TrimSpace(dataDir))
+	if dataDir == "" {
+		return fmt.Errorf("enterprise hooks: data dir is required")
+	}
+	if !filepath.IsAbs(dataDir) {
+		return fmt.Errorf("enterprise hooks: data dir %q is not absolute", dataDir)
+	}
+	if !pathInside(home, dataDir) {
+		return fmt.Errorf("enterprise hooks: refusing data dir outside user home: %s", dataDir)
+	}
+	return validateExistingUserPathPrefix(home, dataDir, uid, "data dir")
+}
+
+func validateExistingUserFile(home, path string, uid int, label string) error {
+	if err := validateExistingUserParentPrefix(home, path, uid, label); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("enterprise hooks: %s file missing: %s", label, path)
+		}
+		return fmt.Errorf("enterprise hooks: inspect %s %s: %w", label, path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("enterprise hooks: refusing symlink %s: %s", label, path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("enterprise hooks: %s path is a directory: %s", label, path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("enterprise hooks: %s %s is group/other writable", label, path)
+	}
+	if ok, actual := fileOwnerMatches(path, uid); !ok {
+		return fmt.Errorf("enterprise hooks: %s %s owner uid=%d does not match target uid=%d", label, path, actual, uid)
+	}
+	return nil
+}
+
+func validateExistingUserPathPrefix(home, path string, uid int, label string) error {
+	return validateUserPathPrefix(home, path, uid, label, true)
+}
+
+func validateExistingUserParentPrefix(home, path string, uid int, label string) error {
+	return validateUserPathPrefix(home, path, uid, label, false)
+}
+
+func validateUserPathPrefix(home, path string, uid int, label string, includeLeaf bool) error {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("enterprise hooks: %s path %q is not absolute", label, path)
+	}
+	if !pathInside(home, path) {
+		return fmt.Errorf("enterprise hooks: refusing %s outside user home: %s", label, path)
+	}
+	rel, err := filepath.Rel(home, path)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: resolve %s relative to user home: %w", label, err)
+	}
+	cur := filepath.Clean(home)
+	if err := validateExistingUserDir(cur, uid, "user home"); err != nil {
+		return err
+	}
+	if rel == "." {
+		return nil
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		if i == len(parts)-1 && !includeLeaf {
+			return nil
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if err != nil {
+			if os.IsNotExist(err) {
+				if i == len(parts)-1 {
+					return nil
+				}
+				return fmt.Errorf("enterprise hooks: %s parent missing: %s", label, cur)
+			}
+			return fmt.Errorf("enterprise hooks: inspect %s path %s: %w", label, cur, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("enterprise hooks: refusing symlink in %s path: %s", label, cur)
+		}
+		if i < len(parts)-1 {
+			if !info.IsDir() {
+				return fmt.Errorf("enterprise hooks: %s parent is not a directory: %s", label, cur)
+			}
+			if err := validateExistingUserDir(cur, uid, label+" parent"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateExistingUserDir(path string, uid int, label string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect %s %s: %w", label, path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("enterprise hooks: refusing symlink %s: %s", label, path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("enterprise hooks: %s is not a directory: %s", label, path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("enterprise hooks: %s %s is group/other writable", label, path)
+	}
+	if ok, actual := fileOwnerMatches(path, uid); !ok {
+		return fmt.Errorf("enterprise hooks: %s %s owner uid=%d does not match target uid=%d", label, path, actual, uid)
+	}
+	return nil
+}
+
+func hardenInstallFootprint(uid, gid int, home, dataDir string, footprint connector.AgentPaths, hookConfigPaths []string) error {
+	if err := validateExistingUserDir(dataDir, uid, "data dir"); err != nil {
+		return err
+	}
+	if err := chmodOwnedPath(dataDir, 0o700); err != nil {
+		return err
+	}
+	for _, dir := range append([]string{filepath.Join(dataDir, "hooks")}, footprint.CreatedDirs...) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		dir = filepath.Clean(dir)
+		if !pathInside(home, dir) {
+			return fmt.Errorf("enterprise hooks: refusing created dir outside user home: %s", dir)
+		}
+		if _, err := os.Lstat(dir); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("enterprise hooks: inspect created dir %s: %w", dir, err)
+		}
+		if err := validateExistingUserDir(dir, uid, "created dir"); err != nil {
+			return err
+		}
+		if err := chmodOwnedPath(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	for _, path := range sortedUnique(append(append([]string{}, hookConfigPaths...), footprint.PatchedFiles...)) {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		if err := validateExistingUserFile(home, filepath.Clean(path), uid, "patched file"); err != nil {
+			return err
+		}
+		if err := chmodOwnedPath(path, 0o600); err != nil {
+			return err
+		}
+	}
+	for _, path := range sortedUnique(append(append([]string{}, footprint.BackupFiles...), footprint.HookScripts...)) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if _, err := os.Lstat(path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("enterprise hooks: inspect footprint file %s: %w", path, err)
+		}
+		if err := validateExistingUserFile(home, filepath.Clean(path), uid, "footprint file"); err != nil {
+			return err
+		}
+		mode := os.FileMode(0o600)
+		for _, script := range footprint.HookScripts {
+			if filepath.Clean(script) == filepath.Clean(path) {
+				mode = 0o700
+				break
+			}
+		}
+		if err := chmodOwnedPath(path, mode); err != nil {
+			return err
+		}
+	}
+	return lchownInstallFootprint(uid, gid, dataDir, footprint, hookConfigPaths)
 }
 
 func validateHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) error {

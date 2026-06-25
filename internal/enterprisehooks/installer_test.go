@@ -16,7 +16,7 @@ import (
 
 func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	skipIfRoot(t)
-	home := t.TempDir()
+	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
 		t.Fatalf("mkdir codex dir: %v", err)
@@ -64,7 +64,7 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 
 func TestInstallRefusesMissingHookConfig(t *testing.T) {
 	skipIfRoot(t)
-	home := t.TempDir()
+	home := newTestHome(t)
 	_, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "codex",
 		UserHome:      home,
@@ -74,7 +74,7 @@ func TestInstallRefusesMissingHookConfig(t *testing.T) {
 		APIToken:      "test-token",
 		Registry:      connector.NewDefaultRegistry(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "hook config file missing") {
+	if err == nil || !strings.Contains(err.Error(), "hook config") || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("Install error = %v, want hook config missing", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(statErr) {
@@ -84,7 +84,7 @@ func TestInstallRefusesMissingHookConfig(t *testing.T) {
 
 func TestInstallRefusesHookConfigSymlinkOutsideHome(t *testing.T) {
 	skipIfRoot(t)
-	home := t.TempDir()
+	home := newTestHome(t)
 	outside := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(outside, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
 		t.Fatalf("write outside target: %v", err)
@@ -106,14 +106,157 @@ func TestInstallRefusesHookConfigSymlinkOutsideHome(t *testing.T) {
 		APIToken:      "test-token",
 		Registry:      connector.NewDefaultRegistry(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "outside user home") {
-		t.Fatalf("Install error = %v, want outside user home symlink refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "refusing symlink hook config") {
+		t.Fatalf("Install error = %v, want symlink hook config refusal", err)
+	}
+	if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "model = \"gpt-5\"\n" {
+		t.Fatalf("outside symlink target changed: data=%q err=%v", string(got), readErr)
+	}
+}
+
+func TestInstallRefusesHookConfigSymlinkInsideHome(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	realConfig := filepath.Join(home, "real-config.toml")
+	if err := os.WriteFile(realConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write real target: %v", err)
+	}
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.Symlink(realConfig, codexConfig); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing symlink hook config") {
+		t.Fatalf("Install error = %v, want symlink hook config refusal", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(statErr) {
+		t.Fatalf("data dir exists after refused symlink install: %v", statErr)
+	}
+}
+
+func TestInstallRefusesHookConfigSymlinkParent(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	realDir := filepath.Join(home, "real-codex")
+	if err := os.MkdirAll(realDir, 0o700); err != nil {
+		t.Fatalf("mkdir real dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "config.toml"), []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(home, ".codex")); err != nil {
+		t.Fatalf("symlink parent: %v", err)
+	}
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing symlink in hook config path") {
+		t.Fatalf("Install error = %v, want symlink parent refusal", err)
+	}
+}
+
+func TestInstallRefusesDataDirSymlink(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	realData := filepath.Join(home, "real-defenseclaw")
+	if err := os.MkdirAll(realData, 0o700); err != nil {
+		t.Fatalf("mkdir real data: %v", err)
+	}
+	if err := os.Symlink(realData, filepath.Join(home, ".defenseclaw")); err != nil {
+		t.Fatalf("symlink data dir: %v", err)
+	}
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing symlink in data dir path") {
+		t.Fatalf("Install error = %v, want data dir symlink refusal", err)
+	}
+	if entries, readErr := os.ReadDir(realData); readErr != nil || len(entries) != 0 {
+		t.Fatalf("real data dir changed: entries=%v err=%v", entries, readErr)
+	}
+}
+
+func TestInstallRefusesHomeOwnerMismatch(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid() + 1,
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "user home") || !strings.Contains(err.Error(), "does not match target uid") {
+		t.Fatalf("Install error = %v, want home owner mismatch", err)
+	}
+}
+
+func TestHardenInstallFootprintRefusesCreatedDirOutsideHome(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.Chmod(outside, 0o700); err != nil {
+		t.Fatalf("chmod outside dir: %v", err)
+	}
+
+	err := hardenInstallFootprint(os.Getuid(), os.Getgid(), home, dataDir, connector.AgentPaths{
+		CreatedDirs: []string{outside},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "refusing created dir outside user home") {
+		t.Fatalf("hardenInstallFootprint error = %v, want outside created dir refusal", err)
 	}
 }
 
 func TestInstallRefusesProxyConnector(t *testing.T) {
 	skipIfRoot(t)
-	home := t.TempDir()
+	home := newTestHome(t)
 	_, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "openclaw",
 		UserHome:      home,
@@ -129,7 +272,7 @@ func TestInstallRefusesProxyConnector(t *testing.T) {
 }
 
 func TestInstallRefusesRootTarget(t *testing.T) {
-	home := t.TempDir()
+	home := newTestHome(t)
 	_, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "codex",
 		UserHome:      home,
@@ -193,4 +336,13 @@ func skipIfRoot(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("enterprise hook installer refuses uid 0 targets")
 	}
+}
+
+func newTestHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatalf("chmod test home: %v", err)
+	}
+	return home
 }

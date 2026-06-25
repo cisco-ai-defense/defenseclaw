@@ -6,6 +6,10 @@
 
 package cli
 
+func validateEnterpriseHookScopedTokenLocation(_, _ string) error {
+	return nil
+}
+
 func alignEnterpriseHookScopedTokenOwner(_, _ string) error {
 	return nil
 }

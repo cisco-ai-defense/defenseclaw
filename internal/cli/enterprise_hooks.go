@@ -129,11 +129,11 @@ func init() {
 
 func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {
-		return fmt.Errorf("enterprise hooks install: config is not loaded")
+		return enterpriseHooksInstallError(cmd, fmt.Errorf("enterprise hooks install: config is not loaded"))
 	}
 	target, err := resolveEnterpriseHookTarget()
 	if err != nil {
-		return err
+		return enterpriseHooksInstallError(cmd, err)
 	}
 	apiAddr := strings.TrimSpace(enterpriseHookAPIAddr)
 	if apiAddr == "" {
@@ -145,7 +145,7 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	}
 	token, err := enterpriseHookScopedToken(cfg.DataDir, enterpriseHookConnector)
 	if err != nil {
-		return err
+		return enterpriseHooksInstallError(cmd, err)
 	}
 
 	opts := enterprisehooks.InstallOptions{
@@ -169,12 +169,7 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	defer cancel()
 	result, err := enterprisehooks.Install(ctx, opts)
 	if err != nil {
-		if enterpriseHookJSON {
-			payload := map[string]any{"ok": false, "error": err.Error()}
-			_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
-			return fmt.Errorf("enterprise hooks install failed")
-		}
-		return err
+		return enterpriseHooksInstallError(cmd, err)
 	}
 	if enterpriseHookJSON {
 		payload := map[string]any{"ok": true, "result": result}
@@ -182,6 +177,15 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s hooks installed for %s\n", Style("✓", "fg=green", "bold"), result.Connector, result.UserHome)
 	return nil
+}
+
+func enterpriseHooksInstallError(cmd *cobra.Command, err error) error {
+	if enterpriseHookJSON {
+		payload := map[string]any{"ok": false, "error": err.Error()}
+		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
+		return fmt.Errorf("enterprise hooks install failed")
+	}
+	return err
 }
 
 type enterpriseHookReconcileRow struct {
@@ -416,6 +420,9 @@ func enterpriseHookScopedToken(dataDir, connectorName string) (string, error) {
 	dataDir = strings.TrimSpace(dataDir)
 	if dataDir == "" {
 		return "", fmt.Errorf("enterprise hooks: config data_dir is required before minting hook API token")
+	}
+	if err := validateEnterpriseHookScopedTokenLocation(dataDir, connectorName); err != nil {
+		return "", err
 	}
 	token, err := connector.EnsureHookAPIToken(dataDir, connectorName)
 	if err != nil {
