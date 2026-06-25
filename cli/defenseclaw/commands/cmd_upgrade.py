@@ -267,10 +267,22 @@ def upgrade(
             else os.path.expanduser("~/.defenseclaw")
         )
 
-        from defenseclaw.migrations import run_migrations
-        count = run_migrations(current_version, target_version, openclaw_home, data_dir)
+        migration_failed = False
+        try:
+            count = _run_installed_migrations(
+                current_version,
+                target_version,
+                openclaw_home,
+                data_dir,
+                os_name=os_name,
+            )
+        except subprocess.CalledProcessError:
+            migration_failed = True
+            count = 0
         click.echo()
-        if count == 0:
+        if migration_failed:
+            ux.warn("Migration runner failed; upgrade will continue. Run: defenseclaw doctor --fix")
+        elif count == 0:
             ux.ok("No migrations needed")
         else:
             ux.ok(f"Applied {count} migration(s)")
@@ -1352,6 +1364,68 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
                 os.remove(symlink)
             os.symlink(venv_bin, symlink)
     ux.ok("Python CLI installed")
+
+
+def _run_installed_migrations(
+    from_version: str,
+    to_version: str,
+    openclaw_home: str,
+    data_dir: str,
+    *,
+    os_name: str | None = None,
+) -> int:
+    """Run migrations in the freshly installed managed venv.
+
+    ``defenseclaw upgrade`` replaces the wheel while this command is already
+    running. Importing ``defenseclaw.migrations`` in-process can therefore mix
+    old modules cached in ``sys.modules`` with new files on disk. A child
+    interpreter starts with a clean import graph from the just-installed wheel.
+    """
+    if os_name is None:
+        os_name = platform.system().lower()
+
+    venv = os.path.expanduser("~/.defenseclaw/.venv")
+    venv_python = _venv_python_path(venv, os_name)
+    if not os.path.isfile(venv_python):
+        raise subprocess.CalledProcessError(1, [venv_python, "-c", "<missing managed venv>"])
+
+    fd, result_path = tempfile.mkstemp(prefix="defenseclaw-migrations-", suffix=".json")
+    os.close(fd)
+    script = """
+import json
+import sys
+
+from defenseclaw.migrations import run_migrations
+
+count = run_migrations(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
+with open(sys.argv[5], "w", encoding="utf-8") as fh:
+    json.dump({"count": count}, fh)
+"""
+    try:
+        subprocess.run(
+            [
+                venv_python,
+                "-c",
+                script,
+                from_version,
+                to_version,
+                openclaw_home,
+                data_dir,
+                result_path,
+            ],
+            check=True,
+        )
+        with open(result_path, encoding="utf-8") as f:
+            payload = json.load(f)
+        count = payload.get("count")
+        if not isinstance(count, int):
+            raise subprocess.CalledProcessError(1, [venv_python, "-c", "<invalid migration count>"])
+        return count
+    finally:
+        try:
+            os.remove(result_path)
+        except OSError:
+            pass
 
 
 def _venv_python_path(venv: str, os_name: str) -> str:

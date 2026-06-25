@@ -11,6 +11,7 @@ OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 
 DIST_DIR    := dist
+UPGRADE_SMOKE_FROM ?= 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
 
 # Cross-platform virtualenv / executable layout. Windows Python venvs expose
 # console entry points under Scripts/ (not bin/) and binaries carry a .exe
@@ -34,6 +35,7 @@ endif
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
+        upgrade-smoke upgrade-smoke-matrix \
         set-version \
         _bundle-data \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
@@ -600,6 +602,12 @@ check-llm-catalog:
 
 check-upgrade-manifest:
 	@python3 scripts/generate-upgrade-manifest.py --check
+
+upgrade-smoke:
+	@scripts/test-upgrade-release.sh $(ARGS)
+
+upgrade-smoke-matrix:
+	@scripts/test-upgrade-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)
 
 # ---------------------------------------------------------------------------
 # Lint targets

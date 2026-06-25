@@ -36,11 +36,13 @@ Design contract for every migration:
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
 import secrets
 import shutil
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -62,6 +64,50 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
         m = re.match(r"\d+", part)
         out.append(int(m.group(0)) if m else 0)
     return tuple(out)
+
+
+def _ensure_legacy_openclaw_restart_shim(
+    from_version: str,
+    to_version: str,
+    data_dir: str,
+) -> None:
+    """Prevent pre-0.6.1 upgraders from crashing when ``openclaw`` is absent.
+
+    The 0.4.0-0.6.0 ``cmd_upgrade`` path installs the target wheel, imports
+    this module, runs migrations, and then calls ``subprocess.run(["openclaw",
+    "gateway", "restart"], check=False)``. If ``openclaw`` is not installed,
+    Python raises ``FileNotFoundError`` before ``check=False`` can matter,
+    aborting an otherwise successful upgrade. We cannot patch those already
+    released command modules, but we can provide a process-local PATH shim
+    before their ``finally`` block runs.
+    """
+    if os.name == "nt":
+        return
+    if _ver_tuple(to_version) < _ver_tuple("0.8.0"):
+        return
+    if _ver_tuple(from_version) >= _ver_tuple("0.6.1"):
+        return
+    if shutil.which("openclaw"):
+        return
+
+    shim_dir = os.path.join(data_dir, ".upgrade-shims")
+    shim_path = os.path.join(shim_dir, "openclaw")
+    try:
+        os.makedirs(shim_dir, mode=0o700, exist_ok=True)
+        with open(shim_path, "w", encoding="utf-8") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'openclaw CLI not found; skipping automatic gateway restart' >&2\n"
+                "exit 127\n"
+            )
+        os.chmod(shim_path, 0o700)
+    except OSError as exc:
+        ux.warn(f"could not create legacy openclaw restart shim: {exc}", indent="    ")
+        return
+
+    path_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+    if shim_dir not in path_parts:
+        os.environ["PATH"] = os.pathsep.join([shim_dir, *path_parts])
 
 
 # ---------------------------------------------------------------------------
@@ -1980,8 +2026,23 @@ def run_migrations(
     """
     from defenseclaw import migration_state
 
+    if not all(
+        hasattr(migration_state, attr)
+        for attr in ("detect_schema", "is_future_schema", "FutureSchemaError")
+    ):
+        migration_state = importlib.reload(migration_state)
+    import defenseclaw as defenseclaw_pkg
+
+    if getattr(defenseclaw_pkg, "__version__", "") != to_version:
+        importlib.reload(defenseclaw_pkg)
+    cmd_version = sys.modules.get("defenseclaw.commands.cmd_version")
+    if cmd_version is not None:
+        importlib.reload(cmd_version)
+
     if data_dir is None:
         data_dir = os.environ.get("DEFENSECLAW_HOME") or os.path.expanduser("~/.defenseclaw")
+
+    _ensure_legacy_openclaw_restart_shim(from_version, to_version, data_dir)
 
     from_t = _ver_tuple(from_version)
     to_t = _ver_tuple(to_version)

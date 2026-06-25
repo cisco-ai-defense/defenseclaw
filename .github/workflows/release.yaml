@@ -304,6 +304,9 @@ jobs:
             --output-signature=dist/checksums.txt.sig \
             dist/checksums.txt
 
+      - name: Pre-publish upgrade smoke
+        run: make upgrade-smoke-matrix ARGS="--release-dir dist --baseline-mode seed"
+
       # Atomic: tag + release + every asset are created in a single API
       # call. On workflow_dispatch, --target $GITHUB_SHA tells gh to create
       # the tag at this commit if it doesn't yet exist. On push:tags the

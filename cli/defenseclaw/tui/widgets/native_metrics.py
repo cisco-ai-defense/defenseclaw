@@ -155,12 +155,7 @@ class MetricTile(Vertical):
         self._progress.update(total=100, progress=_clamp(metric.progress))
         self._sparkline.data = metric.trend or (0,)
         self._detail.update(metric.detail)
-        # Textual >=8.2.4 ``DOM.update_classes`` swaps a whole class
-        # mapping in a single style-recomputation pass. The previous
-        # four ``set_class`` calls each triggered an independent
-        # restyle of the tile + its descendants; the tile is rendered
-        # on every metric refresh, so the cost was real.
-        self.update_classes(
+        self._apply_class_map(
             {
                 "metric-ok": metric.state == "ok",
                 "metric-warn": metric.state == "warn",
@@ -172,6 +167,16 @@ class MetricTile(Vertical):
             self.tooltip = f"Open {metric.target_panel.title()}"
         else:
             self.tooltip = None
+
+    def _apply_class_map(self, classes: dict[str, bool]) -> None:
+        """Apply a class map across Textual 7.x and 8.x."""
+
+        update_classes = getattr(self, "update_classes", None)
+        if callable(update_classes):
+            update_classes(classes)
+            return
+        for class_name, enabled in classes.items():
+            self.set_class(enabled, class_name)
 
     def on_click(self, event: events.Click) -> None:
         if not self.metric.target_panel:

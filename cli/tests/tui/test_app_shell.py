@@ -142,6 +142,7 @@ async def test_overview_scroll_keys_move_body_scroll_container() -> None:
         app._refresh_models_from_disk = counted_refresh  # type: ignore[method-assign]
         app._render_overview_metrics = counted_metric_refresh  # type: ignore[method-assign]
         app._overview_last_scroll_activity_at = 0.0
+        app._overview_sampled_refresh_scheduled = True
         app._periodic_refresh()
         assert refresh_calls == 0
         assert metric_refresh_calls == 1

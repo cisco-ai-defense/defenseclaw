@@ -28,6 +28,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _normalize_target_version,
     _preflight_wheel_install,
     _print_migration_cursor_summary,
+    _run_installed_migrations,
     _run_silent,
     _validate_upgrade_manifest,
     _verify_checksums_sigstore,
@@ -139,6 +140,36 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         self.assertIn("--dry-run", calls[1])
         self.assertEqual(calls[1][-1], "/tmp/defenseclaw.whl")
 
+    def test_run_installed_migrations_uses_managed_venv_python(self):
+        with TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}), \
+             patch("subprocess.run") as run_mock:
+            venv_python = os.path.join(home, ".defenseclaw", ".venv", "bin", "python")
+            os.makedirs(os.path.dirname(venv_python), exist_ok=True)
+            with open(venv_python, "w") as f:
+                f.write("# python")
+
+            def side_effect(args, **_kwargs):
+                result_path = args[-1]
+                with open(result_path, "w", encoding="utf-8") as f:
+                    json.dump({"count": 1}, f)
+                return Mock(returncode=0)
+
+            run_mock.side_effect = side_effect
+
+            count = _run_installed_migrations(
+                "0.7.0",
+                "0.8.0",
+                "/tmp/openclaw",
+                "/tmp/defenseclaw",
+                os_name="darwin",
+            )
+
+        self.assertEqual(count, 1)
+        call = run_mock.call_args.args[0]
+        self.assertEqual(call[0], venv_python)
+        self.assertEqual(call[1], "-c")
+        self.assertEqual(call[3:7], ["0.7.0", "0.8.0", "/tmp/openclaw", "/tmp/defenseclaw"])
+
 
 class TestUpgradeSameVersionRepair(unittest.TestCase):
     def test_same_version_reapplies_migrations(self):
@@ -195,7 +226,7 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
                 return_value=Mock(returncode=0),
             ))
             run_migrations = stack.enter_context(
-                patch("defenseclaw.migrations.run_migrations", return_value=1)
+                patch("defenseclaw.commands.cmd_upgrade._run_installed_migrations", return_value=1)
             )
             result = runner.invoke(upgrade, ["--yes", "--version", "9.9.9"], obj=app)
 
@@ -262,7 +293,7 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._run_silent"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._poll_health"))
             stack.enter_context(
-                patch("defenseclaw.migrations.run_migrations", return_value=0)
+                patch("defenseclaw.commands.cmd_upgrade._run_installed_migrations", return_value=0)
             )
             result = runner.invoke(upgrade, ["--yes", "--version", "9.9.9"], obj=app)
 
@@ -335,7 +366,7 @@ class TestUpgradeWithoutOpenClawCli(unittest.TestCase):
                 side_effect=fake_run,
             ))
             stack.enter_context(
-                patch("defenseclaw.migrations.run_migrations", return_value=0)
+                patch("defenseclaw.commands.cmd_upgrade._run_installed_migrations", return_value=0)
             )
             result = runner.invoke(upgrade, ["--yes", "--version", "9.9.9"], obj=app)
 

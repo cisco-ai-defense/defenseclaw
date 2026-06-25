@@ -5174,7 +5174,8 @@ class DefenseClawTUI(App[None]):
         # model filters during render, and hidden panels sync when opened.
         # Eagerly refiltering Logs/Audit/catalog data here made an Overview
         # chip click pay for every table in the app.
-        if defer_overview and self.active_panel == "overview" and not self.help_open:
+        overview_active = self.active_panel == "overview" and not self.help_open
+        if (defer_overview or overview_active) and overview_active:
             self._render_overview_scope_indicator()
             self._render_overview_metrics()
             self._schedule_overview_deferred_render()

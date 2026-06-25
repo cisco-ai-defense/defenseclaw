@@ -141,7 +141,7 @@ class TestUpgradeFailsClosedWithoutChecksums(unittest.TestCase):
                 return_value=Mock(returncode=0),
             ))
             stack.enter_context(
-                patch("defenseclaw.migrations.run_migrations", return_value=0)
+                patch("defenseclaw.commands.cmd_upgrade._run_installed_migrations", return_value=0)
             )
 
             result = runner.invoke(
@@ -264,7 +264,7 @@ class TestUpgradeRefusesUnsignedAssetDigests(unittest.TestCase):
                 return_value=Mock(returncode=0),
             ))
             stack.enter_context(
-                patch("defenseclaw.migrations.run_migrations", return_value=0)
+                patch("defenseclaw.commands.cmd_upgrade._run_installed_migrations", return_value=0)
             )
 
             result = runner.invoke(

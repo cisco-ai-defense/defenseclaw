@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shutil
@@ -440,6 +441,65 @@ class TestRunMigrations(unittest.TestCase):
                 "run_migrations should persist the cursor under $DEFENSECLAW_HOME",
             )
         self.assertEqual(count, 1)
+
+    def test_run_migrations_reloads_stale_migration_state_module(self):
+        """0.7.x upgraders cache migration_state before installing 0.8.0.
+
+        The newly imported migrations module must refresh that stale module
+        before it reaches APIs introduced after 0.7.x.
+        """
+        import defenseclaw
+        import defenseclaw.commands.cmd_version as cmd_version
+        from defenseclaw import migration_state
+
+        defenseclaw.__version__ = "0.7.0"
+        cmd_version.__version__ = "0.7.0"
+        for attr in ("detect_schema", "is_future_schema", "FutureSchemaError"):
+            delattr(migration_state, attr)
+
+        calls: list[str] = []
+
+        def record(_ctx: MigrationContext) -> None:
+            calls.append("0.8.0")
+
+        try:
+            with patch("defenseclaw.migrations.MIGRATIONS", [("0.8.0", "compat", record)]):
+                with tempfile.TemporaryDirectory() as data_dir:
+                    count = run_migrations("0.7.0", "0.8.0", tempfile.mkdtemp(), data_dir)
+                    refreshed_version = defenseclaw.__version__
+                    refreshed_cmd_version = cmd_version.__version__
+        finally:
+            importlib.reload(defenseclaw)
+            importlib.reload(cmd_version)
+            importlib.reload(migration_state)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(calls, ["0.8.0"])
+        self.assertEqual(refreshed_version, "0.8.0")
+        self.assertEqual(refreshed_cmd_version, "0.8.0")
+
+    def test_legacy_openclaw_restart_shim_for_pre_061_upgrade(self):
+        with tempfile.TemporaryDirectory() as data_dir, \
+             patch("defenseclaw.migrations.MIGRATIONS", []), \
+             patch("defenseclaw.migrations.shutil.which", return_value=None), \
+             patch.dict(os.environ, {"PATH": "/usr/bin"}):
+            run_migrations("0.6.0", "0.8.0", tempfile.mkdtemp(), data_dir)
+
+            shim_dir = os.path.join(data_dir, ".upgrade-shims")
+            shim_path = os.path.join(shim_dir, "openclaw")
+            self.assertTrue(os.path.isfile(shim_path))
+            self.assertTrue(os.access(shim_path, os.X_OK))
+            self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], shim_dir)
+
+    def test_legacy_openclaw_restart_shim_skips_fixed_upgraders(self):
+        with tempfile.TemporaryDirectory() as data_dir, \
+             patch("defenseclaw.migrations.MIGRATIONS", []), \
+             patch("defenseclaw.migrations.shutil.which", return_value=None), \
+             patch.dict(os.environ, {"PATH": "/usr/bin"}):
+            run_migrations("0.6.1", "0.8.0", tempfile.mkdtemp(), data_dir)
+
+            self.assertFalse(os.path.exists(os.path.join(data_dir, ".upgrade-shims")))
+            self.assertEqual(os.environ["PATH"], "/usr/bin")
 
 
 # ---------------------------------------------------------------------------
