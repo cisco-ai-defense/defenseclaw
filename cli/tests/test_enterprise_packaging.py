@@ -54,7 +54,7 @@ def test_systemd_hook_guardian_is_oneshot_and_keeps_gateway_config_read_only():
         "ProtectSystem=strict",
         "ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw",
         "ReadWritePaths=/home -/var/home /var/lib/defenseclaw",
-        "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER",
+        "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID",
         "RestrictNamespaces=true",
         "RestrictSUIDSGID=true",
         "NoNewPrivileges=true",
@@ -80,7 +80,7 @@ def test_systemd_hook_guardian_reconcile_timer_and_manifest_contract():
     assert "UMask=0077" in service_text
     assert "ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw" in service_text
     assert "ReadWritePaths=/home -/var/home /var/lib/defenseclaw" in service_text
-    assert "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER" in service_text
+    assert "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID" in service_text
     assert "OnUnitActiveSec=5min" in timer_text
     assert "Persistent=true" in timer_text
     assert "Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment" in timer_text
