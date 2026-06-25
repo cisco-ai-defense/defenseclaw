@@ -168,6 +168,8 @@ async def test_overview_scroll_keys_move_body_scroll_container() -> None:
 
         app._render_chrome = counted_sampled_render  # type: ignore[method-assign]
         app.set_timer = immediate_sampled_timer  # type: ignore[method-assign]
+        # Keep the mount-time interval from racing this direct sampler assertion on slow CI.
+        app._periodic_refresh_running = True  # noqa: SLF001
         app._overview_sampled_refresh_scheduled = False  # noqa: SLF001 - isolate direct sampler assertions.
 
         scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
@@ -4680,6 +4682,34 @@ async def test_overview_connector_filter_does_not_refilter_hidden_panels(monkeyp
         app._set_connector_filter("cursor")
 
     assert hidden_filter_calls == []
+
+
+@pytest.mark.asyncio
+async def test_overview_connector_filter_defers_full_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Overview filter changes should avoid a full chrome render in the hot path."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app.active_panel = "overview"
+        render_calls: list[str] = []
+
+        def record_render() -> None:
+            render_calls.append("full")
+
+        monkeypatch.setattr(app, "_render_chrome", record_render)
+        app._set_connector_filter("cursor")
+
+        assert app._connector_filter() == "cursor"
+        assert render_calls == []
 
 
 @pytest.mark.asyncio

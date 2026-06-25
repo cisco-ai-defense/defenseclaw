@@ -46,11 +46,11 @@ Pick a row with **proxy family**, **block: yes**, **native ask: yes**, **fail-cl
 
 ### "I want enforcement on Claude Code without the proxy"
 
-Hook-only enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Gemini CLI](/docs/connectors/geminicli), [Hermes](/docs/connectors/hermes), [Windsurf](/docs/connectors/windsurf), [Copilot CLI](/docs/connectors/copilot), and [OpenCode](/docs/connectors/opencode). The constraint: hook-only enforcement cannot block a request the agent has not yet asked the hook about. Trust the hook surface to scope what's possible.
+Hook-only enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Gemini CLI](/docs/connectors/geminicli), [Hermes](/docs/connectors/hermes), [Windsurf](/docs/connectors/windsurf), [Copilot CLI](/docs/connectors/copilot), [OpenHands](/docs/connectors/openhands), [Antigravity](/docs/connectors/antigravity), and [OpenCode](/docs/connectors/opencode). The constraint: hook-only enforcement cannot block a request the agent has not yet asked the hook about. Trust the hook surface to scope what's possible.
 
 ### "I want HITL approvals to surface inside the agent UI"
 
-Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor (beforeShellExecution / beforeMCPExecution), GitHub Copilot CLI (preToolUse). Other connectors downgrade to a confirm verdict.
+Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor (beforeShellExecution / beforeMCPExecution), GitHub Copilot CLI (preToolUse), or Antigravity (ask). Other connectors downgrade to a confirm verdict.
 
 ### "I want fail-closed on transport failures"
 

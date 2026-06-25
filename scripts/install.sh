@@ -666,6 +666,9 @@ print_success() {
             printf "    ${CYAN}defenseclaw init${NC}\n"
             ;;
     esac
+    if [[ "${INSTALL_SANDBOX}" == true && "${CONNECTOR}" != "openclaw" ]]; then
+        warn "Sandbox setup is experimental and currently applies to the OpenClaw/OpenShell path only."
+    fi
     echo ""
 }
 
@@ -718,11 +721,11 @@ while [[ $# -gt 0 ]]; do
             echo "  curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash"
             echo "  ./scripts/install.sh --local ./dist               # from local build"
             echo "  curl -LsSf <url>/install.sh | bash -s -- --yes    # non-interactive"
-            echo "  curl ... | bash -s -- --sandbox                   # also install openshell-sandbox"
+            echo "  curl ... | bash -s -- --sandbox                   # OpenClaw/OpenShell sandbox support"
             echo "  curl ... | bash -s -- --quickstart                # run quickstart after install"
             echo ""
             echo "Options:"
-            echo "  --sandbox             Also install openshell-sandbox (Linux only)"
+            echo "  --sandbox             Also install openshell-sandbox (experimental Linux/OpenClaw path)"
             echo "  --local <dir>         Install from a local dist directory"
             echo "  --yes, -y             Skip all confirmation prompts"
             echo "  --connector <name>    Pick agent connector (openclaw|codex|claudecode|zeptoclaw|none)"

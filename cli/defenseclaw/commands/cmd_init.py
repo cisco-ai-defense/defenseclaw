@@ -47,7 +47,11 @@ from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
 @click.command("init")
 @click.option("--skip-install", is_flag=True, help="Skip automatic scanner dependency installation")
 @click.option("--enable-guardrail", is_flag=True, help="Configure LLM guardrail during init")
-@click.option("--sandbox", is_flag=True, help="Set up sandbox mode (Linux only: creates sandbox user and directories)")
+@click.option(
+    "--sandbox",
+    is_flag=True,
+    help="Set up experimental OpenClaw/OpenShell sandbox mode (Linux only).",
+)
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
 @click.option("--rescan-agents", is_flag=True, help="Refresh cached local agent discovery before choosing a connector.")
@@ -204,7 +208,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     (the two compose). With neither flag (nor --connector), init keeps the
     legacy single-connector default.
 
-    Use --sandbox to set up openshell-sandbox standalone mode (Linux only).
+    Use --sandbox to set up OpenClaw/OpenShell standalone sandbox mode
+    (experimental, Linux only).
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
     import platform
