@@ -464,6 +464,15 @@ Signed releases can be upgraded on hosts without `cosign`; the command warns
 and continues with SHA-256 checksum validation only. Install `cosign` to verify
 Sigstore provenance in addition to checksums.
 
+**Known recovery paths:**
+
+| Installed version | Recommendation |
+| --- | --- |
+| `0.8.0` or `0.8.1` | These versions can require local `cosign` before the fixed wheel is installed. Install `cosign` first (`brew install cosign` on macOS) and then run plain `defenseclaw upgrade`, or use `defenseclaw upgrade --allow-unverified` only if you accept the reduced provenance check for that one bridge upgrade. |
+| `0.7.x` | Upgrade directly to the latest release. Do not target `0.8.0`; that release had a broken migration-cache path. |
+| `0.7.0` release tag | No downloadable release assets were published for this tag, so release-asset smoke cannot cover it. Upgrade from a locally installed `0.7.0` directly to the latest release. |
+| `0.2.0` | This predates the `defenseclaw upgrade` command. Use the installer documented in `docs/INSTALL.md` to bridge to a modern release. |
+
 **Examples:**
 
 ```bash
