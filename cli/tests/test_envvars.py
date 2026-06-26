@@ -12,17 +12,14 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from defenseclaw.envvars import (
     ALLOWED_CATEGORIES,
     ALLOWED_SECURITY_IMPACT,
-    CATEGORY_CREDENTIAL,
     CATEGORY_SECURITY_OPT_OUT,
-    EnvVar,
-    Registry,
     active_security_overrides,
-    iter_entries,
     load_registry,
 )
 
@@ -67,6 +64,12 @@ class RegistryStructureTests(unittest.TestCase):
     def test_no_duplicate_names(self) -> None:
         names = [e.name for e in self.registry.entries]
         self.assertEqual(len(names), len(set(names)))
+
+    def test_bundled_registry_matches_source_registry(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        source = root / "internal" / "envvars" / "registry.json"
+        bundled = root / "cli" / "defenseclaw" / "_data" / "envvars" / "registry.json"
+        self.assertEqual(json.loads(bundled.read_text()), json.loads(source.read_text()))
 
     def test_names_use_canonical_prefix(self) -> None:
         for e in self.registry.entries:

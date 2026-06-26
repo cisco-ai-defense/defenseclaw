@@ -76,6 +76,7 @@ defenseclaw = [
     "_data/policies/*.yaml",
     "_data/policies/rego/*.rego",
     "_data/policies/rego/*.json",
+    "_data/envvars/*.json",
     "_data/skills/codeguard/*.md",
     "_data/skills/codeguard/*.yaml",
     "_data/skills/codeguard/*.py",
