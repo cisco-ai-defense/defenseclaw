@@ -97,6 +97,31 @@ class TestStatusCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("running", result.output)
 
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    @patch("defenseclaw.commands.cmd_status.shutil.which")
+    def test_status_accepts_openshell_sandbox_binary(self, mock_which, mock_client_cls):
+        from defenseclaw.commands.cmd_status import status
+
+        def fake_which(binary):
+            if binary == "openshell-sandbox":
+                return "/usr/local/bin/openshell-sandbox"
+            return None
+
+        mock_which.side_effect = fake_which
+        mock_client = MagicMock()
+        mock_client.is_running.return_value = False
+        mock_client_cls.return_value = mock_client
+
+        result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Sandbox:", result.output)
+        self.assertIn("available", result.output)
+
+        result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["sandbox"]["available"])
+
 
 # ---------------------------------------------------------------------------
 # Alerts command
