@@ -406,6 +406,9 @@ build_go_gateway() {
     log_step "Building Go Gateway Binary"
     
     cd "${REPO_ROOT}"
+
+    log_info "Preparing OpenClaw extension embed..."
+    make -C "${REPO_ROOT}" sync-openclaw-extension
     
     # Fetch dependencies
     log_info "Fetching Go dependencies..."

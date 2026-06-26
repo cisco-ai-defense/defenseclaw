@@ -71,6 +71,13 @@ def _status_row(key: str, value: str) -> None:
     click.echo(f"  {ux._style(label_padded, fg='bright_black', bold=True)}{rendered_value}")
 
 
+def _openshell_available(cfg) -> bool:
+    binary = getattr(getattr(cfg, "openshell", None), "binary", "")
+    if binary and shutil.which(str(binary)):
+        return True
+    return bool(shutil.which("openshell-sandbox"))
+
+
 @click.command()
 @click.option(
     "--json",
@@ -117,7 +124,7 @@ def status(app: AppContext, as_json: bool) -> None:
     click.echo()
 
     # Sandbox
-    if shutil.which(cfg.openshell.binary):
+    if _openshell_available(cfg):
         _status_row("Sandbox", ux._style("available", fg="green"))
     else:
         _status_row(
@@ -606,7 +613,7 @@ def _status_payload(app) -> dict:
         "config": f"{cfg.data_dir}/config.yaml",
         "audit_db": cfg.audit_db,
         "scope": _connector_scope_text(cfg),
-        "sandbox": {"available": bool(shutil.which(cfg.openshell.binary))},
+        "sandbox": {"available": _openshell_available(cfg)},
         "scanners": _scanner_status_map(cfg),
         "connectors": _connector_roster(cfg),
     }
