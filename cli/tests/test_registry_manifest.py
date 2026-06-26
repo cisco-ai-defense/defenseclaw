@@ -446,6 +446,7 @@ class TestKnownConstants(unittest.TestCase):
                 "openhands",
                 "antigravity",
                 "opencode",
+                "omnigent",
             },
         )
 

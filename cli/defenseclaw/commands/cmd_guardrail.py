@@ -77,6 +77,7 @@ _CONNECTOR_LABELS = {
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
+    "omnigent": "OmniGent",
 }
 
 

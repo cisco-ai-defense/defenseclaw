@@ -39,6 +39,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
+from defenseclaw.connector_paths import omnigent_config_path
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener
@@ -567,6 +568,13 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
             "pass",
             "Human approval",
             "Antigravity supports native PreToolUse ask; decision=ask overrides --dangerously-skip-permissions",
+            r=r,
+        )
+    elif connector == "omnigent":
+        _emit(
+            "pass",
+            "Human approval",
+            "OmniGent supports native ASK on request, tool_call, and llm_request; post-action confirms use fallback",
             r=r,
         )
     else:
@@ -1226,6 +1234,10 @@ _HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         (os.path.join(".config", "opencode", "plugins", "defenseclaw.js"),),
         ("defenseclaw",),
     ),
+    "omnigent": (
+        (os.path.join(".omnigent", "config.yaml"),),
+        ("defenseclaw_omnigent_policy", "defenseclaw_guardrail"),
+    ),
 }
 
 _HOOK_HEALTH_LABELS = {
@@ -1234,6 +1246,7 @@ _HOOK_HEALTH_LABELS = {
     "windsurf": "Windsurf hooks",
     "geminicli": "Gemini CLI hooks",
     "opencode": "OpenCode hooks",
+    "omnigent": "OmniGent policy",
 }
 
 
@@ -1278,6 +1291,92 @@ def _hook_health_paths_from_lock(cfg, connector: str) -> list[str]:
     if not isinstance(locations, dict):
         return []
     return [str(p) for p in (locations.get("hook_config_paths") or []) if p]
+
+
+def _hook_runtime_paths_from_lock(cfg, connector: str) -> list[str]:
+    """Return the installed runtime artifacts recorded for a hook connector."""
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        return []
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as fh:
+            lock = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return []
+    entry = (lock.get("connectors") or {}).get(connector) or {}
+    locations = entry.get("locations") or {}
+    if not isinstance(locations, dict):
+        return []
+    return [str(p) for p in (locations.get("hook_script_paths") or []) if p]
+
+
+def _omnigent_runtime_paths_from_backups(cfg) -> list[str]:
+    """Recover OmniGent runtime targets when the hook lock is absent."""
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        return []
+    paths: list[str] = []
+    for logical in ("module", "pth"):
+        backup_path = os.path.join(
+            data_dir,
+            "connector_backups",
+            "omnigent",
+            f"{logical}.json",
+        )
+        try:
+            with open(backup_path, encoding="utf-8") as fh:
+                record = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if record.get("connector") != "omnigent" or record.get("logical_name") != logical:
+            continue
+        target = str(record.get("path") or "").strip()
+        if target and target not in paths:
+            paths.append(target)
+    return paths
+
+
+def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
+    """Verify the config, policy module, and Python import shim as one unit."""
+    config_paths = _hook_health_paths_from_lock(cfg, "omnigent") or [
+        omnigent_config_path()
+    ]
+    config_path = next((p for p in config_paths if os.path.isfile(p)), "")
+    if not config_path or not _file_references_marker(
+        config_path, ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
+    ):
+        _emit("fail", "OmniGent policy", "config is missing the DefenseClaw policy registration", r=r)
+        return
+
+    runtime_paths = (
+        _hook_runtime_paths_from_lock(cfg, "omnigent")
+        or _omnigent_runtime_paths_from_backups(cfg)
+    )
+    module_path = next((p for p in runtime_paths if p.endswith(".py")), "")
+    pth_path = next((p for p in runtime_paths if p.endswith(".pth")), "")
+    if not module_path or not pth_path:
+        _emit(
+            "fail",
+            "OmniGent policy",
+            "hook contract lock does not record both the policy module and .pth import shim",
+            r=r,
+        )
+        return
+    if not os.path.isfile(module_path) or not all(
+        _file_references_marker(module_path, (marker,))
+        for marker in ("POLICY_REGISTRY", "defenseclaw_policy")
+    ):
+        _emit("fail", "OmniGent policy", f"policy module is missing or invalid: {module_path}", r=r)
+        return
+    try:
+        with open(pth_path, encoding="utf-8") as fh:
+            import_path = fh.read().strip()
+    except OSError:
+        import_path = ""
+    if not import_path or os.path.realpath(import_path) != os.path.realpath(os.path.dirname(module_path)):
+        _emit("fail", "OmniGent policy", f".pth import shim is missing or points elsewhere: {pth_path}", r=r)
+        return
+    _emit("pass", "OmniGent policy", f"config={config_path}; module={module_path}; import={pth_path}", r=r)
 
 
 def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
@@ -1339,6 +1438,8 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
         _check_openhands_hooks(cfg, r)
     elif connector == "antigravity":
         _check_antigravity_hooks(cfg, r)
+    elif connector == "omnigent":
+        _check_omnigent_policy_health(cfg, r)
     elif connector in _HOOK_HEALTH_FALLBACK:
         # hermes / cursor / windsurf / geminicli / opencode — generic
         # lock-file-driven hook-health row (D4).
@@ -1599,11 +1700,10 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
 
 
-# Connectors that enforce in-process via the agent's native hook bus
-# (PreToolUse / UserPromptSubmit / PostToolUse) and talk directly to their
-# upstream provider — they do NOT bind the guardrail proxy listener on port
-# 4000. Proxy connectors (openclaw, zeptoclaw) are deliberately absent: they
-# DO bind 4000, so a real liveliness probe must run for them.
+# Connectors that enforce in-process via an agent-native lifecycle surface
+# (hook bus or OmniGent's custom policy API) and talk directly to their
+# upstream provider. They do NOT bind the guardrail proxy listener on port
+# 4000. Proxy connectors (openclaw, zeptoclaw) are deliberately absent.
 _HOOK_ENFORCED_CONNECTORS = frozenset(
     {
         "codex",
@@ -1616,6 +1716,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "openhands",
         "antigravity",
         "opencode",
+        "omnigent",
     }
 )
 
@@ -1623,8 +1724,8 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
 def _guardrail_proxy_intentionally_closed(cfg) -> str:
     """Return a detail string when the proxy port is expected to be closed.
 
-    Hook-enforced connectors feed DefenseClaw through the agent's
-    native hook bus (PreToolUse / UserPromptSubmit / PostToolUse)
+    Hook/policy-enforced connectors feed DefenseClaw through the agent's
+    native lifecycle surface
     while the agent talks directly to its upstream provider. Port
     4000 is deliberately unbound in that topology, so doctor must
     not report a hard proxy failure. Action mode IS supported on
@@ -1652,6 +1753,13 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
     label = connectors[0] if len(connectors) == 1 else ", ".join(sorted(connectors))
     if len(connectors) == 1:
         mode = modes.get(connectors[0], "observe")
+        if connectors[0] == "omnigent":
+            if mode == "action":
+                return (
+                    "policy-enforced for omnigent "
+                    "(mode=action via ALLOW/ASK/DENY) — proxy port intentionally closed"
+                )
+            return "policy-driven for omnigent (mode=observe) — proxy port intentionally closed"
         if mode == "action":
             return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
         return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
@@ -1697,6 +1805,22 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     gc = cfg.guardrail
     if not gc.enabled:
         _emit("skip", "LLM API key", "guardrail disabled", r=r)
+        return
+
+    # Hook/policy-only connectors do not route LLM traffic through the
+    # guardrail provider. When the optional judge is also off, requiring a
+    # guardrail LLM key is a false failure: local regex/Cisco-AID policy lanes
+    # remain fully functional without one.
+    judge = getattr(gc, "judge", None)
+    if _guardrail_proxy_intentionally_closed(cfg) and not bool(
+        getattr(judge, "enabled", False)
+    ):
+        _emit(
+            "skip",
+            "LLM API key",
+            "not required by hook/policy enforcement while the LLM judge is disabled",
+            r=r,
+        )
         return
 
     llm = cfg.resolve_llm("guardrail")
@@ -3367,6 +3491,7 @@ _CONNECTOR_LABELS = {
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
+    "omnigent": "OmniGent",
 }
 
 
@@ -3608,10 +3733,13 @@ def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
     if isinstance(locations, dict):
         workspace_dir = str(locations.get("workspace_dir") or "").strip()
         hook_paths = [str(v) for v in locations.get("hook_config_paths", []) if v]
+        runtime_paths = [str(v) for v in locations.get("hook_script_paths", []) if v]
         if workspace_dir:
             detail += f" workspace={workspace_dir}"
         if hook_paths:
             detail += f" hook_path={hook_paths[0]}"
+        if runtime_paths:
+            detail += f" runtime_path={runtime_paths[0]}"
 
     current_version = _discovered_agent_version(data_dir, connector)
     if current_version and raw_version and current_version != raw_version:

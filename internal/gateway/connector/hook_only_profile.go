@@ -114,6 +114,11 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		}
 	case "antigravity":
 		output = antigravityHookOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, reason, in.AdditionalContext)
+	case "omnigent":
+		// The installed Python policy reads the unified top-level action
+		// and translates allow/block/confirm to ALLOW/DENY/ASK. No nested
+		// hook_output body is required by OmniGent's policy API.
+		return HookRespondOutput{}
 	}
 	if output == nil && in.RawAction == "confirm" && in.AdditionalContext != "" && !in.Caps.CanAskNative {
 		output = map[string]interface{}{"systemMessage": in.AdditionalContext}

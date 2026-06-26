@@ -843,13 +843,7 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 }
 
 func (c *hookOnlyConnector) Authenticate(r *http.Request) bool {
-	if c.gatewayToken != "" && SecureTokenMatch(ExtractBearerKey(r.Header.Get("Authorization")), c.gatewayToken) {
-		return true
-	}
-	if c.masterKey != "" && SecureTokenMatch(ExtractBearerKey(r.Header.Get("Authorization")), c.masterKey) {
-		return true
-	}
-	return AcceptLoopbackWithWarning(r, c.gatewayToken, c.name,
+	return authenticateHookBridgeRequest(r, c.gatewayToken, c.masterKey, c.name,
 		"hook-only connectors run as local shell hooks; setup injects Authorization when possible, but loopback remains accepted for legacy hook installs",
 		&c.loopbackWarn)
 }

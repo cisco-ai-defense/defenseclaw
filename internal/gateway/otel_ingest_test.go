@@ -38,6 +38,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func TestNormalizeConnectorTelemetrySourceIncludesHookOnlyBuiltins(t *testing.T) {
+	for _, source := range []string{"opencode", "omnigent"} {
+		if got := normalizeConnectorTelemetrySource(source); got != source {
+			t.Errorf("normalizeConnectorTelemetrySource(%q) = %q", source, got)
+		}
+	}
+}
+
 // TestOTLPIngest_Logs_AcceptsValidPayload pins the success path: a
 // well-formed OTLP-JSON logs body produces an HTTP 200 with the
 // canonical empty-success body so the OTel exporter does NOT

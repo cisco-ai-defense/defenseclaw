@@ -36,6 +36,7 @@ def test_first_run_defaults_match_go_panel_argv() -> None:
         "openhands",
         "antigravity",
         "opencode",
+        "omnigent",
     )
     assert panel.args() == (
         "init",

@@ -57,16 +57,17 @@ def test_doctor_labels_cover_every_known_connector() -> None:
     assert KNOWN <= set(_CONNECTOR_LABELS), f"doctor labels missing: {KNOWN - set(_CONNECTOR_LABELS)}"
 
 
-def test_agent_discovery_covers_opencode() -> None:
-    assert "opencode" in DISCOVERY_PRECEDENCE
-    assert "opencode" in _SPECS
+def test_agent_discovery_covers_every_known_connector() -> None:
+    assert KNOWN <= set(DISCOVERY_PRECEDENCE)
+    assert KNOWN <= set(_SPECS)
 
 
-def test_tui_label_maps_have_explicit_opencode_case() -> None:
-    # The fallback path would capitalize to "Opencode"; the explicit case
-    # returns "OpenCode". Asserting the latter proves the case exists.
+def test_tui_label_maps_have_explicit_brand_cases() -> None:
+    # The fallback capitalization is wrong for both of these brands.
     assert overview_friendly_name("opencode") == "OpenCode"
     assert catalog_friendly_name("opencode") == "OpenCode"
+    assert overview_friendly_name("omnigent") == "OmniGent"
+    assert catalog_friendly_name("omnigent") == "OmniGent"
 
 
 def test_command_palette_offers_setup_for_every_known_connector() -> None:

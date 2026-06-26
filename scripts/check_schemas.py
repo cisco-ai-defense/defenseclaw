@@ -64,6 +64,8 @@ EXPECTED_CLAW_MODE_ENUM = {
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
+    "omnigent",
     # Sentinel emitted when one gateway process serves >1 connector at once.
     # Not a connector name: the true connector is carried per-event by the
     # `connector` metric label / `defenseclaw.connector.source` span attribute.

@@ -3868,10 +3868,13 @@ def test_enforcement_label_multi_connector() -> None:
         guardrail_mode="action",
         connector_modes=(("codex", "action"), ("claudecode", "action")),
     )
-    assert _enforcement_label(multi) == "2 connectors (hook observability)"
+    assert _enforcement_label(multi) == "2 connectors (per-connector policy modes)"
 
     single = OverviewConfig(guardrail_connector="codex", guardrail_mode="action")
-    assert _enforcement_label(single) == "codex hook observability (action)"
+    assert _enforcement_label(single) == "codex hook enforcement (action)"
+
+    omnigent = OverviewConfig(guardrail_connector="omnigent", guardrail_mode="action")
+    assert _enforcement_label(omnigent) == "omnigent policy enforcement (action)"
 
 
 @pytest.mark.asyncio

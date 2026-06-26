@@ -72,6 +72,7 @@ from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
             "openhands",
             "antigravity",
             "opencode",
+            "omnigent",
         ],
         case_sensitive=False,
     ),

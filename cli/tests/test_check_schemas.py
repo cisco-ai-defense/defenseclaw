@@ -62,6 +62,8 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
                 "copilot",
                 "openhands",
                 "antigravity",
+                "opencode",
+                "omnigent",
                 # Sentinel set by telemetry/resource.go when more than one
                 # connector is active (multi-connector install). Not a
                 # connector name — see buildResource / WU4.
@@ -75,15 +77,15 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
     def test_legacy_modes_dropped(self) -> None:
         """Legacy placeholders that were never emitted must stay dropped.
 
-        ``nemoclaw`` and ``opencode`` shipped in the schema before any
-        connector by those names existed; allowing them back masks
-        typos in operator config files and fails closed at the
-        downstream consumer (silent drop of the resource record).
+        ``nemoclaw`` shipped in the schema before a connector by that name
+        existed; allowing it back masks typos in operator config files and
+        fails closed at the downstream consumer (silent drop of the resource
+        record). OpenCode is now a real built-in connector.
         """
         doc = json.loads(RESOURCE_SCHEMA.read_text(encoding="utf-8"))
         enum = set(doc["properties"]["defenseclaw.claw.mode"].get("enum", []))
         self.assertNotIn("nemoclaw", enum)
-        self.assertNotIn("opencode", enum)
+        self.assertIn("opencode", enum)
 
 
 class TestCheckSchemasDriftDetection(unittest.TestCase):

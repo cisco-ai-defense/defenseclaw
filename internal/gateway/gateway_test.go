@@ -291,6 +291,8 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 		{"copilot_observability", &stubConnector{name: "copilot"}, false},
 		{"openhands_observability", &stubConnector{name: "openhands"}, false},
 		{"antigravity_observability", &stubConnector{name: "antigravity"}, false},
+		{"opencode_observability", &stubConnector{name: "opencode"}, false},
+		{"omnigent_observability", &stubConnector{name: "omnigent"}, false},
 		// Unknown connectors default to bind=true (conservative
 		// fail-closed for the proxy data path).
 		{"unknown_connector", &stubConnector{name: "frobozz"}, true},
@@ -326,6 +328,8 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 		{"geminicli", "geminicli", false},
 		{"copilot", "copilot", false},
 		{"openhands", "openhands", false},
+		{"opencode", "opencode", false},
+		{"omnigent", "omnigent", false},
 		{"unknown", "frobozz", true},
 	}
 	for _, tc := range cases {
@@ -2594,6 +2598,13 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks"},
 		},
+		{
+			name:             "omnigent_direct_policy_api_until_optional_otel_is_configured",
+			connector:        "omnigent",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"policy-api"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -2622,6 +2633,12 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			}
 			if cm["mode"] != c.wantMode {
 				t.Errorf("mode = %v, want %s", cm["mode"], c.wantMode)
+			}
+			if cm["policy_mode"] != "observe" {
+				t.Errorf("policy_mode = %v, want observe", cm["policy_mode"])
+			}
+			if c.connector == "omnigent" && cm["enforcement_surface"] != "omnigent_policy_api" {
+				t.Errorf("enforcement_surface = %v, want omnigent_policy_api", cm["enforcement_surface"])
 			}
 			if cm["proxy_intercept"] != c.wantIntercept {
 				t.Errorf("proxy_intercept = %v, want %v", cm["proxy_intercept"], c.wantIntercept)
@@ -2656,6 +2673,29 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 				t.Errorf("connector_modes[0].mode = %v, want %s", first["mode"], c.wantMode)
 			}
 		})
+	}
+}
+
+func TestAPIStatusOmnigentActionPolicyMode(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "omnigent"
+	cfg.Guardrail.Mode = "action"
+	api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+
+	api.handleStatus(w, req)
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	cm, _ := result["connector_mode"].(map[string]interface{})
+	if cm["policy_mode"] != "action" {
+		t.Fatalf("policy_mode = %v, want action", cm["policy_mode"])
+	}
+	if cm["enforcement_surface"] != "omnigent_policy_api" {
+		t.Fatalf("enforcement_surface = %v, want omnigent_policy_api", cm["enforcement_surface"])
 	}
 }
 

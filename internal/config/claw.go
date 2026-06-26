@@ -222,6 +222,8 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 		return readMCPServersOpenCode(workspaceDir)
 	case "antigravity":
 		return readMCPServersAntigravity(workspaceDir)
+	case "omnigent":
+		return nil, nil
 	default:
 		return readMCPServersOpenClaw(c.Claw.ConfigFile)
 	}
@@ -515,6 +517,11 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 		// opencode keeps its config under ~/.config/opencode/ (XDG-style);
 		// matches connector_paths.connector_home("opencode").
 		return filepath.Join(home, ".config", "opencode")
+	case "omnigent":
+		if configHome := strings.TrimSpace(os.Getenv("OMNIGENT_CONFIG_HOME")); configHome != "" {
+			return expandPath(configHome)
+		}
+		return filepath.Join(home, ".omnigent")
 	default:
 		if c == nil {
 			return expandPath("~/.openclaw")
@@ -627,7 +634,7 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".cursor", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		})
-	case "windsurf", "opencode":
+	case "windsurf", "opencode", "omnigent":
 		// No documented skills install/discovery surface. Return nil so
 		// these never fall through to OpenClaw's skill dirs — parity with
 		// connector_paths.skill_dirs() == [] on the Python side.
@@ -703,7 +710,7 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".agents", "plugins"),
 			workspaceJoin(cwd, "_agents", "plugins"),
 		})
-	case "cursor", "windsurf", "copilot", "openhands", "opencode":
+	case "cursor", "windsurf", "copilot", "openhands", "opencode", "omnigent":
 		return nil
 	default:
 		return c.pluginDirsOpenClaw()

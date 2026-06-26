@@ -356,6 +356,7 @@ There is **no** `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR`, or `DEFENSEC
 | Antigravity | `~/.gemini/config/hooks.json` (global only — the path agy v1.0.x actually evaluates; the marketing-facing `~/.gemini/antigravity-cli/hooks.json` is silently ignored at runtime; agy merges all discovered hooks files, so DefenseClaw never patches workspace-local copies) |
 | Hermes | `~/.hermes/config.yaml` |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` (managed bridge plugin — written whole, not patched; removed on teardown) |
+| OmniGent | `~/.omnigent/config.yaml`, `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`, and `defenseclaw_omnigent.pth` in OmniGent's Python environment |
 
 A hash-checked backup of each file is stored in `~/.defenseclaw/backups/` before any mutation. Teardown (or `--disable`) restores the backup byte-for-byte; if the file has drifted since the backup, only DefenseClaw-owned entries are surgically removed.
 

@@ -513,6 +513,41 @@ var builtinHookContracts = map[string][]HookContract{
 			"Contract is unbounded (min 0.0.0): the plugin hook API is documented as a stable contract rather than a versioned floor, matching the OpenHands precedent.",
 		},
 	}},
+	"omnigent": {{
+		Connector:               "omnigent",
+		ContractID:              "omnigent-custom-policy-v1",
+		MinAgentVersion:         "0.0.0",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v1",
+		HookConfigPathTemplates: []string{"~/.omnigent/config.yaml"},
+		ResponseFieldName:       "",
+		Events: []string{
+			"UserPromptSubmit",
+			"PreToolUse",
+			"PostToolUse",
+			"AfterAgentResponse",
+			"BeforeModel",
+			"AfterModel",
+		},
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
+		Capabilities: HookCapability{
+			CanBlock:           true,
+			CanAskNative:       true,
+			AskEvents:          []string{"UserPromptSubmit", "PreToolUse", "BeforeModel"},
+			BlockEvents:        []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "AfterAgentResponse", "BeforeModel", "AfterModel"},
+			SupportsFailClosed: true,
+			Scope:              "user",
+		},
+		SupportsTraceparent: true,
+		NativeOTLP:          true,
+		Notes: []string{
+			"OmniGent invokes DefenseClaw through its documented custom Python policy API; the installed callable translates DefenseClaw allow, confirm, and block verdicts to ALLOW, ASK, and DENY.",
+			"The bridge covers request, tool_call, tool_result, response, llm_request, and llm_response phases exposed by OmniGent's PolicyEvent schema.",
+			"ASK is native only for OmniGent's pre-action request, tool_call, and llm_request phases; post-action confirm verdicts use DefenseClaw's explicit fallback.",
+			"The in-process Python bridge forwards an active OpenTelemetry W3C trace context when present; otherwise DefenseClaw starts a new trace.",
+			"Optional native OTLP is inactive until the OmniGent launch process exports the standard environment variables; native traces require its optional tracing extra.",
+		},
+	}},
 }
 
 func KnownHookContracts(connectorName string) []HookContract {

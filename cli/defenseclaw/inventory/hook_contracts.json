@@ -603,6 +603,69 @@
           ]
         }
       ]
+    },
+    "omnigent": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "omnigent --version",
+      "docs_url": "https://omnigent.ai/docs/policies/custom",
+      "contracts": [
+        {
+          "contract_id": "omnigent-custom-policy-v1",
+          "agent_version": {
+            "min_inclusive": "0.0.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v1",
+          "hook_script": "omnigent-policy.py",
+          "hook_config_path_templates": [
+            "~/.omnigent/config.yaml"
+          ],
+          "response_field": "",
+          "events": [
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "AfterAgentResponse",
+            "BeforeModel",
+            "AfterModel"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": true,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": true,
+            "ask_events": [
+              "UserPromptSubmit",
+              "PreToolUse",
+              "BeforeModel"
+            ],
+            "block_events": [
+              "UserPromptSubmit",
+              "PreToolUse",
+              "PostToolUse",
+              "AfterAgentResponse",
+              "BeforeModel",
+              "AfterModel"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "OmniGent invokes DefenseClaw through its documented custom Python policy API; the installed callable translates DefenseClaw allow, confirm, and block verdicts to ALLOW, ASK, and DENY.",
+            "The bridge covers request, tool_call, tool_result, response, llm_request, and llm_response phases exposed by OmniGent's PolicyEvent schema.",
+            "ASK is native only for OmniGent's pre-action request, tool_call, and llm_request phases; post-action confirm verdicts use DefenseClaw's explicit fallback.",
+            "The in-process Python bridge forwards an active OpenTelemetry W3C trace context when present; otherwise DefenseClaw starts a new trace.",
+            "Optional native OTLP is inactive until the OmniGent launch process exports the standard environment variables; native traces require its optional tracing extra."
+          ]
+        }
+      ]
     }
   }
 }

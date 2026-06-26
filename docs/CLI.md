@@ -239,7 +239,7 @@ The Go binary runs the sidecar daemon and provides additional commands.
 | `start` | Start the sidecar as a background daemon |
 | `stop` | Stop the running daemon |
 | `restart` | Restart the daemon |
-| `status` | Show health of the running sidecar's subsystems. On a multi-connector install it also renders a per-connector "Connector Mode" section from the `/status` endpoint's `connector_modes` array (one entry per active connector: `connector`, `mode`, `telemetry`, `proxy_intercept`). The `/status` payload also keeps the singular `connector_mode` field for the active connector as a back-compat alias. |
+| `status` | Show health of the running sidecar's subsystems. It renders a per-connector "Connector Mode" section from the `/status` endpoint's `connector_modes` array, including the direct/proxy data path, `policy_mode`, `enforcement_surface`, telemetry channels, and proxy interception state. The payload keeps the legacy `mode` data-path value and singular `connector_mode` alias for compatibility. |
 
 ### scan
 

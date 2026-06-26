@@ -52,6 +52,7 @@ from defenseclaw.commands.cmd_doctor import (
     _check_connector_inventory,
     _check_hook_contract_lock,
     _check_hook_health,
+    _check_omnigent_policy_health,
     _check_plugin_registry_required,
     _check_scan_coverage,
     _connector_enabled,
@@ -555,8 +556,89 @@ class TestCheckHookHealth(unittest.TestCase):
         _check_hook_health(MagicMock(), "totallymadeupclaw", r)
         self.assertEqual(r.checks, [])
 
+    def test_omnigent_requires_config_module_and_import_shim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.yaml")
+            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
+            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("def defenseclaw_policy(event): return {'result': 'ALLOW'}\nPOLICY_REGISTRY = []\n")
+            with open(pth, "w", encoding="utf-8") as fh:
+                fh.write(tmp + "\n")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"connectors": {"omnigent": {"locations": {
+                        "hook_config_paths": [config],
+                        "hook_script_paths": [module, pth],
+                    }}}},
+                    fh,
+                )
+            r = _DoctorResult()
+            _check_omnigent_policy_health(cfg, r)
+        self.assertEqual(r.checks[-1]["status"], "pass")
+
+    def test_omnigent_missing_import_shim_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.yaml")
+            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("defenseclaw_omnigent_policy: defenseclaw_guardrail\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"connectors": {"omnigent": {"locations": {
+                        "hook_config_paths": [config],
+                        "hook_script_paths": [module],
+                    }}}},
+                    fh,
+                )
+            r = _DoctorResult()
+            _check_omnigent_policy_health(cfg, r)
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn(".pth", r.checks[-1]["detail"])
+
+    def test_omnigent_uses_managed_backups_when_lock_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_home = os.path.join(tmp, "omnigent-config")
+            os.makedirs(config_home)
+            config = os.path.join(config_home, "config.yaml")
+            module_dir = os.path.join(tmp, "hooks")
+            os.makedirs(module_dir)
+            module = os.path.join(module_dir, "defenseclaw_omnigent_policy.py")
+            site_packages = os.path.join(tmp, "site-packages")
+            os.makedirs(site_packages)
+            pth = os.path.join(site_packages, "defenseclaw_omnigent.pth")
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("defenseclaw_omnigent_policy: defenseclaw_guardrail\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
+            with open(pth, "w", encoding="utf-8") as fh:
+                fh.write(module_dir + "\n")
+            backup_dir = os.path.join(tmp, "connector_backups", "omnigent")
+            os.makedirs(backup_dir)
+            for logical, path in (("module", module), ("pth", pth)):
+                with open(os.path.join(backup_dir, f"{logical}.json"), "w", encoding="utf-8") as fh:
+                    json.dump(
+                        {"connector": "omnigent", "logical_name": logical, "path": path},
+                        fh,
+                    )
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
+                r = _DoctorResult()
+                _check_omnigent_policy_health(cfg, r)
+
+        self.assertEqual(r.checks[-1]["status"], "pass")
+
     def test_dispatch_routes_all_five_connectors(self) -> None:
-        """``_check_connector_hooks`` must dispatch each of the five formerly
+        """``_check_connector_hooks`` must dispatch each generic connector
         unhandled connectors to the generic hook-health row."""
         for connector, label in (
             ("hermes", "Hermes hooks"),

@@ -175,8 +175,8 @@ def setup(
 
     \b
     Multi-connector:
-      One gateway enforces N hook connectors (codex, claudecode,
-      hermes, antigravity) tracked under guardrail.connectors. Add one
+      One gateway enforces N agent-native connectors (codex, claudecode,
+      hermes, antigravity, omnigent, and others) tracked under guardrail.connectors. Add one
       with 'defenseclaw setup <connector>' (choose Add when prompted),
       remove with 'defenseclaw setup remove <name>'. Scope policy per peer
       with 'defenseclaw guardrail ... --connector X', and inspect the
@@ -2470,6 +2470,7 @@ _CONNECTOR_NAMES_FALLBACK = [
     "openhands",
     "antigravity",
     "opencode",
+    "omnigent",
 ]
 
 
@@ -2581,6 +2582,12 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
+    "omnigent": {
+        "label": "OmniGent",
+        "description": "custom Python policy bridge with ALLOW/ASK/DENY and optional native OTLP",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
 }
 
 _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
@@ -2662,6 +2669,12 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
             "plugin auto-loaded by opencode; no opencode.json edit and no "
             "shell-hook config patch"
         ),
+    ),
+    "omnigent": (
+        "OmniGent's effective config.yaml policy_modules and server-wide policies",
+        "~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py",
+        "OmniGent Python environment defenseclaw_omnigent.pth import-path file",
+        "Optional native OTLP uses documented process environment variables; shell startup files are not modified",
     ),
 }
 
@@ -3138,6 +3151,11 @@ def _hilt_support_note(connector: str) -> str:
         return (
             "Antigravity supports native PreToolUse ask; returning decision=ask "
             "from a hook overrides agy's --dangerously-skip-permissions flag."
+        )
+    if connector == "omnigent":
+        return (
+            "OmniGent parks request, tool_call, and llm_request policy phases for native ASK approval; "
+            "post-action confirm verdicts use the configured fallback."
         )
     if connector in {"hermes", "windsurf", "geminicli", "openhands", "opencode"}:
         return (
@@ -4696,7 +4714,7 @@ def _apply_hook_connector_setup(
 
     if restart:
         click.echo()
-        click.echo("  Restarting gateway to wire connector telemetry...")
+        click.echo("  Restarting gateway to wire connector runtime and telemetry...")
         _restart_services(
             cfg.data_dir,
             cfg.gateway.host,
@@ -4739,19 +4757,37 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo(f"  DefenseClaw — {label} {mode} setup")
     click.echo("  ─────────────────────────────────────────────────────────")
     click.echo()
-    click.echo(f"  This wires {label} into DefenseClaw via the agent's")
-    click.echo("  native hook bus. No proxy is inserted in the LLM data")
-    if mode == "action":
-        click.echo("  path; tool calls flagged by policy are blocked by the")
-        click.echo("  connector's pre-tool hook returning a deny verdict.")
+    if connector == "omnigent":
+        click.echo("  This wires OmniGent into DefenseClaw through its custom")
+        click.echo("  Python policy API. No proxy is inserted in the LLM data")
+        if mode == "action":
+            click.echo("  path; supported policy phases return ALLOW, ASK, or DENY")
+            click.echo("  directly through OmniGent's native approval flow.")
+        else:
+            click.echo("  path; policy activity is recorded but never blocked.")
     else:
-        click.echo("  path; activity is recorded but never blocked.")
+        click.echo(f"  This wires {label} into DefenseClaw via the agent's")
+        click.echo("  native hook bus. No proxy is inserted in the LLM data")
+        if mode == "action":
+            click.echo("  path; supported actions flagged by policy are blocked")
+            click.echo("  by the connector's native lifecycle verdict.")
+        else:
+            click.echo("  path; activity is recorded but never blocked.")
     click.echo()
     click.echo("  Telemetry channels:")
-    click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → /api/v1/{connector}/hook")
-    native_otel_connectors = {"codex", "claudecode", "geminicli", "copilot"}
+    if connector == "omnigent":
+        click.echo("    • Policy API — six request/tool/model phases → /api/v1/omnigent/hook")
+    else:
+        click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → /api/v1/{connector}/hook")
+    native_otel_connectors = {"codex", "claudecode", "geminicli", "copilot", "omnigent"}
     if connector in native_otel_connectors:
-        click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
+        if connector == "omnigent":
+            click.echo(
+                "    • Native OTel — optional; inactive until OTEL_* variables "
+                "are exported for the OmniGent process"
+            )
+        else:
+            click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
     if connector == "codex":
         click.echo("    • Notify     — agent-turn-complete events → /api/v1/codex/notify")
     click.echo()
@@ -4769,7 +4805,12 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
 def _print_observability_summary(connector: str, cfg=None, *, mode: str = "observe") -> None:
     """One-screen summary surfaced after a successful alias run."""
     label = _CONNECTOR_META[connector]["label"]
-    enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
+    if connector == "omnigent":
+        enforcement_label = (
+            "enabled (custom policy API)" if mode == "action" else "disabled (observe-only)"
+        )
+    else:
+        enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
 
     # Multi-connector awareness: a singular legacy mirror row + a global
     # "setup guardrail --disable" revert line both read as if this one
@@ -4809,6 +4850,8 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
         ("enforcement", enforcement_label),
         ("ai_discovery", f"enabled ({cfg.ai_discovery.mode})" if cfg else "enabled"),
     ]
+    if connector == "omnigent":
+        rows.append(("native OTel", "optional; inactive until OTEL_* is exported for OmniGent"))
     for k, v in rows:
         click.echo(f"    {k + ':':<22s} {v}")
     click.echo()
@@ -6337,21 +6380,22 @@ def setup_remove(
 def _make_observability_setup_command(connector: str) -> click.Command:
     """Create a ``defenseclaw setup <connector>`` hook-driven alias."""
     label = _CONNECTOR_META[connector]["label"]
+    surface_name = "custom policy API" if connector == "omnigent" else "agent lifecycle hooks"
 
     @click.command(
         connector,
         help=(
-            f"Configure DefenseClaw for {label} via the agent's hook bus.\n\n"
+            f"Configure DefenseClaw for {label} via its {surface_name}.\n\n"
             "Configures this connector in the hook connector set so CLI/TUI "
             "scanners read that agent's documented local surfaces. Default "
             "mode is observe; pass "
-            "--mode action to enable hook-driven blocking on policy hits "
-            "(pre-tool hook deny verdict). No proxy is involved in either mode."
+            "--mode action to enable agent-native blocking/approval verdicts "
+            "on supported events. No proxy is involved in either mode."
         ),
         short_help=f"Configure DefenseClaw for {label}.",
         epilog=(
-            "Hook connectors enforce via the agent's PreToolUse deny verdict "
-            "(no LLM proxy). The judge/HILT/block-message options here write "
+            "Hook and policy connectors enforce through agent-native lifecycle "
+            "verdicts (no LLM proxy). The judge/HILT/block-message options here write "
             "per-connector overrides; openclaw/zeptoclaw use the proxy backend "
             "(`setup openclaw --help`) and additionally expose proxy/scanner "
             "options that do not apply to hook connectors."
@@ -6370,7 +6414,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         show_default=True,
         help=(
             "Restart defenseclaw-gateway after applying changes "
-            "(needed so the connector's hook scripts and telemetry are wired)."
+            "(needed so the connector's runtime artifacts and telemetry are wired)."
         ),
     )
     @click.option(
@@ -6388,9 +6432,8 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         default="observe",
         show_default=True,
         help=(
-            "Hook policy mode. observe records only; action returns a "
-            "deny verdict from the connector's pre-tool hook on policy hits so the agent "
-            "blocks the tool call inside its own permission flow."
+            "Lifecycle policy mode. observe records only; action returns the "
+            "connector's native blocking or approval verdict on supported events."
         ),
     )
     @click.option(
@@ -6472,11 +6515,11 @@ def _make_observability_setup_command(connector: str) -> click.Command:
 
     _cmd.__name__ = f"setup_{connector}"
     _cmd.__doc__ = (
-        f"Configure DefenseClaw for {label} via the agent's hook bus.\n\n"
+        f"Configure DefenseClaw for {label} via its {surface_name}.\n\n"
         "Configures this connector in the hook connector set so CLI/TUI "
         "scanners read that agent's documented local surfaces. Default "
         "mode is observe; pass "
-        "--mode action to enable hook-driven blocking on policy hits."
+        "--mode action to enable agent-native lifecycle verdicts on policy hits."
     )
     return _cmd
 
@@ -6490,6 +6533,7 @@ for _observability_connector in (
     "openhands",
     "antigravity",
     "opencode",
+    "omnigent",
 ):
     setup.add_command(_make_observability_setup_command(_observability_connector))
 
@@ -6527,6 +6571,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "openhands",
         "antigravity",
         "opencode",
+        "omnigent",
     }
 )
 
@@ -8120,8 +8165,9 @@ def _restart_services(
         # No proxy listener binds for hook-only connectors — the agent
         # talks directly to its native upstream and DefenseClaw
         # observes/enforces via the hook bus on the sidecar API port.
+        surface = "custom policy API" if connector == "omnigent" else "hook bus"
         ux.subhead(
-            f"{connector} connector: enforcement via hook bus on the sidecar API port. "
+            f"{connector} connector: enforcement via {surface} on the sidecar API port. "
             f"No proxy listener — {connector} talks directly to its native upstream."
         )
 

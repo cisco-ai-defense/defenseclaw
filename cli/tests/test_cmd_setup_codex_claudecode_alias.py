@@ -260,7 +260,10 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def test_new_aliases_pin_observability_connector(self):
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
+        for connector in [
+            "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands",
+            "antigravity", "opencode", "omnigent",
+        ]:
             with (
                 self.subTest(connector=connector),
                 patch(
@@ -305,7 +308,10 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                     self.assertEqual(fh.read().strip(), connector)
 
     def test_new_aliases_support_hook_action_mode(self):
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
+        for connector in [
+            "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands",
+            "antigravity", "opencode", "omnigent",
+        ]:
             with (
                 self.subTest(connector=connector),
                 patch(
@@ -419,7 +425,10 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
     def test_setup_help_lists_new_alias_commands(self):
         result = _invoke(["--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
+        for connector in [
+            "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands",
+            "antigravity", "opencode", "omnigent",
+        ]:
             self.assertIn(connector, result.output)
         self.assertIn("codex, claudecode", result.output)
         self.assertIn("hermes, antigravity", result.output)
@@ -428,7 +437,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         self.assertNotIn("openclaw) tracked under guardrail.connectors", result.output)
 
     def test_hook_help_uses_connector_set_wording(self):
-        for connector in ["codex", "claude-code", "hermes", "opencode"]:
+        for connector in ["codex", "claude-code", "hermes", "opencode", "omnigent"]:
             with self.subTest(connector=connector):
                 result = _invoke([connector, "--help"], self.app)
                 self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -436,6 +445,14 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertNotIn("Pins the active connector", result.output)
                 self.assertNotIn("Pins claw.mode", result.output)
                 self.assertNotIn("OpenClaw default layout", result.output)
+
+    def test_omnigent_help_describes_policy_api_not_pretool_hooks(self):
+        result = _invoke(["omnigent", "--help"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("custom policy API", result.output)
+        self.assertIn("approval verdict", result.output)
+        self.assertNotIn("PreToolUse deny", result.output)
+        self.assertNotIn("pre-tool hook", result.output)
 
     def test_guardrail_help_mentions_new_connector_choices(self):
         result = _invoke(["guardrail", "--help"], self.app)

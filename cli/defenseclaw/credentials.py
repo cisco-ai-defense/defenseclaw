@@ -174,7 +174,7 @@ def _any_llm_component_uses_default_key(cfg: Config) -> bool:
 
     gc = getattr(cfg, "guardrail", None)
     if gc is not None and getattr(gc, "enabled", False):
-        if needs_key("guardrail"):
+        if _guardrail_proxy_uses_llm(cfg) and needs_key("guardrail"):
             return True
         judge = getattr(gc, "judge", None)
         if judge is not None and getattr(judge, "enabled", False) and needs_key("guardrail.judge"):
@@ -193,6 +193,43 @@ def _any_llm_component_uses_default_key(cfg: Config) -> bool:
                 if needs_key("scanners.mcp"):
                     return True
     return False
+
+
+_HOOK_POLICY_ONLY_CONNECTORS = frozenset(
+    {
+        "codex",
+        "claudecode",
+        "hermes",
+        "cursor",
+        "windsurf",
+        "geminicli",
+        "copilot",
+        "openhands",
+        "antigravity",
+        "opencode",
+        "omnigent",
+    }
+)
+
+
+def _guardrail_proxy_uses_llm(cfg: Config) -> bool:
+    """Whether any enabled connector sends LLM traffic through the proxy."""
+    gc = getattr(cfg, "guardrail", None)
+    connectors = getattr(gc, "connectors", {}) if gc is not None else {}
+    if isinstance(connectors, dict) and connectors:
+        active: list[str] = []
+        for name, override in connectors.items():
+            if getattr(override, "enabled", None) is False:
+                continue
+            active.append(_connector_name(name))
+        return any(name not in _HOOK_POLICY_ONLY_CONNECTORS for name in active)
+
+    connector = _connector_name(getattr(gc, "connector", "") if gc is not None else "")
+    if not connector:
+        claw = getattr(cfg, "claw", None)
+        connector = _connector_name(getattr(claw, "mode", ""))
+    # An unconfigured legacy install historically defaults to OpenClaw.
+    return not connector or connector not in _HOOK_POLICY_ONLY_CONNECTORS
 
 
 def _defenseclaw_llm_key(cfg: Config) -> Requirement:

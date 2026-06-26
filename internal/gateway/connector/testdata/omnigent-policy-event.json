@@ -1,0 +1,23 @@
+{
+  "type": "tool_result",
+  "target": "shell",
+  "data": {
+    "result": {
+      "stdout": "/workspace\n",
+      "exit_code": 0
+    }
+  },
+  "context": {
+    "model": "test-model",
+    "actor": {
+      "client_id": "client-123",
+      "run_as": "alice@example.test"
+    }
+  },
+  "request_data": {
+    "name": "shell",
+    "arguments": {
+      "command": "pwd"
+    }
+  }
+}

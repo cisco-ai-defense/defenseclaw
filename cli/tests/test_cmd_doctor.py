@@ -320,6 +320,62 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("mode=action via PreToolUse deny", detail)
         self.assertIn("proxy port intentionally closed", detail)
 
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_omnigent_action_reports_policy_enforcement_without_proxy_probe(self, mock_probe):
+        from defenseclaw.commands.cmd_doctor import _check_guardrail_proxy
+
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                mode="action",
+                port=4000,
+                connector="omnigent",
+            ),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "omnigent"
+        result = _DoctorResult()
+
+        _check_guardrail_proxy(cfg, result)
+
+        mock_probe.assert_not_called()
+        self.assertEqual(result.failed, 0, result.checks)
+        detail = result.checks[0]["detail"]
+        self.assertIn("policy-enforced for omnigent", detail)
+        self.assertIn("mode=action via ALLOW/ASK/DENY", detail)
+
+    def test_omnigent_without_judge_skips_llm_key_requirement(self):
+        from defenseclaw.commands.cmd_doctor import _check_llm_api_key
+
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                mode="action",
+                connector="omnigent",
+            ),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "omnigent"
+        result = _DoctorResult()
+
+        _check_llm_api_key(cfg, result)
+
+        self.assertEqual(result.failed, 0, result.checks)
+        self.assertEqual(result.checks[0]["status"], "skip")
+        self.assertIn("not required by hook/policy enforcement", result.checks[0]["detail"])
+
     def test_hilt_disabled_is_pass(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",

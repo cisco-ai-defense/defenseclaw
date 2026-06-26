@@ -186,7 +186,20 @@ func NewDefaultRegistry() *Registry {
 	r.RegisterBuiltin(NewOpenHandsConnector())
 	r.RegisterBuiltin(NewAntigravityConnector())
 	r.RegisterBuiltin(NewOpenCodeConnector())
+	r.RegisterBuiltin(NewOmnigentConnector())
 	return r
+}
+
+// IsKnownBuiltinConnector reports whether name is reserved by the compiled-in
+// registry without constructing every connector. Unknown/plugin connectors
+// intentionally return false so callers retain their conservative fallback.
+func IsKnownBuiltinConnector(name string) bool {
+	switch name {
+	case "openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent":
+		return true
+	default:
+		return false
+	}
 }
 
 // DiscoverPlugins scans a directory for Go plugin .so files and loads them.

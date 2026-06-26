@@ -33,7 +33,7 @@ The four are independent — you can run any subset. Most teams start with `defe
 defenseclaw agent discover
 ```
 
-That's it. The CLI walks the known connector paths (OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode), checks for config files and binaries, probes versions inside trusted prefixes, and prints a table of what's installed.
+That's it. The CLI walks the known connector paths (OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, OmniGent), checks for config files and binaries, probes versions inside trusted prefixes, and prints a table of what's installed.
 
 Add `--json` for machine-readable output or `--emit-otel` to also publish a sanitized report to the gateway so Splunk and Grafana light up:
 
@@ -72,7 +72,7 @@ The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every s
 
 | Category | What it surfaces |
 | --- | --- |
-| `connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode |
+| `connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, OmniGent |
 | `cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
 | `process` | Live AI processes — model serving, sandbox runners, scanner subprocesses |
 | `ide_extension` | VS Code / JetBrains / Cursor extensions that talk to providers |

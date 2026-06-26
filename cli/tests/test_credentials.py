@@ -187,6 +187,29 @@ class RequirementPredicateTests(unittest.TestCase):
         cfg = _make_cfg("/tmp/dc-test", guardrail=GuardrailConfig(enabled=True))
         self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)
 
+    def test_defenseclaw_llm_key_optional_for_omnigent_without_judge(self):
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                mode="action",
+                connector="omnigent",
+                judge=JudgeConfig(enabled=False),
+            ),
+        )
+        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.OPTIONAL)
+
+    def test_defenseclaw_llm_key_required_for_omnigent_judge(self):
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                connector="omnigent",
+                judge=JudgeConfig(enabled=True),
+            ),
+        )
+        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)
+
     def test_defenseclaw_llm_key_optional_with_local_guardrail(self):
         """Local provider needs no key, but the knob is still surfaced."""
         cfg = _make_cfg(

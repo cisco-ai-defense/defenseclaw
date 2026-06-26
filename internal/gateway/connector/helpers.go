@@ -305,3 +305,14 @@ func AcceptLoopbackWithWarning(r *http.Request, gatewayToken, connectorName, rea
 	}
 	return true
 }
+
+func authenticateHookBridgeRequest(r *http.Request, gatewayToken, masterKey, connectorName, loopbackReason string, warned *sync.Once) bool {
+	provided := ExtractBearerKey(r.Header.Get("Authorization"))
+	if gatewayToken != "" && SecureTokenMatch(provided, gatewayToken) {
+		return true
+	}
+	if masterKey != "" && SecureTokenMatch(provided, masterKey) {
+		return true
+	}
+	return AcceptLoopbackWithWarning(r, gatewayToken, connectorName, loopbackReason, warned)
+}

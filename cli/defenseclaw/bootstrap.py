@@ -36,8 +36,10 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from defenseclaw.connector_paths import omnigent_config_path
 from defenseclaw.inventory import agent_discovery
 
 if TYPE_CHECKING:
@@ -1111,6 +1113,20 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "warn",
             "OpenCode bridge plugin not found yet",
             "defenseclaw setup opencode",
+        )
+    if connector == "omnigent":
+        path = omnigent_config_path()
+        try:
+            configured = "defenseclaw_omnigent_policy" in Path(path).read_text(encoding="utf-8")
+        except OSError:
+            configured = False
+        if configured:
+            return StepResult("Connector", "pass", "OmniGent custom policy found")
+        return StepResult(
+            "Connector",
+            "warn",
+            "OmniGent custom policy not found yet",
+            "defenseclaw setup omnigent",
         )
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 

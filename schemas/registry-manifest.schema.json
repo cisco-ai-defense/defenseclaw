@@ -23,7 +23,7 @@
     },
     "default_connector": {
       "type": ["string", "null"],
-      "enum": [null, "openclaw", "claudecode", "codex", "zeptoclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"],
+      "enum": [null, "openclaw", "claudecode", "codex", "zeptoclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"],
       "description": "Optional default connector applied to entries that don't specify one. Per-entry `connector` overrides this."
     },
     "entries": {
@@ -70,7 +70,7 @@
         "homepage": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^https?://" },
         "connector": {
           "type": ["string", "null"],
-          "enum": [null, "openclaw", "claudecode", "codex", "zeptoclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]
+          "enum": [null, "openclaw", "claudecode", "codex", "zeptoclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"]
         },
         "tags": {
           "type": ["array", "null"],
@@ -130,7 +130,7 @@
         "homepage": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^https?://" },
         "connector": {
           "type": ["string", "null"],
-          "enum": [null, "openclaw", "claudecode", "codex", "zeptoclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]
+          "enum": [null, "openclaw", "claudecode", "codex", "zeptoclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"]
         },
         "tags": {
           "type": ["array", "null"],

@@ -208,8 +208,8 @@ func TestPrintConnectors_NoConnector(t *testing.T) {
 // not just the primary connector's.
 func TestPrintConnectorModes_ListsAll(t *testing.T) {
 	modes := []connectorModeSummary{
-		{Connector: "codex", Mode: "observability", Telemetry: []string{"hooks", "otel", "notify"}, ProxyIntercept: false},
-		{Connector: "openclaw", Mode: "guardrail", Telemetry: []string{"hooks"}, ProxyIntercept: true},
+		{Connector: "codex", Mode: "observability", PolicyMode: "action", EnforcementSurface: "agent_lifecycle_hooks", Telemetry: []string{"hooks", "otel", "notify"}, ProxyIntercept: false},
+		{Connector: "openclaw", Mode: "guardrail", PolicyMode: "observe", EnforcementSurface: "llm_proxy", Telemetry: []string{"hooks"}, ProxyIntercept: true},
 	}
 
 	out := captureStdout(t, func() { printConnectorModes(modes) })
@@ -222,9 +222,11 @@ func TestPrintConnectorModes_ListsAll(t *testing.T) {
 			t.Errorf("connector %q missing from Connector Mode section:\n%s", name, out)
 		}
 	}
-	// Both DIFFERING modes must appear — the whole point of fanning out.
-	if !strings.Contains(out, "observability") || !strings.Contains(out, "guardrail") {
-		t.Errorf("expected both per-connector modes rendered, got:\n%s", out)
+	// Both differing data paths and policy modes must be explicit.
+	for _, want := range []string{"direct-to-upstream", "DefenseClaw proxy", "Policy mode:", "action", "observe"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in per-connector status, got:\n%s", want, out)
+		}
 	}
 }
 
@@ -237,6 +239,24 @@ func TestPrintConnectorModes_SingleEntry(t *testing.T) {
 	out := captureStdout(t, func() { printConnectorModes(modes) })
 	if !strings.Contains(out, "Connector Mode") || !strings.Contains(out, "codex") {
 		t.Errorf("single-entry Connector Mode render missing header/connector:\n%s", out)
+	}
+}
+
+func TestPrintConnectorModes_OmnigentPolicySurface(t *testing.T) {
+	modes := []connectorModeSummary{{
+		Connector:          "omnigent",
+		Mode:               "observability",
+		PolicyMode:         "action",
+		EnforcementSurface: "omnigent_policy_api",
+		Telemetry:          []string{"policy-api"},
+	}}
+
+	out := captureStdout(t, func() { printConnectorModes(modes) })
+
+	for _, want := range []string{"Data path:", "direct-to-upstream", "Policy mode:", "action", "omnigent policy api", "policy-api"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("OmniGent status missing %q:\n%s", want, out)
+		}
 	}
 }
 

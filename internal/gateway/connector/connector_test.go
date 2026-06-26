@@ -265,7 +265,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode"}
+	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"}
 	for _, name := range expected {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -4290,8 +4290,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 12 {
-		t.Errorf("expected 12 built-in connectors, got %d", r.Len())
+	if r.Len() != 13 {
+		t.Errorf("expected 13 built-in connectors, got %d", r.Len())
 	}
 }
 
@@ -6157,6 +6157,7 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []EnvScope{EnvScopeNone}},
 		{"copilot", func() Connector { return NewCopilotConnector() }, []EnvScope{EnvScopeNone}},
 		{"openhands", func() Connector { return NewOpenHandsConnector() }, []EnvScope{EnvScopeNone}},
+		{"omnigent", func() Connector { return NewOmnigentConnector() }, []EnvScope{EnvScopeNone, EnvScopeProcess}},
 	}
 
 	for _, c := range cases {

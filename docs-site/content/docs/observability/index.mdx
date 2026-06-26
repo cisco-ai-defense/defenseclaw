@@ -110,7 +110,7 @@ When one gateway enforces guardrail policy for several hook connectors at once (
 The OTel **resource** attribute `defenseclaw.claw.mode` reports `multi` when more than one connector is active, so you can also tell a fan-out gateway apart from a single-connector one. Grafana's **Connectors (Overview)** and **Connector Detail** boards are built on the `connector` metric label, and the **Guardrail Evaluations** board is connector-filterable. See [Local observability stack](/docs/observability/local-observability#bundled-grafana-dashboards) and [Splunk](/docs/observability/splunk).
 
 <Callout title="Reading multi-connector charts">
-On a multi-connector gateway, totals show the whole active roster. Use the `connector` label or field to split Codex, Claude Code, Hermes, OpenCode, and other hook peers; the same dimension appears in Grafana, Splunk, JSONL, and the TUI.
+On a multi-connector gateway, totals show the whole active roster. Use the `connector` label or field to split Codex, Claude Code, Hermes, OpenCode, OmniGent, and other hook peers; the same dimension appears in Grafana, Splunk, JSONL, and the TUI.
 </Callout>
 
 ## Pick a starting point

@@ -524,7 +524,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
 			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
 		}
-		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode"} {
+		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
 			if f, ok := connectorHookHandlerByName[name]; ok {
 				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
 			}
@@ -888,21 +888,21 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, status)
 }
 
-// connectorModeSummary returns the per-connector enforcement /
-// observability mode for the active connector. The shape is:
+// connectorModeSummary returns the per-connector runtime summary for the
+// active connector. The shape is:
 //
 //	{
 //	  "connector":  "codex" | "claudecode" | "openclaw" | "zeptoclaw",
-//	  "mode":       "guardrail" | "observability",
+//	  "mode":       "guardrail" | "observability", // legacy data-path field
+//	  "policy_mode": "observe" | "action",
+//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks" | "omnigent_policy_api",
 //	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
 //	  "proxy_intercept": true | false,
 //	}
 //
-// "guardrail" means the proxy listener is bound and inline blocking
-// is active; "observability" means traffic is NOT intercepted and
-// the gateway only ingests telemetry. Telemetry channels reflect
-// what Setup() actually wired (hooks always on; otel + notify are
-// codex/claude-only; openclaw/zeptoclaw enumerate "hooks" alone).
+// "guardrail" means the proxy listener is bound; "observability" is the
+// legacy name for a direct-to-upstream data path. Enforcement on that direct
+// path is described separately by policy_mode and enforcement_surface.
 //
 // This is the singular (active-connector) view kept for back-compat;
 // connectorModesSummary fans the same shape out across every active
@@ -910,13 +910,20 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (a *APIServer) connectorModeSummary() map[string]interface{} {
 	if a.scannerCfg != nil && !a.scannerCfg.HasConnectorConfigured() {
 		return map[string]interface{}{
-			"connector":       "",
-			"mode":            "unconfigured",
-			"telemetry":       []string{},
-			"proxy_intercept": false,
+			"connector":           "",
+			"mode":                "unconfigured",
+			"policy_mode":         "",
+			"enforcement_surface": "",
+			"telemetry":           []string{},
+			"proxy_intercept":     false,
 		}
 	}
-	return connectorModeFor(a.connectorName())
+	name := a.connectorName()
+	policyMode := "observe"
+	if a.scannerCfg != nil {
+		policyMode = a.scannerCfg.Guardrail.EffectiveMode(name)
+	}
+	return connectorModeFor(name, policyMode)
 }
 
 // connectorModesSummary returns one connectorModeFor entry per active
@@ -939,7 +946,12 @@ func (a *APIServer) connectorModesSummary() []map[string]interface{} {
 	}
 	out := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
-		out = append(out, connectorModeFor(strings.ToLower(strings.TrimSpace(name))))
+		name = strings.ToLower(strings.TrimSpace(name))
+		policyMode := "observe"
+		if a.scannerCfg != nil {
+			policyMode = a.scannerCfg.Guardrail.EffectiveMode(name)
+		}
+		out = append(out, connectorModeFor(name, policyMode))
 	}
 	return out
 }
@@ -948,31 +960,44 @@ func (a *APIServer) connectorModesSummary() []map[string]interface{} {
 // single connector name. Pure function of the name so it can be mapped over
 // the whole active set (connectorModesSummary) or applied to just the
 // primary (connectorModeSummary).
-func connectorModeFor(name string) map[string]interface{} {
+func connectorModeFor(name, policyMode string) map[string]interface{} {
 	mode := "guardrail"
 	intercept := true
+	surface := "llm_proxy"
 	var telemetry []string
+	policyMode = strings.ToLower(strings.TrimSpace(policyMode))
+	if policyMode != "action" {
+		policyMode = "observe"
+	}
 
 	switch name {
 	case "codex":
 		mode = "observability"
 		intercept = false
+		surface = "agent_lifecycle_hooks"
 		// codex telemetry always wires all three channels (hooks,
 		// the [otel.exporter.otlp-http] block, the notify bridge).
 		telemetry = []string{"hooks", "otel", "notify"}
 	case "claudecode":
 		mode = "observability"
 		intercept = false
+		surface = "agent_lifecycle_hooks"
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
 	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode":
 		mode = "observability"
 		intercept = false
+		surface = "agent_lifecycle_hooks"
 		telemetry = []string{"hooks"}
 		if name == "geminicli" || name == "copilot" {
 			telemetry = append(telemetry, "otel")
 		}
+	case "omnigent":
+		mode = "observability"
+		intercept = false
+		surface = "omnigent_policy_api"
+		telemetry = []string{"policy-api"}
 	default:
 		// openclaw / zeptoclaw / unknown: enforcement is the only
 		// supported mode today. Hooks are wired by the connector;
@@ -981,10 +1006,12 @@ func connectorModeFor(name string) map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"connector":       name,
-		"mode":            mode,
-		"telemetry":       telemetry,
-		"proxy_intercept": intercept,
+		"connector":           name,
+		"mode":                mode,
+		"policy_mode":         policyMode,
+		"enforcement_surface": surface,
+		"telemetry":           telemetry,
+		"proxy_intercept":     intercept,
 	}
 }
 

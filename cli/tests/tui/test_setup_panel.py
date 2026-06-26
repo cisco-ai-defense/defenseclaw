@@ -311,6 +311,19 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
     )
 
     fields = connector_setup_wizard_fields({})
+    fields = _with_field(fields, "Connector", "omnigent")
+    fields = _with_field(fields, "Guardrail Mode", "action")
+    fields = _with_field(fields, "Restart Gateway", "no")
+    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
+        "setup",
+        "omnigent",
+        "--yes",
+        "--mode",
+        "action",
+        "--no-restart",
+    )
+
+    fields = connector_setup_wizard_fields({})
     fields = _with_field(fields, "Connector", "antigravity")
     fields = _with_field(fields, "Replace Existing", "yes")
     assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
@@ -349,6 +362,7 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "openhands",
         "antigravity",
         "opencode",
+        "omnigent",
     }
 
 

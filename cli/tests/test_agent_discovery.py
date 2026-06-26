@@ -207,6 +207,21 @@ def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
     assert kwargs["timeout"] == 8.0
 
 
+def test_omnigent_discovery_honors_config_home(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    config_home = tmp_path / "omnigent-config-home"
+    config_home.mkdir()
+    config_path = config_home / "config.yaml"
+    config_path.write_text("policies: {}\n", encoding="utf-8")
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("omnigent")
+
+    assert signal.installed is True
+    assert signal.config_path == str(config_path)
+
+
 # M-4 regression coverage: the version probe MUST refuse to exec a
 # binary that lives outside the canonical install prefixes (an attacker
 # who can prepend a hostile directory to PATH could otherwise have us
@@ -245,6 +260,21 @@ def test_trust_check_accepts_canonical_prefix(monkeypatch, tmp_path):
     binary.parent.chmod(0o755)
     monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(tmp_path))
     assert ad._is_trusted_binary_path(str(binary)) is True
+
+
+def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path):
+    real_root = tmp_path / "real-tools"
+    binary = real_root / "bin" / "omnigent"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    binary.parent.chmod(0o755)
+    alias = tmp_path / "tools-alias"
+    alias.symlink_to(real_root, target_is_directory=True)
+
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(alias))
+
+    assert ad._is_trusted_binary_path(str(alias / "bin" / "omnigent")) is True
 
 
 def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
@@ -382,9 +412,8 @@ def test_default_trusted_prefixes_excludes_user_writable_roots():
 def test_trust_check_codex_standalone_symlink_requires_opt_in(monkeypatch, tmp_path):
     # Reproduce the Codex standalone layout under a fake HOME and assert
     # the secure-default behavior plus the documented opt-in escape
-    # hatch. realpath() the tmp dir up front so macOS's /var ->
-    # /private/var symlink doesn't desync the resolved binary path from
-    # the abspath'd prefix.
+    # hatch. Prefixes and binaries are both canonicalised before comparison,
+    # including macOS's /var -> /private/var indirection.
     home = Path(os.path.realpath(str(tmp_path)))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)

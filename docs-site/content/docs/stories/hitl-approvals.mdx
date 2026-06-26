@@ -1,6 +1,6 @@
 ---
 title: Approve risky tool calls before they fire
-description: HITL is the middle ground between observe and full enforcement. CRITICAL findings still block; HIGH findings pause for the operator. Native ask on Claude Code, Cursor, Copilot CLI, OpenClaw; downgraded confirm elsewhere.
+description: HITL is the middle ground between observe and full enforcement. CRITICAL findings still block; HIGH findings pause for the operator. Native ask on Claude Code, Cursor, Copilot CLI, OpenClaw, Antigravity, and OmniGent; downgraded confirm elsewhere.
 keywords:
   - DefenseClaw HITL approval
   - human in the loop AI agent
@@ -16,7 +16,7 @@ HITL is for the messy middle: actions that *might* be fine, *usually* are fine, 
 
 ### Pick a connector with native ask
 
-For the cleanest operator UX, pick a connector with native ask: [OpenClaw](/docs/connectors/openclaw), [Claude Code](/docs/connectors/claudecode) (PreToolUse), [Cursor](/docs/connectors/cursor) (beforeShellExecution / beforeMCPExecution), [GitHub Copilot CLI](/docs/connectors/copilot) (preToolUse). On these connectors the approval prompt surfaces inside the agent UI itself.
+For the cleanest operator UX, pick a connector with native ask: [OpenClaw](/docs/connectors/openclaw), [Claude Code](/docs/connectors/claudecode) (PreToolUse), [Cursor](/docs/connectors/cursor) (beforeShellExecution / beforeMCPExecution), [GitHub Copilot CLI](/docs/connectors/copilot) (preToolUse), [Antigravity](/docs/connectors/antigravity) (PreToolUse), or [OmniGent](/docs/connectors/omnigent) (`request`, `tool_call`, `llm_request`). On these connectors the approval prompt surfaces inside the agent UI or OmniGent approval flow itself.
 
 ```bash
 defenseclaw setup claude-code

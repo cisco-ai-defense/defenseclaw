@@ -865,7 +865,7 @@ DefenseClaw supports multiple agent frameworks. Set the active mode in `~/.defen
 
 ```yaml
 claw:
-  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex | hermes | cursor | windsurf | geminicli | copilot
+  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex | hermes | cursor | windsurf | geminicli | copilot | openhands | antigravity | opencode | omnigent
   home_dir: ""          # auto-detected; override to use a custom path
 ```
 

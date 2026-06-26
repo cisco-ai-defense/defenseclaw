@@ -86,7 +86,7 @@ X-DefenseClaw-Client: cli
 ```
 
 - **`connector_mode`** (singular) is a legacy compatibility value for clients written before multi-connector existed. On a fan-out install it is not the authoritative roster view; use `connector_modes` instead.
-- **`connector_modes`** (plural) is the authoritative per-connector view: one entry per **active** connector, each with `connector` (name), `mode` (`observe` / `action`), `telemetry` (the signal sources wired for it), and `proxy_intercept` (whether it owns a proxy listener — `true` only for the proxy connectors). `defenseclaw-gateway status` renders its per-connector **"Connector Mode"** section directly from this array.
+- **`connector_modes`** (plural) is the authoritative per-connector view: one entry per **active** connector. `mode` is the backward-compatible data-path value (`guardrail` or `observability`); `policy_mode` is the operator posture (`observe` or `action`); `enforcement_surface` identifies the proxy, lifecycle-hook, or OmniGent policy API path; `telemetry` lists active signal sources; and `proxy_intercept` is `true` only for proxy connectors. `defenseclaw-gateway status` renders its per-connector **"Connector Mode"** section directly from this array.
 
 ### Connector hooks
 
@@ -104,6 +104,7 @@ Each connector registers exactly one hook endpoint. The path is owned by the con
 | `POST` | `/api/v1/antigravity/hook` | Antigravity | same |
 | `POST` | `/api/v1/hermes/hook` | Hermes | same |
 | `POST` | `/api/v1/opencode/hook` | OpenCode | same |
+| `POST` | `/api/v1/omnigent/hook` | OmniGent | [`internal/gateway/connector/omnigent.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/omnigent.go) |
 
 All hook endpoints share a per-IP rate limiter (20 RPS, burst 40 — see `hookLimiter` in api.go). Loopback callers (the on-host hook scripts) are exempt; the limit only applies to remote callers.
 
@@ -272,7 +273,7 @@ Notable behaviours:
 
 - **`action` is the *effective* verdict, not the raw policy decision.** `applyMode()` downgrades `block` / `confirm` / `alert` to `allow` when the gateway is in `observe` mode, but preserves the raw verdict in `raw_action` and the would-have-blocked signal in `would_block`. This is how observe-mode dry-runs work without touching the rule pack.
 - **`confirm` is the in-process HITL signal.** The gateway resolves the operator approval inline (via the in-process `HILTApprovalManager` it constructs in `SetHILTApprovalManager()`) before returning. There is **no** HTTP HITL surface — every HITL decision happens in-process and the verdict is downgraded to `allow` or `block` before the response is written. The TUI reads HITL state from the audit DB, not from a `/v1/hilt/*` endpoint.
-- **`evaluation_id` is the runtime join key.** For every `/api/v1/inspect/*` call and every connector hook (`/api/v1/{claude-code,codex,cursor,windsurf,geminicli,copilot,openhands,antigravity,hermes,opencode}/hook`), the gateway mints a UUID and stamps it on (a) the structured `EventScan` / `EventScanFinding` / `EventVerdict` rows in `gateway.jsonl`, (b) the matching `scan_results.evaluation_id` / `scan_findings.evaluation_id` / `judge_responses.evaluation_id` columns in the audit DB, and (c) the `evaluation_id` and `rule_ids` fields in this response. SIEM dashboards keyed on `evaluation_id` can pivot from any per-finding row back to the aggregate evaluation and the verdict that gated it. See [Observability §1.4](/docs/observability) for the full per-surface contract.
+- **`evaluation_id` is the runtime join key.** For every `/api/v1/inspect/*` call and every connector hook (`/api/v1/{claude-code,codex,cursor,windsurf,geminicli,copilot,openhands,antigravity,hermes,opencode,omnigent}/hook`), the gateway mints a UUID and stamps it on (a) the structured `EventScan` / `EventScanFinding` / `EventVerdict` rows in `gateway.jsonl`, (b) the matching `scan_results.evaluation_id` / `scan_findings.evaluation_id` / `judge_responses.evaluation_id` columns in the audit DB, and (c) the `evaluation_id` and `rule_ids` fields in this response. SIEM dashboards keyed on `evaluation_id` can pivot from any per-finding row back to the aggregate evaluation and the verdict that gated it. See [Observability §1.4](/docs/observability) for the full per-surface contract.
 - **`detailed_findings` and `findings` are both populated** for backward compatibility. Existing clients that only read `findings: []string` are unaffected by the new structured field.
 
 Other endpoints return their own shapes — `/v1/skill/scan` returns a scanner-specific envelope, `/audit/event` returns `{"status": "stored", "id": "..."}`, `/skill/disable` returns `{"status": "disabled", "skillKey": "..."}`. Always confirm against the handler code before assuming a shape.

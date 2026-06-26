@@ -82,6 +82,7 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "openhands",
     "antigravity",
     "opencode",
+    "omnigent",
 )
 """Allow-list of recognized agent-framework connector names.
 
@@ -102,6 +103,7 @@ HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
         "openhands",
         "antigravity",
         "opencode",
+        "omnigent",
     }
 )
 """Connectors added through lifecycle hook surfaces.
@@ -227,6 +229,20 @@ def _workspace_path(workspace_dir: str | None, *parts: str) -> str:
     return os.path.join(root, *parts)
 
 
+def omnigent_config_path() -> str:
+    """Return OmniGent's effective user-level ``config.yaml`` path.
+
+    OmniGent resolves ``OMNIGENT_CONFIG_HOME/config.yaml`` before its
+    ``~/.omnigent/config.yaml`` default. Keeping this in one resolver ensures
+    discovery, bootstrap, doctor, inventory, and setup all inspect the file
+    that OmniGent itself loads.
+    """
+    config_home = (os.environ.get("OMNIGENT_CONFIG_HOME") or "").strip()
+    if config_home:
+        return os.path.join(os.path.abspath(os.path.expanduser(config_home)), "config.yaml")
+    return os.path.join(str(Path.home()), ".omnigent", "config.yaml")
+
+
 # ---------------------------------------------------------------------------
 # Public dispatchers
 # ---------------------------------------------------------------------------
@@ -294,6 +310,9 @@ def connector_home(
         # Surfaced so inventory/doctor render a truthful home label rather
         # than an empty string or — worse — OpenClaw's path.
         return os.path.join(home, ".config", "opencode")
+    if name == "omnigent":
+        config_home = (os.environ.get("OMNIGENT_CONFIG_HOME") or "").strip()
+        return _expand(config_home) if config_home else os.path.join(home, ".omnigent")
     if name == "openclaw":
         if openclaw_home:
             return _expand(openclaw_home)
@@ -373,6 +392,8 @@ def connector_config_files(
         paths = [
             os.path.join(home, ".config", "opencode", "plugins", "defenseclaw.js"),
         ]
+    elif name == "omnigent":
+        paths = [omnigent_config_path()]
     elif name == "cursor":
         paths = [
             os.path.join(home, ".cursor", "mcp.json"),
@@ -443,6 +464,8 @@ def skill_dirs(
         return _antigravity_skill_dirs(workspace_dir)
     if name == "opencode":
         return _opencode_skill_dirs(workspace_dir)
+    if name == "omnigent":
+        return []
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
 
 
@@ -484,6 +507,8 @@ def plugin_dirs(
         return _antigravity_plugin_dirs(workspace_dir)
     if name == "opencode":
         return _opencode_plugin_dirs(workspace_dir)
+    if name == "omnigent":
+        return []
     return _openclaw_plugin_dirs(openclaw_home)
 
 
@@ -539,6 +564,8 @@ def mcp_servers(
         # a top-level ``mcp`` map rather than the ``mcpServers`` shape the
         # other connectors use. Read its config, never OpenClaw's.
         return _opencode_mcp_servers(workspace_dir)
+    if name == "omnigent":
+        return []
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
@@ -1466,6 +1493,11 @@ def set_mcp_server(
     if name_n == "opencode":
         _set_opencode_mcp_server(name, entry, workspace_dir=workspace_dir)
         return
+    if name_n == "omnigent":
+        raise MCPWriteUnsupportedError(
+            "omnigent MCP configuration is managed by OmniGent; the DefenseClaw "
+            "connector only installs a custom policy bridge.",
+        )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. "
@@ -1558,6 +1590,11 @@ def unset_mcp_server(
     if name_n == "opencode":
         _unset_opencode_mcp_server(name, workspace_dir=workspace_dir)
         return
+    if name_n == "omnigent":
+        raise MCPWriteUnsupportedError(
+            "omnigent MCP configuration is managed by OmniGent; the DefenseClaw "
+            "connector only installs a custom policy bridge.",
+        )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. Remove the server inside the ZeptoClaw UI.",

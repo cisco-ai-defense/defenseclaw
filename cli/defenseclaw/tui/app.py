@@ -10447,14 +10447,16 @@ def _enforcement_label(cfg: OverviewConfig | None) -> str:
     # instead; the per-connector modes live in the roster below.
     if len(cfg.connector_modes) > 1:
         n = len(cfg.connector_modes)
-        return f"{n} connectors (hook observability)"
+        return f"{n} connectors (per-connector policy modes)"
     connector = cfg.guardrail_connector or cfg.claw_mode
     mode = cfg.guardrail_mode or "observe"
     if not connector:
         return f"not configured ({mode})"
     if connector in {"openclaw", "zeptoclaw"}:
         return f"{connector} proxy guardrail ({mode})"
-    return f"{connector} hook observability ({mode})"
+    surface = "policy" if connector == "omnigent" else "hook"
+    posture = "enforcement" if mode == "action" else "observability"
+    return f"{connector} {surface} {posture} ({mode})"
 
 
 def _cycle_value(current: str, options: tuple[str, ...], delta: int) -> str:

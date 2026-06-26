@@ -21,10 +21,11 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw.bootstrap import BootstrapReport, bootstrap_env
+from defenseclaw.bootstrap import BootstrapReport, _connector_readiness, bootstrap_env
 from defenseclaw.config import (
     Config,
     GatewayConfig,
@@ -107,6 +108,18 @@ class BootstrapEnvTests(unittest.TestCase):
         report = bootstrap_env(cfg)
         self.assertEqual(report.data_dir, cfg.data_dir)
         self.assertEqual(report.audit_db, cfg.audit_db)
+
+    def test_omnigent_readiness_honors_config_home(self):
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        config_home = os.path.join(self._tmp.name, "omnigent-config")
+        os.makedirs(config_home)
+        with open(os.path.join(config_home, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("policy_modules: [defenseclaw_omnigent_policy]\n")
+        with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
+            result = _connector_readiness(cfg, "omnigent")
+
+        self.assertEqual(result.status, "pass")
+        self.assertIn("custom policy", result.detail)
 
 
 # ---------------------------------------------------------------------------
