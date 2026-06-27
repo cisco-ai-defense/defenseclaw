@@ -24,6 +24,9 @@ validation, audit drill-down) silently depend on:
    Adding a connector and forgetting the schema means dashboards
    silently start dropping records — and the fresh-install empty
    placeholder ("") masks the failure on bench tests.
+
+3. CLI schema mirrors are discovered from real ``//go:embed`` directives,
+   remain byte-identical, and reject unexplained duplicate JSON files.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "check_schemas.py"
 SCHEMA_DIR = ROOT / "schemas"
 RESOURCE_SCHEMA = SCHEMA_DIR / "otel" / "resource.schema.json"
+GALILEO_PROFILE_SCHEMA = SCHEMA_DIR / "otel" / "galileo-export-profile.schema.json"
 
 
 class TestCheckSchemasResourceEnum(unittest.TestCase):
@@ -193,6 +197,81 @@ class TestCheckSchemasCoversOtelTree(unittest.TestCase):
             )
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("otel/metrics.schema.json", res.stderr)
+
+
+class TestCliEmbedSchemaMirrors(unittest.TestCase):
+    def test_unreferenced_duplicate_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            schema_dir = root / "schemas"
+            cli_dir = root / "internal" / "cli"
+            embed_dir = cli_dir / "embed"
+            schema_dir.mkdir(parents=True)
+            embed_dir.mkdir(parents=True)
+            schema = '{"$schema":"https://json-schema.org/draft/2020-12/schema"}\n'
+            (schema_dir / "scan-result.json").write_text(schema, encoding="utf-8")
+            (embed_dir / "scan-result.json").write_text(schema, encoding="utf-8")
+            (embed_dir / "orphan.json").write_text(schema, encoding="utf-8")
+            (cli_dir / "scan.go").write_text(
+                "//go:embed embed/scan-result.json\n", encoding="utf-8"
+            )
+
+            shim = (
+                "import importlib.util, pathlib, sys\n"
+                f"spec = importlib.util.spec_from_file_location('check_schemas', r'{SCRIPT}')\n"
+                "mod = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(mod)\n"
+                f"mod.SCHEMA_DIR = pathlib.Path(r'{schema_dir}')\n"
+                f"mod.CLI_GO_DIR = pathlib.Path(r'{cli_dir}')\n"
+                f"mod.CLI_EMBED_SCHEMA_DIR = pathlib.Path(r'{embed_dir}')\n"
+                "sys.exit(0 if mod.check_cli_embed_mirrors() else 1)\n"
+            )
+            res = subprocess.run(
+                [sys.executable, "-c", shim],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("unreferenced CLI embed schema copies", res.stderr)
+            self.assertIn("orphan.json", res.stderr)
+
+
+class TestGalileoExportProfileSchema(unittest.TestCase):
+    def test_profile_signals_match_galileo_preset(self) -> None:
+        from defenseclaw.observability.presets import PRESETS
+
+        doc = json.loads(GALILEO_PROFILE_SCHEMA.read_text(encoding="utf-8"))
+        preset = PRESETS["galileo"]
+        schema_signals = tuple(doc["properties"]["signals"]["const"])
+        self.assertEqual(schema_signals, preset.default_signals)
+        self.assertEqual(
+            [
+                (item["name"], tuple(item["required_attributes"]))
+                for item in doc["properties"]["operations"]["const"]
+            ],
+            list(preset.span_filter_operations),
+        )
+
+    def test_profile_operations_match_runtime_contracts(self) -> None:
+        profile = json.loads(GALILEO_PROFILE_SCHEMA.read_text(encoding="utf-8"))
+        operations = profile["properties"]["operations"]["const"]
+        schemas = {
+            "chat": "runtime-llm-span.schema.json",
+            "invoke_agent": "runtime-agent-span.schema.json",
+            "execute_tool": "runtime-tool-span.schema.json",
+        }
+        for operation in operations:
+            contract = json.loads(
+                (SCHEMA_DIR / "otel" / schemas[operation["name"]]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                operation["required_attributes"],
+                contract["x-required-attribute-keys"],
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover

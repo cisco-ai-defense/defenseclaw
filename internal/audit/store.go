@@ -1283,6 +1283,76 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		description: "agent lifecycle: correlate network egress with connector, agent, execution, user, and tool",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "network_egress_events")
+			if err != nil {
+				return err
+			}
+			if !present {
+				return nil
+			}
+			for _, spec := range []struct {
+				column, stmt string
+			}{
+				{"connector", `ALTER TABLE network_egress_events ADD COLUMN connector TEXT`},
+				{"agent_id", `ALTER TABLE network_egress_events ADD COLUMN agent_id TEXT`},
+				{"agent_lifecycle_id", `ALTER TABLE network_egress_events ADD COLUMN agent_lifecycle_id TEXT`},
+				{"agent_execution_id", `ALTER TABLE network_egress_events ADD COLUMN agent_execution_id TEXT`},
+				{"user_id", `ALTER TABLE network_egress_events ADD COLUMN user_id TEXT`},
+				{"tool_id", `ALTER TABLE network_egress_events ADD COLUMN tool_id TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, "network_egress_events", spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter network_egress_events.%s: %w", spec.column, err)
+					}
+				}
+			}
+			for _, stmt := range []string{
+				`CREATE INDEX IF NOT EXISTS idx_egress_agent ON network_egress_events(agent_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_egress_lifecycle ON network_egress_events(agent_lifecycle_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_egress_user ON network_egress_events(user_id)`,
+			} {
+				if _, err := ex.Exec(stmt); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
+	{
+		description: "agent360: correlate network egress with root agent, parent agent, and root session",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "network_egress_events")
+			if err != nil || !present {
+				return err
+			}
+			for _, spec := range []struct {
+				column, stmt string
+			}{
+				{"root_agent_id", `ALTER TABLE network_egress_events ADD COLUMN root_agent_id TEXT`},
+				{"parent_agent_id", `ALTER TABLE network_egress_events ADD COLUMN parent_agent_id TEXT`},
+				{"root_session_id", `ALTER TABLE network_egress_events ADD COLUMN root_session_id TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, "network_egress_events", spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter network_egress_events.%s: %w", spec.column, err)
+					}
+				}
+			}
+			_, err = ex.Exec(`CREATE INDEX IF NOT EXISTS idx_egress_root_agent ON network_egress_events(root_agent_id)`)
+			return err
+		},
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2802,11 +2872,14 @@ func (s *Store) GetCounts() (Counts, error) {
 // NetworkEgressFilter parameterises QueryNetworkEgressEvents.
 // Zero values mean "no filter". Limit defaults to 100 when zero.
 type NetworkEgressFilter struct {
-	Hostname  string    // exact match; empty = all hosts
-	SessionID string    // exact match; empty = all sessions
-	Since     time.Time // only events at or after this time; zero = all time
-	Blocked   *bool     // nil = all; &true = blocked only; &false = allowed only
-	Limit     int       // defaults to 100
+	Hostname    string    // exact match; empty = all hosts
+	SessionID   string    // exact match; empty = all sessions
+	AgentID     string    // exact match; empty = all agents
+	RootAgentID string    // exact match; empty = all agent trees
+	UserID      string    // exact match; empty = all users
+	Since       time.Time // only events at or after this time; zero = all time
+	Blocked     *bool     // nil = all; &true = blocked only; &false = allowed only
+	Limit       int       // defaults to 100
 }
 
 // QueryNetworkEgressEvents returns egress events matching the filter, newest first.
@@ -2816,7 +2889,8 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 		limit = 100
 	}
 
-	query := `SELECT id, timestamp, session_id, hostname, url, http_method, protocol,
+	query := `SELECT id, timestamp, session_id, connector, agent_id, root_agent_id, parent_agent_id, root_session_id, agent_lifecycle_id,
+	                 agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 	                 policy_outcome, decision_code, blocked, severity, details
 	          FROM network_egress_events WHERE 1=1`
 	var args []any
@@ -2828,6 +2902,18 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 	if f.SessionID != "" {
 		query += " AND session_id = ?"
 		args = append(args, f.SessionID)
+	}
+	if f.AgentID != "" {
+		query += " AND agent_id = ?"
+		args = append(args, f.AgentID)
+	}
+	if f.RootAgentID != "" {
+		query += " AND root_agent_id = ?"
+		args = append(args, f.RootAgentID)
+	}
+	if f.UserID != "" {
+		query += " AND user_id = ?"
+		args = append(args, f.UserID)
 	}
 	if !f.Since.IsZero() {
 		query += " AND julianday(timestamp) >= julianday(?)"
@@ -2853,15 +2939,26 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 	var events []NetworkEgressRow
 	for rows.Next() {
 		var e NetworkEgressRow
-		var sessionID, url, httpMethod, protocol, decisionCode, details sql.NullString
+		var sessionID, connector, agentID, rootAgentID, parentAgentID, rootSessionID, lifecycleID, executionID, userID, toolID sql.NullString
+		var url, httpMethod, protocol, decisionCode, details sql.NullString
 		var blocked int
 		if err := rows.Scan(
-			&e.ID, &e.Timestamp, &sessionID, &e.Hostname, &url, &httpMethod, &protocol,
+			&e.ID, &e.Timestamp, &sessionID, &connector, &agentID, &rootAgentID, &parentAgentID, &rootSessionID, &lifecycleID,
+			&executionID, &userID, &toolID, &e.Hostname, &url, &httpMethod, &protocol,
 			&e.PolicyOutcome, &decisionCode, &blocked, &e.Severity, &details,
 		); err != nil {
 			return nil, fmt.Errorf("audit: scan egress row: %w", err)
 		}
 		e.SessionID = sessionID.String
+		e.Connector = connector.String
+		e.AgentID = agentID.String
+		e.RootAgentID = rootAgentID.String
+		e.ParentAgentID = parentAgentID.String
+		e.RootSessionID = rootSessionID.String
+		e.AgentLifecycleID = lifecycleID.String
+		e.AgentExecutionID = executionID.String
+		e.UserID = userID.String
+		e.ToolID = toolID.String
 		e.URL = url.String
 		e.HTTPMethod = httpMethod.String
 		e.Protocol = protocol.String
@@ -2917,18 +3014,27 @@ func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, erro
 
 // NetworkEgressRow is the persisted shape of a network_egress_events row.
 type NetworkEgressRow struct {
-	ID            string    `json:"id"`
-	Timestamp     time.Time `json:"timestamp"`
-	SessionID     string    `json:"session_id,omitempty"`
-	Hostname      string    `json:"hostname"`
-	URL           string    `json:"url,omitempty"`
-	HTTPMethod    string    `json:"http_method,omitempty"`
-	Protocol      string    `json:"protocol,omitempty"`
-	PolicyOutcome string    `json:"policy_outcome"`
-	DecisionCode  string    `json:"decision_code,omitempty"`
-	Blocked       bool      `json:"blocked"`
-	Severity      string    `json:"severity"`
-	Details       string    `json:"details,omitempty"`
+	ID               string    `json:"id"`
+	Timestamp        time.Time `json:"timestamp"`
+	SessionID        string    `json:"session_id,omitempty"`
+	Connector        string    `json:"connector,omitempty"`
+	AgentID          string    `json:"agent_id,omitempty"`
+	RootAgentID      string    `json:"root_agent_id,omitempty"`
+	ParentAgentID    string    `json:"parent_agent_id,omitempty"`
+	RootSessionID    string    `json:"root_session_id,omitempty"`
+	AgentLifecycleID string    `json:"agent_lifecycle_id,omitempty"`
+	AgentExecutionID string    `json:"agent_execution_id,omitempty"`
+	UserID           string    `json:"user_id,omitempty"`
+	ToolID           string    `json:"tool_id,omitempty"`
+	Hostname         string    `json:"hostname"`
+	URL              string    `json:"url,omitempty"`
+	HTTPMethod       string    `json:"http_method,omitempty"`
+	Protocol         string    `json:"protocol,omitempty"`
+	PolicyOutcome    string    `json:"policy_outcome"`
+	DecisionCode     string    `json:"decision_code,omitempty"`
+	Blocked          bool      `json:"blocked"`
+	Severity         string    `json:"severity"`
+	Details          string    `json:"details,omitempty"`
 }
 
 // InsertNetworkEgressEvent persists one outbound network call as a structured row.
@@ -2949,10 +3055,13 @@ func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
 	}
 	_, err := s.execDB(context.Background(), "audit",
 		`INSERT INTO network_egress_events
-		 (id, timestamp, session_id, hostname, url, http_method, protocol, policy_outcome, decision_code, blocked, severity, details)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 (id, timestamp, session_id, connector, agent_id, root_agent_id, parent_agent_id, root_session_id, agent_lifecycle_id, agent_execution_id, user_id, tool_id,
+		  hostname, url, http_method, protocol, policy_outcome, decision_code, blocked, severity, details)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, ts,
-		nullStr(e.SessionID), e.Hostname, nullStr(e.URL), nullStr(e.HTTPMethod), nullStr(e.Protocol),
+		nullStr(e.SessionID), nullStr(e.Connector), nullStr(e.AgentID), nullStr(e.RootAgentID), nullStr(e.ParentAgentID), nullStr(e.RootSessionID), nullStr(e.AgentLifecycleID),
+		nullStr(e.AgentExecutionID), nullStr(e.UserID), nullStr(e.ToolID),
+		e.Hostname, nullStr(e.URL), nullStr(e.HTTPMethod), nullStr(e.Protocol),
 		e.PolicyOutcome, nullStr(e.DecisionCode), blocked, e.Severity, nullStr(e.Details),
 	)
 	if err != nil {
@@ -3026,14 +3135,16 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 	)
 	if hostname == "" {
 		rows, err = s.queryDB(context.Background(), "audit",
-			`SELECT id, timestamp, session_id, hostname, url, http_method, protocol,
+			`SELECT id, timestamp, session_id, connector, agent_id, root_agent_id, parent_agent_id, root_session_id, agent_lifecycle_id,
+			        agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events
 			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, limit,
 		)
 	} else {
 		rows, err = s.queryDB(context.Background(), "audit",
-			`SELECT id, timestamp, session_id, hostname, url, http_method, protocol,
+			`SELECT id, timestamp, session_id, connector, agent_id, root_agent_id, parent_agent_id, root_session_id, agent_lifecycle_id,
+			        agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events WHERE hostname = ?
 			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, hostname, limit,
@@ -3047,15 +3158,26 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 	var events []NetworkEgressRow
 	for rows.Next() {
 		var e NetworkEgressRow
-		var sessionID, url, httpMethod, protocol, decisionCode, details sql.NullString
+		var sessionID, connector, agentID, rootAgentID, parentAgentID, rootSessionID, lifecycleID, executionID, userID, toolID sql.NullString
+		var url, httpMethod, protocol, decisionCode, details sql.NullString
 		var blocked int
 		if err := rows.Scan(
-			&e.ID, &e.Timestamp, &sessionID, &e.Hostname, &url, &httpMethod, &protocol,
+			&e.ID, &e.Timestamp, &sessionID, &connector, &agentID, &rootAgentID, &parentAgentID, &rootSessionID, &lifecycleID,
+			&executionID, &userID, &toolID, &e.Hostname, &url, &httpMethod, &protocol,
 			&e.PolicyOutcome, &decisionCode, &blocked, &e.Severity, &details,
 		); err != nil {
 			return nil, fmt.Errorf("audit: scan egress row: %w", err)
 		}
 		e.SessionID = sessionID.String
+		e.Connector = connector.String
+		e.AgentID = agentID.String
+		e.RootAgentID = rootAgentID.String
+		e.ParentAgentID = parentAgentID.String
+		e.RootSessionID = rootSessionID.String
+		e.AgentLifecycleID = lifecycleID.String
+		e.AgentExecutionID = executionID.String
+		e.UserID = userID.String
+		e.ToolID = toolID.String
 		e.URL = url.String
 		e.HTTPMethod = httpMethod.String
 		e.Protocol = protocol.String

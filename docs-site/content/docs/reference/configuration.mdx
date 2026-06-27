@@ -61,14 +61,71 @@ gateway:
   api_port: 18970              # gateway REST API port (hooks + TUI dial this)
   api_bind: ""                 # optional override for the REST API bind address
 
-# Top-level OTel exporter — wires the sidecar to a collector. Written by
-# `setup local-observability up` or `setup observability add <preset>`.
+# Named OTel fan-out destinations. The top-level block owns the master switch,
+# resource identity, sampler, and emission policy; each destination has an
+# independent transport and bounded export queue.
 otel:
-  enabled: false
-  protocol: grpc               # grpc | http/protobuf
-  endpoint: ""                 # 127.0.0.1:4317 after local-observability up
-  service_name: defenseclaw
-  signals: [traces, metrics, logs]
+  enabled: true
+  resource:
+    attributes:
+      service.name: defenseclaw
+  traces:
+    sampler: always_on
+    sampler_arg: "1.0"
+  destinations:
+    - name: local-observability
+      preset: local-otlp
+      enabled: true
+      protocol: grpc
+      endpoint: 127.0.0.1:4317
+      tls: { insecure: true }
+      traces: { enabled: true }
+      metrics: { enabled: true }
+      logs: { enabled: true }
+    - name: galileo
+      preset: galileo
+      enabled: true
+      protocol: http
+      endpoint: https://api.galileo.ai/otel/traces
+      batch: { scheduled_delay_ms: 1000 }
+      headers:
+        Galileo-API-Key: ${GALILEO_API_KEY}
+        project: defenseclaw
+        logstream: production
+      span_filter:
+        operations:
+          - name: chat
+            require_attributes:
+              - gen_ai.operation.name
+              - gen_ai.provider.name
+              - gen_ai.request.model
+              - gen_ai.input.messages
+              - gen_ai.output.messages
+          - name: invoke_agent
+            require_attributes:
+              - gen_ai.operation.name
+              - gen_ai.agent.name
+              - gen_ai.provider.name
+              - openinference.span.kind
+              - gen_ai.input.messages
+              - gen_ai.output.messages
+          - name: execute_tool
+            require_attributes:
+              - gen_ai.operation.name
+              - gen_ai.tool.name
+              - openinference.span.kind
+              - gen_ai.tool.call.arguments
+              - gen_ai.tool.call.result
+              - gen_ai.input.messages
+              - gen_ai.output.messages
+      traces: { enabled: true }
+      metrics: { enabled: false }
+      logs: { enabled: false }
+
+# Flat `otel.protocol` / `otel.endpoint` / signal transport blocks are rejected.
+# Preview and apply the one-way conversion with:
+# `defenseclaw setup observability migrate-otel [--apply]`.
+# Sampling remains process-wide and cannot differ by destination.
 
 # Top-level LLM block. Written by `defenseclaw setup llm` (and copied
 # into per-component blocks via the `--inherit-from` machinery). The

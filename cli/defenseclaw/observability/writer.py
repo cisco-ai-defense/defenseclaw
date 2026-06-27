@@ -41,6 +41,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -86,8 +87,7 @@ class WriteResult:
     day consume a ``--json`` variant of ``setup observability add``.
     """
 
-    # Canonical name of the destination ("otel" for gateway OTel exporter
-    # or the ``audit_sinks[].name`` for audit sinks).
+    # Canonical name of the named OTel destination or audit sink.
     name: str
     target: str  # "otel" | "audit_sinks"
     preset_id: str
@@ -149,10 +149,7 @@ def apply_preset(
     data_dir:
         DefenseClaw data directory (normally ``~/.defenseclaw``).
     name:
-        Override the auto-derived destination name. For ``target=otel``
-        presets this is ignored because there is only one ``otel:``
-        block; instead it is stamped into
-        ``otel.resource.attributes.service.name``.
+        Override the auto-derived destination name.
     enabled:
         ``audit_sinks[*].enabled`` / ``otel.enabled``. Callers typically
         use ``set_destination_enabled`` after initial creation.
@@ -181,9 +178,7 @@ def apply_preset(
     resolved_inputs = _resolve_inputs(preset, inputs)
     dest_name = _destination_name(preset, name, resolved_inputs)
     if effective_target == "audit_sinks" and not _NAME_RE.match(dest_name):
-        raise ValueError(
-            f"destination name {dest_name!r} must match {_NAME_RE.pattern}"
-        )
+        raise ValueError(f"destination name {dest_name!r} must match {_NAME_RE.pattern}")
 
     cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
     with locked_config_yaml(cfg_path):
@@ -196,6 +191,7 @@ def apply_preset(
                 raw,
                 preset,
                 resolved_inputs,
+                data_dir=data_dir,
                 enabled=enabled,
                 signals=signals or preset.default_signals,
                 dest_name=dest_name,
@@ -213,10 +209,18 @@ def apply_preset(
 
         yaml_changes = _summarize_diff(before, raw, effective_target, dest_name)
         dotenv_changes = _apply_secret(
-            data_dir, preset, secret_value, dry_run=dry_run,
+            data_dir,
+            preset,
+            secret_value,
+            dry_run=dry_run,
         )
 
         if not dry_run:
+            if any(warning.startswith("migrated flat OTel exporter") for warning in warnings):
+                backup_path = cfg_path + ".pre-observability-migration.bak"
+                if not os.path.exists(backup_path):
+                    write_config_yaml_secure(backup_path, before)
+                    warnings.append(f"saved pre-migration backup at {backup_path}")
             _write_yaml(cfg_path, raw)
 
     return WriteResult(
@@ -238,32 +242,34 @@ def apply_preset(
 def list_destinations(data_dir: str) -> list[Destination]:
     """Return all configured observability destinations.
 
-    Includes the gateway ``otel:`` block (as ``Destination(name="otel")``)
-    and every entry in ``audit_sinks:``. Stable order: ``otel`` first,
-    then audit sinks in file order (matching the Go Manager
-    dispatch order).
+    Includes every named ``otel.destinations[]`` route and every entry in
+    ``audit_sinks:`` in file order.
     """
     raw = _load_yaml(os.path.join(data_dir, CONFIG_FILE_NAME))
     out: list[Destination] = []
 
     otel = raw.get("otel") or {}
     if isinstance(otel, dict):
-        attrs = ((otel.get("resource") or {}).get("attributes") or {})
-        out.append(
-            Destination(
-                name="otel",
-                target="otel",
-                kind="otel",
-                enabled=bool(otel.get("enabled", False)),
-                preset_id=str(attrs.get(_RESOURCE_PRESET_ID_KEY, "") or ""),
-                endpoint=_derive_otel_endpoint(otel),
-                signals={
-                    "traces": bool((otel.get("traces") or {}).get("enabled", False)),
-                    "metrics": bool((otel.get("metrics") or {}).get("enabled", False)),
-                    "logs": bool((otel.get("logs") or {}).get("enabled", False)),
-                },
-            ),
-        )
+        destinations = otel.get("destinations")
+        if isinstance(destinations, list):
+            for item in destinations:
+                if not isinstance(item, dict) or not item.get("name"):
+                    continue
+                out.append(
+                    Destination(
+                        name=str(item["name"]),
+                        target="otel",
+                        kind="otel",
+                        enabled=bool(otel.get("enabled", False) and item.get("enabled", False)),
+                        preset_id=str(item.get("preset", "") or ""),
+                        endpoint=_derive_otel_endpoint(item),
+                        signals={
+                            "traces": bool((item.get("traces") or {}).get("enabled", False)),
+                            "metrics": bool((item.get("metrics") or {}).get("enabled", False)),
+                            "logs": bool((item.get("logs") or {}).get("enabled", False)),
+                        },
+                    ),
+                )
 
     for sink in raw.get("audit_sinks") or []:
         if not isinstance(sink, dict):
@@ -286,6 +292,47 @@ def list_destinations(data_dir: str) -> list[Destination]:
     return out
 
 
+def migrate_flat_otel(data_dir: str, *, dry_run: bool = True) -> WriteResult:
+    """Convert an old flat ``otel:`` exporter into one named destination."""
+
+    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    with locked_config_yaml(cfg_path):
+        raw = _load_yaml(cfg_path)
+        before = copy.deepcopy(raw)
+        warnings: list[str] = []
+        otel = raw.get("otel")
+        if isinstance(otel, dict):
+            _migrate_flat_otel_in_place(otel, warnings, data_dir=data_dir)
+        migrated = any(warning.startswith("migrated flat OTel exporter") for warning in warnings)
+        if not migrated:
+            return WriteResult(
+                name="",
+                target="otel",
+                preset_id="",
+                yaml_changes=[],
+                dotenv_changes=[],
+                warnings=[],
+                dry_run=dry_run,
+            )
+        destination = (raw.get("otel") or {}).get("destinations", [{}])[0]
+        name = str(destination.get("name", "generic-otlp"))
+        if not dry_run:
+            backup_path = cfg_path + ".pre-observability-migration.bak"
+            if not os.path.exists(backup_path):
+                write_config_yaml_secure(backup_path, before)
+                warnings.append(f"saved pre-migration backup at {backup_path}")
+            _write_yaml(cfg_path, raw)
+        return WriteResult(
+            name=name,
+            target="otel",
+            preset_id=str(destination.get("preset", "generic-otlp")),
+            yaml_changes=[f"flat otel exporter -> otel.destinations[{name}]"],
+            dotenv_changes=[],
+            warnings=warnings,
+            dry_run=dry_run,
+        )
+
+
 def set_destination_enabled(
     name: str,
     enabled: bool,
@@ -293,19 +340,27 @@ def set_destination_enabled(
 ) -> WriteResult:
     """Flip the ``enabled`` flag on an existing destination.
 
-    ``name == "otel"`` targets the top-level ``otel:`` block. Any other
-    name must match an existing ``audit_sinks[].name``.
+    Named OTel destinations are matched before audit sinks.
     """
     cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
     with locked_config_yaml(cfg_path):
         raw = _load_yaml(cfg_path)
         changes: list[str] = []
-        target = "otel" if name == "otel" else "audit_sinks"
+        otel_destination = _find_otel_destination(raw, name)
+        target = "otel" if otel_destination is not None else "audit_sinks"
 
-        if target == "otel":
+        if otel_destination is not None:
+            otel_destination["enabled"] = bool(enabled)
             otel = raw.setdefault("otel", {})
-            otel["enabled"] = bool(enabled)
-            changes.append(f"otel.enabled = {bool(enabled)}")
+            if enabled:
+                otel["enabled"] = True
+            else:
+                destinations = otel.get("destinations") or []
+                otel["enabled"] = any(
+                    isinstance(item, dict) and bool(item.get("enabled", False))
+                    for item in destinations
+                )
+            changes.append(f"otel.destinations[{name}].enabled = {bool(enabled)}")
         else:
             sink = _find_sink(raw, name)
             if sink is None:
@@ -326,30 +381,30 @@ def set_destination_enabled(
 
 
 def remove_destination(name: str, data_dir: str) -> WriteResult:
-    """Delete an audit_sinks entry (``name == "otel"`` clears otel.enabled).
-
-    The writer intentionally does *not* delete the gateway ``otel:`` block
-    on ``remove otel`` — operators frequently toggle the exporter off
-    while iterating, and re-enabling requires all fields to remain. Use
-    ``disable otel`` explicitly to keep the config stable.
-    """
+    """Delete one named OTel destination or audit sink."""
     cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
     with locked_config_yaml(cfg_path):
         raw = _load_yaml(cfg_path)
         changes: list[str] = []
 
-        if name == "otel":
-            otel = raw.get("otel")
-            if isinstance(otel, dict):
-                otel["enabled"] = False
-                changes.append("otel.enabled = False (use `remove` only to disable)")
-            else:
-                changes.append("otel block absent — nothing to do")
-            _write_yaml(cfg_path, raw)
-            return WriteResult(
-                name=name, target="otel", preset_id="",
-                yaml_changes=changes, dotenv_changes=[], warnings=[], dry_run=False,
-            )
+        otel = raw.get("otel")
+        if isinstance(otel, dict) and isinstance(otel.get("destinations"), list):
+            destinations = otel["destinations"]
+            kept = [item for item in destinations if not (isinstance(item, dict) and item.get("name") == name)]
+            if len(kept) != len(destinations):
+                otel["destinations"] = kept
+                otel["enabled"] = any(isinstance(item, dict) and bool(item.get("enabled", False)) for item in kept)
+                changes.append(f"otel.destinations[{name}] removed")
+                _write_yaml(cfg_path, raw)
+                return WriteResult(
+                    name=name,
+                    target="otel",
+                    preset_id="",
+                    yaml_changes=changes,
+                    dotenv_changes=[],
+                    warnings=[],
+                    dry_run=False,
+                )
 
         sinks = raw.get("audit_sinks")
         if not isinstance(sinks, list):
@@ -365,8 +420,26 @@ def remove_destination(name: str, data_dir: str) -> WriteResult:
 
         _write_yaml(cfg_path, raw)
     return WriteResult(
-        name=name, target="audit_sinks", preset_id="",
-        yaml_changes=changes, dotenv_changes=[], warnings=[], dry_run=False,
+        name=name,
+        target="audit_sinks",
+        preset_id="",
+        yaml_changes=changes,
+        dotenv_changes=[],
+        warnings=[],
+        dry_run=False,
+    )
+
+
+def _find_otel_destination(raw: dict[str, Any], name: str) -> dict[str, Any] | None:
+    otel = raw.get("otel")
+    if not isinstance(otel, dict):
+        return None
+    destinations = otel.get("destinations")
+    if not isinstance(destinations, list):
+        return None
+    return next(
+        (item for item in destinations if isinstance(item, dict) and item.get("name") == name),
+        None,
     )
 
 
@@ -402,6 +475,7 @@ def _apply_otel_preset(
     preset: Preset,
     inputs: dict[str, str],
     *,
+    data_dir: str,
     enabled: bool,
     signals: tuple[Signal, ...],
     dest_name: str,
@@ -413,56 +487,117 @@ def _apply_otel_preset(
         otel = {}
         raw["otel"] = otel
 
-    # Endpoint — strip scheme (matches the Go exporter's expectation
-    # that endpoint is host[:port], with scheme implied by protocol +
-    # insecure flag; see internal/telemetry/provider.go).
+    # Convert an old flat exporter before adding a route so setup is a one-way,
+    # lossless migration into the named destination model.
+    _migrate_flat_otel_in_place(otel, warnings, data_dir=data_dir)
+
     endpoint = _render_template(preset.endpoint_template, inputs)
-    endpoint_no_scheme = _strip_scheme(endpoint)
 
-    otel["enabled"] = bool(enabled)
-    if preset.otel_protocol:
-        otel["protocol"] = preset.otel_protocol
-
-    # Headers merge: preserve any pre-existing headers the user added
-    # manually, but overwrite keys we manage (vendor-specific auth).
-    existing_headers = otel.get("headers")
-    if not isinstance(existing_headers, dict):
-        existing_headers = {}
+    headers: dict[str, str] = {}
     for k, v in preset.otel_headers.items():
-        existing_headers[k] = v
+        headers[k] = _render_header_template(v, inputs)
+    if preset.id == "galileo":
+        for field_name in ("project", "logstream"):
+            _validate_literal_header_value(field_name, inputs.get(field_name, ""))
     # Honeycomb dataset lives in a separate header; stamp it at apply
     # time from inputs rather than at preset-decl time so per-environment
     # values work.
     if preset.id == "honeycomb" and inputs.get("dataset"):
-        existing_headers["x-honeycomb-dataset"] = inputs["dataset"]
-    if existing_headers:
-        otel["headers"] = existing_headers
+        headers["x-honeycomb-dataset"] = inputs["dataset"]
+
+    destination: dict[str, Any] = {
+        "name": dest_name,
+        "preset": preset.id,
+        "enabled": bool(enabled),
+        "protocol": preset.otel_protocol or inputs.get("protocol", "grpc"),
+        "endpoint": endpoint,
+    }
+    if preset.id == "galileo":
+        # Real-time is the Galileo default: completed operations leave the
+        # process within one second, while retaining bounded async batching.
+        destination["batch"] = {"scheduled_delay_ms": 1000}
+    if headers:
+        destination["headers"] = headers
     if preset.otel_tls_insecure:
-        tls = otel.setdefault("tls", {})
-        if not isinstance(tls, dict):
-            warnings.append("otel.tls: replaced non-mapping value")
-            tls = {}
-            otel["tls"] = tls
-        tls["insecure"] = True
+        destination["tls"] = {"insecure": True}
+    if preset.span_filter_operations:
+        destination["span_filter"] = {
+            "operations": [
+                {"name": name, "require_attributes": list(attributes)}
+                for name, attributes in preset.span_filter_operations
+            ]
+        }
+    elif preset.span_filter_operation or preset.span_filter_required_attributes:
+        destination["span_filter"] = {
+            "require_operation": preset.span_filter_operation,
+            "require_attributes": list(preset.span_filter_required_attributes),
+        }
 
     signals_set = set(signals)
     for sig in ("traces", "metrics", "logs"):
-        block = otel.setdefault(sig, {})
-        if not isinstance(block, dict):
-            block = {}
-            otel[sig] = block
-        block["enabled"] = sig in signals_set
-        if sig in signals_set:
-            block["endpoint"] = endpoint_no_scheme
-            if preset.otel_protocol:
-                block["protocol"] = preset.otel_protocol
-            path = preset.signal_url_paths.get(sig, "")
-            if path:
-                block["url_path"] = path
+        block: dict[str, Any] = {"enabled": sig in signals_set}
+        path = preset.signal_url_paths.get(sig, "")
+        if path:
+            block["url_path"] = path
+        destination[sig] = block
 
-    # Stamp identity attributes so operators can tell which preset
-    # wrote the current config and the gateway telemetry panel can show
-    # it at runtime.
+    destinations = otel.setdefault("destinations", [])
+    if not isinstance(destinations, list):
+        warnings.append("otel.destinations: replaced non-list value")
+        destinations = []
+        otel["destinations"] = destinations
+    replaced = False
+    for idx, existing in enumerate(destinations):
+        if isinstance(existing, dict) and existing.get("name") == dest_name:
+            # Presets own identity, endpoint, their declared headers/filter, and
+            # signal enablement. Preserve operator-owned additions such as a
+            # private CA, batch tuning, and non-preset headers.
+            merged = copy.deepcopy(existing)
+            merged.update(
+                {
+                    key: copy.deepcopy(value)
+                    for key, value in destination.items()
+                    if key not in {"headers", "tls", "batch"}
+                }
+            )
+            if headers:
+                merged_headers = copy.deepcopy(existing.get("headers") or {})
+                merged_headers.update(headers)
+                merged["headers"] = merged_headers
+            if preset.otel_tls_insecure:
+                merged_tls = copy.deepcopy(existing.get("tls") or {})
+                merged_tls["insecure"] = True
+                merged["tls"] = merged_tls
+            if "batch" in destination:
+                existing_batch = copy.deepcopy(existing.get("batch") or {})
+                if preset.id == "galileo":
+                    # 5000ms is the historical/global default, not an
+                    # operator-tuned real-time value. Upgrade that historical
+                    # value to Galileo's one-second default while preserving
+                    # every non-default/custom batch field.
+                    if existing_batch.get("scheduled_delay_ms") in (None, 5000):
+                        existing_batch["scheduled_delay_ms"] = destination["batch"]["scheduled_delay_ms"]
+                elif not existing_batch:
+                    existing_batch = copy.deepcopy(destination["batch"])
+                merged["batch"] = existing_batch
+            destinations[idx] = merged
+            warnings.append(
+                f"overwriting existing OTel destination {dest_name!r} while preserving operator-owned fields"
+            )
+            replaced = True
+            break
+    if not replaced:
+        destinations.append(destination)
+
+    # The root switch controls the whole fan-out provider. It must reflect
+    # the aggregate, not the destination currently being edited: adding one
+    # disabled route beside an enabled local collector must not turn every
+    # OTel route off.
+    otel["enabled"] = any(isinstance(item, dict) and bool(item.get("enabled", False)) for item in destinations)
+
+    # Resource identity is process-wide. Keep service identity here, but do
+    # not stamp a vendor preset: different destinations now receive the same
+    # resource and vendor-specific preset metadata belongs on each entry.
     resource = otel.setdefault("resource", {})
     if not isinstance(resource, dict):
         resource = {}
@@ -471,9 +606,175 @@ def _apply_otel_preset(
     if not isinstance(attrs, dict):
         attrs = {}
         resource["attributes"] = attrs
-    attrs[_RESOURCE_PRESET_ID_KEY] = preset.id
-    attrs[_RESOURCE_PRESET_NAME_KEY] = preset.display_name
-    attrs.setdefault("service.name", dest_name or "defenseclaw")
+    attrs.pop(_RESOURCE_PRESET_ID_KEY, None)
+    attrs.pop(_RESOURCE_PRESET_NAME_KEY, None)
+    if inputs.get("service_name"):
+        attrs["service.name"] = inputs["service_name"]
+    else:
+        attrs.setdefault("service.name", "defenseclaw")
+
+
+def _migrate_flat_otel_in_place(
+    otel: dict[str, Any],
+    warnings: list[str],
+    *,
+    data_dir: str,
+) -> None:
+    """Move a configured flat exporter into ``otel.destinations[]``.
+
+    The runtime accepts only named destinations. Migration preserves a flat
+    exporter when setup mutates the file and ignores a bare disabled scaffold.
+    """
+
+    existing_destinations = otel.get("destinations")
+    has_named_destinations = isinstance(existing_destinations, list)
+    env_endpoint = _first_runtime_env(
+        data_dir,
+        "DEFENSECLAW_OTEL_TRACES_ENDPOINT",
+        "DEFENSECLAW_OTEL_ENDPOINT",
+        "OPENCLAW_OTEL_TRACES_ENDPOINT",
+        "OPENCLAW_OTEL_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    )
+    has_flat_transport = bool(
+        otel.get("endpoint")
+        or otel.get("headers")
+        or any(
+            isinstance(otel.get(sig), dict)
+            and ((otel.get(sig) or {}).get("endpoint") or (otel.get(sig) or {}).get("url_path"))
+            for sig in ("traces", "metrics", "logs")
+        )
+    )
+    has_destination = bool(
+        has_flat_transport
+        or (
+            not has_named_destinations
+            and (
+                any(
+                    isinstance(otel.get(sig), dict) and (otel.get(sig) or {}).get("enabled") is True
+                    for sig in ("traces", "metrics", "logs")
+                )
+                or (otel.get("enabled") is True and env_endpoint)
+            )
+        )
+    )
+    if not has_destination:
+        return
+
+    attrs = (otel.get("resource") or {}).get("attributes") or {}
+    preset_id = str(attrs.get(_RESOURCE_PRESET_ID_KEY, "") or "generic-otlp")
+    name = preset_id if _NAME_RE.match(preset_id) else "generic-otlp"
+    configured_endpoints = [
+        str(value)
+        for value in [
+            otel.get("endpoint"),
+            *((otel.get(signal) or {}).get("endpoint") for signal in ("traces", "metrics", "logs")),
+        ]
+        if value
+    ]
+    if (
+        preset_id == "generic-otlp"
+        and configured_endpoints
+        and all(_endpoint_is_loopback(value) for value in configured_endpoints)
+    ):
+        preset_id = "local-otlp"
+        name = "local-observability"
+    if has_named_destinations:
+        existing_names = {str(item.get("name", "")) for item in existing_destinations if isinstance(item, dict)}
+        base_name = name
+        suffix = 2
+        while name in existing_names:
+            name = f"{base_name}-{suffix}"
+            suffix += 1
+    destination: dict[str, Any] = {
+        "name": name,
+        "preset": preset_id,
+        "enabled": bool(otel.get("enabled", False)),
+        "protocol": str(
+            otel.get("protocol", "")
+            or _first_runtime_env(
+                data_dir,
+                "DEFENSECLAW_OTEL_TRACES_PROTOCOL",
+                "DEFENSECLAW_OTEL_PROTOCOL",
+                "OPENCLAW_OTEL_TRACES_PROTOCOL",
+                "OPENCLAW_OTEL_PROTOCOL",
+                "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+                "OTEL_EXPORTER_OTLP_PROTOCOL",
+            )
+            or "grpc"
+        ),
+        "endpoint": str(otel.get("endpoint", "") or env_endpoint or ""),
+    }
+    for key in ("headers", "tls", "batch"):
+        value = otel.get(key)
+        if value:
+            destination[key] = copy.deepcopy(value)
+    for sig in ("traces", "metrics", "logs"):
+        source = copy.deepcopy(otel.get(sig) or {})
+        if not isinstance(source, dict):
+            source = {}
+        if "enabled" not in source and env_endpoint:
+            source["enabled"] = True
+        if sig == "traces":
+            source.pop("sampler", None)
+            source.pop("sampler_arg", None)
+        elif sig == "logs":
+            source.pop("emit_individual_findings", None)
+        destination[sig] = source
+
+    if has_named_destinations:
+        otel["destinations"] = [destination, *existing_destinations]
+    else:
+        otel["destinations"] = [destination]
+    for key in ("protocol", "endpoint", "headers", "tls", "batch"):
+        otel.pop(key, None)
+    traces = otel.get("traces") or {}
+    otel["traces"] = {key: value for key, value in traces.items() if key in {"sampler", "sampler_arg"}}
+    logs = otel.get("logs") or {}
+    otel["logs"] = {key: value for key, value in logs.items() if key == "emit_individual_findings"}
+    otel.pop("metrics", None)
+    if isinstance(attrs, dict):
+        attrs.pop(_RESOURCE_PRESET_ID_KEY, None)
+        attrs.pop(_RESOURCE_PRESET_NAME_KEY, None)
+    warnings.append(f"migrated flat OTel exporter to named destination {name!r}")
+
+
+def _first_runtime_env(data_dir: str, *names: str) -> str:
+    """Return the first process/.env value without copying secret headers."""
+
+    dotenv: dict[str, str] = {}
+    try:
+        with open(os.path.join(data_dir, DOTENV_FILE_NAME)) as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                dotenv[key.strip()] = value.strip().strip("'\"")
+    except OSError:
+        pass
+    for name in names:
+        value = os.environ.get(name, "") or dotenv.get(name, "")
+        if value:
+            return value
+    return ""
+
+
+def _endpoint_is_loopback(value: str) -> bool:
+    parsed = urlparse(value if "://" in value else f"//{value}")
+    host = (parsed.hostname or "").strip("[]").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _validate_literal_header_value(name: str, value: str) -> None:
+    value = str(value).strip()
+    if not value:
+        raise ValueError(f"Galileo {name} must not be empty")
+    if len(value) > 512:
+        raise ValueError(f"Galileo {name} must be 512 characters or fewer")
+    if "$" in value or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ValueError(f"Galileo {name} must not contain '$' or control characters")
 
 
 # ---------------------------------------------------------------------------
@@ -504,8 +805,7 @@ def _apply_audit_sink_preset(
             break
     if existing_idx >= 0:
         warnings.append(
-            f"audit_sinks[{name}] already existed — fields overwritten (other "
-            "keys preserved)",
+            f"audit_sinks[{name}] already existed — fields overwritten (other keys preserved)",
         )
         # Shallow-merge: preserve operator-added keys (min_severity,
         # actions, batch_size, etc.) that the preset does not own.
@@ -568,10 +868,12 @@ def _build_sink_entry(
             # are mapped onto the new insecure_skip_verify field.
             insecure = not _parse_bool(inputs.get("verify_tls", "true"))
         else:
-            insecure = _parse_bool(inputs.get(
-                "insecure_skip_verify",
-                "true" if insecure_default else "false",
-            ))
+            insecure = _parse_bool(
+                inputs.get(
+                    "insecure_skip_verify",
+                    "true" if insecure_default else "false",
+                )
+            )
         block: dict[str, Any] = {
             "endpoint": endpoint,
             "token_env": preset.token_env,
@@ -672,8 +974,7 @@ def _resolve_inputs(preset: Preset, inputs: dict[str, str]) -> dict[str, str]:
             val = default
         if not val:
             raise ValueError(
-                f"preset {preset.id!r}: missing required input {flag_name!r} "
-                "(no default provided)",
+                f"preset {preset.id!r}: missing required input {flag_name!r} (no default provided)",
             )
         resolved[flag_name] = val
     # Pass-through extra keys (dataset, verify_tls, url_path) that are
@@ -685,7 +986,9 @@ def _resolve_inputs(preset: Preset, inputs: dict[str, str]) -> dict[str, str]:
 
 
 def _destination_name(
-    preset: Preset, override: str | None, inputs: dict[str, str],
+    preset: Preset,
+    override: str | None,
+    inputs: dict[str, str],
 ) -> str:
     if override:
         return override
@@ -710,6 +1013,8 @@ def _destination_name(
         endpoint = inputs.get("endpoint", "")
         host = endpoint.split("/")[0] if endpoint else "otlp"
         return f"otlp-{_slug(host)}"
+    if preset.id == "local-otlp":
+        return "local-observability"
     return preset.id
 
 
@@ -727,11 +1032,23 @@ def _render_template(template: str, inputs: dict[str, str]) -> str:
         ) from exc
 
 
+def _render_header_template(template: str, inputs: dict[str, str]) -> str:
+    """Render preset inputs while preserving ``${ENV_VAR}`` references."""
+
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key not in inputs:
+            raise ValueError(f"header template {template!r} references unknown input {key!r}")
+        return inputs[key]
+
+    return re.sub(r"(?<!\$)\{([a-zA-Z_][a-zA-Z0-9_]*)\}", replace, template)
+
+
 def _strip_scheme(url: str) -> str:
     low = url.lower()
     for prefix in ("https://", "http://"):
         if low.startswith(prefix):
-            return url[len(prefix):]
+            return url[len(prefix) :]
     return url
 
 
@@ -751,16 +1068,18 @@ def _summarize_diff(
         a = after.get("otel") or {}
         if b.get("enabled") != a.get("enabled"):
             lines.append(f"otel.enabled: {b.get('enabled')} -> {a.get('enabled')}")
-        for sig in ("traces", "metrics", "logs"):
-            bs = (b.get(sig) or {}).get("enabled")
-            as_ = (a.get(sig) or {}).get("enabled")
-            if bs != as_:
-                lines.append(f"otel.{sig}.enabled: {bs} -> {as_}")
-        if (b.get("headers") or {}) != (a.get("headers") or {}):
-            # Redact values — show keys only.
-            keys = sorted((a.get("headers") or {}).keys())
-            lines.append(f"otel.headers: {', '.join(keys)} (values redacted)")
-        lines.append(f"otel stamped with preset={name}")
+        destination = next(
+            (item for item in (a.get("destinations") or []) if isinstance(item, dict) and item.get("name") == name),
+            {},
+        )
+        enabled_signals = [sig for sig in ("traces", "metrics", "logs") if (destination.get(sig) or {}).get("enabled")]
+        lines.append(
+            f"otel.destinations[{name}] preset={destination.get('preset', '')} "
+            f"signals={','.join(enabled_signals) or 'none'}"
+        )
+        headers = destination.get("headers") or {}
+        if headers:
+            lines.append(f"otel.destinations[{name}].headers: {', '.join(sorted(headers))} (values redacted)")
         return lines
 
     bsinks = before.get("audit_sinks") or []
@@ -789,8 +1108,7 @@ def _apply_secret(
         dotenv = _load_dotenv(os.path.join(data_dir, DOTENV_FILE_NAME))
         if preset.token_env not in dotenv and not os.environ.get(preset.token_env):
             return [
-                f"{preset.token_env}: not set — sink/exporter will fail until "
-                "exported or added to ~/.defenseclaw/.env",
+                f"{preset.token_env}: not set — sink/exporter will fail until exported or added to ~/.defenseclaw/.env",
             ]
         return []
     if dry_run:
@@ -909,10 +1227,7 @@ def _load_dotenv(path: str) -> dict[str, str]:
 
 
 def _write_dotenv(path: str, entries: dict[str, str]) -> None:
-    lines = [
-        f"{k}={sanitize_dotenv_value(v, key=k)}\n"
-        for k, v in sorted(entries.items())
-    ]
+    lines = [f"{k}={sanitize_dotenv_value(v, key=k)}\n" for k, v in sorted(entries.items())]
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     # O_NOFOLLOW (where available) refuses to open through a symlink so a
     # pre-planted symlink cannot redirect the secret write elsewhere.

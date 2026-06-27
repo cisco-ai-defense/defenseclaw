@@ -1,0 +1,274 @@
+---
+title: Galileo
+description: Send DefenseClaw GenAI traces to Galileo Cloud or self-hosted Galileo while keeping local observability enabled.
+keywords:
+  - Galileo
+  - OpenTelemetry
+  - OTLP
+  - multi OTLP
+  - defenseclaw setup galileo
+---
+
+DefenseClaw sends OpenTelemetry GenAI spans to Galileo over OTLP
+HTTP/protobuf. Galileo is a **traces-only** destination; metrics and logs can
+continue flowing to the bundled local collector or another named OTLP backend.
+
+## Cloud setup
+
+```bash
+export GALILEO_API_KEY='...'
+
+defenseclaw setup galileo \
+  --non-interactive \
+  --project defenseclaw \
+  --logstream production \
+  --persist-api-key
+
+defenseclaw setup galileo test
+```
+
+`--persist-api-key` copies the environment value into the owner-only
+`~/.defenseclaw/.env`. The key is never written to `config.yaml`; the OTLP
+header contains `${GALILEO_API_KEY}`.
+
+Run `defenseclaw setup galileo` without flags for the guided wizard, or open
+**Setup → Observability → Galileo Cloud / Self-hosted** in `defenseclaw tui`.
+
+## Self-hosted setup
+
+DefenseClaw derives the API hostname by replacing a leading `console.` with
+`api.` or `console-` with `api-`, then appends `/otel/traces`:
+
+```bash
+export GALILEO_API_KEY='...'
+
+defenseclaw setup galileo \
+  --deployment self-hosted \
+  --console-url https://console.galileo.example.com \
+  --project defenseclaw \
+  --logstream production
+```
+
+For deployments with a custom hostname or path convention, pass the complete
+endpoint explicitly:
+
+```bash
+defenseclaw setup galileo \
+  --deployment self-hosted \
+  --trace-endpoint https://api.example.com/galileo/otel/traces \
+  --project defenseclaw \
+  --logstream production
+```
+
+TLS verification is always enabled for Galileo setup and canary requests.
+
+## Keep local observability and Galileo together
+
+```bash
+defenseclaw setup local-observability up
+defenseclaw setup galileo
+defenseclaw setup observability list
+```
+
+The resulting configuration contains two independent destinations:
+
+```yaml
+otel:
+  enabled: true
+  destinations:
+    - name: local-observability
+      preset: local-otlp
+      enabled: true
+      protocol: grpc
+      endpoint: 127.0.0.1:4317
+      traces: { enabled: true }
+      metrics: { enabled: true }
+      logs: { enabled: true }
+
+    - name: galileo
+      preset: galileo
+      enabled: true
+      protocol: http
+      endpoint: https://api.galileo.ai/otel/traces
+      batch:
+        scheduled_delay_ms: 1000
+      headers:
+        Galileo-API-Key: ${GALILEO_API_KEY}
+        project: defenseclaw
+        logstream: production
+      span_filter:
+        operations:
+          - name: chat
+            require_attributes:
+              - gen_ai.operation.name
+              - gen_ai.provider.name
+              - gen_ai.request.model
+              - gen_ai.input.messages
+              - gen_ai.output.messages
+          - name: invoke_agent
+            require_attributes:
+              - gen_ai.operation.name
+              - gen_ai.agent.name
+              - gen_ai.provider.name
+              - openinference.span.kind
+              - gen_ai.input.messages
+              - gen_ai.output.messages
+          - name: execute_tool
+            require_attributes:
+              - gen_ai.operation.name
+              - gen_ai.tool.name
+              - openinference.span.kind
+              - gen_ai.tool.call.arguments
+              - gen_ai.tool.call.result
+              - gen_ai.input.messages
+              - gen_ai.output.messages
+      traces: { enabled: true }
+      metrics: { enabled: false }
+      logs: { enabled: false }
+```
+
+Each destination has its own bounded export queue. A Galileo outage does not
+stop local Tempo/Grafana export, and a local collector outage does not stop
+Galileo export. Credential-bearing routes are rejected at gateway startup if a
+hand-edited endpoint uses remote plaintext transport or URL userinfo; loopback
+collectors may still use plaintext.
+
+## Manage and verify
+
+```bash
+defenseclaw setup observability list
+defenseclaw setup observability list --json
+defenseclaw setup galileo status
+defenseclaw setup galileo status --json
+defenseclaw setup galileo test
+defenseclaw setup galileo disable
+defenseclaw setup galileo enable
+defenseclaw setup galileo remove --yes
+```
+
+Destination names are identities. A new name appends a route; the same name
+updates only that route. The dedicated Galileo command always manages the
+destination named `galileo`, so rerunning it reports `UPDATE` and never replaces
+`local-observability`. Preview the exact result without writing:
+
+```bash
+defenseclaw setup galileo --project defenseclaw --logstream production --dry-run
+```
+
+To configure a second Galileo project, use the unified command with a unique
+name:
+
+```bash
+defenseclaw setup observability add galileo \
+  --name galileo-security \
+  --endpoint https://api.galileo.ai/otel/traces \
+  --project defenseclaw \
+  --logstream security
+```
+
+The inventory distinguishes process-wide `otel` destinations from
+`audit_sinks` and prints each destination's enabled signal set.
+
+`test` asks the running gateway to emit canonical agent/chat spans, flushes the
+real destination processor, and prints the trace ID only after the Galileo
+exporter records an OTLP acknowledgement. Use `test --direct` only to isolate
+remote auth/connectivity; it bypasses filtering, batching, and fan-out.
+
+The TUI Overview includes a full-width **Observability Destinations · Runtime**
+panel. It lists every runtime-loaded named OTel route and audit sink with
+target, process/global/connector scope, kind/preset, state, signals, schema
+eligibility, delivery/rejection/failure counts, and endpoint. Explicit
+per-connector suppression is visible too.
+Headers and credential values are never displayed. The compact Services row
+remains as a roll-up. `defenseclaw status` shows each destination, while
+`defenseclaw doctor` probes every enabled endpoint independently.
+
+## DefenseClaw and GenAI semantic conventions
+
+DefenseClaw keeps its `defenseclaw.*` security attributes as the authoritative
+policy and forensic schema, then adds a standards-compatible projection on AI
+inference spans:
+
+| DefenseClaw data | GenAI projection |
+| --- | --- |
+| provider and request model | `gen_ai.provider.name`, `gen_ai.request.model` |
+| response model and token counts | `gen_ai.response.model`, `gen_ai.usage.*` |
+| session ID | `gen_ai.conversation.id` |
+| prompt and response | `gen_ai.input.messages`, `gen_ai.output.messages` |
+| agent identity | `gen_ai.agent.*` |
+| tool name and call ID | `gen_ai.tool.*` |
+
+Prompt and response values follow DefenseClaw's persistent-sink redaction
+policy. They are correlation-safe redaction placeholders by default; raw
+content is exported only when redaction has been explicitly disabled for all
+sinks.
+
+The Galileo preset writes a vendor-neutral per-destination `span_filter` that
+filters out policy, scanner, health, and other operational spans that do not
+satisfy Galileo's GenAI span requirements. Filtering is driven by this explicit
+contract, not by the destination or preset name. Those spans still flow
+unchanged to local-observability and other OTLP destinations. This avoids
+Galileo partial-success rejections without weakening the richer DefenseClaw
+schema.
+
+Hook connectors expose prompts, model completions, and tool calls as separate
+events. DefenseClaw gives each hook delivery a short canonical `invoke_agent`
+anchor and parents that delivery's completed `chat`, `execute_tool`, or
+lifecycle span to it. The pair is exported as an independently indexable trace;
+DefenseClaw does not append children for hours to a trace a backend may already
+have finalized. `gen_ai.conversation.id` and the stable agent, root-session,
+lifecycle, and execution attributes group these short traces into the same
+Galileo session and Agent360 identity. This keeps long-running agents real-time
+without disconnected operations or duplicated `Bash → Bash` rows. Connectors
+with post-model hooks export chat output at that hook; Codex and Claude Code use
+their turn-completion/Stop signal as the chat fallback. Completed tools export
+immediately during long-running turns. Correlation caches and content are
+bounded, duplicate completions are suppressed, and restart gaps use explicit
+unavailable-input placeholders.
+
+The machine-readable contracts live under `schemas/otel/`:
+
+- `runtime-llm-span.schema.json`
+- `runtime-agent-span.schema.json`
+- `runtime-tool-span.schema.json`
+- `runtime-approval-span.schema.json`
+- `galileo-export-profile.schema.json`
+
+Runtime contract tests emit real spans and compare their name, kind, required
+attributes, and complete attribute set to these schemas. The schema checker
+also pins the Galileo preset to traces-only and keeps each operation branch
+aligned with its matching chat, agent, or tool runtime contract.
+
+### Read the routing and delivery funnel
+
+`defenseclaw.telemetry.destination.spans` counts every destination-profile
+decision with `destination`, `outcome`, and `reason` attributes. For Galileo:
+
+```text
+observed → eligible → attempted → delivered | rejected | failed
+```
+
+`eligible` means the operation-specific schema matched; it is not remote
+success. `collector_accepted` (and the compatibility `delivered` counter) is a
+batch-level span count inferred from OTLP responses and
+partial-success rejection counts; it is not per-span attribution. The runtime
+canary is stricter: its trace is isolated into its own export request and must
+appear in the destination's acknowledged trace-ID set. Indexing remains
+unverified until the trace appears in Galileo Logs. Protocol partial success
+increments `rejected`, while authentication, transport, TLS,
+timeout, and other exporter errors increment `failed`. `/health`, `setup
+galileo status`, and the TUI expose the same process-lifetime counters without
+headers or credentials.
+
+## Migrating a flat `otel:` configuration
+
+The runtime accepts named destinations only. Preview and apply the one-way
+conversion before restart:
+
+```bash
+defenseclaw setup observability migrate-otel
+defenseclaw setup observability migrate-otel --apply
+```
+
+The migration preserves endpoint, headers, TLS settings, enabled signals, and
+batch settings, writes a backup, then removes the flat transport fields.

@@ -164,3 +164,24 @@ func TestParseIntStrict(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractHookPayloadReportedCost(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		payload map[string]interface{}
+		want    hookReportedCost
+	}{
+		{"top-level", map[string]interface{}{"total_cost_usd": 1.25}, hookReportedCost{USD: 1.25, Present: true, Cumulative: true}},
+		{"nested usage string", map[string]interface{}{"usage": map[string]interface{}{"cost_usd": "0.0042"}}, hookReportedCost{USD: 0.0042, Present: true}},
+		{"reported zero is present", map[string]interface{}{"sessionCostUsd": 0}, hookReportedCost{USD: 0, Present: true, Cumulative: true}},
+		{"generic cost is not assumed USD", map[string]interface{}{"cost": 99}, hookReportedCost{}},
+		{"missing", map[string]interface{}{"model": "gpt-5"}, hookReportedCost{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractHookPayloadReportedCost(tc.payload); got != tc.want {
+				t.Fatalf("extractHookPayloadReportedCost() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}

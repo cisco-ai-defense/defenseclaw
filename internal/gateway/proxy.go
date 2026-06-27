@@ -2666,6 +2666,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			system, aliasModel, providerName,
 			maxTokens, temperature,
 		)
+		p.otel.SetGenAIInput(llmSpan, lastUserText(req.Messages))
 		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.request.body", string(req.RawBody))
 	}
 
@@ -2673,6 +2674,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
+			p.otel.SetGenAIOutput(llmSpan, "")
 			p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 		}
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
@@ -2695,6 +2697,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 		}
 	}
 	if p.otel != nil && llmSpan != nil {
+		p.otel.SetGenAIOutput(llmSpan, content)
 		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.response.body", string(resp.RawResponse))
 	}
 	responseMeta := proxyLLMEventMeta(p, r, req, providerName)
@@ -2884,6 +2887,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			system, aliasModel, providerName,
 			maxTokens, temperature,
 		)
+		p.otel.SetGenAIInput(llmSpan, lastUserText(req.Messages))
 		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.request.body", string(req.RawBody))
 	}
 
@@ -2978,6 +2982,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	})
+	if p.otel != nil && llmSpan != nil {
+		p.otel.SetGenAIOutput(llmSpan, accumulated.String())
+	}
 	// Flush any remaining initial buffer (short streams that completed
 	// before reaching the buffer threshold). Run a guardrail check first.
 	if !initialBufFlushed && !streamBlocked && len(initialChunkBuf) > 0 {

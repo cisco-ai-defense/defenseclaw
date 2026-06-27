@@ -4063,6 +4063,90 @@ func TestReportSinksHealth_NoSinksConfigured(t *testing.T) {
 	}
 }
 
+func TestDestinationRoutingHealthMarshal(t *testing.T) {
+	raw, err := json.Marshal(destinationRoutingHealth{
+		provider: &telemetry.Provider{}, destination: "filtered",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]float64
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"accepted", "dropped", "total", "accepted_percentage"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("routing health missing %q: %s", key, raw)
+		}
+	}
+}
+
+func TestTelemetryCanaryUsesRuntimeExporterAcknowledgement(t *testing.T) {
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/otel/traces" {
+			t.Errorf("collector path=%q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	cfg := &config.Config{
+		Environment: "test",
+		Claw:        config.ClawConfig{Mode: config.ClawOpenClaw},
+		OTel: config.OTelConfig{
+			Enabled: true,
+			Traces:  config.OTelTracePolicyConfig{Sampler: "always_on", SamplerArg: "1.0"},
+			Batch: config.OTelBatchConfig{
+				MaxExportBatchSize: 16, ScheduledDelayMs: 10, MaxQueueSize: 32,
+			},
+			Destinations: []config.OTelDestinationConfig{{
+				Name: "galileo", Preset: "galileo", Enabled: true,
+				Protocol: "http", Endpoint: collector.URL,
+				Traces: config.OTelTracesConfig{Enabled: true, URLPath: "/otel/traces"},
+				SpanFilter: config.OTelSpanFilterConfig{Operations: []config.OTelSpanFilterOperationConfig{
+					{Name: "chat", RequireAttributes: []string{
+						"gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model",
+						"gen_ai.input.messages", "gen_ai.output.messages",
+					}},
+					{Name: "invoke_agent", RequireAttributes: []string{
+						"gen_ai.operation.name", "gen_ai.agent.name",
+						"gen_ai.input.messages", "gen_ai.output.messages",
+					}},
+				}},
+			}},
+		},
+	}
+	provider, err := telemetry.NewProvider(context.Background(), cfg, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	api := &APIServer{otel: provider}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost, "/api/v1/telemetry/canary", strings.NewReader(`{"destination":"galileo"}`),
+	)
+	api.handleTelemetryCanary(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		TraceID      string                                `json:"trace_id"`
+		Acknowledged bool                                  `json:"acknowledged"`
+		Delivery     telemetry.DestinationDeliverySnapshot `json:"delivery"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Acknowledged || len(payload.TraceID) != 32 {
+		t.Fatalf("payload=%+v", payload)
+	}
+	if payload.Delivery.Attempted != 2 || payload.Delivery.Delivered != 2 {
+		t.Fatalf("delivery=%+v want two acknowledged runtime spans", payload.Delivery)
+	}
+}
+
 func TestReportSinksHealth_AllDisabledStillSurfacesEntries(t *testing.T) {
 	s := &Sidecar{
 		cfg: &config.Config{
@@ -4154,6 +4238,48 @@ func TestReportSinksHealth_MixedEnabledDisabled(t *testing.T) {
 	}
 	if rows[1]["enabled"] != true {
 		t.Errorf("rows[1].enabled = %v, want true", rows[1]["enabled"])
+	}
+}
+
+func TestReportSinksHealth_IncludesConnectorOverridesAndSuppression(t *testing.T) {
+	codexSinks := []config.AuditSink{
+		{
+			Name: "codex-otlp", Kind: config.SinkKindOTLPLogs, Enabled: true,
+			OTLPLogs: &config.OTLPLogsSinkConfig{
+				Endpoint: "collector.example.test:4317", Protocol: "grpc",
+			},
+		},
+	}
+	claudeSinks := []config.AuditSink{}
+	s := &Sidecar{
+		cfg: &config.Config{
+			Observability: config.ObservabilityConfig{
+				Connectors: map[string]config.PerConnectorObservability{
+					"codex":      {AuditSinks: &codexSinks},
+					"claudecode": {AuditSinks: &claudeSinks},
+				},
+			},
+		},
+		health: NewSidecarHealth(),
+	}
+
+	s.reportSinksHealth()
+	snap := s.health.Snapshot()
+	if snap.Sinks.State != StateRunning {
+		t.Fatalf("State = %q, want %q", snap.Sinks.State, StateRunning)
+	}
+	if got, _ := snap.Sinks.Details["summary"].(string); got != "1 of 2 enabled" {
+		t.Fatalf("summary = %q, want %q", got, "1 of 2 enabled")
+	}
+	rows, ok := snap.Sinks.Details["sinks"].([]map[string]interface{})
+	if !ok || len(rows) != 2 {
+		t.Fatalf("sinks = %#v, want two connector-scoped rows", snap.Sinks.Details["sinks"])
+	}
+	if rows[0]["scope"] != "connector:claudecode" || rows[0]["suppressed"] != true {
+		t.Errorf("rows[0] = %#v, want claudecode suppression", rows[0])
+	}
+	if rows[1]["scope"] != "connector:codex" || rows[1]["name"] != "codex-otlp" {
+		t.Errorf("rows[1] = %#v, want codex OTLP sink", rows[1])
 	}
 }
 
@@ -6077,6 +6203,41 @@ func TestAPINetworkEgressHandlerRejectsInvalidBlockedFilter(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "blocked must be true, false, 1, or 0") {
 		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestAPINetworkEgressIngestDerivesAgentLifecycleCorrelation(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	meta := llmEventMeta{
+		Source: "codex", SessionID: "egress-session", AgentID: "egress-agent",
+		LifecycleID: "lifecycle-0123456789abcdef", ExecutionID: "execution-0123456789abcdef",
+	}
+	api := &APIServer{
+		store: store, logger: logger,
+		hookSessionTraces: map[string]hookSessionTrace{
+			hookSessionTraceKey(meta): {meta: meta},
+		},
+	}
+	body := strings.NewReader(`{"hostname":"docs.example.com","policy_outcome":"allowed"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/network-egress", body)
+	ctx := ContextWithSessionID(req.Context(), meta.SessionID)
+	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{AgentID: meta.AgentID, AgentName: "codex", AgentType: "codex"})
+	ctx = audit.ContextWithEnvelope(ctx, audit.CorrelationEnvelope{Connector: "codex", ToolID: "web-tool-1"})
+	req = req.WithContext(ctx)
+	req.Header.Set(llmEventUserIDHeader, "user-egress")
+	w := httptest.NewRecorder()
+	api.handleNetworkEgress(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Result().StatusCode, w.Body.String())
+	}
+	rows, err := store.QueryNetworkEgressEvents(audit.NetworkEgressFilter{AgentID: meta.AgentID})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("egress rows=%d err=%v", len(rows), err)
+	}
+	got := rows[0]
+	if got.AgentLifecycleID != meta.LifecycleID || got.AgentExecutionID != meta.ExecutionID ||
+		got.UserID != "user-egress" || got.ToolID != "web-tool-1" {
+		t.Fatalf("egress correlation=%+v", got)
 	}
 }
 

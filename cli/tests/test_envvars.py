@@ -9,7 +9,6 @@ truthy-value semantics).
 
 from __future__ import annotations
 
-import json
 import os
 import unittest
 from unittest import mock
@@ -17,12 +16,8 @@ from unittest import mock
 from defenseclaw.envvars import (
     ALLOWED_CATEGORIES,
     ALLOWED_SECURITY_IMPACT,
-    CATEGORY_CREDENTIAL,
     CATEGORY_SECURITY_OPT_OUT,
-    EnvVar,
-    Registry,
     active_security_overrides,
-    iter_entries,
     load_registry,
 )
 
@@ -171,10 +166,9 @@ class ActiveSecurityOverridesTests(unittest.TestCase):
         names = [e.name for e in active_security_overrides(env)]
         self.assertIn("DEFENSECLAW_DISABLE_REDACTION", names)
 
-    def test_three_overrides_returns_three(self) -> None:
+    def test_two_overrides_returns_two(self) -> None:
         env = {
             "DEFENSECLAW_DISABLE_REDACTION": "1",
-            "DEFENSECLAW_OTEL_TLS_INSECURE": "true",
             "DEFENSECLAW_CODEX_LOOPBACK_TRUST": "1",
         }
         names = [e.name for e in active_security_overrides(env)]
@@ -183,7 +177,6 @@ class ActiveSecurityOverridesTests(unittest.TestCase):
             sorted(
                 [
                     "DEFENSECLAW_DISABLE_REDACTION",
-                    "DEFENSECLAW_OTEL_TLS_INSECURE",
                     "DEFENSECLAW_CODEX_LOOPBACK_TRUST",
                 ]
             ),

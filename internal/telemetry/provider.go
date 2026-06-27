@@ -20,11 +20,15 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -81,6 +85,11 @@ type Provider struct {
 	// guard it with an atomic load rather than a mutex; writes
 	// happen exactly once during NewSidecar.
 	agentInstanceID atomic.Value // string
+
+	routingMu      sync.RWMutex
+	routingByName  map[string]*destinationRoutingCounters
+	deliveryMu     sync.RWMutex
+	deliveryByName map[string]*destinationDeliveryCounters
 }
 
 // NewProvider initializes the OTel SDK providers and exporters. When
@@ -95,7 +104,7 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 	}
 
 	res := buildResource(fullCfg, version)
-	headers := expandHeaders(cfg.Headers)
+	destinations := effectiveOTelDestinations(cfg)
 
 	p := &Provider{
 		cfg:       cfg,
@@ -104,11 +113,34 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 		startTime: time.Now(),
 	}
 
-	if cfg.Traces.Enabled {
-		tp, err := newTracerProvider(ctx, cfg, res, headers)
-		if err != nil {
-			return nil, fmt.Errorf("telemetry: traces: %w", err)
+	traceOpts := []sdktrace.TracerProviderOption{
+		sdktrace.WithResource(res),
+		sdktrace.WithSampler(buildSampler(cfg.Traces.Sampler, cfg.Traces.SamplerArg)),
+	}
+	traceCount := 0
+	for _, destination := range destinations {
+		if !destination.cfg.Enabled || !destination.cfg.Traces.Enabled {
+			continue
 		}
+		processor, err := newSpanProcessor(
+			ctx, destination.cfg, expandHeaders(destination.cfg.Headers), p, destination.name,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("telemetry: destination %q traces: %w", destination.name, err)
+		}
+		if destination.filter.Enabled() {
+			processor = &filteredSpanProcessor{
+				next:        processor,
+				provider:    p,
+				destination: destination.name,
+				filter:      destination.filter,
+			}
+		}
+		traceOpts = append(traceOpts, sdktrace.WithSpanProcessor(processor))
+		traceCount++
+	}
+	if traceCount > 0 {
+		tp := sdktrace.NewTracerProvider(traceOpts...)
 		p.tracerProvider = tp
 		otel.SetTracerProvider(tp)
 		p.tracer = tp.Tracer("defenseclaw")
@@ -116,11 +148,21 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 		p.tracer = traceNoop.NewTracerProvider().Tracer("defenseclaw")
 	}
 
-	if cfg.Logs.Enabled {
-		lp, err := newLoggerProvider(ctx, cfg, res, headers)
-		if err != nil {
-			return nil, fmt.Errorf("telemetry: logs: %w", err)
+	logOpts := []sdklog.LoggerProviderOption{sdklog.WithResource(res)}
+	logCount := 0
+	for _, destination := range destinations {
+		if !destination.cfg.Enabled || !destination.cfg.Logs.Enabled {
+			continue
 		}
+		processor, err := newLogProcessor(ctx, destination.cfg, expandHeaders(destination.cfg.Headers))
+		if err != nil {
+			return nil, fmt.Errorf("telemetry: destination %q logs: %w", destination.name, err)
+		}
+		logOpts = append(logOpts, sdklog.WithProcessor(processor))
+		logCount++
+	}
+	if logCount > 0 {
+		lp := sdklog.NewLoggerProvider(logOpts...)
 		p.loggerProvider = lp
 		global.SetLoggerProvider(lp)
 		p.logger = lp.Logger("defenseclaw")
@@ -128,11 +170,23 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 		p.logger = logNoop.NewLoggerProvider().Logger("defenseclaw")
 	}
 
-	if cfg.Metrics.Enabled {
-		mp, err := newMeterProvider(ctx, cfg, res, headers, p)
-		if err != nil {
-			return nil, fmt.Errorf("telemetry: metrics: %w", err)
+	meterOpts := []sdkmetric.Option{sdkmetric.WithResource(res)}
+	metricCount := 0
+	for _, destination := range destinations {
+		if !destination.cfg.Enabled || !destination.cfg.Metrics.Enabled {
+			continue
 		}
+		reader, err := newMetricReader(
+			ctx, destination.cfg, expandHeaders(destination.cfg.Headers), p,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("telemetry: destination %q metrics: %w", destination.name, err)
+		}
+		meterOpts = append(meterOpts, sdkmetric.WithReader(reader))
+		metricCount++
+	}
+	if metricCount > 0 {
+		mp := sdkmetric.NewMeterProvider(meterOpts...)
 		p.meterProvider = mp
 		otel.SetMeterProvider(mp)
 		p.meter = mp.Meter("defenseclaw")
@@ -167,7 +221,7 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 		p.RecordConfigLoadError(ctx, reason)
 	}
 
-	if cfg.Metrics.Enabled {
+	if metricCount > 0 {
 		capCtx, capCancel := context.WithCancel(context.Background())
 		p.capacityShutdown = capCancel
 		startCapacityBackground(capCtx, p)
@@ -271,17 +325,474 @@ func (p *Provider) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func newTracerProvider(ctx context.Context, cfg config.OTelConfig, res *resource.Resource, headers map[string]string) (*sdktrace.TracerProvider, error) {
+type namedOTelDestination struct {
+	name   string
+	filter config.OTelSpanFilterConfig
+	cfg    destinationExporterConfig
+}
+
+type destinationExporterConfig struct {
+	Enabled  bool
+	Protocol string
+	Endpoint string
+	Headers  map[string]string
+	TLS      config.OTelTLSConfig
+	Traces   config.OTelTracesConfig
+	Logs     config.OTelLogsConfig
+	Metrics  config.OTelMetricsConfig
+	Batch    config.OTelBatchConfig
+}
+
+// effectiveOTelDestinations resolves process-wide policy defaults into each
+// explicitly named exporter. An empty destination list means no export.
+func effectiveOTelDestinations(global config.OTelConfig) []namedOTelDestination {
+	out := make([]namedOTelDestination, 0, len(global.Destinations))
+	for i, destination := range global.Destinations {
+		name := strings.TrimSpace(destination.Name)
+		if name == "" {
+			name = fmt.Sprintf("destination-%d", i+1)
+		}
+		batch := destination.Batch
+		if batch.MaxExportBatchSize <= 0 {
+			batch.MaxExportBatchSize = global.Batch.MaxExportBatchSize
+		}
+		if batch.ScheduledDelayMs <= 0 {
+			batch.ScheduledDelayMs = global.Batch.ScheduledDelayMs
+		}
+		if batch.MaxQueueSize <= 0 {
+			batch.MaxQueueSize = global.Batch.MaxQueueSize
+		}
+
+		traces := destination.Traces
+		traces.Sampler = global.Traces.Sampler
+		traces.SamplerArg = global.Traces.SamplerArg
+		logs := destination.Logs
+		logs.EmitIndividualFindings = global.Logs.EmitIndividualFindings
+		metrics := destination.Metrics
+		if metrics.ExportIntervalS <= 0 {
+			metrics.ExportIntervalS = global.Metrics.ExportIntervalS
+		}
+		if metrics.Temporality == "" {
+			metrics.Temporality = global.Metrics.Temporality
+		}
+
+		out = append(out, namedOTelDestination{
+			name:   name,
+			filter: destination.SpanFilter,
+			cfg: destinationExporterConfig{
+				Enabled:  destination.Enabled,
+				Protocol: destination.Protocol,
+				Endpoint: destination.Endpoint,
+				Headers:  destination.Headers,
+				TLS:      destination.TLS,
+				Traces:   traces,
+				Logs:     logs,
+				Metrics:  metrics,
+				Batch:    batch,
+			},
+		})
+	}
+	return out
+}
+
+// filteredSpanProcessor projects a destination-specific subset of the process
+// trace graph without changing what general OTLP destinations receive.
+type filteredSpanProcessor struct {
+	next        sdktrace.SpanProcessor
+	provider    *Provider
+	destination string
+	filter      config.OTelSpanFilterConfig
+}
+
+func (p *filteredSpanProcessor) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+
+func (p *filteredSpanProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
+	if spanMatchesFilter(span, p.filter) {
+		p.provider.recordDestinationRoute(p.destination, true)
+		p.provider.RecordDestinationSpanRoute(
+			context.Background(), p.destination, "accepted", "span_filter_match",
+		)
+		p.next.OnEnd(span)
+		return
+	}
+	p.provider.recordDestinationRoute(p.destination, false)
+	p.provider.RecordDestinationSpanRoute(
+		context.Background(), p.destination, "dropped", "span_filter_miss",
+	)
+}
+
+func (p *filteredSpanProcessor) Shutdown(ctx context.Context) error {
+	return p.next.Shutdown(ctx)
+}
+
+func (p *filteredSpanProcessor) ForceFlush(ctx context.Context) error {
+	return p.next.ForceFlush(ctx)
+}
+
+func spanMatchesFilter(span sdktrace.ReadOnlySpan, filter config.OTelSpanFilterConfig) bool {
+	tracked := make(map[string]struct{}, len(filter.RequireAttributes)+1)
+	for _, key := range filter.RequireAttributes {
+		tracked[strings.TrimSpace(key)] = struct{}{}
+	}
+	if strings.TrimSpace(filter.RequireOperation) != "" {
+		tracked["gen_ai.operation.name"] = struct{}{}
+	}
+	for _, operation := range filter.Operations {
+		tracked["gen_ai.operation.name"] = struct{}{}
+		for _, key := range operation.RequireAttributes {
+			tracked[strings.TrimSpace(key)] = struct{}{}
+		}
+	}
+	values := make(map[string]string, len(tracked))
+	for _, item := range span.Attributes() {
+		key := string(item.Key)
+		if _, ok := tracked[key]; ok {
+			values[key] = strings.TrimSpace(item.Value.AsString())
+		}
+	}
+	if len(filter.Operations) > 0 {
+		operationName := values["gen_ai.operation.name"]
+		for _, operation := range filter.Operations {
+			if strings.TrimSpace(operation.Name) != operationName {
+				continue
+			}
+			for _, key := range operation.RequireAttributes {
+				if values[strings.TrimSpace(key)] == "" {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	}
+	if operation := strings.TrimSpace(filter.RequireOperation); operation != "" &&
+		values["gen_ai.operation.name"] != operation {
+		return false
+	}
+	for _, key := range filter.RequireAttributes {
+		if values[strings.TrimSpace(key)] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// DestinationRoutingSnapshot reports process-lifetime results for one named
+// destination filter independently of metrics export.
+type DestinationRoutingSnapshot struct {
+	Accepted uint64 `json:"accepted"`
+	Dropped  uint64 `json:"dropped"`
+}
+
+type destinationRoutingCounters struct {
+	accepted atomic.Uint64
+	dropped  atomic.Uint64
+}
+
+// DestinationDeliverySnapshot reports batch-level exporter outcomes.
+// CollectorAccepted is the number of spans in error-free OTLP requests plus
+// the accepted-count inferred from protocol partial-success rejection counts.
+// It is not per-span acknowledgement and does not claim backend indexing.
+type DestinationDeliverySnapshot struct {
+	Attempted         uint64    `json:"attempted"`
+	Pending           uint64    `json:"pending"`
+	CollectorAccepted uint64    `json:"collector_accepted"`
+	Delivered         uint64    `json:"delivered"` // compatibility alias
+	Rejected          uint64    `json:"rejected"`
+	Failed            uint64    `json:"failed"`
+	ExportBatches     uint64    `json:"export_batches"`
+	FailedBatches     uint64    `json:"failed_batches"`
+	LastAttemptAt     time.Time `json:"last_attempt_at,omitempty"`
+	LastSuccessAt     time.Time `json:"last_success_at,omitempty"`
+	LastError         string    `json:"last_error,omitempty"`
+	IndexingStatus    string    `json:"indexing_status"`
+}
+
+type destinationDeliveryCounters struct {
+	attempted                    atomic.Uint64
+	delivered                    atomic.Uint64
+	rejected                     atomic.Uint64
+	failed                       atomic.Uint64
+	exportBatches                atomic.Uint64
+	failedBatches                atomic.Uint64
+	mu                           sync.RWMutex
+	lastAttemptAt                time.Time
+	lastSuccessAt                time.Time
+	lastError                    string
+	acknowledgedCanaryTraceIDs   map[string]struct{}
+	acknowledgedCanaryTraceOrder []string
+}
+
+const recentAcknowledgedCanaryTraceLimit = 256
+
+func (p *Provider) recordDestinationRoute(destination string, accepted bool) {
+	p.routingMu.RLock()
+	counters := p.routingByName[destination]
+	p.routingMu.RUnlock()
+	if counters == nil {
+		p.routingMu.Lock()
+		if p.routingByName == nil {
+			p.routingByName = make(map[string]*destinationRoutingCounters)
+		}
+		counters = p.routingByName[destination]
+		if counters == nil {
+			counters = &destinationRoutingCounters{}
+			p.routingByName[destination] = counters
+		}
+		p.routingMu.Unlock()
+	}
+	if accepted {
+		counters.accepted.Add(1)
+	} else {
+		counters.dropped.Add(1)
+	}
+}
+
+// DestinationRoutingStats reports process-lifetime routing for one named
+// destination and remains correct with multiple filtered destinations.
+func (p *Provider) DestinationRoutingStats(destination string) DestinationRoutingSnapshot {
+	if p == nil {
+		return DestinationRoutingSnapshot{}
+	}
+	p.routingMu.RLock()
+	counters := p.routingByName[destination]
+	p.routingMu.RUnlock()
+	if counters == nil {
+		return DestinationRoutingSnapshot{}
+	}
+	return DestinationRoutingSnapshot{
+		Accepted: counters.accepted.Load(),
+		Dropped:  counters.dropped.Load(),
+	}
+}
+
+func (p *Provider) deliveryCounters(destination string) *destinationDeliveryCounters {
+	p.deliveryMu.RLock()
+	counters := p.deliveryByName[destination]
+	p.deliveryMu.RUnlock()
+	if counters != nil {
+		return counters
+	}
+	p.deliveryMu.Lock()
+	defer p.deliveryMu.Unlock()
+	if p.deliveryByName == nil {
+		p.deliveryByName = make(map[string]*destinationDeliveryCounters)
+	}
+	if p.deliveryByName[destination] == nil {
+		p.deliveryByName[destination] = &destinationDeliveryCounters{}
+	}
+	return p.deliveryByName[destination]
+}
+
+// DestinationDeliveryStats returns process-lifetime delivery results for one
+// named OTLP trace destination.
+func (p *Provider) DestinationDeliveryStats(destination string) DestinationDeliverySnapshot {
+	if p == nil {
+		return DestinationDeliverySnapshot{}
+	}
+	p.deliveryMu.RLock()
+	counters := p.deliveryByName[destination]
+	p.deliveryMu.RUnlock()
+	if counters == nil {
+		return DestinationDeliverySnapshot{}
+	}
+	counters.mu.RLock()
+	defer counters.mu.RUnlock()
+	snapshot := DestinationDeliverySnapshot{
+		Attempted: counters.attempted.Load(), Delivered: counters.delivered.Load(),
+		CollectorAccepted: counters.delivered.Load(), IndexingStatus: "unverified",
+		Rejected: counters.rejected.Load(), Failed: counters.failed.Load(),
+		ExportBatches: counters.exportBatches.Load(), FailedBatches: counters.failedBatches.Load(),
+		LastAttemptAt: counters.lastAttemptAt, LastSuccessAt: counters.lastSuccessAt,
+		LastError: counters.lastError,
+	}
+	routing := p.DestinationRoutingStats(destination)
+	if routing.Accepted > snapshot.Attempted {
+		snapshot.Pending = routing.Accepted - snapshot.Attempted
+	}
+	return snapshot
+}
+
+// DestinationAcknowledgedCanaryTrace reports whether a marked canary trace was
+// part of an isolated export request with zero reported rejections. OTLP
+// partial success reports only a count, so any rejected span makes that
+// canary trace unacknowledged.
+func (p *Provider) DestinationAcknowledgedCanaryTrace(destination, traceID string) bool {
+	if p == nil || strings.TrimSpace(traceID) == "" {
+		return false
+	}
+	p.deliveryMu.RLock()
+	counters := p.deliveryByName[destination]
+	p.deliveryMu.RUnlock()
+	if counters == nil {
+		return false
+	}
+	counters.mu.RLock()
+	_, ok := counters.acknowledgedCanaryTraceIDs[traceID]
+	counters.mu.RUnlock()
+	return ok
+}
+
+func recordAcknowledgedCanaryTraceIDs(counters *destinationDeliveryCounters, spans []sdktrace.ReadOnlySpan) {
+	counters.mu.Lock()
+	defer counters.mu.Unlock()
+	if counters.acknowledgedCanaryTraceIDs == nil {
+		counters.acknowledgedCanaryTraceIDs = make(map[string]struct{})
+	}
+	for _, span := range spans {
+		if !isCanarySpan(span) || !span.SpanContext().TraceID().IsValid() {
+			continue
+		}
+		traceID := span.SpanContext().TraceID().String()
+		if _, exists := counters.acknowledgedCanaryTraceIDs[traceID]; exists {
+			continue
+		}
+		counters.acknowledgedCanaryTraceIDs[traceID] = struct{}{}
+		counters.acknowledgedCanaryTraceOrder = append(counters.acknowledgedCanaryTraceOrder, traceID)
+	}
+	for len(counters.acknowledgedCanaryTraceOrder) > recentAcknowledgedCanaryTraceLimit {
+		oldest := counters.acknowledgedCanaryTraceOrder[0]
+		counters.acknowledgedCanaryTraceOrder = counters.acknowledgedCanaryTraceOrder[1:]
+		delete(counters.acknowledgedCanaryTraceIDs, oldest)
+	}
+}
+
+var partialSuccessRejectedSpans = regexp.MustCompile(`\(([0-9]+) spans rejected\)`)
+
+// destinationSpanExporter gives every independently queued destination an
+// observable acknowledgement boundary. The upstream OTLP exporters return an
+// error for protocol-level partial_success responses, so rejected counts can
+// be separated from transport/auth failures without reimplementing OTLP.
+type destinationSpanExporter struct {
+	next        sdktrace.SpanExporter
+	provider    *Provider
+	destination string
+}
+
+func (e *destinationSpanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	regular, canaries := partitionCanarySpans(spans)
+	var errs []error
+	if len(regular) > 0 {
+		if err := e.exportBatch(ctx, regular); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, canary := range canaries {
+		if err := e.exportBatch(ctx, canary); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// partitionCanarySpans prevents unrelated traffic from sharing a canary OTLP
+// request. Each canary trace gets a single-use export boundary, so an
+// zero-rejection response can be attributed to that exact trace ID.
+func partitionCanarySpans(spans []sdktrace.ReadOnlySpan) ([]sdktrace.ReadOnlySpan, [][]sdktrace.ReadOnlySpan) {
+	regular := make([]sdktrace.ReadOnlySpan, 0, len(spans))
+	byTrace := make(map[string][]sdktrace.ReadOnlySpan)
+	order := make([]string, 0)
+	for _, span := range spans {
+		if !isCanarySpan(span) {
+			regular = append(regular, span)
+			continue
+		}
+		traceID := span.SpanContext().TraceID().String()
+		if _, exists := byTrace[traceID]; !exists {
+			order = append(order, traceID)
+		}
+		byTrace[traceID] = append(byTrace[traceID], span)
+	}
+	canaries := make([][]sdktrace.ReadOnlySpan, 0, len(order))
+	for _, traceID := range order {
+		canaries = append(canaries, byTrace[traceID])
+	}
+	return regular, canaries
+}
+
+func isCanarySpan(span sdktrace.ReadOnlySpan) bool {
+	if span == nil {
+		return false
+	}
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) == telemetryCanaryAttribute && attr.Value.Type() == attribute.BOOL {
+			return attr.Value.AsBool()
+		}
+	}
+	return false
+}
+
+func (e *destinationSpanExporter) exportBatch(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	counters := e.provider.deliveryCounters(e.destination)
+	now := time.Now().UTC()
+	count := uint64(len(spans))
+	counters.attempted.Add(count)
+	e.provider.recordDestinationExport(ctx, e.destination, "attempted", count)
+	counters.exportBatches.Add(1)
+	counters.mu.Lock()
+	counters.lastAttemptAt = now
+	counters.mu.Unlock()
+
+	err := e.next.ExportSpans(ctx, spans)
+	if err == nil {
+		counters.delivered.Add(count)
+		e.provider.recordDestinationExport(ctx, e.destination, "delivered", count)
+		recordAcknowledgedCanaryTraceIDs(counters, spans)
+		counters.mu.Lock()
+		counters.lastSuccessAt = time.Now().UTC()
+		counters.lastError = ""
+		counters.mu.Unlock()
+		return nil
+	}
+
+	message := err.Error()
+	if match := partialSuccessRejectedSpans.FindStringSubmatch(message); len(match) == 2 {
+		rejected, parseErr := strconv.ParseUint(match[1], 10, 64)
+		if parseErr == nil {
+			if rejected > count {
+				rejected = count
+			}
+			counters.rejected.Add(rejected)
+			counters.delivered.Add(count - rejected)
+			if rejected == 0 {
+				recordAcknowledgedCanaryTraceIDs(counters, spans)
+			}
+			e.provider.recordDestinationExport(ctx, e.destination, "rejected", rejected)
+			e.provider.recordDestinationExport(ctx, e.destination, "delivered", count-rejected)
+		}
+	} else {
+		counters.failed.Add(count)
+		e.provider.recordDestinationExport(ctx, e.destination, "failed", count)
+	}
+	counters.failedBatches.Add(1)
+	if len(message) > 300 {
+		message = message[:300] + "…"
+	}
+	counters.mu.Lock()
+	counters.lastError = message
+	counters.mu.Unlock()
+	return err
+}
+
+func (e *destinationSpanExporter) Shutdown(ctx context.Context) error {
+	return e.next.Shutdown(ctx)
+}
+
+func newSpanProcessor(
+	ctx context.Context,
+	cfg destinationExporterConfig,
+	headers map[string]string,
+	provider *Provider,
+	destination string,
+) (sdktrace.SpanProcessor, error) {
 	var exporter sdktrace.SpanExporter
 	var err error
 
 	endpoint := resolveValue(cfg.Traces.Endpoint, cfg.Endpoint)
-	protocol := resolveProtocol(
-		cfg.Traces.Protocol,
-		cfg.Protocol,
-		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
-		"OTEL_EXPORTER_OTLP_PROTOCOL",
-	)
+	protocol := resolveProtocol(cfg.Traces.Protocol, cfg.Protocol)
+	if err := validateCredentialTransport(endpoint, cfg.TLS.Insecure, headers); err != nil {
+		return nil, err
+	}
 
 	if protocol == "http" {
 		opts := []tracehttp.Option{}
@@ -298,9 +809,7 @@ func newTracerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 				opts = append(opts, tracehttp.WithEndpoint(endpoint))
 			}
 		}
-		if len(headers) > 0 {
-			opts = append(opts, tracehttp.WithHeaders(headers))
-		}
+		opts = append(opts, tracehttp.WithHeaders(headers))
 		if cfg.Traces.URLPath != "" {
 			opts = append(opts, tracehttp.WithURLPath(cfg.Traces.URLPath))
 		}
@@ -324,9 +833,7 @@ func newTracerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 				opts = append(opts, tracegrpc.WithEndpoint(endpoint))
 			}
 		}
-		if len(headers) > 0 {
-			opts = append(opts, tracegrpc.WithHeaders(headers))
-		}
+		opts = append(opts, tracegrpc.WithHeaders(headers))
 		if cfg.TLS.Insecure {
 			opts = append(opts, tracegrpc.WithInsecure())
 		} else if cfg.TLS.CACert != "" {
@@ -341,33 +848,27 @@ func newTracerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 	if err != nil {
 		return nil, err
 	}
-
-	sampler := buildSampler(cfg.Traces.Sampler, cfg.Traces.SamplerArg)
+	exporter = &destinationSpanExporter{
+		next: exporter, provider: provider, destination: destination,
+	}
 
 	bsp := sdktrace.NewBatchSpanProcessor(exporter,
 		sdktrace.WithMaxExportBatchSize(cfg.Batch.MaxExportBatchSize),
 		sdktrace.WithBatchTimeout(time.Duration(cfg.Batch.ScheduledDelayMs)*time.Millisecond),
 		sdktrace.WithMaxQueueSize(cfg.Batch.MaxQueueSize),
 	)
-
-	return sdktrace.NewTracerProvider(
-		sdktrace.WithResource(res),
-		sdktrace.WithSpanProcessor(bsp),
-		sdktrace.WithSampler(sampler),
-	), nil
+	return bsp, nil
 }
 
-func newLoggerProvider(ctx context.Context, cfg config.OTelConfig, res *resource.Resource, headers map[string]string) (*sdklog.LoggerProvider, error) {
+func newLogProcessor(ctx context.Context, cfg destinationExporterConfig, headers map[string]string) (sdklog.Processor, error) {
 	var exporter sdklog.Exporter
 	var err error
 
 	endpoint := resolveValue(cfg.Logs.Endpoint, cfg.Endpoint)
-	protocol := resolveProtocol(
-		cfg.Logs.Protocol,
-		cfg.Protocol,
-		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
-		"OTEL_EXPORTER_OTLP_PROTOCOL",
-	)
+	protocol := resolveProtocol(cfg.Logs.Protocol, cfg.Protocol)
+	if err := validateCredentialTransport(endpoint, cfg.TLS.Insecure, headers); err != nil {
+		return nil, err
+	}
 
 	if protocol == "http" {
 		opts := []loghttp.Option{}
@@ -384,9 +885,7 @@ func newLoggerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 				opts = append(opts, loghttp.WithEndpoint(endpoint))
 			}
 		}
-		if len(headers) > 0 {
-			opts = append(opts, loghttp.WithHeaders(headers))
-		}
+		opts = append(opts, loghttp.WithHeaders(headers))
 		if cfg.Logs.URLPath != "" {
 			opts = append(opts, loghttp.WithURLPath(cfg.Logs.URLPath))
 		}
@@ -410,9 +909,7 @@ func newLoggerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 				opts = append(opts, loggrpc.WithEndpoint(endpoint))
 			}
 		}
-		if len(headers) > 0 {
-			opts = append(opts, loggrpc.WithHeaders(headers))
-		}
+		opts = append(opts, loggrpc.WithHeaders(headers))
 		if cfg.TLS.Insecure {
 			opts = append(opts, loggrpc.WithInsecure())
 		} else if cfg.TLS.CACert != "" {
@@ -434,10 +931,7 @@ func newLoggerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 		sdklog.WithExportInterval(time.Duration(cfg.Batch.ScheduledDelayMs)*time.Millisecond),
 	)
 
-	return sdklog.NewLoggerProvider(
-		sdklog.WithResource(res),
-		sdklog.WithProcessor(batcher),
-	), nil
+	return batcher, nil
 }
 
 // temporalitySelector returns a TemporalitySelector based on the config value.
@@ -453,17 +947,15 @@ func temporalitySelector(mode string) sdkmetric.TemporalitySelector {
 	}
 }
 
-func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.Resource, headers map[string]string, tel *Provider) (*sdkmetric.MeterProvider, error) {
+func newMetricReader(ctx context.Context, cfg destinationExporterConfig, headers map[string]string, tel *Provider) (sdkmetric.Reader, error) {
 	var exporter sdkmetric.Exporter
 	var err error
 
 	endpoint := resolveValue(cfg.Metrics.Endpoint, cfg.Endpoint)
-	protocol := resolveProtocol(
-		cfg.Metrics.Protocol,
-		cfg.Protocol,
-		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
-		"OTEL_EXPORTER_OTLP_PROTOCOL",
-	)
+	protocol := resolveProtocol(cfg.Metrics.Protocol, cfg.Protocol)
+	if err := validateCredentialTransport(endpoint, cfg.TLS.Insecure, headers); err != nil {
+		return nil, err
+	}
 	tsel := temporalitySelector(cfg.Metrics.Temporality)
 
 	if protocol == "http" {
@@ -481,9 +973,7 @@ func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.
 				opts = append(opts, metrichttp.WithEndpoint(endpoint))
 			}
 		}
-		if len(headers) > 0 {
-			opts = append(opts, metrichttp.WithHeaders(headers))
-		}
+		opts = append(opts, metrichttp.WithHeaders(headers))
 		if cfg.Metrics.URLPath != "" {
 			opts = append(opts, metrichttp.WithURLPath(cfg.Metrics.URLPath))
 		}
@@ -507,9 +997,7 @@ func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.
 				opts = append(opts, metricgrpc.WithEndpoint(endpoint))
 			}
 		}
-		if len(headers) > 0 {
-			opts = append(opts, metricgrpc.WithHeaders(headers))
-		}
+		opts = append(opts, metricgrpc.WithHeaders(headers))
 		if cfg.TLS.Insecure {
 			opts = append(opts, metricgrpc.WithInsecure())
 		} else if cfg.TLS.CACert != "" {
@@ -531,10 +1019,7 @@ func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.
 		sdkmetric.WithInterval(time.Duration(cfg.Metrics.ExportIntervalS)*time.Second),
 	)
 
-	return sdkmetric.NewMeterProvider(
-		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(reader),
-	), nil
+	return reader, nil
 }
 
 func buildTLSConfig(caCertPath string) (*tls.Config, error) {
@@ -575,24 +1060,99 @@ func resolveValue(signal, global string) string {
 	return global
 }
 
-func resolveProtocol(signal, global, signalEnv, globalEnv string) string {
+func resolveProtocol(signal, destination string) string {
+	value := ""
 	if signal != "" {
-		return strings.ToLower(strings.TrimSpace(signal))
+		value = signal
+	} else if destination != "" {
+		value = destination
 	}
-	if global != "" {
-		return strings.ToLower(strings.TrimSpace(global))
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "http/protobuf", "http/json":
+		return "http"
+	case "grpc/protobuf":
+		return "grpc"
+	default:
+		return value
 	}
-	if v := strings.TrimSpace(os.Getenv(signalEnv)); v != "" {
-		return strings.ToLower(v)
-	}
-	if v := strings.TrimSpace(os.Getenv(globalEnv)); v != "" {
-		return strings.ToLower(v)
-	}
-	return ""
 }
 
 func endpointLooksLikeURL(endpoint string) bool {
 	return strings.Contains(endpoint, "://")
+}
+
+func credentialHeaderName(name string) bool {
+	// This is intentionally a heuristic for the credential headers used by
+	// shipped presets. Preset authors adding a non-standard secret header (for
+	// example X-Secret) must extend this matcher so plaintext remote endpoints
+	// remain blocked by validateCredentialTransport.
+	normalized := strings.NewReplacer("-", "", "_", "", ".", "").Replace(
+		strings.ToLower(strings.TrimSpace(name)),
+	)
+	return strings.Contains(normalized, "authorization") ||
+		strings.Contains(normalized, "apikey") ||
+		strings.Contains(normalized, "token") ||
+		normalized == "xhoneycombteam"
+}
+
+func hasCredentialHeaders(headers map[string]string) bool {
+	for name := range headers {
+		if credentialHeaderName(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func endpointTransport(endpoint string, tlsInsecure bool) (host string, insecure, userinfo bool) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		// Empty named-destination endpoints are rejected by config validation.
+		return "localhost", tlsInsecure, false
+	}
+	if endpointLooksLikeURL(endpoint) {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			return "", tlsInsecure, false
+		}
+		return u.Hostname(), tlsInsecure || strings.EqualFold(u.Scheme, "http"), u.User != nil
+	}
+	host = endpoint
+	if parsedHost, _, err := net.SplitHostPort(endpoint); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	return host, tlsInsecure, false
+}
+
+func loopbackEndpointHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// validateCredentialTransport is the runtime guard for hand-edited config.
+// Setup commands validate their endpoints too, but the long-running exporter
+// must independently refuse to attach credentials to plaintext remote links.
+func validateCredentialTransport(endpoint string, tlsInsecure bool, headers map[string]string) error {
+	if !hasCredentialHeaders(headers) {
+		return nil
+	}
+	host, insecure, userinfo := endpointTransport(endpoint, tlsInsecure)
+	if userinfo {
+		return fmt.Errorf("telemetry: credential-bearing OTLP endpoint must not contain URL userinfo")
+	}
+	if insecure && !loopbackEndpointHost(host) {
+		return fmt.Errorf(
+			"telemetry: credential-bearing OTLP endpoint %q must use TLS unless it is loopback",
+			host,
+		)
+	}
+	return nil
 }
 
 func splitEndpointURL(endpoint string) (host, path string, insecure, ok bool) {
@@ -608,8 +1168,8 @@ func splitEndpointURL(endpoint string) (host, path string, insecure, ok bool) {
 
 // expandHeaders substitutes ${ENV_VAR} references in header values so
 // operators can keep secrets out of the YAML file. Header semantics stay
-// vendor-neutral: if you need an auth header (X-SF-Token, api-key, etc.)
-// put it in cfg.OTel.Headers or export it via OTEL_EXPORTER_OTLP_HEADERS.
+// vendor-neutral: auth headers (X-SF-Token, api-key, etc.) must be declared
+// on the named destination that uses them.
 func expandHeaders(headers map[string]string) map[string]string {
 	out := make(map[string]string, len(headers))
 	for k, v := range headers {

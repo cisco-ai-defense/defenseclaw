@@ -317,7 +317,7 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
       - DEFENSECLAW_LLM_KEY
       - DEFENSECLAW_HOME
       - DEFENSECLAW_DISABLE_REDACTION
-      - DEFENSECLAW_OTEL_TLS_INSECURE
+      - DEFENSECLAW_OTEL_ENABLED
       - DefenseClaw configuration
     ---
 

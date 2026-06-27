@@ -190,6 +190,12 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 	if ev.AgentType == "" {
 		ev.AgentType = id.AgentType
 	}
+	if ev.UserID == "" {
+		ev.UserID = id.UserID
+	}
+	if ev.UserName == "" {
+		ev.UserName = id.UserName
+	}
 	if ev.AgentInstanceID == "" {
 		ev.AgentInstanceID = firstNonEmpty(id.AgentInstanceID, env.AgentInstanceID)
 	}
@@ -210,6 +216,16 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 	}
 	if ev.Connector == "" {
 		ev.Connector = env.Connector
+	}
+	if ev.AgentLifecycleID == "" && ev.SessionID != "" && ev.AgentID != "" {
+		source := firstNonEmpty(ev.Connector, ev.AgentType)
+		if source != "" {
+			ev.AgentLifecycleID = stableLLMEventID("lifecycle", source, ev.SessionID, ev.AgentID)
+			ev.AgentExecutionID = firstNonEmpty(
+				ev.AgentExecutionID,
+				stableLLMEventID("execution", source, ev.SessionID, ev.AgentID, gatewaylog.ProcessRunID()),
+			)
+		}
 	}
 }
 

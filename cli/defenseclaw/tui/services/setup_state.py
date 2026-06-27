@@ -892,7 +892,7 @@ def _looks_like_url_field(key: str) -> bool:
 
 
 def _is_otlp_endpoint_field(key: str) -> bool:
-    return key in {"otel.endpoint", "otel.traces.endpoint", "otel.logs.endpoint", "otel.metrics.endpoint"}
+    return False
 
 
 def _validate_host_port(value: str) -> bool:
@@ -1114,11 +1114,7 @@ _BOOL_FIELD_KEYS = frozenset(
         "gateway.watcher.mcp.take_action",
         "gateway.watchdog.enabled",
         "otel.enabled",
-        "otel.tls.insecure",
-        "otel.traces.enabled",
-        "otel.logs.enabled",
         "otel.logs.emit_individual_findings",
-        "otel.metrics.enabled",
         "watch.auto_block",
         "watch.allow_list_bypass_scan",
         "watch.rescan_enabled",
@@ -1191,6 +1187,6 @@ _CSV_FIELD_KEYS = frozenset(
     }
 )
 
-_KV_CSV_FIELD_KEYS = frozenset({"otel.headers", "otel.resource.attributes"})
+_KV_CSV_FIELD_KEYS = frozenset({"otel.resource.attributes"})
 
 _TRISTATE_FIELD_KEYS = frozenset({"openshell.auto_pair", "openshell.host_networking"})

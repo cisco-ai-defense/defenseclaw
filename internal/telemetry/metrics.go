@@ -174,6 +174,8 @@ type metricsSet struct {
 	queueDrops      metric.Int64Counter
 	// Process health
 	panicsTotal           metric.Int64Counter
+	destinationSpans      metric.Int64Counter
+	destinationExports    metric.Int64Counter
 	telemetryExporterErrs metric.Int64Counter
 	exporterLastExportSec metric.Float64Gauge
 	tuiFilterApplied      metric.Int64Counter
@@ -218,11 +220,15 @@ type metricsSet struct {
 
 	// On-demand local agent discovery. Emitted by the CLI via
 	// POST /api/v1/agents/discovery after it has stripped raw local paths.
-	agentDiscoveryRuns      metric.Int64Counter
-	agentDiscoveryDuration  metric.Float64Histogram
-	agentDiscoverySignals   metric.Int64Counter
-	agentDiscoveryInstalled metric.Int64Gauge
-	agentDiscoveryErrors    metric.Int64Counter
+	agentLastSeen             metric.Float64Gauge
+	agentLifecycleTransitions metric.Int64Counter
+	agentReportedCost         metric.Float64Gauge
+	agentTokenUsage           metric.Int64Counter
+	agentDiscoveryRuns        metric.Int64Counter
+	agentDiscoveryDuration    metric.Float64Histogram
+	agentDiscoverySignals     metric.Int64Counter
+	agentDiscoveryInstalled   metric.Int64Gauge
+	agentDiscoveryErrors      metric.Int64Counter
 
 	// Continuous AI discovery / shadow AI visibility.
 	aiDiscoveryRuns             metric.Int64Counter
@@ -802,6 +808,18 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	if err != nil {
 		return nil, err
 	}
+	ms.destinationSpans, err = m.Int64Counter("defenseclaw.telemetry.destination.spans",
+		metric.WithUnit("{span}"),
+		metric.WithDescription("Spans accepted or dropped by a named telemetry destination profile"))
+	if err != nil {
+		return nil, err
+	}
+	ms.destinationExports, err = m.Int64Counter("defenseclaw.telemetry.destination.exports",
+		metric.WithUnit("{span}"),
+		metric.WithDescription("Spans attempted, delivered, rejected, or failed by a named OTLP destination"))
+	if err != nil {
+		return nil, err
+	}
 	ms.telemetryExporterErrs, err = m.Int64Counter("defenseclaw.telemetry.exporter.errors",
 		metric.WithUnit("{error}"),
 		metric.WithDescription("OTel exporter or SDK errors by signal"))
@@ -990,6 +1008,39 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.otelIngestLastSeen, err = m.Float64Gauge("defenseclaw.otel.ingest.last_seen_ts",
 		metric.WithUnit("s"),
 		metric.WithDescription("Unix-seconds timestamp of the most recent OTLP-HTTP batch accepted from a given source/signal. Used by the ConnectorTelemetrySilent alert."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Agent360 inventory and lifecycle metrics. The identity labels are
+	// intentionally stable correlation IDs rather than request/trace IDs so a
+	// newly observed agent appears in Grafana immediately and remains
+	// selectable across executions and gateway restarts.
+	ms.agentLastSeen, err = m.Float64Gauge("defenseclaw.agent.last_seen",
+		metric.WithUnit("s"),
+		metric.WithDescription("Unix seconds when an agent lifecycle transition was last observed."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentLifecycleTransitions, err = m.Int64Counter("defenseclaw.agent.lifecycle.transitions",
+		metric.WithUnit("{transition}"),
+		metric.WithDescription("Agent lifecycle transitions by stable identity, execution, event, and state."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentReportedCost, err = m.Float64Gauge("defenseclaw.agent.reported_cost",
+		metric.WithUnit("USD"),
+		metric.WithDescription("Latest upstream-reported cumulative agent cost in USD; absent when the connector does not report cost."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentTokenUsage, err = m.Int64Counter("defenseclaw.agent.token.usage",
+		metric.WithUnit("{token}"),
+		metric.WithDescription("Connector-reported input and output tokens attributed to an agent tree."),
 	)
 	if err != nil {
 		return nil, err
@@ -1669,7 +1720,7 @@ func NormalizeGenAIProviderLabel(provider string) string {
 		return "other"
 	}
 	switch {
-	case p == "openai" || strings.Contains(p, "openai"):
+	case p == "openai" || p == "codex" || strings.Contains(p, "openai"):
 		return "openai"
 	case p == "anthropic" || strings.Contains(p, "anthropic") || strings.Contains(p, "claude"):
 		return "anthropic"
@@ -1717,6 +1768,7 @@ func NormalizeHookEventTypeLabel(eventType string) string {
 	canon := strings.ToLower(strings.TrimSpace(eventType))
 	canon = strings.ReplaceAll(canon, "_", "")
 	canon = strings.ReplaceAll(canon, "-", "")
+	canon = strings.ReplaceAll(canon, ".", "")
 	if canon == "" {
 		return "unknown"
 	}
@@ -1725,14 +1777,24 @@ func NormalizeHookEventTypeLabel(eventType string) string {
 		return "prompt"
 	case "toolcall", "pretooluse", "beforetool", "pretoolcall", "permissionrequest", "beforeshellexecution", "beforemcpexecution", "beforereadfile", "beforetabfileread", "prereadcode", "prewritecode", "preruncommand", "premcptooluse":
 		return "tool_call"
-	case "toolresult", "posttooluse", "posttoolusefailure", "aftertool", "posttoolcall", "postreadcode", "postwritecode", "postruncommand", "postmcptooluse", "aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit", "afteragentresponse", "afteragentthought", "afteragent", "aftermodel", "posttoolbatch":
+	case "toolresult", "posttooluse", "posttoolusefailure", "aftertool", "posttoolcall", "postreadcode", "postwritecode", "postruncommand", "postmcptooluse", "aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit", "afteragentthought", "afteragent", "posttoolbatch":
 		return "tool_result"
-	case "stop", "agentstop", "subagentstop":
+	case "postllmcall", "postinvocation", "postcascaderesponse", "postcascaderesponsewithtranscript", "messagedisplay", "afteragentresponse", "aftermodel":
+		return "response"
+	case "stop", "stopfailure", "agentstop", "sessionidle", "teammateidle":
 		return "stop"
+	case "subagentstart":
+		return "subagent_start"
+	case "subagentstop":
+		return "subagent_stop"
 	case "notification":
 		return "notification"
-	case "sessionstart":
-		return "sessionstart"
+	case "sessionstart", "onsessionstart", "onsessionreset", "sessioncreated":
+		return "session_start"
+	case "sessionend", "onsessionend", "onsessionfinalize", "sessiondeleted", "sessionerror":
+		return "session_end"
+	case "precompact", "postcompact", "precompress", "sessioncompacted":
+		return "compact"
 	default:
 		return "other"
 	}
@@ -1762,6 +1824,30 @@ func NormalizeMetricTextLabel(value string) string {
 	out := strings.Trim(b.String(), "_")
 	if out == "" {
 		return "other"
+	}
+	return out
+}
+
+// normalizeMetricIdentityLabel preserves exact runtime identities used to join
+// Prometheus, Loki, and Tempo. Prometheus label values may contain mixed case and
+// punctuation; only control characters are replaced so dashboard variables can
+// safely reuse the same value across every signal.
+func normalizeMetricIdentityLabel(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	for _, r := range trimmed {
+		if r < 0x20 || r == 0x7f {
+			b.WriteByte('_')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "unknown"
 	}
 	return out
 }
@@ -2475,6 +2561,30 @@ func (p *Provider) RecordExporterHealth(ctx context.Context, exporter string, st
 	))
 }
 
+// RecordDestinationSpanRoute records bounded-cardinality routing decisions for
+// destination-specific profiles such as Galileo's GenAI-only trace filter.
+func (p *Provider) RecordDestinationSpanRoute(ctx context.Context, destination, outcome, reason string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.destinationSpans.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("destination", destination),
+		attribute.String("outcome", outcome),
+		attribute.String("reason", reason),
+	))
+}
+
+func (p *Provider) recordDestinationExport(ctx context.Context, destination, outcome string, count uint64) {
+	if !p.Enabled() || p.metrics == nil || count == 0 {
+		return
+	}
+	p.metrics.destinationExports.Add(ctx, int64(count), metric.WithAttributes(
+		attribute.String("destination", destination),
+		attribute.String("outcome", outcome),
+		attribute.String("signal", "traces"),
+	))
+}
+
 // RecordPanic increments the panic counter and emits EventError.
 func (p *Provider) RecordPanic(ctx context.Context, subsystem gatewaylog.Subsystem) {
 	if p != nil && p.Enabled() && p.metrics != nil {
@@ -2781,6 +2891,107 @@ func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result 
 	// timestamp on every batch lets the ConnectorTelemetrySilent
 	// alert page when a connector goes silent for >10m.
 	p.metrics.otelIngestLastSeen.Record(ctx, float64(time.Now().Unix()), volumeAttrs)
+}
+
+// AgentLifecycleObservation is the bounded, connector-neutral inventory row
+// used by Agent Directory and Agent360. IDs are stable hashes produced by the
+// gateway lifecycle reconciler; raw prompts, outputs, and local paths never
+// become metric labels.
+type AgentLifecycleObservation struct {
+	Connector           string
+	AgentID             string
+	AgentName           string
+	AgentType           string
+	RootAgentID         string
+	ParentAgentID       string
+	RootSessionID       string
+	LifecycleID         string
+	ExecutionID         string
+	Event               string
+	State               string
+	Depth               int
+	ReportedCostUSD     float64
+	ReportedCostPresent bool
+}
+
+// RecordAgentLifecycle updates the automatic agent inventory and records the
+// transition. A connector-reported cost is recorded only when the source
+// payload explicitly supplied one; DefenseClaw never estimates or invents it.
+func (p *Provider) RecordAgentLifecycle(ctx context.Context, observation AgentLifecycleObservation) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	label := func(value, fallback string) string {
+		if strings.TrimSpace(value) == "" {
+			return fallback
+		}
+		return NormalizeMetricTextLabel(value)
+	}
+	identity := func(value, fallback string) string {
+		if strings.TrimSpace(value) == "" {
+			value = fallback
+		}
+		return normalizeMetricIdentityLabel(value)
+	}
+	depth := observation.Depth
+	if depth < 0 {
+		depth = 0
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("connector", label(observation.Connector, "unknown")),
+		attribute.String("gen_ai.agent.id", identity(observation.AgentID, "unknown")),
+		attribute.String("gen_ai.agent.name", label(observation.AgentName, "unknown")),
+		attribute.String("gen_ai.agent.type", label(observation.AgentType, "unknown")),
+		attribute.String("defenseclaw.agent.root.id", identity(observation.RootAgentID, observation.AgentID)),
+		attribute.String("defenseclaw.agent.parent.id", identity(observation.ParentAgentID, "none")),
+		attribute.String("defenseclaw.session.root.id", identity(observation.RootSessionID, "unknown")),
+		attribute.String("defenseclaw.agent.lifecycle.id", identity(observation.LifecycleID, "unknown")),
+		attribute.String("defenseclaw.agent.execution.id", identity(observation.ExecutionID, "unknown")),
+		attribute.String("defenseclaw.agent.lifecycle.event", label(observation.Event, "event")),
+		attribute.String("defenseclaw.agent.lifecycle.state", label(observation.State, "observed")),
+		attribute.Int("defenseclaw.agent.depth", depth),
+	)
+	p.metrics.agentLastSeen.Record(ctx, float64(time.Now().UnixNano())/float64(time.Second), attrs)
+	p.metrics.agentLifecycleTransitions.Add(ctx, 1, attrs)
+	if observation.ReportedCostPresent && observation.ReportedCostUSD >= 0 {
+		p.metrics.agentReportedCost.Record(ctx, observation.ReportedCostUSD, attrs)
+	}
+}
+
+// RecordAgentTokenUsage records the per-completed-model-call token counts that
+// the hook explicitly reported, retaining root-agent correlation for tree
+// totals. It is separate from the generic GenAI histogram so Agent360 can
+// aggregate descendants without a high-cardinality join.
+func (p *Provider) RecordAgentTokenUsage(ctx context.Context, observation AgentLifecycleObservation, input, output int64) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	base := []attribute.KeyValue{
+		attribute.String("connector", NormalizeMetricTextLabel(observation.Connector)),
+		attribute.String("gen_ai.agent.id", normalizeMetricIdentityLabel(observation.AgentID)),
+		attribute.String("gen_ai.agent.name", NormalizeMetricTextLabel(observation.AgentName)),
+		attribute.String("defenseclaw.agent.root.id", normalizeMetricIdentityLabel(firstNonEmptyTelemetry(observation.RootAgentID, observation.AgentID))),
+		attribute.String("defenseclaw.agent.lifecycle.id", normalizeMetricIdentityLabel(observation.LifecycleID)),
+		attribute.String("defenseclaw.agent.execution.id", normalizeMetricIdentityLabel(observation.ExecutionID)),
+	}
+	record := func(kind string, value int64) {
+		if value <= 0 {
+			return
+		}
+		attrs := append(append([]attribute.KeyValue{}, base...), attribute.String("kind", kind))
+		p.metrics.agentTokenUsage.Add(ctx, value, metric.WithAttributes(attrs...))
+	}
+	record("input", input)
+	record("output", output)
+}
+
+func firstNonEmptyTelemetry(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return "unknown"
 }
 
 // RecordAgentDiscovery records one on-demand agent discovery report accepted

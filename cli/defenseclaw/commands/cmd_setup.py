@@ -230,6 +230,13 @@ from defenseclaw.commands.cmd_setup_observability import observability  # noqa: 
 
 setup.add_command(observability)
 
+# Register the first-class Galileo cloud/self-hosted setup workflow. It writes
+# a named OTel destination through the shared observability writer, so Galileo
+# can coexist with local-observability and every other OTLP backend.
+from defenseclaw.commands.cmd_setup_galileo import galileo  # noqa: E402
+
+setup.add_command(galileo)
+
 # Register `defenseclaw setup local-observability` (bundled
 # Prom/Loki/Tempo/Grafana stack driver). Mirrors the `setup splunk
 # --logs` pattern: preflights Docker, drives a docker-compose bridge,
@@ -9676,22 +9683,26 @@ def _disable_splunk(
     click.echo("  Disabling Splunk integration...")
 
     from defenseclaw.observability import list_destinations, set_destination_enabled
+    dests = list_destinations(app.cfg.data_dir)
 
     if disable_both or o11y_only:
-        # Flip otel.enabled via the observability writer so unmodeled
-        # fields (resource.attributes, etc.) are preserved.
-        try:
-            set_destination_enabled("otel", False, app.cfg.data_dir)
-        except ValueError:
-            # No otel: block — nothing to disable.
-            pass
+        # Disable only Splunk's named OTLP routes. The top-level otel.enabled
+        # flag is now a master switch shared with Galileo, local-observability,
+        # and other destinations, so toggling it here would cause collateral
+        # telemetry loss.
+        for destination in dests:
+            if destination.target != "otel" or destination.preset_id != "splunk-o11y":
+                continue
+            try:
+                set_destination_enabled(destination.name, False, app.cfg.data_dir)
+            except ValueError:
+                pass
         click.echo("    Splunk O11y (OTLP): disabled")
 
     if disable_both or logs_only or enterprise_only:
         # Find splunk_hec audit sinks and flip enabled=false. The legacy
         # Config.splunk dataclass hydrates from the first enabled one, so
         # the gateway will see it as disabled on next load.
-        dests = list_destinations(app.cfg.data_dir)
         disabled_local = False
         disabled_enterprise = False
         for d in dests:
@@ -9783,22 +9794,35 @@ def _print_splunk_status(app: AppContext) -> None:
     otel = app.cfg.otel
     sc = app.cfg.splunk
 
-    if otel.enabled:
+    destination = next(
+        (item for item in otel.destinations if item.preset == "splunk-o11y"),
+        None,
+    )
+    route_enabled = otel.enabled and destination is not None and destination.enabled
+    if route_enabled:
+        traces = destination.traces
+        metrics = destination.metrics
+        logs = destination.logs
+        base_endpoint = destination.endpoint
+
+        def signal_endpoint(signal) -> str:
+            return signal.endpoint or base_endpoint
+
         click.echo("  Splunk Observability Cloud (OTLP):")
         click.echo("    Status:      enabled")
-        if otel.traces.endpoint:
-            realm = otel.traces.endpoint.replace("ingest.", "").replace(".observability.splunkcloud.com", "")
+        if signal_endpoint(traces):
+            realm = signal_endpoint(traces).replace("ingest.", "").replace(".observability.splunkcloud.com", "")
             click.echo(f"    Realm:       {realm}")
-        if otel.traces.enabled:
-            click.echo(f"    Traces:      {otel.traces.endpoint}{otel.traces.url_path}")
+        if traces.enabled:
+            click.echo(f"    Traces:      {signal_endpoint(traces)}{traces.url_path}")
         else:
             click.echo("    Traces:      disabled")
-        if otel.metrics.enabled:
-            click.echo(f"    Metrics:     {otel.metrics.endpoint}{otel.metrics.url_path}")
+        if metrics.enabled:
+            click.echo(f"    Metrics:     {signal_endpoint(metrics)}{metrics.url_path}")
         else:
             click.echo("    Metrics:     disabled")
-        if otel.logs.enabled:
-            click.echo(f"    Logs:        {otel.logs.endpoint}{otel.logs.url_path}")
+        if logs.enabled:
+            click.echo(f"    Logs:        {signal_endpoint(logs)}{logs.url_path}")
         else:
             click.echo("    Logs:        disabled")
         dotenv_path = os.path.join(app.cfg.data_dir, ".env")
