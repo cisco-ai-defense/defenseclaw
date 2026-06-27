@@ -314,6 +314,37 @@ func TestRecordExporterHealth_LastExport(t *testing.T) {
 	}
 }
 
+func TestRecordDestinationSpanRoute_EmitsMetric(t *testing.T) {
+	t.Parallel()
+	reader := sdkmetric.NewManualReader()
+	p, err := NewProviderForTest(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	p.RecordDestinationSpanRoute(ctx, "galileo", "accepted", "valid_genai_chat")
+	p.RecordDestinationSpanRoute(ctx, "galileo", "dropped", "not_valid_genai_chat")
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatal(err)
+	}
+	counter := findCounter(rm, "defenseclaw.telemetry.destination.spans")
+	if counter == nil {
+		t.Fatal("destination span routing counter missing")
+	}
+	sum, ok := counter.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("unexpected data type %T", counter.Data)
+	}
+	var total int64
+	for _, point := range sum.DataPoints {
+		total += point.Value
+	}
+	if total != 2 {
+		t.Fatalf("destination routing total=%d want 2", total)
+	}
+}
+
 func TestRecordSQLiteBusy_Counter(t *testing.T) {
 	t.Parallel()
 	reader := sdkmetric.NewManualReader()

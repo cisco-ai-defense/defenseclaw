@@ -85,17 +85,26 @@ defenseclaw setup local-observability up \
 | `--no-wait` | Don't block on healthchecks — fire-and-forget. |
 | `--timeout` | Seconds to wait for healthchecks. Default 180. |
 
-The OTLP protocol is read from the bridge readiness contract (currently `grpc`); there is no `--protocol` flag on `up`. Override it by editing `otel.protocol` in `config.yaml` if you need `http/protobuf`.
+The OTLP protocol is read from the bridge readiness contract (currently `grpc`); there is no `--protocol` flag on `up`. To use `http/protobuf`, configure that protocol on the named `local-observability` destination.
 
 ## What ends up in `config.yaml`
 
 ```yaml title="~/.defenseclaw/config.yaml (after up)"
 otel:
-  endpoint: 127.0.0.1:4317
-  protocol: grpc
-  insecure: true
-  signals: [traces, metrics, logs]
-  service_name: defenseclaw-gateway
+  enabled: true
+  destinations:
+    - name: local-observability
+      preset: local-otlp
+      enabled: true
+      endpoint: 127.0.0.1:4317
+      protocol: grpc
+      tls: { insecure: true }
+      traces: { enabled: true }
+      metrics: { enabled: true }
+      logs: { enabled: true }
+  resource:
+    attributes:
+      service.name: defenseclaw-gateway
 
 audit_sinks:
   - kind: otlp_logs
@@ -125,6 +134,7 @@ The bundle ships a full board set in `bundles/local_observability_stack/grafana/
     <File name="defenseclaw-runtime.json" />
     <File name="defenseclaw-reliability.json" />
     <File name="defenseclaw-agent-identity.json" />
+    <File name="defenseclaw-agent-360.json" />
     <File name="defenseclaw-ai-discovery.json" />
   </Folder>
 </Files>
@@ -143,9 +153,35 @@ The bundle ships a full board set in `bundles/local_observability_stack/grafana/
 | **Runtime & SLO** (`defenseclaw-runtime`) | Process health, runtime metrics, SLO histograms. |
 | **Reliability** (`defenseclaw-reliability`) | Schema violations, gateway errors, sink health, panics. |
 | **Agent identity** (`defenseclaw-agent-identity`) | Three-tier agent identity correlation, churn, discovery latency, per-connector header presence. |
+| **Agent360** (`defenseclaw-agent-360`) | Automatic Agent Directory plus one-click per-agent/tree lifecycle, executions, descendants, tools/websites, inputs/outputs, reported tokens/cost, security decisions, and Tempo drill-down. |
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Continuous AI inventory loop: active signals, per-vendor/product tables, confidence. |
 
 For a multi-connector gateway, start on **Connectors (Overview)** to compare connectors side by side, then click a connector cell to drill into **Connector Detail**.
+
+### Agent Directory and Agent360
+
+Open **Agent identity → Runtime Agent Directory**. Every hook lifecycle
+transition updates the stable `defenseclaw.agent.last_seen` inventory metric,
+so a newly observed root agent or subagent appears automatically. Click its
+**Agent ID** to open the reusable Agent360 dashboard; DefenseClaw does not
+create or provision a separate dashboard file for each agent.
+
+Agent360 correlates the same stable fields across all three backends:
+
+| Correlation | Purpose |
+| --- | --- |
+| `gen_ai.agent.id` | One logical root or delegated agent. |
+| `defenseclaw.agent.root.id` / `parent.id` | Full descendant tree and direct parent relationship. |
+| `defenseclaw.agent.lifecycle.id` | Durable identity across gateway restarts and resumed sessions. |
+| `defenseclaw.agent.execution.id` | One concrete execution attempt. |
+| `trace_id` | Direct Loki/Prometheus exemplar pivot into the Tempo waterfall. |
+
+Use **Scope = This agent** for a single agent, or **Agent tree** to include
+all descendants. Prometheus supplies directory, state, throughput, latency,
+token, and reported-cost totals; Loki supplies lifecycle/model/tool/network
+and security detail; Tempo supplies the complete request waterfall and dynamic
+node graph. Token and cost panels only display values explicitly reported by
+the connector. Missing values remain **Not reported** and are never estimated.
 
 They're auto-provisioned via `bundles/local_observability_stack/grafana/provisioning/`. The folder is named "DefenseClaw" inside Grafana so they're easy to find. Edits you make in the UI are not persisted back to disk by default — copy them out with `Dashboard → JSON Model` if you want to keep them.
 

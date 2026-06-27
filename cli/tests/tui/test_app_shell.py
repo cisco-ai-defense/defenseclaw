@@ -77,9 +77,49 @@ async def test_textual_shell_starts_on_overview() -> None:
         assert app.active_panel == "overview"
         assert "Overview" in app.body_text
         assert "SERVICES" in app.body_text
+        assert "OBSERVABILITY DESTINATIONS" in app.body_text
         assert "SCANNERS" in app.body_text
         assert "backend=textual" in app.status_text
         assert app.hint_text
+
+
+@pytest.mark.asyncio
+async def test_overview_renders_observability_destination_panel() -> None:
+    from rich.console import Console
+
+    overview = OverviewPanelModel(OverviewConfig(data_dir="/tmp/dc"), version="test")
+    overview.set_health(
+        HealthSnapshot(
+            telemetry=SubsystemHealth(
+                state="running",
+                details={
+                    "destinations": [
+                        {
+                            "name": "galileo",
+                            "preset": "galileo",
+                            "enabled": True,
+                            "signals": "traces",
+                            "endpoint": "https://api.example.test/otel/traces",
+                            "routing": {"accepted": 3, "dropped": 1},
+                        }
+                    ]
+                },
+            )
+        )
+    )
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 50)) as pilot:
+        await pilot.pause()
+        console = Console(width=170, height=80, record=True)
+        console.print(app._overview_renderable())
+        rendered = console.export_text()
+
+    assert "OBSERVABILITY DESTINATIONS · RUNTIME" in rendered
+    assert "Galileo" in rendered
+    assert "traces" in rendered
+    assert "75.0% (3/4)" in rendered
+    assert "https://api.example.test/otel/traces" in rendered
 
 
 @pytest.mark.asyncio

@@ -52,9 +52,16 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |
 | `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
 | `defenseclaw setup local-observability up\|down` | Bring up the bundled Prom/Loki/Tempo/Grafana stack. |
+| `defenseclaw setup galileo [status\|test\|enable\|disable\|remove]` | Configure and verify Galileo Cloud or self-hosted OTLP traces. |
 | `defenseclaw setup splunk` | Configure the Splunk audit sink. |
 | `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
-| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage audit-log fan-out destinations (OTLP logs, Splunk HEC, generic HTTP JSONL). Distinct from `setup webhook`, which manages notifier webhooks. |
+| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test\|migrate-otel` | Manage named OTLP telemetry destinations and audit-log sinks; convert flat OTel config once. Distinct from `setup webhook`, which manages notifier webhooks. |
+
+For observability destinations, `name` is the stable identity: a new name adds,
+and an existing name updates only that destination. Run `list --json` for the
+complete target/kind/signal inventory and `add ... --dry-run` for a safe preview.
+The TUI mirrors the runtime-loaded inventory in **Overview → Observability
+Destinations** and exposes the wizard at **0 Setup → Observability / Galileo**.
 | `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and persists to `~/.defenseclaw/.env`; `remove` only touches operator-added entries. All verbs accept `--json`. |
 
 <Callout title="Safety gates are intentional">

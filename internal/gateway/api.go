@@ -124,6 +124,19 @@ type APIServer struct {
 	llmPromptBySourceSessionOrder     []string
 	llmPromptBySourceSessionTurn      map[string]string
 	llmPromptBySourceSessionTurnOrder []string
+	hookLLMSpanPrompts                map[string]hookLLMSpanPrompt
+	hookLLMSpanPromptOrder            []string
+	hookLLMSpanCompleted              map[string]struct{}
+	hookLLMSpanCompletedOrder         []string
+	hookLLMSpanUsage                  map[string]hookLLMSpanUsage
+	hookLLMSpanUsageOrder             []string
+	hookToolInvocations               map[string]hookToolInvocation
+	hookToolInvocationOrder           []string
+	hookSessionTraces                 map[string]hookSessionTrace
+	hookSessionTraceOrder             []string
+	otlpMetricMu                      sync.Mutex
+	otlpMetricCumulative              map[string]otlpCumulativePoint
+	otlpMetricCumulativeOrder         []string
 
 	// stepIdxMu guards stepIdxBySession, the per-session 1-indexed
 	// turn counter used to populate audit.Event.StepIdx. A "turn" is
@@ -657,6 +670,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.Handle("/api/v1/inspect/", hookLimiter(inspectMux))
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
+	mux.HandleFunc("/api/v1/telemetry/canary", a.handleTelemetryCanary)
 	a.registerConnectorHookRoutes(mux, hookLimiter)
 	// OTLP-HTTP receiver for the three signal types codex
 	// (via [otel.exporter.otlp-http]) and Claude Code (via
@@ -760,6 +774,53 @@ func (a *APIServer) Run(ctx context.Context) error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// handleTelemetryCanary exercises the real runtime trace pipeline. The global
+// token/CSRF middleware protects this diagnostic endpoint like every other
+// mutating API route.
+func (a *APIServer) handleTelemetryCanary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if a.otel == nil || !a.otel.TracesEnabled() {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "OTel traces are not enabled"})
+		return
+	}
+	var request struct {
+		Destination string `json:"destination"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if strings.TrimSpace(request.Destination) == "" {
+		request.Destination = "galileo"
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	traceID, err := a.otel.EmitGenAICanary(ctx)
+	after := a.otel.DestinationDeliveryStats(request.Destination)
+	acknowledged := a.otel.DestinationAcknowledgedCanaryTrace(request.Destination, traceID)
+	if err != nil && !acknowledged {
+		a.writeJSON(w, http.StatusBadGateway, map[string]interface{}{
+			"error": err.Error(), "trace_id": traceID, "delivery": after,
+		})
+		return
+	}
+	status := http.StatusOK
+	if !acknowledged {
+		status = http.StatusBadGateway
+	}
+	payload := map[string]interface{}{
+		"trace_id": traceID, "destination": request.Destination,
+		"acknowledged": acknowledged, "delivery": after,
+	}
+	if err != nil {
+		payload["flush_warning"] = err.Error()
+	}
+	a.writeJSON(w, status, payload)
 }
 
 func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -3314,9 +3375,12 @@ func (a *APIServer) handleNetworkEgressList(w http.ResponseWriter, r *http.Reque
 	}
 
 	f := audit.NetworkEgressFilter{
-		Hostname:  q.Get("hostname"),
-		SessionID: q.Get("session_id"),
-		Limit:     limit,
+		Hostname:    q.Get("hostname"),
+		SessionID:   q.Get("session_id"),
+		AgentID:     q.Get("agent_id"),
+		RootAgentID: q.Get("root_agent_id"),
+		UserID:      q.Get("user_id"),
+		Limit:       limit,
 	}
 
 	// ?blocked=true|false — optional boolean filter
@@ -3370,6 +3434,30 @@ func (a *APIServer) handleNetworkEgressIngest(w http.ResponseWriter, r *http.Req
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	env := audit.EnvelopeFromContext(r.Context())
+	identity := AgentIdentityFromContext(r.Context())
+	evt.SessionID = firstNonEmpty(evt.SessionID, SessionIDFromContext(r.Context()), env.SessionID)
+	evt.Connector = firstNonEmpty(evt.Connector, env.Connector)
+	evt.AgentID = firstNonEmpty(evt.AgentID, identity.AgentID, env.AgentID)
+	evt.ToolID = firstNonEmpty(evt.ToolID, env.ToolID)
+	userID, _ := userFromHTTPRequest(r, nil)
+	evt.UserID = firstNonEmpty(evt.UserID, userID)
+	if evt.AgentLifecycleID == "" && evt.Connector != "" && evt.SessionID != "" && evt.AgentID != "" {
+		evt.AgentLifecycleID = stableLLMEventID("lifecycle", evt.Connector, evt.SessionID, evt.AgentID)
+	}
+	if snapshot, ok := a.hookLifecycleSnapshot(evt.Connector, evt.SessionID, evt.AgentID); ok {
+		evt.RootAgentID = firstNonEmpty(evt.RootAgentID, snapshot.RootAgentID, snapshot.AgentID)
+		evt.ParentAgentID = firstNonEmpty(evt.ParentAgentID, snapshot.ParentAgentID)
+		evt.RootSessionID = firstNonEmpty(evt.RootSessionID, snapshot.RootSessionID, snapshot.SessionID)
+		if snapshot.LifecycleID != "" {
+			evt.AgentLifecycleID = snapshot.LifecycleID
+		}
+		if snapshot.ExecutionID != "" {
+			evt.AgentExecutionID = snapshot.ExecutionID
+		}
+	}
+	evt.RootAgentID = firstNonEmpty(evt.RootAgentID, evt.AgentID)
+	evt.RootSessionID = firstNonEmpty(evt.RootSessionID, evt.SessionID)
 
 	if a.logger == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit logger not configured"})

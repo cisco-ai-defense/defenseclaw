@@ -18,6 +18,7 @@ package audit
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -262,6 +263,37 @@ func TestStore_QueryNetworkEgressEvents(t *testing.T) {
 	}
 }
 
+func TestStore_NetworkEgressPreservesAgentLifecycleCorrelation(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	want := NetworkEgressRow{
+		SessionID:        "session-agent-egress",
+		Connector:        "codex",
+		AgentID:          "agent-egress",
+		AgentLifecycleID: "lifecycle-0123456789abcdef",
+		AgentExecutionID: "execution-0123456789abcdef",
+		UserID:           "user-egress",
+		ToolID:           "tool-egress",
+		Hostname:         "docs.example.com",
+		PolicyOutcome:    "allowed",
+		Severity:         "INFO",
+	}
+	if err := store.InsertNetworkEgressEvent(want); err != nil {
+		t.Fatalf("InsertNetworkEgressEvent: %v", err)
+	}
+	rows, err := store.QueryNetworkEgressEvents(NetworkEgressFilter{
+		AgentID: want.AgentID, UserID: want.UserID,
+	})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("QueryNetworkEgressEvents rows=%d err=%v", len(rows), err)
+	}
+	got := rows[0]
+	if got.Connector != want.Connector || got.AgentLifecycleID != want.AgentLifecycleID ||
+		got.AgentExecutionID != want.AgentExecutionID || got.ToolID != want.ToolID {
+		t.Fatalf("egress lifecycle correlation=%+v want=%+v", got, want)
+	}
+}
+
 func TestStore_QueryNetworkEgressEvents_OrdersFractionalTimestampsChronologically(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
@@ -484,5 +516,57 @@ func TestLogger_LogNetworkEgress_BlockedAlertFansOutWithCorrelationDefaults(t *t
 	}
 	if emitted[0].ID == "" || emitted[0].RunID == "" || emitted[0].Actor == "" {
 		t.Fatalf("structured event missing defaults: %+v", emitted[0])
+	}
+}
+
+func TestAgent360NetworkEgressMigrationUpgradesAlreadyMigratedDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "pre-agent360.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL);
+		CREATE TABLE network_egress_events (
+			id TEXT PRIMARY KEY, timestamp DATETIME NOT NULL, session_id TEXT,
+			connector TEXT, agent_id TEXT, agent_lifecycle_id TEXT,
+			agent_execution_id TEXT, user_id TEXT, tool_id TEXT,
+			hostname TEXT NOT NULL, url TEXT, http_method TEXT, protocol TEXT,
+			policy_outcome TEXT NOT NULL, decision_code TEXT, blocked INTEGER NOT NULL DEFAULT 0,
+			severity TEXT NOT NULL DEFAULT 'INFO', details TEXT
+		)
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version < len(migrations); version++ {
+		if _, err := db.Exec(`INSERT INTO schema_version(version, applied_at) VALUES (?, CURRENT_TIMESTAMP)`, version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init upgrade: %v", err)
+	}
+	for _, column := range []string{"root_agent_id", "parent_agent_id", "root_session_id"} {
+		exists, err := store.hasColumn("network_egress_events", column)
+		if err != nil || !exists {
+			t.Fatalf("column %s after upgrade: exists=%v err=%v", column, exists, err)
+		}
+	}
+	if err := store.InsertNetworkEgressEvent(NetworkEgressRow{
+		SessionID: "child-session", AgentID: "child", RootAgentID: "root",
+		ParentAgentID: "root", RootSessionID: "root-session",
+		Hostname: "example.com", PolicyOutcome: "allowed",
+	}); err != nil {
+		t.Fatalf("insert correlated egress after upgrade: %v", err)
 	}
 }

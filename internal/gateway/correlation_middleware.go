@@ -369,6 +369,12 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 				// sidecar memory by flooding unique
 				// X-DefenseClaw-Session-Id values.
 				id := registry.ResolvePeek(ctx, SessionIDFromContext(ctx), inboundAgent)
+				id.UserID = sanitizeLLMEventUser(firstNonEmpty(
+					r.Header.Get(llmEventUserIDHeader), r.Header.Get("X-User-Id"), r.Header.Get("X-User-ID"), r.Header.Get("X-User"),
+				))
+				id.UserName = sanitizeLLMEventUser(firstNonEmpty(
+					r.Header.Get(llmEventUserNameHeader), r.Header.Get("X-User-Name"), r.Header.Get("X-Username"),
+				))
 				ctx = ContextWithAgentIdentity(ctx, id)
 				ctx = contextWithPendingAgentRegistry(ctx, registry, inboundAgent)
 				if id.AgentID != "" {

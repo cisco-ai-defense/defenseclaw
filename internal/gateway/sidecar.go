@@ -2514,6 +2514,39 @@ func (s *Sidecar) logHello(h *HelloOK) {
 
 // reportTelemetryHealth sets the OTel telemetry subsystem health based on
 // whether the provider was initialized and which signals are active.
+type destinationRoutingHealth struct {
+	provider    *telemetry.Provider
+	destination string
+}
+
+func (h destinationRoutingHealth) MarshalJSON() ([]byte, error) {
+	stats := h.provider.DestinationRoutingStats(h.destination)
+	total := stats.Accepted + stats.Dropped
+	percentage := float64(0)
+	if total > 0 {
+		percentage = 100 * float64(stats.Accepted) / float64(total)
+	}
+	return json.Marshal(map[string]interface{}{
+		"eligible":               stats.Accepted,
+		"filtered":               stats.Dropped,
+		"total":                  total,
+		"eligibility_percentage": percentage,
+		// Compatibility aliases for clients predating delivery telemetry.
+		"accepted":            stats.Accepted,
+		"dropped":             stats.Dropped,
+		"accepted_percentage": percentage,
+	})
+}
+
+type destinationDeliveryHealth struct {
+	provider    *telemetry.Provider
+	destination string
+}
+
+func (h destinationDeliveryHealth) MarshalJSON() ([]byte, error) {
+	return json.Marshal(h.provider.DestinationDeliveryStats(h.destination))
+}
+
 func (s *Sidecar) reportTelemetryHealth() {
 	if s.otel == nil || !s.otel.Enabled() {
 		s.health.SetTelemetry(StateDisabled, "", nil)
@@ -2521,29 +2554,46 @@ func (s *Sidecar) reportTelemetryHealth() {
 	}
 
 	details := map[string]interface{}{}
-	if s.cfg.OTel.Endpoint != "" {
-		details["endpoint"] = s.cfg.OTel.Endpoint
+	if len(s.cfg.OTel.Destinations) > 0 {
+		destinations := make([]map[string]interface{}, 0, len(s.cfg.OTel.Destinations))
+		for _, destination := range s.cfg.OTel.Destinations {
+			signals := make([]string, 0, 3)
+			if destination.Traces.Enabled {
+				signals = append(signals, "traces")
+			}
+			if destination.Metrics.Enabled {
+				signals = append(signals, "metrics")
+			}
+			if destination.Logs.Enabled {
+				signals = append(signals, "logs")
+			}
+			entry := map[string]interface{}{
+				"name":     destination.Name,
+				"preset":   destination.Preset,
+				"enabled":  destination.Enabled,
+				"endpoint": destination.Endpoint,
+				"signals":  strings.Join(signals, ", "),
+			}
+			if destination.Traces.Enabled {
+				entry["delivery"] = destinationDeliveryHealth{
+					provider: s.otel, destination: destination.Name,
+				}
+			}
+			if destination.SpanFilter.Enabled() {
+				entry["routing"] = destinationRoutingHealth{
+					provider: s.otel, destination: destination.Name,
+				}
+			}
+			destinations = append(destinations, entry)
+		}
+		details["destination_count"] = len(destinations)
+		details["destinations"] = destinations
+		s.health.SetTelemetry(StateRunning, "", details)
+		return
 	}
-
-	var signals []string
-	if s.cfg.OTel.Traces.Enabled {
-		signals = append(signals, "traces")
-	}
-	if s.cfg.OTel.Metrics.Enabled {
-		signals = append(signals, "metrics")
-	}
-	if s.cfg.OTel.Logs.Enabled {
-		signals = append(signals, "logs")
-	}
-	if len(signals) > 0 {
-		details["signals"] = strings.Join(signals, ", ")
-	}
-
-	if ep := s.cfg.OTel.Traces.Endpoint; ep != "" {
-		details["traces_endpoint"] = ep
-	}
-
-	s.health.SetTelemetry(StateRunning, "", details)
+	// Config validation requires at least one named destination whenever OTel
+	// is enabled, so reaching this branch indicates an invalid in-memory config.
+	s.health.SetTelemetry(StateError, "otel enabled without named destinations", details)
 }
 
 // reportSandboxHealth sets the sandbox subsystem health when standalone mode is active.
@@ -2614,7 +2664,19 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 // audit_sinks model is provider-agnostic and operators bring their own
 // collector/SIEM credentials.
 func (s *Sidecar) reportSinksHealth() {
+	connectorNames := s.cfg.Observability.ConnectorNames()
 	total := len(s.cfg.AuditSinks)
+	for _, name := range connectorNames {
+		pc := s.cfg.Observability.Connectors[name]
+		if pc.AuditSinks == nil {
+			continue
+		}
+		if len(*pc.AuditSinks) == 0 {
+			total++ // explicit empty override suppresses global routing
+			continue
+		}
+		total += len(*pc.AuditSinks)
+	}
 	if total == 0 {
 		// Nothing configured — surface the explicit reason + a hint
 		// pointing operators at the right CLI command. Without this
@@ -2633,11 +2695,12 @@ func (s *Sidecar) reportSinksHealth() {
 	rows := make([]map[string]interface{}, 0, total)
 	details := make(map[string]interface{}, total+4)
 
-	for i, sink := range s.cfg.AuditSinks {
+	appendSink := func(sink config.AuditSink, scope string) {
 		row := map[string]interface{}{
 			"name":    sink.Name,
 			"kind":    string(sink.Kind),
 			"enabled": sink.Enabled,
+			"scope":   scope,
 		}
 		var endpoint string
 		switch sink.Kind {
@@ -2673,19 +2736,50 @@ func (s *Sidecar) reportSinksHealth() {
 		// index keeps the alphabetical key sort matching the config
 		// order (sink_01 before sink_10), so the rendered list
 		// follows config.yaml ordering rather than map iteration.
-		key := fmt.Sprintf("sink_%02d", i+1)
+		key := fmt.Sprintf("sink_%02d", len(rows))
+		prefix := ""
+		if scope != "global" {
+			prefix = scope + ": "
+		}
 		if endpoint != "" {
 			details[key] = fmt.Sprintf(
-				"%s (%s) -> %s [%s]", sink.Name, sink.Kind, endpoint, state,
+				"%s%s (%s) -> %s [%s]", prefix, sink.Name, sink.Kind, endpoint, state,
 			)
 		} else {
 			// Sink missing its kind block (validation should reject
 			// this at config-load, but be defensive — health is
 			// strictly read-only and must never panic).
 			details[key] = fmt.Sprintf(
-				"%s (%s) [%s, missing %s block]",
-				sink.Name, sink.Kind, state, sink.Kind,
+				"%s%s (%s) [%s, missing %s block]",
+				prefix, sink.Name, sink.Kind, state, sink.Kind,
 			)
+		}
+	}
+
+	for _, sink := range s.cfg.AuditSinks {
+		appendSink(sink, "global")
+	}
+	for _, connectorName := range connectorNames {
+		pc := s.cfg.Observability.Connectors[connectorName]
+		if pc.AuditSinks == nil {
+			continue // inherits global; no duplicate rows
+		}
+		if len(*pc.AuditSinks) == 0 {
+			rows = append(rows, map[string]interface{}{
+				"name":       "(none)",
+				"kind":       "suppressed",
+				"enabled":    false,
+				"scope":      "connector:" + connectorName,
+				"suppressed": true,
+			})
+			key := fmt.Sprintf("sink_%02d", len(rows))
+			details[key] = fmt.Sprintf(
+				"connector:%s: no sinks [global inheritance suppressed]", connectorName,
+			)
+			continue
+		}
+		for _, sink := range *pc.AuditSinks {
+			appendSink(sink, "connector:"+connectorName)
 		}
 	}
 

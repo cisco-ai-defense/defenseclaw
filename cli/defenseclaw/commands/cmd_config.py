@@ -264,7 +264,7 @@ def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
 
     def _walk(node, key_hint: str = "") -> None:
         if isinstance(node, dict):
-            # Header maps (``otel.headers``, audit-sink HTTP headers, …)
+            # Header maps (named OTel routes, audit-sink HTTP headers, …)
             # carry bearer/API tokens under non-secret-looking keys such
             # as ``Authorization`` and ``x-honeycomb-team``; redact every
             # header value so none slips through (F-0221).

@@ -234,6 +234,45 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 	if e.AgentType != "" {
 		attrs = append(attrs, log.String("gen_ai.agent.type", e.AgentType))
 	}
+	if e.RootAgentID != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.root.id", e.RootAgentID))
+	}
+	if e.ParentAgentID != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.parent.id", e.ParentAgentID))
+	}
+	if e.RootSessionID != "" {
+		attrs = append(attrs, log.String("defenseclaw.session.root.id", e.RootSessionID))
+	}
+	if e.ParentSessionID != "" {
+		attrs = append(attrs, log.String("defenseclaw.session.parent.id", e.ParentSessionID))
+	}
+	if e.AgentLifecycleID != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.lifecycle.id", e.AgentLifecycleID))
+	}
+	if e.AgentExecutionID != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.execution.id", e.AgentExecutionID))
+	}
+	if e.AgentLifecycleEvent != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.lifecycle.event", e.AgentLifecycleEvent))
+	}
+	if e.AgentLifecycleState != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.lifecycle.state", e.AgentLifecycleState))
+	}
+	if e.AgentReportedCost {
+		attrs = append(attrs,
+			log.Float64("defenseclaw.agent.reported_cost.usd", e.AgentReportedCostUSD),
+			log.Bool("defenseclaw.agent.reported_cost.present", true),
+		)
+	}
+	if e.AgentDepth > 0 || e.AgentLifecycleID != "" {
+		attrs = append(attrs, log.Int("defenseclaw.agent.depth", e.AgentDepth))
+	}
+	if e.SessionSource != "" {
+		attrs = append(attrs, log.String("defenseclaw.session.source", e.SessionSource))
+	}
+	if e.SessionResumed {
+		attrs = append(attrs, log.Bool("defenseclaw.session.resumed", true))
+	}
 	if e.AgentInstanceID != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent_instance_id", e.AgentInstanceID))
 	}
@@ -242,6 +281,7 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 	}
 	if e.UserID != "" {
 		attrs = append(attrs, log.String("defenseclaw.user_id", e.UserID))
+		attrs = append(attrs, log.String("user.id", e.UserID))
 	}
 	if e.UserName != "" {
 		attrs = append(attrs, log.String("defenseclaw.user_name", e.UserName))

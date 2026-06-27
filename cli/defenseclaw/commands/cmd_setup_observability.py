@@ -30,6 +30,7 @@ disable <name>        Flip ``enabled: false``
 remove <name>         Delete an audit_sinks entry
 test <name>           Probe the configured endpoint and report status
 migrate-splunk        Move legacy ``splunk:`` block to ``audit_sinks[]``
+migrate-otel          Convert flat ``otel:`` transport into a named route
 
 All destructive subcommands write atomically (``config.yaml.tmp`` ->
 ``rename``) so a crash mid-write cannot leave the gateway with an
@@ -62,6 +63,7 @@ from defenseclaw.observability import (
     WriteResult,
     apply_preset,
     list_destinations,
+    migrate_flat_otel,
     preset_choices,
     remove_destination,
     resolve_preset,
@@ -92,7 +94,7 @@ from defenseclaw.observability.writer import (
 # keys per preset.
 _ALL_PROMPT_FLAGS = (
     "realm", "site", "region", "dataset",
-    "endpoint", "protocol",
+    "endpoint", "protocol", "project", "logstream",
     "host", "port", "index", "source", "sourcetype",
     "url", "method", "url_path", "verify_tls",
 )
@@ -138,8 +140,7 @@ def observability() -> None:
               help="Scope this sink to a connector (omit = global). A connector's "
                    "events route to its per-connector audit_sinks when set, "
                    "falling back to the global audit_sinks otherwise. Applies to "
-                   "audit_sinks only (the OTel gateway exporter is a single "
-                   "global block).")
+                   "audit_sinks only (OTel destinations are process-wide).")
 @click.option("--dry-run", is_flag=True, help="Preview YAML/dotenv changes without writing")
 @click.option("--non-interactive", is_flag=True, help="Skip prompts; use flags only")
 # Prompt flags — shared across all presets; writer resolves per-preset.
@@ -149,6 +150,8 @@ def observability() -> None:
 @click.option("--dataset", default=None)
 @click.option("--endpoint", default=None)
 @click.option("--protocol", type=click.Choice(["grpc", "http"]), default=None)
+@click.option("--project", default=None, help="Vendor project name or ID")
+@click.option("--logstream", default=None, help="Vendor Log stream name or ID")
 @click.option("--host", default=None)
 @click.option("--port", default=None)
 @click.option("--index", default=None)
@@ -171,7 +174,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     dry_run: bool,
     non_interactive: bool,
     realm, site, region, dataset,
-    endpoint, protocol,
+    endpoint, protocol, project, logstream,
     host, port, index, source, sourcetype,
     url, method, url_path, verify_tls,
 ) -> None:
@@ -192,6 +195,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     raw_inputs: dict[str, str | None] = {
         "realm": realm, "site": site, "region": region, "dataset": dataset,
         "endpoint": endpoint, "protocol": protocol,
+        "project": project, "logstream": logstream,
         "host": host, "port": port, "index": index, "source": source,
         "sourcetype": sourcetype,
         "url": url, "method": method, "url_path": url_path,
@@ -246,7 +250,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
 
-    _print_write_result(result, dry_run=dry_run, connector=connector_name)
+    _print_write_result(result, action="add", dry_run=dry_run, connector=connector_name)
     print_redaction_status_hint(app.cfg)
     click.echo()
 
@@ -293,16 +297,9 @@ def list_cmd(app: AppContext, emit_json: bool, connector: str | None) -> None:
             return
         click.echo()
         ux.section(f"Observability destinations — connector {connector_name}")
-        click.echo(f"  {'NAME':<40} {'KIND':<12} {'ENABLED':<8} {'PRESET':<18} ENDPOINT")
-        click.echo(f"  {'-' * 40} {'-' * 12} {'-' * 8} {'-' * 18} {'-' * 40}")
+        _print_destination_header()
         for d in dests:
-            endpoint = d.endpoint or "(none)"
-            if len(endpoint) > 60:
-                endpoint = endpoint[:57] + "..."
-            click.echo(
-                f"  {ux.bold(f'{d.name:<40}')} {d.kind:<12} {('yes' if d.enabled else 'no'):<8} "
-                f"{(d.preset_id or '-'):<18} {endpoint}",
-            )
+            _print_destination_row(d)
         click.echo()
         return
     dests = list_destinations(app.cfg.data_dir)
@@ -315,16 +312,9 @@ def list_cmd(app: AppContext, emit_json: bool, connector: str | None) -> None:
         return
     click.echo()
     ux.section("Observability destinations")
-    click.echo(f"  {'NAME':<40} {'KIND':<12} {'ENABLED':<8} {'PRESET':<18} ENDPOINT")
-    click.echo(f"  {'-' * 40} {'-' * 12} {'-' * 8} {'-' * 18} {'-' * 40}")
+    _print_destination_header()
     for d in dests:
-        endpoint = d.endpoint or "(none)"
-        if len(endpoint) > 60:
-            endpoint = endpoint[:57] + "..."
-        click.echo(
-            f"  {ux.bold(f'{d.name:<40}')} {d.kind:<12} {('yes' if d.enabled else 'no'):<8} "
-            f"{(d.preset_id or '-'):<18} {endpoint}",
-        )
+        _print_destination_row(d)
     click.echo()
 
 
@@ -348,7 +338,7 @@ def enable_cmd(app: AppContext, name: str, connector: str | None) -> None:
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result, dry_run=False, connector=connector_name)
+    _print_write_result(result, action="enable", dry_run=False, connector=connector_name)
 
 
 @observability.command("disable")
@@ -366,7 +356,7 @@ def disable_cmd(app: AppContext, name: str, connector: str | None) -> None:
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result, dry_run=False, connector=connector_name)
+    _print_write_result(result, action="disable", dry_run=False, connector=connector_name)
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +384,7 @@ def remove_cmd(app: AppContext, name: str, connector: str | None, yes: bool) -> 
     except ValueError as exc:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
-    _print_write_result(result, dry_run=False, connector=connector_name)
+    _print_write_result(result, action="remove", dry_run=False, connector=connector_name)
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +420,7 @@ def test_cmd(app: AppContext, name: str, timeout: float) -> None:
         f"{ux.dim('[' + label + ']')}: {d.endpoint or '(no endpoint)'}"
     )
     if d.target == "otel":
-        _test_otel(app.cfg.data_dir, timeout=timeout)
+        _test_otel(app.cfg.data_dir, name, timeout=timeout)
     elif d.kind == "splunk_hec":
         _test_splunk_hec(app.cfg.data_dir, name, timeout=timeout)
     elif d.kind == "otlp_logs":
@@ -440,6 +430,28 @@ def test_cmd(app: AppContext, name: str, timeout: float) -> None:
     else:
         click.echo(f"  Unknown kind {d.kind!r} — cannot test.")
     click.echo()
+
+
+# ---------------------------------------------------------------------------
+# migrate-splunk
+# ---------------------------------------------------------------------------
+
+
+@observability.command("migrate-otel")
+@click.option("--apply", "do_apply", is_flag=True, help="Write the migration (default: preview)")
+@pass_ctx
+def migrate_otel_cmd(app: AppContext, do_apply: bool) -> None:
+    """Convert a flat OTel exporter into ``otel.destinations[]``.
+
+    This is the only supported transition from pre-fan-out configuration.
+    It is idempotent and saves a backup before writing.
+    """
+
+    result = migrate_flat_otel(app.cfg.data_dir, dry_run=not do_apply)
+    if not result.yaml_changes:
+        click.echo("  No flat OTel exporter found — nothing to migrate.")
+        return
+    _print_write_result(result, action="migrate", dry_run=not do_apply)
 
 
 # ---------------------------------------------------------------------------
@@ -618,7 +630,7 @@ def _mask(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _test_otel(data_dir: str, *, timeout: float) -> None:
+def _test_otel(data_dir: str, name: str, *, timeout: float) -> None:
     """Dial the configured OTel signal endpoints over TCP.
 
     A full OTLP probe would require an SDK + collector context — TCP
@@ -633,9 +645,19 @@ def _test_otel(data_dir: str, *, timeout: float) -> None:
     except OSError as exc:
         click.echo(f"  ✗ cannot read config.yaml: {exc}")
         return
-    otel = raw.get("otel") or {}
-    if not otel.get("enabled"):
-        click.echo("  ⚠ otel.enabled=false — exporter will not run until enabled")
+    otel_root = raw.get("otel") or {}
+    if isinstance(otel_root.get("destinations"), list):
+        otel = next(
+            (
+                item for item in otel_root["destinations"]
+                if isinstance(item, dict) and item.get("name") == name
+            ),
+            {},
+        )
+    else:
+        otel = otel_root
+    if not otel_root.get("enabled") or not otel.get("enabled"):
+        click.echo("  ⚠ destination enabled=false — exporter will not run until enabled")
     for sig in ("traces", "metrics", "logs"):
         block = otel.get(sig) or {}
         if not block.get("enabled"):
@@ -643,6 +665,8 @@ def _test_otel(data_dir: str, *, timeout: float) -> None:
             continue
         endpoint = str(block.get("endpoint", "") or "")
         protocol = str(block.get("protocol") or otel.get("protocol") or "grpc")
+        if not endpoint:
+            endpoint = str(otel.get("endpoint", "") or "")
         ok, msg = _tcp_probe(endpoint, protocol, timeout=timeout)
         click.echo(f"    {sig:<8} {'✓' if ok else '✗'} {msg}")
 
@@ -849,12 +873,26 @@ def _tcp_probe(endpoint: str, protocol: str, *, timeout: float) -> tuple[bool, s
 # ---------------------------------------------------------------------------
 
 
-def _print_write_result(result: WriteResult, *, dry_run: bool, connector: str = "") -> None:
+def _print_write_result(
+    result: WriteResult,
+    *,
+    action: str,
+    dry_run: bool,
+    connector: str = "",
+) -> None:
     click.echo()
     mode_tag = f"{ux.dim('[dry-run]')} " if dry_run else ""
     scope = f" {ux.dim('@' + connector)}" if connector else ""
+    display_action = action.upper()
+    if action == "add":
+        updating = any(
+            "overwriting existing" in warning or "already existed" in warning
+            for warning in result.warnings
+        )
+        display_action = "UPDATE" if updating else "ADD"
     click.echo(
-        f"  {mode_tag}{ux.bold(result.target)}:{ux.bold(result.name)} "
+        f"  {mode_tag}{ux.bold(display_action)} "
+        f"{ux.bold(result.target)}:{ux.bold(result.name)} "
         f"(preset={result.preset_id}){scope}"
     )
     line_indent = "      " if dry_run else "    "
@@ -867,6 +905,35 @@ def _print_write_result(result: WriteResult, *, dry_run: bool, connector: str = 
     if not dry_run:
         ux.subhead("Next: defenseclaw-gateway restart (to reload config)")
     click.echo()
+
+
+def _destination_signals(d: Destination) -> str:
+    if d.target != "otel":
+        return "audit-events"
+    enabled = [name for name in ("traces", "metrics", "logs") if d.signals.get(name)]
+    return ",".join(enabled) or "none"
+
+
+def _print_destination_header() -> None:
+    click.echo(
+        f"  {'NAME':<28} {'TARGET':<12} {'KIND':<10} {'ENABLED':<8} "
+        f"{'SIGNALS':<22} {'PRESET':<18} ENDPOINT"
+    )
+    click.echo(
+        f"  {'-' * 28} {'-' * 12} {'-' * 10} {'-' * 8} "
+        f"{'-' * 22} {'-' * 18} {'-' * 36}"
+    )
+
+
+def _print_destination_row(d: Destination) -> None:
+    endpoint = d.endpoint or "(none)"
+    if len(endpoint) > 54:
+        endpoint = endpoint[:51] + "..."
+    click.echo(
+        f"  {ux.bold(f'{d.name:<28}')} {d.target:<12} {d.kind:<10} "
+        f"{('yes' if d.enabled else 'no'):<8} {_destination_signals(d):<22} "
+        f"{(d.preset_id or '-'):<18} {endpoint}"
+    )
 
 
 def _dest_to_dict(d: Destination) -> dict[str, Any]:

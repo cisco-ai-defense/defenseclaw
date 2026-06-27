@@ -945,12 +945,12 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         otel = self.app.cfg.otel
         self.assertTrue(otel.enabled)
-        self.assertEqual(otel.traces.endpoint, "ingest.eu0.observability.splunkcloud.com")
-        self.assertEqual(otel.traces.protocol, "http")
-        self.assertEqual(otel.traces.url_path, "/v2/trace/otlp")
-        self.assertEqual(otel.metrics.endpoint, "ingest.eu0.observability.splunkcloud.com")
-        self.assertEqual(otel.metrics.url_path, "/v2/datapoint/otlp")
-        self.assertEqual(otel.headers.get("X-SF-Token"), "${SPLUNK_ACCESS_TOKEN}")
+        destination = next(d for d in otel.destinations if d.preset == "splunk-o11y")
+        self.assertEqual(destination.endpoint, "ingest.eu0.observability.splunkcloud.com")
+        self.assertEqual(destination.protocol, "http")
+        self.assertEqual(destination.traces.url_path, "/v2/trace/otlp")
+        self.assertEqual(destination.metrics.url_path, "/v2/datapoint/otlp")
+        self.assertEqual(destination.headers.get("X-SF-Token"), "${SPLUNK_ACCESS_TOKEN}")
 
         dotenv_path = os.path.join(self.tmp_dir, ".env")
         self.assertTrue(os.path.exists(dotenv_path))
@@ -1632,8 +1632,11 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0)
         self.assertTrue(self.app.cfg.otel.enabled)
-        self.assertEqual(self.app.cfg.otel.traces.endpoint, "ingest.us1.observability.splunkcloud.com")
-        self.assertFalse(self.app.cfg.otel.logs.enabled)
+        destination = next(
+            d for d in self.app.cfg.otel.destinations if d.preset == "splunk-o11y"
+        )
+        self.assertEqual(destination.endpoint, "ingest.us1.observability.splunkcloud.com")
+        self.assertFalse(destination.logs.enabled)
         mock_apply_dashboards.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup.apply_dashboards")

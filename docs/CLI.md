@@ -34,6 +34,15 @@ Use `<binary> --help` for any command.
 | `setup hermes` / `setup cursor` / `setup windsurf` | Configure hook-first observability aliases |
 | `setup geminicli` / `setup copilot` | Configure observability aliases with native OTel where supported |
 | `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
+| `setup galileo [status\|test\|enable\|disable\|remove]` | Configure real-time Galileo Cloud/self-hosted OTLP traces; test uses the live gateway path by default |
+| `setup observability add\|list\|enable\|disable\|remove\|test\|migrate-otel` | Manage named OTLP and audit-sink destinations; convert flat OTel config once |
+| `setup local-observability up\|down\|status` | Manage the bundled OTel Collector + Grafana stack |
+
+Observability destination names are identities: a new `--name` appends a route;
+reusing a name updates only that route. Use `setup observability list [--json]`
+for target/kind/signal inventory and `--dry-run` before `add`. The TUI exposes
+the runtime-loaded inventory under **Overview → Observability Destinations** and
+the management wizard under **0 Setup → Observability / Galileo**.
 
 ### guardrail
 

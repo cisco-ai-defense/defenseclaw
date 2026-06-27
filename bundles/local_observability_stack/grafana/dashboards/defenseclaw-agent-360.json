@@ -1,0 +1,132 @@
+{
+  "annotations": {"list": [{"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"}, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard"}]},
+  "description": "Dynamic drill-down for every automatically observed DefenseClaw agent. Stable agent/root/parent/lifecycle/execution IDs correlate Prometheus inventory and totals, Loki event detail, and Tempo traces.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {"asDropdown": false, "icon": "external link", "includeVars": true, "keepTime": true, "tags": [], "targetBlank": false, "title": "Agent Directory", "type": "link", "url": "/d/defenseclaw-agent-identity/agent-identity"},
+    {"asDropdown": false, "icon": "external link", "includeVars": true, "keepTime": true, "tags": [], "targetBlank": false, "title": "Activity", "type": "link", "url": "/d/defenseclaw-activity/activity"}
+  ],
+  "liveNow": true,
+  "panels": [
+    {
+      "id": 1, "type": "text", "title": "Agent360", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 3},
+      "options": {"mode": "markdown", "content": "# Agent360 · `$agent`\nStable identity → lifecycle/executions → models, tools, websites, security decisions → Tempo trace. **Scope** chooses only this agent or its full descendant tree. Unknown tokens/cost remain absent rather than being rendered as zero."}
+    },
+    {
+      "id": 2, "type": "table", "title": "Agent Directory — click an Agent ID to drill down", "description": "Every hook lifecycle transition updates defenseclaw.agent.last_seen. This table therefore discovers new agents automatically; no dashboard JSON is generated per agent.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 0, "y": 3, "w": 24, "h": 8},
+      "targets": [{"expr": "topk by (gen_ai_agent_id) (1, max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}[$__range]))", "format": "table", "instant": true, "refId": "A"}],
+      "transformations": [{"id": "labelsToFields", "options": {"mode": "columns"}}, {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "defenseclaw_agent_execution_id": true, "defenseclaw_agent_lifecycle_event": true, "defenseclaw_agent_lifecycle_id": true, "defenseclaw_claw_mode": true, "defenseclaw_device_id": true, "defenseclaw_gateway_host": true, "defenseclaw_gateway_port": true, "defenseclaw_instance_id": true, "defenseclaw_session_root_id": true, "deployment_environment": true, "host_arch": true, "host_name": true, "instance": true, "job": true, "os_type": true, "service": true, "service_name": true, "service_namespace": true, "service_version": true, "exported_job": true}, "renameByName": {"Value": "Last Seen (Unix s)", "connector": "Connector", "gen_ai_agent_id": "Agent ID", "gen_ai_agent_name": "Name", "gen_ai_agent_type": "Type", "defenseclaw_agent_root_id": "Root Agent", "defenseclaw_agent_parent_id": "Parent Agent", "defenseclaw_agent_lifecycle_state": "State", "defenseclaw_agent_depth": "Depth"}}}],
+      "fieldConfig": {"defaults": {"custom": {"align": "auto", "cellOptions": {"type": "auto"}}}, "overrides": [{"matcher": {"id": "byName", "options": "Agent ID"}, "properties": [{"id": "links", "value": [{"title": "Open Agent360", "url": "/d/defenseclaw-agent-360/agent360?var-connector=${__data.fields.Connector}&var-agent=${__value.raw}&var-scope_label=defenseclaw_agent_root_id", "targetBlank": false}]}]}]},
+      "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Last Seen (Unix s)", "desc": true}]}
+    },
+    {
+      "id": 3, "type": "stat", "title": "Last seen", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 0, "y": 11, "w": 3, "h": 4},
+      "targets": [{"expr": "time() - max(max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range]))", "instant": true, "refId": "A"}], "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 300}, {"color": "red", "value": 1800}]}}, "overrides": []}, "options": {"colorMode": "value", "graphMode": "area", "textMode": "value_and_name"}
+    },
+    {
+      "id": 4, "type": "stat", "title": "Turns", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 3, "y": 11, "w": 3, "h": 4},
+      "targets": [{"expr": "sum(max without (job, instance, service, exported_job) (last_over_time(defenseclaw_agent_lifecycle_transitions_total{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_event=\"turn_end\"}[$__range]))) or vector(0)", "instant": true, "refId": "A"}], "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []}, "options": {"colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "id": 5, "type": "stat", "title": "Tool calls", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 6, "y": 11, "w": 3, "h": 4},
+      "targets": [{"expr": "sum(max without (job, instance, service, exported_job) (last_over_time(defenseclaw_agent_lifecycle_transitions_total{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_event=\"tool_start\"}[$__range]))) or vector(0)", "instant": true, "refId": "A"}], "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []}, "options": {"colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "id": 6, "type": "stat", "title": "Descendants", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 9, "y": 11, "w": 3, "h": 4},
+      "targets": [{"expr": "count(count by (gen_ai_agent_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",defenseclaw_agent_root_id=~\"$agent\",defenseclaw_agent_depth!=\"0\"}[$__range]))) or vector(0)", "instant": true, "refId": "A"}], "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []}, "options": {"colorMode": "value", "graphMode": "none"}
+    },
+    {
+      "id": 7, "type": "stat", "title": "Input tokens", "description": "Only connector-reported counts from completed model calls. Missing usage is absent, not guessed.", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 12, "y": 11, "w": 3, "h": 4},
+      "targets": [{"expr": "sum(max without (job, instance, service, exported_job) (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"input\"}[$__range])))", "instant": true, "refId": "A"}], "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "noValue": "Not reported"}, "overrides": []}, "options": {"colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "id": 8, "type": "stat", "title": "Output tokens", "description": "Only connector-reported counts from completed model calls. Missing usage is absent, not guessed.", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 15, "y": 11, "w": 3, "h": 4},
+      "targets": [{"expr": "sum(max without (job, instance, service, exported_job) (last_over_time(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\",kind=\"output\"}[$__range])))", "instant": true, "refId": "A"}], "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "noValue": "Not reported"}, "overrides": []}, "options": {"colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "id": 9, "type": "stat", "title": "Reported cost", "description": "Latest cumulative USD cost only when the connector explicitly reports it. DefenseClaw does not estimate prices.", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 18, "y": 11, "w": 3, "h": 4},
+      "targets": [{"expr": "sum(max by (gen_ai_agent_id, defenseclaw_agent_lifecycle_id) (max_over_time(defenseclaw_agent_reported_cost_USD{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__range])))", "instant": true, "refId": "A"}], "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 4, "noValue": "Not reported"}, "overrides": []}, "options": {"colorMode": "value", "graphMode": "none"}
+    },
+    {
+      "id": 10, "type": "gauge", "title": "Terminal success", "description": "Completed/observed terminal transitions divided by completed, observed, failed, and interrupted terminal transitions. Active lifecycle events are not failures.", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 21, "y": 11, "w": 3, "h": 4},
+      "targets": [{"expr": "100 * sum(max without (job, instance, service, exported_job) (last_over_time(defenseclaw_agent_lifecycle_transitions_total{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_state=~\"completed|observed\"}[$__range]))) / clamp_min(sum(max without (job, instance, service, exported_job) (last_over_time(defenseclaw_agent_lifecycle_transitions_total{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_state=~\"completed|observed|failed|interrupted\"}[$__range]))), 1)", "instant": true, "refId": "A"}], "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 80}, {"color": "green", "value": 95}]}}, "overrides": []}, "options": {"showThresholdLabels": false, "showThresholdMarkers": true}
+    },
+    {"id": 11, "type": "row", "title": "Lifecycle, throughput, latency, and tokens", "gridPos": {"x": 0, "y": 15, "w": 24, "h": 1}, "collapsed": false},
+    {
+      "id": 12, "type": "state-timeline", "title": "Agent state timeline", "description": "A row appears when the selected agent/tree emits a lifecycle state in each interval.", "datasource": {"type": "loki", "uid": "defenseclaw-loki"}, "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (gen_ai_agent_id, defenseclaw_agent_lifecycle_state) (count_over_time({service_name=\"defenseclaw\"} | $scope_label=~\"$agent\" | defenseclaw_agent_lifecycle_state != \"\" [$__interval]))", "legendFormat": "{{gen_ai_agent_id}} · {{defenseclaw_agent_lifecycle_state}}", "queryType": "range", "refId": "A"}],
+      "fieldConfig": {"defaults": {"custom": {"fillOpacity": 70, "lineWidth": 0, "spanNulls": false}}, "overrides": []}, "options": {"alignValue": "left", "mergeValues": true, "rowHeight": 0.8, "showValue": "never", "tooltip": {"mode": "single", "sort": "none"}}
+    },
+    {
+      "id": 13, "type": "timeseries", "title": "Agent span throughput", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 12, "y": 16, "w": 6, "h": 8},
+      "targets": [{"expr": "sum by (span_name) (max without (job, instance, service, exported_job) (rate(defenseclaw_agent_span_calls_total{$scope_label=~\"$agent\"}[$__rate_interval])))", "legendFormat": "{{span_name}}", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "fillOpacity": 20, "lineWidth": 2}}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 14, "type": "timeseries", "title": "Agent span p95 latency", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 18, "y": 16, "w": 6, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, span_name) (max without (job, instance, service, exported_job) (rate(defenseclaw_agent_span_duration_milliseconds_bucket{$scope_label=~\"$agent\"}[$__rate_interval]))))", "legendFormat": "{{span_name}}", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "ms", "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2}}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 15, "type": "timeseries", "title": "Input/output tokens over time", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 0, "y": 24, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (kind) (max without (job, instance, service, exported_job) (rate(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__rate_interval])))", "legendFormat": "{{kind}}", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "tps", "custom": {"drawStyle": "bars", "fillOpacity": 35}}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 16, "type": "table", "title": "Executions and current lifecycle state", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "gridPos": {"x": 12, "y": 24, "w": 12, "h": 8},
+      "targets": [{"expr": "max by (gen_ai_agent_id, defenseclaw_agent_lifecycle_id, defenseclaw_agent_execution_id, defenseclaw_agent_lifecycle_event, defenseclaw_agent_lifecycle_state, defenseclaw_agent_depth) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\",defenseclaw_agent_execution_id=~\"$execution\"}[$__range]))", "format": "table", "instant": true, "refId": "A"}],
+      "transformations": [{"id": "labelsToFields", "options": {"mode": "columns"}}, {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true}, "renameByName": {"Value": "Last Seen", "gen_ai_agent_id": "Agent", "defenseclaw_agent_lifecycle_id": "Lifecycle", "defenseclaw_agent_execution_id": "Execution", "defenseclaw_agent_lifecycle_event": "Event", "defenseclaw_agent_lifecycle_state": "State", "defenseclaw_agent_depth": "Depth"}}}], "options": {"showHeader": true, "cellHeight": "sm"}
+    },
+    {"id": 17, "type": "row", "title": "Models, tools, websites, and security decisions", "gridPos": {"x": 0, "y": 32, "w": 24, "h": 1}, "collapsed": false},
+    {
+      "id": 18, "type": "logs", "title": "LLM turns — prompts, responses, model, usage", "description": "Inputs/outputs render only when privacy policy permits and the connector supplied them.", "datasource": {"type": "loki", "uid": "defenseclaw-loki"}, "gridPos": {"x": 0, "y": 33, "w": 12, "h": 11},
+      "targets": [{"expr": "{service_name=\"defenseclaw\"} | $scope_label=~\"$agent\" | defenseclaw_gateway_event_type=~\"llm_prompt|llm_response\"", "refId": "A"}], "options": {"showTime": true, "wrapLogMessage": true, "prettifyLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true, "sortOrder": "Descending"}
+    },
+    {
+      "id": 19, "type": "logs", "title": "Tools and website/network interactions", "description": "Tool name, destination app, arguments/result, and network egress metadata remain trace-correlated.", "datasource": {"type": "loki", "uid": "defenseclaw-loki"}, "gridPos": {"x": 12, "y": 33, "w": 12, "h": 11},
+      "targets": [{"expr": "{service_name=\"defenseclaw\"} | $scope_label=~\"$agent\" | defenseclaw_gateway_event_type=~\"tool_invocation|network_egress\"", "refId": "A"}], "options": {"showTime": true, "wrapLogMessage": true, "prettifyLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true, "sortOrder": "Descending"}
+    },
+    {
+      "id": 20, "type": "logs", "title": "Errors, blocks, approvals, and guardrail decisions", "datasource": {"type": "loki", "uid": "defenseclaw-loki"}, "gridPos": {"x": 0, "y": 44, "w": 24, "h": 10},
+      "targets": [{"expr": "{service_name=\"defenseclaw\"} | $scope_label=~\"$agent\" | defenseclaw_gateway_event_type=~\"runtime_error|verdict|approval|guardrail|scan_finding\"", "refId": "A"}], "options": {"showTime": true, "wrapLogMessage": true, "prettifyLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true, "sortOrder": "Descending"}
+    },
+    {"id": 21, "type": "row", "title": "Tempo execution drill-down and topology", "gridPos": {"x": 0, "y": 54, "w": 24, "h": 1}, "collapsed": false},
+    {
+      "id": 22, "type": "table", "title": "Recent traces — click a Trace ID", "description": "TraceQL searches the stable agent attribute. Open a row in Tempo for the complete flame graph and parent/child span tree.", "datasource": {"type": "tempo", "uid": "defenseclaw-tempo"}, "gridPos": {"x": 0, "y": 55, "w": 12, "h": 11},
+      "targets": [{"queryType": "traceql", "query": "{ span.gen_ai.agent.id = \"$agent\" || span.defenseclaw.agent.root.id = \"$agent\" }", "limit": 100, "tableType": "traces", "refId": "A"}],
+      "fieldConfig": {"defaults": {"custom": {"align": "left"}, "links": [{"title": "Open trace in Tempo", "url": "/explore?left=%7B%22datasource%22:%22defenseclaw-tempo%22,%22queries%22:%5B%7B%22refId%22:%22A%22,%22datasource%22:%7B%22type%22:%22tempo%22,%22uid%22:%22defenseclaw-tempo%22%7D,%22queryType%22:%22traceql%22,%22query%22:%22${__data.fields.traceID}%22%7D%5D%7D", "targetBlank": true}]}, "overrides": []}, "options": {"showHeader": true, "cellHeight": "sm"}
+    },
+    {
+      "id": 23, "type": "traces", "title": "Selected trace waterfall", "description": "Paste or select a trace ID in the Trace variable to render the end-to-end request, subagents, LLM calls, tools, and guardrails.", "datasource": {"type": "tempo", "uid": "defenseclaw-tempo"}, "gridPos": {"x": 12, "y": 55, "w": 12, "h": 11},
+      "targets": [{"queryType": "traceql", "query": "$trace", "refId": "A"}], "options": {"spanBar": {"type": "None"}}
+    },
+    {
+      "id": 24, "type": "nodeGraph", "title": "Selected trace agent/tool graph", "description": "Tempo node graph for the selected trace ID; dynamic topology is derived from real parent/child spans rather than a static canvas.", "datasource": {"type": "tempo", "uid": "defenseclaw-tempo"}, "gridPos": {"x": 0, "y": 66, "w": 24, "h": 12},
+      "targets": [{"queryType": "traceql", "query": "$trace", "refId": "A"}], "options": {"nodes": {"mainStatUnit": "ms"}, "edges": {"mainStatUnit": "ms"}}
+    },
+    {
+      "id": 25, "type": "logs", "title": "Raw correlated event stream", "description": "Forensic fallback across every event type. Use the Loki-derived trace_id link to pivot directly to Tempo.", "datasource": {"type": "loki", "uid": "defenseclaw-loki"}, "gridPos": {"x": 0, "y": 78, "w": 24, "h": 12},
+      "targets": [{"expr": "{service_name=\"defenseclaw\"} | $scope_label=~\"$agent\" | defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | defenseclaw_agent_execution_id=~\"$execution\"", "refId": "A"}], "options": {"showTime": true, "wrapLogMessage": true, "prettifyLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true, "sortOrder": "Descending"}
+    }
+  ],
+  "preload": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["defenseclaw", "agent360", "agents", "lifecycle", "tempo", "loki", "prometheus"],
+  "templating": {"list": [
+    {"name": "connector", "label": "Connector", "type": "query", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "definition": "label_values(defenseclaw_agent_last_seen_seconds, connector)", "query": {"query": "label_values(defenseclaw_agent_last_seen_seconds, connector)", "refId": "connector-var"}, "refresh": 2, "sort": 1, "multi": true, "includeAll": true, "allValue": ".+", "current": {"text": ["All"], "value": ["$__all"], "selected": true}},
+    {"name": "agent", "label": "Agent", "type": "query", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "definition": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}, gen_ai_agent_id)", "query": {"query": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}, gen_ai_agent_id)", "refId": "agent-var"}, "refresh": 2, "sort": 1, "multi": false, "includeAll": false},
+    {"name": "scope_label", "label": "Scope", "type": "custom", "query": "This agent : gen_ai_agent_id,Agent tree : defenseclaw_agent_root_id", "current": {"text": "Agent tree", "value": "defenseclaw_agent_root_id", "selected": true}, "options": [{"text": "This agent", "value": "gen_ai_agent_id", "selected": false}, {"text": "Agent tree", "value": "defenseclaw_agent_root_id", "selected": true}]},
+    {"name": "lifecycle", "label": "Lifecycle", "type": "query", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "definition": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}, defenseclaw_agent_lifecycle_id)", "query": {"query": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\"}, defenseclaw_agent_lifecycle_id)", "refId": "lifecycle-var"}, "refresh": 2, "multi": true, "includeAll": true, "allValue": ".+", "current": {"text": ["All"], "value": ["$__all"], "selected": true}},
+    {"name": "execution", "label": "Execution", "type": "query", "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"}, "definition": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\"}, defenseclaw_agent_execution_id)", "query": {"query": "label_values(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\",$scope_label=~\"$agent\",defenseclaw_agent_lifecycle_id=~\"$lifecycle\"}, defenseclaw_agent_execution_id)", "refId": "execution-var"}, "refresh": 2, "multi": true, "includeAll": true, "allValue": ".+", "current": {"text": ["All"], "value": ["$__all"], "selected": true}},
+    {"name": "trace", "label": "Trace ID", "type": "textbox", "query": "", "current": {"text": "", "value": ""}}
+  ]},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "DefenseClaw — Agent360",
+  "uid": "defenseclaw-agent-360",
+  "version": 1,
+  "weekStart": ""
+}

@@ -252,6 +252,7 @@ func (p *Provider) StartAgentSpan(
 		attribute.String("gen_ai.operation.name", "invoke_agent"),
 		attribute.String("gen_ai.agent.name", agentName),
 		attribute.String("gen_ai.conversation.id", conversationID),
+		attribute.String("openinference.span.kind", "AGENT"),
 	)
 	if provider != "" {
 		span.SetAttributes(attribute.String("gen_ai.provider.name", provider))
@@ -285,6 +286,40 @@ func (p *Provider) EndAgentSpan(span trace.Span, errMsg string) {
 	span.End()
 }
 
+const telemetryCanaryAttribute = "defenseclaw.telemetry.canary"
+
+// EmitGenAICanary emits a schema-valid agent/chat trace through the active
+// SDK provider and synchronously flushes every configured destination. Unlike
+// a direct HTTP probe this exercises filtering, batching, fan-out, and the
+// destination trace acknowledgement used by the diagnostic API.
+func (p *Provider) EmitGenAICanary(ctx context.Context) (string, error) {
+	if p == nil || !p.TracesEnabled() || p.tracerProvider == nil {
+		return "", fmt.Errorf("OTel traces are not enabled")
+	}
+	rootCtx := trace.ContextWithSpanContext(ctx, trace.SpanContext{})
+	agentCtx, agentSpan := p.StartAgentSpan(
+		rootCtx, "defenseclaw-galileo-canary", "defenseclaw", "diagnostic", "canary", "openai",
+	)
+	agentSpan.SetAttributes(attribute.Bool(telemetryCanaryAttribute, true))
+	p.SetGenAIInput(agentSpan, "DefenseClaw Galileo runtime canary request")
+	p.SetGenAIOutput(agentSpan, "DefenseClaw Galileo runtime canary response")
+	_, span := p.StartLLMSpan(agentCtx, "openai", "gpt-4o-mini", "openai", 0, 0)
+	span.SetAttributes(attribute.Bool(telemetryCanaryAttribute, true))
+	p.SetGenAIInput(span, "DefenseClaw Galileo runtime canary request")
+	p.SetGenAIOutput(span, "DefenseClaw Galileo runtime canary response")
+	traceID := span.SpanContext().TraceID().String()
+	p.EndLLMSpan(
+		ctx, span, "gpt-4o-mini", 0, 0, []string{"stop"}, 0,
+		"diagnostic", "pass", "openai", time.Now(),
+		"defenseclaw", "diagnostic", "canary", "defenseclaw-galileo-canary",
+	)
+	p.EndAgentSpan(agentSpan, "")
+	if err := p.tracerProvider.ForceFlush(ctx); err != nil {
+		return traceID, fmt.Errorf("flush runtime canary: %w", err)
+	}
+	return traceID, nil
+}
+
 // ToolSpanContext bundles the correlation identifiers the tool-call
 // runtime (and the audit/sink emitters) need to stamp on every tool
 // span. Split out into a struct so adding a new field (policy_id,
@@ -296,6 +331,10 @@ func (p *Provider) EndAgentSpan(span trace.Span, errMsg string) {
 // information (tool id from the LLM stream, active session key from
 // the router) fill what they have.
 type ToolSpanContext struct {
+	// StartedAt preserves the hook-side pre-tool timestamp when the completed
+	// span is synthesized from a later post-tool event.
+	StartedAt time.Time
+
 	// ToolID is the provider-assigned identifier for this specific
 	// tool invocation (e.g. the OpenAI tool_call_id). Required for
 	// /v1/agentwatch/summary top_tools aggregation and for joining
@@ -358,9 +397,13 @@ func (p *Provider) StartToolSpan(
 		return ctx, nil
 	}
 
+	startedAt := cor.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
 	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("execute_tool %s", tool),
 		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithTimestamp(time.Now()),
+		trace.WithTimestamp(startedAt),
 	)
 
 	p.setSpanResourceContext(span)
@@ -368,6 +411,7 @@ func (p *Provider) StartToolSpan(
 		attribute.String("gen_ai.operation.name", "execute_tool"),
 		attribute.String("gen_ai.tool.name", tool),
 		attribute.String("gen_ai.tool.type", "function"),
+		attribute.String("openinference.span.kind", "TOOL"),
 		// DefenseClaw-specific attributes
 		attribute.String("defenseclaw.tool.status", status),
 		attribute.Int("defenseclaw.tool.args_length", len(args)),
@@ -376,6 +420,9 @@ func (p *Provider) StartToolSpan(
 	)
 	if redaction.DisableAll() && len(args) > 0 {
 		span.SetAttributes(attribute.String("defenseclaw.tool.args", string(args)))
+	}
+	if len(args) > 0 {
+		p.SetGenAIToolArguments(span, string(args))
 	}
 
 	if skillKey != "" {
@@ -438,6 +485,72 @@ func (p *Provider) SetRawSpanStringSlice(span trace.Span, key string, values []s
 		return
 	}
 	span.SetAttributes(attribute.StringSlice(key, values))
+}
+
+// SetGenAIInput projects DefenseClaw's prompt content into the standard OTel
+// GenAI and OpenInference fields expected by GenAI observability backends.
+// Persistent-sink redaction remains authoritative: raw content is emitted only
+// when the operator has explicitly disabled redaction for every sink.
+func (p *Provider) SetGenAIInput(span trace.Span, content string) {
+	p.setGenAIContent(span, "input", "user", content)
+}
+
+// SetGenAIOutput is the response-side counterpart to SetGenAIInput.
+func (p *Provider) SetGenAIOutput(span trace.Span, content string) {
+	p.setGenAIContent(span, "output", "assistant", content)
+}
+
+// SetGenAIToolArguments and SetGenAIToolResult project completed tool calls
+// onto the OTel GenAI tool semantic attributes Galileo consumes. Content is
+// passed through the same persistent-sink redaction policy as model messages.
+func (p *Provider) SetGenAIToolArguments(span trace.Span, content string) {
+	if span == nil || strings.TrimSpace(content) == "" {
+		return
+	}
+	safe := redaction.ForSinkString(content)
+	messages, err := json.Marshal([]map[string]string{{"role": "user", "content": safe}})
+	if err != nil {
+		return
+	}
+	span.SetAttributes(
+		attribute.String("gen_ai.tool.call.arguments", safe),
+		attribute.String("gen_ai.input.messages", string(messages)),
+		attribute.String("input.value", safe),
+		attribute.String("input.mime_type", "application/json"),
+	)
+}
+
+func (p *Provider) SetGenAIToolResult(span trace.Span, content string) {
+	if span == nil || strings.TrimSpace(content) == "" {
+		return
+	}
+	safe := redaction.ForSinkString(content)
+	messages, err := json.Marshal([]map[string]string{{"role": "tool", "content": safe}})
+	if err != nil {
+		return
+	}
+	span.SetAttributes(
+		attribute.String("gen_ai.tool.call.result", safe),
+		attribute.String("gen_ai.output.messages", string(messages)),
+		attribute.String("output.value", safe),
+		attribute.String("output.mime_type", "text/plain"),
+	)
+}
+
+func (p *Provider) setGenAIContent(span trace.Span, direction, role, content string) {
+	if span == nil || strings.TrimSpace(content) == "" {
+		return
+	}
+	safe := redaction.ForSinkString(content)
+	messages, err := json.Marshal([]map[string]string{{"role": role, "content": safe}})
+	if err != nil {
+		return
+	}
+	span.SetAttributes(
+		attribute.String("gen_ai."+direction+".messages", string(messages)),
+		attribute.String(direction+".value", safe),
+		attribute.String(direction+".mime_type", "text/plain"),
+	)
 }
 
 // EndToolSpan ends an active tool call span with result data.
@@ -576,13 +689,30 @@ func (p *Provider) StartLLMSpan(
 	maxTokens int,
 	temperature float64,
 ) (context.Context, trace.Span) {
+	return p.StartLLMSpanAt(ctx, system, model, provider, maxTokens, temperature, time.Now())
+}
+
+// StartLLMSpanAt is the hook-correlation counterpart to StartLLMSpan. Hook
+// connectors report the prompt and completion in separate callbacks, so the
+// completed span must retain the prompt timestamp to render meaningful turn
+// latency instead of a near-zero serialization duration.
+func (p *Provider) StartLLMSpanAt(
+	ctx context.Context,
+	system, model, provider string,
+	maxTokens int,
+	temperature float64,
+	startedAt time.Time,
+) (context.Context, trace.Span) {
 	if !p.TracesEnabled() {
 		return ctx, nil
+	}
+	if startedAt.IsZero() {
+		startedAt = time.Now()
 	}
 
 	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("chat %s", model),
 		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithTimestamp(time.Now()),
+		trace.WithTimestamp(startedAt),
 	)
 
 	p.setSpanResourceContext(span)
@@ -593,6 +723,7 @@ func (p *Provider) StartLLMSpan(
 		attribute.String("gen_ai.request.model", model),
 		attribute.Int("gen_ai.request.max_tokens", maxTokens),
 		attribute.Float64("gen_ai.request.temperature", temperature),
+		attribute.String("openinference.span.kind", "LLM"),
 	)
 	if runID := gatewaylog.ProcessRunID(); runID != "" {
 		span.SetAttributes(attribute.String("defenseclaw.run.id", runID))
@@ -636,11 +767,15 @@ func (p *Provider) EndLLMSpan(
 	spanAttrs := []attribute.KeyValue{
 		attribute.String("gen_ai.response.model", responseModel),
 		attribute.StringSlice("gen_ai.response.finish_reasons", finishReasons),
-		attribute.Int("gen_ai.usage.input_tokens", promptTokens),
-		attribute.Int("gen_ai.usage.output_tokens", completionTokens),
 		attribute.Int("defenseclaw.llm.tool_calls", toolCallCount),
 		attribute.String("defenseclaw.llm.guardrail", guardrail),
 		attribute.String("defenseclaw.llm.guardrail.result", guardrailResult),
+	}
+	if promptTokens > 0 {
+		spanAttrs = append(spanAttrs, attribute.Int("gen_ai.usage.input_tokens", promptTokens))
+	}
+	if completionTokens > 0 {
+		spanAttrs = append(spanAttrs, attribute.Int("gen_ai.usage.output_tokens", completionTokens))
 	}
 	// Stamp agent identity onto the LLM span so traces in o11y join
 	// cleanly with metrics by the same labels. Metrics omit empty,
@@ -653,6 +788,9 @@ func (p *Provider) EndLLMSpan(
 	}
 	if agentID != "" {
 		spanAttrs = append(spanAttrs, attribute.String("gen_ai.agent.id", agentID))
+	}
+	if sessionID != "" {
+		spanAttrs = append(spanAttrs, attribute.String("gen_ai.conversation.id", sessionID))
 	}
 	span.SetAttributes(spanAttrs...)
 

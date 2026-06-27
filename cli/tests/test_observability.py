@@ -49,12 +49,44 @@ from defenseclaw.observability import (
     PRESETS,
     apply_preset,
     list_destinations,
+    migrate_flat_otel,
     preset_choices,
     remove_destination,
     resolve_preset,
     set_destination_enabled,
 )
 from defenseclaw.observability.presets import Preset
+
+# ---------------------------------------------------------------------------
+# flat OTel migration
+# ---------------------------------------------------------------------------
+
+
+def test_flat_otel_migration_is_previewable_applied_once_and_idempotent() -> None:
+    _, tmp = _make_tmp_ctx()
+    cfg_path = os.path.join(tmp, "config.yaml")
+    with open(cfg_path, "w") as handle:
+        handle.write(
+            "otel:\n"
+            "  enabled: true\n"
+            "  protocol: grpc\n"
+            "  endpoint: 127.0.0.1:4317\n"
+            "  traces: {enabled: true}\n"
+        )
+
+    preview = migrate_flat_otel(tmp)
+    assert preview.yaml_changes
+    assert "destinations" not in _read_yaml(tmp)["otel"]
+
+    applied = migrate_flat_otel(tmp, dry_run=False)
+    assert applied.name == "local-observability"
+    otel = _read_yaml(tmp)["otel"]
+    assert otel["destinations"][0]["endpoint"] == "127.0.0.1:4317"
+    assert "endpoint" not in otel
+    assert os.path.exists(cfg_path + ".pre-observability-migration.bak")
+
+    repeated = migrate_flat_otel(tmp, dry_run=False)
+    assert repeated.yaml_changes == []
 
 
 def _make_tmp_ctx() -> tuple[AppContext, str]:
@@ -137,6 +169,7 @@ class PresetRegistryTests(unittest.TestCase):
         "honeycomb",
         "newrelic",
         "grafana-cloud",
+        "galileo",
         "local-otlp",
         "otlp",
         "webhook",
@@ -175,9 +208,7 @@ class PresetRegistryTests(unittest.TestCase):
         ``preset_choices()`` ordering. The TUI is a separate Go codebase
         so we grep its source rather than import it.
         """
-        go_file = os.path.join(
-            os.path.dirname(__file__), "..", "..", "internal", "tui", "setup.go"
-        )
+        go_file = os.path.join(os.path.dirname(__file__), "..", "..", "internal", "tui", "setup.go")
         if not os.path.exists(go_file):
             self.skipTest(f"{go_file} not found; running outside repo")
         with open(go_file) as f:
@@ -186,8 +217,7 @@ class PresetRegistryTests(unittest.TestCase):
             self.assertIn(
                 f'"{pid}"',
                 source,
-                f"preset id '{pid}' missing from internal/tui/setup.go — "
-                "observabilityPresets drifted from presets.py",
+                f"preset id '{pid}' missing from internal/tui/setup.go — observabilityPresets drifted from presets.py",
             )
 
 
@@ -202,7 +232,7 @@ class WriterOTelPresetTests(unittest.TestCase):
     def tearDown(self) -> None:
         os.environ.pop("DEFENSECLAW_HOME", None)
 
-    def test_datadog_roundtrip_stamps_preset_identity(self) -> None:
+    def test_datadog_roundtrip_creates_named_destination(self) -> None:
         _, tmp = _make_tmp_ctx()
         result = apply_preset(
             "datadog",
@@ -218,15 +248,15 @@ class WriterOTelPresetTests(unittest.TestCase):
         doc = _read_yaml(tmp)
         otel = doc.get("otel") or {}
         self.assertTrue(otel.get("enabled"))
-        # Datadog's endpoint_template must have been substituted.
-        self.assertIn("datadoghq.com", str(otel.get("traces", {}).get("endpoint", "")))
-
-        attrs = (otel.get("resource") or {}).get("attributes") or {}
-        self.assertEqual(attrs.get("defenseclaw.preset"), "datadog")
-        self.assertEqual(
-            attrs.get("defenseclaw.preset_name"),
-            PRESETS["datadog"].display_name,
-        )
+        destinations = otel.get("destinations") or []
+        self.assertEqual(len(destinations), 1)
+        datadog = destinations[0]
+        self.assertEqual(datadog.get("name"), "datadog")
+        self.assertEqual(datadog.get("preset"), "datadog")
+        self.assertIn("datadoghq.com", str(datadog.get("endpoint", "")))
+        self.assertTrue((datadog.get("traces") or {}).get("enabled"))
+        self.assertTrue((datadog.get("metrics") or {}).get("enabled"))
+        self.assertFalse((datadog.get("logs") or {}).get("enabled"))
 
         dotenv = _read_dotenv(tmp)
         self.assertEqual(dotenv.get(PRESETS["datadog"].token_env), "dd-key-abc")
@@ -241,9 +271,307 @@ class WriterOTelPresetTests(unittest.TestCase):
 
         doc = _read_yaml(tmp)
         otel = doc.get("otel") or {}
-        self.assertTrue((otel.get("tls") or {}).get("insecure"))
-        self.assertEqual(otel.get("traces", {}).get("protocol"), "grpc")
-        self.assertEqual(otel.get("traces", {}).get("endpoint"), "127.0.0.1:4317")
+        local = (otel.get("destinations") or [])[0]
+        self.assertTrue((local.get("tls") or {}).get("insecure"))
+        self.assertEqual(local.get("protocol"), "grpc")
+        self.assertEqual(local.get("endpoint"), "127.0.0.1:4317")
+
+    def test_local_and_galileo_coexist_with_secret_reference(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        apply_preset("local-otlp", {"endpoint": "127.0.0.1:4317"}, tmp)
+        apply_preset(
+            "galileo",
+            {
+                "endpoint": "https://api.galileo.ai/otel/traces",
+                "project": "defenseclaw-tests",
+                "logstream": "default",
+            },
+            tmp,
+            secret_value="galileo-test-key",
+        )
+
+        doc = _read_yaml(tmp)
+        destinations = (doc.get("otel") or {}).get("destinations") or []
+        self.assertEqual([d.get("name") for d in destinations], ["local-observability", "galileo"])
+        galileo = destinations[1]
+        self.assertEqual(galileo.get("endpoint"), "https://api.galileo.ai/otel/traces")
+        self.assertNotIn("url_path", galileo.get("traces") or {})
+        self.assertTrue((galileo.get("traces") or {}).get("enabled"))
+        self.assertFalse((galileo.get("metrics") or {}).get("enabled"))
+        self.assertFalse((galileo.get("logs") or {}).get("enabled"))
+        self.assertEqual(galileo["headers"]["Galileo-API-Key"], "${GALILEO_API_KEY}")
+        self.assertEqual(galileo["headers"]["project"], "defenseclaw-tests")
+        self.assertEqual(galileo["headers"]["logstream"], "default")
+        self.assertEqual(
+            galileo["span_filter"],
+            {
+                "operations": [
+                    {
+                        "name": "chat",
+                        "require_attributes": [
+                            "gen_ai.operation.name",
+                            "gen_ai.provider.name",
+                            "gen_ai.request.model",
+                            "gen_ai.input.messages",
+                            "gen_ai.output.messages",
+                        ],
+                    },
+                    {
+                        "name": "invoke_agent",
+                        "require_attributes": [
+                            "gen_ai.operation.name",
+                            "gen_ai.agent.name",
+                            "gen_ai.provider.name",
+                            "openinference.span.kind",
+                            "gen_ai.input.messages",
+                            "gen_ai.output.messages",
+                        ],
+                    },
+                    {
+                        "name": "execute_tool",
+                        "require_attributes": [
+                            "gen_ai.operation.name",
+                            "gen_ai.tool.name",
+                            "openinference.span.kind",
+                            "gen_ai.tool.call.arguments",
+                            "gen_ai.tool.call.result",
+                            "gen_ai.input.messages",
+                            "gen_ai.output.messages",
+                        ],
+                    },
+                ],
+            },
+        )
+        self.assertEqual(_read_dotenv(tmp)["GALILEO_API_KEY"], "galileo-test-key")
+
+    def test_adding_disabled_route_does_not_disable_existing_routes(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        apply_preset("local-otlp", {"endpoint": "127.0.0.1:4317"}, tmp)
+        apply_preset(
+            "galileo",
+            {
+                "endpoint": "https://api.galileo.ai/otel/traces",
+                "project": "defenseclaw-tests",
+                "logstream": "default",
+            },
+            tmp,
+            enabled=False,
+            secret_value="galileo-test-key",
+        )
+
+        otel = _read_yaml(tmp)["otel"]
+        self.assertTrue(otel["enabled"])
+        destinations = {item["name"]: item for item in otel["destinations"]}
+        self.assertTrue(destinations["local-observability"]["enabled"])
+        self.assertFalse(destinations["galileo"]["enabled"])
+
+    def test_adding_galileo_migrates_legacy_flat_exporter_without_loss(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        with open(os.path.join(tmp, "config.yaml"), "w") as handle:
+            handle.write(
+                textwrap.dedent(
+                    """
+                    otel:
+                      enabled: true
+                      protocol: grpc
+                      endpoint: 127.0.0.1:4317
+                      tls: {insecure: true}
+                      traces: {enabled: true, sampler: always_on, sampler_arg: "1.0"}
+                      metrics: {enabled: true, export_interval_s: 30}
+                      logs: {enabled: true, emit_individual_findings: true}
+                      resource:
+                        attributes:
+                          defenseclaw.preset: local-otlp
+                          service.name: defenseclaw
+                    """
+                )
+            )
+
+        result = apply_preset(
+            "galileo",
+            {
+                "endpoint": "https://api.galileo.ai/otel/traces",
+                "project": "defenseclaw-tests",
+                "logstream": "default",
+            },
+            tmp,
+            secret_value="galileo-test-key",
+        )
+
+        assert any("migrated flat OTel exporter" in warning for warning in result.warnings)
+        otel = _read_yaml(tmp)["otel"]
+        assert [d["name"] for d in otel["destinations"]] == ["local-otlp", "galileo"]
+        migrated = otel["destinations"][0]
+        assert migrated["endpoint"] == "127.0.0.1:4317"
+        assert migrated["tls"]["insecure"] is True
+        assert migrated["traces"]["enabled"] is True
+        assert migrated["metrics"]["enabled"] is True
+        assert migrated["logs"]["enabled"] is True
+        assert otel["traces"]["sampler"] == "always_on"
+        assert otel["logs"]["emit_individual_findings"] is True
+        backup = os.path.join(tmp, "config.yaml.pre-observability-migration.bak")
+        assert os.path.exists(backup)
+        with open(backup) as handle:
+            backup_doc = yaml.safe_load(handle) or {}
+        assert "destinations" not in (backup_doc.get("otel") or {})
+
+    def test_adding_galileo_migrates_environment_backed_flat_exporter(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        with open(os.path.join(tmp, "config.yaml"), "w") as handle:
+            handle.write("otel:\n  enabled: true\n")
+        with patch.dict(
+            os.environ,
+            {
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318",
+                "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+            },
+            clear=False,
+        ):
+            apply_preset(
+                "galileo",
+                {
+                    "endpoint": "https://api.galileo.ai/otel/traces",
+                    "project": "defenseclaw-tests",
+                    "logstream": "default",
+                },
+                tmp,
+                secret_value="galileo-test-key",
+            )
+
+        destinations = _read_yaml(tmp)["otel"]["destinations"]
+        assert [item["name"] for item in destinations] == ["generic-otlp", "galileo"]
+        assert destinations[0]["endpoint"] == "http://127.0.0.1:4318"
+        assert destinations[0]["protocol"] == "http/protobuf"
+        assert all(destinations[0][signal]["enabled"] for signal in ("traces", "metrics", "logs"))
+
+    def test_rerun_repairs_mixed_flat_and_named_destination_shape(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        with open(os.path.join(tmp, "config.yaml"), "w") as handle:
+            handle.write(
+                textwrap.dedent(
+                    """
+                    otel:
+                      enabled: true
+                      protocol: grpc
+                      headers: {X-Local-Metadata: preserved}
+                      traces:
+                        enabled: true
+                        sampler: always_on
+                        endpoint: 127.0.0.1:4317
+                      metrics: {enabled: true, endpoint: 127.0.0.1:4317}
+                      logs: {enabled: true, endpoint: 127.0.0.1:4317}
+                      destinations:
+                        - name: galileo
+                          preset: galileo
+                          enabled: true
+                          protocol: http
+                          endpoint: https://api.galileo.ai/otel/traces
+                          traces: {enabled: true}
+                          metrics: {enabled: false}
+                          logs: {enabled: false}
+                    """
+                )
+            )
+
+        result = apply_preset(
+            "galileo",
+            {"endpoint": "https://api.galileo.ai/otel/traces", "project": "p", "logstream": "l"},
+            tmp,
+            secret_value="key",
+        )
+        assert any("migrated flat OTel exporter" in warning for warning in result.warnings)
+        otel = _read_yaml(tmp)["otel"]
+        assert [item["name"] for item in otel["destinations"]] == [
+            "local-observability",
+            "galileo",
+        ]
+        assert otel["destinations"][0]["preset"] == "local-otlp"
+        assert otel["destinations"][0]["traces"]["endpoint"] == "127.0.0.1:4317"
+        assert "endpoint" not in otel["traces"]
+        assert "headers" not in otel
+
+    def test_updating_galileo_preserves_operator_owned_fields(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        apply_preset(
+            "galileo",
+            {"endpoint": "https://api.galileo.ai/otel/traces", "project": "p", "logstream": "l"},
+            tmp,
+            secret_value="key",
+        )
+        raw = _read_yaml(tmp)
+        destination = raw["otel"]["destinations"][0]
+        destination["tls"] = {"ca_cert": "/etc/galileo-ca.pem"}
+        destination["batch"] = {"scheduled_delay_ms": 250}
+        destination["headers"]["X-Tenant-Region"] = "east"
+        with open(os.path.join(tmp, "config.yaml"), "w") as handle:
+            yaml.safe_dump(raw, handle)
+
+        apply_preset(
+            "galileo",
+            {"endpoint": "https://api.galileo.ai/otel/traces", "project": "p2", "logstream": "l2"},
+            tmp,
+        )
+        updated = _read_yaml(tmp)["otel"]["destinations"][0]
+        assert updated["tls"] == {"ca_cert": "/etc/galileo-ca.pem"}
+        assert updated["batch"] == {"scheduled_delay_ms": 250}
+        assert updated["headers"]["X-Tenant-Region"] == "east"
+        assert updated["headers"]["project"] == "p2"
+
+    def test_updating_galileo_upgrades_legacy_batch_delay_to_realtime_default(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        apply_preset(
+            "galileo",
+            {"endpoint": "https://api.galileo.ai/otel/traces", "project": "p", "logstream": "l"},
+            tmp,
+            secret_value="key",
+        )
+        raw = _read_yaml(tmp)
+        raw["otel"]["destinations"][0]["batch"] = {
+            "max_export_batch_size": 512,
+            "scheduled_delay_ms": 5000,
+            "max_queue_size": 2048,
+        }
+        with open(os.path.join(tmp, "config.yaml"), "w") as handle:
+            yaml.safe_dump(raw, handle)
+
+        apply_preset(
+            "galileo",
+            {"endpoint": "https://api.galileo.ai/otel/traces", "project": "p", "logstream": "l"},
+            tmp,
+        )
+        batch = _read_yaml(tmp)["otel"]["destinations"][0]["batch"]
+        assert batch == {
+            "max_export_batch_size": 512,
+            "scheduled_delay_ms": 1000,
+            "max_queue_size": 2048,
+        }
+
+    def test_shared_galileo_writer_rejects_environment_header_expansion(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        with self.assertRaisesRegex(ValueError, "must not contain"):
+            apply_preset(
+                "galileo",
+                {
+                    "endpoint": "https://api.galileo.ai/otel/traces",
+                    "project": "${HOME}",
+                    "logstream": "default",
+                },
+                tmp,
+                secret_value="key",
+            )
+
+    def test_removing_final_named_destination_disables_root_otel(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        apply_preset(
+            "galileo",
+            {"endpoint": "https://api.galileo.ai/otel/traces", "project": "p", "logstream": "l"},
+            tmp,
+            secret_value="key",
+        )
+        remove_destination("galileo", tmp)
+        otel = _read_yaml(tmp)["otel"]
+        assert otel["destinations"] == []
+        assert otel["enabled"] is False
 
     def test_dry_run_does_not_write(self) -> None:
         _, tmp = _make_tmp_ctx()
@@ -442,47 +770,108 @@ class ObservabilityCLITests(unittest.TestCase):
         os.environ.pop("DEFENSECLAW_HOME", None)
 
     def _invoke(self, args: list[str]):
-        return self.runner.invoke(
-            observability_cmd, args, obj=self.app, catch_exceptions=False
-        )
+        return self.runner.invoke(observability_cmd, args, obj=self.app, catch_exceptions=False)
 
     def test_add_datadog_non_interactive(self) -> None:
-        result = self._invoke([
-            "add", "datadog",
-            "--non-interactive",
-            "--token", "dd-key-abc",
-            "--site", "us5",
-            "--signals", "traces,metrics",
-        ])
+        result = self._invoke(
+            [
+                "add",
+                "datadog",
+                "--non-interactive",
+                "--token",
+                "dd-key-abc",
+                "--site",
+                "us5",
+                "--signals",
+                "traces,metrics",
+            ]
+        )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Redaction: ON (redacted telemetry)", result.output)
         self.assertIn("defenseclaw setup redaction off --yes", result.output)
         doc = _read_yaml(self.tmp)
         self.assertTrue(doc.get("otel", {}).get("enabled"))
+        self.assertIn("ADD otel:datadog", result.output)
+
+        updated = self._invoke(
+            [
+                "add",
+                "datadog",
+                "--non-interactive",
+                "--token",
+                "dd-key-abc",
+                "--site",
+                "us5",
+                "--signals",
+                "traces",
+            ]
+        )
+        self.assertEqual(updated.exit_code, 0, updated.output)
+        self.assertIn("UPDATE otel:datadog", updated.output)
+        self.assertIn("overwriting existing OTel destination", updated.output)
+
+    def test_list_identifies_target_kind_and_signals(self) -> None:
+        result = self._invoke(
+            [
+                "add",
+                "otlp",
+                "--non-interactive",
+                "--name",
+                "tempo",
+                "--endpoint",
+                "127.0.0.1:4317",
+                "--signals",
+                "traces",
+            ]
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        listed = self._invoke(["list"])
+        self.assertEqual(listed.exit_code, 0, listed.output)
+        for heading in ("TARGET", "KIND", "SIGNALS"):
+            self.assertIn(heading, listed.output)
+        self.assertIn("tempo", listed.output)
+        self.assertIn("otel", listed.output)
+        self.assertIn("traces", listed.output)
 
     def test_add_reports_raw_redaction_status_without_prompting(self) -> None:
         self.app.cfg.privacy.disable_redaction = True
-        result = self._invoke([
-            "add", "otlp",
-            "--non-interactive",
-            "--target", "audit_sinks",
-            "--endpoint", "collector.example.com:4317",
-            "--protocol", "grpc",
-            "--name", "lab-otlp",
-        ])
+        result = self._invoke(
+            [
+                "add",
+                "otlp",
+                "--non-interactive",
+                "--target",
+                "audit_sinks",
+                "--endpoint",
+                "collector.example.com:4317",
+                "--protocol",
+                "grpc",
+                "--name",
+                "lab-otlp",
+            ]
+        )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Redaction: OFF (RAW telemetry; privacy.disable_redaction=true)", result.output)
         self.assertIn("defenseclaw setup redaction on", result.output)
         self.assertNotIn("Disable redaction?", result.output)
 
     def test_add_splunk_hec_then_disable(self) -> None:
-        r1 = self._invoke([
-            "add", "splunk-hec",
-            "--non-interactive",
-            "--host", "localhost", "--port", "8088",
-            "--token", "hec-token",
-            "--name", "splunk-hec-local",
-        ])
+        r1 = self._invoke(
+            [
+                "add",
+                "splunk-hec",
+                "--non-interactive",
+                "--host",
+                "localhost",
+                "--port",
+                "8088",
+                "--token",
+                "hec-token",
+                "--name",
+                "splunk-hec-local",
+            ]
+        )
         self.assertEqual(r1.exit_code, 0, r1.output)
 
         r2 = self._invoke(["disable", "splunk-hec-local"])
@@ -493,13 +882,19 @@ class ObservabilityCLITests(unittest.TestCase):
         self.assertFalse(hec.enabled)
 
     def test_add_splunk_enterprise_non_interactive(self) -> None:
-        result = self._invoke([
-            "add", "splunk-enterprise",
-            "--non-interactive",
-            "--endpoint", "https://splunk.example.com:8088/services/collector/event",
-            "--token", "hec-token",
-            "--index", "defenseclaw",
-        ])
+        result = self._invoke(
+            [
+                "add",
+                "splunk-enterprise",
+                "--non-interactive",
+                "--endpoint",
+                "https://splunk.example.com:8088/services/collector/event",
+                "--token",
+                "hec-token",
+                "--index",
+                "defenseclaw",
+            ]
+        )
         self.assertEqual(result.exit_code, 0, result.output)
 
         dests = list_destinations(self.tmp)
@@ -509,12 +904,17 @@ class ObservabilityCLITests(unittest.TestCase):
         self.assertEqual(_read_dotenv(self.tmp).get("DEFENSECLAW_SPLUNK_HEC_TOKEN"), "hec-token")
 
     def _add_enterprise_sink(self) -> None:
-        result = self._invoke([
-            "add", "splunk-enterprise",
-            "--non-interactive",
-            "--endpoint", "https://splunk.example.com:8088/services/collector/event",
-            "--token", "hec-token",
-        ])
+        result = self._invoke(
+            [
+                "add",
+                "splunk-enterprise",
+                "--non-interactive",
+                "--endpoint",
+                "https://splunk.example.com:8088/services/collector/event",
+                "--token",
+                "hec-token",
+            ]
+        )
         self.assertEqual(result.exit_code, 0, result.output)
 
     def test_splunk_enterprise_probe_success(self) -> None:
@@ -563,12 +963,16 @@ class ObservabilityCLITests(unittest.TestCase):
         self.assertIn("network down", result.output)
 
     def test_add_webhook_dry_run_does_not_persist(self) -> None:
-        result = self._invoke([
-            "add", "webhook",
-            "--non-interactive",
-            "--url", "https://example.com/hook",
-            "--dry-run",
-        ])
+        result = self._invoke(
+            [
+                "add",
+                "webhook",
+                "--non-interactive",
+                "--url",
+                "https://example.com/hook",
+                "--dry-run",
+            ]
+        )
         self.assertEqual(result.exit_code, 0, result.output)
         # list_destinations() always surfaces the otel: block (enabled
         # or not) — a dry-run webhook must not land in audit_sinks.

@@ -809,6 +809,35 @@
         "dedupStrategy": "none",
         "enableLogDetails": true
       }
+    },
+    {
+      "type": "row",
+      "title": "Runtime Agent Directory",
+      "description": "Automatically populated by lifecycle telemetry. Click Agent ID to open the reusable Agent360 drill-down.",
+      "gridPos": {"x": 0, "y": 73, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "table",
+      "title": "Observed agents — click Agent ID for Agent360",
+      "description": "One row per stable agent identity and current lifecycle state. New agents appear without dashboard provisioning changes.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 74, "w": 24, "h": 12},
+      "targets": [{
+        "expr": "topk by (gen_ai_agent_id) (1, max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}[$__range]))",
+        "format": "table",
+        "instant": true,
+        "refId": "A"
+      }],
+      "transformations": [
+        {"id": "labelsToFields", "options": {"mode": "columns"}},
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "defenseclaw_agent_execution_id": true, "defenseclaw_agent_lifecycle_event": true, "defenseclaw_agent_lifecycle_id": true, "defenseclaw_claw_mode": true, "defenseclaw_device_id": true, "defenseclaw_gateway_host": true, "defenseclaw_gateway_port": true, "defenseclaw_instance_id": true, "defenseclaw_session_root_id": true, "deployment_environment": true, "host_arch": true, "host_name": true, "instance": true, "job": true, "os_type": true, "service": true, "service_name": true, "service_namespace": true, "service_version": true, "exported_job": true}, "renameByName": {"Value": "Last Seen (Unix s)", "connector": "Connector", "gen_ai_agent_id": "Agent ID", "gen_ai_agent_name": "Name", "gen_ai_agent_type": "Type", "defenseclaw_agent_root_id": "Root Agent", "defenseclaw_agent_parent_id": "Parent Agent", "defenseclaw_agent_lifecycle_state": "State", "defenseclaw_agent_depth": "Depth"}}}
+      ],
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "auto", "cellOptions": {"type": "auto"}}},
+        "overrides": [{"matcher": {"id": "byName", "options": "Agent ID"}, "properties": [{"id": "links", "value": [{"title": "Open Agent360", "url": "/d/defenseclaw-agent-360/agent360?var-connector=${__data.fields.Connector}&var-agent=${__value.raw}&var-scope_label=defenseclaw_agent_root_id", "targetBlank": false}]}]}]
+      },
+      "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Last Seen (Unix s)", "desc": true}]}
     }
   ],
   "preload": false,

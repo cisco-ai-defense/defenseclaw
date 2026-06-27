@@ -89,6 +89,29 @@ class TestHelpers(unittest.TestCase):
     def test_dedup_empty(self):
         self.assertEqual(_dedup([]), [])
 
+    def test_malformed_otel_destination_numbers_fall_back_to_defaults(self):
+        cfg = config_mod._merge_otel(
+            {
+                "destinations": [
+                    {
+                        "name": "malformed",
+                        "enabled": True,
+                        "metrics": {"enabled": True, "export_interval_s": "abc"},
+                        "batch": {
+                            "max_export_batch_size": "many",
+                            "scheduled_delay_ms": {},
+                            "max_queue_size": None,
+                        },
+                    }
+                ]
+            }
+        )
+        destination = cfg.destinations[0]
+        self.assertEqual(destination.metrics.export_interval_s, 60)
+        self.assertEqual(destination.batch.max_export_batch_size, 512)
+        self.assertEqual(destination.batch.scheduled_delay_ms, 5000)
+        self.assertEqual(destination.batch.max_queue_size, 2048)
+
     def test_validate_deployment_mode_empty_allowed(self):
         self.assertEqual(config_mod._validate_deployment_mode(""), "")
 

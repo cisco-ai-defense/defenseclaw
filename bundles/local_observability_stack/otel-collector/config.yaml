@@ -94,6 +94,39 @@ processors:
           - truncate_all(attributes, 8192)
           - set(body, Substring(body, 0, 200000)) where IsString(body) and Len(body) > 200000
 
+connectors:
+  # Turn completed runtime spans into per-agent RED metrics. These dimensions
+  # are the stable Agent360 correlation contract; request IDs and prompt text
+  # are intentionally excluded from labels. The native agent.last_seen metric
+  # powers the durable directory while these derived metrics power latency,
+  # throughput, tool, model, and error panels.
+  spanmetrics/agent360:
+    namespace: defenseclaw.agent.span
+    histogram:
+      explicit:
+        buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s, 10s, 30s, 1m, 5m]
+    dimensions:
+      - name: gen_ai.operation.name
+      - name: gen_ai.agent.id
+      - name: gen_ai.agent.name
+      - name: gen_ai.agent.type
+      - name: defenseclaw.agent.root.id
+      - name: defenseclaw.agent.parent.id
+      - name: defenseclaw.agent.lifecycle.id
+      - name: defenseclaw.agent.execution.id
+      - name: defenseclaw.agent.lifecycle.event
+      - name: defenseclaw.agent.lifecycle.state
+      - name: gen_ai.tool.name
+      - name: defenseclaw.destination.app
+      - name: gen_ai.provider.name
+      - name: gen_ai.request.model
+    exemplars:
+      enabled: true
+    dimensions_cache_size: 10000
+    resource_metrics_cache_size: 1000
+    metrics_flush_interval: 15s
+    metrics_expiration: 24h
+
 exporters:
   # Traces -> Tempo.
   otlp/tempo:
@@ -149,9 +182,9 @@ service:
     traces:
       receivers: [otlp]
       processors: [resource, batch]
-      exporters: [otlp/tempo, debug]
+      exporters: [otlp/tempo, spanmetrics/agent360, debug]
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, spanmetrics/agent360]
       processors: [resource, batch]
       exporters: [prometheusremotewrite/prometheus, prometheus, debug]
     logs:

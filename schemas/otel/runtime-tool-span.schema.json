@@ -2,48 +2,83 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.dev/schemas/otel/runtime-tool-span.schema.json",
   "title": "DefenseClaw Runtime Tool Call Span",
-  "description": "OTEL Span representing a tool_call → tool_result lifecycle. Created on tool_call event, ended on matching tool_result.",
+  "description": "OTEL INTERNAL span for a tool invocation. gen_ai.* attributes provide correlation; defenseclaw.* attributes carry enforcement and provenance.",
   "type": "object",
-  "required": ["name", "kind", "startTimeUnixNano", "attributes"],
+  "required": [
+    "name",
+    "kind",
+    "startTimeUnixNano",
+    "attributes"
+  ],
+  "x-required-attribute-keys": [
+    "gen_ai.operation.name",
+    "gen_ai.tool.name",
+    "openinference.span.kind",
+    "gen_ai.tool.call.arguments",
+    "gen_ai.tool.call.result",
+    "gen_ai.input.messages",
+    "gen_ai.output.messages"
+  ],
+  "x-optional-attribute-keys": [
+    "defenseclaw.agent.root.id",
+    "defenseclaw.agent.parent.id",
+    "defenseclaw.session.root.id",
+    "defenseclaw.session.parent.id",
+    "defenseclaw.agent.lifecycle.id",
+    "defenseclaw.agent.execution.id",
+    "defenseclaw.agent.lifecycle.event",
+    "defenseclaw.agent.lifecycle.state",
+    "defenseclaw.agent.depth",
+    "defenseclaw.session.source",
+    "defenseclaw.session.resumed",
+    "defenseclaw.telemetry.input.reported",
+    "defenseclaw.telemetry.output.reported",
+    "user.id",
+    "defenseclaw.user.name"
+  ],
+  "x-galileo-exported": true,
   "properties": {
     "traceId": {
       "type": "string",
-      "description": "16-byte hex trace ID."
+      "pattern": "^[0-9a-f]{32}$"
     },
     "spanId": {
       "type": "string",
-      "description": "8-byte hex span ID."
+      "pattern": "^[0-9a-f]{16}$"
     },
     "parentSpanId": {
       "type": "string",
-      "description": "Parent span ID (LLM call span or agent session span)."
+      "pattern": "^[0-9a-f]{16}$"
     },
     "name": {
       "type": "string",
-      "pattern": "^tool/.+$",
-      "description": "Format: tool/{tool_name}",
-      "examples": ["tool/shell", "tool/read_file", "tool/web_search"]
+      "pattern": "^execute_tool .+$",
+      "description": "OTEL GenAI span name: execute_tool {tool_name}.",
+      "examples": [
+        "execute_tool shell",
+        "execute_tool web_search"
+      ]
     },
     "kind": {
       "type": "integer",
-      "const": 1,
-      "description": "SPAN_KIND_INTERNAL = 1"
+      "const": 1
     },
     "startTimeUnixNano": {
-      "type": "string",
-      "description": "tool_call event timestamp."
+      "type": "string"
     },
     "endTimeUnixNano": {
-      "type": "string",
-      "description": "tool_result event timestamp."
+      "type": "string"
     },
     "status": {
       "type": "object",
       "properties": {
         "code": {
           "type": "integer",
-          "enum": [0, 1, 2],
-          "description": "STATUS_CODE_UNSET=0, OK=1, ERROR=2. Set to ERROR when exit_code != 0."
+          "enum": [
+            0,
+            1,
+            2
+          ]
         },
         "message": {
           "type": "string"
@@ -52,11 +87,12 @@
     },
     "attributes": {
       "type": "array",
-      "items": { "$ref": "#/$defs/attribute" }
+      "items": {
+        "$ref": "#/$defs/attribute"
+      }
     },
     "events": {
       "type": "array",
-      "description": "Span events, e.g. tool.flagged.",
       "items": {
         "$ref": "#/$defs/spanEvent"
       }
@@ -65,86 +101,192 @@
   "$defs": {
     "attribute": {
       "type": "object",
-      "required": ["key", "value"],
+      "required": [
+        "key",
+        "value"
+      ],
       "properties": {
-        "key": { "type": "string" },
-        "value": { "type": "object" }
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "object"
+        }
       }
     },
     "spanEvent": {
       "type": "object",
-      "required": ["name", "timeUnixNano"],
+      "required": [
+        "name",
+        "timeUnixNano"
+      ],
       "properties": {
         "name": {
           "type": "string",
-          "enum": ["tool.flagged"]
+          "enum": [
+            "tool.flagged"
+          ]
         },
-        "timeUnixNano": { "type": "string" },
+        "timeUnixNano": {
+          "type": "string"
+        },
         "attributes": {
           "type": "array",
-          "items": { "$ref": "#/$defs/attribute" }
+          "items": {
+            "$ref": "#/$defs/attribute"
+          }
         }
       }
     },
     "attributeDefinitions": {
       "type": "object",
-      "description": "Semantic definition of all span attributes.",
       "properties": {
-        "gen_ai.tool.name": {
+        "tenant.id": {
+          "type": "string"
+        },
+        "workspace.id": {
+          "type": "string"
+        },
+        "deployment.environment": {
+          "type": "string"
+        },
+        "deployment.mode": {
+          "type": "string"
+        },
+        "discovery.source": {
+          "type": "string"
+        },
+        "defenseclaw.device.id": {
+          "type": "string"
+        },
+        "gen_ai.operation.name": {
           "type": "string",
-          "description": "Tool name as reported by the agent framework.",
-          "examples": ["shell", "read_file", "web_search"]
+          "const": "execute_tool"
+        },
+        "gen_ai.tool.name": {
+          "type": "string"
+        },
+        "gen_ai.tool.type": {
+          "type": "string",
+          "const": "function"
+        },
+        "gen_ai.tool.call.id": {
+          "type": "string"
+        },
+        "openinference.span.kind": {
+          "type": "string",
+          "const": "TOOL"
+        },
+        "gen_ai.tool.call.arguments": {
+          "type": "string"
+        },
+        "gen_ai.tool.call.result": {
+          "type": "string"
+        },
+        "gen_ai.input.messages": {
+          "type": "string"
+        },
+        "gen_ai.output.messages": {
+          "type": "string"
+        },
+        "input.value": {
+          "type": "string"
+        },
+        "input.mime_type": {
+          "type": "string",
+          "const": "application/json"
+        },
+        "output.value": {
+          "type": "string"
+        },
+        "output.mime_type": {
+          "type": "string",
+          "const": "text/plain"
+        },
+        "gen_ai.conversation.id": {
+          "type": "string"
+        },
+        "gen_ai.agent.name": {
+          "type": "string"
+        },
+        "gen_ai.agent.type": {
+          "type": "string"
+        },
+        "gen_ai.agent.id": {
+          "type": "string"
+        },
+        "defenseclaw.agent.root.id": { "type": "string" },
+        "defenseclaw.agent.parent.id": { "type": "string" },
+        "defenseclaw.session.root.id": { "type": "string" },
+        "defenseclaw.session.parent.id": { "type": "string" },
+        "defenseclaw.agent.lifecycle.id": { "type": "string" },
+        "defenseclaw.agent.execution.id": { "type": "string" },
+        "defenseclaw.agent.lifecycle.event": { "type": "string" },
+        "defenseclaw.agent.lifecycle.state": { "type": "string" },
+        "defenseclaw.agent.depth": { "type": "integer", "minimum": 0 },
+        "defenseclaw.session.source": { "type": "string" },
+        "defenseclaw.session.resumed": { "type": "boolean" },
+        "defenseclaw.telemetry.input.reported": { "type": "boolean" },
+        "defenseclaw.telemetry.output.reported": { "type": "boolean" },
+        "user.id": { "type": "string" },
+        "defenseclaw.user.name": { "type": "string" },
+        "defenseclaw.run.id": {
+          "type": "string"
+        },
+        "defenseclaw.agent.instance_id": {
+          "type": "string"
+        },
+        "defenseclaw.destination.app": {
+          "type": "string"
+        },
+        "defenseclaw.policy.id": {
+          "type": "string"
         },
         "defenseclaw.tool.status": {
-          "type": "string",
-          "description": "Status from the tool_call payload."
+          "type": "string"
+        },
+        "defenseclaw.tool.args_length": {
+          "type": "integer",
+          "minimum": 0
         },
         "defenseclaw.tool.args": {
           "type": "string",
-          "description": "Truncated tool arguments JSON (max 2048 chars)."
+          "description": "Raw arguments; emitted only when persistent-sink redaction is explicitly disabled."
         },
         "defenseclaw.tool.exit_code": {
-          "type": "integer",
-          "description": "Exit code from tool_result. 0 = success."
+          "type": "integer"
         },
         "defenseclaw.tool.output_length": {
           "type": "integer",
-          "description": "Byte length of the tool_result output."
+          "minimum": 0
         },
         "defenseclaw.tool.dangerous": {
-          "type": "boolean",
-          "description": "True if the tool call matched a dangerous pattern."
+          "type": "boolean"
         },
         "defenseclaw.tool.flagged_pattern": {
-          "type": "string",
-          "description": "The dangerous pattern that matched (if any).",
-          "examples": ["curl", "rm -rf /", "base64 -d"]
+          "type": "string"
         },
         "defenseclaw.tool.provider": {
-          "type": "string",
-          "enum": ["skill", "builtin", "mcp"],
-          "description": "Where the tool comes from."
+          "type": "string"
         },
         "defenseclaw.tool.skill_key": {
-          "type": "string",
-          "description": "Skill key if the tool is provided by a skill."
+          "type": "string"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "spanEventAttributeDefinitions": {
       "type": "object",
-      "description": "Attributes on tool.flagged span events.",
       "properties": {
         "defenseclaw.flag.reason": {
           "type": "string",
-          "enum": ["dangerous-pattern"],
-          "description": "Why the tool call was flagged."
+          "const": "dangerous-pattern"
         },
         "defenseclaw.flag.pattern": {
-          "type": "string",
-          "description": "The specific pattern that matched."
+          "type": "string"
         }
-      }
+      },
+      "additionalProperties": false
     }
   }
 }

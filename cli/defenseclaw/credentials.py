@@ -259,6 +259,27 @@ def _splunk_token(cfg: Config) -> Requirement:
     return Requirement.REQUIRED
 
 
+def _galileo_key(cfg: Config) -> Requirement:
+    otel = getattr(cfg, "otel", None)
+    if not getattr(otel, "enabled", False):
+        return Requirement.NOT_USED
+    for destination in getattr(otel, "destinations", ()) or ():
+        if (
+            getattr(destination, "preset", "") == "galileo"
+            and getattr(destination, "enabled", False)
+        ):
+            return Requirement.REQUIRED
+    return Requirement.NOT_USED
+
+
+def _galileo_endpoint(cfg: Config) -> str:
+    otel = getattr(cfg, "otel", None)
+    for destination in getattr(otel, "destinations", ()) or ():
+        if getattr(destination, "preset", "") == "galileo":
+            return str(getattr(destination, "endpoint", "") or "")
+    return ""
+
+
 def _inspect_llm_key(cfg: Config) -> Requirement:
     """Tracks a *custom* skill-scanner LLM env var — only surfaces when
     the operator has overridden ``scanners.skill_scanner.llm.api_key_env``
@@ -392,6 +413,13 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         description="Splunk HEC token for audit forwarding",
         required=_splunk_token,
         effective_env_name=_splunk_env,
+    ),
+    CredentialSpec(
+        env_name="GALILEO_API_KEY",
+        feature="observability.galileo",
+        description="Galileo API key for OTLP trace export",
+        required=_galileo_key,
+        bound_endpoint=_galileo_endpoint,
     ),
     CredentialSpec(
         env_name="DEFENSECLAW_SKILL_SCANNER_LLM_KEY",

@@ -6628,6 +6628,8 @@ class DefenseClawTUI(App[None]):
         columns.add_column(ratio=1)
         columns.add_row(Group(services_panel, cfg_panel), Group(enf_panel, sc_panel, doc_panel))
 
+        observability_panel = self._overview_observability_panel()
+
         # 8.13: dedicated per-connector CONNECTORS table for multi-connector
         # installs. Empty for single-connector (panel omitted from the Group).
         connectors_panel = self._overview_connectors_panel(overview_connector_rows)
@@ -6670,6 +6672,8 @@ class DefenseClawTUI(App[None]):
             *notice_block,
             Text(""),
             columns,
+            Text(""),
+            observability_panel,
             Text(""),
             *connectors_block,
             ai_panel,
@@ -6757,6 +6761,67 @@ class DefenseClawTUI(App[None]):
             padding=(0, 1),
         )
 
+    def _overview_observability_panel(self) -> RenderableType:
+        """Full-width inventory of runtime-loaded telemetry destinations."""
+
+        rows = self.overview_model.observability_destination_rows()
+        if rows:
+            table = Table.grid(padding=(0, 2), expand=True)
+            table.add_column(no_wrap=True, min_width=18)  # NAME
+            table.add_column(no_wrap=True, min_width=11)  # TARGET
+            table.add_column(no_wrap=True, min_width=16)  # SCOPE
+            table.add_column(no_wrap=True, min_width=12)  # KIND
+            table.add_column(no_wrap=True, min_width=10)  # STATE
+            table.add_column(no_wrap=True, min_width=18)  # SIGNALS
+            table.add_column(no_wrap=True, min_width=13)  # ROUTING
+            table.add_column(overflow="ellipsis")  # ENDPOINT
+            table.add_row(
+                Text("NAME", style=TOKENS.text_secondary),
+                Text("TARGET", style=TOKENS.text_secondary),
+                Text("SCOPE", style=TOKENS.text_secondary),
+                Text("KIND/PRESET", style=TOKENS.text_secondary),
+                Text("STATE", style=TOKENS.text_secondary),
+                Text("SIGNALS", style=TOKENS.text_secondary),
+                Text("ROUTING", style=TOKENS.text_secondary),
+                Text("ENDPOINT", style=TOKENS.text_secondary),
+            )
+            for row in rows:
+                color = state_color(row.state)
+                table.add_row(
+                    Text(row.name, style=TOKENS.text_primary),
+                    Text(row.target, style=TOKENS.text_secondary),
+                    Text(row.scope, style=TOKENS.text_secondary),
+                    Text(row.kind, style=TOKENS.text_secondary),
+                    Text(row.state, style=color),
+                    Text(row.signals, style=TOKENS.text_secondary),
+                    Text(row.routing or "—", style=TOKENS.accent_cyan),
+                    Text(row.endpoint, style=TOKENS.text_muted, overflow="ellipsis"),
+                )
+            body: RenderableType = Group(
+                table,
+                Text(
+                    "Names are identities: a new name adds a route; the same name updates it. "
+                    "Manage in 0 Setup → Observability / Galileo.",
+                    style=f"italic {TOKENS.text_muted}",
+                ),
+            )
+        else:
+            body = Text(
+                "No runtime-loaded destinations. Configure one in 0 Setup → "
+                "Observability / Galileo, then restart the gateway.",
+                style=TOKENS.text_secondary,
+            )
+        return Panel(
+            body,
+            title=Text(
+                "OBSERVABILITY DESTINATIONS · RUNTIME",
+                style=f"bold {TOKENS.accent_cyan}",
+            ),
+            title_align="left",
+            border_style=TOKENS.accent_cyan,
+            padding=(0, 1),
+        )
+
     def _overview_connectors_text(self, rows: list[ConnectorOverviewRow]) -> str:
         """Plain-text CONNECTORS section for the fallback body (or "")."""
 
@@ -6784,6 +6849,37 @@ class DefenseClawTUI(App[None]):
             )
         body = "\n".join(lines)
         return f"[bold {TOKENS.accent_green}]CONNECTORS[/]\n{body}\n\n"
+
+    def _overview_observability_text(self) -> str:
+        """Plain-text equivalent of the observability destination panel."""
+
+        rows = self.overview_model.observability_destination_rows()
+        if not rows:
+            return (
+                f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
+                "  No runtime-loaded destinations. Configure one in 0 Setup → "
+                "Observability / Galileo, then restart the gateway.\n\n"
+            )
+        lines = [
+            f"  {'NAME':<20}{'TARGET':<14}{'SCOPE':<20}{'KIND/PRESET':<16}{'STATE':<11}"
+            f"{'SIGNALS':<20}{'ROUTING':<16}ENDPOINT"
+        ]
+        for row in rows:
+            color = state_color(row.state)
+            lines.append(
+                f"  {row.name[:19]:<20}{row.target:<14}{row.scope[:19]:<20}{row.kind[:15]:<16}"
+                f"[{color}]{row.state:<11}[/]{row.signals[:19]:<20}"
+                f"{(row.routing or '—'):<16}{rich_escape(row.endpoint)}"
+            )
+        lines.append(
+            "  Names are identities: a new name adds; the same name updates. "
+            "Manage in 0 Setup → Observability / Galileo."
+        )
+        return (
+            f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
+            + "\n".join(lines)
+            + "\n\n"
+        )
 
     def _overview_body_text(self, service_cards: tuple[Any, ...]) -> str:
         notices = self.overview_model.build_notices()
@@ -6837,6 +6933,7 @@ class DefenseClawTUI(App[None]):
         config_text = "\n".join(f"  {key:<16} {value}" for key, value in config_lines)
 
         connectors_text = self._overview_connectors_text(overview_connector_rows)
+        observability_text = self._overview_observability_text()
 
         scanner_lines = [
             ("Gateway", state_by_key.get("gateway", "unknown"), detail_by_key.get("gateway", "")),
@@ -6968,6 +7065,7 @@ class DefenseClawTUI(App[None]):
             + "\n".join(notice_lines)
             + "\n\n"
             f"[bold {TOKENS.accent_blue}]SERVICES[/]\n{services_text}\n\n"
+            + observability_text
             + (
                 f"[bold {TOKENS.accent_amber}]ENFORCEMENT · {enf_selected}[/]\n"
                 if enf_selected

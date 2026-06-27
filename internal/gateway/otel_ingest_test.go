@@ -465,7 +465,15 @@ func TestOTLPIngest_Logs_PromotesCodexTokenUsage(t *testing.T) {
 	}
 	defer otelProvider.Shutdown(context.Background())
 
-	a := &APIServer{}
+	rootMeta := hookLLMEventMeta(
+		"codex", "codex-session-usage", "", "", "codex", "native-codex-root", "codex", "codex",
+		map[string]interface{}{"hook_event_name": "SessionStart"},
+	)
+	rootKey := hookSessionTraceKey(rootMeta)
+	a := &APIServer{
+		hookSessionTraces:     map[string]hookSessionTrace{rootKey: {meta: rootMeta}},
+		hookSessionTraceOrder: []string{rootKey},
+	}
 	a.SetOTelProvider(otelProvider)
 	body := `{
 		"resourceLogs": [{
@@ -477,6 +485,7 @@ func TestOTLPIngest_Logs_PromotesCodexTokenUsage(t *testing.T) {
 					"attributes": [
 						{"key": "event.name", "value": {"stringValue": "codex.sse_event"}},
 						{"key": "event.kind", "value": {"stringValue": "response.completed"}},
+						{"key": "conversation.id", "value": {"stringValue": "codex-session-usage"}},
 						{"key": "model", "value": {"stringValue": "gpt-5-codex"}},
 						{"key": "input_tokens", "value": {"stringValue": "123"}},
 						{"key": "gen_ai.usage", "value": {"kvlistValue": {"values": [
@@ -499,6 +508,10 @@ func TestOTLPIngest_Logs_PromotesCodexTokenUsage(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
 	}
+	spanUsage := a.takeHookLLMSpanUsage(llmEventMeta{Source: "codex", SessionID: "codex-session-usage"})
+	if spanUsage.promptTokens != 123 || spanUsage.completionTokens != 45 || spanUsage.model != "gpt-5-codex" {
+		t.Fatalf("correlated span usage=%+v, want input=123 output=45 model=gpt-5-codex", spanUsage)
+	}
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -513,15 +526,17 @@ func TestOTLPIngest_Logs_PromotesCodexTokenUsage(t *testing.T) {
 		t.Fatalf("expected Histogram[float64], got %T", tokenMetric.Data)
 	}
 
-	var gotInput, gotOutput bool
+	var gotInput, gotOutput, gotAgentID bool
 	for _, dp := range tokenHist.DataPoints {
-		var tokenType, agentName string
+		var tokenType, agentName, agentID string
 		for _, attr := range dp.Attributes.ToSlice() {
 			switch string(attr.Key) {
 			case "gen_ai.token.type":
 				tokenType = attr.Value.AsString()
 			case "gen_ai.agent.name":
 				agentName = attr.Value.AsString()
+			case "gen_ai.agent.id":
+				agentID = attr.Value.AsString()
 			}
 		}
 		if agentName != "codex" {
@@ -533,9 +548,10 @@ func TestOTLPIngest_Logs_PromotesCodexTokenUsage(t *testing.T) {
 		case "output":
 			gotOutput = dp.Sum == 45
 		}
+		gotAgentID = gotAgentID || agentID == "native-codex-root"
 	}
-	if !gotInput || !gotOutput {
-		t.Fatalf("token histogram missing input/output sums: input=%v output=%v", gotInput, gotOutput)
+	if !gotInput || !gotOutput || !gotAgentID {
+		t.Fatalf("token histogram missing correlation: input=%v output=%v agent_id=%v", gotInput, gotOutput, gotAgentID)
 	}
 }
 
@@ -621,6 +637,34 @@ func TestOTLPIngest_Metrics_PromotesClaudeCodeTokenUsage(t *testing.T) {
 	}
 	if got["input"] != 321 || got["cacheRead"] != 17 {
 		t.Fatalf("token histogram sums = %#v, want input=321 cacheRead=17", got)
+	}
+}
+
+func TestDeltaOTLPCumulativeTokenUsage(t *testing.T) {
+	a := &APIServer{}
+	base := otelTokenUsage{
+		cumulative: true,
+		seriesKey:  "claude-input",
+		startTime:  "1000",
+		tokens:     100,
+	}
+	got, ok := a.deltaOTLPCumulativeTokenUsage(base)
+	if !ok || got.tokens != 100 {
+		t.Fatalf("first cumulative point = (%+v,%v), want 100,true", got, ok)
+	}
+	if _, ok := a.deltaOTLPCumulativeTokenUsage(base); ok {
+		t.Fatal("duplicate cumulative point must not emit a second usage observation")
+	}
+	base.tokens = 145
+	got, ok = a.deltaOTLPCumulativeTokenUsage(base)
+	if !ok || got.tokens != 45 {
+		t.Fatalf("cumulative delta = (%+v,%v), want 45,true", got, ok)
+	}
+	base.startTime = "2000"
+	base.tokens = 12
+	got, ok = a.deltaOTLPCumulativeTokenUsage(base)
+	if !ok || got.tokens != 12 {
+		t.Fatalf("reset cumulative point = (%+v,%v), want 12,true", got, ok)
 	}
 }
 
@@ -974,10 +1018,16 @@ func TestCodexNotify_EmitsFirstClassLLMEvents(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
 	}
-	if len(*events) != 2 {
-		t.Fatalf("events=%d want 2: %+v", len(*events), *events)
+	var llmEvents []gatewaylog.Event
+	for _, event := range *events {
+		if event.EventType == gatewaylog.EventLLMPrompt || event.EventType == gatewaylog.EventLLMResponse {
+			llmEvents = append(llmEvents, event)
+		}
 	}
-	prompt := (*events)[0]
+	if len(llmEvents) != 2 {
+		t.Fatalf("LLM events=%d want 2; all=%+v", len(llmEvents), *events)
+	}
+	prompt := llmEvents[0]
 	if prompt.EventType != gatewaylog.EventLLMPrompt || prompt.LLMPrompt == nil {
 		t.Fatalf("first event = %+v, want llm_prompt", prompt)
 	}
@@ -994,7 +1044,7 @@ func TestCodexNotify_EmitsFirstClassLLMEvents(t *testing.T) {
 		t.Fatalf("notify llm_prompt should not duplicate raw body: %q", prompt.LLMPrompt.RawRequestBody)
 	}
 
-	response := (*events)[1]
+	response := llmEvents[1]
 	if response.EventType != gatewaylog.EventLLMResponse || response.LLMResponse == nil {
 		t.Fatalf("second event = %+v, want llm_response", response)
 	}
@@ -1035,13 +1085,19 @@ func TestCodexNotify_LLMEventsUseRedactionPath(t *testing.T) {
 
 	a.handleCodexNotify(w, req)
 
-	if len(*events) != 2 {
-		t.Fatalf("events=%d want 2", len(*events))
+	var llmEvents []gatewaylog.Event
+	for _, event := range *events {
+		if event.EventType == gatewaylog.EventLLMPrompt || event.EventType == gatewaylog.EventLLMResponse {
+			llmEvents = append(llmEvents, event)
+		}
 	}
-	if got := (*events)[0].LLMPrompt.Prompt; strings.Contains(got, "sk-secret-token") || strings.Contains(got, "please leak") {
+	if len(llmEvents) != 2 {
+		t.Fatalf("LLM events=%d want 2; all=%+v", len(llmEvents), *events)
+	}
+	if got := llmEvents[0].LLMPrompt.Prompt; strings.Contains(got, "sk-secret-token") || strings.Contains(got, "please leak") {
 		t.Fatalf("prompt bypassed redaction: %q", got)
 	}
-	if got := (*events)[1].LLMResponse.Response; strings.Contains(got, "secret response") {
+	if got := llmEvents[1].LLMResponse.Response; strings.Contains(got, "secret response") {
 		t.Fatalf("response bypassed redaction: %q", got)
 	}
 }
