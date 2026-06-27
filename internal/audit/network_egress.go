@@ -24,6 +24,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
 )
@@ -126,10 +127,7 @@ func (e *NetworkEgressEvent) effectiveSeverity() string {
 
 // toRow converts the event to the store's persisted shape.
 func (e *NetworkEgressEvent) toRow() NetworkEgressRow {
-	url := e.URL
-	if len(url) > 512 {
-		url = truncateUTF8(url, 512)
-	}
+	url := redactedNetworkEgressURL(e.URL)
 	return NetworkEgressRow{
 		Timestamp:        e.Timestamp,
 		SessionID:        e.SessionID,
@@ -212,7 +210,7 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 		Target:    e.Hostname,
 		Actor:     "defenseclaw",
 		Details: fmt.Sprintf("url=%s method=%s decision=%s outcome=%s",
-			truncateStr(e.URL, 200), e.HTTPMethod, e.DecisionCode, e.PolicyOutcome),
+			truncateStr(row.URL, 200), e.HTTPMethod, e.DecisionCode, e.PolicyOutcome),
 		Severity: "HIGH",
 		RunID:    currentRunID(),
 	})
@@ -235,6 +233,17 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 	}
 
 	return nil
+}
+
+func redactedNetworkEgressURL(url string) string {
+	if url == "" {
+		return ""
+	}
+	redacted := redaction.ForSinkString(url)
+	if len(redacted) > 512 {
+		return truncateUTF8(redacted, 512)
+	}
+	return redacted
 }
 
 func truncateStr(s string, max int) string {

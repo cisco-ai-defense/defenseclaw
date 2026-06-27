@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -425,6 +426,55 @@ func TestLogger_LogNetworkEgress(t *testing.T) {
 		if !found {
 			t.Error("expected a network-egress-blocked alert in audit_events")
 		}
+	})
+
+	t.Run("url credentials are redacted before persistence and alerts", func(t *testing.T) {
+		rawURL := "https://api.example.com/v1/export?api_key=sk-live-secret&token=also-secret"
+		if err := logger.LogNetworkEgress(ctx, NetworkEgressEvent{
+			Hostname:      "api.example.com",
+			URL:           rawURL,
+			HTTPMethod:    "GET",
+			Protocol:      "https",
+			PolicyOutcome: "Allowed",
+		}); err != nil {
+			t.Fatalf("LogNetworkEgress allowed: %v", err)
+		}
+		rows, err := store.QueryNetworkEgressEvents(NetworkEgressFilter{Hostname: "api.example.com", Limit: 1})
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("expected 1 egress row, got %d (err=%v)", len(rows), err)
+		}
+		if strings.Contains(rows[0].URL, "sk-live-secret") || strings.Contains(rows[0].URL, "also-secret") {
+			t.Fatalf("stored egress URL leaked credentials: %q", rows[0].URL)
+		}
+		if rows[0].URL == "" || rows[0].URL == rawURL {
+			t.Fatalf("stored egress URL was not redacted: %q", rows[0].URL)
+		}
+
+		blockedURL := "https://blocked.example/upload?api_key=blocked-secret"
+		if err := logger.LogNetworkEgress(ctx, NetworkEgressEvent{
+			Hostname:      "blocked.example",
+			URL:           blockedURL,
+			HTTPMethod:    "POST",
+			Protocol:      "https",
+			PolicyOutcome: "Denied",
+			DecisionCode:  "NETWORK_DENY_PATTERN",
+			Blocked:       true,
+		}); err != nil {
+			t.Fatalf("LogNetworkEgress blocked: %v", err)
+		}
+		alerts, err := store.ListAlerts(10)
+		if err != nil {
+			t.Fatalf("ListAlerts: %v", err)
+		}
+		for _, alert := range alerts {
+			if alert.Action == "network-egress-blocked" && alert.Target == "blocked.example" {
+				if strings.Contains(alert.Details, "blocked-secret") || strings.Contains(alert.Details, blockedURL) {
+					t.Fatalf("blocked egress alert leaked credentials: %q", alert.Details)
+				}
+				return
+			}
+		}
+		t.Fatal("expected blocked egress alert for blocked.example")
 	})
 
 	t.Run("validation error propagates", func(t *testing.T) {
