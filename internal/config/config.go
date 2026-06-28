@@ -2597,9 +2597,32 @@ func migrateFlatOTelConfigFromViper(cfg *Config) {
 	if cfg == nil {
 		return
 	}
-	envEndpoint := flatOTelEnvEndpoint()
-	if !hasFlatOTelTransportInConfig() && !(cfg.OTel.Enabled && envEndpoint != "") {
+	globalEndpoint := firstNonEmptyString(viper.GetString("otel.endpoint"), flatOTelEnvEndpoint(""))
+	traceEndpoint := firstNonEmptyString(viper.GetString("otel.traces.endpoint"), flatOTelEnvEndpoint("TRACES"))
+	logEndpoint := firstNonEmptyString(viper.GetString("otel.logs.endpoint"), flatOTelEnvEndpoint("LOGS"))
+	metricEndpoint := firstNonEmptyString(viper.GetString("otel.metrics.endpoint"), flatOTelEnvEndpoint("METRICS"))
+	if !hasFlatOTelTransportInConfig() && !(cfg.OTel.Enabled && firstNonEmptyString(
+		globalEndpoint, traceEndpoint, logEndpoint, metricEndpoint,
+	) != "") {
 		return
+	}
+	globalProtocol := firstNonEmptyString(viper.GetString("otel.protocol"), flatOTelEnvProtocol(""))
+	traceProtocol := firstNonEmptyString(viper.GetString("otel.traces.protocol"), flatOTelEnvProtocol("TRACES"))
+	logProtocol := firstNonEmptyString(viper.GetString("otel.logs.protocol"), flatOTelEnvProtocol("LOGS"))
+	metricProtocol := firstNonEmptyString(viper.GetString("otel.metrics.protocol"), flatOTelEnvProtocol("METRICS"))
+	tracesEnabled := flatOTelSignalEnabled("otel.traces.enabled")
+	logsEnabled := flatOTelSignalEnabled("otel.logs.enabled")
+	metricsEnabled := flatOTelSignalEnabled("otel.metrics.enabled")
+	hasExplicitSignalEnabled := viper.InConfig("otel.traces.enabled") ||
+		viper.InConfig("otel.logs.enabled") || viper.InConfig("otel.metrics.enabled")
+	if !viper.InConfig("otel.traces.enabled") && (traceEndpoint != "" || (globalEndpoint != "" && !hasExplicitSignalEnabled)) {
+		tracesEnabled = true
+	}
+	if !viper.InConfig("otel.logs.enabled") && (logEndpoint != "" || (globalEndpoint != "" && !hasExplicitSignalEnabled)) {
+		logsEnabled = true
+	}
+	if !viper.InConfig("otel.metrics.enabled") && (metricEndpoint != "" || (globalEndpoint != "" && !hasExplicitSignalEnabled)) {
+		metricsEnabled = true
 	}
 
 	destination := OTelDestinationConfig{
@@ -2607,41 +2630,34 @@ func migrateFlatOTelConfigFromViper(cfg *Config) {
 		Preset:  "generic-otlp",
 		Enabled: cfg.OTel.Enabled,
 		Protocol: firstNonEmptyString(
-			viper.GetString("otel.protocol"),
-			viper.GetString("otel.traces.protocol"),
-			viper.GetString("otel.logs.protocol"),
-			viper.GetString("otel.metrics.protocol"),
-			flatOTelEnvProtocol(),
+			globalProtocol,
+			traceProtocol,
+			logProtocol,
+			metricProtocol,
 			"grpc",
 		),
-		Endpoint: firstNonEmptyString(
-			viper.GetString("otel.endpoint"),
-			viper.GetString("otel.traces.endpoint"),
-			viper.GetString("otel.logs.endpoint"),
-			viper.GetString("otel.metrics.endpoint"),
-			envEndpoint,
-		),
-		Headers: viper.GetStringMapString("otel.headers"),
-		TLS:     cfg.OTelTLSFromFlatConfig(),
-		Batch:   cfg.OTel.Batch,
+		Endpoint: globalEndpoint,
+		Headers:  viper.GetStringMapString("otel.headers"),
+		TLS:      cfg.OTelTLSFromFlatConfig(),
+		Batch:    cfg.OTel.Batch,
 		Traces: OTelTracesConfig{
-			Enabled:  flatOTelSignalEnabled("otel.traces.enabled"),
-			Endpoint: viper.GetString("otel.traces.endpoint"),
-			Protocol: viper.GetString("otel.traces.protocol"),
+			Enabled:  tracesEnabled,
+			Endpoint: traceEndpoint,
+			Protocol: traceProtocol,
 			URLPath:  viper.GetString("otel.traces.url_path"),
 		},
 		Logs: OTelLogsConfig{
-			Enabled:  flatOTelSignalEnabled("otel.logs.enabled"),
-			Endpoint: viper.GetString("otel.logs.endpoint"),
-			Protocol: viper.GetString("otel.logs.protocol"),
+			Enabled:  logsEnabled,
+			Endpoint: logEndpoint,
+			Protocol: logProtocol,
 			URLPath:  viper.GetString("otel.logs.url_path"),
 		},
 		Metrics: OTelMetricsConfig{
-			Enabled:         flatOTelSignalEnabled("otel.metrics.enabled"),
+			Enabled:         metricsEnabled,
 			ExportIntervalS: cfg.OTel.Metrics.ExportIntervalS,
 			Temporality:     cfg.OTel.Metrics.Temporality,
-			Endpoint:        viper.GetString("otel.metrics.endpoint"),
-			Protocol:        viper.GetString("otel.metrics.protocol"),
+			Endpoint:        metricEndpoint,
+			Protocol:        metricProtocol,
 			URLPath:         viper.GetString("otel.metrics.url_path"),
 		},
 	}
@@ -2678,25 +2694,35 @@ func flatOTelSignalEnabled(key string) bool {
 	return false
 }
 
-func flatOTelEnvEndpoint() string {
+func flatOTelEnvEndpoint(signal string) string {
+	signal = strings.ToUpper(strings.TrimSpace(signal))
+	if signal == "" {
+		return firstNonEmptyString(
+			os.Getenv("DEFENSECLAW_OTEL_ENDPOINT"),
+			os.Getenv("OPENCLAW_OTEL_ENDPOINT"),
+			os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		)
+	}
 	return firstNonEmptyString(
-		os.Getenv("DEFENSECLAW_OTEL_TRACES_ENDPOINT"),
-		os.Getenv("DEFENSECLAW_OTEL_ENDPOINT"),
-		os.Getenv("OPENCLAW_OTEL_TRACES_ENDPOINT"),
-		os.Getenv("OPENCLAW_OTEL_ENDPOINT"),
-		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
-		os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		os.Getenv("DEFENSECLAW_OTEL_"+signal+"_ENDPOINT"),
+		os.Getenv("OPENCLAW_OTEL_"+signal+"_ENDPOINT"),
+		os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_ENDPOINT"),
 	)
 }
 
-func flatOTelEnvProtocol() string {
+func flatOTelEnvProtocol(signal string) string {
+	signal = strings.ToUpper(strings.TrimSpace(signal))
+	if signal == "" {
+		return firstNonEmptyString(
+			os.Getenv("DEFENSECLAW_OTEL_PROTOCOL"),
+			os.Getenv("OPENCLAW_OTEL_PROTOCOL"),
+			os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"),
+		)
+	}
 	return firstNonEmptyString(
-		os.Getenv("DEFENSECLAW_OTEL_TRACES_PROTOCOL"),
-		os.Getenv("DEFENSECLAW_OTEL_PROTOCOL"),
-		os.Getenv("OPENCLAW_OTEL_TRACES_PROTOCOL"),
-		os.Getenv("OPENCLAW_OTEL_PROTOCOL"),
-		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"),
-		os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"),
+		os.Getenv("DEFENSECLAW_OTEL_"+signal+"_PROTOCOL"),
+		os.Getenv("OPENCLAW_OTEL_"+signal+"_PROTOCOL"),
+		os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_PROTOCOL"),
 	)
 }
 

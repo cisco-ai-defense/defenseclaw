@@ -466,6 +466,62 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_OTEL_LOGS_ENDPOINT",
+      "category": "telemetry",
+      "purpose": "Legacy log-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].logs.endpoint or the destination endpoint.",
+      "default": "unset",
+      "accepted_values": ["any-otlp-endpoint", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/config/config.go:2724", "description": "Migrates a legacy logs-only env-backed exporter into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:655", "description": "Preserves a legacy logs-only route when setup adds a named destination"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_LOGS_PROTOCOL",
+      "category": "telemetry",
+      "purpose": "Legacy log-specific flat OTLP protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].logs.protocol or the destination protocol.",
+      "default": "unset",
+      "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/config/config.go:2740", "description": "Migrates a legacy logs-only env-backed exporter into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:664", "description": "Preserves a legacy logs-only route when setup adds a named destination"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_METRICS_ENDPOINT",
+      "category": "telemetry",
+      "purpose": "Legacy metric-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].metrics.endpoint or the destination endpoint.",
+      "default": "unset",
+      "accepted_values": ["any-otlp-endpoint", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/config/config.go:2723", "description": "Migrates a legacy metrics-only env-backed exporter into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:655", "description": "Preserves a legacy metrics-only route when setup adds a named destination"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_METRICS_PROTOCOL",
+      "category": "telemetry",
+      "purpose": "Legacy metric-specific flat OTLP protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].metrics.protocol or the destination protocol.",
+      "default": "unset",
+      "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/config/config.go:2739", "description": "Migrates a legacy metrics-only env-backed exporter into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:664", "description": "Preserves a legacy metrics-only route when setup adds a named destination"}
+      ],
+      "since": "0.8.0"
+    },
+    {
       "name": "DEFENSECLAW_TELEMETRY_ENABLED",
       "category": "telemetry",
       "purpose": "Local-observability-stack-only toggle. Used by bundles/local_observability_stack/docker-compose.yml to gate telemetry collection. Distinct from DEFENSECLAW_OTEL_ENABLED.",

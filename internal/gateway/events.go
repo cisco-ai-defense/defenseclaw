@@ -217,13 +217,17 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 	if ev.Connector == "" {
 		ev.Connector = env.Connector
 	}
-	if ev.AgentLifecycleID == "" && ev.SessionID != "" && ev.AgentID != "" {
-		source := firstNonEmpty(ev.Connector, ev.AgentType)
-		if source != "" {
+	if ev.SessionID != "" && ev.AgentID != "" {
+		source := strings.ToLower(strings.TrimSpace(ev.Connector))
+		if source == "" {
+			source = "unknown"
+		}
+		if ev.AgentLifecycleID == "" {
 			ev.AgentLifecycleID = stableLLMEventID("lifecycle", source, ev.SessionID, ev.AgentID)
-			ev.AgentExecutionID = firstNonEmpty(
-				ev.AgentExecutionID,
-				stableLLMEventID("execution", source, ev.SessionID, ev.AgentID, gatewaylog.ProcessRunID()),
+		}
+		if ev.AgentExecutionID == "" {
+			ev.AgentExecutionID = stableLLMEventID(
+				"execution", source, ev.SessionID, ev.AgentID, gatewaylog.ProcessRunID(),
 			)
 		}
 	}

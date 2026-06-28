@@ -122,8 +122,9 @@ otel:
       metrics: { enabled: false }
       logs: { enabled: false }
 
-# Flat `otel.protocol` / `otel.endpoint` / signal transport blocks are rejected.
-# Preview and apply the one-way conversion with:
+# Legacy flat `otel.protocol` / `otel.endpoint` / signal transport blocks are
+# translated into a `generic-otlp` destination before runtime validation.
+# Preview and persist the conversion with:
 # `defenseclaw setup observability migrate-otel [--apply]`.
 # Sampling remains process-wide and cannot differ by destination.
 

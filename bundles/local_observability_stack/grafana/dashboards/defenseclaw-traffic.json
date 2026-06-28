@@ -162,11 +162,11 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_gateway_errors_total[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_http_auth_failures_total[5m])) * 60 or vector(0)",
           "refId": "A"
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_http_auth_failures \u2192 internal/gateway/router.go\n\ncovered_by:\n  - defenseclaw_gateway_errors \u2192 internal/telemetry/gateway_events.go (EventError)"
+      "description": "Authentication failures rejected by the sidecar, per minute.\n\ncovered_by:\n  - defenseclaw_http_auth_failures \u2192 internal/telemetry/metrics.go (RecordHTTPAuthFailure)"
     },
     {
       "type": "row",

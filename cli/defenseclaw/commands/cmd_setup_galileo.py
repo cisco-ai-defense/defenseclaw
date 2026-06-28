@@ -187,7 +187,10 @@ def status_cmd(app: AppContext, as_json: bool) -> None:
 def enable_cmd(app: AppContext) -> None:
     """Enable the Galileo destination."""
 
-    set_destination_enabled(_DESTINATION, True, app.cfg.data_dir)
+    try:
+        set_destination_enabled(_DESTINATION, True, app.cfg.data_dir)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo("  Galileo destination enabled.")
 
 
@@ -196,7 +199,10 @@ def enable_cmd(app: AppContext) -> None:
 def disable_cmd(app: AppContext) -> None:
     """Disable Galileo without deleting its configuration."""
 
-    set_destination_enabled(_DESTINATION, False, app.cfg.data_dir)
+    try:
+        set_destination_enabled(_DESTINATION, False, app.cfg.data_dir)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo("  Galileo destination disabled.")
 
 
@@ -209,7 +215,10 @@ def remove_cmd(app: AppContext, yes: bool) -> None:
     if not yes and not click.confirm("  Remove the Galileo OTLP destination?", default=False):
         click.echo("  Aborted.")
         return
-    remove_destination(_DESTINATION, app.cfg.data_dir)
+    try:
+        remove_destination(_DESTINATION, app.cfg.data_dir)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo("  Galileo destination removed (GALILEO_API_KEY was preserved).")
 
 

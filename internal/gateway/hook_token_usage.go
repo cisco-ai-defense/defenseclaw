@@ -72,7 +72,7 @@ func extractHookPayloadReportedCost(payload map[string]interface{}) hookReported
 
 func firstFloat64Present(payload map[string]interface{}, keys ...string) (float64, bool) {
 	for _, key := range keys {
-		raw, ok := payload[key]
+		raw, ok := valueAtPath(payload, key)
 		if !ok {
 			continue
 		}
@@ -93,6 +93,21 @@ func firstFloat64Present(payload map[string]interface{}, keys ...string) (float6
 		}
 	}
 	return 0, false
+}
+
+func valueAtPath(payload map[string]interface{}, key string) (interface{}, bool) {
+	var current interface{} = payload
+	for _, part := range strings.Split(key, ".") {
+		object, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		current, ok = object[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
 }
 
 // extractHookPayloadTokenUsage walks an agent-hook payload looking

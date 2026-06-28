@@ -56,6 +56,7 @@ from defenseclaw.observability import (
     set_destination_enabled,
 )
 from defenseclaw.observability.presets import Preset
+from defenseclaw.observability.display import redact_endpoint_for_display
 
 # ---------------------------------------------------------------------------
 # flat OTel migration
@@ -87,6 +88,45 @@ def test_flat_otel_migration_is_previewable_applied_once_and_idempotent() -> Non
 
     repeated = migrate_flat_otel(tmp, dry_run=False)
     assert repeated.yaml_changes == []
+
+
+def test_flat_otel_global_endpoint_enables_all_signals() -> None:
+    _, tmp = _make_tmp_ctx()
+    with open(os.path.join(tmp, "config.yaml"), "w") as handle:
+        handle.write("otel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
+
+    migrate_flat_otel(tmp, dry_run=False)
+    destination = _read_yaml(tmp)["otel"]["destinations"][0]
+    assert all(destination[signal]["enabled"] for signal in ("traces", "metrics", "logs"))
+
+
+def test_observability_endpoint_display_redacts_credentials() -> None:
+    endpoint = "https://alice:secret@collector.example.test/token/path?api_key=secret#fragment"
+    assert redact_endpoint_for_display(endpoint) == "https://collector.example.test/token/path"
+    assert redact_endpoint_for_display(endpoint, hide_path=True) == "https://collector.example.test/…"
+
+
+def test_flat_otel_signal_environment_migrates_only_matching_signal() -> None:
+    _, tmp = _make_tmp_ctx()
+    with open(os.path.join(tmp, "config.yaml"), "w") as handle:
+        handle.write("otel:\n  enabled: true\n")
+    environment = {
+        "DEFENSECLAW_OTEL_ENDPOINT": "",
+        "DEFENSECLAW_OTEL_TRACES_ENDPOINT": "",
+        "DEFENSECLAW_OTEL_LOGS_ENDPOINT": "http://127.0.0.1:4318/v1/logs",
+        "DEFENSECLAW_OTEL_LOGS_PROTOCOL": "http/protobuf",
+        "DEFENSECLAW_OTEL_METRICS_ENDPOINT": "",
+    }
+    with patch.dict(os.environ, environment, clear=False):
+        migrate_flat_otel(tmp, dry_run=False)
+    destination = _read_yaml(tmp)["otel"]["destinations"][0]
+    assert destination["logs"] == {
+        "enabled": True,
+        "endpoint": "http://127.0.0.1:4318/v1/logs",
+        "protocol": "http/protobuf",
+    }
+    assert destination["traces"].get("enabled") is not True
+    assert destination["metrics"].get("enabled") is not True
 
 
 def _make_tmp_ctx() -> tuple[AppContext, str]:
@@ -515,6 +555,7 @@ class WriterOTelPresetTests(unittest.TestCase):
             "galileo",
         ]
         assert otel["destinations"][0]["preset"] == "local-otlp"
+        assert otel["destinations"][0]["headers"] == {"X-Local-Metadata": "preserved"}
         assert otel["destinations"][0]["traces"]["endpoint"] == "127.0.0.1:4317"
         assert "endpoint" not in otel["traces"]
         assert "headers" not in otel
@@ -708,6 +749,14 @@ class WriterAuditSinksPresetTests(unittest.TestCase):
         dests = list_destinations(tmp)
         by_name = {d.name: d for d in dests}
         self.assertFalse(by_name["generic-webhook"].enabled)
+
+    def test_set_destination_enabled_supports_legacy_flat_otel(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        with open(os.path.join(tmp, "config.yaml"), "w") as handle:
+            handle.write("otel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
+        result = set_destination_enabled("otel", False, tmp)
+        self.assertEqual(result.target, "otel")
+        self.assertFalse(_read_yaml(tmp)["otel"]["enabled"])
 
     def test_remove_destination(self) -> None:
         _, tmp = _make_tmp_ctx()

@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
@@ -2571,7 +2572,7 @@ func (s *Sidecar) reportTelemetryHealth() {
 				"name":     destination.Name,
 				"preset":   destination.Preset,
 				"enabled":  destination.Enabled,
-				"endpoint": destination.Endpoint,
+				"endpoint": netguard.EndpointForDisplay(destination.Endpoint),
 				"signals":  strings.Join(signals, ", "),
 			}
 			if destination.Traces.Enabled {

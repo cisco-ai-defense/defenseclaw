@@ -373,8 +373,9 @@ samplers are not supported because the SDK makes its sampling decision before
 fan-out processors run.
 
 The flat single-exporter shape (`otel.endpoint`, `otel.protocol`,
-`otel.headers`, and top-level signal transport/enable fields) is not accepted
-by the runtime. Upgrade it once with:
+`otel.headers`, and top-level signal transport/enable fields) is legacy-only
+and is migrated into a named destination during upgrade. Persist the
+conversion once with:
 
 ```bash
 defenseclaw setup observability migrate-otel       # preview

@@ -80,9 +80,28 @@ def test_agent360_terminal_success_excludes_observed_non_terminal_events() -> No
     dashboard = _dashboard(AGENT360)
     panel = _panel_by_title(dashboard, "Terminal success")
     expr = panel["targets"][0]["expr"]
-    assert 'defenseclaw_agent_lifecycle_state="completed"' in expr
-    assert 'defenseclaw_agent_lifecycle_state=~"completed|failed|interrupted"' in expr
+    assert panel["datasource"]["uid"] == "defenseclaw-loki"
+    assert 'agent_lifecycle_state="completed"' in expr
+    assert 'agent_lifecycle_state=~"completed|failed|interrupted"' in expr
     assert "completed|observed" not in expr
+
+
+def test_agent360_durable_counts_use_loki_event_history() -> None:
+    dashboard = _dashboard(AGENT360)
+    expected_filters = {
+        "Turns": 'agent_lifecycle_event="turn_end"',
+        "Model calls": 'defenseclaw_gateway_event_type="llm_response"',
+        "Tool calls": 'tool_invocation_phase="result"',
+    }
+    for title, fragment in expected_filters.items():
+        panel = _panel_by_title(dashboard, title)
+        assert panel["datasource"]["uid"] == "defenseclaw-loki"
+        assert "count_over_time" in panel["targets"][0]["expr"]
+        assert fragment in panel["targets"][0]["expr"]
+
+    funnel = _panel_by_title(dashboard, "Lifecycle funnel")
+    assert funnel["datasource"]["uid"] == "defenseclaw-loki"
+    assert "count_over_time" in funnel["targets"][0]["expr"]
 
 
 def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
@@ -192,15 +211,13 @@ def test_agent360_presents_human_readable_usage_lifecycle_and_logs() -> None:
     assert last_seen["options"]["textMode"] == "value"
     assert last_seen["options"]["graphMode"] == "none"
 
-    model_calls_expr = _panel_by_title(dashboard, "Model calls")["targets"][0]["expr"]
-    assert "gen_ai_operation_name" in model_calls_expr
-    # Spanmetrics does not carry the connector dimension. Stable agent/root
-    # identity is the cross-signal selector for this panel.
-    assert "connector=" not in model_calls_expr
+    model_calls = _panel_by_title(dashboard, "Model calls")
+    assert model_calls["datasource"]["uid"] == "defenseclaw-loki"
+    assert 'defenseclaw_gateway_event_type="llm_response"' in model_calls["targets"][0]["expr"]
     for title in ("Input tokens", "Output tokens"):
         assert _panel_by_title(dashboard, title)["options"]["colorMode"] == "none"
 
-    executions = _panel_by_title(dashboard, "Executions and current lifecycle state")
+    executions = _panel_by_title(dashboard, "Executions and last activity")
     assert executions["targets"][0]["expr"].startswith("1000 * ")
     assert any(
         override["matcher"].get("options") == "Last Seen"
@@ -236,7 +253,7 @@ def test_agent360_uses_canonical_gateway_event_types() -> None:
 def test_agent360_exposes_model_tool_cost_and_reliability_analytics() -> None:
     dashboard = _dashboard(AGENT360)
     expected = {
-        "Model calls by provider and model": ("gen_ai_provider_name", "gen_ai_request_model"),
+        "Model calls by provider and model": ("count_over_time", "provider", "model"),
         "Model p95 latency by provider and model": ("histogram_quantile", "gen_ai_request_model"),
         "Top tools by calls": ("gen_ai_tool_name",),
         "Tool p95 latency": ("gen_ai_tool_name", "histogram_quantile"),
@@ -244,7 +261,7 @@ def test_agent360_exposes_model_tool_cost_and_reliability_analytics() -> None:
         "Reported tokens by model": ("defenseclaw_agent_token_usage_total", "gen_ai_request_model"),
         "Reported cost over time": ("defenseclaw_agent_reported_cost_USD",),
         "Reported cost by model": ("defenseclaw_agent_reported_cost_USD", "gen_ai_request_model"),
-        "Lifecycle funnel": ("defenseclaw_agent_lifecycle_event",),
+        "Lifecycle funnel": ("count_over_time", "agent_lifecycle_event"),
         "Span error rate": ('status_code="STATUS_CODE_ERROR"',),
         "Agent span latency heatmap": ("_bucket", "sum by (le)"),
         "Active agents over time": ("gen_ai_agent_id",),
@@ -257,6 +274,15 @@ def test_agent360_exposes_model_tool_cost_and_reliability_analytics() -> None:
         dashboard, "Aggregate dependency map — agents, subagents, models, and tools"
     )
     assert "structural topology" in topology["description"]
+
+    for title in (
+        "Model p95 latency by provider and model",
+        "Top tools by calls",
+        "Tool p95 latency",
+    ):
+        expression = _panel_by_title(dashboard, title)["targets"][0]["expr"]
+        assert "max_over_time(defenseclaw_agent_last_seen_seconds" in expression
+        assert "time() - $__range_s" in expression
 
 
 def test_agent_directory_links_to_reusable_agent360_dashboard() -> None:
@@ -279,9 +305,14 @@ def test_collector_derives_agent_span_metrics_and_fans_them_to_prometheus() -> N
     assert "deltatocumulative:" in config
     assert "processors: [resource, deltatocumulative, batch]" in config
     assert "endpoint: 0.0.0.0:8889" not in config
+    assert "readers:" in config
+    assert "without_type_suffix: true" in config
+    assert "without_units: true" in config
+    assert "address: 0.0.0.0:8888" not in config
 
     prometheus = PROMETHEUS.read_text(encoding="utf-8")
     compose = COMPOSE.read_text(encoding="utf-8")
+    assert "otel/opentelemetry-collector-contrib:0.153.0" in compose
     assert "otel-collector-export" not in prometheus
     assert "otel-collector:8889" not in prometheus
     assert ":8889:8889" not in compose

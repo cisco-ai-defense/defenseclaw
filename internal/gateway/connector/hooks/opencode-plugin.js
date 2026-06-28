@@ -112,7 +112,7 @@ export const DefenseClaw = async ({ directory, worktree }) => {
         "session.created", "session.updated", "session.status", "session.idle",
         "session.compacted", "session.error", "session.deleted",
       ].includes(event.type)) return;
-      defenseclawPostLifecycle(event, cwd).catch(() => {});
+      await defenseclawPostLifecycle(event, cwd);
     },
     // tool.execute.before is opencode's pre-tool hook. Throwing here
     // aborts the tool (same mechanism as the .env-protection example).

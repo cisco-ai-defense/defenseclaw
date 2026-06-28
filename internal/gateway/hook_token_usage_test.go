@@ -174,6 +174,7 @@ func TestExtractHookPayloadReportedCost(t *testing.T) {
 	}{
 		{"top-level", map[string]interface{}{"total_cost_usd": 1.25}, hookReportedCost{USD: 1.25, Present: true, Cumulative: true}},
 		{"nested usage string", map[string]interface{}{"usage": map[string]interface{}{"cost_usd": "0.0042"}}, hookReportedCost{USD: 0.0042, Present: true}},
+		{"nested result usage", map[string]interface{}{"result": map[string]interface{}{"usage": map[string]interface{}{"total_cost_usd": "0.007"}}}, hookReportedCost{USD: 0.007, Present: true, Cumulative: true}},
 		{"reported zero is present", map[string]interface{}{"sessionCostUsd": 0}, hookReportedCost{USD: 0, Present: true, Cumulative: true}},
 		{"generic cost is not assumed USD", map[string]interface{}{"cost": 99}, hookReportedCost{}},
 		{"missing", map[string]interface{}{"model": "gpt-5"}, hookReportedCost{}},

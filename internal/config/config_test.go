@@ -1079,6 +1079,52 @@ otel:
 	}
 }
 
+func TestLoadMigratesEnvironmentBackedLegacyOTelSignalExporters(t *testing.T) {
+	tests := []struct {
+		name     string
+		signal   string
+		endpoint string
+		protocol string
+	}{
+		{name: "traces", signal: "TRACES", endpoint: "http://127.0.0.1:4318/v1/traces", protocol: "http/protobuf"},
+		{name: "logs", signal: "LOGS", endpoint: "http://127.0.0.1:4318/v1/logs", protocol: "http/protobuf"},
+		{name: "metrics", signal: "METRICS", endpoint: "http://127.0.0.1:4318/v1/metrics", protocol: "http/protobuf"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+			t.Setenv("DEFENSECLAW_OTEL_"+tt.signal+"_ENDPOINT", tt.endpoint)
+			t.Setenv("DEFENSECLAW_OTEL_"+tt.signal+"_PROTOCOL", tt.protocol)
+			data := []byte("config_version: 6\notel:\n  enabled: true\n")
+			if err := os.WriteFile(filepath.Join(DefaultDataPath(), DefaultConfigName), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error=%v", err)
+			}
+			if got := len(cfg.OTel.Destinations); got != 1 {
+				t.Fatalf("destinations=%d want 1", got)
+			}
+			destination := cfg.OTel.Destinations[0]
+			switch tt.signal {
+			case "TRACES":
+				if !destination.Traces.Enabled || destination.Traces.Endpoint != tt.endpoint || destination.Traces.Protocol != tt.protocol || destination.Logs.Enabled || destination.Metrics.Enabled {
+					t.Fatalf("migrated destination=%+v, want traces-only", destination)
+				}
+			case "LOGS":
+				if !destination.Logs.Enabled || destination.Logs.Endpoint != tt.endpoint || destination.Logs.Protocol != tt.protocol || destination.Traces.Enabled || destination.Metrics.Enabled {
+					t.Fatalf("migrated destination=%+v, want logs-only", destination)
+				}
+			case "METRICS":
+				if !destination.Metrics.Enabled || destination.Metrics.Endpoint != tt.endpoint || destination.Metrics.Protocol != tt.protocol || destination.Traces.Enabled || destination.Logs.Enabled {
+					t.Fatalf("migrated destination=%+v, want metrics-only", destination)
+				}
+			}
+		})
+	}
+}
+
 func TestConfig_ClawHomeDir(t *testing.T) {
 	cfg := &Config{
 		Claw: ClawConfig{HomeDir: "/tmp/my-claw"},

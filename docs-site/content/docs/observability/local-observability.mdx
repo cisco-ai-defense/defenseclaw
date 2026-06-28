@@ -89,7 +89,11 @@ The OTLP protocol is read from the bridge readiness contract (currently `grpc`);
 
 ## What ends up in `config.yaml`
 
-```yaml title="~/.defenseclaw/config.yaml (after up)"
+The example below is the result of the sample `up` command using
+`--service-name defenseclaw-gateway`; without that flag, `service.name` is
+`defenseclaw`.
+
+```yaml title="~/.defenseclaw/config.yaml (after the sample command)"
 otel:
   enabled: true
   destinations:

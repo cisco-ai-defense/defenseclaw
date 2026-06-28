@@ -361,6 +361,13 @@ def set_destination_enabled(
                     for item in destinations
                 )
             changes.append(f"otel.destinations[{name}].enabled = {bool(enabled)}")
+        elif name == "otel":
+            otel = raw.get("otel")
+            if not isinstance(otel, dict) or isinstance(otel.get("destinations"), list):
+                raise ValueError(f"no audit sink named {name!r}")
+            otel["enabled"] = bool(enabled)
+            target = "otel"
+            changes.append(f"otel.enabled = {bool(enabled)}")
         else:
             sink = _find_sink(raw, name)
             if sink is None:
@@ -628,14 +635,32 @@ def _migrate_flat_otel_in_place(
 
     existing_destinations = otel.get("destinations")
     has_named_destinations = isinstance(existing_destinations, list)
-    env_endpoint = _first_runtime_env(
+    env_global_endpoint = _first_runtime_env(
         data_dir,
-        "DEFENSECLAW_OTEL_TRACES_ENDPOINT",
         "DEFENSECLAW_OTEL_ENDPOINT",
-        "OPENCLAW_OTEL_TRACES_ENDPOINT",
         "OPENCLAW_OTEL_ENDPOINT",
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
         "OTEL_EXPORTER_OTLP_ENDPOINT",
+    )
+    env_signal_endpoints = {
+        sig: _first_runtime_env(
+            data_dir,
+            f"DEFENSECLAW_OTEL_{sig.upper()}_ENDPOINT",
+            f"OPENCLAW_OTEL_{sig.upper()}_ENDPOINT",
+            f"OTEL_EXPORTER_OTLP_{sig.upper()}_ENDPOINT",
+        )
+        for sig in ("traces", "metrics", "logs")
+    }
+    env_signal_protocols = {
+        sig: _first_runtime_env(
+            data_dir,
+            f"DEFENSECLAW_OTEL_{sig.upper()}_PROTOCOL",
+            f"OPENCLAW_OTEL_{sig.upper()}_PROTOCOL",
+            f"OTEL_EXPORTER_OTLP_{sig.upper()}_PROTOCOL",
+        )
+        for sig in ("traces", "metrics", "logs")
+    }
+    env_endpoint = env_global_endpoint or next(
+        (value for value in env_signal_endpoints.values() if value), ""
     )
     has_flat_transport = bool(
         otel.get("endpoint")
@@ -695,26 +720,37 @@ def _migrate_flat_otel_in_place(
             otel.get("protocol", "")
             or _first_runtime_env(
                 data_dir,
-                "DEFENSECLAW_OTEL_TRACES_PROTOCOL",
                 "DEFENSECLAW_OTEL_PROTOCOL",
-                "OPENCLAW_OTEL_TRACES_PROTOCOL",
                 "OPENCLAW_OTEL_PROTOCOL",
-                "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
                 "OTEL_EXPORTER_OTLP_PROTOCOL",
             )
+            or next((value for value in env_signal_protocols.values() if value), "")
             or "grpc"
         ),
-        "endpoint": str(otel.get("endpoint", "") or env_endpoint or ""),
+        "endpoint": str(otel.get("endpoint", "") or env_global_endpoint or ""),
     }
     for key in ("headers", "tls", "batch"):
         value = otel.get(key)
         if value:
             destination[key] = copy.deepcopy(value)
+    has_global_endpoint = bool(otel.get("endpoint") or env_global_endpoint)
+    has_explicit_signal_enabled = any(
+        isinstance(otel.get(sig), dict) and "enabled" in (otel.get(sig) or {})
+        for sig in ("traces", "metrics", "logs")
+    )
     for sig in ("traces", "metrics", "logs"):
         source = copy.deepcopy(otel.get(sig) or {})
         if not isinstance(source, dict):
             source = {}
-        if "enabled" not in source and env_endpoint:
+        if not source.get("endpoint") and env_signal_endpoints[sig]:
+            source["endpoint"] = env_signal_endpoints[sig]
+        if not source.get("protocol") and env_signal_protocols[sig]:
+            source["protocol"] = env_signal_protocols[sig]
+        if "enabled" not in source and (
+            source.get("endpoint")
+            or source.get("url_path")
+            or (has_global_endpoint and not has_explicit_signal_enabled)
+        ):
             source["enabled"] = True
         if sig == "traces":
             source.pop("sampler", None)
@@ -722,6 +758,13 @@ def _migrate_flat_otel_in_place(
         elif sig == "logs":
             source.pop("emit_individual_findings", None)
         destination[sig] = source
+
+    if has_global_endpoint and not any(
+        bool((destination.get(sig) or {}).get("enabled", False))
+        for sig in ("traces", "metrics", "logs")
+    ):
+        for sig in ("traces", "metrics", "logs"):
+            destination[sig]["enabled"] = True
 
     if has_named_destinations:
         otel["destinations"] = [destination, *existing_destinations]

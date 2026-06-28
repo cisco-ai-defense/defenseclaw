@@ -24,6 +24,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
 )
@@ -126,7 +127,10 @@ func (e *NetworkEgressEvent) effectiveSeverity() string {
 
 // toRow converts the event to the store's persisted shape.
 func (e *NetworkEgressEvent) toRow() NetworkEgressRow {
-	url := e.URL
+	url := netguard.ScrubURLString(e.URL)
+	if strings.TrimSpace(e.URL) == "" {
+		url = ""
+	}
 	if len(url) > 512 {
 		url = truncateUTF8(url, 512)
 	}

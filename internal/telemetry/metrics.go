@@ -2993,7 +2993,7 @@ func (p *Provider) RecordAgentLifecycle(ctx context.Context, observation AgentLi
 	if depth < 0 {
 		depth = 0
 	}
-	attrs := metric.WithAttributes(
+	transitionAttrs := metric.WithAttributes(
 		attribute.String("connector", label(observation.Connector, "unknown")),
 		attribute.String("gen_ai.provider.name", NormalizeGenAIProviderLabel(firstNonEmptyTelemetry(observation.Provider, observation.Connector))),
 		attribute.String("gen_ai.request.model", NormalizeModelLabel(observation.Model)),
@@ -3009,8 +3009,18 @@ func (p *Provider) RecordAgentLifecycle(ctx context.Context, observation AgentLi
 		attribute.String("defenseclaw.agent.lifecycle.state", label(observation.State, "observed")),
 		attribute.Int("defenseclaw.agent.depth", depth),
 	)
-	p.metrics.agentLastSeen.Record(ctx, float64(time.Now().UnixNano())/float64(time.Second), attrs)
-	p.metrics.agentLifecycleTransitions.Add(ctx, 1, attrs)
+	p.metrics.agentLifecycleTransitions.Add(ctx, 1, transitionAttrs)
+	gaugeAttrs := metric.WithAttributes(
+		attribute.String("connector", label(observation.Connector, "unknown")),
+		attribute.String("gen_ai.agent.id", identity(observation.AgentID, "unknown")),
+		attribute.String("gen_ai.agent.name", label(observation.AgentName, "unknown")),
+		attribute.String("gen_ai.agent.type", label(observation.AgentType, "unknown")),
+		attribute.String("defenseclaw.agent.root.id", identity(observation.RootAgentID, observation.AgentID)),
+		attribute.String("defenseclaw.agent.parent.id", identity(observation.ParentAgentID, "none")),
+		attribute.String("defenseclaw.session.root.id", identity(observation.RootSessionID, "unknown")),
+		attribute.String("defenseclaw.agent.lifecycle.id", identity(observation.LifecycleID, "unknown")),
+		attribute.String("defenseclaw.agent.execution.id", identity(observation.ExecutionID, "unknown")),
+	)
 	phase := label(observation.Phase, "observed")
 	phaseAttrs := metric.WithAttributes(
 		attribute.String("connector", label(observation.Connector, "unknown")),
@@ -3020,6 +3030,7 @@ func (p *Provider) RecordAgentLifecycle(ctx context.Context, observation AgentLi
 		attribute.String("defenseclaw.agent.lifecycle.id", identity(observation.LifecycleID, "unknown")),
 		attribute.String("defenseclaw.agent.execution.id", identity(observation.ExecutionID, "unknown")),
 	)
+	p.metrics.agentLastSeen.Record(ctx, float64(time.Now().UnixNano())/float64(time.Second), gaugeAttrs)
 	p.metrics.agentPhaseCurrent.Record(ctx, int64(AgentPhaseCode(phase)), phaseAttrs)
 	previousPhase := label(observation.PreviousPhase, "unknown")
 	if previousPhase != "unknown" && previousPhase != phase {
@@ -3035,7 +3046,17 @@ func (p *Provider) RecordAgentLifecycle(ctx context.Context, observation AgentLi
 		p.metrics.agentPhaseTransitions.Add(ctx, 1, transitionAttrs)
 	}
 	if observation.ReportedCostPresent && observation.ReportedCostUSD >= 0 {
-		p.metrics.agentReportedCost.Record(ctx, observation.ReportedCostUSD, attrs)
+		costAttrs := metric.WithAttributes(
+			attribute.String("connector", label(observation.Connector, "unknown")),
+			attribute.String("gen_ai.provider.name", NormalizeGenAIProviderLabel(firstNonEmptyTelemetry(observation.Provider, observation.Connector))),
+			attribute.String("gen_ai.request.model", NormalizeModelLabel(observation.Model)),
+			attribute.String("gen_ai.agent.id", identity(observation.AgentID, "unknown")),
+			attribute.String("gen_ai.agent.name", label(observation.AgentName, "unknown")),
+			attribute.String("defenseclaw.agent.root.id", identity(observation.RootAgentID, observation.AgentID)),
+			attribute.String("defenseclaw.agent.lifecycle.id", identity(observation.LifecycleID, "unknown")),
+			attribute.String("defenseclaw.agent.execution.id", identity(observation.ExecutionID, "unknown")),
+		)
+		p.metrics.agentReportedCost.Record(ctx, observation.ReportedCostUSD, costAttrs)
 	}
 }
 

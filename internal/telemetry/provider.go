@@ -1139,12 +1139,12 @@ func loopbackEndpointHost(host string) bool {
 // Setup commands validate their endpoints too, but the long-running exporter
 // must independently refuse to attach credentials to plaintext remote links.
 func validateCredentialTransport(endpoint string, tlsInsecure bool, headers map[string]string) error {
-	if !hasCredentialHeaders(headers) {
-		return nil
-	}
 	host, insecure, userinfo := endpointTransport(endpoint, tlsInsecure)
 	if userinfo {
-		return fmt.Errorf("telemetry: credential-bearing OTLP endpoint must not contain URL userinfo")
+		return fmt.Errorf("telemetry: OTLP endpoint must not contain URL userinfo")
+	}
+	if !hasCredentialHeaders(headers) {
+		return nil
 	}
 	if insecure && !loopbackEndpointHost(host) {
 		return fmt.Errorf(

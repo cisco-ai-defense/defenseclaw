@@ -1205,9 +1205,6 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 			}
 		}
 	}
-	if toolName == "" && isPromptLikeEvent(event) {
-		toolName = "message"
-	}
 	if toolName == "" {
 		// Label-only mapping for lifecycle events that carry no tool:
 		// session start/end → "session", subagent stop → "subagent",
@@ -1216,14 +1213,20 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 		// span/log/audit labels (precedent: the antigravity profile
 		// already labels Stop as "session").
 		switch canonicalEvent(event) {
-		case "onsessionstart", "onsessionend", "sessionstart", "sessionend":
+		case "onsessionstart", "onsessionend", "sessionstart", "sessionend",
+			"sessioncreated", "sessionupdated", "sessionstatus", "sessionidle",
+			"sessioncompacted", "sessionerror", "sessiondeleted":
 			toolName = "session"
 		case "subagentstart", "subagentstop":
 			toolName = "subagent"
 		case "postllmcall":
 			toolName = "message"
 		default:
-			toolName = "tool"
+			if isPromptLikeEvent(event) {
+				toolName = "message"
+			} else {
+				toolName = "tool"
+			}
 		}
 	}
 

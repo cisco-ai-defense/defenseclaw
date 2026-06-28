@@ -660,6 +660,15 @@ func TestDeltaOTLPCumulativeTokenUsage(t *testing.T) {
 	if !ok || got.tokens != 45 {
 		t.Fatalf("cumulative delta = (%+v,%v), want 45,true", got, ok)
 	}
+	base.tokens = 120
+	if _, ok := a.deltaOTLPCumulativeTokenUsage(base); ok {
+		t.Fatal("lower out-of-order cumulative point must not emit a fresh delta")
+	}
+	base.tokens = 150
+	got, ok = a.deltaOTLPCumulativeTokenUsage(base)
+	if !ok || got.tokens != 5 {
+		t.Fatalf("delta after out-of-order point = (%+v,%v), want 5,true", got, ok)
+	}
 	base.startTime = "2000"
 	base.tokens = 12
 	got, ok = a.deltaOTLPCumulativeTokenUsage(base)

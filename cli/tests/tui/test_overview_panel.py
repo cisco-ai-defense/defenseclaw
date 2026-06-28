@@ -156,10 +156,11 @@ def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
                             "name": "galileo",
                             "preset": "galileo",
                             "enabled": True,
-                            "endpoint": "https://api.example.test/otel/traces",
+                            "endpoint": "https://user:secret@api.example.test/otel/traces?api_key=secret",
                             "signals": "traces",
                             "headers": {"Galileo-API-Key": "must-not-render"},
-                            "routing": {"accepted": 3, "dropped": 1},
+                            "routing": {"accepted": 3, "dropped": 1, "total": 10, "eligibility_percentage": 30},
+                            "delivery": {"attempted": 3, "collector_accepted": 3},
                         },
                         {
                             "name": "local-observability",
@@ -180,7 +181,7 @@ def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
                             "kind": "otlp_logs",
                             "enabled": True,
                             "scope": "connector:codex",
-                            "endpoint": "collector.example.test:4317",
+                            "endpoint": "https://user:secret@collector.example.test:4317/provider/token?token=secret",
                         }
                     ]
                 },
@@ -194,11 +195,13 @@ def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
         ("local-observability", "otel"),
         ("soc-archive", "audit_sinks"),
     ]
-    assert rows[0].routing == "75.0% (3/4)"
+    assert rows[0].routing == "collector accepted 3/3; pending 0; rejected 0; failed 0"
+    assert rows[0].endpoint == "https://api.example.test/otel/traces"
     assert rows[0].signals == "traces"
     assert rows[1].state == "disabled"
     assert rows[2].signals == "audit-events"
     assert rows[2].scope == "connector:codex"
+    assert rows[2].endpoint == "https://collector.example.test:4317/…"
     assert "must-not-render" not in repr(rows)
 
 

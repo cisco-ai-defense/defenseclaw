@@ -108,6 +108,13 @@ func TestScrubURL(t *testing.T) {
 	}
 }
 
+func TestEndpointForDisplayRemovesAllCredentialCarriers(t *testing.T) {
+	got := EndpointForDisplay("https://alice:secret@collector.example.test/v1/traces?custom_token=secret#fragment")
+	if got != "https://collector.example.test/v1/traces" {
+		t.Fatalf("EndpointForDisplay()=%q", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DEFENSECLAW_ALLOW_CGNAT — operator escape hatch for Tailscale and other
 // 100.64.0.0/10 overlay deployments.

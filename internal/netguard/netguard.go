@@ -219,6 +219,22 @@ func ScrubURLString(raw string, extra ...string) string {
 	return ScrubURL(u, extra...)
 }
 
+// EndpointForDisplay returns a URL safe for health/status surfaces. Unlike
+// ScrubURL, it removes the entire query and fragment because those surfaces do
+// not need request parameters and arbitrary provider-specific keys may carry
+// credentials.
+func EndpointForDisplay(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u == nil {
+		return "<unparseable-url>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return u.String()
+}
+
 // SafeDialContext returns a DialContext function suitable for a
 // http.Transport that:
 //

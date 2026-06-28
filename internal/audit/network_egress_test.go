@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -105,6 +106,21 @@ func TestNetworkEgressEvent_effectiveSeverity(t *testing.T) {
 				t.Errorf("effectiveSeverity() = %q, want %q", got, tt.wantSev)
 			}
 		})
+	}
+}
+
+func TestNetworkEgressEventToRowRedactsURLCredentials(t *testing.T) {
+	event := NetworkEgressEvent{
+		Hostname:      "api.example.test",
+		URL:           "https://alice:secret@api.example.test/v1/data?api_key=secret&region=us#fragment",
+		PolicyOutcome: "allowed",
+	}
+	row := event.toRow()
+	if strings.Contains(row.URL, "alice") || strings.Contains(row.URL, "secret") {
+		t.Fatalf("persisted URL leaked credentials: %q", row.URL)
+	}
+	if !strings.Contains(row.URL, "api_key=%3Credacted%3E") || !strings.Contains(row.URL, "region=us") {
+		t.Fatalf("persisted URL did not retain safe diagnostic context: %q", row.URL)
 	}
 }
 

@@ -521,7 +521,7 @@ func (p *Provider) SetGenAIToolArguments(span trace.Span, content string) {
 }
 
 func (p *Provider) SetGenAIToolResult(span trace.Span, content string) {
-	if span == nil || strings.TrimSpace(content) == "" {
+	if span == nil {
 		return
 	}
 	safe := redaction.ForSinkString(content)

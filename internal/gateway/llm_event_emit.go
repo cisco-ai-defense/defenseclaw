@@ -1688,14 +1688,10 @@ func (a *APIServer) emitHookToolSpan(
 			AgentName: merged.AgentName, AgentType: merged.AgentType, AgentID: merged.AgentID,
 		},
 	)
-	applyHookLifecycleSpanAttributes(span, merged)
-	if strings.TrimSpace(arguments) != "" {
-		span.SetAttributes(attribute.Bool("defenseclaw.telemetry.input.reported", true))
-	} else if span != nil {
-		span.SetAttributes(attribute.Bool("defenseclaw.telemetry.input.reported", false))
-	}
-	a.otel.SetGenAIToolResult(span, boundedHookLLMSpanContent(result))
 	if span != nil {
+		applyHookLifecycleSpanAttributes(span, merged)
+		span.SetAttributes(attribute.Bool("defenseclaw.telemetry.input.reported", strings.TrimSpace(arguments) != ""))
+		a.otel.SetGenAIToolResult(span, boundedHookLLMSpanContent(result))
 		span.SetAttributes(attribute.Bool("defenseclaw.telemetry.output.reported", true))
 	}
 	a.otel.EndToolSpan(span, code, len(result), startedAt, tool, "hook")
@@ -2116,16 +2112,19 @@ func userFromHookPayload(payload map[string]interface{}) (string, string) {
 	}
 	userID := firstNonEmpty(
 		stringMapValue(payload, "user_id"),
-		stringMapValue(payload, "user_email"),
 		stringMapValue(payload, "user"),
 		stringMapValue(payload, "actor"),
 		stringMapValue(payload, "login"),
 	)
+	if userID == "" {
+		if email := strings.TrimSpace(strings.ToLower(stringMapValue(payload, "user_email"))); email != "" {
+			userID = stableLLMEventID("user", email)
+		}
+	}
 	userName := firstNonEmpty(
 		stringMapValue(payload, "user_name"),
 		stringMapValue(payload, "username"),
 		stringMapValue(payload, "user_login"),
-		stringMapValue(payload, "user_email"),
 	)
 	return llmEventUserWithLocalFallback(userID, userName)
 }

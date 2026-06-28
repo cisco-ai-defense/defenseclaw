@@ -82,7 +82,7 @@ Every credential the gateway and CLI know about is registered in `cli/defensecla
 | `CISCO_AI_DEFENSE_API_KEY` | `guardrail.remote` | `guardrail.scanner_mode` is `remote` or `both`. | API key for the [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) remote scanner. |
 | `VIRUSTOTAL_API_KEY` | `skill-scanner.virustotal` | `scanners.skill_scanner.use_virustotal=true`. | Required when the skill scanner is wired up to ask VirusTotal. |
 | `SPLUNK_ACCESS_TOKEN` | `observability.splunk` | A Splunk audit sink is enabled. | The HEC token. |
-| `GALILEO_API_KEY` | `observability.galileo` | An enabled OTLP destination named `galileo` is configured. | Required for Galileo Cloud and authenticated self-hosted trace export; bound to the destination endpoint shown by `keys list`. |
+| `GALILEO_API_KEY` | `observability.galileo` | An enabled OTLP destination named `galileo` is configured. | Required for Galileo Cloud and authenticated self-hosted trace export. Use `setup observability list` for the destination inventory. |
 | `DEFENSECLAW_SKILL_SCANNER_LLM_KEY` | `skill-scanner.llm` | The skill scanner uses LLM and has a custom `llm.api_key_env` override. | Only tracked when there's a custom override; otherwise falls through to `DEFENSECLAW_LLM_KEY`. |
 
 The names you see in `keys list` are the **effective** ones. If you set `guardrail.judge.llm.api_key_env: MY_JUDGE_KEY`, the table shows `MY_JUDGE_KEY` — not the canonical `JUDGE_API_KEY` — because that's the env var the running gateway will actually read.

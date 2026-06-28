@@ -195,10 +195,20 @@ def test_canary_request_is_otlp_protobuf() -> None:
     assert span.kind == 3
     assert attributes["gen_ai.operation.name"].string_value == "chat"
     assert attributes["gen_ai.provider.name"].string_value == "openai"
+    assert attributes["gen_ai.request.model"].string_value
     assert attributes["openinference.span.kind"].string_value == "LLM"
     assert attributes["gen_ai.input.messages"].string_value
     assert attributes["gen_ai.output.messages"].string_value
     assert len(bytes.fromhex(trace_id)) == 16
+
+
+def test_management_commands_report_missing_destination_without_traceback(tmp_path, monkeypatch) -> None:
+    app = _app(tmp_path, monkeypatch)
+    for args in (["enable"], ["disable"], ["remove", "--yes"]):
+        result = CliRunner().invoke(galileo, args, obj=app)
+        assert result.exit_code != 0
+        assert "no audit sink named 'galileo'" in result.output
+        assert "Traceback" not in result.output
 
 
 def test_non_interactive_requires_secret(tmp_path, monkeypatch) -> None:

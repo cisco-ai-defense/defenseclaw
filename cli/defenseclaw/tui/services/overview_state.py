@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.tui.services import connector_filter
 from defenseclaw.tui.services.ai_discovery_state import AIUsageSignal, AIUsageSnapshot
 
@@ -1017,16 +1018,31 @@ class OverviewPanelModel:
                         dropped = max(0, int(routing.get("dropped", 0) or 0))
                     except (TypeError, ValueError):
                         accepted = dropped = 0
-                    total = accepted + dropped
+                    try:
+                        total = max(accepted + dropped, int(routing.get("total", 0) or 0))
+                    except (TypeError, ValueError):
+                        total = accepted + dropped
                     if total:
-                        routing_label = f"{100 * accepted / total:.1f}% ({accepted}/{total})"
+                        try:
+                            percentage = float(
+                                routing.get(
+                                    "eligibility_percentage",
+                                    routing.get("accepted_percentage", 100 * accepted / total),
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            percentage = 0.0
+                        routing_label = f"{percentage:.1f}% ({accepted}/{total})"
                     else:
                         routing_label = "waiting"
                 delivery = item.get("delivery")
                 if isinstance(delivery, dict):
                     try:
                         attempted = max(0, int(delivery.get("attempted", 0) or 0))
-                        delivered = max(0, int(delivery.get("delivered", 0) or 0))
+                        delivered = max(
+                            0,
+                            int(delivery.get("collector_accepted", delivery.get("delivered", 0)) or 0),
+                        )
                         rejected = max(0, int(delivery.get("rejected", 0) or 0))
                         failed = max(0, int(delivery.get("failed", 0) or 0))
                         pending = max(0, int(delivery.get("pending", 0) or 0))
@@ -1045,7 +1061,7 @@ class OverviewPanelModel:
                         kind=kind,
                         state="enabled" if bool(item.get("enabled", False)) else "disabled",
                         signals=signals,
-                        endpoint=str(item.get("endpoint", "") or "—"),
+                        endpoint=redact_endpoint_for_display(str(item.get("endpoint", "") or "—")),
                         routing=routing_label,
                     )
                 )
@@ -1055,7 +1071,10 @@ class OverviewPanelModel:
             for item in sinks:
                 if not isinstance(item, dict) or not item.get("name"):
                     continue
-                endpoint = item.get("endpoint") or item.get("url") or "—"
+                endpoint = redact_endpoint_for_display(
+                    str(item.get("endpoint") or item.get("url") or "—"),
+                    hide_path=True,
+                )
                 rows.append(
                     ObservabilityDestinationRow(
                         name=str(item["name"]),

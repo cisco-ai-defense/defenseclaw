@@ -337,7 +337,21 @@ class BoundEndpointTests(unittest.TestCase):
             "https://api.example.test/otel/traces",
         )
 
-        cfg.otel.destinations[0].name = "galileo-security"
+        cfg.otel.destinations.insert(
+            0,
+            OTelDestinationConfig(
+                name="galileo-stale",
+                preset="galileo",
+                enabled=False,
+                endpoint="https://stale.example.test/otel/traces",
+            ),
+        )
+        self.assertEqual(
+            spec.resolve_bound_endpoint(cfg),
+            "https://api.example.test/otel/traces",
+        )
+
+        cfg.otel.destinations[1].name = "galileo-security"
         self.assertEqual(
             spec.resolve_bound_endpoint(cfg),
             "https://api.example.test/otel/traces",

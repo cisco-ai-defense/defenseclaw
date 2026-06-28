@@ -75,6 +75,51 @@ func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentHookRequestLabelsLifecycleEvents(t *testing.T) {
+	for _, tc := range []struct {
+		event string
+		want  string
+	}{
+		{event: "SubagentStart", want: "subagent"},
+		{event: "SubagentStop", want: "subagent"},
+		{event: "session.created", want: "session"},
+		{event: "session.updated", want: "session"},
+		{event: "session.status", want: "session"},
+		{event: "session.idle", want: "session"},
+		{event: "session.compacted", want: "session"},
+		{event: "session.error", want: "session"},
+		{event: "session.deleted", want: "session"},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			req := normalizeAgentHookRequest("opencode", map[string]interface{}{
+				"hook_event_name": tc.event,
+				"session_id":      "session-1",
+			})
+			if req.ToolName != tc.want {
+				t.Fatalf("ToolName=%q want %q", req.ToolName, tc.want)
+			}
+		})
+	}
+}
+
+func TestStampEventCorrelationBackfillsStableLifecycleIDsIndependently(t *testing.T) {
+	gatewaylog.SetProcessRunID("run-1")
+	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
+	first := gatewaylog.Event{SessionID: "session-1", AgentID: "agent-1", Connector: "codex", AgentType: "codex"}
+	stampEventCorrelation(&first, context.Background())
+	if first.AgentLifecycleID == "" || first.AgentExecutionID == "" {
+		t.Fatalf("missing derived IDs: %+v", first)
+	}
+	second := gatewaylog.Event{
+		SessionID: "session-1", AgentID: "agent-1", Connector: "codex", AgentType: "subagent",
+		AgentLifecycleID: first.AgentLifecycleID,
+	}
+	stampEventCorrelation(&second, context.Background())
+	if second.AgentLifecycleID != first.AgentLifecycleID || second.AgentExecutionID != first.AgentExecutionID {
+		t.Fatalf("inconsistent derived IDs: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestHookExecutionRotatesWithinGatewayProcess(t *testing.T) {
 	gatewaylog.SetProcessRunID("gateway-run-stable")
 	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
@@ -675,6 +720,16 @@ func TestHookLLMEventMetaFallsBackToLocalUser(t *testing.T) {
 	meta := hookLLMEventMeta("codex", "sess", "turn", "gpt-5.5", "openai", "", "codex", "ide", map[string]interface{}{})
 	if meta.UserID == "" && meta.UserName == "" {
 		t.Fatalf("expected local user fallback, got user_id=%q user_name=%q", meta.UserID, meta.UserName)
+	}
+}
+
+func TestHookUserEmailIsPseudonymized(t *testing.T) {
+	userID, userName := userFromHookPayload(map[string]interface{}{"user_email": "Alice@Example.COM"})
+	if userID == "" || strings.Contains(strings.ToLower(userID), "alice@example.com") {
+		t.Fatalf("user email was not pseudonymized: %q", userID)
+	}
+	if strings.Contains(strings.ToLower(userName), "alice@example.com") {
+		t.Fatalf("user name leaked email: %q", userName)
 	}
 }
 

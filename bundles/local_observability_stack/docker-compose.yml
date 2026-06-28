@@ -49,7 +49,11 @@ volumes:
 
 services:
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.111.0
+    # v0.111.0 can panic while Prometheus scrapes the Collector's own
+    # metrics after the spanmetrics connector registers callbacks. Keep this
+    # pinned to a tested release so the metrics pipeline does not restart on
+    # every scrape and reset Agent360 counters.
+    image: otel/opentelemetry-collector-contrib:0.153.0
     container_name: defenseclaw-otel-collector
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:

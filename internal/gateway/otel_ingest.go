@@ -339,7 +339,10 @@ func (a *APIServer) deltaOTLPCumulativeTokenUsage(usage otelTokenUsage) (otelTok
 	previous, exists := a.otlpMetricCumulative[usage.seriesKey]
 	delta := usage.tokens
 	start := usage.startTime
-	if exists && previous.start == start && usage.tokens >= previous.value {
+	if exists && previous.start == start {
+		if usage.tokens <= previous.value {
+			return usage, false
+		}
 		delta = usage.tokens - previous.value
 	}
 	if !exists {

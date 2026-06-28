@@ -9841,7 +9841,7 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo(f"    Sourcetype:  {sc.sourcetype}")
         click.echo()
 
-    if not otel.enabled and not sc.enabled:
+    if not route_enabled and not sc.enabled:
         click.echo("  No Splunk integrations are currently enabled.")
         click.echo()
 

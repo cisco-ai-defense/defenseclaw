@@ -685,6 +685,7 @@ func TestValidateCredentialTransport(t *testing.T) {
 		{name: "loopback plaintext auth", endpoint: "http://127.0.0.1:4318/v1/traces", headers: map[string]string{"Galileo-API-Key": "secret"}},
 		{name: "metadata only plaintext", endpoint: "http://collector.example.test/v1/traces", headers: map[string]string{"project": "demo"}},
 		{name: "userinfo rejected", endpoint: "https://user:pass@collector.example.test/v1/traces", headers: map[string]string{"Authorization": "secret"}, wantErr: true},
+		{name: "userinfo rejected without headers", endpoint: "https://user:pass@collector.example.test/v1/traces", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -69,6 +69,7 @@ from defenseclaw.observability import (
     resolve_preset,
     set_destination_enabled,
 )
+from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.observability.writer import _NAME_RE as _SINK_NAME_RE
 
 # Per-connector (D5b) sink writes reuse the writer's preset-resolution,
@@ -926,7 +927,10 @@ def _print_destination_header() -> None:
 
 
 def _print_destination_row(d: Destination) -> None:
-    endpoint = d.endpoint or "(none)"
+    endpoint = redact_endpoint_for_display(
+        d.endpoint or "(none)",
+        hide_path=d.target != "otel",
+    )
     if len(endpoint) > 54:
         endpoint = endpoint[:51] + "..."
     click.echo(

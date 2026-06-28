@@ -34,11 +34,12 @@ func (p *Provider) EmitNetworkEgressLog(ctx context.Context, attrs NetworkEgress
 	record := otellog.Record{}
 	record.SetTimestamp(now)
 	record.SetObservedTimestamp(now)
-	record.SetSeverityText(attrs.Severity)
 	if attrs.Blocked {
 		record.SetSeverity(otellog.SeverityWarn)
+		record.SetSeverityText("WARN")
 	} else {
 		record.SetSeverity(otellog.SeverityInfo)
+		record.SetSeverityText("INFO")
 	}
 	eventType := string(gatewaylog.EventEgress)
 	bodyFields := map[string]interface{}{

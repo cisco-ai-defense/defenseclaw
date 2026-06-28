@@ -490,7 +490,7 @@
     {
       "type": "stat",
       "title": "Pending requests gauge (5m window)",
-      "description": "Approximation of in-flight requests = requested - (approved + denied + timeout) summed over the last 5 minutes. Sustained positive value means operators are slow to respond. Negative or zero means the queue is clear.\n\ncovered_by:\n  - defenseclaw_connector_hook_invocations \u2192 internal/gateway/hook_telemetry.go",
+      "description": "Approximation of in-flight HILT requests = approval_requested - (approval_approved + approval_denied + approval_timeout) over the last 5 minutes. Sustained positive value means operators are slow to respond; zero means the queue is clear.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations \u2192 internal/gateway/hilt.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -503,7 +503,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}) or vector(0)",
+          "expr": "clamp_min((sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_connector=~\"$connector\",guardrail_action_taken=\"approval_requested\"}[5m])) or vector(0)) - (sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_connector=~\"$connector\",guardrail_action_taken=~\"approval_approved|approval_denied|approval_timeout\"}[5m])) or vector(0)), 0)",
           "refId": "A"
         }
       ],

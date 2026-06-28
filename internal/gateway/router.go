@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -668,7 +669,9 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			)
 			r.otel.SetRawSpanString(span, "defenseclaw.llm.response.content", contentStr)
 			r.otel.SetRawSpanString(span, "defenseclaw.llm.response.raw_content", string(msg.Content))
-			r.otel.SetGenAIInput(span, "input unavailable on assistant session message transport")
+			if span != nil {
+				span.SetAttributes(attribute.Bool("defenseclaw.telemetry.input.reported", false))
+			}
 			r.otel.SetGenAIOutput(span, contentStr)
 			r.otel.EndLLMSpan(
 				parentCtx,

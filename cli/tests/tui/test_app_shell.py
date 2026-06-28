@@ -84,10 +84,10 @@ async def test_textual_shell_starts_on_overview() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overview_renders_observability_destination_panel() -> None:
+async def test_overview_renders_observability_destination_panel(tmp_path) -> None:
     from rich.console import Console
 
-    overview = OverviewPanelModel(OverviewConfig(data_dir="/tmp/dc"), version="test")
+    overview = OverviewPanelModel(OverviewConfig(data_dir=str(tmp_path)), version="test")
     overview.set_health(
         HealthSnapshot(
             telemetry=SubsystemHealth(

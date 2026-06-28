@@ -274,8 +274,13 @@ def _galileo_key(cfg: Config) -> Requirement:
 
 def _galileo_endpoint(cfg: Config) -> str:
     otel = getattr(cfg, "otel", None)
+    if not getattr(otel, "enabled", False):
+        return ""
     for destination in getattr(otel, "destinations", ()) or ():
-        if getattr(destination, "preset", "") == "galileo":
+        if (
+            getattr(destination, "preset", "") == "galileo"
+            and getattr(destination, "enabled", False)
+        ):
             return str(getattr(destination, "endpoint", "") or "")
     return ""
 
