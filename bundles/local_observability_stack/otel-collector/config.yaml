@@ -158,13 +158,6 @@ exporters:
     sampling_initial: 5
     sampling_thereafter: 200
 
-  # Prometheus-format exporter so Prometheus can scrape the collector
-  # directly if remote_write is ever disabled.
-  prometheus:
-    endpoint: 0.0.0.0:8889
-    resource_to_telemetry_conversion:
-      enabled: true
-
 extensions:
   health_check:
     endpoint: 0.0.0.0:13133
@@ -186,7 +179,10 @@ service:
     metrics:
       receivers: [otlp, spanmetrics/agent360]
       processors: [resource, batch]
-      exporters: [prometheusremotewrite/prometheus, prometheus, debug]
+      # One application-metric path only. Prometheus still scrapes the
+      # collector's own operational metrics on 8888, while OTLP and derived
+      # span metrics reach Prometheus exclusively through remote write.
+      exporters: [prometheusremotewrite/prometheus, debug]
     logs:
       receivers: [otlp]
       processors: [resource, attributes/strip-bodies, transform/loki-payload-cap, batch]

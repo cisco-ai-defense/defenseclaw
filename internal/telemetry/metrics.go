@@ -2899,6 +2899,8 @@ func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result 
 // become metric labels.
 type AgentLifecycleObservation struct {
 	Connector           string
+	Provider            string
+	Model               string
 	AgentID             string
 	AgentName           string
 	AgentType           string
@@ -2939,6 +2941,8 @@ func (p *Provider) RecordAgentLifecycle(ctx context.Context, observation AgentLi
 	}
 	attrs := metric.WithAttributes(
 		attribute.String("connector", label(observation.Connector, "unknown")),
+		attribute.String("gen_ai.provider.name", NormalizeGenAIProviderLabel(firstNonEmptyTelemetry(observation.Provider, observation.Connector))),
+		attribute.String("gen_ai.request.model", NormalizeModelLabel(observation.Model)),
 		attribute.String("gen_ai.agent.id", identity(observation.AgentID, "unknown")),
 		attribute.String("gen_ai.agent.name", label(observation.AgentName, "unknown")),
 		attribute.String("gen_ai.agent.type", label(observation.AgentType, "unknown")),
@@ -2968,6 +2972,8 @@ func (p *Provider) RecordAgentTokenUsage(ctx context.Context, observation AgentL
 	}
 	base := []attribute.KeyValue{
 		attribute.String("connector", NormalizeMetricTextLabel(observation.Connector)),
+		attribute.String("gen_ai.provider.name", NormalizeGenAIProviderLabel(firstNonEmptyTelemetry(observation.Provider, observation.Connector))),
+		attribute.String("gen_ai.request.model", NormalizeModelLabel(observation.Model)),
 		attribute.String("gen_ai.agent.id", normalizeMetricIdentityLabel(observation.AgentID)),
 		attribute.String("gen_ai.agent.name", NormalizeMetricTextLabel(observation.AgentName)),
 		attribute.String("defenseclaw.agent.root.id", normalizeMetricIdentityLabel(firstNonEmptyTelemetry(observation.RootAgentID, observation.AgentID))),

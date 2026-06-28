@@ -21,6 +21,8 @@ CLI_AGENT360 = (
 )
 IDENTITY = DASHBOARDS / "defenseclaw-agent-identity.json"
 COLLECTOR = ROOT / "bundles" / "local_observability_stack" / "otel-collector" / "config.yaml"
+PROMETHEUS = ROOT / "bundles" / "local_observability_stack" / "prometheus" / "prometheus.yml"
+COMPOSE = ROOT / "bundles" / "local_observability_stack" / "docker-compose.yml"
 DATASOURCES = (
     ROOT
     / "bundles"
@@ -65,9 +67,9 @@ def test_agent360_has_dynamic_directory_and_required_drilldown_surfaces() -> Non
         assert correlation_field in serialized
     assert "defenseclaw_agent_token_usage_total" in serialized
     assert "defenseclaw_agent_reported_cost_USD" in serialized
-    # Both local metric transports can coexist during upgrades. Aggregates
-    # collapse transport-only label copies so values are never double-counted.
-    assert serialized.count("max without (job, instance, service, exported_job)") >= 8
+    # Application metrics have exactly one local transport (remote write), so
+    # dashboard authors do not need transport-label de-duplication boilerplate.
+    assert "max without (job, instance, service, exported_job)" not in serialized
 
 
 def test_agent360_cli_packaged_dashboard_matches_bundle_source() -> None:
@@ -157,6 +159,46 @@ def test_agent360_presents_human_readable_usage_lifecycle_and_logs() -> None:
         assert "| json | line_format" in expr
 
 
+def test_agent360_uses_canonical_gateway_event_types() -> None:
+    dashboard = _dashboard(AGENT360)
+    decisions = _panel_by_title(
+        dashboard, "Errors, blocks, approvals, and guardrail decisions"
+    )["targets"][0]["expr"]
+    assert 'defenseclaw_gateway_event_type=~"error|verdict|judge|scan_finding"' in decisions
+    for nonexistent in ("runtime_error", "approval|", "guardrail|"):
+        assert nonexistent not in decisions
+
+    network = _panel_by_title(
+        dashboard, "Tools and website/network interactions"
+    )["targets"][0]["expr"]
+    assert 'defenseclaw_gateway_event_type=~"tool_invocation|egress"' in network
+    assert "network_egress" not in network
+
+
+def test_agent360_exposes_model_tool_cost_and_reliability_analytics() -> None:
+    dashboard = _dashboard(AGENT360)
+    expected = {
+        "Model calls by provider and model": ("gen_ai_provider_name", "gen_ai_request_model"),
+        "Model p95 latency by provider and model": ("histogram_quantile", "gen_ai_request_model"),
+        "Top tools by calls": ("gen_ai_tool_name",),
+        "Tool p95 latency": ("gen_ai_tool_name", "histogram_quantile"),
+        "Top websites and destinations": ("defenseclaw_destination_app",),
+        "Reported tokens by model": ("defenseclaw_agent_token_usage_total", "gen_ai_request_model"),
+        "Reported cost over time": ("defenseclaw_agent_reported_cost_USD",),
+        "Reported cost by model": ("defenseclaw_agent_reported_cost_USD", "gen_ai_request_model"),
+        "Lifecycle funnel": ("defenseclaw_agent_lifecycle_event",),
+        "Span error rate": ('status_code="STATUS_CODE_ERROR"',),
+        "Agent span latency heatmap": ("_bucket", "sum by (le)"),
+        "Active agents over time": ("gen_ai_agent_id",),
+    }
+    for title, fragments in expected.items():
+        expression = _panel_by_title(dashboard, title)["targets"][0]["expr"]
+        assert all(fragment in expression for fragment in fragments), title
+
+    topology = _panel_by_title(dashboard, "Agent, subagent, model, and tool graph")
+    assert "Persistent cross-trace topology" in topology["description"]
+
+
 def test_agent_directory_links_to_reusable_agent360_dashboard() -> None:
     identity = json.dumps(_dashboard(IDENTITY))
     assert "Runtime Agent Directory" in identity
@@ -171,6 +213,14 @@ def test_collector_derives_agent_span_metrics_and_fans_them_to_prometheus() -> N
     assert "gen_ai.tool.name" in config
     assert "exporters: [otlp/tempo, spanmetrics/agent360, debug]" in config
     assert "receivers: [otlp, spanmetrics/agent360]" in config
+    assert "exporters: [prometheusremotewrite/prometheus, debug]" in config
+    assert "endpoint: 0.0.0.0:8889" not in config
+
+    prometheus = PROMETHEUS.read_text(encoding="utf-8")
+    compose = COMPOSE.read_text(encoding="utf-8")
+    assert "otel-collector-export" not in prometheus
+    assert "otel-collector:8889" not in prometheus
+    assert ":8889:8889" not in compose
 
 
 def test_loki_json_trace_ids_link_to_tempo() -> None:

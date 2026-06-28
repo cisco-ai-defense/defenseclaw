@@ -1100,6 +1100,8 @@ func (a *APIServer) recordHookLifecycleMetric(ctx context.Context, meta llmEvent
 	}
 	a.otel.RecordAgentLifecycle(ctx, telemetry.AgentLifecycleObservation{
 		Connector:           meta.Source,
+		Provider:            meta.Provider,
+		Model:               meta.Model,
 		AgentID:             meta.AgentID,
 		AgentName:           meta.AgentName,
 		AgentType:           meta.AgentType,
@@ -1847,6 +1849,8 @@ func (a *APIServer) emitHookLLMSpan(ctx context.Context, meta llmEventMeta, resp
 	}
 	a.otel.RecordAgentTokenUsage(ctx, telemetry.AgentLifecycleObservation{
 		Connector:   meta.Source,
+		Provider:    provider,
+		Model:       model,
 		AgentID:     agentID,
 		AgentName:   agentName,
 		AgentType:   agentType,

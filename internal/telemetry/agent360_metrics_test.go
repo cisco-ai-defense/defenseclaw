@@ -20,7 +20,7 @@ func TestAgent360MetricsCarryStableTreeCorrelation(t *testing.T) {
 	defer provider.Shutdown(context.Background())
 
 	observation := AgentLifecycleObservation{
-		Connector: "codex", AgentID: "child-agent", AgentName: "reviewer", AgentType: "subagent",
+		Connector: "codex", Provider: "openai", Model: "gpt-5.5", AgentID: "child-agent", AgentName: "reviewer", AgentType: "subagent",
 		RootAgentID: "root-agent", ParentAgentID: "root-agent", RootSessionID: "root-session",
 		LifecycleID: "lifecycle-0123456789abcdef", ExecutionID: "execution-0123456789abcdef",
 		Event: "turn_end", State: "completed", Depth: 1,
@@ -41,6 +41,8 @@ func TestAgent360MetricsCarryStableTreeCorrelation(t *testing.T) {
 	attrs := lastSeenData.DataPoints[0].Attributes
 	for key, want := range map[string]string{
 		"connector": "codex", "gen_ai.agent.id": "child-agent",
+		"gen_ai.provider.name":           "openai",
+		"gen_ai.request.model":           "gpt-5",
 		"defenseclaw.agent.root.id":      "root-agent",
 		"defenseclaw.agent.parent.id":    "root-agent",
 		"defenseclaw.agent.lifecycle.id": "lifecycle-0123456789abcdef",
@@ -61,6 +63,12 @@ func TestAgent360MetricsCarryStableTreeCorrelation(t *testing.T) {
 	}
 	if got := counterValueByAttr(tokens, "kind", "output"); got != 30 {
 		t.Errorf("output tokens = %d, want 30", got)
+	}
+	if got := counterValueByAttr(tokens, "gen_ai.request.model", "gpt-5"); got <= 0 {
+		t.Errorf("model-attributed tokens = %d, want a reported value", got)
+	}
+	if got := counterValueByAttr(tokens, "gen_ai.provider.name", "openai"); got <= 0 {
+		t.Errorf("provider-attributed tokens = %d, want a reported value", got)
 	}
 
 	cost := findGauge(rm, "defenseclaw.agent.reported_cost")

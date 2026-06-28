@@ -31,7 +31,7 @@ func TestEmitNetworkEgressLogCarriesAgentAndTraceCorrelation(t *testing.T) {
 	}
 	record := records[0]
 	for key, want := range map[string]string{
-		"defenseclaw.gateway.event_type": "network_egress",
+		"defenseclaw.gateway.event_type": "egress",
 		"gen_ai.agent.id":                "child",
 		"defenseclaw.agent.root.id":      "root",
 		"defenseclaw.agent.parent.id":    "root",

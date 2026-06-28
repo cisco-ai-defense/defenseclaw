@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -39,8 +40,9 @@ func (p *Provider) EmitNetworkEgressLog(ctx context.Context, attrs NetworkEgress
 	} else {
 		record.SetSeverity(otellog.SeverityInfo)
 	}
+	eventType := string(gatewaylog.EventEgress)
 	bodyFields := map[string]interface{}{
-		"event_type": "network_egress", "hostname": attrs.Hostname,
+		"event_type": eventType, "hostname": attrs.Hostname,
 		"http_method": attrs.HTTPMethod, "protocol": attrs.Protocol,
 		"blocked": attrs.Blocked, "decision_code": attrs.DecisionCode,
 	}
@@ -52,7 +54,7 @@ func (p *Provider) EmitNetworkEgressLog(ctx context.Context, attrs NetworkEgress
 	body, _ := json.Marshal(bodyFields)
 	record.SetBody(otellog.StringValue(string(body)))
 	logAttrs := []otellog.KeyValue{
-		otellog.String("defenseclaw.gateway.event_type", "network_egress"),
+		otellog.String("defenseclaw.gateway.event_type", eventType),
 		otellog.String("connector", attrs.Connector),
 		otellog.String("gen_ai.agent.id", attrs.AgentID),
 		otellog.String("defenseclaw.agent.root.id", attrs.RootAgentID),

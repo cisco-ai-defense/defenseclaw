@@ -23,7 +23,7 @@
 #   3100        — Loki HTTP (scraped by Grafana)
 #   3200        — Tempo HTTP
 #   9090        — Prometheus UI
-#   8888 / 8889 — Collector self-metrics + prom exporter
+#   8888        — Collector self-metrics
 #
 # SECURITY: all host-side port publishes are scoped to the loopback
 # interface (127.0.0.1) so a developer laptop joining a coffee-shop
@@ -58,7 +58,6 @@ services:
       - "${HOST_BIND:-127.0.0.1}:4317:4317"   # OTLP gRPC (traces, metrics, logs)
       - "${HOST_BIND:-127.0.0.1}:4318:4318"   # OTLP HTTP
       - "${HOST_BIND:-127.0.0.1}:8888:8888"   # Collector telemetry
-      - "${HOST_BIND:-127.0.0.1}:8889:8889"   # Prometheus-format exporter for scraping
       - "${HOST_BIND:-127.0.0.1}:13133:13133" # health check extension
     networks:
       - defenseclaw-o11y
