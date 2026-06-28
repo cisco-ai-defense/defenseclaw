@@ -353,5 +353,5 @@ def test_splunk_status_lists_every_named_destination(
     output = capsys.readouterr().out
     assert "Splunk Observability Cloud (OTLP) [splunk-us1]" in output
     assert "Splunk Observability Cloud (OTLP) [splunk-eu0]" in output
-    assert "us1" in output
-    assert "eu0" in output
+    assert "Realm:       us1" in output
+    assert "Realm:       eu0" in output

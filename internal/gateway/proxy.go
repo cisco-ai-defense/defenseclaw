@@ -2532,6 +2532,14 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	if agentCtx == nil {
 		agentCtx = context.Background()
 	}
+	agentSpanEnded := false
+	endAgentSpan := func(errMsg string) {
+		if p.otel != nil && agentSpan != nil && !agentSpanEnded {
+			p.otel.EndAgentSpan(agentSpan, errMsg)
+			agentSpanEnded = true
+		}
+	}
+	defer endAgentSpan("")
 
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
 	userText := lastUserText(req.Messages)
@@ -2590,9 +2598,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			rawTelemetryField{key: "raw_request_body", raw: req.RawBody})
 
 		if verdict.Action == "block" && mode == "action" {
-			if p.otel != nil && agentSpan != nil {
-				p.otel.EndAgentSpan(agentSpan, "guardrail blocked")
-			}
+			endAgentSpan("guardrail blocked")
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
 			if req.Stream {
@@ -2638,9 +2644,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	// End invoke_agent span after the full request completes.
-	if p.otel != nil && agentSpan != nil {
-		p.otel.EndAgentSpan(agentSpan, "")
-	}
+	endAgentSpan("")
 }
 
 func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, mode, customBlockMsg string, upstream LLMProvider, agentCtx context.Context, promptID string) {

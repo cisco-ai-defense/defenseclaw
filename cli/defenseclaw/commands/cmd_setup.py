@@ -31,6 +31,7 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import click
 
@@ -9821,8 +9822,17 @@ def _print_splunk_status(app: AppContext) -> None:
             "",
         )
         if realm_endpoint:
-            realm = realm_endpoint.replace("ingest.", "").replace(".observability.splunkcloud.com", "")
-            click.echo(f"    Realm:       {realm}")
+            parse_target = (
+                realm_endpoint
+                if "://" in realm_endpoint
+                else f"//{realm_endpoint}"
+            )
+            hostname = urlparse(parse_target).hostname or ""
+            realm = hostname.removeprefix("ingest.").removesuffix(
+                ".observability.splunkcloud.com"
+            )
+            if realm:
+                click.echo(f"    Realm:       {realm}")
         if route_enabled and traces.enabled:
             click.echo(f"    Traces:      {signal_endpoint(traces)}{traces.url_path}")
         else:

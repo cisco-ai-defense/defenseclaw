@@ -297,17 +297,20 @@ def test_agent_directory_links_to_reusable_agent360_dashboard() -> None:
 
 def test_agent360_span_metrics_are_connector_scoped() -> None:
     dashboard = _dashboard(AGENT360)
+    seen = 0
     for panel in dashboard["panels"]:
         for target in panel.get("targets", []):
             expression = target.get("expr", "")
             if "defenseclaw_agent_span_" not in expression:
                 continue
+            seen += 1
             # New series carry connector directly. The empty-label branch keeps
             # pre-upgrade spanmetrics visible; the adjacent execution-ID join is
             # still filtered by the selected connector.
             assert expression.count('connector=~"(${connector:regex}|^$)"') == (
                 expression.count("defenseclaw_agent_span_")
             ), panel["title"]
+    assert seen > 0
 
 
 def test_collector_derives_agent_span_metrics_and_fans_them_to_prometheus() -> None:
