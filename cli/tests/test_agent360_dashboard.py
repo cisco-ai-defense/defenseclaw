@@ -291,7 +291,23 @@ def test_agent_directory_links_to_reusable_agent360_dashboard() -> None:
     identity = json.dumps(_dashboard(IDENTITY))
     assert "Runtime Agent Directory" in identity
     assert "/d/defenseclaw-agent-360/agent360" in identity
-    assert '${__data.fields[\\"Root Agent\\"]}' in identity
+    assert "${__value.raw}" in identity
+    assert "var-scope_label=gen_ai_agent_id" in identity
+
+
+def test_agent360_span_metrics_are_connector_scoped() -> None:
+    dashboard = _dashboard(AGENT360)
+    for panel in dashboard["panels"]:
+        for target in panel.get("targets", []):
+            expression = target.get("expr", "")
+            if "defenseclaw_agent_span_" not in expression:
+                continue
+            # New series carry connector directly. The empty-label branch keeps
+            # pre-upgrade spanmetrics visible; the adjacent execution-ID join is
+            # still filtered by the selected connector.
+            assert expression.count('connector=~"(${connector:regex}|^$)"') == (
+                expression.count("defenseclaw_agent_span_")
+            ), panel["title"]
 
 
 def test_collector_derives_agent_span_metrics_and_fans_them_to_prometheus() -> None:

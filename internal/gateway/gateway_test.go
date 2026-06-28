@@ -28,6 +28,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -4079,6 +4080,15 @@ func TestDestinationRoutingHealthMarshal(t *testing.T) {
 		if _, ok := got[key]; !ok {
 			t.Errorf("routing health missing %q: %s", key, raw)
 		}
+	}
+}
+
+func TestDestinationSignalNamesDoesNotInventTraces(t *testing.T) {
+	destination := config.OTelDestinationConfig{}
+	destination.Metrics.Enabled = true
+	destination.Logs.Enabled = true
+	if got := destinationSignalNames(destination); !reflect.DeepEqual(got, []string{"metrics", "logs"}) {
+		t.Fatalf("destinationSignalNames() = %v, want [metrics logs]", got)
 	}
 }
 

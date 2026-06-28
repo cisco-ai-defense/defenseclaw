@@ -378,6 +378,7 @@ def _validate_https_endpoint(value: str) -> str:
     if (
         parsed.scheme != "https"
         or not parsed.netloc
+        or not parsed.hostname
         or parsed.username
         or parsed.password
         or parsed.query

@@ -124,6 +124,28 @@ func TestNetworkEgressEventToRowRedactsURLCredentials(t *testing.T) {
 	}
 }
 
+func TestStore_InsertNetworkEgressEventRedactsURLInDetails(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	rawURL := "https://alice:secret@api.example.test/v1/data?api_key=secret"
+	if err := store.InsertNetworkEgressEvent(NetworkEgressRow{
+		Hostname: "api.example.test", URL: rawURL, PolicyOutcome: "blocked",
+		Details: "blocked outbound request to " + rawURL,
+	}); err != nil {
+		t.Fatalf("InsertNetworkEgressEvent: %v", err)
+	}
+	rows, err := store.QueryNetworkEgressEvents(NetworkEgressFilter{})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("QueryNetworkEgressEvents rows=%d err=%v", len(rows), err)
+	}
+	if strings.Contains(rows[0].Details, "alice") || strings.Contains(rows[0].Details, "secret") {
+		t.Fatalf("persisted details leaked URL credentials: %q", rows[0].Details)
+	}
+	if !strings.Contains(rows[0].Details, "%3Credacted%3E") {
+		t.Fatalf("persisted details did not retain redacted URL context: %q", rows[0].Details)
+	}
+}
+
 // --- Store: insert / list / query ---
 
 func TestStore_InsertAndListNetworkEgressEvents(t *testing.T) {

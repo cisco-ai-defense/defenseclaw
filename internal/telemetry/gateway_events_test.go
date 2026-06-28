@@ -47,6 +47,20 @@ func intAttrValue(r sdklog.Record, key string) (int64, bool) {
 	return out, found
 }
 
+func boolAttrValue(r sdklog.Record, key string) (bool, bool) {
+	var out, found bool
+	r.WalkAttributes(func(kv log.KeyValue) bool {
+		if string(kv.Key) == key {
+			if kv.Value.Kind() == log.KindBool {
+				out, found = kv.Value.AsBool(), true
+			}
+			return false
+		}
+		return true
+	})
+	return out, found
+}
+
 func TestGatewaySeverityToOTel(t *testing.T) {
 	cases := []struct {
 		in      gatewaylog.Severity
@@ -257,6 +271,24 @@ func TestEmitGatewayEventWithContext_PropagatesTraceContext(t *testing.T) {
 	}
 	if got := rec.TraceFlags(); got != trace.FlagsSampled {
 		t.Fatalf("record trace flags=%v want %v", got, trace.FlagsSampled)
+	}
+}
+
+func TestEmitGatewayEventPreservesExplicitFalseAgentFlags(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+	value := false
+	p.EmitGatewayEvent(gatewaylog.Event{
+		EventType: gatewaylog.EventLifecycle, Severity: gatewaylog.SeverityInfo,
+		AgentReportedCost: &value, SessionResumed: &value,
+	})
+	record := exp.snapshot()[0]
+	for _, key := range []string{
+		"defenseclaw.agent.reported_cost.present",
+		"defenseclaw.session.resumed",
+	} {
+		if got, found := boolAttrValue(record, key); !found || got {
+			t.Fatalf("%s=(%v,%v), want explicit false", key, got, found)
+		}
 	}
 }
 

@@ -2526,7 +2526,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		agentName := p.agentNameForRequest(r.Header.Get("X-Agent-Name"))
 		agentCtx, agentSpan = p.otel.StartAgentSpan(
 			context.Background(),
-			conversationID, agentName, agentName, p.agentIDForRequest(), "",
+			conversationID, agentName, agentName, p.agentIDForRequest(), "", agentName,
 		)
 	}
 	if agentCtx == nil {

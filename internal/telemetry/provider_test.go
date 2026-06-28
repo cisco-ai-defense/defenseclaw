@@ -301,7 +301,7 @@ func TestStartAgentSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
 	p, exp := newTracingProvider(t)
 	attachTraceTestResourceContext(t, p)
 
-	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai")
+	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai", "codex")
 	p.EndAgentSpan(span, "")
 
 	spans := exp.GetSpans()
@@ -413,7 +413,7 @@ func TestStartAgentSpan_EmitsRunID(t *testing.T) {
 	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
 
 	p, exp := newTracingProvider(t)
-	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai")
+	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai", "codex")
 	p.EndAgentSpan(span, "")
 
 	spans := exp.GetSpans()

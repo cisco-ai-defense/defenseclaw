@@ -649,11 +649,18 @@ type OTelConfig struct {
 type OTelDestinationConfig struct {
     // Endpoint, protocol, headers, TLS, per-signal settings, and batching are
     // destination-owned so each fan-out route can be tuned independently.
-    Batch struct {
-        MaxExportBatchSize int `mapstructure:"max_export_batch_size" yaml:"max_export_batch_size"`
-        ScheduledDelayMs   int `mapstructure:"scheduled_delay_ms"    yaml:"scheduled_delay_ms"`
-        MaxQueueSize       int `mapstructure:"max_queue_size"         yaml:"max_queue_size"`
-    } `mapstructure:"batch" yaml:"batch"`
+    Name       string               `mapstructure:"name"        yaml:"name"`
+    Preset     string               `mapstructure:"preset"      yaml:"preset,omitempty"`
+    Enabled    bool                 `mapstructure:"enabled"     yaml:"enabled"`
+    Protocol   string               `mapstructure:"protocol"    yaml:"protocol"`
+    Endpoint   string               `mapstructure:"endpoint"    yaml:"endpoint"`
+    Headers    map[string]string    `mapstructure:"headers"     yaml:"headers,omitempty"`
+    TLS        OTelTLSConfig        `mapstructure:"tls"         yaml:"tls"`
+    Traces     OTelTracesConfig     `mapstructure:"traces"      yaml:"traces"`
+    Logs       OTelLogsConfig       `mapstructure:"logs"        yaml:"logs"`
+    Metrics    OTelMetricsConfig    `mapstructure:"metrics"     yaml:"metrics"`
+    Batch      OTelBatchConfig      `mapstructure:"batch"       yaml:"batch"`
+    SpanFilter OTelSpanFilterConfig `mapstructure:"span_filter" yaml:"span_filter,omitempty"`
 }
 ```
 

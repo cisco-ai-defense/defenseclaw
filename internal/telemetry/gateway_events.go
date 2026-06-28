@@ -275,11 +275,11 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 	if e.AgentOperationID != "" {
 		attrs = append(attrs, log.String("defenseclaw.operation.id", e.AgentOperationID))
 	}
-	if e.AgentReportedCost && e.AgentReportedCostUSD != nil {
-		attrs = append(attrs,
-			log.Float64("defenseclaw.agent.reported_cost.usd", *e.AgentReportedCostUSD),
-			log.Bool("defenseclaw.agent.reported_cost.present", true),
-		)
+	if e.AgentReportedCost != nil {
+		attrs = append(attrs, log.Bool("defenseclaw.agent.reported_cost.present", *e.AgentReportedCost))
+		if *e.AgentReportedCost && e.AgentReportedCostUSD != nil {
+			attrs = append(attrs, log.Float64("defenseclaw.agent.reported_cost.usd", *e.AgentReportedCostUSD))
+		}
 	}
 	if e.AgentDepth != nil {
 		attrs = append(attrs, log.Int("defenseclaw.agent.depth", *e.AgentDepth))
@@ -287,8 +287,8 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 	if e.SessionSource != "" {
 		attrs = append(attrs, log.String("defenseclaw.session.source", e.SessionSource))
 	}
-	if e.SessionResumed {
-		attrs = append(attrs, log.Bool("defenseclaw.session.resumed", true))
+	if e.SessionResumed != nil {
+		attrs = append(attrs, log.Bool("defenseclaw.session.resumed", *e.SessionResumed))
 	}
 	if e.AgentInstanceID != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent_instance_id", e.AgentInstanceID))

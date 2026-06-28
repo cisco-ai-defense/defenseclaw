@@ -171,6 +171,7 @@ def test_trace_endpoint_rejects_userinfo() -> None:
     for endpoint in (
         "https://api.galileo.example/otel/traces?token=secret",
         "https://api.galileo.example/otel/traces#secret",
+        "https://:443/otel/traces",
     ):
         with pytest.raises(click.ClickException, match="without query or fragment"):
             _validate_https_endpoint(endpoint)
@@ -335,3 +336,22 @@ def test_disabling_splunk_does_not_disable_galileo(tmp_path, monkeypatch) -> Non
     assert raw["otel"]["enabled"] is True
     assert destinations["galileo"]["enabled"] is True
     assert destinations["splunk-cloud"]["enabled"] is False
+
+
+def test_splunk_status_lists_every_named_destination(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    app = _app(tmp_path, monkeypatch)
+    apply_preset("splunk-o11y", {"realm": "us1"}, str(tmp_path), name="splunk-us1")
+    apply_preset("splunk-o11y", {"realm": "eu0"}, str(tmp_path), name="splunk-eu0")
+
+    from defenseclaw import config
+    from defenseclaw.commands.cmd_setup import _print_splunk_status
+
+    app.cfg = config.load()
+    _print_splunk_status(app)
+    output = capsys.readouterr().out
+    assert "Splunk Observability Cloud (OTLP) [splunk-us1]" in output
+    assert "Splunk Observability Cloud (OTLP) [splunk-eu0]" in output
+    assert "us1" in output
+    assert "eu0" in output

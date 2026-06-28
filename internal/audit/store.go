@@ -3040,10 +3040,14 @@ type NetworkEgressRow struct {
 
 // InsertNetworkEgressEvent persists one outbound network call as a structured row.
 func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
-	if strings.TrimSpace(e.URL) != "" {
-		e.URL = netguard.ScrubURLString(e.URL)
+	rawURL := e.URL
+	if strings.TrimSpace(rawURL) != "" {
+		e.URL = netguard.ScrubURLString(rawURL)
 		if len(e.URL) > 512 {
 			e.URL = truncateUTF8(e.URL, 512)
+		}
+		if e.Details != "" && e.URL != rawURL {
+			e.Details = strings.ReplaceAll(e.Details, rawURL, e.URL)
 		}
 	}
 	if e.ID == "" {

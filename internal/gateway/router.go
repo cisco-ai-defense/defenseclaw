@@ -1085,7 +1085,8 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 					r.agentNameForStream(""), // agent name (claw mode fallback)
 					r.agentNameForStream(""), // agent type
 					SharedAgentRegistry().AgentID(),
-					"", // provider filled on session.message
+					"",                       // provider filled on session.message
+					r.agentNameForStream(""), // connector / claw mode
 				)
 				r.spanMu.Lock()
 				r.activeAgentSpans[se.RunID] = &activeAgent{

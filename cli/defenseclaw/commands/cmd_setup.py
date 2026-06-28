@@ -9797,11 +9797,10 @@ def _print_splunk_status(app: AppContext) -> None:
     splunk_destinations = [
         item for item in otel.destinations if item.preset == "splunk-o11y"
     ]
-    destination = next((item for item in splunk_destinations if item.enabled), None)
-    if destination is None and splunk_destinations:
-        destination = splunk_destinations[0]
-    route_enabled = otel.enabled and destination is not None and destination.enabled
-    if route_enabled:
+    any_route_enabled = False
+    for destination in splunk_destinations:
+        route_enabled = otel.enabled and destination.enabled
+        any_route_enabled = any_route_enabled or route_enabled
         traces = destination.traces
         metrics = destination.metrics
         logs = destination.logs
@@ -9810,20 +9809,29 @@ def _print_splunk_status(app: AppContext) -> None:
         def signal_endpoint(signal) -> str:
             return signal.endpoint or base_endpoint
 
-        click.echo("  Splunk Observability Cloud (OTLP):")
-        click.echo("    Status:      enabled")
-        if signal_endpoint(traces):
-            realm = signal_endpoint(traces).replace("ingest.", "").replace(".observability.splunkcloud.com", "")
+        suffix = f" [{destination.name}]" if len(splunk_destinations) > 1 else ""
+        click.echo(f"  Splunk Observability Cloud (OTLP){suffix}:")
+        click.echo(f"    Status:      {'enabled' if route_enabled else 'disabled'}")
+        realm_endpoint = next(
+            (
+                signal_endpoint(signal)
+                for signal in (traces, metrics, logs)
+                if signal_endpoint(signal)
+            ),
+            "",
+        )
+        if realm_endpoint:
+            realm = realm_endpoint.replace("ingest.", "").replace(".observability.splunkcloud.com", "")
             click.echo(f"    Realm:       {realm}")
-        if traces.enabled:
+        if route_enabled and traces.enabled:
             click.echo(f"    Traces:      {signal_endpoint(traces)}{traces.url_path}")
         else:
             click.echo("    Traces:      disabled")
-        if metrics.enabled:
+        if route_enabled and metrics.enabled:
             click.echo(f"    Metrics:     {signal_endpoint(metrics)}{metrics.url_path}")
         else:
             click.echo("    Metrics:     disabled")
-        if logs.enabled:
+        if route_enabled and logs.enabled:
             click.echo(f"    Logs:        {signal_endpoint(logs)}{logs.url_path}")
         else:
             click.echo("    Logs:        disabled")
@@ -9843,7 +9851,7 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo(f"    Sourcetype:  {sc.sourcetype}")
         click.echo()
 
-    if not route_enabled and not sc.enabled:
+    if not any_route_enabled and not sc.enabled:
         click.echo("  No Splunk integrations are currently enabled.")
         click.echo()
 

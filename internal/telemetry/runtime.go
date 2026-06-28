@@ -231,7 +231,7 @@ func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity s
 // DefenseClaw-specific defenseclaw.agent.instance_id attribute.
 func (p *Provider) StartAgentSpan(
 	ctx context.Context,
-	conversationID, agentName, agentType, agentID, provider string,
+	conversationID, agentName, agentType, agentID, provider, connector string,
 ) (context.Context, trace.Span) {
 	if !p.TracesEnabled() {
 		return ctx, nil
@@ -256,6 +256,9 @@ func (p *Provider) StartAgentSpan(
 	)
 	if provider != "" {
 		span.SetAttributes(attribute.String("gen_ai.provider.name", provider))
+	}
+	if connector != "" {
+		span.SetAttributes(attribute.String("connector", connector))
 	}
 	if agentType != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.type", agentType))
@@ -318,7 +321,7 @@ func (p *Provider) emitGenAICanary(ctx context.Context, destination string) (str
 	}
 	rootCtx := trace.ContextWithSpanContext(ctx, trace.SpanContext{})
 	agentCtx, agentSpan := p.StartAgentSpan(
-		rootCtx, "defenseclaw-galileo-canary", "defenseclaw", "diagnostic", "canary", "openai",
+		rootCtx, "defenseclaw-galileo-canary", "defenseclaw", "diagnostic", "canary", "openai", "defenseclaw",
 	)
 	agentSpan.SetAttributes(attribute.Bool(telemetryCanaryAttribute, true))
 	if destination != "" {

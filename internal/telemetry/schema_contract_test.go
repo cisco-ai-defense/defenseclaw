@@ -164,13 +164,12 @@ func TestRuntimeAgentSpanSchemaMatchesEmitter(t *testing.T) {
 	attachAllSchemaSpanContext(p)
 	p.SetAgentInstanceID("instance-1")
 	_, span := p.StartAgentSpan(
-		context.Background(), "session-1", "codex", "ide", "agent-1", "openai",
+		context.Background(), "session-1", "codex", "ide", "agent-1", "openai", "codex",
 	)
 	p.SetGenAIInput(span, "schema agent input")
 	p.SetGenAIOutput(span, "schema agent output")
 	span.SetAttributes(
 		attribute.Bool(telemetryCanaryAttribute, true),
-		attribute.String("connector", "codex"),
 	)
 	p.EndAgentSpan(span, "")
 	assertSpanMatchesRuntimeSchema(t, oneRecordedSpan(t, exporter), "runtime-agent-span.schema.json")
@@ -246,9 +245,16 @@ func TestGalileoExportProfileMatchesRuntimeFilter(t *testing.T) {
 	if !filter.Enabled() || len(filter.Operations) == 0 {
 		t.Fatalf("Galileo profile does not produce an enabled runtime filter: %+v", filter)
 	}
+	requiredOperations := map[string]bool{
+		"chat": true, "invoke_agent": true, "execute_tool": true,
+	}
 	for _, operation := range filter.Operations {
 		if operation.Name == "" || len(operation.RequireAttributes) == 0 {
 			t.Fatalf("Galileo profile contains an incomplete operation: %+v", operation)
 		}
+		delete(requiredOperations, operation.Name)
+	}
+	if len(requiredOperations) != 0 {
+		t.Fatalf("Galileo profile is missing required operations: %v", requiredOperations)
 	}
 }

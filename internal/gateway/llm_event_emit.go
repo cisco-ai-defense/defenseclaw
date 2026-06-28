@@ -99,6 +99,10 @@ func agentReportedCostPointer(meta llmEventMeta) *float64 {
 	return &value
 }
 
+func boolPointer(value bool) *bool {
+	return &value
+}
+
 func emitLLMPromptEvent(ctx context.Context, meta llmEventMeta, prompt string, rawRequestBody []byte) string {
 	if strings.TrimSpace(prompt) == "" && len(rawRequestBody) == 0 {
 		return ""
@@ -133,9 +137,9 @@ func emitLLMPromptEvent(ctx context.Context, meta llmEventMeta, prompt string, r
 		AgentOperationID:     meta.OperationID,
 		AgentDepth:           agentDepthPointer(meta),
 		AgentReportedCostUSD: agentReportedCostPointer(meta),
-		AgentReportedCost:    meta.ReportedCost,
+		AgentReportedCost:    boolPointer(meta.ReportedCost),
 		SessionSource:        meta.SessionSource,
-		SessionResumed:       meta.SessionResumed,
+		SessionResumed:       boolPointer(meta.SessionResumed),
 		UserID:               meta.UserID,
 		UserName:             meta.UserName,
 		PolicyID:             meta.PolicyID,
@@ -188,9 +192,9 @@ func emitLLMResponseEvent(ctx context.Context, meta llmEventMeta, response, rawR
 		AgentOperationID:     meta.OperationID,
 		AgentDepth:           agentDepthPointer(meta),
 		AgentReportedCostUSD: agentReportedCostPointer(meta),
-		AgentReportedCost:    meta.ReportedCost,
+		AgentReportedCost:    boolPointer(meta.ReportedCost),
 		SessionSource:        meta.SessionSource,
-		SessionResumed:       meta.SessionResumed,
+		SessionResumed:       boolPointer(meta.SessionResumed),
 		UserID:               meta.UserID,
 		UserName:             meta.UserName,
 		PolicyID:             meta.PolicyID,
@@ -244,9 +248,9 @@ func emitToolInvocationEvent(ctx context.Context, meta llmEventMeta, phase, tool
 		AgentOperationID:     meta.OperationID,
 		AgentDepth:           agentDepthPointer(meta),
 		AgentReportedCostUSD: agentReportedCostPointer(meta),
-		AgentReportedCost:    meta.ReportedCost,
+		AgentReportedCost:    boolPointer(meta.ReportedCost),
 		SessionSource:        meta.SessionSource,
-		SessionResumed:       meta.SessionResumed,
+		SessionResumed:       boolPointer(meta.SessionResumed),
 		UserID:               meta.UserID,
 		UserName:             meta.UserName,
 		PolicyID:             meta.PolicyID,
@@ -1281,9 +1285,9 @@ func emitHookLifecycleEvent(ctx context.Context, meta llmEventMeta) {
 		AgentOperationID:     meta.OperationID,
 		AgentDepth:           agentDepthPointer(meta),
 		AgentReportedCostUSD: agentReportedCostPointer(meta),
-		AgentReportedCost:    meta.ReportedCost,
+		AgentReportedCost:    boolPointer(meta.ReportedCost),
 		SessionSource:        meta.SessionSource,
-		SessionResumed:       meta.SessionResumed,
+		SessionResumed:       boolPointer(meta.SessionResumed),
 		UserID:               meta.UserID,
 		UserName:             meta.UserName,
 		Connector:            meta.Source,
@@ -1495,7 +1499,7 @@ func (a *APIServer) emitHookLifecycleTransitionSpan(ctx context.Context, meta ll
 	agentName := firstNonEmpty(meta.AgentName, meta.AgentType, meta.Source, meta.AgentID, "agent")
 	agentType := firstNonEmpty(meta.AgentType, meta.Source)
 	_, span := a.otel.StartAgentSpan(
-		parentCtx, meta.SessionID, agentName, agentType, meta.AgentID, provider,
+		parentCtx, meta.SessionID, agentName, agentType, meta.AgentID, provider, meta.Source,
 	)
 	if span == nil {
 		return
@@ -1567,7 +1571,7 @@ func (a *APIServer) ensureHookSessionTrace(
 	agentType := firstNonEmpty(meta.AgentType, meta.Source)
 	rootCtx := parentCtx
 	_, root := a.otel.StartAgentSpan(
-		rootCtx, meta.SessionID, agentName, agentType, meta.AgentID, provider,
+		rootCtx, meta.SessionID, agentName, agentType, meta.AgentID, provider, meta.Source,
 	)
 	if root == nil {
 		return rootCtx

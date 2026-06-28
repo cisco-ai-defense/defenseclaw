@@ -154,6 +154,7 @@ func TestEventMarshalOmitsEmptyPayloads(t *testing.T) {
 func TestEventMarshalPreservesPresentZeroAgentScalars(t *testing.T) {
 	zeroInt := 0
 	zeroCost := 0.0
+	reportedCost := true
 	e := Event{
 		Timestamp:            time.Unix(0, 0).UTC(),
 		EventType:            EventLifecycle,
@@ -163,7 +164,7 @@ func TestEventMarshalPreservesPresentZeroAgentScalars(t *testing.T) {
 		AgentPhaseCode:       &zeroInt,
 		AgentDepth:           &zeroInt,
 		AgentReportedCostUSD: &zeroCost,
-		AgentReportedCost:    true,
+		AgentReportedCost:    &reportedCost,
 	}
 	b, err := json.Marshal(e)
 	if err != nil {
@@ -177,6 +178,25 @@ func TestEventMarshalPreservesPresentZeroAgentScalars(t *testing.T) {
 	} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("marshalled event missing %s: %s", want, b)
+		}
+	}
+}
+
+func TestEventMarshalPreservesExplicitFalseAgentFlags(t *testing.T) {
+	value := false
+	b, err := json.Marshal(Event{
+		Timestamp: time.Unix(0, 0).UTC(), EventType: EventLifecycle,
+		Severity: SeverityInfo, AgentReportedCost: &value, SessionResumed: &value,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"agent_reported_cost_present":false`,
+		`"session_resumed":false`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("marshalled event missing explicit false %s: %s", want, b)
 		}
 	}
 }

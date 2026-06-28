@@ -2544,6 +2544,20 @@ type destinationDeliveryHealth struct {
 	destination string
 }
 
+func destinationSignalNames(destination config.OTelDestinationConfig) []string {
+	signals := make([]string, 0, 3)
+	if destination.Traces.Enabled {
+		signals = append(signals, "traces")
+	}
+	if destination.Metrics.Enabled {
+		signals = append(signals, "metrics")
+	}
+	if destination.Logs.Enabled {
+		signals = append(signals, "logs")
+	}
+	return signals
+}
+
 func (h destinationDeliveryHealth) MarshalJSON() ([]byte, error) {
 	return json.Marshal(h.provider.DestinationDeliveryStats(h.destination))
 }
@@ -2558,16 +2572,7 @@ func (s *Sidecar) reportTelemetryHealth() {
 	if len(s.cfg.OTel.Destinations) > 0 {
 		destinations := make([]map[string]interface{}, 0, len(s.cfg.OTel.Destinations))
 		for _, destination := range s.cfg.OTel.Destinations {
-			signals := make([]string, 0, 3)
-			if destination.Traces.Enabled || destination.Metrics.Enabled || destination.Logs.Enabled {
-				signals = append(signals, "traces")
-			}
-			if destination.Metrics.Enabled {
-				signals = append(signals, "metrics")
-			}
-			if destination.Logs.Enabled {
-				signals = append(signals, "logs")
-			}
+			signals := destinationSignalNames(destination)
 			entry := map[string]interface{}{
 				"name":     destination.Name,
 				"preset":   destination.Preset,

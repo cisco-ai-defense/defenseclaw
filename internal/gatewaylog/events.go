@@ -312,9 +312,9 @@ type Event struct {
 	AgentOperationID     string   `json:"agent_operation_id,omitempty"`
 	AgentDepth           *int     `json:"agent_depth,omitempty"`
 	AgentReportedCostUSD *float64 `json:"agent_reported_cost_usd,omitempty"`
-	AgentReportedCost    bool     `json:"agent_reported_cost_present,omitempty"`
+	AgentReportedCost    *bool    `json:"agent_reported_cost_present,omitempty"`
 	SessionSource        string   `json:"session_source,omitempty"`
-	SessionResumed       bool     `json:"session_resumed,omitempty"`
+	SessionResumed       *bool    `json:"session_resumed,omitempty"`
 	AgentInstanceID      string   `json:"agent_instance_id,omitempty"`
 	SidecarInstanceID    string   `json:"sidecar_instance_id,omitempty"`
 	UserID               string   `json:"user_id,omitempty"`
