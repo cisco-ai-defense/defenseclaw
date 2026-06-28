@@ -2539,7 +2539,8 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			agentSpanEnded = true
 		}
 	}
-	defer endAgentSpan("")
+	agentSpanErr := ""
+	defer func() { endAgentSpan(agentSpanErr) }()
 
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
 	userText := lastUserText(req.Messages)
@@ -2622,11 +2623,13 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 	// --- Forward to upstream provider ---
 	if p.resolveProviderFn == nil {
+		agentSpanErr = "proxy misconfigured"
 		writeOpenAIError(w, http.StatusInternalServerError, "proxy misconfigured: no provider resolver")
 		return
 	}
 	upstream := p.resolveProviderFn(&req)
 	if upstream == nil {
+		agentSpanErr = "unsupported provider"
 		provName, _ := splitModel(req.Model)
 		msg := fmt.Sprintf("provider %q is not supported by DefenseClaw guardrail — traffic blocked", provName)
 		if req.Stream {
