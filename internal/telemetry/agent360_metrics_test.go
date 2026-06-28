@@ -23,7 +23,7 @@ func TestAgent360MetricsCarryStableTreeCorrelation(t *testing.T) {
 		Connector: "codex", Provider: "openai", Model: "gpt-5.5", AgentID: "child-agent", AgentName: "reviewer", AgentType: "subagent",
 		RootAgentID: "root-agent", ParentAgentID: "root-agent", RootSessionID: "root-session",
 		LifecycleID: "lifecycle-0123456789abcdef", ExecutionID: "execution-0123456789abcdef",
-		Event: "turn_end", State: "completed", Depth: 1,
+		Event: "turn_end", State: "completed", Phase: "responding", PreviousPhase: "model", Depth: 1,
 		ReportedCostUSD: 0.042, ReportedCostPresent: true,
 	}
 	provider.RecordAgentLifecycle(context.Background(), observation)
@@ -57,6 +57,18 @@ func TestAgent360MetricsCarryStableTreeCorrelation(t *testing.T) {
 	if got := counterValueByAttr(transitions, "gen_ai.agent.id", "child-agent"); got != 1 {
 		t.Fatalf("lifecycle transitions = %d, want 1", got)
 	}
+	phaseCurrent := findGauge(rm, "defenseclaw.agent.phase.current")
+	if phaseCurrent == nil {
+		t.Fatal("agent phase current gauge missing")
+	}
+	phaseData, ok := phaseCurrent.Data.(metricdata.Gauge[int64])
+	if !ok || len(phaseData.DataPoints) != 1 || phaseData.DataPoints[0].Value != int64(AgentPhaseCode("responding")) {
+		t.Fatalf("unexpected phase current: %T %+v", phaseCurrent.Data, phaseCurrent.Data)
+	}
+	phaseTransitions := sumOf(t, rm, "defenseclaw.agent.phase.transitions")
+	if got := counterValueByAttr(phaseTransitions, "defenseclaw.agent.phase.from", "model"); got != 1 {
+		t.Fatalf("phase transitions model -> responding = %d, want 1", got)
+	}
 	tokens := sumOf(t, rm, "defenseclaw.agent.token.usage")
 	if got := counterValueByAttr(tokens, "kind", "input"); got != 120 {
 		t.Errorf("input tokens = %d, want 120", got)
@@ -78,6 +90,23 @@ func TestAgent360MetricsCarryStableTreeCorrelation(t *testing.T) {
 	costData, ok := cost.Data.(metricdata.Gauge[float64])
 	if !ok || len(costData.DataPoints) != 1 || costData.DataPoints[0].Value != 0.042 {
 		t.Fatalf("unexpected reported cost: %T %+v", cost.Data, cost.Data)
+	}
+}
+
+func TestAgentPhaseCodesAreStable(t *testing.T) {
+	t.Parallel()
+	want := map[string]int{
+		"session": 1, "planning": 2, "model": 3, "tool": 4,
+		"approval": 5, "waiting": 6, "responding": 7, "maintenance": 8,
+		"completed": 9, "failed": 10, "interrupted": 11, "observed": 12,
+	}
+	for phase, code := range want {
+		if got := AgentPhaseCode(phase); got != code {
+			t.Errorf("AgentPhaseCode(%q)=%d want %d", phase, got, code)
+		}
+	}
+	if got := AgentPhaseCode("unknown"); got != 0 {
+		t.Fatalf("unknown phase code=%d want 0", got)
 	}
 }
 

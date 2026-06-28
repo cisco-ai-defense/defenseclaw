@@ -28,6 +28,13 @@ processors:
     send_batch_max_size: 2048
     timeout: 5s
 
+  # Prometheus remote write requires cumulative monotonic sums. The Go OTLP
+  # SDK intentionally exports many counters as delta sums; without this
+  # stateful conversion gauges arrived but lifecycle/tool/token counters were
+  # silently absent from Prometheus after the single-ingestion-path cleanup.
+  # Keep this in the metrics pipeline only.
+  deltatocumulative:
+
   # Defense-in-depth resource enrichment so every signal carries the
   # service.namespace=defenseclaw label even if the sidecar forgets to
   # set it. The `insert` action keeps the sidecar-supplied value when
@@ -116,6 +123,9 @@ connectors:
       - name: defenseclaw.agent.execution.id
       - name: defenseclaw.agent.lifecycle.event
       - name: defenseclaw.agent.lifecycle.state
+      - name: defenseclaw.agent.phase
+      - name: defenseclaw.agent.phase.previous
+      - name: defenseclaw.agent.phase.code
       - name: gen_ai.tool.name
       - name: defenseclaw.destination.app
       - name: gen_ai.provider.name
@@ -178,7 +188,7 @@ service:
       exporters: [otlp/tempo, spanmetrics/agent360, debug]
     metrics:
       receivers: [otlp, spanmetrics/agent360]
-      processors: [resource, batch]
+      processors: [resource, deltatocumulative, batch]
       # One application-metric path only. Prometheus still scrapes the
       # collector's own operational metrics on 8888, while OTLP and derived
       # span metrics reach Prometheus exclusively through remote write.

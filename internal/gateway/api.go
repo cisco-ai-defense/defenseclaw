@@ -138,6 +138,8 @@ type APIServer struct {
 	hookToolInvocationOrder           []string
 	hookSessionTraces                 map[string]hookSessionTrace
 	hookSessionTraceOrder             []string
+	hookPhaseStates                   map[string]hookPhaseState
+	hookPhaseStateOrder               []string
 	otlpMetricMu                      sync.Mutex
 	otlpMetricCumulative              map[string]otlpCumulativePoint
 	otlpMetricCumulativeOrder         []string

@@ -65,6 +65,18 @@
       "description": "Agent lifecycle transitions by stable identity, execution, event, and state."
     },
     {
+      "name": "defenseclaw.agent.phase.current",
+      "type": "gauge",
+      "unit": "1",
+      "description": "Current execution phase encoded as a stable integer for state timelines."
+    },
+    {
+      "name": "defenseclaw.agent.phase.transitions",
+      "type": "counter",
+      "unit": "{transition}",
+      "description": "Directed execution phase transitions by stable agent identity and execution."
+    },
+    {
       "name": "defenseclaw.agent.reported_cost",
       "type": "gauge",
       "unit": "USD",

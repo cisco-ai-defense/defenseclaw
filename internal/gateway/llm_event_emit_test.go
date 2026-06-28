@@ -93,6 +93,62 @@ func TestHookExecutionRotatesWithinGatewayProcess(t *testing.T) {
 	}
 }
 
+func TestHookPhaseSequenceIsOrderedAndDirected(t *testing.T) {
+	t.Parallel()
+	api := &APIServer{}
+	base := llmEventMeta{
+		Source: "codex", SessionID: "phase-session", AgentID: "phase-agent",
+		LifecycleID: "phase-lifecycle", ExecutionID: "phase-execution",
+	}
+	planning := base
+	planning.LifecycleEvent = "turn_start"
+	planning.LifecycleState = "active"
+	planning.Phase = "planning"
+	planning = api.enrichHookPhase(planning)
+	if planning.Sequence != 1 || planning.PreviousPhase != "unknown" {
+		t.Fatalf("first phase = %+v", planning)
+	}
+	tool := base
+	tool.LifecycleEvent = "tool_start"
+	tool.LifecycleState = "active"
+	tool.Phase = "tool"
+	tool = api.enrichHookPhase(tool)
+	if tool.Sequence != 2 || tool.PreviousPhase != "planning" || tool.OperationID == "" {
+		t.Fatalf("second phase = %+v", tool)
+	}
+	responding := base
+	responding.LifecycleEvent = "turn_end"
+	responding.LifecycleState = "completed"
+	responding.Phase = "responding"
+	responding = api.enrichHookPhase(responding)
+	if responding.Sequence != 3 || responding.PreviousPhase != "tool" {
+		t.Fatalf("third phase = %+v", responding)
+	}
+}
+
+func TestHookOperationIDPairsToolStartAndEndWithoutCollapsingTurn(t *testing.T) {
+	t.Parallel()
+	base := llmEventMeta{
+		Source: "codex", SessionID: "operation-session", AgentID: "operation-agent",
+		TurnID: "shared-turn", ToolName: "Bash",
+	}
+	firstStart := base
+	firstStart.ToolID = "tool-call-1"
+	firstStart = applyHookEventMeta(firstStart, "PreToolUse", map[string]interface{}{})
+	firstEnd := base
+	firstEnd.ToolID = "tool-call-1"
+	firstEnd = applyHookEventMeta(firstEnd, "PostToolUse", map[string]interface{}{})
+	secondStart := base
+	secondStart.ToolID = "tool-call-2"
+	secondStart = applyHookEventMeta(secondStart, "PreToolUse", map[string]interface{}{})
+	if firstStart.OperationID == "" || firstStart.OperationID != firstEnd.OperationID {
+		t.Fatalf("tool pair operation IDs differ: start=%q end=%q", firstStart.OperationID, firstEnd.OperationID)
+	}
+	if firstStart.OperationID == secondStart.OperationID {
+		t.Fatalf("distinct tool calls in one turn collapsed to %q", firstStart.OperationID)
+	}
+}
+
 func TestOpenCodeChildSessionParentsToParentConversationTrace(t *testing.T) {
 	api, exporter := newHookLLMSpanTestAPI(t)
 	rootPayload := map[string]interface{}{

@@ -462,6 +462,16 @@ also emits an explicit correlated `lifecycle` log. Session/subagent terminal
 and compaction hooks emit short transition spans, so terminal state remains
 visible even when the upstream hook reports no assistant text.
 
+Every normalized hook event also carries a canonical execution phase, the
+previous phase, a monotonically increasing per-execution sequence, and a stable
+operation ID. The native `defenseclaw.agent.phase.current` gauge gives Agent360
+a continuous state timeline between scrapes, while
+`defenseclaw.agent.phase.transitions` supplies real directed `from → to` edges.
+The Loki sequence keeps every sub-scrape transition in order. Agent360's trace
+table intentionally lists completed operation traces (`tool_end`, `turn_end`,
+terminal session/subagent events) rather than real-time start anchors or HTTP
+hook envelopes; selecting the Trace ID drives the adjacent Tempo waterfall.
+
 Connector-native child IDs are authoritative. Codex, Claude Code, Cursor,
 Copilot, and Hermes expose subagent lifecycle hooks; OpenCode exposes child
 sessions through `parentID`. For connectors that expose delegation only as a
@@ -926,7 +936,7 @@ by Grafana via the file provisioner
 | **Findings (Rule detail)** | `defenseclaw-findings` | Top rules with sparklines, rule_id × time heatmap, last-seen / first-seen tables, top targets, finding-to-verdict correlation, scoped Loki `scan_finding` stream. |
 | **Policy decisions** | `defenseclaw-policy-decisions` | OPA verdicts by `policy_domain` × `policy_verdict`, egress branch / decision split, block-list hits, multi-turn injection trips, schema violation panel. |
 | **Agent identity** | `defenseclaw-agent-identity` | v7 correlation: agent.id × agent.instance_id × sidecar.instance_id counts, identity churn, on-demand discovery latency / errors, continuous AI confidence histograms, per-connector header presence. |
-| **Agent360** | `defenseclaw-agent-360` | Automatic runtime Agent Directory and one-click agent/tree drill-down: durable lifecycle/execution identity, descendants, turns, model calls, tools, websites, inputs/outputs, reported tokens/cost, security decisions, Tempo waterfall, and agent/subagent/model/tool topology. |
+| **Agent360** | `defenseclaw-agent-360` | Automatic runtime Agent Directory and one-click agent/tree drill-down: durable lifecycle/execution identity, continuous execution-phase timeline, ordered hook sequence, clickable completed-operation Tempo waterfall, directed phase flow, aggregate agent/subagent/model/tool topology, inputs/outputs, reported tokens/cost, websites, and security decisions. |
 | **Scanners (Ops)** | `defenseclaw-scanners` | Scanner ops focus: throughput, queue depth, scan duration p95 + heatmap, errors by `error_type`, quarantine actions, top rules with drill into Findings. |
 | **AI Agent Usage & Detection** | `defenseclaw-ai-discovery` | Continuous AI inventory loop: active signals, scan completions, new / gone signals, detector errors, per-vendor / per-product tables, two-axis Bayesian confidence, scoped traces and logs. |
 | **Reliability** | `defenseclaw-reliability` | Schema violations, gateway errors by subsystem / code, sink health, panics, config errors. |

@@ -222,6 +222,8 @@ type metricsSet struct {
 	// POST /api/v1/agents/discovery after it has stripped raw local paths.
 	agentLastSeen             metric.Float64Gauge
 	agentLifecycleTransitions metric.Int64Counter
+	agentPhaseCurrent         metric.Int64Gauge
+	agentPhaseTransitions     metric.Int64Counter
 	agentReportedCost         metric.Float64Gauge
 	agentTokenUsage           metric.Int64Counter
 	agentDiscoveryRuns        metric.Int64Counter
@@ -1027,6 +1029,20 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.agentLifecycleTransitions, err = m.Int64Counter("defenseclaw.agent.lifecycle.transitions",
 		metric.WithUnit("{transition}"),
 		metric.WithDescription("Agent lifecycle transitions by stable identity, execution, event, and state."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentPhaseCurrent, err = m.Int64Gauge("defenseclaw.agent.phase.current",
+		metric.WithUnit("1"),
+		metric.WithDescription("Current execution phase encoded as a stable integer for state timelines."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentPhaseTransitions, err = m.Int64Counter("defenseclaw.agent.phase.transitions",
+		metric.WithUnit("{transition}"),
+		metric.WithDescription("Directed execution phase transitions by stable agent identity and execution."),
 	)
 	if err != nil {
 		return nil, err
@@ -2911,9 +2927,47 @@ type AgentLifecycleObservation struct {
 	ExecutionID         string
 	Event               string
 	State               string
+	Phase               string
+	PreviousPhase       string
+	OperationID         string
+	Sequence            int64
 	Depth               int
 	ReportedCostUSD     float64
 	ReportedCostPresent bool
+}
+
+// AgentPhaseCode is the durable numeric vocabulary used by Grafana state
+// timelines. Existing values must never be renumbered because historical
+// Prometheus samples are rendered with the same value mappings as live data.
+func AgentPhaseCode(phase string) int {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "session":
+		return 1
+	case "planning":
+		return 2
+	case "model":
+		return 3
+	case "tool":
+		return 4
+	case "approval":
+		return 5
+	case "waiting":
+		return 6
+	case "responding":
+		return 7
+	case "maintenance":
+		return 8
+	case "completed":
+		return 9
+	case "failed":
+		return 10
+	case "interrupted":
+		return 11
+	case "observed":
+		return 12
+	default:
+		return 0
+	}
 }
 
 // RecordAgentLifecycle updates the automatic agent inventory and records the
@@ -2957,6 +3011,29 @@ func (p *Provider) RecordAgentLifecycle(ctx context.Context, observation AgentLi
 	)
 	p.metrics.agentLastSeen.Record(ctx, float64(time.Now().UnixNano())/float64(time.Second), attrs)
 	p.metrics.agentLifecycleTransitions.Add(ctx, 1, attrs)
+	phase := label(observation.Phase, "observed")
+	phaseAttrs := metric.WithAttributes(
+		attribute.String("connector", label(observation.Connector, "unknown")),
+		attribute.String("gen_ai.agent.id", identity(observation.AgentID, "unknown")),
+		attribute.String("gen_ai.agent.name", label(observation.AgentName, "unknown")),
+		attribute.String("defenseclaw.agent.root.id", identity(observation.RootAgentID, observation.AgentID)),
+		attribute.String("defenseclaw.agent.lifecycle.id", identity(observation.LifecycleID, "unknown")),
+		attribute.String("defenseclaw.agent.execution.id", identity(observation.ExecutionID, "unknown")),
+	)
+	p.metrics.agentPhaseCurrent.Record(ctx, int64(AgentPhaseCode(phase)), phaseAttrs)
+	previousPhase := label(observation.PreviousPhase, "unknown")
+	if previousPhase != "unknown" && previousPhase != phase {
+		transitionAttrs := metric.WithAttributes(
+			attribute.String("connector", label(observation.Connector, "unknown")),
+			attribute.String("gen_ai.agent.id", identity(observation.AgentID, "unknown")),
+			attribute.String("gen_ai.agent.name", label(observation.AgentName, "unknown")),
+			attribute.String("defenseclaw.agent.root.id", identity(observation.RootAgentID, observation.AgentID)),
+			attribute.String("defenseclaw.agent.execution.id", identity(observation.ExecutionID, "unknown")),
+			attribute.String("defenseclaw.agent.phase.from", previousPhase),
+			attribute.String("defenseclaw.agent.phase.to", phase),
+		)
+		p.metrics.agentPhaseTransitions.Add(ctx, 1, transitionAttrs)
+	}
 	if observation.ReportedCostPresent && observation.ReportedCostUSD >= 0 {
 		p.metrics.agentReportedCost.Record(ctx, observation.ReportedCostUSD, attrs)
 	}

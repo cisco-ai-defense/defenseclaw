@@ -305,6 +305,11 @@ type Event struct {
 	AgentExecutionID     string  `json:"agent_execution_id,omitempty"`
 	AgentLifecycleEvent  string  `json:"agent_lifecycle_event,omitempty"`
 	AgentLifecycleState  string  `json:"agent_lifecycle_state,omitempty"`
+	AgentPhase           string  `json:"agent_phase,omitempty"`
+	AgentPreviousPhase   string  `json:"agent_previous_phase,omitempty"`
+	AgentPhaseCode       int     `json:"agent_phase_code,omitempty"`
+	AgentSequence        int64   `json:"agent_sequence,omitempty"`
+	AgentOperationID     string  `json:"agent_operation_id,omitempty"`
 	AgentDepth           int     `json:"agent_depth,omitempty"`
 	AgentReportedCostUSD float64 `json:"agent_reported_cost_usd,omitempty"`
 	AgentReportedCost    bool    `json:"agent_reported_cost_present,omitempty"`

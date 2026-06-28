@@ -434,6 +434,11 @@ trace.
 | `defenseclaw.agent.depth` | int | root `0`, direct child `1` |
 | `defenseclaw.agent.lifecycle.event` | string | normalized session/turn/tool/subagent/compaction event |
 | `defenseclaw.agent.lifecycle.state` | string | `active`, `completed`, `failed`, `interrupted`, or `observed` |
+| `defenseclaw.agent.phase` | string | canonical execution phase: session, planning, model, tool, approval, waiting, responding, maintenance, or terminal state |
+| `defenseclaw.agent.phase.previous` | string | previous canonical phase, used to build a directed execution graph |
+| `defenseclaw.agent.phase.code` | int | stable 0–12 numeric phase vocabulary for state-timeline panels |
+| `defenseclaw.agent.sequence` | int | monotonically increasing event sequence within one agent execution |
+| `defenseclaw.operation.id` | string | stable join key for the hook operation represented by the log/span |
 | `defenseclaw.session.source` | string | upstream session start/resume source |
 | `defenseclaw.session.resumed` | bool | whether the upstream session was resumed |
 | `user.id` | string | upstream user identity, with a local-user fallback when unavailable |

@@ -34,6 +34,14 @@
       "type": "string",
       "enum": ["active", "completed", "failed", "interrupted", "observed"]
     },
+    "defenseclaw.agent.phase": {
+      "type": "string",
+      "enum": ["session", "planning", "model", "tool", "approval", "waiting", "responding", "maintenance", "completed", "failed", "interrupted", "observed"]
+    },
+    "defenseclaw.agent.phase.previous": { "type": "string" },
+    "defenseclaw.agent.phase.code": { "type": "integer", "minimum": 0, "maximum": 12 },
+    "defenseclaw.agent.sequence": { "type": "integer", "minimum": 1 },
+    "defenseclaw.operation.id": { "type": "string", "minLength": 1 },
     "defenseclaw.agent.depth": { "type": "integer", "minimum": 0 },
     "defenseclaw.session.source": { "type": "string" },
     "defenseclaw.session.resumed": { "type": "boolean" },

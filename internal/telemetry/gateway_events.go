@@ -258,6 +258,21 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 	if e.AgentLifecycleState != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent.lifecycle.state", e.AgentLifecycleState))
 	}
+	if e.AgentPhase != "" {
+		attrs = append(attrs,
+			log.String("defenseclaw.agent.phase", e.AgentPhase),
+			log.Int("defenseclaw.agent.phase.code", e.AgentPhaseCode),
+		)
+	}
+	if e.AgentPreviousPhase != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.phase.previous", e.AgentPreviousPhase))
+	}
+	if e.AgentSequence > 0 {
+		attrs = append(attrs, log.Int64("defenseclaw.agent.sequence", e.AgentSequence))
+	}
+	if e.AgentOperationID != "" {
+		attrs = append(attrs, log.String("defenseclaw.operation.id", e.AgentOperationID))
+	}
 	if e.AgentReportedCost {
 		attrs = append(attrs,
 			log.Float64("defenseclaw.agent.reported_cost.usd", e.AgentReportedCostUSD),

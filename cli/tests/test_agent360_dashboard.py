@@ -87,23 +87,40 @@ def test_agent360_terminal_success_excludes_observed_non_terminal_events() -> No
 
 def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
     dashboard = _dashboard(AGENT360)
-    recent = _panel_by_title(dashboard, "Recent traces — click a Trace ID")
-    assert "with (most_recent=true)" in recent["targets"][0]["query"]
-    links = recent["fieldConfig"]["defaults"]["links"]
-    assert any(
-        link["title"] == "Select trace in Agent360"
-        and "var-trace=${__data.fields.traceID}" in link["url"]
-        and link["targetBlank"] is False
-        for link in links
+    recent = _panel_by_title(
+        dashboard, "Completed operation traces — click a Trace ID"
     )
-    assert any("queryType%22:%22traceId" in link["url"] for link in links)
+    assert "with (most_recent=true)" in recent["targets"][0]["query"]
+    assert "tool_end|turn_end|session_end|subagent_stop" in recent["targets"][0]["query"]
+    assert "span.gen_ai.operation.name" in recent["targets"][0]["query"]
+    trace_override = next(
+        override
+        for override in recent["fieldConfig"]["overrides"]
+        if override["matcher"].get("options") == "Trace ID"
+    )
+    links = next(
+        prop["value"]
+        for prop in trace_override["properties"]
+        if prop["id"] == "links"
+    )
+    assert links == [
+        {
+            "title": "Select trace in Agent360",
+            "url": "/d/defenseclaw-agent-360/agent360?orgId=1&${__all_variables}&var-trace=${__value.raw}&from=${__from}&to=${__to}",
+            "targetBlank": False,
+        }
+    ]
 
-    waterfall = _panel_by_title(dashboard, "Selected trace waterfall")
+    waterfall = _panel_by_title(
+        dashboard, "Selected trace waterfall — choose a Trace ID on the left"
+    )
     assert waterfall["targets"] == [
         {"queryType": "traceql", "query": "$trace", "refId": "A"}
     ]
 
-    topology = _panel_by_title(dashboard, "Agent, subagent, model, and tool graph")
+    topology = _panel_by_title(
+        dashboard, "Aggregate dependency map — agents, subagents, models, and tools"
+    )
     assert topology["datasource"]["uid"] == "defenseclaw-prometheus"
     edge_query = topology["targets"][0]["expr"]
     for edge_field in ('"id"', '"source"', '"target"'):
@@ -116,6 +133,47 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
         "merge",
         "organize",
     ]
+
+
+def test_agent360_has_continuous_phase_timeline_and_directed_flow() -> None:
+    dashboard = _dashboard(AGENT360)
+    timeline = _panel_by_title(dashboard, "Execution phase timeline")
+    assert timeline["datasource"]["uid"] == "defenseclaw-prometheus"
+    assert "defenseclaw_agent_phase_current_ratio" in timeline["targets"][0]["expr"]
+    mappings = timeline["fieldConfig"]["defaults"]["mappings"][0]["options"]
+    assert mappings["2"]["text"] == "Planning"
+    assert mappings["3"]["text"] == "Model"
+    assert mappings["4"]["text"] == "Tool"
+    assert mappings["9"]["text"] == "Completed"
+
+    sequence = _panel_by_title(
+        dashboard, "Ordered execution sequence — every hook transition"
+    )
+    assert sequence["options"]["sortOrder"] == "Ascending"
+    assert ".agent_sequence" in sequence["targets"][0]["expr"]
+    assert ".agent_previous_phase" in sequence["targets"][0]["expr"]
+    assert ".agent_phase" in sequence["targets"][0]["expr"]
+
+    flow = _panel_by_title(dashboard, "Execution phase network")
+    assert flow["type"] == "nodeGraph"
+    edge_query = flow["targets"][0]["expr"]
+    assert "defenseclaw_agent_phase_transitions_total" in edge_query
+    for edge_field in ('"id"', '"source"', '"target"'):
+        assert edge_field in edge_query
+    assert "defenseclaw_agent_phase_from" in edge_query
+    assert "defenseclaw_agent_phase_to" in edge_query
+
+    directed_edges = _panel_by_title(
+        dashboard, "Directed phase edges (source → target)"
+    )
+    assert '"direction", " → "' in directed_edges["targets"][0]["expr"]
+    rename = directed_edges["transformations"][1]["options"]["renameByName"]
+    assert rename["defenseclaw_agent_phase_from"] == "From"
+    assert rename["defenseclaw_agent_phase_to"] == "To"
+    assert rename["direction"] == "Direction"
+
+    for title in ("Average observed phase duration", "Slowest operation classes (p95)"):
+        assert _panel_by_title(dashboard, title)["datasource"]["uid"] == "defenseclaw-prometheus"
 
 
 def test_agent360_presents_human_readable_usage_lifecycle_and_logs() -> None:
@@ -195,8 +253,10 @@ def test_agent360_exposes_model_tool_cost_and_reliability_analytics() -> None:
         expression = _panel_by_title(dashboard, title)["targets"][0]["expr"]
         assert all(fragment in expression for fragment in fragments), title
 
-    topology = _panel_by_title(dashboard, "Agent, subagent, model, and tool graph")
-    assert "Persistent cross-trace topology" in topology["description"]
+    topology = _panel_by_title(
+        dashboard, "Aggregate dependency map — agents, subagents, models, and tools"
+    )
+    assert "structural topology" in topology["description"]
 
 
 def test_agent_directory_links_to_reusable_agent360_dashboard() -> None:
@@ -210,10 +270,14 @@ def test_collector_derives_agent_span_metrics_and_fans_them_to_prometheus() -> N
     config = COLLECTOR.read_text(encoding="utf-8")
     assert "spanmetrics/agent360:" in config
     assert "defenseclaw.agent.root.id" in config
+    assert "defenseclaw.agent.phase" in config
+    assert "defenseclaw.agent.phase.code" in config
     assert "gen_ai.tool.name" in config
     assert "exporters: [otlp/tempo, spanmetrics/agent360, debug]" in config
     assert "receivers: [otlp, spanmetrics/agent360]" in config
     assert "exporters: [prometheusremotewrite/prometheus, debug]" in config
+    assert "deltatocumulative:" in config
+    assert "processors: [resource, deltatocumulative, batch]" in config
     assert "endpoint: 0.0.0.0:8889" not in config
 
     prometheus = PROMETHEUS.read_text(encoding="utf-8")

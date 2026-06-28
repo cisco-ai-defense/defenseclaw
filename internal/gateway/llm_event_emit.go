@@ -52,6 +52,10 @@ type llmEventMeta struct {
 	LifecycleEvent  string
 	LifecycleState  string
 	LifecycleDedupe string
+	Phase           string
+	PreviousPhase   string
+	OperationID     string
+	Sequence        int64
 	AgentDepth      int
 	ReportedCostUSD float64
 	ReportedCost    bool
@@ -98,6 +102,11 @@ func emitLLMPromptEvent(ctx context.Context, meta llmEventMeta, prompt string, r
 		AgentExecutionID:     meta.ExecutionID,
 		AgentLifecycleEvent:  meta.LifecycleEvent,
 		AgentLifecycleState:  meta.LifecycleState,
+		AgentPhase:           meta.Phase,
+		AgentPreviousPhase:   meta.PreviousPhase,
+		AgentPhaseCode:       telemetry.AgentPhaseCode(meta.Phase),
+		AgentSequence:        meta.Sequence,
+		AgentOperationID:     meta.OperationID,
 		AgentDepth:           meta.AgentDepth,
 		AgentReportedCostUSD: meta.ReportedCostUSD,
 		AgentReportedCost:    meta.ReportedCost,
@@ -148,6 +157,11 @@ func emitLLMResponseEvent(ctx context.Context, meta llmEventMeta, response, rawR
 		AgentExecutionID:     meta.ExecutionID,
 		AgentLifecycleEvent:  meta.LifecycleEvent,
 		AgentLifecycleState:  meta.LifecycleState,
+		AgentPhase:           meta.Phase,
+		AgentPreviousPhase:   meta.PreviousPhase,
+		AgentPhaseCode:       telemetry.AgentPhaseCode(meta.Phase),
+		AgentSequence:        meta.Sequence,
+		AgentOperationID:     meta.OperationID,
 		AgentDepth:           meta.AgentDepth,
 		AgentReportedCostUSD: meta.ReportedCostUSD,
 		AgentReportedCost:    meta.ReportedCost,
@@ -199,6 +213,11 @@ func emitToolInvocationEvent(ctx context.Context, meta llmEventMeta, phase, tool
 		AgentExecutionID:     meta.ExecutionID,
 		AgentLifecycleEvent:  meta.LifecycleEvent,
 		AgentLifecycleState:  meta.LifecycleState,
+		AgentPhase:           meta.Phase,
+		AgentPreviousPhase:   meta.PreviousPhase,
+		AgentPhaseCode:       telemetry.AgentPhaseCode(meta.Phase),
+		AgentSequence:        meta.Sequence,
+		AgentOperationID:     meta.OperationID,
 		AgentDepth:           meta.AgentDepth,
 		AgentReportedCostUSD: meta.ReportedCostUSD,
 		AgentReportedCost:    meta.ReportedCost,
@@ -289,11 +308,14 @@ func streamLLMEventMeta(r *EventRouter, sessionID, runID, provider, model, agent
 
 func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequest, _ []string, rawPayload []byte) {
 	meta := hookLLMEventMeta("codex", req.SessionID, req.TurnID, req.Model, req.Source, req.AgentID, payloadString(req.Payload, "agent_name"), req.AgentType, req.Payload)
+	meta.ToolID = req.ToolUseID
+	meta.ToolName = codexToolName(req)
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.beginHookExecution(meta)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
 	meta.TraceEventID = hookTraceEventID(ctx, meta)
+	meta = a.enrichHookPhase(meta)
 	recordLifecycle := a.shouldRecordHookLifecycleTransition(meta)
 	emitHookLifecycleEvent(ctx, meta)
 	if recordLifecycle {
@@ -375,11 +397,14 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 	}
 	model := payloadString(req.Payload, "model")
 	meta := hookLLMEventMeta(source, req.SessionID, req.TurnID, model, source, req.AgentID, req.AgentName, req.AgentType, req.Payload)
+	meta.ToolID = firstNonEmpty(firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"), req.TurnID)
+	meta.ToolName = req.ToolName
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.beginHookExecution(meta)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
 	meta.TraceEventID = hookTraceEventID(ctx, meta)
+	meta = a.enrichHookPhase(meta)
 	recordLifecycle := a.shouldRecordHookLifecycleTransition(meta)
 	emitHookLifecycleEvent(ctx, meta)
 	if recordLifecycle {
@@ -441,11 +466,14 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 
 func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCodeHookRequest, _ []string, rawPayload []byte) {
 	meta := hookLLMEventMeta("claudecode", req.SessionID, req.TurnID, req.Model, req.Source, req.AgentID, payloadString(req.Payload, "agent_name"), req.AgentType, req.Payload)
+	meta.ToolID = req.ToolUseID
+	meta.ToolName = claudeCodeToolName(req)
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.beginHookExecution(meta)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
 	meta.TraceEventID = hookTraceEventID(ctx, meta)
+	meta = a.enrichHookPhase(meta)
 	recordLifecycle := a.shouldRecordHookLifecycleTransition(meta)
 	emitHookLifecycleEvent(ctx, meta)
 	if recordLifecycle {
@@ -626,6 +654,8 @@ func applyHookEventMeta(meta llmEventMeta, event string, payload map[string]inte
 	meta.LifecycleEvent = canonicalHookLifecycleEvent(event)
 	meta.LifecycleState = hookLifecycleState(meta.LifecycleEvent, payload)
 	meta.LifecycleDedupe = hookLifecycleDedupeKey(meta, payload)
+	meta.Phase = hookLifecyclePhase(event, meta.LifecycleEvent, meta.LifecycleState)
+	meta.OperationID = hookOperationID(meta)
 	if (meta.LifecycleEvent == "session_start" || meta.LifecycleEvent == "session_end") && meta.SessionSource == "" {
 		meta.SessionSource = firstString(payload, "source", "reason")
 		meta.SessionResumed = strings.Contains(strings.ToLower(meta.SessionSource), "resume")
@@ -816,6 +846,126 @@ type hookSessionTrace struct {
 	traceEventID string
 }
 
+// hookPhaseState is the bounded per-execution cursor used to turn unordered
+// hook notifications into an explicit execution sequence and directed phase
+// transitions. It stores identifiers only; prompt/tool bodies never enter the
+// map.
+type hookPhaseState struct {
+	phase    string
+	sequence int64
+}
+
+func hookPhaseStateKey(meta llmEventMeta) string {
+	if strings.TrimSpace(meta.Source) == "" || strings.TrimSpace(meta.AgentID) == "" {
+		return ""
+	}
+	return strings.Join([]string{
+		meta.Source, meta.SessionID, meta.AgentID,
+		firstNonEmpty(meta.ExecutionID, meta.LifecycleID),
+	}, "\x00")
+}
+
+func hookLifecyclePhase(rawEvent, lifecycleEvent, lifecycleState string) string {
+	canon := canonicalEvent(rawEvent)
+	switch canon {
+	case "sessionstart", "onsessionstart", "onsessionreset", "sessioncreated", "subagentstart":
+		return "session"
+	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt", "beforeagent":
+		return "planning"
+	case "prellmcall", "beforemodel", "preinvocation":
+		return "model"
+	case "postllmcall", "aftermodel", "postinvocation", "afteragentresponse",
+		"postcascaderesponse", "postcascaderesponsewithtranscript", "stop", "agentstop":
+		return "responding"
+	case "permissionrequest":
+		return "approval"
+	case "pretooluse", "beforetool", "pretoolcall", "preruncommand", "premcptooluse",
+		"beforemcpexecution", "beforeshellexecution", "beforereadfile", "beforetabfileread",
+		"prereadcode", "prewritecode", "toolexecutebefore":
+		return "tool"
+	case "posttooluse", "aftertool", "posttoolcall", "posttoolusefailure", "posttoolbatch",
+		"postreadcode", "postwritecode", "postruncommand", "postmcptooluse",
+		"aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit",
+		"toolexecuteafter", "permissiondenied", "postsetupworktree":
+		return "planning"
+	case "sessionidle", "teammateidle", "notification":
+		return "waiting"
+	case "precompact", "postcompact", "precompress", "sessioncompacted":
+		return "maintenance"
+	case "sessionend", "onsessionend", "onsessionfinalize", "sessiondeleted", "sessionerror", "subagentstop":
+		switch lifecycleState {
+		case "failed":
+			return "failed"
+		case "interrupted":
+			return "interrupted"
+		default:
+			return "completed"
+		}
+	}
+	switch lifecycleEvent {
+	case "tool_start":
+		return "tool"
+	case "tool_end", "turn_start", "compact_end":
+		return "planning"
+	case "turn_end":
+		return "responding"
+	case "compact_start":
+		return "maintenance"
+	case "session_start", "subagent_start":
+		return "session"
+	case "session_end", "subagent_stop":
+		if lifecycleState == "failed" || lifecycleState == "interrupted" {
+			return lifecycleState
+		}
+		return "completed"
+	default:
+		return "observed"
+	}
+}
+
+func hookOperationID(meta llmEventMeta) string {
+	if value := firstNonEmpty(meta.ToolID, meta.PromptID, meta.TurnID, meta.LifecycleDedupe); value != "" {
+		return stableLLMEventID("operation", meta.Source, meta.SessionID, meta.AgentID, value)
+	}
+	return stableLLMEventID(
+		"operation", meta.Source, meta.SessionID, meta.AgentID,
+		meta.ExecutionID, meta.LifecycleEvent, meta.TraceEventID,
+	)
+}
+
+func (a *APIServer) enrichHookPhase(meta llmEventMeta) llmEventMeta {
+	if meta.Phase == "" {
+		meta.Phase = hookLifecyclePhase("", meta.LifecycleEvent, meta.LifecycleState)
+	}
+	if meta.OperationID == "" {
+		meta.OperationID = hookOperationID(meta)
+	}
+	key := hookPhaseStateKey(meta)
+	if a == nil || key == "" {
+		return meta
+	}
+	a.llmPromptMu.Lock()
+	defer a.llmPromptMu.Unlock()
+	if a.hookPhaseStates == nil {
+		a.hookPhaseStates = make(map[string]hookPhaseState)
+	}
+	state, exists := a.hookPhaseStates[key]
+	if !exists {
+		for len(a.hookPhaseStates) >= hookPromptCacheMaxEntries && len(a.hookPhaseStateOrder) > 0 {
+			oldest := a.hookPhaseStateOrder[0]
+			a.hookPhaseStateOrder = a.hookPhaseStateOrder[1:]
+			delete(a.hookPhaseStates, oldest)
+		}
+		a.hookPhaseStateOrder = append(a.hookPhaseStateOrder, key)
+	}
+	meta.PreviousPhase = firstNonEmpty(state.phase, "unknown")
+	state.sequence++
+	state.phase = meta.Phase
+	meta.Sequence = state.sequence
+	a.hookPhaseStates[key] = state
+	return meta
+}
+
 const hookSessionStartedOutput = "Live session started. Child operations stream as they complete."
 
 func hookSessionTraceKey(meta llmEventMeta) string {
@@ -969,7 +1119,7 @@ func applyHookLifecycleSpanAttributes(span trace.Span, meta llmEventMeta) {
 	if span == nil {
 		return
 	}
-	attrs := make([]attribute.KeyValue, 0, 18)
+	attrs := make([]attribute.KeyValue, 0, 24)
 	if meta.RootAgentID != "" {
 		attrs = append(attrs, attribute.String("defenseclaw.agent.root.id", meta.RootAgentID))
 	}
@@ -993,6 +1143,21 @@ func applyHookLifecycleSpanAttributes(span trace.Span, meta llmEventMeta) {
 	}
 	if meta.LifecycleState != "" {
 		attrs = append(attrs, attribute.String("defenseclaw.agent.lifecycle.state", meta.LifecycleState))
+	}
+	if meta.Phase != "" {
+		attrs = append(attrs,
+			attribute.String("defenseclaw.agent.phase", meta.Phase),
+			attribute.Int("defenseclaw.agent.phase.code", telemetry.AgentPhaseCode(meta.Phase)),
+		)
+	}
+	if meta.PreviousPhase != "" {
+		attrs = append(attrs, attribute.String("defenseclaw.agent.phase.previous", meta.PreviousPhase))
+	}
+	if meta.OperationID != "" {
+		attrs = append(attrs, attribute.String("defenseclaw.operation.id", meta.OperationID))
+	}
+	if meta.Sequence > 0 {
+		attrs = append(attrs, attribute.Int64("defenseclaw.agent.sequence", meta.Sequence))
 	}
 	attrs = append(attrs, attribute.Int("defenseclaw.agent.depth", meta.AgentDepth))
 	if meta.SessionSource != "" {
@@ -1053,6 +1218,9 @@ func emitHookLifecycleEvent(ctx context.Context, meta llmEventMeta) {
 		"connector":       meta.Source,
 		"lifecycle_event": meta.LifecycleEvent,
 		"lifecycle_state": meta.LifecycleState,
+		"phase":           meta.Phase,
+		"previous_phase":  meta.PreviousPhase,
+		"sequence":        strconv.FormatInt(meta.Sequence, 10),
 		"agent_depth":     strconv.Itoa(meta.AgentDepth),
 	}
 	if meta.SessionSource != "" {
@@ -1078,6 +1246,11 @@ func emitHookLifecycleEvent(ctx context.Context, meta llmEventMeta) {
 		AgentExecutionID:     meta.ExecutionID,
 		AgentLifecycleEvent:  meta.LifecycleEvent,
 		AgentLifecycleState:  meta.LifecycleState,
+		AgentPhase:           meta.Phase,
+		AgentPreviousPhase:   meta.PreviousPhase,
+		AgentPhaseCode:       telemetry.AgentPhaseCode(meta.Phase),
+		AgentSequence:        meta.Sequence,
+		AgentOperationID:     meta.OperationID,
 		AgentDepth:           meta.AgentDepth,
 		AgentReportedCostUSD: meta.ReportedCostUSD,
 		AgentReportedCost:    meta.ReportedCost,
@@ -1112,6 +1285,10 @@ func (a *APIServer) recordHookLifecycleMetric(ctx context.Context, meta llmEvent
 		ExecutionID:         meta.ExecutionID,
 		Event:               meta.LifecycleEvent,
 		State:               meta.LifecycleState,
+		Phase:               meta.Phase,
+		PreviousPhase:       meta.PreviousPhase,
+		OperationID:         meta.OperationID,
+		Sequence:            meta.Sequence,
 		Depth:               meta.AgentDepth,
 		ReportedCostUSD:     meta.ReportedCostUSD,
 		ReportedCostPresent: meta.ReportedCost,
@@ -1176,12 +1353,16 @@ func (a *APIServer) emitInferredDelegatedAgentTransitions(
 		if starting {
 			child.LifecycleEvent = "subagent_start"
 			child.LifecycleState = "active"
+			child.Phase = "session"
 			child = a.beginHookExecution(child)
 		} else {
 			child.LifecycleEvent = "subagent_stop"
 			child.LifecycleState = "completed"
+			child.Phase = "completed"
 			child = a.mergeHookSessionLifecycle(child)
 		}
+		child.OperationID = hookOperationID(child)
+		child = a.enrichHookPhase(child)
 		emitHookLifecycleEvent(ctx, child)
 		a.recordHookLifecycleMetric(ctx, child)
 		a.emitHookLifecycleTransitionSpan(ctx, child)
@@ -1492,6 +1673,8 @@ func (a *APIServer) emitHookToolSpan(
 	merged.AgentName = firstNonEmpty(meta.AgentName, snapshot.meta.AgentName)
 	merged.AgentType = firstNonEmpty(meta.AgentType, snapshot.meta.AgentType)
 	merged.AgentID = firstNonEmpty(meta.AgentID, snapshot.meta.AgentID)
+	merged.Phase = "tool"
+	merged.OperationID = hookOperationID(merged)
 	code := 0
 	if exitCode != nil {
 		code = *exitCode
@@ -1835,9 +2018,11 @@ func (a *APIServer) emitHookLLMSpan(ctx context.Context, meta llmEventMeta, resp
 	spanMeta.AgentName = agentName
 	spanMeta.AgentType = agentType
 	spanMeta.AgentID = agentID
+	spanMeta.Phase = "model"
+	spanMeta.OperationID = hookOperationID(spanMeta)
 	parentCtx := a.ensureHookSessionTrace(ctx, spanMeta, prompt)
 	_, span := a.otel.StartLLMSpanAt(parentCtx, system, model, provider, 0, 0, startedAt)
-	applyHookLifecycleSpanAttributes(span, meta)
+	applyHookLifecycleSpanAttributes(span, spanMeta)
 	a.otel.SetGenAIInput(span, prompt)
 	a.otel.SetGenAIOutput(span, boundedHookLLMSpanContent(response))
 	if span != nil {
