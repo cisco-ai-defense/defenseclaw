@@ -3756,28 +3756,28 @@ def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
             OTelDestinationConfig(
                 name=str(item.get("name", "") or ""),
                 preset=str(item.get("preset", "") or ""),
-                enabled=bool(item.get("enabled", True)),
+                enabled=_coerce_bool(item.get("enabled", True), default=True),
                 protocol=str(item.get("protocol", "grpc") or "grpc"),
                 endpoint=str(item.get("endpoint", "") or ""),
                 headers={str(k): str(v) for k, v in _as_mapping(item.get("headers")).items()},
                 tls=OTelTLSConfig(
-                    insecure=bool(dest_tls.get("insecure", False)),
+                    insecure=_coerce_bool(dest_tls.get("insecure", False)),
                     ca_cert=str(dest_tls.get("ca_cert", "") or ""),
                 ),
                 traces=OTelTracesConfig(
-                    enabled=bool(dest_traces.get("enabled", False)),
+                    enabled=_coerce_bool(dest_traces.get("enabled", False)),
                     endpoint=str(dest_traces.get("endpoint", "") or ""),
                     protocol=str(dest_traces.get("protocol", "") or ""),
                     url_path=str(dest_traces.get("url_path", "") or ""),
                 ),
                 logs=OTelLogsConfig(
-                    enabled=bool(dest_logs.get("enabled", False)),
+                    enabled=_coerce_bool(dest_logs.get("enabled", False)),
                     endpoint=str(dest_logs.get("endpoint", "") or ""),
                     protocol=str(dest_logs.get("protocol", "") or ""),
                     url_path=str(dest_logs.get("url_path", "") or ""),
                 ),
                 metrics=OTelMetricsConfig(
-                    enabled=bool(dest_metrics.get("enabled", False)),
+                    enabled=_coerce_bool(dest_metrics.get("enabled", False)),
                     export_interval_s=_as_int(dest_metrics.get("export_interval_s", 60), 60),
                     temporality=str(dest_metrics.get("temporality", "delta") or "delta"),
                     endpoint=str(dest_metrics.get("endpoint", "") or ""),
@@ -3807,13 +3807,15 @@ def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
             )
         )
     return OTelConfig(
-        enabled=raw.get("enabled", False),
+        enabled=_coerce_bool(raw.get("enabled", False)),
         traces=OTelTracePolicyConfig(
             sampler=traces_raw.get("sampler", "always_on"),
             sampler_arg=traces_raw.get("sampler_arg", "1.0"),
         ),
         logs=OTelLogPolicyConfig(
-            emit_individual_findings=logs_raw.get("emit_individual_findings", False),
+            emit_individual_findings=_coerce_bool(
+                logs_raw.get("emit_individual_findings", False)
+            ),
         ),
         metrics=OTelMetricPolicyConfig(
             export_interval_s=_as_int(metrics_raw.get("export_interval_s", 60), 60),

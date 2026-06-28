@@ -98,6 +98,7 @@ def test_agent360_durable_counts_use_loki_event_history() -> None:
         assert panel["datasource"]["uid"] == "defenseclaw-loki"
         assert "count_over_time" in panel["targets"][0]["expr"]
         assert fragment in panel["targets"][0]["expr"]
+        assert 'connector=~"$connector"' in panel["targets"][0]["expr"]
 
     funnel = _panel_by_title(dashboard, "Lifecycle funnel")
     assert funnel["datasource"]["uid"] == "defenseclaw-loki"
@@ -231,7 +232,9 @@ def test_agent360_presents_human_readable_usage_lifecycle_and_logs() -> None:
         "Raw correlated event stream",
     ):
         expr = _panel_by_title(dashboard, title)["targets"][0]["expr"]
-        assert "| json | line_format" in expr
+        assert "| json" in expr
+        assert '| connector=~"$connector"' in expr
+        assert "| line_format" in expr
 
 
 def test_agent360_uses_canonical_gateway_event_types() -> None:
@@ -254,10 +257,10 @@ def test_agent360_exposes_model_tool_cost_and_reliability_analytics() -> None:
     dashboard = _dashboard(AGENT360)
     expected = {
         "Model calls by provider and model": ("count_over_time", "provider", "model"),
-        "Model p95 latency by provider and model": ("histogram_quantile", "gen_ai_request_model"),
-        "Top tools by calls": ("gen_ai_tool_name",),
-        "Tool p95 latency": ("gen_ai_tool_name", "histogram_quantile"),
-        "Top websites and destinations": ("defenseclaw_destination_app",),
+        "Execution-lifetime model p95 (active in range)": ("histogram_quantile", "gen_ai_request_model"),
+        "Top tools by calls": ("count_over_time", "tool_name"),
+        "Execution-lifetime tool p95 (active in range)": ("gen_ai_tool_name", "histogram_quantile"),
+        "Top websites and destinations": ("count_over_time", "destination"),
         "Reported tokens by model": ("defenseclaw_agent_token_usage_total", "gen_ai_request_model"),
         "Reported cost over time": ("defenseclaw_agent_reported_cost_USD",),
         "Reported cost by model": ("defenseclaw_agent_reported_cost_USD", "gen_ai_request_model"),
@@ -276,9 +279,8 @@ def test_agent360_exposes_model_tool_cost_and_reliability_analytics() -> None:
     assert "structural topology" in topology["description"]
 
     for title in (
-        "Model p95 latency by provider and model",
-        "Top tools by calls",
-        "Tool p95 latency",
+        "Execution-lifetime model p95 (active in range)",
+        "Execution-lifetime tool p95 (active in range)",
     ):
         expression = _panel_by_title(dashboard, title)["targets"][0]["expr"]
         assert "max_over_time(defenseclaw_agent_last_seen_seconds" in expression
@@ -289,7 +291,7 @@ def test_agent_directory_links_to_reusable_agent360_dashboard() -> None:
     identity = json.dumps(_dashboard(IDENTITY))
     assert "Runtime Agent Directory" in identity
     assert "/d/defenseclaw-agent-360/agent360" in identity
-    assert "${__value.raw}" in identity
+    assert '${__data.fields[\\"Root Agent\\"]}' in identity
 
 
 def test_collector_derives_agent_span_metrics_and_fans_them_to_prometheus() -> None:
@@ -298,6 +300,7 @@ def test_collector_derives_agent_span_metrics_and_fans_them_to_prometheus() -> N
     assert "defenseclaw.agent.root.id" in config
     assert "defenseclaw.agent.phase" in config
     assert "defenseclaw.agent.phase.code" in config
+    assert "- name: connector" in config
     assert "gen_ai.tool.name" in config
     assert "exporters: [otlp/tempo, spanmetrics/agent360, debug]" in config
     assert "receivers: [otlp, spanmetrics/agent360]" in config

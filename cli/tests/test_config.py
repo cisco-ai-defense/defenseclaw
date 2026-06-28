@@ -112,6 +112,32 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(destination.batch.scheduled_delay_ms, 5000)
         self.assertEqual(destination.batch.max_queue_size, 2048)
 
+    def test_quoted_false_does_not_enable_otel_destination_or_signals(self):
+        cfg = config_mod._merge_otel(
+            {
+                "enabled": "false",
+                "logs": {"emit_individual_findings": "false"},
+                "destinations": [
+                    {
+                        "name": "quoted",
+                        "enabled": "false",
+                        "tls": {"insecure": "false"},
+                        "traces": {"enabled": "false"},
+                        "logs": {"enabled": "false"},
+                        "metrics": {"enabled": "false"},
+                    }
+                ],
+            }
+        )
+        self.assertFalse(cfg.enabled)
+        self.assertFalse(cfg.logs.emit_individual_findings)
+        destination = cfg.destinations[0]
+        self.assertFalse(destination.enabled)
+        self.assertFalse(destination.tls.insecure)
+        self.assertFalse(destination.traces.enabled)
+        self.assertFalse(destination.logs.enabled)
+        self.assertFalse(destination.metrics.enabled)
+
     def test_validate_deployment_mode_empty_allowed(self):
         self.assertEqual(config_mod._validate_deployment_mode(""), "")
 

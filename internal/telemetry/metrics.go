@@ -1791,7 +1791,7 @@ func NormalizeHookEventTypeLabel(eventType string) string {
 	switch canon {
 	case "prompt", "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt", "prellmcall", "beforeagent", "beforemodel":
 		return "prompt"
-	case "toolcall", "pretooluse", "beforetool", "pretoolcall", "permissionrequest", "beforeshellexecution", "beforemcpexecution", "beforereadfile", "beforetabfileread", "prereadcode", "prewritecode", "preruncommand", "premcptooluse":
+	case "toolcall", "pretooluse", "beforetool", "beforetoolselection", "pretoolcall", "permissionrequest", "beforeshellexecution", "beforemcpexecution", "beforereadfile", "beforetabfileread", "prereadcode", "prewritecode", "preruncommand", "premcptooluse":
 		return "tool_call"
 	case "toolresult", "posttooluse", "posttoolusefailure", "aftertool", "posttoolcall", "postreadcode", "postwritecode", "postruncommand", "postmcptooluse", "aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit", "afteragentthought", "afteragent", "posttoolbatch":
 		return "tool_result"

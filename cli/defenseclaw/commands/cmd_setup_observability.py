@@ -416,9 +416,13 @@ def test_cmd(app: AppContext, name: str, timeout: float) -> None:
 
     click.echo()
     label = "Splunk Enterprise (HEC)" if d.preset_id == "splunk-enterprise" else d.kind
+    display_endpoint = redact_endpoint_for_display(
+        d.endpoint or "(no endpoint)",
+        hide_path=d.target != "otel",
+    )
     click.echo(
         f"  {ux.bold('Testing')} {ux.bold(name)} "
-        f"{ux.dim('[' + label + ']')}: {d.endpoint or '(no endpoint)'}"
+        f"{ux.dim('[' + label + ']')}: {display_endpoint}"
     )
     if d.target == "otel":
         _test_otel(app.cfg.data_dir, name, timeout=timeout)
@@ -647,7 +651,8 @@ def _test_otel(data_dir: str, name: str, *, timeout: float) -> None:
         click.echo(f"  ✗ cannot read config.yaml: {exc}")
         return
     otel_root = raw.get("otel") or {}
-    if isinstance(otel_root.get("destinations"), list):
+    using_named_destinations = isinstance(otel_root.get("destinations"), list)
+    if using_named_destinations:
         otel = next(
             (
                 item for item in otel_root["destinations"]
@@ -661,7 +666,10 @@ def _test_otel(data_dir: str, name: str, *, timeout: float) -> None:
         click.echo("  ⚠ destination enabled=false — exporter will not run until enabled")
     for sig in ("traces", "metrics", "logs"):
         block = otel.get(sig) or {}
-        if not block.get("enabled"):
+        signal_enabled = bool(block.get("enabled"))
+        if not using_named_destinations and "enabled" not in block:
+            signal_enabled = bool(block.get("endpoint") or otel.get("endpoint"))
+        if not signal_enabled:
             click.echo(f"    {sig:<8} disabled")
             continue
         endpoint = str(block.get("endpoint", "") or "")

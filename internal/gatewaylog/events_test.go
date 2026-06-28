@@ -151,6 +151,36 @@ func TestEventMarshalOmitsEmptyPayloads(t *testing.T) {
 	}
 }
 
+func TestEventMarshalPreservesPresentZeroAgentScalars(t *testing.T) {
+	zeroInt := 0
+	zeroCost := 0.0
+	e := Event{
+		Timestamp:            time.Unix(0, 0).UTC(),
+		EventType:            EventLifecycle,
+		Severity:             SeverityInfo,
+		AgentID:              "agent-root",
+		AgentPhase:           "session",
+		AgentPhaseCode:       &zeroInt,
+		AgentDepth:           &zeroInt,
+		AgentReportedCostUSD: &zeroCost,
+		AgentReportedCost:    true,
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"agent_phase_code":0`,
+		`"agent_depth":0`,
+		`"agent_reported_cost_usd":0`,
+		`"agent_reported_cost_present":true`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("marshalled event missing %s: %s", want, b)
+		}
+	}
+}
+
 // TestEventScanFindingPayload pins the per-finding fanout shape so
 // SIEM consumers can rely on rule_id + severity + scan_id always
 // being present in the payload.

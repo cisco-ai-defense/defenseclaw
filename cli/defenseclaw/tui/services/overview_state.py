@@ -985,7 +985,9 @@ class OverviewPanelModel:
         if details.get("signals"):
             parts.append(str(details["signals"]))
         if details.get("endpoint"):
-            parts.append(str(details["endpoint"]))
+            parts.append(
+                redact_endpoint_for_display(str(details["endpoint"]), hide_path=True)
+            )
         return ", ".join(parts)
 
     def observability_destination_rows(self) -> tuple[ObservabilityDestinationRow, ...]:
@@ -1057,7 +1059,7 @@ class OverviewPanelModel:
                     ObservabilityDestinationRow(
                         name="Galileo" if name.lower() == "galileo" else name,
                         target="otel",
-                        scope="process",
+                        scope=str(item.get("scope", "") or "process"),
                         kind=kind,
                         state="enabled" if bool(item.get("enabled", False)) else "disabled",
                         signals=signals,

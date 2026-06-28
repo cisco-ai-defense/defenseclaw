@@ -232,7 +232,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_guardrail_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "stat",
@@ -269,7 +269,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_guardrail_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "stat",
@@ -489,8 +489,8 @@
     },
     {
       "type": "stat",
-      "title": "Pending requests gauge (5m window)",
-      "description": "Approximation of in-flight HILT requests = approval_requested - (approval_approved + approval_denied + approval_timeout) over the last 5 minutes. Sustained positive value means operators are slow to respond; zero means the queue is clear.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations \u2192 internal/gateway/hilt.go",
+      "title": "HITL backlog delta (5m)",
+      "description": "Five-minute request/completion delta, not a live in-flight gauge. Positive means more approval requests than terminal decisions arrived during the window; zero does not prove an older request is no longer pending.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -571,7 +571,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_approval_count \u2192 internal/telemetry/metrics.go:1146 (RecordApproval) \u2014 code-emitted, will populate once exec approvals run\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "stat",
@@ -600,7 +600,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_approval_count \u2192 internal/telemetry/metrics.go:1146 (RecordApproval) \u2014 code-emitted, will populate once exec approvals run\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "stat",
@@ -875,6 +875,6 @@
   "timezone": "",
   "title": "DefenseClaw \u2014 HITL (Human-in-the-Loop)",
   "uid": "defenseclaw-hitl",
-  "version": 3,
+  "version": 4,
   "weekStart": ""
 }

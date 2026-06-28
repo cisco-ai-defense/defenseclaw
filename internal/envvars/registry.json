@@ -438,6 +438,20 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_OTEL_TLS_INSECURE",
+      "category": "telemetry",
+      "purpose": "Legacy flat OTLP TLS toggle consumed only for upgrade compatibility. New setups should configure otel.destinations[].tls.insecure.",
+      "default": "unset",
+      "accepted_values": ["true", "false", "1", "0", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/config/config.go:2769", "description": "Migrates legacy env-backed flat OTel TLS policy into a named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:742", "description": "Preserves legacy env-backed TLS policy when setup adds a named destination"}
+      ],
+      "since": "0.4.0"
+    },
+    {
       "name": "DEFENSECLAW_OTEL_TRACES_ENDPOINT",
       "category": "telemetry",
       "purpose": "Legacy trace-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].traces.endpoint or destination endpoint.",

@@ -818,11 +818,21 @@ func (c OTelConfig) ValidateNamedDestinations() error {
 			!destination.Metrics.Enabled {
 			return fmt.Errorf("destination %q is enabled but has no enabled signals", name)
 		}
-		if destination.Enabled && strings.TrimSpace(destination.Endpoint) == "" &&
-			strings.TrimSpace(destination.Traces.Endpoint) == "" &&
-			strings.TrimSpace(destination.Logs.Endpoint) == "" &&
-			strings.TrimSpace(destination.Metrics.Endpoint) == "" {
-			return fmt.Errorf("destination %q is enabled but has no endpoint", name)
+		if destination.Enabled {
+			destinationEndpoint := strings.TrimSpace(destination.Endpoint)
+			for _, signal := range []struct {
+				name     string
+				enabled  bool
+				endpoint string
+			}{
+				{"traces", destination.Traces.Enabled, destination.Traces.Endpoint},
+				{"logs", destination.Logs.Enabled, destination.Logs.Endpoint},
+				{"metrics", destination.Metrics.Enabled, destination.Metrics.Endpoint},
+			} {
+				if signal.enabled && destinationEndpoint == "" && strings.TrimSpace(signal.endpoint) == "" {
+					return fmt.Errorf("destination %q enables %s but has no endpoint", name, signal.name)
+				}
+			}
 		}
 		if destination.Enabled {
 			protocol := strings.ToLower(strings.TrimSpace(destination.Protocol))
@@ -2760,6 +2770,17 @@ func (cfg Config) OTelTLSFromFlatConfig() OTelTLSConfig {
 	var tls OTelTLSConfig
 	if viper.InConfig("otel.tls") {
 		_ = viper.UnmarshalKey("otel.tls", &tls)
+	}
+	if !viper.InConfig("otel.tls.insecure") {
+		switch strings.ToLower(firstNonEmptyString(
+			os.Getenv("DEFENSECLAW_OTEL_TLS_INSECURE"),
+			os.Getenv("OPENCLAW_OTEL_TLS_INSECURE"),
+		)) {
+		case "1", "true", "yes", "on":
+			tls.Insecure = true
+		case "0", "false", "no", "off":
+			tls.Insecure = false
+		}
 	}
 	return tls
 }

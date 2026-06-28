@@ -261,8 +261,10 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 	if e.AgentPhase != "" {
 		attrs = append(attrs,
 			log.String("defenseclaw.agent.phase", e.AgentPhase),
-			log.Int("defenseclaw.agent.phase.code", e.AgentPhaseCode),
 		)
+	}
+	if e.AgentPhaseCode != nil {
+		attrs = append(attrs, log.Int("defenseclaw.agent.phase.code", *e.AgentPhaseCode))
 	}
 	if e.AgentPreviousPhase != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent.phase.previous", e.AgentPreviousPhase))
@@ -273,14 +275,14 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 	if e.AgentOperationID != "" {
 		attrs = append(attrs, log.String("defenseclaw.operation.id", e.AgentOperationID))
 	}
-	if e.AgentReportedCost {
+	if e.AgentReportedCost && e.AgentReportedCostUSD != nil {
 		attrs = append(attrs,
-			log.Float64("defenseclaw.agent.reported_cost.usd", e.AgentReportedCostUSD),
+			log.Float64("defenseclaw.agent.reported_cost.usd", *e.AgentReportedCostUSD),
 			log.Bool("defenseclaw.agent.reported_cost.present", true),
 		)
 	}
-	if e.AgentDepth > 0 || e.AgentLifecycleID != "" {
-		attrs = append(attrs, log.Int("defenseclaw.agent.depth", e.AgentDepth))
+	if e.AgentDepth != nil {
+		attrs = append(attrs, log.Int("defenseclaw.agent.depth", *e.AgentDepth))
 	}
 	if e.SessionSource != "" {
 		attrs = append(attrs, log.String("defenseclaw.session.source", e.SessionSource))

@@ -641,14 +641,19 @@ type OTelConfig struct {
     Metrics struct {
         ExportIntervalS int  `mapstructure:"export_interval_s"  yaml:"export_interval_s"`
     } `mapstructure:"metrics" yaml:"metrics"`
+    Resource struct {
+        Attributes map[string]string `mapstructure:"attributes" yaml:"attributes"`
+    } `mapstructure:"resource" yaml:"resource"`
+}
+
+type OTelDestinationConfig struct {
+    // Endpoint, protocol, headers, TLS, per-signal settings, and batching are
+    // destination-owned so each fan-out route can be tuned independently.
     Batch struct {
         MaxExportBatchSize int `mapstructure:"max_export_batch_size" yaml:"max_export_batch_size"`
         ScheduledDelayMs   int `mapstructure:"scheduled_delay_ms"    yaml:"scheduled_delay_ms"`
         MaxQueueSize       int `mapstructure:"max_queue_size"         yaml:"max_queue_size"`
     } `mapstructure:"batch" yaml:"batch"`
-    Resource struct {
-        Attributes map[string]string `mapstructure:"attributes" yaml:"attributes"`
-    } `mapstructure:"resource" yaml:"resource"`
 }
 ```
 

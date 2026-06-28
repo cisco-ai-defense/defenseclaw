@@ -168,6 +168,13 @@ def test_trace_endpoint_rejects_userinfo() -> None:
     with pytest.raises(click.ClickException, match="credential-free https"):
         _validate_https_endpoint("https://user:password@api.galileo.example/otel/traces")
 
+    for endpoint in (
+        "https://api.galileo.example/otel/traces?token=secret",
+        "https://api.galileo.example/otel/traces#secret",
+    ):
+        with pytest.raises(click.ClickException, match="without query or fragment"):
+            _validate_https_endpoint(endpoint)
+
 
 def test_project_and_logstream_reject_environment_expansion(tmp_path, monkeypatch) -> None:
     app = _app(tmp_path, monkeypatch)
@@ -207,7 +214,7 @@ def test_management_commands_report_missing_destination_without_traceback(tmp_pa
     for args in (["enable"], ["disable"], ["remove", "--yes"]):
         result = CliRunner().invoke(galileo, args, obj=app)
         assert result.exit_code != 0
-        assert "no audit sink named 'galileo'" in result.output
+        assert "no destination named 'galileo'" in result.output
         assert "Traceback" not in result.output
 
 

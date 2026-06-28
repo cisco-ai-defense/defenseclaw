@@ -1148,19 +1148,6 @@
     },
     {
       "type": "row",
-      "title": "Audit sink + runtime health",
-      "description": "Panels in this row reference metrics that are NOT emitted by any current gateway code path. They are kept here on purpose \u2014 collapsed and clearly fenced \u2014 so dashboard authors can iterate on the visualization while the underlying instrumentation lands across the v7 tracks. Each panel's own description carries an explicit ``covered_by: ... \u2192 EMITTED-NOWHERE`` tag so the next time a panel mysteriously goes empty, the description is its own bug report.",
-      "gridPos": {
-        "x": 0,
-        "y": 75,
-        "w": 24,
-        "h": 1
-      },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "type": "row",
       "title": "Speculative \u2014 pending instrumentation (v7 tracks)",
       "description": "Panels in this row reference metrics that are NOT emitted by any current gateway code path. They are kept here on purpose \u2014 collapsed and clearly fenced \u2014 so dashboard authors can iterate on the visualization while the underlying instrumentation lands across the v7 tracks. Each panel's own description carries an explicit ``covered_by: ... \u2192 EMITTED-NOWHERE`` tag so the next time a panel mysteriously goes empty, the description is its own bug report.",
       "gridPos": {

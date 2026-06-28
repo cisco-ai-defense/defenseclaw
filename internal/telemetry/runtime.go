@@ -286,13 +286,33 @@ func (p *Provider) EndAgentSpan(span trace.Span, errMsg string) {
 	span.End()
 }
 
-const telemetryCanaryAttribute = "defenseclaw.telemetry.canary"
+const (
+	telemetryCanaryAttribute            = "defenseclaw.telemetry.canary"
+	telemetryCanaryDestinationAttribute = "defenseclaw.telemetry.canary.destination"
+)
 
 // EmitGenAICanary emits a schema-valid agent/chat trace through the active
 // SDK provider and synchronously flushes every configured destination. Unlike
 // a direct HTTP probe this exercises filtering, batching, fan-out, and the
 // destination trace acknowledgement used by the diagnostic API.
 func (p *Provider) EmitGenAICanary(ctx context.Context) (string, error) {
+	return p.emitGenAICanary(ctx, "")
+}
+
+// EmitGenAICanaryToDestination runs the same runtime-pipeline diagnostic but
+// marks the trace for exactly one named destination. Every destination's span
+// processor sees the span, while destinationSpanExporter drops a targeted
+// canary unless its name matches. This preserves real filtering/batching while
+// preventing a Galileo test from creating traffic or cost in unrelated sinks.
+func (p *Provider) EmitGenAICanaryToDestination(ctx context.Context, destination string) (string, error) {
+	destination = strings.TrimSpace(destination)
+	if destination == "" {
+		return "", fmt.Errorf("OTel destination is required")
+	}
+	return p.emitGenAICanary(ctx, destination)
+}
+
+func (p *Provider) emitGenAICanary(ctx context.Context, destination string) (string, error) {
 	if p == nil || !p.TracesEnabled() || p.tracerProvider == nil {
 		return "", fmt.Errorf("OTel traces are not enabled")
 	}
@@ -301,10 +321,16 @@ func (p *Provider) EmitGenAICanary(ctx context.Context) (string, error) {
 		rootCtx, "defenseclaw-galileo-canary", "defenseclaw", "diagnostic", "canary", "openai",
 	)
 	agentSpan.SetAttributes(attribute.Bool(telemetryCanaryAttribute, true))
+	if destination != "" {
+		agentSpan.SetAttributes(attribute.String(telemetryCanaryDestinationAttribute, destination))
+	}
 	p.SetGenAIInput(agentSpan, "DefenseClaw Galileo runtime canary request")
 	p.SetGenAIOutput(agentSpan, "DefenseClaw Galileo runtime canary response")
 	_, span := p.StartLLMSpan(agentCtx, "openai", "gpt-4o-mini", "openai", 0, 0)
 	span.SetAttributes(attribute.Bool(telemetryCanaryAttribute, true))
+	if destination != "" {
+		span.SetAttributes(attribute.String(telemetryCanaryDestinationAttribute, destination))
+	}
 	p.SetGenAIInput(span, "DefenseClaw Galileo runtime canary request")
 	p.SetGenAIOutput(span, "DefenseClaw Galileo runtime canary response")
 	traceID := span.SpanContext().TraceID().String()

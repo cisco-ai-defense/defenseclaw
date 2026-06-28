@@ -31,6 +31,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -3039,6 +3040,12 @@ type NetworkEgressRow struct {
 
 // InsertNetworkEgressEvent persists one outbound network call as a structured row.
 func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
+	if strings.TrimSpace(e.URL) != "" {
+		e.URL = netguard.ScrubURLString(e.URL)
+		if len(e.URL) > 512 {
+			e.URL = truncateUTF8(e.URL, 512)
+		}
+	}
 	if e.ID == "" {
 		e.ID = uuid.New().String()
 	}

@@ -544,9 +544,9 @@ func TestOTLPIngest_Logs_PromotesCodexTokenUsage(t *testing.T) {
 		}
 		switch tokenType {
 		case "input":
-			gotInput = dp.Sum == 123
+			gotInput = gotInput || dp.Sum == 123
 		case "output":
-			gotOutput = dp.Sum == 45
+			gotOutput = gotOutput || dp.Sum == 45
 		}
 		gotAgentID = gotAgentID || agentID == "native-codex-root"
 	}

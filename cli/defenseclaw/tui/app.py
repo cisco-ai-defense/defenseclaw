@@ -6866,10 +6866,17 @@ class DefenseClawTUI(App[None]):
         ]
         for row in rows:
             color = state_color(row.state)
+            name = rich_escape(row.name[:19])
+            target = rich_escape(row.target[:13])
+            scope = rich_escape(row.scope[:19])
+            kind = rich_escape(row.kind[:15])
+            state = rich_escape(row.state[:10])
+            signals = rich_escape(row.signals[:19])
+            routing = rich_escape((row.routing or "—")[:15])
             lines.append(
-                f"  {row.name[:19]:<20}{row.target:<14}{row.scope[:19]:<20}{row.kind[:15]:<16}"
-                f"[{color}]{row.state:<11}[/]{row.signals[:19]:<20}"
-                f"{(row.routing or '—'):<16}{rich_escape(row.endpoint)}"
+                f"  {name:<20}{target:<14}{scope:<20}{kind:<16}"
+                f"[{color}]{state:<11}[/]{signals:<20}"
+                f"{routing:<16}{rich_escape(row.endpoint)}"
             )
         lines.append(
             "  Names are identities: a new name adds; the same name updates. "

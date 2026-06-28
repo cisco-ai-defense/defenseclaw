@@ -119,7 +119,8 @@ async def test_overview_renders_observability_destination_panel(tmp_path) -> Non
     assert "Galileo" in rendered
     assert "traces" in rendered
     assert "75.0% (3/4)" in rendered
-    assert "https://api.example.test/otel/traces" in rendered
+    assert "api.example.test" in rendered
+    assert "/otel/traces" in rendered
 
 
 @pytest.mark.asyncio

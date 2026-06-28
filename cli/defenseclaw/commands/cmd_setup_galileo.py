@@ -375,8 +375,17 @@ def _resolve_trace_endpoint(deployment: str, console_url: str | None, override: 
 
 def _validate_https_endpoint(value: str) -> str:
     parsed = urlparse(value)
-    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
-        raise click.ClickException("Galileo trace endpoint must be credential-free https://")
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise click.ClickException(
+            "Galileo trace endpoint must be credential-free https:// without query or fragment"
+        )
     return value.rstrip("/")
 
 

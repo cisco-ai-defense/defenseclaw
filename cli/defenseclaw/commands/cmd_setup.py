@@ -9794,10 +9794,12 @@ def _print_splunk_status(app: AppContext) -> None:
     otel = app.cfg.otel
     sc = app.cfg.splunk
 
-    destination = next(
-        (item for item in otel.destinations if item.preset == "splunk-o11y"),
-        None,
-    )
+    splunk_destinations = [
+        item for item in otel.destinations if item.preset == "splunk-o11y"
+    ]
+    destination = next((item for item in splunk_destinations if item.enabled), None)
+    if destination is None and splunk_destinations:
+        destination = splunk_destinations[0]
     route_enabled = otel.enabled and destination is not None and destination.enabled
     if route_enabled:
         traces = destination.traces

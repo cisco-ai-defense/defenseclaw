@@ -2559,7 +2559,7 @@ func (s *Sidecar) reportTelemetryHealth() {
 		destinations := make([]map[string]interface{}, 0, len(s.cfg.OTel.Destinations))
 		for _, destination := range s.cfg.OTel.Destinations {
 			signals := make([]string, 0, 3)
-			if destination.Traces.Enabled {
+			if destination.Traces.Enabled || destination.Metrics.Enabled || destination.Logs.Enabled {
 				signals = append(signals, "traces")
 			}
 			if destination.Metrics.Enabled {
@@ -2572,6 +2572,7 @@ func (s *Sidecar) reportTelemetryHealth() {
 				"name":     destination.Name,
 				"preset":   destination.Preset,
 				"enabled":  destination.Enabled,
+				"scope":    "process",
 				"endpoint": netguard.EndpointForDisplay(destination.Endpoint),
 				"signals":  strings.Join(signals, ", "),
 			}
@@ -2708,19 +2709,25 @@ func (s *Sidecar) reportSinksHealth() {
 		case config.SinkKindSplunkHEC:
 			if sink.SplunkHEC != nil {
 				endpoint = sink.SplunkHEC.Endpoint
-				row["endpoint"] = endpoint
 				row["index"] = sink.SplunkHEC.Index
 			}
 		case config.SinkKindOTLPLogs:
 			if sink.OTLPLogs != nil {
 				endpoint = sink.OTLPLogs.Endpoint
-				row["endpoint"] = endpoint
 				row["protocol"] = sink.OTLPLogs.Protocol
 			}
 		case config.SinkKindHTTPJSONL:
 			if sink.HTTPJSONL != nil {
 				endpoint = sink.HTTPJSONL.URL
-				row["url"] = endpoint
+			}
+		}
+		displayEndpoint := ""
+		if endpoint != "" {
+			displayEndpoint = netguard.EndpointForDisplay(endpoint)
+			if sink.Kind == config.SinkKindHTTPJSONL {
+				row["url"] = displayEndpoint
+			} else {
+				row["endpoint"] = displayEndpoint
 			}
 		}
 		rows = append(rows, row)
@@ -2742,9 +2749,9 @@ func (s *Sidecar) reportSinksHealth() {
 		if scope != "global" {
 			prefix = scope + ": "
 		}
-		if endpoint != "" {
+		if displayEndpoint != "" {
 			details[key] = fmt.Sprintf(
-				"%s%s (%s) -> %s [%s]", prefix, sink.Name, sink.Kind, endpoint, state,
+				"%s%s (%s) -> %s [%s]", prefix, sink.Name, sink.Kind, displayEndpoint, state,
 			)
 		} else {
 			// Sink missing its kind block (validation should reject

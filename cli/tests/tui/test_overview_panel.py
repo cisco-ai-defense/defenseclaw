@@ -203,6 +203,9 @@ def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
     assert rows[2].scope == "connector:codex"
     assert rows[2].endpoint == "https://collector.example.test:4317/…"
     assert "must-not-render" not in repr(rows)
+    assert "user:secret" not in repr(rows)
+    assert "api_key=secret" not in repr(rows)
+    assert "token=secret" not in repr(rows)
 
 
 def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:

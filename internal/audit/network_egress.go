@@ -209,6 +209,10 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 
 	// Blocked call: raise an audit_events alert so the TUI and /alerts
 	// endpoint surface it without requiring a separate egress query.
+	redactedURL := row.URL
+	if len(redactedURL) > 200 {
+		redactedURL = truncateUTF8(redactedURL, 200)
+	}
 	alert := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: e.Timestamp,
@@ -216,7 +220,7 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 		Target:    e.Hostname,
 		Actor:     "defenseclaw",
 		Details: fmt.Sprintf("url=%s method=%s decision=%s outcome=%s",
-			truncateStr(e.URL, 200), e.HTTPMethod, e.DecisionCode, e.PolicyOutcome),
+			redactedURL, e.HTTPMethod, e.DecisionCode, e.PolicyOutcome),
 		Severity: "HIGH",
 		RunID:    currentRunID(),
 	})

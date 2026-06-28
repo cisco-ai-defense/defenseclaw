@@ -102,7 +102,7 @@
           "refId": "A"
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)\n\ncovered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "stat",
@@ -145,7 +145,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)\n\ncovered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "stat",
@@ -166,7 +166,7 @@
           "refId": "A"
         }
       ],
-      "description": "Authentication failures rejected by the sidecar, per minute.\n\ncovered_by:\n  - defenseclaw_http_auth_failures \u2192 internal/telemetry/metrics.go (RecordHTTPAuthFailure)"
+      "description": "Authentication failures rejected by the sidecar, per minute.\n\ncovered_by:\n  - defenseclaw_http_auth_failures \u2192 internal/gateway/router.go"
     },
     {
       "type": "row",
@@ -203,7 +203,7 @@
           "unit": "reqps"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)\n\ncovered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "timeseries",
@@ -230,7 +230,7 @@
           "unit": "ms"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds \u2192 internal/gateway/router.go (otelhttp middleware)\n\ncovered_by:\n  - defenseclaw_http_request_duration_milliseconds \u2192 internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds \u2192 internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "timeseries",
@@ -261,7 +261,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)\n\ncovered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "table",
@@ -301,7 +301,7 @@
           }
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds \u2192 internal/gateway/router.go (otelhttp middleware)\n\ncovered_by:\n  - defenseclaw_http_request_duration_milliseconds \u2192 internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds \u2192 internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "row",
@@ -374,7 +374,7 @@
           "unit": "ms"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_connector_hook_latency_milliseconds \u2192 internal/gateway/hook_telemetry.go\n\ncovered_by:\n  - defenseclaw_connector_hook_latency_milliseconds \u2192 internal/gateway/hook_telemetry.go"
+      "description": "covered_by:\n  - defenseclaw_connector_hook_latency_milliseconds \u2192 internal/gateway/hook_telemetry.go"
     },
     {
       "type": "timeseries",
@@ -396,7 +396,7 @@
           "refId": "A"
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_gateway_errors_total\n\ncovered_by:\n  - defenseclaw_gateway_errors \u2192 internal/telemetry/gateway_events.go (EventError)"
+      "description": "covered_by:\n  - defenseclaw_gateway_errors \u2192 internal/telemetry/gateway_events.go (EventError)"
     },
     {
       "type": "timeseries",
@@ -418,7 +418,7 @@
           "refId": "A"
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations_total\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "row",
@@ -458,7 +458,7 @@
         "colorMode": "value",
         "graphMode": "area"
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations_total\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "timeseries",
@@ -495,7 +495,7 @@
           "unit": "ms"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_latency_milliseconds \u2192 internal/telemetry/metrics.go\n\ncovered_by:\n  - defenseclaw_inspect_latency_milliseconds \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_latency_milliseconds \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "timeseries",
@@ -522,7 +522,7 @@
           "unit": "ops"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations_total\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "row",
@@ -579,7 +579,7 @@
           "unit": "ops"
         }
       },
-      "description": "covered_by:\n  - gen_ai_client_token_usage \u2192 OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)\n\ncovered_by:\n  - gen_ai_client_token_usage \u2192 OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)"
+      "description": "covered_by:\n  - gen_ai_client_token_usage \u2192 OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)"
     },
     {
       "type": "timeseries",
@@ -616,7 +616,7 @@
           "unit": "s"
         }
       },
-      "description": "covered_by:\n  - gen_ai_client_operation_duration_seconds \u2192 OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)\n\ncovered_by:\n  - gen_ai_client_operation_duration_seconds \u2192 OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)"
+      "description": "covered_by:\n  - gen_ai_client_operation_duration_seconds \u2192 OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)"
     },
     {
       "type": "row",
@@ -699,6 +699,6 @@
   "timezone": "",
   "title": "DefenseClaw \u2014 Proxy & LLM Guard",
   "uid": "defenseclaw-traffic",
-  "version": 4,
+  "version": 5,
   "weekStart": ""
 }

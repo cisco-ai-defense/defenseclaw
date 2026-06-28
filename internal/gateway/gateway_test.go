@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -4082,7 +4083,9 @@ func TestDestinationRoutingHealthMarshal(t *testing.T) {
 }
 
 func TestTelemetryCanaryUsesRuntimeExporterAcknowledgement(t *testing.T) {
+	var targetRequests atomic.Int64
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests.Add(1)
 		if r.URL.Path != "/otel/traces" {
 			t.Errorf("collector path=%q", r.URL.Path)
 		}
@@ -4090,6 +4093,12 @@ func TestTelemetryCanaryUsesRuntimeExporterAcknowledgement(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer collector.Close()
+	var unrelatedRequests atomic.Int64
+	unrelated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		unrelatedRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer unrelated.Close()
 
 	cfg := &config.Config{
 		Environment: "test",
@@ -4114,6 +4123,10 @@ func TestTelemetryCanaryUsesRuntimeExporterAcknowledgement(t *testing.T) {
 						"gen_ai.input.messages", "gen_ai.output.messages",
 					}},
 				}},
+			}, {
+				Name: "unrelated", Preset: "generic-otlp", Enabled: true,
+				Protocol: "http", Endpoint: unrelated.URL,
+				Traces: config.OTelTracesConfig{Enabled: true, URLPath: "/otel/traces"},
 			}},
 		},
 	}
@@ -4144,6 +4157,12 @@ func TestTelemetryCanaryUsesRuntimeExporterAcknowledgement(t *testing.T) {
 	}
 	if payload.Delivery.Attempted != 2 || payload.Delivery.Delivered != 2 {
 		t.Fatalf("delivery=%+v want two acknowledged runtime spans", payload.Delivery)
+	}
+	if targetRequests.Load() == 0 || unrelatedRequests.Load() != 0 {
+		t.Fatalf(
+			"target requests=%d unrelated requests=%d; canary must be destination-scoped",
+			targetRequests.Load(), unrelatedRequests.Load(),
+		)
 	}
 }
 

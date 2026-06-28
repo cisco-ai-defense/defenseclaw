@@ -4689,7 +4689,12 @@ def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
                 WizardFormField(
                     "Log Stream", "string", "--logstream", value="default", default="default", required=True
                 ),
-                WizardFormField("API Key", "password", "--token"),
+                WizardFormField(
+                    "API Key",
+                    "password",
+                    "--token",
+                    hint="Required unless GALILEO_API_KEY is already configured in the environment or .env.",
+                ),
             ),
         )
     elif preset_id == "otlp":

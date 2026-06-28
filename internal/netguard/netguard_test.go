@@ -113,6 +113,9 @@ func TestEndpointForDisplayRemovesAllCredentialCarriers(t *testing.T) {
 	if got != "https://collector.example.test/v1/traces" {
 		t.Fatalf("EndpointForDisplay()=%q", got)
 	}
+	if got := EndpointForDisplay("127.0.0.1:4317"); got != "127.0.0.1:4317" {
+		t.Fatalf("EndpointForDisplay() bare OTLP endpoint=%q", got)
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -177,7 +177,7 @@ def apply_preset(
     effective_target = _resolve_target(preset, target_override)
     resolved_inputs = _resolve_inputs(preset, inputs)
     dest_name = _destination_name(preset, name, resolved_inputs)
-    if effective_target == "audit_sinks" and not _NAME_RE.match(dest_name):
+    if effective_target in {"audit_sinks", "otel"} and not _NAME_RE.match(dest_name):
         raise ValueError(f"destination name {dest_name!r} must match {_NAME_RE.pattern}")
 
     cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
@@ -364,14 +364,14 @@ def set_destination_enabled(
         elif name == "otel":
             otel = raw.get("otel")
             if not isinstance(otel, dict) or isinstance(otel.get("destinations"), list):
-                raise ValueError(f"no audit sink named {name!r}")
+                raise ValueError(f"no destination named {name!r}")
             otel["enabled"] = bool(enabled)
             target = "otel"
             changes.append(f"otel.enabled = {bool(enabled)}")
         else:
             sink = _find_sink(raw, name)
             if sink is None:
-                raise ValueError(f"no audit sink named {name!r}")
+                raise ValueError(f"no destination named {name!r}")
             sink["enabled"] = bool(enabled)
             changes.append(f"audit_sinks[{name}].enabled = {bool(enabled)}")
 
@@ -415,10 +415,10 @@ def remove_destination(name: str, data_dir: str) -> WriteResult:
 
         sinks = raw.get("audit_sinks")
         if not isinstance(sinks, list):
-            raise ValueError(f"no audit sink named {name!r}")
+            raise ValueError(f"no destination named {name!r}")
         new = [s for s in sinks if isinstance(s, dict) and s.get("name") != name]
         if len(new) == len(sinks):
-            raise ValueError(f"no audit sink named {name!r}")
+            raise ValueError(f"no destination named {name!r}")
         if new:
             raw["audit_sinks"] = new
         else:
@@ -733,6 +733,16 @@ def _migrate_flat_otel_in_place(
         value = otel.get(key)
         if value:
             destination[key] = copy.deepcopy(value)
+    if "tls" not in destination:
+        legacy_tls_insecure = _first_runtime_env(
+            data_dir,
+            "DEFENSECLAW_OTEL_TLS_INSECURE",
+            "OPENCLAW_OTEL_TLS_INSECURE",
+        ).strip().lower()
+        if legacy_tls_insecure in {"1", "true", "yes", "on"}:
+            destination["tls"] = {"insecure": True}
+        elif legacy_tls_insecure in {"0", "false", "no", "off"}:
+            destination["tls"] = {"insecure": False}
     has_global_endpoint = bool(otel.get("endpoint") or env_global_endpoint)
     has_explicit_signal_enabled = any(
         isinstance(otel.get(sig), dict) and "enabled" in (otel.get(sig) or {})

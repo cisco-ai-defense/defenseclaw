@@ -493,6 +493,7 @@ class WriterOTelPresetTests(unittest.TestCase):
             {
                 "DEFENSECLAW_OTEL_ENDPOINT": "http://127.0.0.1:4318",
                 "DEFENSECLAW_OTEL_PROTOCOL": "http/protobuf",
+                "DEFENSECLAW_OTEL_TLS_INSECURE": "true",
             },
             clear=False,
         ):
@@ -511,6 +512,7 @@ class WriterOTelPresetTests(unittest.TestCase):
         assert [item["name"] for item in destinations] == ["generic-otlp", "galileo"]
         assert destinations[0]["endpoint"] == "http://127.0.0.1:4318"
         assert destinations[0]["protocol"] == "http/protobuf"
+        assert destinations[0]["tls"]["insecure"] is True
         assert all(destinations[0][signal]["enabled"] for signal in ("traces", "metrics", "logs"))
 
     def test_rerun_repairs_mixed_flat_and_named_destination_shape(self) -> None:

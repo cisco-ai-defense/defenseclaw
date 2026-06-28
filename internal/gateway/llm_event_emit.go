@@ -75,6 +75,30 @@ type llmEventMeta struct {
 	TraceEventID string
 }
 
+func agentPhaseCodePointer(meta llmEventMeta) *int {
+	if strings.TrimSpace(meta.Phase) == "" {
+		return nil
+	}
+	value := telemetry.AgentPhaseCode(meta.Phase)
+	return &value
+}
+
+func agentDepthPointer(meta llmEventMeta) *int {
+	if strings.TrimSpace(meta.AgentID) == "" {
+		return nil
+	}
+	value := meta.AgentDepth
+	return &value
+}
+
+func agentReportedCostPointer(meta llmEventMeta) *float64 {
+	if !meta.ReportedCost {
+		return nil
+	}
+	value := meta.ReportedCostUSD
+	return &value
+}
+
 func emitLLMPromptEvent(ctx context.Context, meta llmEventMeta, prompt string, rawRequestBody []byte) string {
 	if strings.TrimSpace(prompt) == "" && len(rawRequestBody) == 0 {
 		return ""
@@ -104,11 +128,11 @@ func emitLLMPromptEvent(ctx context.Context, meta llmEventMeta, prompt string, r
 		AgentLifecycleState:  meta.LifecycleState,
 		AgentPhase:           meta.Phase,
 		AgentPreviousPhase:   meta.PreviousPhase,
-		AgentPhaseCode:       telemetry.AgentPhaseCode(meta.Phase),
+		AgentPhaseCode:       agentPhaseCodePointer(meta),
 		AgentSequence:        meta.Sequence,
 		AgentOperationID:     meta.OperationID,
-		AgentDepth:           meta.AgentDepth,
-		AgentReportedCostUSD: meta.ReportedCostUSD,
+		AgentDepth:           agentDepthPointer(meta),
+		AgentReportedCostUSD: agentReportedCostPointer(meta),
 		AgentReportedCost:    meta.ReportedCost,
 		SessionSource:        meta.SessionSource,
 		SessionResumed:       meta.SessionResumed,
@@ -159,11 +183,11 @@ func emitLLMResponseEvent(ctx context.Context, meta llmEventMeta, response, rawR
 		AgentLifecycleState:  meta.LifecycleState,
 		AgentPhase:           meta.Phase,
 		AgentPreviousPhase:   meta.PreviousPhase,
-		AgentPhaseCode:       telemetry.AgentPhaseCode(meta.Phase),
+		AgentPhaseCode:       agentPhaseCodePointer(meta),
 		AgentSequence:        meta.Sequence,
 		AgentOperationID:     meta.OperationID,
-		AgentDepth:           meta.AgentDepth,
-		AgentReportedCostUSD: meta.ReportedCostUSD,
+		AgentDepth:           agentDepthPointer(meta),
+		AgentReportedCostUSD: agentReportedCostPointer(meta),
 		AgentReportedCost:    meta.ReportedCost,
 		SessionSource:        meta.SessionSource,
 		SessionResumed:       meta.SessionResumed,
@@ -215,11 +239,11 @@ func emitToolInvocationEvent(ctx context.Context, meta llmEventMeta, phase, tool
 		AgentLifecycleState:  meta.LifecycleState,
 		AgentPhase:           meta.Phase,
 		AgentPreviousPhase:   meta.PreviousPhase,
-		AgentPhaseCode:       telemetry.AgentPhaseCode(meta.Phase),
+		AgentPhaseCode:       agentPhaseCodePointer(meta),
 		AgentSequence:        meta.Sequence,
 		AgentOperationID:     meta.OperationID,
-		AgentDepth:           meta.AgentDepth,
-		AgentReportedCostUSD: meta.ReportedCostUSD,
+		AgentDepth:           agentDepthPointer(meta),
+		AgentReportedCostUSD: agentReportedCostPointer(meta),
 		AgentReportedCost:    meta.ReportedCost,
 		SessionSource:        meta.SessionSource,
 		SessionResumed:       meta.SessionResumed,
@@ -397,7 +421,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 	}
 	model := payloadString(req.Payload, "model")
 	meta := hookLLMEventMeta(source, req.SessionID, req.TurnID, model, source, req.AgentID, req.AgentName, req.AgentType, req.Payload)
-	meta.ToolID = firstNonEmpty(firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"), req.TurnID)
+	meta.ToolID = firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")
 	meta.ToolName = req.ToolName
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.beginHookExecution(meta)
@@ -444,7 +468,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 			a.lastHookPromptID(source, req.SessionID),
 			promptIDForTurn(source, req.SessionID, req.TurnID),
 		)
-		meta.ToolID = firstNonEmpty(firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"), req.TurnID)
+		meta.ToolID = firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")
 		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName)
 		emitToolInvocationEvent(ctx, meta, "call", req.ToolName, stringFromJSONRaw(req.ToolArgs), "", nil)
 		a.ensureHookSessionTrace(ctx, meta, stringFromJSONRaw(req.ToolArgs))
@@ -456,7 +480,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 			a.lastHookPromptID(source, req.SessionID),
 			promptIDForTurn(source, req.SessionID, req.TurnID),
 		)
-		meta.ToolID = firstNonEmpty(firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"), req.TurnID)
+		meta.ToolID = firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")
 		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName)
 		emitToolInvocationEvent(ctx, meta, "result", req.ToolName, "", req.Content, nil)
 		a.emitInferredDelegatedAgentTransitions(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs), false)
@@ -694,7 +718,7 @@ func canonicalHookLifecycleEvent(event string) string {
 	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt",
 		"prellmcall", "beforeagent", "beforemodel", "preinvocation":
 		return "turn_start"
-	case "pretooluse", "beforetool", "pretoolcall", "preruncommand", "premcptooluse",
+	case "pretooluse", "beforetool", "beforetoolselection", "pretoolcall", "preruncommand", "premcptooluse",
 		"beforemcpexecution", "beforeshellexecution", "beforereadfile", "beforetabfileread",
 		"prereadcode", "prewritecode", "toolexecutebefore", "permissionrequest":
 		return "tool_start"
@@ -828,6 +852,7 @@ type hookLLMSpanUsage struct {
 }
 
 type hookToolInvocation struct {
+	id        string
 	meta      llmEventMeta
 	tool      string
 	arguments string
@@ -879,7 +904,7 @@ func hookLifecyclePhase(rawEvent, lifecycleEvent, lifecycleState string) string 
 		return "responding"
 	case "permissionrequest":
 		return "approval"
-	case "pretooluse", "beforetool", "pretoolcall", "preruncommand", "premcptooluse",
+	case "pretooluse", "beforetool", "beforetoolselection", "pretoolcall", "preruncommand", "premcptooluse",
 		"beforemcpexecution", "beforeshellexecution", "beforereadfile", "beforetabfileread",
 		"prereadcode", "prewritecode", "toolexecutebefore":
 		return "tool"
@@ -1120,6 +1145,9 @@ func applyHookLifecycleSpanAttributes(span trace.Span, meta llmEventMeta) {
 		return
 	}
 	attrs := make([]attribute.KeyValue, 0, 24)
+	if meta.Source != "" {
+		attrs = append(attrs, attribute.String("connector", meta.Source))
+	}
 	if meta.RootAgentID != "" {
 		attrs = append(attrs, attribute.String("defenseclaw.agent.root.id", meta.RootAgentID))
 	}
@@ -1248,11 +1276,11 @@ func emitHookLifecycleEvent(ctx context.Context, meta llmEventMeta) {
 		AgentLifecycleState:  meta.LifecycleState,
 		AgentPhase:           meta.Phase,
 		AgentPreviousPhase:   meta.PreviousPhase,
-		AgentPhaseCode:       telemetry.AgentPhaseCode(meta.Phase),
+		AgentPhaseCode:       agentPhaseCodePointer(meta),
 		AgentSequence:        meta.Sequence,
 		AgentOperationID:     meta.OperationID,
-		AgentDepth:           meta.AgentDepth,
-		AgentReportedCostUSD: meta.ReportedCostUSD,
+		AgentDepth:           agentDepthPointer(meta),
+		AgentReportedCostUSD: agentReportedCostPointer(meta),
 		AgentReportedCost:    meta.ReportedCost,
 		SessionSource:        meta.SessionSource,
 		SessionResumed:       meta.SessionResumed,
@@ -1600,28 +1628,44 @@ func (a *APIServer) rememberHookToolInvocation(meta llmEventMeta, tool, argument
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
 	if a.hookToolInvocations == nil {
-		a.hookToolInvocations = make(map[string]hookToolInvocation)
+		a.hookToolInvocations = make(map[string][]hookToolInvocation)
 	}
-	if _, exists := a.hookToolInvocations[key]; !exists {
-		for len(a.hookToolInvocations) >= hookPromptCacheMaxEntries && len(a.hookToolInvocationOrder) > 0 {
-			oldest := a.hookToolInvocationOrder[0]
-			a.hookToolInvocationOrder = a.hookToolInvocationOrder[1:]
+	for len(a.hookToolInvocationOrder) >= hookPromptCacheMaxEntries {
+		oldest := a.hookToolInvocationOrder[0]
+		a.hookToolInvocationOrder = a.hookToolInvocationOrder[1:]
+		queue := a.hookToolInvocations[oldest]
+		if len(queue) <= 1 {
 			delete(a.hookToolInvocations, oldest)
+		} else {
+			a.hookToolInvocations[oldest] = queue[1:]
 		}
-		a.hookToolInvocationOrder = append(a.hookToolInvocationOrder, key)
 	}
-	a.hookToolInvocations[key] = hookToolInvocation{
-		meta: meta, tool: tool, arguments: boundedHookLLMSpanContent(arguments), startedAt: time.Now(),
-	}
+	startedAt := time.Now()
+	a.hookToolInvocationOrder = append(a.hookToolInvocationOrder, key)
+	a.hookToolInvocations[key] = append(a.hookToolInvocations[key], hookToolInvocation{
+		id: stableLLMEventID(
+			"hook-tool-invocation", key, strconv.FormatInt(startedAt.UnixNano(), 10), arguments,
+		),
+		meta: meta, tool: tool, arguments: boundedHookLLMSpanContent(arguments), startedAt: startedAt,
+	})
 }
 
 func (a *APIServer) takeHookToolInvocation(
 	meta llmEventMeta, tool, result string,
 ) (hookToolInvocation, bool) {
 	key := hookToolInvocationKey(meta, tool)
-	completionKey := stableLLMEventID("hook-tool-span", key, result)
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
+	queue := a.hookToolInvocations[key]
+	var snapshot hookToolInvocation
+	if len(queue) > 0 {
+		snapshot = queue[0]
+	}
+	baseCompletionKey := stableLLMEventID("hook-tool-span", key, result)
+	completionKey := baseCompletionKey
+	if snapshot.id != "" {
+		completionKey = stableLLMEventID("hook-tool-span", baseCompletionKey, snapshot.id)
+	}
 	if a.hookLLMSpanCompleted == nil {
 		a.hookLLMSpanCompleted = make(map[string]struct{})
 	}
@@ -1631,9 +1675,17 @@ func (a *APIServer) takeHookToolInvocation(
 	putBoundedHookLLMSpanCompletion(
 		a.hookLLMSpanCompleted, &a.hookLLMSpanCompletedOrder, completionKey,
 	)
-	snapshot, exists := a.hookToolInvocations[key]
-	if exists {
-		delete(a.hookToolInvocations, key)
+	if completionKey != baseCompletionKey {
+		putBoundedHookLLMSpanCompletion(
+			a.hookLLMSpanCompleted, &a.hookLLMSpanCompletedOrder, baseCompletionKey,
+		)
+	}
+	if len(queue) > 0 {
+		if len(queue) == 1 {
+			delete(a.hookToolInvocations, key)
+		} else {
+			a.hookToolInvocations[key] = queue[1:]
+		}
 		for i, candidate := range a.hookToolInvocationOrder {
 			if candidate == key {
 				copy(a.hookToolInvocationOrder[i:], a.hookToolInvocationOrder[i+1:])

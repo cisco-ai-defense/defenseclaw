@@ -145,7 +145,9 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 		otel.SetTracerProvider(tp)
 		p.tracer = tp.Tracer("defenseclaw")
 	} else {
-		p.tracer = traceNoop.NewTracerProvider().Tracer("defenseclaw")
+		tp := traceNoop.NewTracerProvider()
+		otel.SetTracerProvider(tp)
+		p.tracer = tp.Tracer("defenseclaw")
 	}
 
 	logOpts := []sdklog.LoggerProviderOption{sdklog.WithResource(res)}
@@ -167,7 +169,9 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 		global.SetLoggerProvider(lp)
 		p.logger = lp.Logger("defenseclaw")
 	} else {
-		p.logger = logNoop.NewLoggerProvider().Logger("defenseclaw")
+		lp := logNoop.NewLoggerProvider()
+		global.SetLoggerProvider(lp)
+		p.logger = lp.Logger("defenseclaw")
 	}
 
 	meterOpts := []sdkmetric.Option{sdkmetric.WithResource(res)}
@@ -191,7 +195,9 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 		otel.SetMeterProvider(mp)
 		p.meter = mp.Meter("defenseclaw")
 	} else {
-		p.meter = metricNoop.NewMeterProvider().Meter("defenseclaw")
+		mp := metricNoop.NewMeterProvider()
+		otel.SetMeterProvider(mp)
+		p.meter = mp.Meter("defenseclaw")
 	}
 
 	ms, err := newMetricsSet(p.meter)
@@ -670,6 +676,10 @@ type destinationSpanExporter struct {
 }
 
 func (e *destinationSpanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	spans = canarySpansForDestination(spans, e.destination)
+	if len(spans) == 0 {
+		return nil
+	}
 	regular, canaries := partitionCanarySpans(spans)
 	var errs []error
 	if len(regular) > 0 {
@@ -683,6 +693,29 @@ func (e *destinationSpanExporter) ExportSpans(ctx context.Context, spans []sdktr
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func canarySpansForDestination(spans []sdktrace.ReadOnlySpan, destination string) []sdktrace.ReadOnlySpan {
+	filtered := make([]sdktrace.ReadOnlySpan, 0, len(spans))
+	for _, span := range spans {
+		target := canaryDestination(span)
+		if target == "" || target == destination {
+			filtered = append(filtered, span)
+		}
+	}
+	return filtered
+}
+
+func canaryDestination(span sdktrace.ReadOnlySpan) string {
+	if span == nil || !isCanarySpan(span) {
+		return ""
+	}
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) == telemetryCanaryDestinationAttribute && attr.Value.Type() == attribute.STRING {
+			return strings.TrimSpace(attr.Value.AsString())
+		}
+	}
+	return ""
 }
 
 // partitionCanarySpans prevents unrelated traffic from sharing a canary OTLP

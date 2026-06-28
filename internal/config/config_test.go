@@ -962,6 +962,14 @@ func TestOTelConfigValidateNamedDestinations(t *testing.T) {
 	if err := noEndpoint.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "no endpoint") {
 		t.Fatalf("no-endpoint validation error=%v, want actionable diagnostic", err)
 	}
+	missingLogEndpoint := OTelConfig{Destinations: []OTelDestinationConfig{{
+		Name: "partial", Enabled: true, Protocol: "http",
+		Traces: OTelTracesConfig{Enabled: true, Endpoint: "https://collector.example.test/v1/traces"},
+		Logs:   OTelLogsConfig{Enabled: true},
+	}}}
+	if err := missingLogEndpoint.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "enables logs but has no endpoint") {
+		t.Fatalf("partial endpoint validation error=%v, want signal-specific diagnostic", err)
+	}
 	filteredWithoutTraces := OTelConfig{Destinations: []OTelDestinationConfig{{
 		Name: "filtered", SpanFilter: OTelSpanFilterConfig{RequireOperation: "chat"},
 	}}}
@@ -1056,6 +1064,7 @@ func TestLoadMigratesEnvironmentBackedLegacyOTelExporter(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	t.Setenv("DEFENSECLAW_OTEL_ENDPOINT", "http://127.0.0.1:4318")
 	t.Setenv("DEFENSECLAW_OTEL_PROTOCOL", "http/protobuf")
+	t.Setenv("DEFENSECLAW_OTEL_TLS_INSECURE", "true")
 	data := []byte(`config_version: 6
 otel:
   enabled: true
@@ -1073,6 +1082,9 @@ otel:
 	migrated := cfg.OTel.Destinations[0]
 	if migrated.Endpoint != "http://127.0.0.1:4318" || migrated.Protocol != "http/protobuf" {
 		t.Fatalf("migrated destination=%+v", migrated)
+	}
+	if !migrated.TLS.Insecure {
+		t.Fatalf("migrated TLS=%+v, want legacy insecure policy preserved", migrated.TLS)
 	}
 	if !migrated.Traces.Enabled || !migrated.Logs.Enabled || !migrated.Metrics.Enabled {
 		t.Fatalf("migrated signals=%+v %+v %+v, want all enabled", migrated.Traces, migrated.Logs, migrated.Metrics)

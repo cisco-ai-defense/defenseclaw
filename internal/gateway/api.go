@@ -134,7 +134,7 @@ type APIServer struct {
 	hookLifecycleTransitionOrder      []string
 	hookReportedCostTotals            map[string]float64
 	hookReportedCostTotalOrder        []string
-	hookToolInvocations               map[string]hookToolInvocation
+	hookToolInvocations               map[string][]hookToolInvocation
 	hookToolInvocationOrder           []string
 	hookSessionTraces                 map[string]hookSessionTrace
 	hookSessionTraceOrder             []string
@@ -806,7 +806,7 @@ func (a *APIServer) handleTelemetryCanary(w http.ResponseWriter, r *http.Request
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	traceID, err := a.otel.EmitGenAICanary(ctx)
+	traceID, err := a.otel.EmitGenAICanaryToDestination(ctx, request.Destination)
 	after := a.otel.DestinationDeliveryStats(request.Destination)
 	acknowledged := a.otel.DestinationAcknowledgedCanaryTrace(request.Destination, traceID)
 	if err != nil && !acknowledged {
@@ -3442,12 +3442,12 @@ func (a *APIServer) handleNetworkEgressIngest(w http.ResponseWriter, r *http.Req
 	}
 	env := audit.EnvelopeFromContext(r.Context())
 	identity := AgentIdentityFromContext(r.Context())
-	evt.SessionID = firstNonEmpty(evt.SessionID, SessionIDFromContext(r.Context()), env.SessionID)
-	evt.Connector = firstNonEmpty(evt.Connector, env.Connector)
-	evt.AgentID = firstNonEmpty(evt.AgentID, identity.AgentID, env.AgentID)
-	evt.ToolID = firstNonEmpty(evt.ToolID, env.ToolID)
+	evt.SessionID = firstNonEmpty(SessionIDFromContext(r.Context()), env.SessionID, evt.SessionID)
+	evt.Connector = firstNonEmpty(env.Connector, evt.Connector)
+	evt.AgentID = firstNonEmpty(identity.AgentID, env.AgentID, evt.AgentID)
+	evt.ToolID = firstNonEmpty(env.ToolID, evt.ToolID)
 	userID, _ := userFromHTTPRequest(r, nil)
-	evt.UserID = firstNonEmpty(evt.UserID, userID)
+	evt.UserID = firstNonEmpty(userID, evt.UserID)
 	if evt.AgentLifecycleID == "" && evt.Connector != "" && evt.SessionID != "" && evt.AgentID != "" {
 		evt.AgentLifecycleID = stableLLMEventID("lifecycle", evt.Connector, evt.SessionID, evt.AgentID)
 	}

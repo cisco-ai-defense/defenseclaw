@@ -294,35 +294,35 @@ type Event struct {
 	//     sidecar's lifetime; changes on every restart. Primarily
 	//     useful for operators debugging which sidecar emitted a
 	//     specific event.
-	AgentID              string  `json:"agent_id,omitempty"`
-	AgentName            string  `json:"agent_name,omitempty"`
-	AgentType            string  `json:"agent_type,omitempty"`
-	RootAgentID          string  `json:"root_agent_id,omitempty"`
-	ParentAgentID        string  `json:"parent_agent_id,omitempty"`
-	RootSessionID        string  `json:"root_session_id,omitempty"`
-	ParentSessionID      string  `json:"parent_session_id,omitempty"`
-	AgentLifecycleID     string  `json:"agent_lifecycle_id,omitempty"`
-	AgentExecutionID     string  `json:"agent_execution_id,omitempty"`
-	AgentLifecycleEvent  string  `json:"agent_lifecycle_event,omitempty"`
-	AgentLifecycleState  string  `json:"agent_lifecycle_state,omitempty"`
-	AgentPhase           string  `json:"agent_phase,omitempty"`
-	AgentPreviousPhase   string  `json:"agent_previous_phase,omitempty"`
-	AgentPhaseCode       int     `json:"agent_phase_code,omitempty"`
-	AgentSequence        int64   `json:"agent_sequence,omitempty"`
-	AgentOperationID     string  `json:"agent_operation_id,omitempty"`
-	AgentDepth           int     `json:"agent_depth,omitempty"`
-	AgentReportedCostUSD float64 `json:"agent_reported_cost_usd,omitempty"`
-	AgentReportedCost    bool    `json:"agent_reported_cost_present,omitempty"`
-	SessionSource        string  `json:"session_source,omitempty"`
-	SessionResumed       bool    `json:"session_resumed,omitempty"`
-	AgentInstanceID      string  `json:"agent_instance_id,omitempty"`
-	SidecarInstanceID    string  `json:"sidecar_instance_id,omitempty"`
-	UserID               string  `json:"user_id,omitempty"`
-	UserName             string  `json:"user_name,omitempty"`
-	PolicyID             string  `json:"policy_id,omitempty"`
-	DestinationApp       string  `json:"destination_app,omitempty"`
-	ToolName             string  `json:"tool_name,omitempty"`
-	ToolID               string  `json:"tool_id,omitempty"`
+	AgentID              string   `json:"agent_id,omitempty"`
+	AgentName            string   `json:"agent_name,omitempty"`
+	AgentType            string   `json:"agent_type,omitempty"`
+	RootAgentID          string   `json:"root_agent_id,omitempty"`
+	ParentAgentID        string   `json:"parent_agent_id,omitempty"`
+	RootSessionID        string   `json:"root_session_id,omitempty"`
+	ParentSessionID      string   `json:"parent_session_id,omitempty"`
+	AgentLifecycleID     string   `json:"agent_lifecycle_id,omitempty"`
+	AgentExecutionID     string   `json:"agent_execution_id,omitempty"`
+	AgentLifecycleEvent  string   `json:"agent_lifecycle_event,omitempty"`
+	AgentLifecycleState  string   `json:"agent_lifecycle_state,omitempty"`
+	AgentPhase           string   `json:"agent_phase,omitempty"`
+	AgentPreviousPhase   string   `json:"agent_previous_phase,omitempty"`
+	AgentPhaseCode       *int     `json:"agent_phase_code,omitempty"`
+	AgentSequence        int64    `json:"agent_sequence,omitempty"`
+	AgentOperationID     string   `json:"agent_operation_id,omitempty"`
+	AgentDepth           *int     `json:"agent_depth,omitempty"`
+	AgentReportedCostUSD *float64 `json:"agent_reported_cost_usd,omitempty"`
+	AgentReportedCost    bool     `json:"agent_reported_cost_present,omitempty"`
+	SessionSource        string   `json:"session_source,omitempty"`
+	SessionResumed       bool     `json:"session_resumed,omitempty"`
+	AgentInstanceID      string   `json:"agent_instance_id,omitempty"`
+	SidecarInstanceID    string   `json:"sidecar_instance_id,omitempty"`
+	UserID               string   `json:"user_id,omitempty"`
+	UserName             string   `json:"user_name,omitempty"`
+	PolicyID             string   `json:"policy_id,omitempty"`
+	DestinationApp       string   `json:"destination_app,omitempty"`
+	ToolName             string   `json:"tool_name,omitempty"`
+	ToolID               string   `json:"tool_id,omitempty"`
 
 	// Connector is the hook/proxy connector that produced this event
 	// (codex, claudecode, antigravity, openclaw, …). Optional —

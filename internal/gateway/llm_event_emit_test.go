@@ -1236,3 +1236,33 @@ func TestBoundedHookLLMSpanContent(t *testing.T) {
 		t.Fatalf("bounded content length=%d want %d", got, hookLLMSpanMaxContentBytes)
 	}
 }
+
+func TestHookToolInvocationQueuePreservesRepeatedSameToolCalls(t *testing.T) {
+	api := &APIServer{}
+	meta := llmEventMeta{
+		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+	}
+	api.rememberHookToolInvocation(meta, "Bash", `{"command":"first"}`)
+	api.rememberHookToolInvocation(meta, "Bash", `{"command":"second"}`)
+
+	first, ok := api.takeHookToolInvocation(meta, "Bash", "first-result")
+	if !ok || first.arguments != `{"command":"first"}` {
+		t.Fatalf("first queued invocation=%+v ok=%v", first, ok)
+	}
+	second, ok := api.takeHookToolInvocation(meta, "Bash", "second-result")
+	if !ok || second.arguments != `{"command":"second"}` {
+		t.Fatalf("second queued invocation=%+v ok=%v", second, ok)
+	}
+	if len(api.hookToolInvocations) != 0 || len(api.hookToolInvocationOrder) != 0 {
+		t.Fatalf("tool queue not drained: %#v %#v", api.hookToolInvocations, api.hookToolInvocationOrder)
+	}
+}
+
+func TestBeforeToolSelectionHasBoundedToolLifecycle(t *testing.T) {
+	if got := canonicalHookLifecycleEvent("BeforeToolSelection"); got != "tool_start" {
+		t.Fatalf("lifecycle=%q want tool_start", got)
+	}
+	if got := hookLifecyclePhase("BeforeToolSelection", "tool_start", "active"); got != "tool" {
+		t.Fatalf("phase=%q want tool", got)
+	}
+}

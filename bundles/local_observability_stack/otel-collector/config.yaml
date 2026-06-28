@@ -126,6 +126,7 @@ connectors:
       - name: defenseclaw.agent.phase
       - name: defenseclaw.agent.phase.previous
       - name: defenseclaw.agent.phase.code
+      - name: connector
       - name: gen_ai.tool.name
       - name: defenseclaw.destination.app
       - name: gen_ai.provider.name

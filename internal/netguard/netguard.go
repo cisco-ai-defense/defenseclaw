@@ -224,7 +224,12 @@ func ScrubURLString(raw string, extra ...string) string {
 // not need request parameters and arbitrary provider-specific keys may carry
 // credentials.
 func EndpointForDisplay(raw string) string {
-	u, err := url.Parse(raw)
+	hasScheme := strings.Contains(raw, "://")
+	candidate := raw
+	if !hasScheme {
+		candidate = "//" + raw
+	}
+	u, err := url.Parse(candidate)
 	if err != nil || u == nil {
 		return "<unparseable-url>"
 	}
@@ -232,7 +237,11 @@ func EndpointForDisplay(raw string) string {
 	u.RawQuery = ""
 	u.ForceQuery = false
 	u.Fragment = ""
-	return u.String()
+	display := u.String()
+	if !hasScheme {
+		display = strings.TrimPrefix(display, "//")
+	}
+	return display
 }
 
 // SafeDialContext returns a DialContext function suitable for a

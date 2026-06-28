@@ -75,6 +75,12 @@ def _openshell_available(cfg) -> bool:
     binary = getattr(getattr(cfg, "openshell", None), "binary", "")
     if binary and shutil.which(str(binary)):
         return True
+    # ``openshell`` is the historical default launcher name. Older installs
+    # may instead provide the companion ``openshell-sandbox`` executable, so
+    # retain that compatibility fallback only for the default/unset value.
+    # A missing operator-supplied path must not silently select another binary.
+    if binary and str(binary) != "openshell":
+        return False
     return bool(shutil.which("openshell-sandbox"))
 
 

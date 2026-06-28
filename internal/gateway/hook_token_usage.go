@@ -96,6 +96,9 @@ func firstFloat64Present(payload map[string]interface{}, keys ...string) (float6
 }
 
 func valueAtPath(payload map[string]interface{}, key string) (interface{}, bool) {
+	if raw, ok := payload[key]; ok {
+		return raw, true
+	}
 	var current interface{} = payload
 	for _, part := range strings.Split(key, ".") {
 		object, ok := current.(map[string]interface{})
