@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -62,3 +63,49 @@ def test_source_audit_allows_missing_generated_mirror(
 
     assert not any("packaged Grafana dashboard directory is missing" in error for error in source_errors)
     assert any("packaged Grafana dashboard directory is missing" in error for error in ci_errors)
+
+
+def test_static_audit_checks_variable_datasources_and_over_time_stats(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audit = _load_audit_module()
+    dashboard = {
+        "uid": "audit-fixture",
+        "title": "Audit fixture",
+        "description": "Exercises non-panel datasource and PromQL checks.",
+        "templating": {
+            "list": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "wrong-prometheus",
+                    },
+                },
+            ],
+        },
+        "panels": [
+            {
+                "type": "stat",
+                "title": "Range stat",
+                "datasource": {
+                    "type": "prometheus",
+                    "uid": "defenseclaw-prometheus",
+                },
+                "targets": [
+                    {
+                        "expr": "sum(sum_over_time(example_total[5m]))",
+                        "refId": "A",
+                    },
+                ],
+            },
+        ],
+    }
+    (tmp_path / "fixture.json").write_text(json.dumps(dashboard), encoding="utf-8")
+    monkeypatch.setattr(audit, "SOURCE_DIR", tmp_path)
+    monkeypatch.setattr(audit, "PACKAGED_DIR", tmp_path / "missing")
+
+    _dashboards, errors = audit.static_audit()
+
+    assert any("prometheus must use 'defenseclaw-prometheus'" in error for error in errors)
+    assert any("range-aggregate stat targets must be instant" in error for error in errors)

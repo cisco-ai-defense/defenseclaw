@@ -47,8 +47,8 @@ groups:
           summary: "A DefenseClaw subsystem panicked"
           description: |
             RecordPanic fired. Go `recover()` caught a panic; the process
-            may still be alive but the triggering request failed.  Inspect
-            Open Runtime & Reliability → "Panics by subsystem" and inspect
+            may still be alive but the triggering request failed. Inspect
+            Runtime & Reliability → "Panics by subsystem" and
             the correlated Loki error stream.
 
   - name: defenseclaw.slo.alerts

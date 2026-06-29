@@ -521,7 +521,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (scanner) (defenseclaw_scanner_queue_depth)",
+          "expr": "sum by (scanner) (defenseclaw_scanner_queue_depth{scanner=~\"$scanner\"})",
           "legendFormat": "{{scanner}}",
           "refId": "A"
         }

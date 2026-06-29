@@ -147,7 +147,7 @@
       },
       "targets": [
         {
-          "expr": "count(count by (connector, gen_ai_agent_id) (max_over_time(defenseclaw_agent_last_seen_seconds[5m]))) or vector(0)",
+          "expr": "count(count by (connector, gen_ai_agent_id) (max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}[5m]))) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -470,7 +470,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (result) (rate(defenseclaw_ai_discovery_runs_total[$__rate_interval]))",
+          "expr": "sum by (source, cache_hit, result) (rate(defenseclaw_agent_discovery_runs_total[$__rate_interval]))",
           "legendFormat": "{{source}} · cache={{cache_hit}} · {{result}}",
           "refId": "A"
         }
@@ -622,7 +622,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (connector, reason) (increase(defenseclaw_agent_discovery_errors_total[1h]))",
+          "expr": "sum by (connector, reason) (increase(defenseclaw_agent_discovery_errors_total{connector=~\"$connector\"}[1h]))",
           "instant": true,
           "format": "table",
           "refId": "A"

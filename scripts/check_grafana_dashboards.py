@@ -146,6 +146,28 @@ def static_audit(
             if following is None or following.get("type") == "row":
                 errors.append(f"{uid}: empty row {panel.get('title')!r}")
 
+        for section in ("templating", "annotations"):
+            for item in dashboard.get(section, {}).get("list", []):
+                datasource = item.get("datasource")
+                if datasource is None:
+                    continue
+                if not isinstance(datasource, dict):
+                    errors.append(f"{uid}/{section}: datasource must be an object")
+                    continue
+                datasource_type = datasource.get("type")
+                datasource_uid = datasource.get("uid")
+                if datasource_type == "grafana" and datasource_uid == "-- Grafana --":
+                    continue
+                if datasource_type not in DATASOURCES:
+                    errors.append(
+                        f"{uid}/{section}: unsupported datasource {datasource_type!r}",
+                    )
+                    continue
+                if datasource_uid != DATASOURCES[datasource_type]:
+                    errors.append(
+                        f"{uid}/{section}: {datasource_type} must use {DATASOURCES[datasource_type]!r}",
+                    )
+
         for panel in panels(dashboard):
             title = panel.get("title")
             kind = panel.get("type")
@@ -166,7 +188,7 @@ def static_audit(
                 if datasource == "loki" and "| json" in expression and '__error__=""' not in expression:
                     errors.append(f"{uid}/{title}: JSON parsing must discard malformed log lines")
                 range_function = re.search(
-                    r"\b(?:increase|rate|max_over_time|last_over_time)\(",
+                    r"\b(?:increase|i?rate|i?delta|changes|resets|deriv|predict_linear|holt_winters|[A-Za-z_][A-Za-z0-9_]*_over_time)\(",
                     expression,
                 )
                 if datasource == "prometheus" and kind == "stat" and range_function and not target.get("instant"):
