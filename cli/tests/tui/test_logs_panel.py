@@ -183,6 +183,20 @@ def test_logs_selected_structured_row_respects_search_and_preset_filters() -> No
     panel.search_text = "no-such-token"
     assert panel.selected_verdict() is None
 
+    # The structured detail row must use the same connector-filtered index
+    # as the visible table, not the unfiltered structured list.
+    panel.search_text = ""
+    panel.filter_mode = FILTER_NONE
+    panel.lines["verdicts"] = [
+        "VERDICT ALLOW connector=codex clean",
+        "VERDICT ALERT connector=cursor suspicious",
+        "VERDICT BLOCK connector=codex error injection",
+    ]
+    panel.set_connector_filter("cursor")
+    selected = panel.selected_verdict()
+    assert selected is not None
+    assert selected.action == "alert"
+
 
 def test_logs_error_empty_and_cursor_scrolling_states(tmp_path) -> None:
     panel = LogsPanelModel(tmp_path)

@@ -225,6 +225,28 @@ def test_alerts_refresh_ingests_scan_finding_from_gateway_jsonl(tmp_path) -> Non
     assert "line=3" in finding.event.details
 
 
+def test_alerts_refresh_clears_gateway_rows_when_data_dir_is_removed(tmp_path) -> None:
+    (tmp_path / "gateway.jsonl").write_text(
+        (
+            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
+            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
+            '"verdict":"warn","severity_max":"HIGH"}}\n'
+        ),
+        encoding="utf-8",
+    )
+    model = AlertsPanelModel(tmp_path)
+    model.show_all_severities = True
+    model.refresh()
+    assert model.scan_blocks
+
+    model.set_data_dir(None)
+    model.refresh()
+
+    assert model.scan_blocks == []
+    assert model.egress_events == []
+    assert all(row.kind == "audit" for row in model.filtered)
+
+
 def test_alerts_refresh_ingests_gateway_egress_and_filters_warning_as_medium(tmp_path) -> None:
     now = datetime.now(timezone.utc)
     old = now - timedelta(minutes=10)

@@ -291,6 +291,10 @@ class AlertsPanelModel:
                 self.audit_events = audit_events
                 self._invalidate_row_caches()
         if self.data_dir is None:
+            if self.scan_blocks or self.egress_events:
+                self.scan_blocks = []
+                self.egress_events = []
+                self._invalidate_row_caches()
             self.apply_filter()
         else:
             self.refresh_gateway_scans()

@@ -991,7 +991,7 @@ class LogsPanelModel:
         rendered = self.lines[source]
         if len(rendered) != len(rows):
             return []
-        if self.filter_mode == FILTER_NONE and not self.search_text:
+        if self.filter_mode == FILTER_NONE and not self.search_text and not self.connector_filter:
             return list(rows)
         return [row for row, line in zip(rows, rendered, strict=True) if self.line_matches_current_filter(line.lower())]
 
@@ -1175,7 +1175,7 @@ def _short_digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
-def _file_signature(path: Path) -> tuple[int, int, int, int] | None:
+def _file_signature(path: Path) -> tuple[int, int, int, int, int] | None:
     """Return a rotation-safe, nanosecond file identity for polling.
 
     ``None`` deliberately represents missing/unreadable files. The caller
@@ -1187,7 +1187,7 @@ def _file_signature(path: Path) -> tuple[int, int, int, int] | None:
         stat = path.stat()
     except OSError:
         return None
-    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
 def _tail_text_file(path: Path, *, max_bytes: int = 512 * 1024, max_lines: int = 5000) -> tuple[str, ...]:
