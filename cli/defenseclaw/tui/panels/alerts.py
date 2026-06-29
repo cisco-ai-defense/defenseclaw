@@ -267,8 +267,12 @@ class AlertsPanelModel:
         if self.data_dir is None:
             return
         gateway_path = self.data_dir / "gateway.jsonl"
-        scan_blocks = load_gateway_scan_blocks(gateway_path)
-        egress_events = load_gateway_egress(gateway_path)
+        try:
+            scan_blocks = load_gateway_scan_blocks(gateway_path, raise_errors=True)
+            egress_events = load_gateway_egress(gateway_path, raise_errors=True)
+        except OSError:
+            self.apply_filter()
+            return
         if tuple(self.scan_blocks) != scan_blocks or tuple(self.egress_events) != egress_events:
             self.scan_blocks = list(scan_blocks)
             self.egress_events = list(egress_events)

@@ -620,9 +620,14 @@ class LogsPanelModel:
             signature = _file_signature(path)
             if self._refresh_signatures.get(source, _UNSET_SIGNATURE) == signature:
                 continue
-            self._refresh_signatures[source] = signature
-            self._load_file(source, path)
-            changed_sources.add(source)
+            if self._load_file(source, path):
+                self._refresh_signatures[source] = signature
+                changed_sources.add(source)
+            elif signature is None:
+                # A missing file is a stable snapshot; creation changes the
+                # signature and naturally retries. Existing-but-unreadable
+                # files keep the old signature so transient failures retry.
+                self._refresh_signatures[source] = signature
 
         gateway_events_path = self.data_dir / "gateway.jsonl"
         structured_signature = (
@@ -632,7 +637,6 @@ class LogsPanelModel:
             self.verdict_severity,
         )
         if self._refresh_signatures.get("structured", _UNSET_SIGNATURE) != structured_signature:
-            self._refresh_signatures["structured"] = structured_signature
             views = load_gateway_log_views(
                 gateway_events_path,
                 action_filter=self.verdict_action,
@@ -641,11 +645,15 @@ class LogsPanelModel:
             )
             self.error_messages["verdicts"] = views.error
             self.error_messages["otel"] = views.error
-            self.verdict_rows = list(views.verdict_rows)
-            self.otel_rows = list(views.otel_rows)
-            self.lines["verdicts"] = list(views.verdict_lines)
-            self.lines["otel"] = list(views.otel_lines)
-            changed_sources.update(("verdicts", "otel"))
+            if not views.error:
+                self._refresh_signatures["structured"] = structured_signature
+                self.verdict_rows = list(views.verdict_rows)
+                self.otel_rows = list(views.otel_rows)
+                self.lines["verdicts"] = list(views.verdict_lines)
+                self.lines["otel"] = list(views.otel_lines)
+                changed_sources.update(("verdicts", "otel"))
+            elif structured_signature[0] is None:
+                self._refresh_signatures["structured"] = structured_signature
 
         if self.source in changed_sources:
             self._clamp_cursor()
@@ -1037,13 +1045,15 @@ class LogsPanelModel:
         else:
             self._clamp_cursor()
 
-    def _load_file(self, source: LogSource, path: Path) -> None:
+    def _load_file(self, source: LogSource, path: Path) -> bool:
         try:
-            self.lines[source] = list(_tail_text_file(path))
-            self.error_messages[source] = ""
+            lines = list(_tail_text_file(path))
         except OSError as exc:
-            self.lines[source] = []
             self.error_messages[source] = f"Cannot open: {exc}"
+            return False
+        self.lines[source] = lines
+        self.error_messages[source] = ""
+        return True
 
     def _header_text(self) -> str:
         state = "PAUSED" if self.paused else "LIVE"

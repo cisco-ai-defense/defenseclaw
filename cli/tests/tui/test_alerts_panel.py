@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from defenseclaw.tui.panels import alerts as alerts_module
 from defenseclaw.tui.panels.alerts import AlertEvent, AlertFinding, AlertsPanelModel, humanize_alert_details
 from defenseclaw.tui.services.gateway_events import count_recent_silent_bypass, load_gateway_egress
 
@@ -66,6 +67,7 @@ def test_alerts_set_events_owns_the_input_list() -> None:
 
     model.set_events(events)
     events.clear()
+    model.refresh()
 
     assert [event.id for event in model.audit_events] == ["a1"]
     assert [row.event.id for row in model.filtered] == ["a1"]
@@ -258,6 +260,29 @@ def test_alerts_refresh_clears_gateway_rows_when_data_dir_is_removed(tmp_path) -
     assert model.egress_events == []
     assert model.filtered
     assert all(row.kind == "audit" for row in model.filtered)
+
+
+def test_alerts_refresh_keeps_gateway_rows_after_transient_read_failure(tmp_path, monkeypatch) -> None:
+    (tmp_path / "gateway.jsonl").write_text(
+        (
+            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
+            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py"}}\n'
+        ),
+        encoding="utf-8",
+    )
+    model = AlertsPanelModel(tmp_path)
+    model.show_all_severities = True
+    model.refresh_gateway_scans()
+    previous = tuple(model.scan_blocks)
+
+    def fail_load(*_args, **_kwargs):
+        raise OSError("transient gateway read")
+
+    monkeypatch.setattr(alerts_module, "load_gateway_scan_blocks", fail_load)
+    model.refresh_gateway_scans()
+
+    assert tuple(model.scan_blocks) == previous
+    assert any(row.kind == "scan" for row in model.filtered)
 
 
 def test_alerts_refresh_ingests_gateway_egress_and_filters_warning_as_medium(tmp_path) -> None:

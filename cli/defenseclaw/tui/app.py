@@ -7504,7 +7504,7 @@ class DefenseClawTUI(App[None]):
         if self.active_panel == "setup" and self.setup_model.form_active:
             if self.focused is table:
                 self.set_focus(None)
-        elif self.focused is not table:
+        elif self.focused is None:
             table.focus()
 
     def _append_panel_table_row(self, table: DataTable[Any], row: tuple[str, ...]) -> None:

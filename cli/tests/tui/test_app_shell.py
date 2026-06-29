@@ -1387,6 +1387,9 @@ async def test_logs_stream_refresh_applies_sliding_tail_delta() -> None:
         await pilot.pause()
         table = app.query_one("#panel-table", DataTable)
         previous_second_row = list(table.rows.values())[1]
+        logs.set_cursor(50)
+        app._render_chrome()  # noqa: SLF001 - establish a non-default cursor.
+        assert table.cursor_row == 50
         restore_flags: list[bool] = []
         update_delta = app._update_panel_table_delta  # noqa: SLF001
 
@@ -1400,6 +1403,7 @@ async def test_logs_stream_refresh_applies_sliding_tail_delta() -> None:
         app._render_chrome()  # noqa: SLF001 - deterministic stream refresh.
 
         assert restore_flags == [True]
+        assert table.cursor_row == 50
         assert table.row_count == 200
         assert list(table.rows.values())[0] is previous_second_row
         assert str(table.get_cell_at((199, 0))) == "error row=new"

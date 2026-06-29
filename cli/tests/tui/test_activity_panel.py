@@ -112,6 +112,17 @@ def test_gateway_event_loaders_retry_after_transient_read_failure(tmp_path, monk
         assert loader(path)
 
 
+def test_gateway_event_tail_preserves_row_at_exact_window_boundary(tmp_path) -> None:
+    first = b'{"event_type":"activity","activity":{"action":"first"}}\n'
+    second = b'{"event_type":"activity","activity":{"action":"second"}}\n'
+    path = tmp_path / "gateway.jsonl"
+    path.write_bytes(first + second)
+
+    lines = gateway_events._read_tail_event_lines(path, max_bytes=len(second), max_lines=None)
+
+    assert lines == (second.decode().strip(),)
+
+
 def test_gateway_event_scan_rendering_matches_go_smoke() -> None:
     event = parse_gateway_event(
         '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'

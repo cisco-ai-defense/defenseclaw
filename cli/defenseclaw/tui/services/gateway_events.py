@@ -131,7 +131,7 @@ def count_recent_silent_bypass(
     return n
 
 
-def load_gateway_egress(path: Path | str) -> tuple[EgressEvent, ...]:
+def load_gateway_egress(path: Path | str, *, raise_errors: bool = False) -> tuple[EgressEvent, ...]:
     """Read the tail of ``gateway.jsonl`` and return egress rows.
 
     Bounded to the last 512 KiB to match the Go reader's budget; on a
@@ -144,6 +144,8 @@ def load_gateway_egress(path: Path | str) -> tuple[EgressEvent, ...]:
         signature = _gateway_file_signature(p)
         return _load_gateway_egress_cached(str(p), signature)
     except OSError:
+        if raise_errors:
+            raise
         return ()
 
 
@@ -262,13 +264,15 @@ def render_verdict_line(event: GatewayEvent) -> str:
     return str(event.raw)
 
 
-def load_gateway_activity(path: Path) -> tuple[ActivityMutation, ...]:
+def load_gateway_activity(path: Path, *, raise_errors: bool = False) -> tuple[ActivityMutation, ...]:
     """Load activity events from a gateway JSONL file."""
 
     try:
         signature = _gateway_file_signature(path)
         return _load_gateway_activity_cached(str(path), signature)
     except OSError:
+        if raise_errors:
+            raise
         return ()
 
 
@@ -305,13 +309,15 @@ def _load_gateway_activity_cached(
     return tuple(rows)
 
 
-def load_gateway_scan_blocks(path: Path) -> tuple[ScanBlock, ...]:
+def load_gateway_scan_blocks(path: Path, *, raise_errors: bool = False) -> tuple[ScanBlock, ...]:
     """Load scan summary blocks and attached findings from gateway JSONL."""
 
     try:
         signature = _gateway_file_signature(path)
         return _load_gateway_scan_blocks_cached(str(path), signature)
     except OSError:
+        if raise_errors:
+            raise
         return ()
 
 
@@ -405,9 +411,12 @@ def _read_tail_event_lines(
     offset = size - read_size
     with path.open("rb") as fh:
         if offset > 0:
-            fh.seek(offset)
+            fh.seek(offset - 1)
+            starts_mid_line = fh.read(1) != b"\n"
+        else:
+            starts_mid_line = False
         data = fh.read(read_size)
-    if offset > 0:
+    if starts_mid_line:
         _, _, data = data.partition(b"\n")
     lines = data.decode("utf-8", errors="replace").splitlines()
     if max_lines is not None and len(lines) > max_lines:
