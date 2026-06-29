@@ -2526,12 +2526,21 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		agentName := p.agentNameForRequest(r.Header.Get("X-Agent-Name"))
 		agentCtx, agentSpan = p.otel.StartAgentSpan(
 			context.Background(),
-			conversationID, agentName, agentName, p.agentIDForRequest(), "",
+			conversationID, agentName, agentName, p.agentIDForRequest(), "", agentName,
 		)
 	}
 	if agentCtx == nil {
 		agentCtx = context.Background()
 	}
+	agentSpanEnded := false
+	endAgentSpan := func(errMsg string) {
+		if p.otel != nil && agentSpan != nil && !agentSpanEnded {
+			p.otel.EndAgentSpan(agentSpan, errMsg)
+			agentSpanEnded = true
+		}
+	}
+	agentSpanErr := ""
+	defer func() { endAgentSpan(agentSpanErr) }()
 
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
 	userText := lastUserText(req.Messages)
@@ -2590,9 +2599,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			rawTelemetryField{key: "raw_request_body", raw: req.RawBody})
 
 		if verdict.Action == "block" && mode == "action" {
-			if p.otel != nil && agentSpan != nil {
-				p.otel.EndAgentSpan(agentSpan, "guardrail blocked")
-			}
+			endAgentSpan("guardrail blocked")
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
 			if req.Stream {
@@ -2616,11 +2623,13 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 	// --- Forward to upstream provider ---
 	if p.resolveProviderFn == nil {
+		agentSpanErr = "proxy misconfigured"
 		writeOpenAIError(w, http.StatusInternalServerError, "proxy misconfigured: no provider resolver")
 		return
 	}
 	upstream := p.resolveProviderFn(&req)
 	if upstream == nil {
+		agentSpanErr = "unsupported provider"
 		provName, _ := splitModel(req.Model)
 		msg := fmt.Sprintf("provider %q is not supported by DefenseClaw guardrail — traffic blocked", provName)
 		if req.Stream {
@@ -2638,9 +2647,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	// End invoke_agent span after the full request completes.
-	if p.otel != nil && agentSpan != nil {
-		p.otel.EndAgentSpan(agentSpan, "")
-	}
+	endAgentSpan("")
 }
 
 func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, mode, customBlockMsg string, upstream LLMProvider, agentCtx context.Context, promptID string) {
@@ -2666,6 +2673,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			system, aliasModel, providerName,
 			maxTokens, temperature,
 		)
+		p.otel.SetGenAIInput(llmSpan, lastUserText(req.Messages))
 		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.request.body", string(req.RawBody))
 	}
 
@@ -2673,6 +2681,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
+			p.otel.SetGenAIOutput(llmSpan, "")
 			p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 		}
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
@@ -2694,13 +2703,9 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			finishReasons = append(finishReasons, *c.FinishReason)
 		}
 	}
-	if p.otel != nil && llmSpan != nil {
-		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.response.body", string(resp.RawResponse))
-	}
 	responseMeta := proxyLLMEventMeta(p, r, req, providerName)
 	responseMeta.PromptID = promptID
 	responseMeta.ResponseID = firstNonEmpty(resp.ID, stableLLMEventID("response", responseMeta.Source, responseMeta.SessionID, responseMeta.RequestID, req.Model))
-	emitLLMResponseEvent(r.Context(), responseMeta, content, string(resp.RawResponse), finishReasons)
 
 	guardrail := "none"
 	guardrailResult := ""
@@ -2751,6 +2756,8 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 		}
 
 		if verdict.Action == "block" && mode == "action" {
+			finishReasons = append(finishReasons, "blocked")
+			emitLLMResponseEvent(r.Context(), responseMeta, "", "", finishReasons)
 			if p.otel != nil && llmSpan != nil {
 				promptTok, completionTok := 0, 0
 				if resp.Usage != nil {
@@ -2772,6 +2779,8 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil,
 				rawTelemetryField{key: "raw_tool_calls", raw: resp.Choices[0].Message.ToolCalls})
 			if verdict.Action == "block" && mode == "action" {
+				finishReasons = append(finishReasons, "blocked")
+				emitLLMResponseEvent(r.Context(), responseMeta, "", "", finishReasons)
 				if p.otel != nil && llmSpan != nil {
 					promptTok, completionTok := 0, 0
 					if resp.Usage != nil {
@@ -2798,9 +2807,18 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
 		emitOpenAIToolCallEvents(r.Context(), responseMeta, resp.Choices[0].Message.ToolCalls)
 	}
+	emitLLMResponseEvent(r.Context(), responseMeta, content, string(resp.RawResponse), finishReasons)
 
 	// End LLM span with response data.
 	if p.otel != nil && llmSpan != nil {
+		spanOutput := content
+		if strings.TrimSpace(spanOutput) == "" && len(resp.Choices) > 0 && resp.Choices[0].Message != nil && len(resp.Choices[0].Message.ToolCalls) > 0 {
+			if encoded, err := json.Marshal(resp.Choices[0].Message.ToolCalls); err == nil {
+				spanOutput = string(encoded)
+			}
+		}
+		p.otel.SetGenAIOutput(llmSpan, spanOutput)
+		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.response.body", string(resp.RawResponse))
 		promptTok, completionTok := 0, 0
 		if resp.Usage != nil {
 			promptTok = int(resp.Usage.PromptTokens)
@@ -2884,6 +2902,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			system, aliasModel, providerName,
 			maxTokens, temperature,
 		)
+		p.otel.SetGenAIInput(llmSpan, lastUserText(req.Messages))
 		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.request.body", string(req.RawBody))
 	}
 
@@ -3021,7 +3040,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		blockedMeta := proxyLLMEventMeta(p, r, req, providerName)
 		blockedMeta.PromptID = promptID
 		blockedMeta.ResponseID = stableLLMEventID("response", blockedMeta.Source, blockedMeta.SessionID, blockedMeta.RequestID, req.Model, "blocked")
-		emitLLMResponseEvent(r.Context(), blockedMeta, accumulated.String(), accumulated.String(), append(streamFinishReasons, "blocked"))
+		emitLLMResponseEvent(r.Context(), blockedMeta, "", "", append(streamFinishReasons, "blocked"))
 		if p.otel != nil && llmSpan != nil {
 			p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, 0, 0, append(streamFinishReasons, "blocked"), 0, "local", "block", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 		}
@@ -3098,7 +3117,6 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	streamResponseMeta := proxyLLMEventMeta(p, r, req, providerName)
 	streamResponseMeta.PromptID = promptID
 	streamResponseMeta.ResponseID = stableLLMEventID("response", streamResponseMeta.Source, streamResponseMeta.SessionID, streamResponseMeta.RequestID, req.Model)
-	emitLLMResponseEvent(r.Context(), streamResponseMeta, accumulated.String(), accumulated.String(), streamFinishReasons)
 	if len(assembledTC) > 0 {
 		if verdict := p.inspectToolCalls(r.Context(), assembledTC); verdict != nil {
 			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil,
@@ -3119,7 +3137,15 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				flusher.Flush()
 			}
 		}
-		emitOpenAIToolCallEvents(r.Context(), streamResponseMeta, assembledTC)
+		if !tcBlocked {
+			emitOpenAIToolCallEvents(r.Context(), streamResponseMeta, assembledTC)
+		}
+	}
+	if tcBlocked {
+		streamFinishReasons = append(streamFinishReasons, "blocked")
+		emitLLMResponseEvent(r.Context(), streamResponseMeta, "", "", streamFinishReasons)
+	} else {
+		emitLLMResponseEvent(r.Context(), streamResponseMeta, accumulated.String(), accumulated.String(), streamFinishReasons)
 	}
 
 	if p.otel != nil && llmSpan != nil {
@@ -3128,8 +3154,15 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			promptTok = int(usage.PromptTokens)
 			completionTok = int(usage.CompletionTokens)
 		}
-		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.response.content", accumulated.String())
-		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.tool_calls", string(assembledTC))
+		if !tcBlocked {
+			spanOutput := accumulated.String()
+			if strings.TrimSpace(spanOutput) == "" && len(assembledTC) > 0 {
+				spanOutput = string(assembledTC)
+			}
+			p.otel.SetGenAIOutput(llmSpan, spanOutput)
+			p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.response.content", accumulated.String())
+			p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.tool_calls", string(assembledTC))
+		}
 		p.otel.EndLLMSpan(r.Context(), llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest(), SessionIDFromContext(r.Context()))
 	}
 

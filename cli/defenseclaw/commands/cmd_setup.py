@@ -31,6 +31,7 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import click
 
@@ -229,6 +230,13 @@ def setup(
 from defenseclaw.commands.cmd_setup_observability import observability  # noqa: E402
 
 setup.add_command(observability)
+
+# Register the first-class Galileo cloud/self-hosted setup workflow. It writes
+# a named OTel destination through the shared observability writer, so Galileo
+# can coexist with local-observability and every other OTLP backend.
+from defenseclaw.commands.cmd_setup_galileo import galileo  # noqa: E402
+
+setup.add_command(galileo)
 
 # Register `defenseclaw setup local-observability` (bundled
 # Prom/Loki/Tempo/Grafana stack driver). Mirrors the `setup splunk
@@ -9676,22 +9684,26 @@ def _disable_splunk(
     click.echo("  Disabling Splunk integration...")
 
     from defenseclaw.observability import list_destinations, set_destination_enabled
+    dests = list_destinations(app.cfg.data_dir)
 
     if disable_both or o11y_only:
-        # Flip otel.enabled via the observability writer so unmodeled
-        # fields (resource.attributes, etc.) are preserved.
-        try:
-            set_destination_enabled("otel", False, app.cfg.data_dir)
-        except ValueError:
-            # No otel: block — nothing to disable.
-            pass
+        # Disable only Splunk's named OTLP routes. The top-level otel.enabled
+        # flag is now a master switch shared with Galileo, local-observability,
+        # and other destinations, so toggling it here would cause collateral
+        # telemetry loss.
+        for destination in dests:
+            if destination.target != "otel" or destination.preset_id != "splunk-o11y":
+                continue
+            try:
+                set_destination_enabled(destination.name, False, app.cfg.data_dir)
+            except ValueError:
+                pass
         click.echo("    Splunk O11y (OTLP): disabled")
 
     if disable_both or logs_only or enterprise_only:
         # Find splunk_hec audit sinks and flip enabled=false. The legacy
         # Config.splunk dataclass hydrates from the first enabled one, so
         # the gateway will see it as disabled on next load.
-        dests = list_destinations(app.cfg.data_dir)
         disabled_local = False
         disabled_enterprise = False
         for d in dests:
@@ -9783,22 +9795,54 @@ def _print_splunk_status(app: AppContext) -> None:
     otel = app.cfg.otel
     sc = app.cfg.splunk
 
-    if otel.enabled:
-        click.echo("  Splunk Observability Cloud (OTLP):")
-        click.echo("    Status:      enabled")
-        if otel.traces.endpoint:
-            realm = otel.traces.endpoint.replace("ingest.", "").replace(".observability.splunkcloud.com", "")
-            click.echo(f"    Realm:       {realm}")
-        if otel.traces.enabled:
-            click.echo(f"    Traces:      {otel.traces.endpoint}{otel.traces.url_path}")
+    splunk_destinations = [
+        item for item in otel.destinations if item.preset == "splunk-o11y"
+    ]
+    any_route_enabled = False
+    for destination in splunk_destinations:
+        route_enabled = otel.enabled and destination.enabled
+        any_route_enabled = any_route_enabled or route_enabled
+        traces = destination.traces
+        metrics = destination.metrics
+        logs = destination.logs
+        base_endpoint = destination.endpoint
+
+        def signal_endpoint(signal) -> str:
+            return signal.endpoint or base_endpoint
+
+        suffix = f" [{destination.name}]" if len(splunk_destinations) > 1 else ""
+        click.echo(f"  Splunk Observability Cloud (OTLP){suffix}:")
+        click.echo(f"    Status:      {'enabled' if route_enabled else 'disabled'}")
+        realm_endpoint = next(
+            (
+                signal_endpoint(signal)
+                for signal in (traces, metrics, logs)
+                if signal_endpoint(signal)
+            ),
+            "",
+        )
+        if realm_endpoint:
+            parse_target = (
+                realm_endpoint
+                if "://" in realm_endpoint
+                else f"//{realm_endpoint}"
+            )
+            hostname = urlparse(parse_target).hostname or ""
+            realm = hostname.removeprefix("ingest.").removesuffix(
+                ".observability.splunkcloud.com"
+            )
+            if realm:
+                click.echo(f"    Realm:       {realm}")
+        if route_enabled and traces.enabled:
+            click.echo(f"    Traces:      {signal_endpoint(traces)}{traces.url_path}")
         else:
             click.echo("    Traces:      disabled")
-        if otel.metrics.enabled:
-            click.echo(f"    Metrics:     {otel.metrics.endpoint}{otel.metrics.url_path}")
+        if route_enabled and metrics.enabled:
+            click.echo(f"    Metrics:     {signal_endpoint(metrics)}{metrics.url_path}")
         else:
             click.echo("    Metrics:     disabled")
-        if otel.logs.enabled:
-            click.echo(f"    Logs:        {otel.logs.endpoint}{otel.logs.url_path}")
+        if route_enabled and logs.enabled:
+            click.echo(f"    Logs:        {signal_endpoint(logs)}{logs.url_path}")
         else:
             click.echo("    Logs:        disabled")
         dotenv_path = os.path.join(app.cfg.data_dir, ".env")
@@ -9817,7 +9861,7 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo(f"    Sourcetype:  {sc.sourcetype}")
         click.echo()
 
-    if not otel.enabled and not sc.enabled:
+    if not any_route_enabled and not sc.enabled:
         click.echo("  No Splunk integrations are currently enabled.")
         click.echo()
 

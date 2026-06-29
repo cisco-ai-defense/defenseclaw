@@ -135,7 +135,7 @@ def annotate_description(panel: dict) -> None:
     desc = panel.get("description") or ""
     if "covered_by:" in desc:
         # Already annotated by a prior run — replace.
-        desc = re.split(r"\n\ncovered_by:", desc, maxsplit=1)[0]
+        desc = re.split(r"(?:^|\n\n)covered_by:", desc, maxsplit=1)[0]
     panel["description"] = (desc.rstrip() + suffix).strip()
 
 
@@ -244,11 +244,17 @@ def speculative_row(orphans: list[dict], y: int) -> dict:
 def transform(path: pathlib.Path) -> dict:
     raw = json.loads(path.read_text())
 
-    # Drop any prior "Speculative" row from a previous run — we'll rebuild it.
-    raw["panels"] = [
-        p for p in raw["panels"]
-        if not (p.get("type") == "row" and (p.get("title") or "").startswith("Speculative"))
-    ]
+    # Lift children from any prior "Speculative" row before dropping the row
+    # itself. A transform must be idempotent: discarding the wrapper before
+    # recovering its children silently deleted every speculative panel on the
+    # second run.
+    recovered: list[dict] = []
+    for p in raw["panels"]:
+        if p.get("type") == "row" and (p.get("title") or "").startswith("Speculative"):
+            recovered.extend(p.get("panels") or [])
+            continue
+        recovered.append(p)
+    raw["panels"] = recovered
     # Lift any orphans previously collapsed inside a row back to the top
     # level so we re-classify them this run.
     flat: list[dict] = []

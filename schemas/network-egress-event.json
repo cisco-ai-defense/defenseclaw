@@ -15,6 +15,42 @@
       "type": "string",
       "description": "Agent session identifier. Correlates this event with tool_call/tool_result rows for the same session."
     },
+    "connector": {
+      "type": "string",
+      "description": "Hook or proxy connector that observed the call."
+    },
+    "agent_id": {
+      "type": "string",
+      "description": "Stable logical agent identifier."
+    },
+    "root_agent_id": {
+      "type": "string",
+      "description": "Root agent for this multi-agent execution tree."
+    },
+    "parent_agent_id": {
+      "type": "string",
+      "description": "Direct parent agent when this event belongs to a delegated agent."
+    },
+    "root_session_id": {
+      "type": "string",
+      "description": "Root conversation/session for the multi-agent execution tree."
+    },
+    "agent_lifecycle_id": {
+      "type": "string",
+      "description": "Stable lifecycle identifier retained across resumes."
+    },
+    "agent_execution_id": {
+      "type": "string",
+      "description": "One execution attempt within the stable lifecycle."
+    },
+    "user_id": {
+      "type": "string",
+      "description": "User principal associated with the agent lifecycle."
+    },
+    "tool_id": {
+      "type": "string",
+      "description": "Tool call identifier that initiated the network action."
+    },
     "hostname": {
       "type": "string",
       "description": "Destination hostname without port (e.g. 'api.example.com').",

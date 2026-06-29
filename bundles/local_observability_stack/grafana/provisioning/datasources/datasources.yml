@@ -22,7 +22,9 @@ datasources:
     jsonData:
       derivedFields:
         - datasourceUid: defenseclaw-tempo
-          matcherRegex: "trace_id=([a-f0-9]+)"
+          # Gateway OTel logs are JSON ("trace_id":"..."); keep support for
+          # the legacy key=value debug rendering as well.
+          matcherRegex: '(?:"trace_id"\s*:\s*"|trace_id=)([a-f0-9]{32})'
           name: trace_id
           url: "$${__value.raw}"
 

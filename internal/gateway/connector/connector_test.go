@@ -1229,9 +1229,8 @@ func TestClaudeCode_Setup_PatchesSettings(t *testing.T) {
 }
 
 // TestClaudeCode_Setup_RegistersFullEventCoverage verifies the Claude
-// Code hook registration matches the coverage established by PR #140:
-// 27 events across the full Claude Code lifecycle, with the event-type
-// specific matchers Claude Code expects.
+// Code hook registration matches the current documented lifecycle, with the
+// event-type specific matchers Claude Code expects.
 //
 // The earlier 8-event registration missed major surfaces — in particular
 // tool-use events were gated on a hard-coded regex of tool names that
@@ -1266,7 +1265,7 @@ func TestClaudeCode_Setup_RegistersFullEventCoverage(t *testing.T) {
 	// client registration; otherwise we rely on events Claude never fires.
 	wanted := []string{
 		"SessionStart", "InstructionsLoaded", "UserPromptSubmit",
-		"UserPromptExpansion", "PreToolUse", "PermissionRequest",
+		"UserPromptExpansion", "MessageDisplay", "PreToolUse", "PermissionRequest",
 		"PostToolUse", "PostToolUseFailure", "PostToolBatch",
 		"PermissionDenied", "Notification", "SubagentStart", "SubagentStop",
 		"TaskCreated", "TaskCompleted", "Stop", "StopFailure", "TeammateIdle",

@@ -283,7 +283,8 @@ func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
 	}
 	for _, event := range []string{
 		"pre_llm_call", "pre_tool_call", "post_tool_call", "post_llm_call",
-		"on_session_start", "on_session_end", "subagent_stop",
+		"on_session_start", "on_session_end", "on_session_finalize", "on_session_reset",
+		"subagent_start", "subagent_stop",
 	} {
 		if _, ok := hooks[event]; !ok {
 			t.Errorf("hooks block missing lifecycle event %q; got keys %v", event, mapKeys(hooks))

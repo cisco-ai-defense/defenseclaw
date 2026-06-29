@@ -102,6 +102,34 @@ func TestValidator_AcceptsValidVerdict(t *testing.T) {
 	}
 }
 
+func TestValidator_AcceptsHookDecision(t *testing.T) {
+	v := newRepoValidator(t)
+	e := Event{
+		Timestamp:     time.Now().UTC(),
+		EventType:     EventHookDecision,
+		Severity:      SeverityHigh,
+		SchemaVersion: 7,
+		SessionID:     "session-1",
+		AgentID:       "agent-1",
+		Connector:     "codex",
+		HookDecision: &HookDecisionPayload{
+			Connector:  "codex",
+			Event:      "PreToolUse",
+			Result:     "ok",
+			Action:     "block",
+			RawAction:  "block",
+			Severity:   SeverityHigh,
+			Mode:       "action",
+			WouldBlock: false,
+			Enforced:   true,
+			StepIdx:    3,
+		},
+	}
+	if err := v.Validate(e); err != nil {
+		t.Fatalf("valid hook decision rejected: %v", err)
+	}
+}
+
 func TestValidator_AcceptsGuardrailRuntimeActions(t *testing.T) {
 	v := newRepoValidator(t)
 

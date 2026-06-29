@@ -10,6 +10,9 @@ dependencies = [
     "pyyaml==6.0.3",
     "requests==2.33.0",
     "rich>=13.0",
+    # Used by `defenseclaw setup galileo test` to emit a real, minimal OTLP
+    # protobuf canary span without starting the gateway.
+    "opentelemetry-proto>=1.28.0,<2",
     # PyPI's Simple API has returned package-specific 503s for this
     # project while the JSON API and locked file URL remain healthy.
     # Pin the exact audited wheel URL so fresh CI venvs do not depend on

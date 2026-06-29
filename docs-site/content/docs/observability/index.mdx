@@ -49,6 +49,16 @@ You can use any combination of those — they're independent sinks, not exclusiv
     href="/docs/observability/splunk"
     description="defenseclaw setup splunk runs three independent pipelines: --logs (local Splunk in Docker), --enterprise (remote HEC), --o11y (Splunk Observability Cloud)."
   />
+  <Card
+    title="Galileo (Cloud + self-hosted)"
+    href="/docs/observability/galileo"
+    description="First-class traces-only OTLP destination with a guided wizard, canary test, and native coexistence with the local stack."
+  />
+  <Card
+    title="Agent360 drill-down"
+    href="/docs/observability/agent360"
+    description="Visual per-agent guide to lifecycle, models, tools, tokens, cost, security decisions, topology, and Tempo trace drill-down."
+  />
 </Cards>
 
 ## What lands in observability
@@ -88,7 +98,31 @@ The `kind` field is your top-level taxonomy:
 | `proxy.request` / `proxy.response` | Gateway-proxied LLM call |
 | `gateway.lifecycle` | Start / reload / shutdown |
 
-You don't pick the schema in `setup` — you pick the *destinations*. Sinks are configured in `audit_sinks:` of `~/.defenseclaw/config.yaml` and the bundled commands maintain that block for you.
+You don't pick the schema in `setup` — you pick the *destinations*. Process-wide
+traces, metrics, and logs use named `otel.destinations[]`; audit-only forwarding
+uses `audit_sinks[]`. Both live in `~/.defenseclaw/config.yaml`, and the bundled
+commands maintain them without storing credential values there.
+
+## Manage destinations safely
+
+Destination names are identities: a new name adds a route, while an existing
+name updates only that route. Inspect and preview before writing:
+
+```bash
+defenseclaw setup observability list
+defenseclaw setup observability list --json
+defenseclaw setup observability add otlp --name production-tempo \
+  --endpoint collector.example.com:4317 --signals traces --dry-run
+```
+
+The list distinguishes `otel` from `audit_sinks` and shows kind, enabled state,
+signals, preset, and endpoint. The TUI Overview's full-width
+**Observability Destinations · Runtime** panel shows the runtime-loaded version
+of the same inventory, including process/global/connector scope, explicit
+connector suppression, and Galileo schema eligibility plus acknowledged,
+rejected, and failed delivery. It never shows
+headers or credential values. Open **0 Setup → Observability / Galileo** to
+add, update, enable, disable, test, or remove destinations.
 
 ## Audit contracts
 
@@ -158,7 +192,7 @@ The gateway will fan out every event to both rails. Verify with `defenseclaw tui
     Sinks are isolated. A 500 from Splunk HEC does not stop OTLP traces or local JSONL. The gateway emits a `sink_failure` metric and surfaces the error in the TUI, but the agent traffic is never blocked by an observability outage.
   </Accordion>
   <Accordion title="Can I send to my own OTLP collector?">
-    Yes. Edit `otel.endpoint` in `config.yaml` (or pass `--endpoint` to `setup local-observability up`). Anything OTLP gRPC/HTTP compatible — Honeycomb, Datadog, your collector — works without modification.
+    Yes. Use `defenseclaw setup observability add otlp --endpoint ...`, or pass `--endpoint` to `setup local-observability up`. Named entries under `otel.destinations[]` can fan the same telemetry out to multiple OTLP gRPC/HTTP backends. See the [Galileo guide](/docs/observability/galileo) for a local-plus-cloud example.
   </Accordion>
   <Accordion title="Does observability slow the gateway down?">
     The gateway batches and ships out-of-band. Hot-path overhead is a single channel send. The Splunk HEC and OTLP exporters tolerate temporary backpressure with bounded queues.

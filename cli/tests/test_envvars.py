@@ -9,7 +9,6 @@ truthy-value semantics).
 
 from __future__ import annotations
 
-import json
 import os
 import unittest
 from pathlib import Path
@@ -174,10 +173,9 @@ class ActiveSecurityOverridesTests(unittest.TestCase):
         names = [e.name for e in active_security_overrides(env)]
         self.assertIn("DEFENSECLAW_DISABLE_REDACTION", names)
 
-    def test_three_overrides_returns_three(self) -> None:
+    def test_two_overrides_returns_two(self) -> None:
         env = {
             "DEFENSECLAW_DISABLE_REDACTION": "1",
-            "DEFENSECLAW_OTEL_TLS_INSECURE": "true",
             "DEFENSECLAW_CODEX_LOOPBACK_TRUST": "1",
         }
         names = [e.name for e in active_security_overrides(env)]
@@ -186,7 +184,6 @@ class ActiveSecurityOverridesTests(unittest.TestCase):
             sorted(
                 [
                     "DEFENSECLAW_DISABLE_REDACTION",
-                    "DEFENSECLAW_OTEL_TLS_INSECURE",
                     "DEFENSECLAW_CODEX_LOOPBACK_TRUST",
                 ]
             ),

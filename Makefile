@@ -671,6 +671,7 @@ dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-
 dist-cli: _bundle-data
 	@mkdir -p $(DIST_DIR)
 	@rm -rf build cli/*.egg-info
+	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv build --wheel --out-dir $(DIST_DIR)
 
 _bundle-data:

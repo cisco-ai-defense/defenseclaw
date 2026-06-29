@@ -109,6 +109,105 @@ def test_overview_service_cards_agent_detail_and_zero_request_guidance() -> None
     assert not any("gateway port" in notice.message for notice in notices)
 
 
+def test_overview_telemetry_detail_lists_named_destinations() -> None:
+    model = _model()
+    model.set_health(
+        HealthSnapshot(
+            telemetry=SubsystemHealth(
+                state="running",
+                details={
+                    "destination_count": 2,
+                    "destinations": [
+                        {"name": "local-observability", "enabled": True},
+                        {
+                            "name": "galileo",
+                            "enabled": True,
+                            "routing": {
+                                "accepted": 3,
+                                "dropped": 1,
+                                "total": 4,
+                                "accepted_percentage": 75,
+                            },
+                            "delivery": {
+                                "attempted": 3,
+                                "delivered": 3,
+                                "rejected": 0,
+                                "failed": 0,
+                            },
+                        },
+                    ],
+                },
+            )
+        )
+    )
+    cards = {card.key: card for card in model.service_cards()}
+    assert cards["telemetry"].detail == "2 destinations: local-observability, Galileo (100.0% delivered)"
+
+
+def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
+    model = _model()
+    model.set_health(
+        HealthSnapshot(
+            telemetry=SubsystemHealth(
+                state="running",
+                details={
+                    "destinations": [
+                        {
+                            "name": "galileo",
+                            "preset": "galileo",
+                            "enabled": True,
+                            "endpoint": "https://user:secret@api.example.test/otel/traces?api_key=secret",
+                            "signals": "traces",
+                            "headers": {"Galileo-API-Key": "must-not-render"},
+                            "routing": {"accepted": 3, "dropped": 1, "total": 10, "eligibility_percentage": 30},
+                            "delivery": {"attempted": 3, "collector_accepted": 3},
+                        },
+                        {
+                            "name": "local-observability",
+                            "preset": "local-otlp",
+                            "enabled": False,
+                            "endpoint": "127.0.0.1:4317",
+                            "signals": "traces, metrics, logs",
+                        },
+                    ]
+                },
+            ),
+            sinks=SubsystemHealth(
+                state="running",
+                details={
+                    "sinks": [
+                        {
+                            "name": "soc-archive",
+                            "kind": "otlp_logs",
+                            "enabled": True,
+                            "scope": "connector:codex",
+                            "endpoint": "https://user:secret@collector.example.test:4317/provider/token?token=secret",
+                        }
+                    ]
+                },
+            ),
+        )
+    )
+
+    rows = model.observability_destination_rows()
+    assert [(row.name, row.target) for row in rows] == [
+        ("Galileo", "otel"),
+        ("local-observability", "otel"),
+        ("soc-archive", "audit_sinks"),
+    ]
+    assert rows[0].routing == "collector accepted 3/3; pending 0; rejected 0; failed 0"
+    assert rows[0].endpoint == "https://api.example.test/otel/traces"
+    assert rows[0].signals == "traces"
+    assert rows[1].state == "disabled"
+    assert rows[2].signals == "audit-events"
+    assert rows[2].scope == "connector:codex"
+    assert rows[2].endpoint == "https://collector.example.test:4317/…"
+    assert "must-not-render" not in repr(rows)
+    assert "user:secret" not in repr(rows)
+    assert "api_key=secret" not in repr(rows)
+    assert "token=secret" not in repr(rows)
+
+
 def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
     # 8.13: in a multi-connector install the SERVICES "Agent" row collapses to
     # an "N connectors active" roll-up (per-connector detail lives in the
@@ -549,10 +648,7 @@ def test_scanner_overrides_summary_formats_and_stays_empty_by_default() -> None:
     # and the Overview renders nothing until the adapter populates the field.
     assert format_scanner_overrides_summary(()) == ""
     assert OverviewPanelModel(None, version="test").scanner_overrides_summary() == ""
-    assert (
-        OverviewPanelModel(OverviewConfig(claw_mode="codex"), version="test").scanner_overrides_summary()
-        == ""
-    )
+    assert OverviewPanelModel(OverviewConfig(claw_mode="codex"), version="test").scanner_overrides_summary() == ""
 
     overrides = (
         ("secrets", "high", "file", "block"),
@@ -563,9 +659,7 @@ def test_scanner_overrides_summary_formats_and_stays_empty_by_default() -> None:
     assert summary == "secrets: HIGH file=block, install=warn | pii: MEDIUM runtime=allow"
 
     # Surfaced through the panel model once the adapter feeds the field.
-    model = OverviewPanelModel(
-        OverviewConfig(claw_mode="codex", scanner_overrides=overrides), version="test"
-    )
+    model = OverviewPanelModel(OverviewConfig(claw_mode="codex", scanner_overrides=overrides), version="test")
     assert model.scanner_overrides_summary() == summary
 
     # Malformed entries degrade gracefully instead of raising.

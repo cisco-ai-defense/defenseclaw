@@ -1628,6 +1628,7 @@ func TestHandlePassthrough_AuthRejection(t *testing.T) {
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
 	proxy.gatewayToken = "secret-token"
+	proxy.skipAuthForTest = false
 
 	t.Run("missing_auth_rejected", func(t *testing.T) {
 		body := mustJSON(t, map[string]interface{}{

@@ -58,7 +58,7 @@ defenseclaw setup guardrail \
   --restart
 ```
 
-Replace `<name>` with a connector you have wired, such as `codex` or `claudecode`. Setup detects the local stack on `127.0.0.1:4317` and wires the top-level `otel.endpoint` (in `~/.defenseclaw/config.yaml`) to point at it. On a multi-connector host, the OTLP endpoint is shared; use `--connector <name>` only when you also want to reconcile that connector's hook wiring.
+Replace `<name>` with a connector you have wired, such as `codex` or `claudecode`. Setup detects the local stack on `127.0.0.1:4317` and creates or updates the named `local-observability` route in `otel.destinations[]`. On a multi-connector host, that route is shared; use `--connector <name>` only when you also want to reconcile that connector's hook wiring.
 
 </Step>
 

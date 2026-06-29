@@ -100,10 +100,15 @@ three partial ones (SQLite, OTel, JSONL).
 ### 1.3 OpenTelemetry
 
 `internal/telemetry` is a plain OTLP client — gRPC or HTTP, logs +
-metrics + traces, configurable via `otel:` in the config file or the
-standard `OTEL_*` environment variables. There is **no** Splunk-specific
-coupling in the telemetry stack; operators who need a Splunk access
-token put it in `otel.headers` or `OTEL_EXPORTER_OTLP_HEADERS`.
+metrics + traces, configured through named `otel.destinations[]` routes.
+Transport, credentials, and signals are explicit per destination; the
+runtime does not create new outbound routes from `OTEL_EXPORTER_OTLP_*`.
+During upgrade, a legacy flat exporter in `otel.*` or the documented
+`DEFENSECLAW_OTEL_*`/standard OTLP endpoint variables is persisted as a single
+named destination, preserving any destinations already present. The Go loader
+also performs the conversion in memory before validation as a write-free
+fallback, so an interrupted release migration cannot prevent startup or stop
+the legacy route.
 
 ### 1.4 Unified finding pipeline
 
@@ -343,29 +348,172 @@ event shape (`id`, `timestamp`, `action`, `target`, `severity`,
 
 ## 4. OpenTelemetry
 
-Minimal config:
+Named multi-destination config:
 
 ```yaml
 otel:
   enabled: true
-  endpoint: https://otlp.example.com:4318
-  protocol: http          # or grpc
-  headers:
-    X-SF-Token: ${SPLUNK_ACCESS_TOKEN}
-    # any other vendor-specific auth header
-
-  traces:  { enabled: true }
-  metrics: { enabled: true, temporality: delta }
-  logs:    { enabled: true }
-
-  tls:
-    insecure: false
-    ca_cert:  ""
+  traces: { sampler: always_on, sampler_arg: "1.0" }
+  destinations:
+    - name: primary
+      enabled: true
+      endpoint: https://otlp.example.com:4318
+      protocol: http
+      headers:
+        Authorization: ${OTLP_TOKEN}
+      traces:  { enabled: true }
+      metrics: { enabled: true, temporality: delta }
+      logs:    { enabled: true }
+      tls: { insecure: false, ca_cert: "" }
 ```
 
-You can also drive the telemetry stack entirely through standard
-`OTEL_EXPORTER_OTLP_*` env vars — the SDK's defaults apply when the
-config is empty.
+Every destination gets its own span/log batch processor and metric reader, so
+backpressure or a transport failure on one route does not stop the other
+routes. Process-wide resource attributes, sampling, and redaction remain on
+the parent `otel:` block. Sampling is intentionally global: destination-local
+samplers are not supported because the SDK makes its sampling decision before
+fan-out processors run.
+
+The flat single-exporter shape (`otel.endpoint`, `otel.protocol`,
+`otel.headers`, and top-level signal transport/enable fields) is legacy-only
+and is persisted as a named destination by `defenseclaw upgrade`. Preview or
+repair the conversion explicitly with:
+
+```bash
+defenseclaw setup observability migrate-otel       # preview
+defenseclaw setup observability migrate-otel --apply
+```
+
+Setup commands also perform this conversion atomically before adding a named
+route. Migration preserves the old exporter, writes a backup, and removes the
+flat transport fields so subsequent saves cannot recreate them.
+
+Named destination identity is the `name` field. Adding a new name appends an
+independent route; applying a preset with an existing name updates only that
+route. Use `defenseclaw setup observability list [--json]` for the complete
+inventory and `--dry-run` before a write. The text inventory includes target
+(`otel` or `audit_sinks`), kind, enabled state, signals, preset, and endpoint.
+The TUI Overview mirrors the runtime-loaded inventory in a dedicated
+**Observability Destinations · Runtime** panel and shows schema eligibility
+separately from OTLP delivery acknowledgement, rejection, and failure.
+Process/global/connector scope and explicit connector suppression are shown;
+headers and credential values are intentionally omitted.
+
+Migration note: moving from the flat exporter to named destinations
+removes the old `defenseclaw.preset` and `defenseclaw.preset_name` resource
+attributes. Preset identity now lives on each destination because one
+process-wide resource cannot truthfully identify multiple vendors. This is a
+wire-visible metadata change for queries that used those two resource keys.
+
+Galileo is available as a traces-only destination:
+
+```bash
+export GALILEO_API_KEY='...'
+defenseclaw setup local-observability up
+defenseclaw setup galileo --project defenseclaw --logstream production
+defenseclaw setup galileo test
+```
+
+Cloud defaults to `https://api.galileo.ai/otel/traces`; self-hosted setup uses
+`--console-url` derivation or an exact `--trace-endpoint`. The API key is
+referenced as `${GALILEO_API_KEY}` and never stored in `config.yaml`.
+Real-time export is the setup default: each completed model invocation, agent
+invocation, or tool execution is queued immediately with a one-second maximum
+batch delay. `setup galileo test` uses the running gateway/filter/exporter path;
+`setup galileo test --direct` is only for isolating remote connectivity.
+
+For Galileo, DefenseClaw projects LLM spans onto the standard
+`gen_ai.operation.name`, `gen_ai.provider.name`, request/response model,
+usage, conversation, and input/output message attributes. The existing
+`defenseclaw.*` attributes remain the authoritative security overlay. GenAI
+message values use persistent-sink redaction by default, and the Galileo
+destination's generic `span_filter` filters non-GenAI policy/scanner/runtime
+spans that Galileo would otherwise reject; other OTLP destinations still
+receive the complete trace set. Preset names do not control filtering, so
+renaming a destination cannot accidentally disable the projection. The filter
+has schema-pinned branches for `chat`, `invoke_agent`, and `execute_tool`;
+each branch requires the exact attributes declared by its runtime span schema.
+
+At runtime, credential-bearing OTLP routes must use TLS unless their endpoint
+is loopback. This guard also applies to hand-edited YAML and rejects URL
+userinfo before any exporter is created.
+
+Hook connectors deliver prompt, model-completion, and tool lifecycle events
+separately. Each hook delivery gets a short canonical `invoke_agent` anchor;
+the delivery's completed `chat`, `execute_tool`, or lifecycle span is parented
+to that anchor and exported as one independently indexable trace. Reusing one
+trace ID for an hours-long session is deliberately avoided because a backend
+may finalize a trace after its first batch and ignore late child spans.
+`gen_ai.conversation.id` and the stable DefenseClaw agent, root-session,
+lifecycle, and execution attributes correlate the short traces into the same
+Galileo session and Agent360 identity. Connectors with a post-model hook export
+at that event; Codex and Claude Code use Stop as their model-completion
+fallback. Start and completed-operation traces export during long-running
+turns, so an agent does not need to stop before Galileo receives activity.
+Correlation caches are bounded, duplicate completions are suppressed, and all
+content continues to follow persistent-sink redaction.
+
+Hook correlation has three explicit identity layers. `gen_ai.conversation.id`
+is the upstream resumable session; `defenseclaw.agent.lifecycle.id` is stable
+for the same root agent or subagent across gateway restarts; and
+`defenseclaw.agent.execution.id` identifies one start/resume attempt even when
+the gateway process remains running. Child agents carry
+`defenseclaw.agent.parent.id`, `defenseclaw.session.parent.id`, and
+`defenseclaw.agent.depth`. Session source (`startup`, `resume`, `clear`, or
+`compact`) is inherited by later spans and logs in that execution. Every hook
+also emits an explicit correlated `lifecycle` log. Session/subagent terminal
+and compaction hooks emit short transition spans, so terminal state remains
+visible even when the upstream hook reports no assistant text.
+
+Every normalized hook event also carries a canonical execution phase, the
+previous phase, a monotonically increasing per-execution sequence, and a stable
+operation ID. The native `defenseclaw.agent.phase.current` gauge gives Agent360
+a continuous state timeline between scrapes, while
+`defenseclaw.agent.phase.transitions` supplies real directed `from → to` edges.
+The Loki sequence keeps every sub-scrape transition in order. Every hook also
+emits a first-class `hook_decision` event after connector enforcement and
+capability mapping. This separates an enforced `block` from a raw guardrail
+block that became an observe-mode `would_block`, and carries the same
+agent/root/lifecycle/execution/trace/evaluation identifiers as nearby model and
+tool events. Agent360's recovery-path timeline renders those records in
+timestamp order so the next tool call, model retry, decision, or terminal
+lifecycle event is visible without inferring a missing retry.
+
+Agent360's trace table lists completed operation traces (`tool_end`,
+`turn_end`, terminal session/subagent events) **and** enforcement attempts
+whose hook span records `defenseclaw.raw_action` or `defenseclaw.decision` as
+block/confirm/alert. The Trace ID link preserves the selected scope and replaces
+the trace variable directly, so the adjacent Tempo waterfall opens the exact
+operation rather than retaining an empty previous trace value.
+
+Connector-native child IDs are authoritative. Codex, Claude Code, Cursor,
+Copilot, and Hermes expose subagent lifecycle hooks; OpenCode exposes child
+sessions through `parentID`. For connectors that expose delegation only as a
+tool call, DefenseClaw creates a deterministic inferred child lifecycle for
+known agent-spawner tools. Inference is labeled through the normal lifecycle
+fields and never replaces a later native child identity.
+
+Prometheus lifecycle series deliberately aggregate by connector and normalized
+event rather than user, session, or agent ID. Those unbounded identities live
+in logs and traces; token metrics retain agent and conversation dimensions for
+per-agent usage drilldown.
+
+Missing telemetry is never converted to agent content or a synthetic zero.
+The `defenseclaw.telemetry.{input,output,tokens}.reported` attributes state
+whether the connector supplied each field. Galileo may render an omitted
+token metric as zero in its built-in table; the reported flag distinguishes
+that UI default from a genuine provider-reported zero.
+
+The durable contracts are `schemas/otel/runtime-{llm,agent,tool,approval}-span.schema.json`,
+`schemas/otel/agent-lifecycle-event.schema.json`, and
+`schemas/otel/galileo-export-profile.schema.json`. CI emits each runtime
+span shape and fails when its name, kind, required fields, or declared
+attributes drift from those files. Galileo routing volume remains available as
+`defenseclaw.telemetry.destination.spans{destination,outcome,reason}`. `/health`
+also exposes eligibility separately from attempted, delivered, rejected, and
+failed export counts. These counters are batch-level outcomes. The runtime
+canary isolates its trace in a single-use export request and verifies the exact
+trace ID, so concurrent traffic cannot create a false acknowledgement.
 
 ### 4.1 Span naming hierarchy
 
@@ -802,6 +950,7 @@ by Grafana via the file provisioner
 | **Findings (Rule detail)** | `defenseclaw-findings` | Top rules with sparklines, rule_id × time heatmap, last-seen / first-seen tables, top targets, finding-to-verdict correlation, scoped Loki `scan_finding` stream. |
 | **Policy decisions** | `defenseclaw-policy-decisions` | OPA verdicts by `policy_domain` × `policy_verdict`, egress branch / decision split, block-list hits, multi-turn injection trips, schema violation panel. |
 | **Agent identity** | `defenseclaw-agent-identity` | v7 correlation: agent.id × agent.instance_id × sidecar.instance_id counts, identity churn, on-demand discovery latency / errors, continuous AI confidence histograms, per-connector header presence. |
+| **Agent360** | `defenseclaw-agent-360` | Automatic runtime Agent Directory and one-click agent/tree drill-down: durable lifecycle/execution identity, continuous execution-phase timeline, ordered hook sequence, clickable completed-operation Tempo waterfall, directed phase flow, aggregate agent/subagent/model/tool topology, inputs/outputs, reported tokens/cost, websites, and security decisions. |
 | **Scanners (Ops)** | `defenseclaw-scanners` | Scanner ops focus: throughput, queue depth, scan duration p95 + heatmap, errors by `error_type`, quarantine actions, top rules with drill into Findings. |
 | **AI Agent Usage & Detection** | `defenseclaw-ai-discovery` | Continuous AI inventory loop: active signals, scan completions, new / gone signals, detector errors, per-vendor / per-product tables, two-axis Bayesian confidence, scoped traces and logs. |
 | **Reliability** | `defenseclaw-reliability` | Schema violations, gateway errors by subsystem / code, sink health, panics, config errors. |

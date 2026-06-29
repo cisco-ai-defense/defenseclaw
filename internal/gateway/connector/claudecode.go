@@ -459,6 +459,7 @@ var hookGroups = []struct {
 	{"InstructionsLoaded", "*", 30000},
 	{"UserPromptSubmit", "", 30000},
 	{"UserPromptExpansion", "", 30000},
+	{"MessageDisplay", "", 10000},
 	{"PreToolUse", "*", 30000},
 	{"PermissionRequest", "*", 30000},
 	{"PostToolUse", "*", 30000},
