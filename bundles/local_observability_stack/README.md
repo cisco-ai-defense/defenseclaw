@@ -45,21 +45,22 @@ and a `Prometheus-Alerts` Alertmanager-shim that surfaces the rules in
 `prometheus/rules/alerts.yml`) and a tagged dashboard pack under
 **Dashboards → Browse → `defenseclaw`**:
 
-| Dashboard                            | Audience              | What to watch for |
-|--------------------------------------|-----------------------|-------------------|
-| **Overview**                         | on-call landing       | `ALERTS` table, SLO gauges, health stats, Loki tail |
-| **Agent Activity (Live)**            | developers / IR       | cross-agent prompts, model usage, tools, destinations, session correlation |
-| **Security**                         | security eng / IR     | verdict mix, judge latency + errors, redactions, GenAI tokens |
-| **Scanners**                         | platform / scanner devs | scan rate + p95 latency per scanner, findings by severity/rule, quarantine, queue |
-| **Findings detail**                  | security eng / IR     | per-rule incidence, top blocked rules, CVSS distribution, latest finding logs |
-| **HITL (Human-in-the-loop)**         | security / governance | approval queue depth, approval latency p50/p95, deny-rate by user, judge fallback events |
-| **Policy decisions**                 | governance            | OPA decision counters, policy_id/version mix, deny / allow / warn split, log tail |
-| **Connectors (overview)**            | platform              | per-connector RPS, hook invocations, agent-id stickiness, blocked actions |
-| **Connectors (detail)**              | platform / connector dev | drill-down into one connector: latency, hook outcomes, OTLP ingest health |
-| **Agent identity**                   | governance / IR       | agent registry size, sticky `gen_ai.agent.id`, mismatch + churn ratios |
-| **AI Discovery & Confidence engine** | security / governance | active AI signals, scan throughput + latency, signals by category/state/vendor, two-axis Bayesian identity & presence quantiles, component fan-out, detector errors, scan traces (Tempo) and per-signal logs (Loki) |
-| **Runtime & Reliability**            | SRE                   | goroutines, heap, GC, SQLite, hook SLOs, exporter freshness/errors, audit-sink delivery, gateway errors |
-| **Traffic & Traces**                 | perf / integration    | HTTP RPS + 5xx ratio per route, SSE lifecycle, tool calls, LLM bridge / Cisco Inspect latency, Tempo search |
+| Dashboard | Audience | What to watch for |
+|---|---|---|
+| **Overview** | on-call landing | alerts, SLO gauges, guardrail outcomes, findings, and canonical errors |
+| **Agent Activity (Live)** | developers / IR | cross-agent prompts, model usage, tools, destinations, and session correlation |
+| **Agent identity** | governance / IR | logical agents, runtime instances, discovery confidence, and Agent360 links |
+| **Agent360** | developers / SOC | one agent tree's lifecycle, tools, tokens, decisions, recovery, topology, and traces |
+| **AI Agent Usage & Detection** | security / governance | active AI signals, detector health, confidence, vendor/product inventory, and scan traces |
+| **Hook Connectors** | platform | connector traffic, latency, evaluation outcomes, silence, and drift |
+| **Connector Detail** | connector developers | one connector's hook phases, model activity, findings, and recent events |
+| **Guardrail Evaluations** | security / IR | allow/alert/confirm/block funnel, severity, latency, and judge reliability |
+| **Policy decisions** | governance | evaluated tools, observe-mode would-blocks, URL destinations, and policy events |
+| **HITL** | security / governance | hook confirmations plus chat/execution approval outcomes when those modes are active |
+| **Findings** | detection engineers | per-rule incidence, first/last seen, target attribution, and verdict correlation |
+| **Scanners (Ops)** | scanner developers / SRE | rolling scan counts and duration, findings, quarantine, and scanner errors |
+| **Proxy & LLM Guard** | proxy operators | HTTP/tool/admission/LLM telemetry when proxy/router mode is active |
+| **Runtime & Reliability** | SRE | process, SQLite, hook SLOs, exporter health, audit delivery, schema violations, and panics |
 
 All dashboards cross-link via the "Dashboards" dropdown on the Overview,
 and the `ALERTS{alertstate="firing"}` annotation overlay is enabled on

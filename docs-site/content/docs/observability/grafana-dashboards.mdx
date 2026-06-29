@@ -37,9 +37,28 @@ duplicating the same analysis across several boards.
 | **Policy decisions** (`defenseclaw-policy-decisions`) | Which policy or egress branch caused the action? | Policy owner, SOC | Prometheus, Loki | Decision and network-egress analysis, including observe-mode would-block outcomes. |
 | **HITL** (`defenseclaw-hitl`) | Where did a human approval enter the flow, and what was the outcome? | Approver, SOC | Prometheus, Loki | Chat and execution approval funnels plus the corresponding event stream. |
 | **Findings** (`defenseclaw-findings`) | Which rule fired, against what target, and how often? | Detection engineer, SOC | Prometheus, Loki | Rule-level ranking, first/last seen, target attribution, and finding-to-verdict correlation. |
-| **Scanners (Ops)** (`defenseclaw-scanners`) | Are scanners keeping up and producing healthy results? | Detection engineer, SRE | Prometheus | Scanner throughput, duration, errors, and operational finding trends. |
+| **Scanners (Ops)** (`defenseclaw-scanners`) | Are scanner executions healthy and producing expected findings? | Detection engineer, SRE | Prometheus | Sparse-safe rolling scan counts, duration, errors, quarantine actions, and operational finding trends. Queue depth is omitted because scanners currently execute synchronously and do not emit a durable queue series. |
 | **Proxy & LLM Guard** (`defenseclaw-traffic`) | What is happening on proxy/router deployments? | Proxy operator, SRE | Prometheus, Loki, Tempo | HTTP, tool, guardrail, GenAI, and trace telemetry that only exists when proxy/router mode is active. |
 | **Runtime & Reliability** (`defenseclaw-runtime`) | Is the local process, database, exporter, or audit pipeline unhealthy? | SRE, operator | Prometheus, Loki | One truthful operations board for runtime, SQLite, exporter freshness/errors, audit delivery, and gateway errors. |
+
+## Retain, consolidate, and remove decisions
+
+- **Retain the 14 boards above.** Each owns a distinct operator question or a
+  deliberate overview → detail drill-down; none is a renamed duplicate.
+- **Runtime and Reliability stay consolidated.** The former standalone
+  Reliability dashboard duplicated process/exporter panels and has been
+  retired from both fresh installs and upgrades.
+- **Scanners no longer shows queue depth.** Scanner execution is synchronous
+  today and the queue instrument has no producer, so that panel could never
+  truthfully populate. Rolling scan count/duration panels remain because they
+  are backed by emitted counters and histograms.
+- **Proxy & LLM Guard and HITL are conditional, not broken.** Proxy panels need
+  proxy/router mode; chat/execution approval panels need those approval paths.
+  They remain separate because combining them with always-on hook telemetry
+  would obscure which enforcement surface generated the event.
+- **Agent Activity and Agent360 intentionally differ.** Activity answers
+  cross-agent “what is happening now?” questions; Agent360 owns one selected
+  agent/execution, recovery path, topology, and trace waterfall.
 
 The old standalone **Reliability** board was consolidated into **Runtime &
 Reliability**. Panels that merely relabeled goroutines or exporter errors as
@@ -95,11 +114,23 @@ DefenseClaw does not invent telemetry.
 If a global panel is unexpectedly empty while raw events are visible, widen
 the time range first. Historical token totals and model/provider breakdowns
 use range functions, so they continue to render after the gateway process
-stops. Then run:
+stops. Then run the syntax/datasource audit:
 
 ```bash
 python scripts/check_grafana_dashboards.py --live
 ```
+
+For a panel-by-panel data inventory over the last 48 hours, run:
+
+```bash
+python scripts/check_grafana_dashboards.py --inventory --inventory-hours 48
+```
+
+The inventory reports **Data**, **Zero**, **Empty**, **Interactive**, and
+**Error** separately for every dashboard. It uses the representative `codex`
+connector and all agent IDs: connector-detail queries exercise a real
+single-selection value, while trace waterfalls that need an explicit agent or
+trace selection are classified as interactive instead of broken.
 
 The live audit checks Grafana health and asks Prometheus, Loki, and Tempo to
 parse every retained query. Conditional panels may return no rows, but malformed queries, missing

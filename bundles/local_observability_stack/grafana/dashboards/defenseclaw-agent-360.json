@@ -780,6 +780,7 @@
       "id": 15,
       "type": "timeseries",
       "title": "Input/output tokens over time",
+      "description": "Rolling one-hour reported token increments. A fixed window keeps completed model calls visible after their short-lived lifecycle series stop exporting.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -792,14 +793,14 @@
       },
       "targets": [
         {
-          "expr": "sum by (kind) (rate(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"}[$__rate_interval]))",
+          "expr": "sum by (kind) (increase(defenseclaw_agent_token_usage_total{connector=~\"$connector\",$scope_label=~\"$agent\"}[1h]))",
           "legendFormat": "{{kind}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "tps",
+          "unit": "short",
           "custom": {
             "drawStyle": "bars",
             "fillOpacity": 35
@@ -1634,17 +1635,17 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | $scope_label=~\"$agent\" | defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | defenseclaw_agent_execution_id=~\"$execution\" | defenseclaw_gateway_event_type=\"hook_decision\" | json | __error__=\"\" | connector=~\"$connector\" | hook_decision_enforced=\"true\" [$__interval]))",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | $scope_label=~\"$agent\" | defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | defenseclaw_agent_execution_id=~\"$execution\" | defenseclaw_gateway_event_type=\"hook_decision\" | json | __error__=\"\" | connector=~\"$connector\" | hook_decision_enforced=\"true\" [$__interval])) or vector(0)",
           "legendFormat": "enforced block",
           "refId": "A"
         },
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | $scope_label=~\"$agent\" | defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | defenseclaw_agent_execution_id=~\"$execution\" | defenseclaw_gateway_event_type=\"hook_decision\" | json | __error__=\"\" | connector=~\"$connector\" | hook_decision_would_block=\"true\" [$__interval]))",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | $scope_label=~\"$agent\" | defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | defenseclaw_agent_execution_id=~\"$execution\" | defenseclaw_gateway_event_type=\"hook_decision\" | json | __error__=\"\" | connector=~\"$connector\" | hook_decision_would_block=\"true\" [$__interval])) or vector(0)",
           "legendFormat": "would block",
           "refId": "B"
         },
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | $scope_label=~\"$agent\" | defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | defenseclaw_agent_execution_id=~\"$execution\" | defenseclaw_gateway_event_type=\"hook_decision\" | json | __error__=\"\" | connector=~\"$connector\" | hook_decision_action=~\"alert|confirm\" [$__interval]))",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | $scope_label=~\"$agent\" | defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | defenseclaw_agent_execution_id=~\"$execution\" | defenseclaw_gateway_event_type=\"hook_decision\" | json | __error__=\"\" | connector=~\"$connector\" | hook_decision_action=~\"alert|confirm\" [$__interval])) or vector(0)",
           "legendFormat": "alert or approval",
           "refId": "C"
         }

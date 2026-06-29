@@ -529,8 +529,8 @@
     },
     {
       "type": "timeseries",
-      "title": "SQLite busy retries",
-      "description": "Audit-store operations retried because SQLite reported a busy database. Sustained activity indicates write contention.",
+      "title": "SQLite busy retries/hour",
+      "description": "Rolling one-hour audit-store retries caused by SQLite contention. Zero is healthy; sustained activity indicates write contention.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -543,14 +543,14 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_sqlite_busy_retries_total[$__rate_interval]))",
+          "expr": "sum(increase(defenseclaw_sqlite_busy_retries_total[1h])) or vector(0)",
           "legendFormat": "busy retries",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "cps"
+          "unit": "short"
         }
       }
     },
@@ -593,7 +593,8 @@
     },
     {
       "type": "timeseries",
-      "title": "OTLP exporter errors by signal",
+      "title": "OTLP exporter errors/hour by signal",
+      "description": "Rolling one-hour exporter failures. Zero is healthy; the wider window preserves sparse failures that a short rate window would hide.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -606,7 +607,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (exporter, signal) (rate(defenseclaw_telemetry_exporter_errors_total[$__rate_interval]))",
+          "expr": "sum by (exporter, signal) (increase(defenseclaw_telemetry_exporter_errors_total[1h])) or on() vector(0)",
           "legendFormat": "{{exporter}} · {{signal}}",
           "refId": "A"
         }
@@ -747,8 +748,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Schema violations by event type / code",
-      "description": "Gateway events rejected by the runtime JSON-schema gate. Any sustained non-zero rate is an observability-contract failure.",
+      "title": "Schema violations/hour by event type / code",
+      "description": "Rolling one-hour gateway events rejected by the runtime JSON-schema gate. Zero is healthy; any non-zero value is an observability-contract failure.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -761,21 +762,21 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_type, code) (rate(defenseclaw_schema_violations_total[$__rate_interval]))",
+          "expr": "sum by (event_type, code) (increase(defenseclaw_schema_violations_total[1h])) or on() vector(0)",
           "legendFormat": "{{event_type}} · {{code}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "cps"
+          "unit": "short"
         }
       }
     },
     {
       "type": "timeseries",
-      "title": "Panics by subsystem",
-      "description": "Panics recovered by DefenseClaw boundaries. The triggering request may have failed even when the process remained alive.",
+      "title": "Panics/hour by subsystem",
+      "description": "Rolling one-hour panics recovered by DefenseClaw boundaries. Zero is healthy; the triggering request may have failed even when the process remained alive.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -788,14 +789,14 @@
       },
       "targets": [
         {
-          "expr": "sum by (subsystem) (rate(defenseclaw_panics_total[$__rate_interval]))",
+          "expr": "sum by (subsystem) (increase(defenseclaw_panics_total[1h])) or on() vector(0)",
           "legendFormat": "{{subsystem}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "cps"
+          "unit": "short"
         }
       }
     }

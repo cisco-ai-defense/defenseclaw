@@ -1296,13 +1296,13 @@
     },
     {
       "type": "logs",
-      "title": "Shadow block detail (full payload + policy reason)",
+      "title": "Shadow block decision detail",
       "id": 20,
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
       },
-      "description": "Every would-be block with connector, phase, severity and policy reason. Expand a line for the full structured payload + the exact command.",
+      "description": "Connector-facing hook decisions where would_block=true. The bounded decision metadata is shown without re-emitting the raw command payload.",
       "gridPos": {
         "x": 0,
         "y": 31,
@@ -1316,7 +1316,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} |= \"\\\"would_block\\\":true\" | json | __error__=\"\" | line_format \"{{.gen_ai_agent_name}} | {{.defenseclaw_gateway_event_type}} | sev={{.severity}} | {{.reason}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"hook_decision\" | defenseclaw_hook_would_block=\"true\" | line_format \"{{.gen_ai_agent_name}} | {{.defenseclaw_hook_event}} | severity={{.severity_text}} | raw={{.defenseclaw_hook_raw_action}} effective={{.defenseclaw_hook_action}} | {{.defenseclaw_hook_reason}}\"",
           "queryType": "range"
         }
       ],
@@ -2358,7 +2358,7 @@
         "type": "loki",
         "uid": "defenseclaw-loki"
       },
-      "description": "Would-be blocks within the selected session.",
+      "description": "Canonical hook_decision records with would_block=true in the selected session. Zero means no advisory block occurred.",
       "gridPos": {
         "x": 16,
         "y": 155,
@@ -2372,7 +2372,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | (gen_ai_conversation_id=~\"$session\" or defenseclaw_session_parent_id=~\"$session\") |= \"\\\"would_block\\\":true\" [$__range]))",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | (gen_ai_conversation_id=~\"$session\" or defenseclaw_session_parent_id=~\"$session\") | defenseclaw_gateway_event_type=\"hook_decision\" | defenseclaw_hook_would_block=\"true\" [$__range])) or vector(0)",
           "queryType": "instant"
         }
       ],

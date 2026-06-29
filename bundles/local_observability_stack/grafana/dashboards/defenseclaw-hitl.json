@@ -447,7 +447,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (severity) (rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum by (severity) (rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{severity}}",
           "refId": "A"
         }
@@ -747,7 +747,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action=~\"allow|block|confirm\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action=~\"allow|block|confirm\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{action}}",
           "refId": "A"
         }
@@ -780,7 +780,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (would_block) (rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum by (would_block) (rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "would_block={{would_block}}",
           "refId": "A"
         }

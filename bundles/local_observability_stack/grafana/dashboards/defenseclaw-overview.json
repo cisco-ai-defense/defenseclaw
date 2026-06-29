@@ -878,7 +878,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert|block\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert|block\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{alert_type}} [{{alert_severity}}]",
           "refId": "A"
         }

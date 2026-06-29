@@ -661,7 +661,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{alert_type}} [{{alert_severity}}]",
           "refId": "A"
         }
@@ -848,8 +848,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Judge errors by reason",
-      "description": "LLM judge provider and parse errors, grouped by bounded judge kind and reason labels.",
+      "title": "Judge errors/hour by reason",
+      "description": "Rolling one-hour LLM judge provider and parse errors, grouped by bounded judge kind and reason labels. Zero is healthy.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -862,14 +862,14 @@
       },
       "targets": [
         {
-          "expr": "sum by (judge_kind, judge_reason) (rate(defenseclaw_gateway_judge_errors_total[$__rate_interval]))",
+          "expr": "sum by (judge_kind, judge_reason) (increase(defenseclaw_gateway_judge_errors_total[1h])) or on() vector(0)",
           "legendFormat": "{{judge_kind}} · {{judge_reason}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "cps"
+          "unit": "short"
         }
       }
     },

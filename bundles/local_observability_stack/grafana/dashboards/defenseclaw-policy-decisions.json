@@ -572,7 +572,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (connector) (rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum by (connector) (rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{connector}}",
           "refId": "A",
           "datasource": {
@@ -712,7 +712,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval])) or vector(0)",
+          "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{error_subsystem}} · {{error_code}}",
           "refId": "A"
         }

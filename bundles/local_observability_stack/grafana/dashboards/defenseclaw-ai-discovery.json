@@ -571,7 +571,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "cps",
+          "unit": "short",
           "custom": {
             "stacking": {
               "mode": "normal"
@@ -661,7 +661,7 @@
     {
       "type": "timeseries",
       "title": "Signals by category",
-      "description": "Stacked discovery signal rate by signal.category (cli, ide_extension, sdk, mcp_server, runtime, browser_extension, shell_history). Sourced from counter `defenseclaw.ai.discovery.signals` — increments per signal per scan.",
+      "description": "Discovery observations by signal.category across the selected range. Per-sidecar cumulative counter maxima preserve sparse runs that may export only once.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -681,7 +681,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "cps",
+          "unit": "short",
           "custom": {
             "stacking": {
               "mode": "normal"
@@ -694,7 +694,7 @@
     {
       "type": "timeseries",
       "title": "Signals by state",
-      "description": "Lifecycle of discovered signals over time: `new` (first appearance), `changed` (fingerprint shifted), `seen` (re-confirmed unchanged), `gone` (dropped on a full scan). A flat 'seen' baseline with sporadic 'new' spikes is the healthy shape.",
+      "description": "Discovery observations by lifecycle state across the selected range: `new`, `changed`, `seen`, and `gone`.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -726,8 +726,8 @@
     },
     {
       "type": "table",
-      "title": "Top vendor / product (1h)",
-      "description": "Hottest (vendor, product, category) tuples ranked by signal volume in the last hour. Use this to answer 'which AI tools are people using right now?'. Confidence column is the bucket label emitted by the engine (very_low | low | medium | high | very_high).",
+      "title": "Top vendor / product (selected range)",
+      "description": "Vendor, product, and category tuples ranked by discovery observations in the selected range.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -768,7 +768,7 @@
               "ai_vendor": "vendor",
               "ai_product": "product",
               "signal_category": "category",
-              "Value": "signals/1h"
+              "Value": "signals (selected range)"
             }
           }
         }
@@ -783,8 +783,8 @@
     },
     {
       "type": "bargauge",
-      "title": "Signals by detector (1h)",
-      "description": "Which detector contributed the most signals in the last hour (label `detector`). Imbalance here is normal — `process` always dominates on developer hosts because it polls the proc table — but a detector that's flat-line zero is a regression to investigate.",
+      "title": "Signals by detector (selected range)",
+      "description": "Detector contribution across the selected range. Imbalance is expected, but a configured detector that remains absent is worth investigating.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -917,8 +917,8 @@
     },
     {
       "type": "table",
-      "title": "Top signals by vendor / product",
-      "description": "Distinct install evidences per (ecosystem, name) component as of the last scan (gauge `defenseclaw.ai.components.installs`). Together with workspaces below, lets you say 'we found openai==1.40.0 in 6 manifests across 3 workspaces' without leaving Grafana. Series are summed across scrape jobs so the same component never appears twice when both the OTel collector's prometheus exporter and the sidecar push pipeline are scraped.",
+      "title": "Top 20 discovered component installs",
+      "description": "The 20 largest most-recent install counts per ecosystem and component name from `defenseclaw.ai.components.installs`, deduplicated across exporter series in the selected range.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -931,7 +931,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, max by (ai_vendor, ai_product, signal_category) (max_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
+          "expr": "topk(20, max by (ecosystem, name) (last_over_time(defenseclaw_ai_components_installs[$__range])))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -966,10 +966,9 @@
               "framework": true
             },
             "indexByName": {
-              "ai_vendor": 0,
-              "ai_product": 1,
-              "signal_category": 2,
-              "Value": 3
+              "ecosystem": 0,
+              "name": 1,
+              "Value": 2
             },
             "renameByName": {
               "Value": "installs"
@@ -988,7 +987,7 @@
     {
       "type": "table",
       "title": "Active signals by source",
-      "description": "Distinct workspaces a component appears in as of the last scan (gauge `defenseclaw.ai.components.workspaces`). High fan-out + low identity_band ('low' / 'very_low') is the classic shape of a typo-squatted package — drill into the Loki signal log to confirm. Series are deduplicated by (ecosystem, name) so the same component doesn't double-count when scraped from multiple pipelines.",
+      "description": "Current active discovery-signal gauge grouped by source and privacy mode. This is current presence, while the panels above summarize observations over the selected range.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1168,8 +1167,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Detector errors by reason",
-      "description": "Detector errors broken down by `detector` and `reason` (counter `defenseclaw.ai.discovery.errors`). 'partial' on every run means one detector is consistently failing — the detector label points at it.",
+      "title": "Detector errors/hour by reason",
+      "description": "Rolling one-hour detector errors grouped by detector and bounded reason. Zero is healthy; repeated errors identify a consistently failing detector.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1182,14 +1181,14 @@
       },
       "targets": [
         {
-          "expr": "sum by (detector, reason) (rate(defenseclaw_ai_discovery_errors_total[$__rate_interval]))",
+          "expr": "sum by (detector, reason) (increase(defenseclaw_ai_discovery_errors_total[1h])) or on() vector(0)",
           "legendFormat": "{{detector}} · {{reason}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "cps"
+          "unit": "short"
         }
       }
     },

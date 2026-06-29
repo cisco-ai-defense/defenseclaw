@@ -1027,7 +1027,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_type, result) (increase(defenseclaw_connector_hook_invocations_total{connector=\"codex\"}[$__range])) or vector(0)",
+          "expr": "sum by (event_type, result) (increase(defenseclaw_connector_hook_invocations_total{connector=\"codex\"}[$__range])) or on() vector(0)",
           "instant": true,
           "format": "table",
           "refId": "A"

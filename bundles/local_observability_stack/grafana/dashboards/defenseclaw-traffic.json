@@ -499,7 +499,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{action}}",
           "refId": "A"
         }

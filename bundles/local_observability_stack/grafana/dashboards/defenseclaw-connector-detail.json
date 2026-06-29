@@ -605,7 +605,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (severity) (rate(defenseclaw_connector_hook_outcome_total{connector=\"$connector\", severity!=\"NONE\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum by (severity) (rate(defenseclaw_connector_hook_outcome_total{connector=\"$connector\", severity!=\"NONE\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{severity}}",
           "refId": "A"
         }

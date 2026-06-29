@@ -665,7 +665,7 @@
     {
       "type": "timeseries",
       "title": "AI signals by category",
-      "description": "supported_connector / ai_cli / ai_lib / ai_extension / etc. — the bounded taxonomy continuous AI discovery emits.",
+      "description": "Observed signals by the bounded continuous-discovery taxonomy. Per-sidecar cumulative counter maxima are summed across the selected range so a one-export discovery run is not undercounted.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -678,14 +678,14 @@
       },
       "targets": [
         {
-          "expr": "sum by (signal_category) (rate(defenseclaw_ai_discovery_signals_total[$__rate_interval]))",
+          "expr": "sum by (signal_category) (max_over_time(defenseclaw_ai_discovery_signals_total[$__range]))",
           "legendFormat": "{{signal_category}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "cps"
+          "unit": "short"
         }
       }
     },

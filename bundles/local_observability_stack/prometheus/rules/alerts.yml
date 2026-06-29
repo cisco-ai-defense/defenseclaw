@@ -182,7 +182,7 @@ groups:
           description: |
             Guardrail judge is erroring on >10% of calls. We fall back to
             heuristics, so guardrail quality is degraded. Open Guardrail
-            Evaluations → "Judge errors by reason".
+            Evaluations → "Judge errors/hour by reason".
 
       - alert: DefenseClawWebhookFailuresSustained
         expr: |
@@ -256,7 +256,7 @@ groups:
           summary: "SQLite busy retries sustained"
           description: |
             The audit store is being contended. Long term this hurts the
-            block SLO. Open Runtime & Reliability → "SQLite busy retries".
+            block SLO. Open Runtime & Reliability → "SQLite busy retries/hour".
 
       - alert: DefenseClawConfigLoadErrors
         expr: increase(defenseclaw_config_load_errors_total[5m]) > 0
