@@ -25,6 +25,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import yaml
 from defenseclaw.migrations import (
     _LEGACY_FLAT_REGO_FILENAMES,
     MigrationContext,
@@ -36,6 +37,7 @@ from defenseclaw.migrations import (
     _migrate_0_5_0,
     _migrate_0_5_0_strip_codex_enforcement_keys,
     _migrate_0_8_0,
+    _migrate_config_v7_named_otel_destinations,
     _parse_dotenv,
     _read_active_connector_from_yaml,
     run_migrations,
@@ -1773,6 +1775,145 @@ class TestMigrate080Compatibility(unittest.TestCase):
         self.assertIn("      insecure_skip_verify: true\n", after)
         cursor = _read_json(os.path.join(self.data_dir, ".migration_state.json"))
         self.assertIn("0.7.0", cursor["applied"])
+        self.assertIn("0.8.0", cursor["applied"])
+
+    def test_upgrade_persists_flat_otel_and_preserves_named_routes(self):
+        self._write(
+            "config_version: 6\n"
+            "otel:\n"
+            "  enabled: true\n"
+            "  protocol: grpc\n"
+            "  endpoint: 127.0.0.1:4317\n"
+            "  headers: {X-Legacy-Tenant: preserved}\n"
+            "  tls: {insecure: true}\n"
+            "  batch: {scheduled_delay_ms: 250}\n"
+            "  traces: {enabled: true, sampler: always_on}\n"
+            "  metrics: {enabled: true}\n"
+            "  logs: {enabled: true, emit_individual_findings: true}\n"
+            "  destinations:\n"
+            "    - name: galileo\n"
+            "      preset: galileo\n"
+            "      enabled: true\n"
+            "      protocol: http/protobuf\n"
+            "      endpoint: https://api.galileo.ai/otel/traces\n"
+            "      traces: {enabled: true}\n"
+            "      metrics: {enabled: false}\n"
+            "      logs: {enabled: false}\n"
+        )
+
+        ctx = self._ctx()
+        self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+
+        with open(self.cfg_path) as handle:
+            doc = yaml.safe_load(handle) or {}
+        self.assertEqual(doc["config_version"], 7)
+        otel = doc["otel"]
+        self.assertEqual(
+            [destination["name"] for destination in otel["destinations"]],
+            ["local-observability", "galileo"],
+        )
+        migrated = otel["destinations"][0]
+        self.assertEqual(migrated["preset"], "local-otlp")
+        self.assertEqual(migrated["endpoint"], "127.0.0.1:4317")
+        self.assertEqual(migrated["headers"], {"X-Legacy-Tenant": "preserved"})
+        self.assertEqual(migrated["tls"], {"insecure": True})
+        self.assertEqual(migrated["batch"], {"scheduled_delay_ms": 250})
+        self.assertTrue(migrated["traces"]["enabled"])
+        self.assertTrue(migrated["metrics"]["enabled"])
+        self.assertTrue(migrated["logs"]["enabled"])
+        self.assertEqual(otel["traces"], {"sampler": "always_on"})
+        self.assertEqual(otel["logs"], {"emit_individual_findings": True})
+        self.assertNotIn("endpoint", otel)
+        self.assertNotIn("protocol", otel)
+        self.assertTrue(
+            os.path.isfile(self.cfg_path + ".pre-observability-migration.bak")
+        )
+        self.assertTrue(any("named otel.destinations" in change for change in ctx.changes))
+
+        # The config migration can be reapplied safely. It must not
+        # duplicate either the converted local route or the existing vendor
+        # route, and it must leave the already-canonical file byte-identical.
+        after = self._read()
+        second = self._ctx()
+        self.assertFalse(_migrate_config_v7_named_otel_destinations(second))
+        self.assertEqual(self._read(), after)
+        self.assertFalse(any("named otel.destinations" in change for change in second.changes))
+
+    def test_upgrade_persists_environment_backed_signal_exporter(self):
+        self._write("config_version: 6\notel:\n  enabled: true\n")
+        environment = {
+            "DEFENSECLAW_OTEL_TRACES_ENDPOINT": "http://127.0.0.1:4318/v1/traces",
+            "DEFENSECLAW_OTEL_TRACES_PROTOCOL": "http/protobuf",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            ctx = self._ctx()
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+
+        with open(self.cfg_path) as handle:
+            destination = (yaml.safe_load(handle) or {})["otel"]["destinations"][0]
+        self.assertEqual(destination["name"], "generic-otlp")
+        self.assertEqual(
+            destination["traces"],
+            {
+                "endpoint": "http://127.0.0.1:4318/v1/traces",
+                "protocol": "http/protobuf",
+                "enabled": True,
+            },
+        )
+        self.assertIsNot(destination["metrics"].get("enabled"), True)
+        self.assertIsNot(destination["logs"].get("enabled"), True)
+        self.assertTrue(any("named otel.destinations" in change for change in ctx.changes))
+
+    def test_upgrade_reloads_stale_observability_writer_from_legacy_client(self):
+        self._write(
+            "config_version: 6\n"
+            "otel:\n"
+            "  enabled: true\n"
+            "  endpoint: 127.0.0.1:4317\n"
+        )
+        from defenseclaw.observability import writer
+
+        original = writer.migrate_flat_otel
+        try:
+            delattr(writer, "migrate_flat_otel")
+            ctx = self._ctx()
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+            self.assertTrue(callable(writer.migrate_flat_otel))
+            with open(self.cfg_path) as handle:
+                doc = yaml.safe_load(handle) or {}
+            self.assertEqual(doc["config_version"], 7)
+            self.assertEqual(
+                doc["otel"]["destinations"][0]["name"],
+                "local-observability",
+            )
+        finally:
+            # The migration reload normally restores this itself. Keep the
+            # finally guard so a failing assertion cannot poison later tests.
+            if not hasattr(writer, "migrate_flat_otel"):
+                writer.migrate_flat_otel = original
+
+    def test_already_applied_080_cursor_still_runs_config_v7_migration(self):
+        self._write(
+            "config_version: 6\n"
+            "otel:\n"
+            "  enabled: true\n"
+            "  endpoint: 127.0.0.1:4317\n"
+        )
+
+        # Bootstrapping from a published 0.8.x marks the release-owned 0.8.0
+        # migration as already applied. The config-shape migration must still
+        # run so existing 0.8.x hosts are not stranded on the flat schema.
+        count = run_migrations("0.8.2", "0.8.3", self.tmp, self.data_dir)
+
+        self.assertEqual(count, 1)
+        with open(self.cfg_path) as handle:
+            doc = yaml.safe_load(handle) or {}
+        self.assertEqual(doc["config_version"], 7)
+        self.assertEqual(
+            doc["otel"]["destinations"][0]["name"],
+            "local-observability",
+        )
+        cursor = _read_json(os.path.join(self.data_dir, ".migration_state.json"))
         self.assertIn("0.8.0", cursor["applied"])
 
     def test_no_op_when_audit_sinks_absent(self):

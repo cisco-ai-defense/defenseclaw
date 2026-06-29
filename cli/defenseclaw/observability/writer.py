@@ -73,6 +73,12 @@ _SINK_KIND_HTTP_JSONL = "http_jsonl"
 # ``enable``/``disable``/``remove`` commands have a clean arg surface.
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
+# Go's configuration schema version that introduced named OTel destinations.
+# Only an explicitly stamped v6 file is advanced after the durable rewrite;
+# missing/older stamps must remain untouched so the Go loader can still apply
+# its unrelated v1-v6 in-memory compatibility migrations.
+_NAMED_OTEL_CONFIG_VERSION = 7
+
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -197,6 +203,8 @@ def apply_preset(
                 dest_name=dest_name,
                 warnings=warnings,
             )
+            if any(warning.startswith("migrated flat OTel exporter") for warning in warnings):
+                _advance_named_otel_config_version(raw)
         else:
             _apply_audit_sink_preset(
                 raw,
@@ -314,6 +322,7 @@ def migrate_flat_otel(data_dir: str, *, dry_run: bool = True) -> WriteResult:
                 warnings=[],
                 dry_run=dry_run,
             )
+        _advance_named_otel_config_version(raw)
         destination = (raw.get("otel") or {}).get("destinations", [{}])[0]
         name = str(destination.get("name", "generic-otlp"))
         if not dry_run:
@@ -470,6 +479,25 @@ def _load_yaml(path: str) -> dict[str, Any]:
 
 def _write_yaml(path: str, data: dict[str, Any]) -> None:
     write_config_yaml_secure(path, data)
+
+
+def _advance_named_otel_config_version(raw: dict[str, Any]) -> None:
+    """Advance only the exact v6 -> v7 schema transition.
+
+    An absent stamp is historically equivalent to a much older config, not
+    necessarily v6. Advancing it directly to v7 would make the Go loader skip
+    unrelated LLM and connector migrations, so those files deliberately keep
+    their original stamp while receiving the named OTel shape.
+    """
+    version = raw.get("config_version")
+    if isinstance(version, bool):
+        return
+    try:
+        parsed = int(version)
+    except (TypeError, ValueError):
+        return
+    if parsed == _NAMED_OTEL_CONFIG_VERSION - 1:
+        raw["config_version"] = _NAMED_OTEL_CONFIG_VERSION
 
 
 # ---------------------------------------------------------------------------

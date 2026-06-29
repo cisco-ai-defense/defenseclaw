@@ -322,13 +322,23 @@ headers or credentials.
 
 ## Migrating a flat `otel:` configuration
 
-The runtime accepts named destinations only. Preview and apply the one-way
-conversion before restart:
+`defenseclaw upgrade` automatically persists the legacy flat exporter as one
+named destination and preserves every named destination already present. The
+gateway also performs the same conversion in memory before validation, so an
+interrupted migration does not stop telemetry or prevent startup.
+
+Use the explicit command to preview the conversion, repair an installation
+that replaced binaries without running `defenseclaw upgrade`, or force the
+write before a planned restart:
 
 ```bash
 defenseclaw setup observability migrate-otel
 defenseclaw setup observability migrate-otel --apply
 ```
 
-The migration preserves endpoint, headers, TLS settings, enabled signals, and
-batch settings, writes a backup, then removes the flat transport fields.
+The migration preserves global and signal-specific endpoints/protocols,
+headers, TLS settings, enabled signals, batch settings, process-wide sampling,
+and any existing named destinations. It writes
+`config.yaml.pre-observability-migration.bak`, then removes only the flat
+transport fields. It is idempotent: applying it again does not duplicate a
+route.

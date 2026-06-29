@@ -35,7 +35,7 @@ Use `<binary> --help` for any command.
 | `setup geminicli` / `setup copilot` | Configure observability aliases with native OTel where supported |
 | `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
 | `setup galileo [status\|test\|enable\|disable\|remove]` | Configure real-time Galileo Cloud/self-hosted OTLP traces; test uses the live gateway path by default |
-| `setup observability add\|list\|enable\|disable\|remove\|test\|migrate-otel` | Manage named OTLP and audit-sink destinations; convert flat OTel config once |
+| `setup observability add\|list\|enable\|disable\|remove\|test\|migrate-otel` | Manage named OTLP and audit-sink destinations; preview or repair the automatic flat-OTel upgrade migration |
 | `setup local-observability up\|down\|status` | Manage the bundled OTel Collector + Grafana stack |
 
 Observability destination names are identities: a new `--name` appends a route;
@@ -439,9 +439,10 @@ Displays recent security alerts. Default limit: 25.
 defenseclaw upgrade [flags]
 ```
 
-Downloads the gateway binary and Python CLI wheel from a GitHub release,
-runs version-specific migrations, and restarts services. No source checkout
-or build toolchain required — your configuration is preserved.
+Downloads and verifies the gateway binary and Python CLI wheel from a GitHub
+release, backs up managed state, runs release-manifest migrations, restarts
+services, and verifies gateway health. No source checkout or build toolchain
+is required.
 
 > **Plugin installs are release-specific.** The OpenClaw plugin is installed
 > by `install.sh` as part of the release that ships it (0.3.0+). `upgrade`
@@ -453,8 +454,8 @@ or build toolchain required — your configuration is preserved.
 2. Stop `defenseclaw-gateway`
 3. Download and replace gateway binary from the GitHub release tarball
 4. Download and replace Python CLI from the GitHub release wheel
-5. Run version-specific migrations between the installed and new versions
-6. Start `defenseclaw-gateway` and restart OpenClaw gateway
+5. Run release-required migrations through the durable migration cursor
+6. Start `defenseclaw-gateway`, restart OpenClaw gateway, and poll health
 
 **Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
 and run automatically even during same-version upgrades. Each migration is
@@ -462,6 +463,14 @@ keyed to the release it ships with. For example, the v0.3.0 migration removes
 legacy `models.providers.defenseclaw`, `models.providers.litellm`, and
 `agents.defaults.model.primary` prefixed entries from `openclaw.json` (written
 by 0.2.0's guardrail setup) while preserving plugin registration.
+
+The upgrade runner also applies configuration schema v7 independently of the
+release cursor: a legacy flat OTel exporter becomes one named
+`otel.destinations[]` route beside any routes already configured. This
+shape-based pass also covers hosts whose published 0.8.x migration cursor was
+already marked. It preserves transport, TLS, batching, signals, and process-wide
+sampling/log policy, and writes a one-time pre-migration backup. The gateway has
+a write-free in-memory fallback so an interrupted migration can still start.
 
 **Flags:**
 - `--yes`, `-y` — skip confirmation prompts
@@ -478,7 +487,7 @@ Sigstore provenance in addition to checksums.
 | Installed version | Recommendation |
 | --- | --- |
 | `0.8.0` or `0.8.1` | These versions can require local `cosign` before the fixed wheel is installed. Install `cosign` first (`brew install cosign` on macOS) and then run plain `defenseclaw upgrade`, or use `defenseclaw upgrade --allow-unverified` only if you accept the reduced provenance check for that one bridge upgrade. |
-| `0.7.x` | Upgrade directly to the latest release with plain `defenseclaw upgrade --yes` or `defenseclaw upgrade --version VERSION --yes`. Do not pass `--allow-unverified`; `0.7.x` clients do not know that option. Do not target `0.8.0`; that release had a broken migration-cache path. |
+| `0.7.x` | Upgrade directly to the latest release with plain `defenseclaw upgrade --yes` or `defenseclaw upgrade --version VERSION --yes`. Do not pass `--allow-unverified`; `0.7.x` clients do not know that option. |
 | `0.7.0` release tag | No downloadable release assets were published for this tag, so release-asset smoke cannot cover it. Upgrade from a locally installed `0.7.0` directly to the latest release without `--allow-unverified`. |
 | `0.2.0` | This predates the `defenseclaw upgrade` command. Use the installer documented in `docs/INSTALL.md` to bridge to a modern release. |
 

@@ -103,10 +103,12 @@ three partial ones (SQLite, OTel, JSONL).
 metrics + traces, configured through named `otel.destinations[]` routes.
 Transport, credentials, and signals are explicit per destination; the
 runtime does not create new outbound routes from `OTEL_EXPORTER_OTLP_*`.
-During upgrade only, a legacy flat exporter in `otel.*` or the documented
-`DEFENSECLAW_OTEL_*`/standard OTLP endpoint variables is translated into a
-single `generic-otlp` named destination before validation so existing
-installations keep starting while operators move to `otel.destinations[]`.
+During upgrade, a legacy flat exporter in `otel.*` or the documented
+`DEFENSECLAW_OTEL_*`/standard OTLP endpoint variables is persisted as a single
+named destination, preserving any destinations already present. The Go loader
+also performs the conversion in memory before validation as a write-free
+fallback, so an interrupted release migration cannot prevent startup or stop
+the legacy route.
 
 ### 1.4 Unified finding pipeline
 
@@ -374,8 +376,8 @@ fan-out processors run.
 
 The flat single-exporter shape (`otel.endpoint`, `otel.protocol`,
 `otel.headers`, and top-level signal transport/enable fields) is legacy-only
-and is migrated into a named destination during upgrade. Persist the
-conversion once with:
+and is persisted as a named destination by `defenseclaw upgrade`. Preview or
+repair the conversion explicitly with:
 
 ```bash
 defenseclaw setup observability migrate-otel       # preview

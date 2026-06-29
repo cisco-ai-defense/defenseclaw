@@ -695,21 +695,14 @@ entries directly into `~/.openclaw/openclaw.json`:
 In 0.3.0, routing is handled transparently by a fetch interceptor in the
 OpenClaw plugin, so these entries are no longer needed.
 
-The migration uses a **pristine-backup restore** strategy. When DefenseClaw's
-guardrail was first enabled, it captured a one-time snapshot of the original
-`openclaw.json` (before any DefenseClaw modifications). The migration:
-
-1. Restores `openclaw.json` from that pristine backup — removing all
-   DefenseClaw-injected entries in one clean step
-2. Re-applies only the minimal plugin registration that 0.3.0 needs
-   (`plugins.allow`, `plugins.entries`, `plugins.load.paths`)
-3. Saves a `.pre-0.3.0-migration` backup of the current file before
-   overwriting, for safety
-
-If no pristine backup exists (e.g. guardrail was never enabled, or the backup
-was deleted), the migration falls back to **surgical removal**: it deletes
-`models.providers.defenseclaw` / `models.providers.litellm` and strips the
-proxy prefix from `agents.defaults.model.primary`.
+The migration uses a **surgical live-file** strategy. A pristine snapshot may
+exist from initial guardrail setup, but the migration never restores that
+snapshot over the live `openclaw.json`. It deletes only
+`models.providers.defenseclaw` /
+`models.providers.litellm`, strips the old proxy prefix from
+`agents.defaults.model.primary`, and preserves operator-added providers,
+plugins, models, workspaces, and ordering. It saves a
+`.pre-0.3.0-migration` backup before changing the live file.
 
 If none of these legacy entries exist, the migration is a no-op.
 

@@ -55,8 +55,8 @@ from defenseclaw.observability import (
     resolve_preset,
     set_destination_enabled,
 )
-from defenseclaw.observability.presets import Preset
 from defenseclaw.observability.display import redact_endpoint_for_display
+from defenseclaw.observability.presets import Preset
 
 # ---------------------------------------------------------------------------
 # flat OTel migration
@@ -88,6 +88,32 @@ def test_flat_otel_migration_is_previewable_applied_once_and_idempotent() -> Non
 
     repeated = migrate_flat_otel(tmp, dry_run=False)
     assert repeated.yaml_changes == []
+
+
+def test_flat_otel_migration_advances_only_explicit_v6_schema_stamp() -> None:
+    _, tmp = _make_tmp_ctx()
+    cfg_path = os.path.join(tmp, "config.yaml")
+    with open(cfg_path, "w") as handle:
+        handle.write(
+            "config_version: 6\n"
+            "otel:\n"
+            "  enabled: true\n"
+            "  endpoint: 127.0.0.1:4317\n"
+        )
+
+    migrate_flat_otel(tmp, dry_run=False)
+    assert _read_yaml(tmp)["config_version"] == 7
+
+    # A missing stamp may represent any historical schema. Preserve it so the
+    # Go loader still runs unrelated pre-v6 compatibility migrations.
+    with open(cfg_path, "w") as handle:
+        handle.write(
+            "otel:\n"
+            "  enabled: true\n"
+            "  endpoint: 127.0.0.1:4317\n"
+        )
+    migrate_flat_otel(tmp, dry_run=False)
+    assert "config_version" not in _read_yaml(tmp)
 
 
 def test_flat_otel_global_endpoint_enables_all_signals() -> None:

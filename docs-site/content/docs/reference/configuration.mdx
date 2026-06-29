@@ -11,6 +11,15 @@ keywords:
 
 `~/.defenseclaw/config.yaml` is the single source of truth for operator-owned configuration. Most fields are managed by `defenseclaw setup *` commands; you can also hand-edit, then run `defenseclaw-gateway restart` (or `defenseclaw setup guardrail --restart`). Note `restart` is on the **Go sidecar binary** — the Python `defenseclaw` CLI has no top-level `gateway` group.
 
+The current Go configuration contract is version 7. Older files may omit
+`config_version` or carry a lower value; the gateway migrates those values in
+memory before validation so an interrupted upgrade can still start. Release
+migrations persist changes that must become durable. In particular, the v7
+upgrade converts a legacy flat OTel exporter into one named
+`otel.destinations[]` route without replacing any destinations already in the
+file. See [Upgrade DefenseClaw](/docs/get-started/upgrade) for the backup,
+migration, and verification flow.
+
 ## On-disk layout
 
 <Files>
@@ -48,6 +57,8 @@ keywords:
 The shape below mirrors the dataclasses in `cli/defenseclaw/config.py` and the matching Go structs in `internal/config/`. Every block is optional — `defenseclaw setup *` writes only the fields it needs and the merge keeps your hand-edits intact.
 
 ```yaml
+config_version: 7             # current Go schema; older files are migrated safely
+
 claw:
   mode: claudecode             # single-connector mode; setup aliases select this with --connector.
                                # Set to `multi` automatically when more than one
@@ -122,9 +133,10 @@ otel:
       metrics: { enabled: false }
       logs: { enabled: false }
 
-# Legacy flat `otel.protocol` / `otel.endpoint` / signal transport blocks are
-# translated into a `generic-otlp` destination before runtime validation.
-# Preview and persist the conversion with:
+# `defenseclaw upgrade` persists legacy flat `otel.protocol` / `otel.endpoint`
+# and signal transport blocks as a named destination. Runtime loading also
+# performs the same conversion in memory as an interrupted-upgrade fallback.
+# Preview or repair the persisted conversion with:
 # `defenseclaw setup observability migrate-otel [--apply]`.
 # Sampling remains process-wide and cannot differ by destination.
 
