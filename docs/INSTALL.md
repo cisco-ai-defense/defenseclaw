@@ -319,7 +319,7 @@ make clean        # Full clean (binaries, venv, node_modules, coverage)
 End users can install a released version without cloning the repo:
 
 ```bash
-VERSION=0.8.1
+VERSION=0.8.2
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
@@ -332,7 +332,7 @@ confirmations.
 Pin a specific version:
 
 ```bash
-VERSION=0.8.0
+VERSION=0.8.2
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
@@ -344,7 +344,7 @@ OpenClaw runtime and the DefenseClaw plugin). You can pick a different
 connector — or skip connector setup entirely — with `--connector`:
 
 ```bash
-VERSION=0.8.1
+VERSION=0.8.2
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 
 # Codex (no OpenClaw, no plugin tarball; patches ~/.codex/config.toml + hooks)
