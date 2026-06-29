@@ -80,10 +80,12 @@ KNOWN_CONNECTORS = {
     "windsurf",
     "geminicli",
     "copilot",
+    "scout",
     "openhands",
     "antigravity",
     "opencode",
 }
+MCP_CONNECTORS = KNOWN_CONNECTORS - {"scout"}
 KNOWN_TYPES = {"skill", "mcp"}
 
 MAX_ENTRIES = 10000
@@ -332,8 +334,9 @@ def _build_entry(raw: Any, default_connector: str) -> ManifestEntry:
     connector = _opt_str(raw.get("connector"), "connector", max_len=64)
     if not connector:
         connector = default_connector
-    if connector and connector not in KNOWN_CONNECTORS:
-        raise ManifestError(f"connector {connector!r} is not one of {sorted(KNOWN_CONNECTORS)}")
+    connector_choices = KNOWN_CONNECTORS if type_ == "skill" else MCP_CONNECTORS
+    if connector and connector not in connector_choices:
+        raise ManifestError(f"connector {connector!r} is not one of {sorted(connector_choices)}")
 
     publisher = _opt_str(raw.get("publisher"), "publisher", max_len=256)
     license_ = _opt_str(raw.get("license"), "license", max_len=128)

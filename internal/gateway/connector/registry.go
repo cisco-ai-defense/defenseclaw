@@ -183,6 +183,7 @@ func NewDefaultRegistry() *Registry {
 	r.RegisterBuiltin(NewWindsurfConnector())
 	r.RegisterBuiltin(NewGeminiCLIConnector())
 	r.RegisterBuiltin(NewCopilotConnector())
+	r.RegisterBuiltin(NewScoutConnector())
 	r.RegisterBuiltin(NewOpenHandsConnector())
 	r.RegisterBuiltin(NewAntigravityConnector())
 	r.RegisterBuiltin(NewOpenCodeConnector())

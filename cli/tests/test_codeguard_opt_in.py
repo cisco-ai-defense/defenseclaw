@@ -256,7 +256,6 @@ def test_codeguard_install_connector_flag_narrows_to_one(tmp_path, monkeypatch):
     assert "[codex]" in result.output
     assert "[claudecode]" not in result.output
 
-
 def test_codeguard_install_skill_alias_fans_out_to_all_active_connectors(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -287,6 +286,23 @@ def test_codeguard_install_skill_alias_connector_flag_narrows_to_one(tmp_path, m
     assert len(install_lines) == 1, result.output
     assert "[codex]" in result.output
     assert "[claudecode]" not in result.output
+
+
+def test_codeguard_install_explicit_surface_only_connector(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app = AppContext()
+    app.cfg = _multi_cfg(["claudecode", "codex"], tmp_path)
+
+    result = CliRunner().invoke(
+        codeguard, ["install", "--connector", "scout", "--target", "skill"], obj=app
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "CodeGuard skill [scout]: installed to " in result.output
+    assert (tmp_path / "home" / ".copilot" / "skills" / "codeguard").is_dir()
+    assert "[claudecode]" not in result.output
+    assert "[codex]" not in result.output
 
 
 def test_codeguard_install_antigravity_skill_fans_out_with_peers(tmp_path, monkeypatch):

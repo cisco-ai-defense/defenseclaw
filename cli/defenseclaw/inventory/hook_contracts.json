@@ -22,6 +22,16 @@
         "ZeptoClaw is proxy-backed; hook contract pinning does not gate setup."
       ]
     },
+    "scout": {
+      "kind": "surface",
+      "compatibility_gate": "not-gated",
+      "version_probe": "scout --version",
+      "contracts": [],
+      "notes": [
+        "Microsoft Scout is currently supported for documented local skill discovery and opt-in skill installation only.",
+        "Microsoft has not published a Scout hook config surface for DefenseClaw to install or gate, so no hook contract is registered."
+      ]
+    },
     "codex": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",

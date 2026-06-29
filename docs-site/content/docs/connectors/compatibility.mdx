@@ -24,6 +24,7 @@ DefenseClaw tracks hook connector compatibility with a packaged JSON manifest at
 | Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Gemini CLI | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | GitHub Copilot CLI | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Microsoft Scout | surface, not hook-gated | not gated by hook contract | n/a | local skills only |
 | OpenHands | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | Antigravity | hook contract | `>=1.0.0` | `antigravity-hooks-v2` / `v7` | prompt, tool_call, tool_result |
 | OpenCode | hook contract | unversioned / plugin API; tested with `opencode 1.16.2` | `opencode-hooks-v1` / `v6` | tool_call, tool_result |
@@ -38,7 +39,7 @@ Every `defenseclaw setup ...` path that chooses a connector refreshes local agen
 
 The most common reason a version can't be read is the connector binary living outside a trusted install prefix (for example a bespoke install under `~/.local`). Interactive action-mode setup detects this and offers to trust the directory (defaulting to No, persisting to `~/.defenseclaw/.env`, then re-running the full contract check — trusting a path never bypasses the version gate). Non-interactive runs print the equivalent remediation: `defenseclaw setup trusted-paths add <dir>`. See the `trusted-paths` group on the [CLI reference](/docs/reference/cli) and the trust model in [AI Discovery](/docs/ai-discovery).
 
-Proxy connectors are recorded in the manifest too, but they are marked `not-gated` because their enforcement surface is the DefenseClaw proxy instead of an agent hook contract.
+Proxy connectors are recorded in the manifest too, but they are marked `not-gated` because their enforcement surface is the DefenseClaw proxy instead of an agent hook contract. Microsoft Scout is also marked `not-gated`; DefenseClaw supports its documented local skill surfaces but does not install a runtime hook until Microsoft publishes one.
 
 ## Runtime lock
 

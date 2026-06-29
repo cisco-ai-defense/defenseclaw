@@ -1063,7 +1063,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1130,7 +1130,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1197,7 +1197,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1233,7 +1233,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1296,7 +1296,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1330,7 +1330,7 @@
             },
             "source": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1371,7 +1371,7 @@
             },
             "source": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1405,7 +1405,7 @@
             },
             "source": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1439,7 +1439,7 @@
             },
             "source": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",
@@ -1473,7 +1473,7 @@
             },
             "source": {
               "type": "string",
-              "enum": [
+"enum": [
                 "openclaw",
                 "zeptoclaw",
                 "claudecode",

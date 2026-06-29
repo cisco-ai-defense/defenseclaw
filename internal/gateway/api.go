@@ -857,7 +857,7 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 	reg := a.connectorRegistry
 	if reg == nil {
 		// Reuse the lazy singleton instead of paying a fresh
-		// NewDefaultRegistry() build (ten builtin
+		// NewDefaultRegistry() build (twelve builtin
 		// registrations) on every /connectors GET.
 		reg = getFallbackConnectorRegistry()
 	}
@@ -1040,6 +1040,10 @@ func connectorModeFor(name string) map[string]interface{} {
 		if name == "geminicli" || name == "copilot" {
 			telemetry = append(telemetry, "otel")
 		}
+	case "scout":
+		mode = "surface"
+		intercept = false
+		telemetry = []string{}
 	default:
 		// openclaw / zeptoclaw / unknown: enforcement is the only
 		// supported mode today. Hooks are wired by the connector;

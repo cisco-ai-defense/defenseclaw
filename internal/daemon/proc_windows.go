@@ -19,10 +19,14 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -106,7 +110,68 @@ func processStartIdentity(pid int) (string, error) {
 	return strconv.FormatInt(creation.Nanoseconds(), 10), nil
 }
 
-// killStaleProcesses is a no-op on Windows. pgrep is not available and
-// process group semantics differ; stale process cleanup relies on the
-// PID file only.
-func (d *Daemon) killStaleProcesses() {}
+func (d *Daemon) killStaleProcesses() {
+	self, _ := os.Executable()
+	binName := filepath.Base(self)
+	if binName == "" || binName == "." {
+		binName = "defenseclaw-gateway.exe"
+	}
+
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(snapshot)
+
+	trackedPID := 0
+	if info, err := d.readPIDInfo(); err == nil {
+		trackedPID = info.PID
+	}
+	myPID := os.Getpid()
+	watchdogPID := d.readWatchdogPID()
+
+	var entry windows.ProcessEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	if err := windows.Process32First(snapshot, &entry); err != nil {
+		return
+	}
+	for {
+		pid := int(entry.ProcessID)
+		exeName := strings.TrimRight(windows.UTF16ToString(entry.ExeFile[:]), "\x00")
+		if shouldKillStaleGatewayProcess(pid, myPID, trackedPID, watchdogPID, exeName, binName) {
+			proc, err := windows.OpenProcess(
+				windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE,
+				false,
+				uint32(pid),
+			)
+			if err == nil {
+				if !processImagePathMatches(proc, self) {
+					_ = windows.CloseHandle(proc)
+					continue
+				}
+				fmt.Fprintf(os.Stderr, "[daemon] killing stale gateway process (PID %d)\n", pid)
+				_ = windows.TerminateProcess(proc, 1)
+				_ = windows.CloseHandle(proc)
+			}
+		}
+		if err := windows.Process32Next(snapshot, &entry); err != nil {
+			break
+		}
+	}
+}
+
+func processImagePathMatches(proc windows.Handle, want string) bool {
+	if want == "" {
+		return false
+	}
+	var buf [32768]uint16
+	size := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(proc, 0, &buf[0], &size); err != nil {
+		return false
+	}
+	got := windows.UTF16ToString(buf[:size])
+	if got == "" {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(got), filepath.Clean(want))
+}

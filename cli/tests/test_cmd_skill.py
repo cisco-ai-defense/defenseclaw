@@ -63,6 +63,19 @@ class SkillCommandTestBase(unittest.TestCase):
     def invoke(self, args: list[str]):
         return self.runner.invoke(skill, args, obj=self.app, catch_exceptions=False)
 
+    def wire_scout_skill_dirs(self):
+        bundled_dir = os.path.join(self.tmp_dir, ".copilot", "bundled-skills")
+        m_skills_dir = os.path.join(self.tmp_dir, ".copilot", "m-skills")
+        user_dir = os.path.join(self.tmp_dir, ".copilot", "skills")
+        for d in (bundled_dir, m_skills_dir, user_dir):
+            os.makedirs(d, exist_ok=True)
+
+        dirs = [bundled_dir, m_skills_dir, user_dir]
+        self.app.cfg.quarantine_dir = os.path.join(self.tmp_dir, "quarantine")
+        self.app.cfg.active_connectors = lambda: ["scout"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: dirs if connector in (None, "scout") else []  # type: ignore[method-assign]
+        return bundled_dir, m_skills_dir, user_dir
+
 
 class TestSkillBlock(SkillCommandTestBase):
     def test_block_adds_to_block_list(self):
@@ -338,6 +351,37 @@ class TestSkillScan(SkillCommandTestBase):
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("not configured", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_action_does_not_quarantine_scout_bundled_skill(self, mock_scanner_cls, mock_client):
+        bundled_dir, _m_skills_dir, _user_dir = self.wire_scout_skill_dirs()
+        word_dir = os.path.join(bundled_dir, "word")
+        os.makedirs(word_dir)
+        with open(os.path.join(word_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("# Word\n")
+
+        mock_client.return_value.disable_skill.return_value = {"status": "disabled"}
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = ScanResult(
+            scanner="skill-scanner",
+            target=word_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="Shell injection", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+        mock_scanner_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "--all", "--connector", "scout", "--action"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("read-only Scout bundled skill", result.output)
+        self.assertTrue(os.path.isdir(word_dir))
+        self.assertFalse(os.path.exists(os.path.join(self.app.cfg.quarantine_dir, "skills", "word")))
+        self.assertFalse(os.path.exists(os.path.join(self.app.cfg.quarantine_dir, "skills", "scout", "word")))
+        pe = PolicyEngine(self.app.store)
+        self.assertFalse(pe.is_quarantined("skill", "word"))
+        self.assertFalse(pe.is_quarantined_for_connector("skill", "word", "scout"))
 
     @patch("defenseclaw.commands.cmd_skill._scan_all_remote")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
@@ -797,6 +841,34 @@ class TestSkillQuarantine(SkillCommandTestBase):
         self.app.cfg.quarantine_dir = os.path.join(self.tmp_dir, "quarantine")
         result = self.invoke(["restore", "not-quarantined"])
         self.assertNotEqual(result.exit_code, 0)
+
+    def test_quarantine_rejects_scout_bundled_skill_by_name(self):
+        bundled_dir, _m_skills_dir, _user_dir = self.wire_scout_skill_dirs()
+        word_dir = os.path.join(bundled_dir, "word")
+        os.makedirs(word_dir)
+
+        result = self.invoke(["quarantine", "word", "--connector", "scout"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("read-only", result.output)
+        self.assertTrue(os.path.isdir(word_dir))
+        self.assertFalse(os.path.exists(os.path.join(self.app.cfg.quarantine_dir, "skills", "word")))
+
+    def test_restore_rejects_scout_bundled_destination(self):
+        bundled_dir, _m_skills_dir, user_dir = self.wire_scout_skill_dirs()
+        word_dir = os.path.join(user_dir, "word")
+        os.makedirs(word_dir)
+
+        result = self.invoke(["quarantine", "word", "--connector", "scout"])
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        bundled_word = os.path.join(bundled_dir, "word")
+        result = self.invoke(["restore", "word", "--connector", "scout", "--path", bundled_word])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("read-only", result.output)
+        self.assertFalse(os.path.exists(bundled_word))
+        self.assertTrue(os.path.isdir(os.path.join(self.app.cfg.quarantine_dir, "skills", "scout", "word")))
 
     def _wire_two_connectors(self):
         """Point skill_dirs at per-connector dirs for codex + claudecode."""

@@ -79,6 +79,7 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "windsurf",
     "geminicli",
     "copilot",
+    "scout",
     "openhands",
     "antigravity",
     "opencode",
@@ -179,6 +180,8 @@ def normalize(connector: str | None) -> str:
     name = connector.strip().lower()
     if name in {"open-hands", "open_hands"}:
         return "openhands"
+    if name in {"microsoft-scout", "microsoft_scout", "ms-scout", "clawpilot"}:
+        return "scout"
     return name or "openclaw"
 
 
@@ -259,6 +262,8 @@ def connector_home(
     if name == "geminicli":
         return os.path.join(home, ".gemini")
     if name == "copilot":
+        return os.path.join(home, ".copilot")
+    if name == "scout":
         return os.path.join(home, ".copilot")
     if name == "openhands":
         root = _workspace_dir(workspace_dir)
@@ -346,6 +351,12 @@ def connector_config_files(
             os.path.join(home, ".copilot", "hooks", "defenseclaw.json"),
             _workspace_path(workspace_dir, ".github", "copilot.json"),
             _workspace_path(workspace_dir, ".github", "hooks", "defenseclaw.json"),
+        ]
+    elif name == "scout":
+        paths = [
+            os.path.join(home, ".copilot", "bundled-skills"),
+            os.path.join(home, ".copilot", "m-skills"),
+            os.path.join(home, ".copilot", "skills"),
         ]
     elif name == "openhands":
         paths = [
@@ -437,6 +448,8 @@ def skill_dirs(
         return _gemini_skill_dirs(workspace_dir)
     if name == "copilot":
         return _copilot_skill_dirs(workspace_dir)
+    if name == "scout":
+        return _scout_skill_dirs()
     if name == "openhands":
         return _openhands_skill_dirs(workspace_dir)
     if name == "antigravity":
@@ -477,6 +490,8 @@ def plugin_dirs(
     if name == "geminicli":
         return _gemini_plugin_dirs(workspace_dir)
     if name == "copilot":
+        return []
+    if name == "scout":
         return []
     if name == "openhands":
         return []
@@ -529,6 +544,8 @@ def mcp_servers(
         return _gemini_mcp_servers()
     if name == "copilot":
         return _copilot_mcp_servers(workspace_dir)
+    if name == "scout":
+        return []
     if name == "openhands":
         return _openhands_mcp_servers()
     if name == "antigravity":
@@ -659,6 +676,17 @@ def _copilot_skill_dirs(workspace_dir: str | None = None) -> list[str]:
             os.path.join(home, ".copilot", "skills"),
             _workspace_path(workspace_dir, ".github", "skills"),
             _workspace_path(workspace_dir, ".agents", "skills"),
+        ]
+    )
+
+
+def _scout_skill_dirs() -> list[str]:
+    home = str(Path.home())
+    return _dedup(
+        [
+            os.path.join(home, ".copilot", "bundled-skills"),
+            os.path.join(home, ".copilot", "m-skills"),
+            os.path.join(home, ".copilot", "skills"),
         ]
     )
 
@@ -1456,6 +1484,12 @@ def set_mcp_server(
         )
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
+    if name_n == "scout":
+        raise MCPWriteUnsupportedError(
+            "scout does not publish a documented local MCP server install "
+            "surface. DefenseClaw discovers Scout skills, but it will not "
+            "create guessed MCP config files.",
+        )
     if name_n == "openhands":
         path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
         _atomic_json_merge(path, ("mcpServers", name), entry)
@@ -1548,6 +1582,11 @@ def unset_mcp_server(
         )
         _atomic_json_delete(path, ("mcpServers", name))
         return
+    if name_n == "scout":
+        raise MCPWriteUnsupportedError(
+            "scout does not publish a documented local MCP server install "
+            "surface; nothing to remove.",
+        )
     if name_n == "openhands":
         path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
         _atomic_json_delete(path, ("mcpServers", name))

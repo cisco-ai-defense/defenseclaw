@@ -432,3 +432,24 @@ func TestStopReturnsErrNotRunningOnMissingPID(t *testing.T) {
 		t.Errorf("Stop with no PID file: got %v, want ErrNotRunning", err)
 	}
 }
+
+func TestShouldKillStaleGatewayProcess(t *testing.T) {
+	if !shouldKillStaleGatewayProcess(123, 1, 2, 3, "defenseclaw-gateway.exe", "defenseclaw-gateway.exe") {
+		t.Fatal("matching untracked gateway process should be killed")
+	}
+	if shouldKillStaleGatewayProcess(1, 1, 2, 3, "defenseclaw-gateway.exe", "defenseclaw-gateway.exe") {
+		t.Fatal("current process should be preserved")
+	}
+	if shouldKillStaleGatewayProcess(2, 1, 2, 3, "defenseclaw-gateway.exe", "defenseclaw-gateway.exe") {
+		t.Fatal("tracked gateway process should be preserved")
+	}
+	if shouldKillStaleGatewayProcess(3, 1, 2, 3, "defenseclaw-gateway.exe", "defenseclaw-gateway.exe") {
+		t.Fatal("watchdog process should be preserved")
+	}
+	if shouldKillStaleGatewayProcess(123, 1, 2, 3, "other.exe", "defenseclaw-gateway.exe") {
+		t.Fatal("unrelated process should be preserved")
+	}
+	if !shouldKillStaleGatewayProcess(123, 1, 2, 3, `C:\Tools\DEFENSECLAW-GATEWAY.EXE`, "defenseclaw-gateway.exe") {
+		t.Fatal("gateway process match should be case-insensitive and basename-only")
+	}
+}

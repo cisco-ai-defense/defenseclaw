@@ -34,6 +34,7 @@ def test_ai_signature_catalog_contains_supported_and_shadow_agents():
         "windsurf",
         "geminicli",
         "copilot",
+        "scout",
         "aider",
         "ai-sdks",
         "qwen-code",
@@ -66,6 +67,17 @@ def test_antigravity_signature_tracks_mcp_and_customization_paths():
     assert "~/.gemini/config/skills" in antigravity.config_paths
     assert ".agents/rules" in antigravity.config_paths
     assert "~/.gemini/config/plugins" in antigravity.config_paths
+
+
+def test_scout_signature_uses_only_scout_specific_identity_signals():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    scout = signatures["scout"]
+
+    assert scout.config_paths == ()
+    assert scout.domain_patterns == ()
+    assert "scout" not in scout.history_patterns
+    assert "microsoft scout" in scout.history_patterns
+    assert "clawpilot" in scout.history_patterns
 
 
 def test_custom_signature_pack_loads_from_managed_dir(tmp_path):

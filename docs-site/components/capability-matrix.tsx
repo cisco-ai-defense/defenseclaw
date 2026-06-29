@@ -12,7 +12,7 @@ import { CapabilityMatrixWrapper } from './capability-matrix-wrapper';
 interface ConnectorRow {
   id: string;
   label: string;
-  family: 'proxy' | 'hooks';
+  family: 'proxy' | 'hooks' | 'surface';
   toolInspection: string;
   subprocessPolicy: string;
   hooks: {
@@ -21,7 +21,7 @@ interface ConnectorRow {
     askEvents: string[];
     blockEvents: string[];
     supportsFailClosed: boolean;
-    scope: 'user' | 'workspace';
+    scope: 'user' | 'workspace' | 'user,workspace' | 'none';
   };
   hilt: string;
   notes?: string;

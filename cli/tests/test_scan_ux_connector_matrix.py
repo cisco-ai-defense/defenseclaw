@@ -73,6 +73,7 @@ SUPPORTED_CONNECTORS = (
     "windsurf",
     "geminicli",
     "copilot",
+    "scout",
     "openhands",
     "antigravity",
 )

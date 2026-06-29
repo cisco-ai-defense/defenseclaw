@@ -173,6 +173,8 @@ def _normalize_target(target: str) -> str:
 
 def _target_path(cfg, connector: str, target: str) -> str:
     if target == "skill":
+        if connector == "scout":
+            return os.path.join(str(Path.home()), ".copilot", "skills", "codeguard")
         dirs = connector_paths.skill_dirs(
             connector,
             openclaw_home=getattr(getattr(cfg, "claw", object()), "home_dir", None),

@@ -32,6 +32,7 @@ const (
 	ToolModePreExecution ToolInspectionMode = "pre-execution"
 	ToolModeResponseScan ToolInspectionMode = "response-scan"
 	ToolModeBoth         ToolInspectionMode = "both"
+	ToolModeNone         ToolInspectionMode = "none"
 )
 
 // SubprocessPolicy declares how the connector restricts subprocess execution.

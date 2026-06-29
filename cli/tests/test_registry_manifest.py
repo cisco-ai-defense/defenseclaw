@@ -261,6 +261,22 @@ class TestMcpEntries(unittest.TestCase):
                 )
             )
 
+    def test_scout_mcp_connector_rejected(self):
+        with self.assertRaises(ManifestError):
+            parse_manifest(
+                json.dumps(
+                    _wrap(
+                        {
+                            "name": "srv",
+                            "type": "mcp",
+                            "transport": "stdio",
+                            "command": "x",
+                            "connector": "scout",
+                        }
+                    )
+                )
+            )
+
 
 class TestNamesAndDuplicates(unittest.TestCase):
     def test_name_must_match_regex(self):
@@ -443,6 +459,7 @@ class TestKnownConstants(unittest.TestCase):
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "scout",
                 "openhands",
                 "antigravity",
                 "opencode",

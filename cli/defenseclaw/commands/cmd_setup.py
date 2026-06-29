@@ -2475,6 +2475,7 @@ _CONNECTOR_NAMES_FALLBACK = [
     "windsurf",
     "geminicli",
     "copilot",
+    "scout",
     "openhands",
     "antigravity",
     "opencode",
@@ -2565,6 +2566,12 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
+    "scout": {
+        "label": "Microsoft Scout",
+        "description": "documented local skill discovery; no published hook/proxy enforcement surface",
+        "tool_mode": "none",
+        "subprocess_policy": "none",
+    },
     "openhands": {
         "label": "OpenHands",
         "description": "~/.openhands/hooks.json command hooks by default; optional repo-local override",
@@ -2644,6 +2651,12 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.copilot/skills and ~/.copilot/agents install surfaces; optional workspace surfaces with --workspace",
         "Native OTLP env vars are documented for the process env; shell rc files are not mutated",
         "~/.defenseclaw/hooks/copilot-hook.sh",
+    ),
+    "scout": (
+        "~/.copilot/bundled-skills documented bundled skill directory",
+        "~/.copilot/m-skills documented workspace skill directory",
+        "~/.copilot/skills documented custom skill directory",
+        "No DefenseClaw hook/proxy config is written until Microsoft publishes a Scout hook contract",
     ),
     "openhands": (
         "~/.openhands/hooks.json hooks by default",
@@ -3971,10 +3984,23 @@ def setup_guardrail(
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
         return
 
+    setup_check_connector = target_connector if non_interactive else explicit_connector
+    setup_targets = _guardrail_setup_check_targets(app, gc, setup_check_connector)
+    surface_targets = [c for c in setup_targets if c in _SURFACE_ONLY_CONNECTORS]
+    if surface_targets:
+        labels = [
+            _CONNECTOR_META.get(connector, {}).get("label", connector)
+            for connector in surface_targets
+        ]
+        raise click.ClickException(
+            f"{', '.join(labels)} is supported for local skill discovery and opt-in CodeGuard skill assets only; "
+            "Microsoft has not published a Scout hook/proxy enforcement surface for DefenseClaw setup."
+        )
+
     if not _check_guardrail_setup_connector_versions(
         app,
         gc,
-        explicit_connector=(target_connector if non_interactive else explicit_connector),
+        explicit_connector=setup_check_connector,
         allow_prompt=not non_interactive,
     ):
         return
@@ -6537,6 +6563,8 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "opencode",
     }
 )
+
+_SURFACE_ONLY_CONNECTORS = frozenset({"scout"})
 
 # Legacy alias retained as a backstop for any out-of-tree code that
 # imported the old name. New call sites must use one of the two named

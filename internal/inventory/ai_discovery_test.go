@@ -39,9 +39,37 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	for _, sig := range sigs {
 		seen[sig.ID] = true
 	}
-	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "ai-sdks"} {
+	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "scout", "openhands", "antigravity", "ai-sdks"} {
 		if !seen[id] {
 			t.Fatalf("signature %q missing", id)
+		}
+	}
+}
+
+func TestScoutSignatureAvoidsSharedCopilotIdentitySignals(t *testing.T) {
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	var scout *AISignature
+	for i := range sigs {
+		if sigs[i].ID == "scout" {
+			scout = &sigs[i]
+			break
+		}
+	}
+	if scout == nil {
+		t.Fatal("scout signature missing")
+	}
+	if len(scout.ConfigPaths) != 0 {
+		t.Fatalf("Scout config paths should not use shared .copilot paths as identity evidence: %v", scout.ConfigPaths)
+	}
+	if len(scout.DomainPatterns) != 0 {
+		t.Fatalf("Scout domain patterns should stay Scout-specific; got %v", scout.DomainPatterns)
+	}
+	for _, pattern := range scout.HistoryPatterns {
+		if pattern == "scout" {
+			t.Fatal("bare scout shell-history pattern is too generic")
 		}
 	}
 }

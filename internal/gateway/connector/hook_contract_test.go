@@ -34,6 +34,7 @@ func TestHookContractResolution(t *testing.T) {
 		{"unversioned_uses_default", "cursor", "", HookCompatibilityUnversioned, "cursor-hooks-v1", ""},
 		{"openclaw_proxy_not_gated", "openclaw", "", HookCompatibilityNotGated, "", ""},
 		{"zeptoclaw_proxy_not_gated", "zeptoclaw", "zeptoclaw 0.5.0", HookCompatibilityNotGated, "", "0.5.0"},
+		{"scout_surface_not_gated", "scout", "Scout 0.1.0", HookCompatibilityNotGated, "", "0.1.0"},
 		{"bad_version_unknown", "codex", "codex nightly", HookCompatibilityUnknown, "", ""},
 	}
 	for _, tc := range cases {
@@ -175,23 +176,23 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		t.Fatalf("unmarshal hook contract manifest: %v", err)
 	}
 
-	for _, proxy := range []string{"openclaw", "zeptoclaw"} {
-		spec, ok := gotManifest.Connectors[proxy]
+	for _, name := range []string{"openclaw", "zeptoclaw", "scout"} {
+		spec, ok := gotManifest.Connectors[name]
 		if !ok {
-			t.Fatalf("manifest missing proxy connector %s", proxy)
+			t.Fatalf("manifest missing not-gated connector %s", name)
 		}
 		if spec.CompatibilityGate != "not-gated" {
-			t.Fatalf("%s compatibility_gate=%q want not-gated", proxy, spec.CompatibilityGate)
+			t.Fatalf("%s compatibility_gate=%q want not-gated", name, spec.CompatibilityGate)
 		}
 		if len(spec.Contracts) != 0 {
-			t.Fatalf("%s should not publish hook contracts in manifest", proxy)
+			t.Fatalf("%s should not publish hook contracts in manifest", name)
 		}
-		resolution := ResolveHookContract(proxy, "")
+		resolution := ResolveHookContract(name, "")
 		if resolution.Status != HookCompatibilityNotGated {
-			t.Fatalf("%s runtime status=%q want %q", proxy, resolution.Status, HookCompatibilityNotGated)
+			t.Fatalf("%s runtime status=%q want %q", name, resolution.Status, HookCompatibilityNotGated)
 		}
 		if resolution.Contract.ContractID != "" {
-			t.Fatalf("%s should not resolve a runtime hook contract", proxy)
+			t.Fatalf("%s should not resolve a runtime hook contract", name)
 		}
 	}
 

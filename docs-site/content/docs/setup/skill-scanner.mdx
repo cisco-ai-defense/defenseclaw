@@ -1,6 +1,6 @@
 ---
 title: Setup skill scanner
-description: Scan configured connector skills before an agent can execute them. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same skill_actions admission policy as the watcher.
+description: Scan configured connector skills, including Scout skill surfaces, before an agent can execute them. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same skill_actions admission policy as the watcher.
 keywords:
   - DefenseClaw skill scanner
   - cisco-ai-skill-scanner
@@ -24,7 +24,7 @@ DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://gi
 
 The wrapper at [`cli/defenseclaw/scanner/skill.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/scanner/skill.py) accepts four target shapes — all **positional**. URL fetches in particular take the URL itself as the positional target (no `--remote` involved). The `--remote` flag does exist, but for a different scenario: it forwards the scan request to a sidecar API for a skill installed on a remote host (see the "Remote sidecar" tab below).
 
-- **Local skill name** (`my-skill`) — resolves through configured connector skill directories. On a multi-connector install, a bare name checks matching connector copies; pass `--connector <name>` to force one connector's skill source.
+- **Local skill name** (`my-skill`) — resolves through configured connector skill directories. On a multi-connector install, a bare name checks matching connector copies; pass `--connector <name>` to force one connector's skill source. Scout read surfaces include `~/.copilot/bundled-skills`, `~/.copilot/m-skills`, and `~/.copilot/skills`.
 - **`--path <dir>`** — scan a directory you specify, useful inside a skill repo's pre-commit hook.
 - **`https://...`** — fetch a remote skill bundle into a temp dir, scan, then clean up. The downloaded bytes never touch your skill directory.
 - **`clawhub://author/skill@version`** — same fetch-to-temp flow, but resolves through the configured Clawhub registry source.
@@ -41,9 +41,11 @@ For each skill it runs:
   <Tab value="All local skills">
 ```bash
 defenseclaw skill scan --all
+defenseclaw skill scan --all --connector scout
 ```
 
 Walks every configured connector's skill directory, scans each bundle, prints connector-tagged findings, and exits non-zero if anything is high severity. Add `--json` to pipe into CI. Use `--connector <name>` to narrow the scan to one connector.
+Use `--connector scout` to target Scout's local skill surfaces even though Scout is not a guardrail-wired connector.
   </Tab>
   <Tab value="Specific path">
 ```bash
