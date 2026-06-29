@@ -103,7 +103,10 @@ def interpolate(query: str) -> str:
     return re.sub(r"\$[A-Za-z_][A-Za-z0-9_]*", ".*", query)
 
 
-def static_audit() -> tuple[list[tuple[Path, dict[str, Any]]], list[str]]:
+def static_audit(
+    *,
+    require_packaged: bool = False,
+) -> tuple[list[tuple[Path, dict[str, Any]]], list[str]]:
     dashboards = load_dashboards(SOURCE_DIR)
     errors: list[str] = []
     if not dashboards:
@@ -163,7 +166,8 @@ def static_audit() -> tuple[list[tuple[Path, dict[str, Any]]], list[str]]:
                 if datasource == "loki" and "| json" in expression and '__error__=""' not in expression:
                     errors.append(f"{uid}/{title}: JSON parsing must discard malformed log lines")
                 range_function = re.search(
-                    r"\b(?:increase|rate|max_over_time|last_over_time)\(", expression,
+                    r"\b(?:increase|rate|max_over_time|last_over_time)\(",
+                    expression,
                 )
                 if datasource == "prometheus" and kind == "stat" and range_function and not target.get("instant"):
                     errors.append(f"{uid}/{title}: range-aggregate stat targets must be instant queries")
@@ -179,9 +183,9 @@ def static_audit() -> tuple[list[tuple[Path, dict[str, Any]]], list[str]]:
             if match and match.group(1) not in known_uids:
                 errors.append(f"{uid}: dashboard link targets missing UID {match.group(1)!r}")
 
-    if not PACKAGED_DIR.is_dir():
+    if require_packaged and not PACKAGED_DIR.is_dir():
         errors.append(f"CLI packaged Grafana dashboard directory is missing: {PACKAGED_DIR}")
-    else:
+    elif PACKAGED_DIR.is_dir():
         packaged = load_dashboards(PACKAGED_DIR)
         source_by_name = {path.name: dashboard for path, dashboard in dashboards}
         packaged_by_name = {path.name: dashboard for path, dashboard in packaged}
@@ -270,9 +274,14 @@ def live_audit(dashboards: list[tuple[Path, dict[str, Any]]]) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="also compile every query against the local stack")
+    parser.add_argument(
+        "--require-packaged",
+        action="store_true",
+        help="fail if the generated CLI dashboard mirror is absent",
+    )
     args = parser.parse_args()
 
-    dashboards, errors = static_audit()
+    dashboards, errors = static_audit(require_packaged=args.require_packaged)
     if args.live and not errors:
         errors.extend(live_audit(dashboards))
 

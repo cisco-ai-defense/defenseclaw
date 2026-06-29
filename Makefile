@@ -574,7 +574,7 @@ check-schemas:
 	@$(VENV)/bin/python scripts/check_schemas.py
 
 check-grafana-dashboards: _bundle-data
-	@$(VENV)/bin/python scripts/check_grafana_dashboards.py
+	@$(VENV)/bin/python scripts/check_grafana_dashboards.py --require-packaged
 
 # check-provider-coverage runs the shared test/testdata/llm-endpoints.json
 # corpus through both the Go shape detector (provider_coverage_test.go)
