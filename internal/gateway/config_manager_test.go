@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -90,6 +91,65 @@ func TestConfigManagerReloadRejectsInvalidAndKeepsSnapshot(t *testing.T) {
 	}
 }
 
+func TestConfigManagerCurrentReturnsDeepCopy(t *testing.T) {
+	initial := config.DefaultConfig()
+	initial.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex": {Mode: "observe"},
+	}
+	initial.Guardrail.Judge.HookConnectors = []string{"codex"}
+	mgr := NewConfigManager("", initial, nil, nil, nil)
+
+	snapshot := mgr.Current()
+	snapshot.Guardrail.Connectors["codex"] = config.PerConnectorGuardrailConfig{Mode: "action"}
+	snapshot.Guardrail.Judge.HookConnectors[0] = "claudecode"
+
+	fresh := mgr.Current()
+	if got := fresh.Guardrail.Connectors["codex"].Mode; got != "observe" {
+		t.Fatalf("connector mode = %q, want observe", got)
+	}
+	if got := fresh.Guardrail.Judge.HookConnectors[0]; got != "codex" {
+		t.Fatalf("hook connector = %q, want codex", got)
+	}
+}
+
+func TestSidecarConfigSnapshotsAreConcurrentSafe(t *testing.T) {
+	observe := config.DefaultConfig()
+	observe.Guardrail.Mode = "observe"
+	action := config.DefaultConfig()
+	action.Guardrail.Mode = "action"
+	sidecar := &Sidecar{cfg: observe}
+	sidecar.publishConfig(observe)
+
+	observe.Guardrail.Mode = "mutated-after-publish"
+	if got := sidecar.currentConfig().Guardrail.Mode; got != "observe" {
+		t.Fatalf("published mode = %q, want observe", got)
+	}
+	observe.Guardrail.Mode = "observe"
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for range 1000 {
+				sidecar.publishConfig(action)
+				sidecar.publishConfig(observe)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 2000 {
+				mode := sidecar.currentConfig().Guardrail.Mode
+				if mode != "observe" && mode != "action" {
+					t.Errorf("observed partial config mode %q", mode)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func TestDiffConfigsMarksStorageIdentityRestartRequired(t *testing.T) {
 	oldCfg := &config.Config{
 		DataDir:       "/old/data",
@@ -146,6 +206,68 @@ func TestReloadPredicatesRestartLLMConsumers(t *testing.T) {
 	if !watcherNeedsRestart(oldCfg, newCfg) {
 		t.Fatal("watcherNeedsRestart returned false for llm change")
 	}
+}
+
+func TestGuardrailRestartPredicateIncludesSingularConnector(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := config.DefaultConfig()
+	oldCfg.Guardrail.Connector = "codex"
+	newCfg.Guardrail.Connector = "claudecode"
+
+	if !guardrailNeedsRestart(oldCfg, newCfg) {
+		t.Fatal("guardrailNeedsRestart returned false for singular connector change")
+	}
+}
+
+func TestOTelProviderAccessorsAreConcurrentSafe(t *testing.T) {
+	router := &EventRouter{}
+	hilt := &HILTApprovalManager{}
+	guardrailCfg := &config.GuardrailConfig{Connector: "codex"}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(6)
+		go func() {
+			defer wg.Done()
+			for range 1000 {
+				router.SetOTelProvider(nil)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 1000 {
+				_ = router.otelProvider()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 1000 {
+				hilt.SetOTelProvider(nil)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 1000 {
+				_ = hilt.otelProvider()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 1000 {
+				router.SetGuardrailConfig(guardrailCfg)
+				router.SetDefaultAgentName("codex")
+				router.SetDefaultPolicyID("action")
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 1000 {
+				_ = router.guardrailConfig()
+				_ = router.connectorName()
+				_, _ = router.defaultRoutingMetadata()
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestApplyConfigReloadRebuildsSharedJudge(t *testing.T) {
@@ -240,7 +362,7 @@ func TestApplyConfigReloadRestartModeRequestsProcessRestart(t *testing.T) {
 	default:
 		t.Fatal("run context was not cancelled")
 	}
-	if got := sidecar.cfg.DataDir; got != newCfg.DataDir {
+	if got := sidecar.currentConfig().DataDir; got != newCfg.DataDir {
 		t.Fatalf("sidecar cfg DataDir = %q, want %q", got, newCfg.DataDir)
 	}
 }
@@ -274,7 +396,7 @@ func TestApplyConfigReloadArmsRestartModeWithoutImmediateRestart(t *testing.T) {
 		t.Fatal("run context was cancelled when only config_reload.mode changed")
 	default:
 	}
-	if got := sidecar.cfg.Gateway.ConfigReload.Mode; got != "restart" {
+	if got := sidecar.currentConfig().Gateway.ConfigReload.Mode; got != "restart" {
 		t.Fatalf("reload mode = %q, want restart", got)
 	}
 }

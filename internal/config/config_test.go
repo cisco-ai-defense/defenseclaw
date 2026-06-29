@@ -454,6 +454,23 @@ func TestValidateGatewayConfigReloadMode(t *testing.T) {
 	}
 }
 
+func TestLoadFromFileNormalizesGatewayConfigReloadMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DefaultConfigName)
+	raw := "config_version: 6\ndata_dir: " + dir + "\ngateway:\n  config_reload:\n    mode: ' Restart '\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if got := cfg.Gateway.ConfigReload.Mode; got != "restart" {
+		t.Fatalf("config reload mode = %q, want restart", got)
+	}
+}
+
 func TestExpandPath(t *testing.T) {
 	home, _ := os.UserHomeDir()
 

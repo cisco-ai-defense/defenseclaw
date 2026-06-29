@@ -4717,6 +4717,7 @@ def _apply_hook_connector_setup(
         click.echo(f"  ✗ Failed to save config: {exc}", err=True)
         return False
 
+    _sync_guardrail_hilt_to_opa(cfg.policy_dir, gc)
     _write_picked_connector_hint(getattr(cfg, "data_dir", None), connector)
     _actives = list(cfg.active_connectors()) if hasattr(cfg, "active_connectors") else [connector]
     if len(_actives) > 1:

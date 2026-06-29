@@ -61,7 +61,9 @@ type EventRouter struct {
 	store        *audit.Store
 	logger       *audit.Logger
 	policy       *enforce.PolicyEngine
+	otelMu       sync.RWMutex
 	otel         *telemetry.Provider
+	configMu     sync.RWMutex
 	notify       *NotificationQueue
 	judge        *LLMJudge
 	rp           *guardrail.RulePack
@@ -114,11 +116,30 @@ func (r *EventRouter) SetOTelProvider(p *telemetry.Provider) {
 	if r == nil {
 		return
 	}
+	r.otelMu.Lock()
 	r.otel = p
+	r.otelMu.Unlock()
+}
+
+func (r *EventRouter) otelProvider() *telemetry.Provider {
+	if r == nil {
+		return nil
+	}
+	r.otelMu.RLock()
+	defer r.otelMu.RUnlock()
+	return r.otel
 }
 
 func (r *EventRouter) SetGuardrailConfig(cfg *config.GuardrailConfig) {
+	r.configMu.Lock()
 	r.guardrailCfg = cfg
+	r.configMu.Unlock()
+}
+
+func (r *EventRouter) guardrailConfig() *config.GuardrailConfig {
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	return r.guardrailCfg
 }
 
 // getActiveAgentCtx returns the context from the currently active agent span,
@@ -216,14 +237,24 @@ func (r *EventRouter) SetJudge(j *LLMJudge) {
 // SetDefaultAgentName sets the agent name fallback used when incoming
 // events do not carry one (e.g. cfg.Claw.Mode = "openclaw").
 func (r *EventRouter) SetDefaultAgentName(name string) {
+	r.configMu.Lock()
 	r.defaultAgentName = name
+	r.configMu.Unlock()
 }
 
 // SetDefaultPolicyID sets the identifier of the active guardrail /
 // admission policy. Threaded into tool and approval spans so downstream
 // SIEMs (Splunk Local Bridge, AgentWatch) can aggregate per-policy.
 func (r *EventRouter) SetDefaultPolicyID(id string) {
+	r.configMu.Lock()
 	r.defaultPolicyID = id
+	r.configMu.Unlock()
+}
+
+func (r *EventRouter) defaultRoutingMetadata() (string, string) {
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	return r.defaultAgentName, r.defaultPolicyID
 }
 
 // connectorName returns the connector this sidecar process is configured for,
@@ -233,12 +264,13 @@ func (r *EventRouter) SetDefaultPolicyID(id string) {
 // a per-request connector), the sidecar is single-connector per process, so
 // the connector comes from config rather than the event payload.
 func (r *EventRouter) connectorName() string {
-	if r.guardrailCfg != nil {
-		if name := strings.TrimSpace(r.guardrailCfg.Connector); name != "" {
+	if cfg := r.guardrailConfig(); cfg != nil {
+		if name := strings.TrimSpace(cfg.Connector); name != "" {
 			return strings.ToLower(name)
 		}
 	}
-	return strings.ToLower(strings.TrimSpace(r.defaultAgentName))
+	defaultAgentName, _ := r.defaultRoutingMetadata()
+	return strings.ToLower(strings.TrimSpace(defaultAgentName))
 }
 
 // agentNameForStream picks the most specific agent name available.
@@ -248,7 +280,8 @@ func (r *EventRouter) agentNameForStream(hint string) string {
 	if strings.TrimSpace(hint) != "" {
 		return hint
 	}
-	return r.defaultAgentName
+	defaultAgentName, _ := r.defaultRoutingMetadata()
+	return defaultAgentName
 }
 
 // streamEnvelope synthesizes an audit correlation envelope for audit
@@ -272,11 +305,12 @@ func (r *EventRouter) agentNameForStream(hint string) string {
 // invocation). Callers that want to correlate a stream event with
 // a matching request should pivot on session_id + run_id.
 func (r *EventRouter) streamEnvelope(ctx context.Context, sessionKey string) audit.CorrelationEnvelope {
+	defaultAgentName, defaultPolicyID := r.defaultRoutingMetadata()
 	env := audit.CorrelationEnvelope{
 		RunID:     gatewaylog.ProcessRunID(),
 		SessionID: sessionKey,
-		AgentName: r.defaultAgentName,
-		PolicyID:  r.defaultPolicyID,
+		AgentName: defaultAgentName,
+		PolicyID:  defaultPolicyID,
 	}
 	if reg := SharedAgentRegistry(); reg != nil {
 		id := reg.Resolve(ctx, sessionKey, "")
@@ -550,6 +584,7 @@ func (r *EventRouter) handleSessionTool(evt EventFrame) {
 // the sidecar is subscribed to a session, using the same stream format as
 // session.tool (runId, stream:"tool", data:{phase, name, ...}).
 func (r *EventRouter) handleSessionMessage(evt EventFrame) {
+	otel := r.otelProvider()
 	// OpenClaw sends two session.message formats:
 	//   Format A (chat message): {sessionKey, message:{role,content,...}, messageSeq, session:{...}}
 	//   Format B (tool stream):  {stream:"tool", data:{phase,name,...}, runId, sessionKey}
@@ -653,7 +688,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		// (the direct OpenClaw → LLM path, not the guardrail proxy).
 		// Uses the active agent context as parent for proper hierarchy.
 		// Stores the LLM context so subsequent tool spans become children.
-		if r.otel != nil && msg.Role == "assistant" && msg.Model != "" {
+		if otel != nil && msg.Role == "assistant" && msg.Model != "" {
 			system := inferSystem(msg.Provider, msg.Model)
 			promptTokens, completionTokens := 0, 0
 			if msg.Usage != nil {
@@ -669,26 +704,26 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 
 			parentCtx := r.getActiveAgentCtx()
 			now := time.Now()
-			llmCtx, span := r.otel.StartLLMSpan(
+			llmCtx, span := otel.StartLLMSpan(
 				parentCtx,
 				system, msg.Model, msg.Provider,
 				0, 0.0,
 			)
-			r.otel.SetRawSpanString(span, "defenseclaw.llm.response.content", contentStr)
-			r.otel.SetRawSpanString(span, "defenseclaw.llm.response.raw_content", string(msg.Content))
+			otel.SetRawSpanString(span, "defenseclaw.llm.response.content", contentStr)
+			otel.SetRawSpanString(span, "defenseclaw.llm.response.raw_content", string(msg.Content))
 			if span != nil {
 				span.SetAttributes(attribute.Bool("defenseclaw.telemetry.input.reported", false))
 			}
-			r.otel.SetGenAIOutput(span, contentStr)
-			r.otel.EndLLMSpan(
+			otel.SetGenAIOutput(span, contentStr)
+			otel.EndLLMSpan(
 				parentCtx,
 				span, msg.Model,
 				promptTokens, completionTokens,
 				finishReasons, toolCallCount,
 				"none", "",
 				system, now,
-				r.defaultAgentName,
-				r.defaultAgentName,
+				r.agentNameForStream(""),
+				r.agentNameForStream(""),
 				SharedAgentRegistry().AgentID(),
 				SessionIDFromContext(parentCtx),
 			)
@@ -730,8 +765,8 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				emitVerdict(vctx, gatewaylog.StageMultiTurn, gatewaylog.DirectionPrompt, "",
 					"warn", "repeated injection patterns across user turns",
 					gatewaylog.SeverityHigh, []string{"injection:multi-turn"}, 0)
-				if r.otel != nil {
-					r.otel.EmitRuntimeAlert(
+				if otel != nil {
+					otel.EmitRuntimeAlert(
 						telemetry.AlertToolCallFlagged, "HIGH", telemetry.SourceLocalPattern,
 						fmt.Sprintf("Multi-turn injection attempt in session %s", truncate(envelope.SessionKey, 32)),
 						map[string]string{"session": envelope.SessionKey},
@@ -770,6 +805,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 // Only prompts that light up the deterministic regex stage escalate
 // to the judge.
 func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content string) {
+	otel := r.otelProvider()
 	if content == "" {
 		return
 	}
@@ -800,7 +836,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 		return
 	}
 
-	verdict.Action = guardrailRuntimeActionForGuardrail(r.guardrailCfg, verdict.Severity, false)
+	verdict.Action = guardrailRuntimeActionForGuardrail(r.guardrailConfig(), verdict.Severity, false)
 	// Mirror the proxy/inspector clamp on this independent prompt-scan
 	// path so the session-message surface obeys the same contract:
 	// prompts get audited as alerts; tool-call gate handles enforcement.
@@ -837,8 +873,8 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 			messageID, model, verdict.Action, verdict.Severity,
 			len(verdict.Findings), scrubbedReason))
 
-	if r.otel != nil {
-		r.otel.EmitRuntimeAlert(
+	if otel != nil {
+		otel.EmitRuntimeAlert(
 			telemetry.AlertPromptInjection, verdict.Severity, telemetry.SourceLocalPattern,
 			fmt.Sprintf("Inbound prompt flagged in session %s", truncate(sessionKey, 32)),
 			map[string]string{
@@ -1063,6 +1099,7 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 	Seq        int             `json:"seq"`
 	Ts         int64           `json:"ts"`
 }, evt EventFrame) {
+	otel := r.otelProvider()
 	var data agentStreamData
 	if se.Data != nil {
 		_ = json.Unmarshal(se.Data, &data)
@@ -1080,13 +1117,13 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 				fmt.Sprintf("runId=%s", se.RunID))
 
 			// Start invoke_agent span as root of this agent run.
-			if r.otel != nil && se.RunID != "" {
+			if otel != nil && se.RunID != "" {
 				// Use sessionKey as conversation.id; fall back to runId.
 				conversationID := se.SessionKey
 				if conversationID == "" {
 					conversationID = se.RunID
 				}
-				agentCtx, agentSpan := r.otel.StartAgentSpan(
+				agentCtx, agentSpan := otel.StartAgentSpan(
 					context.Background(),
 					conversationID,           // conversation.id
 					r.agentNameForStream(""), // agent name (claw mode fallback)
@@ -1122,13 +1159,13 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 				fmt.Errorf("%s", redaction.ForSinkString(data.Error)))
 
 			// End invoke_agent span with error.
-			if r.otel != nil && se.RunID != "" {
+			if otel != nil && se.RunID != "" {
 				r.spanMu.Lock()
 				r.activeLLMCtx = nil
 				if aa := r.activeAgentSpans[se.RunID]; aa != nil {
 					delete(r.activeAgentSpans, se.RunID)
 					r.spanMu.Unlock()
-					r.otel.EndAgentSpan(aa.span, truncate(redaction.ForSinkString(data.Error), 256))
+					otel.EndAgentSpan(aa.span, truncate(redaction.ForSinkString(data.Error), 256))
 				} else {
 					r.spanMu.Unlock()
 				}
@@ -1140,13 +1177,13 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 				fmt.Sprintf("runId=%s", se.RunID))
 
 			// End invoke_agent span successfully.
-			if r.otel != nil && se.RunID != "" {
+			if otel != nil && se.RunID != "" {
 				r.spanMu.Lock()
 				r.activeLLMCtx = nil
 				if aa := r.activeAgentSpans[se.RunID]; aa != nil {
 					delete(r.activeAgentSpans, se.RunID)
 					r.spanMu.Unlock()
-					r.otel.EndAgentSpan(aa.span, "")
+					otel.EndAgentSpan(aa.span, "")
 				} else {
 					r.spanMu.Unlock()
 				}
@@ -1185,6 +1222,7 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 }
 
 func (r *EventRouter) handleToolCall(evt EventFrame) {
+	otel := r.otelProvider()
 	var payload ToolCallPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] parse tool_call: %v\n", err)
@@ -1219,8 +1257,8 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", reason,
 				gatewaylog.SeverityHigh, []string{"policy:block", "surface:mcp_server_block"}, 0)
-			if r.otel != nil {
-				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
+			if otel != nil {
+				otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
 			}
 			return
 		}
@@ -1237,8 +1275,8 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", reason,
 				gatewaylog.SeverityHigh, []string{"policy:error", "surface:tool_call", toolPolicyLookupErrorFinding}, 0)
-			if r.otel != nil {
-				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
+			if otel != nil {
+				otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
 			}
 			return
 		}
@@ -1253,8 +1291,8 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", "static block list",
 				gatewaylog.SeverityHigh, []string{"policy:block", "surface:tool_call"}, 0)
-			if r.otel != nil {
-				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
+			if otel != nil {
+				otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
 			}
 			return
 		}
@@ -1274,15 +1312,15 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", reason,
 				gatewaylog.SeverityHigh, []string{"policy:error", "surface:tool_call", toolPolicyLookupErrorFinding}, 0)
-			if r.otel != nil {
-				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
+			if otel != nil {
+				otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
 			}
 			return
 		}
 		if allowed {
 			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-allowed", payload.Tool, payload.ID, "reason=allow-list")
-			if r.otel != nil {
-				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "allow", "NONE")
+			if otel != nil {
+				otel.RecordInspectEvaluation(context.Background(), payload.Tool, "allow", "NONE")
 			}
 			return
 		}
@@ -1300,8 +1338,8 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				findings[0].RuleID, findings[0].Severity, findings[0].Confidence))
 		fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call: %s (%s)\n", payload.Tool, findings[0].Title)
 
-		if r.otel != nil {
-			r.otel.EmitRuntimeAlert(
+		if otel != nil {
+			otel.EmitRuntimeAlert(
 				telemetry.AlertToolCallFlagged,
 				severity,
 				telemetry.SourceToolInspect,
@@ -1337,17 +1375,18 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 					fmt.Sprintf("severity=%s findings=%d reason=%s",
 						verdict.Severity, len(verdict.Findings),
 						redaction.ForSinkReason(verdict.Reason)))
-				if r.otel != nil {
-					r.otel.RecordInspectEvaluation(ctx, tool, verdict.Action, verdict.Severity)
+				if otel != nil {
+					otel.RecordInspectEvaluation(ctx, tool, verdict.Action, verdict.Severity)
 				}
 			}
 		}(payload.Tool, payload.SessionID, payload.ID, payload.Args)
 	}
 
-	if r.otel != nil {
+	if otel != nil {
 		parentCtx := r.getToolParentCtx()
 		agentName := r.agentNameForStream(payload.AgentName)
-		ctx, span := r.otel.StartToolSpan(
+		_, policyID := r.defaultRoutingMetadata()
+		ctx, span := otel.StartToolSpan(
 			parentCtx,
 			payload.Tool, payload.Status, payload.Args,
 			dangerous, flaggedPattern, "builtin", "",
@@ -1356,7 +1395,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				SessionID:      payload.SessionID,
 				RunID:          payload.RunID,
 				DestinationApp: toolDestinationApp("builtin", ""),
-				PolicyID:       r.defaultPolicyID,
+				PolicyID:       policyID,
 				AgentName:      agentName,
 				AgentType:      agentName,
 				AgentID:        SharedAgentRegistry().AgentID(),
@@ -1396,6 +1435,7 @@ func toolDestinationApp(provider, qualifier string) string {
 }
 
 func (r *EventRouter) handleToolResult(evt EventFrame) {
+	otel := r.otelProvider()
 	var payload ToolResultPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] parse tool_result: %v\n", err)
@@ -1416,7 +1456,7 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 
 	r.inspectToolResult(payload)
 
-	if r.otel != nil {
+	if otel != nil {
 		r.spanMu.Lock()
 		var as *activeSpan
 		if q := r.activeToolSpans[payload.Tool]; len(q) > 0 {
@@ -1429,9 +1469,9 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 		r.spanMu.Unlock()
 
 		if as != nil {
-			r.otel.SetRawSpanString(as.span, "defenseclaw.tool.output", payload.Output)
-			r.otel.SetGenAIToolResult(as.span, payload.Output)
-			r.otel.EndToolSpan(as.span, exitCode, len(payload.Output), as.startTime, as.tool, as.provider)
+			otel.SetRawSpanString(as.span, "defenseclaw.tool.output", payload.Output)
+			otel.SetGenAIToolResult(as.span, payload.Output)
+			otel.EndToolSpan(as.span, exitCode, len(payload.Output), as.startTime, as.tool, as.provider)
 		}
 	}
 }
@@ -1538,6 +1578,7 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 }
 
 func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
+	otel := r.otelProvider()
 	var payload ApprovalRequestPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] parse exec.approval.requested: %v\n", err)
@@ -1578,18 +1619,20 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 		fmt.Sprintf("command_name=%s argc=%d cwd=%s", cmdName, len(argv), cwd))
 
 	var approvalSpan trace.Span
-	if r.otel != nil {
+	if otel != nil {
 		parentCtx := r.getToolParentCtx()
 		sessionID, runID := r.activeAgentCorrelation()
-		_, approvalSpan = r.otel.StartApprovalSpan(parentCtx, payload.ID, rawCmd, argv, cwd,
+		agentName := r.agentNameForStream("")
+		_, policyID := r.defaultRoutingMetadata()
+		_, approvalSpan = otel.StartApprovalSpan(parentCtx, payload.ID, rawCmd, argv, cwd,
 			telemetry.ToolSpanContext{
 				ToolID:         payload.ID,
 				SessionID:      sessionID,
 				RunID:          runID,
 				DestinationApp: toolDestinationApp("builtin", ""),
-				PolicyID:       r.defaultPolicyID,
-				AgentName:      r.agentNameForStream(""),
-				AgentType:      r.agentNameForStream(""),
+				PolicyID:       policyID,
+				AgentName:      agentName,
+				AgentType:      agentName,
 				AgentID:        SharedAgentRegistry().AgentID(),
 			},
 		)
@@ -1626,10 +1669,10 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 			deriveSeverity(topFinding.Severity), []string{"approval:denied", "surface:exec"}, 0)
 		fmt.Fprintf(os.Stderr, "[sidecar] DENIED exec approval: %s (%s)\n", cmdName, topFinding.Title)
 
-		if r.otel != nil {
-			r.otel.EndApprovalSpan(approvalSpan, "denied", "dangerous-command", false, true)
+		if otel != nil {
+			otel.EndApprovalSpan(approvalSpan, "denied", "dangerous-command", false, true)
 
-			r.otel.EmitRuntimeAlert(
+			otel.EmitRuntimeAlert(
 				telemetry.AlertDangerousCommand, "HIGH", telemetry.SourceLocalPattern,
 				fmt.Sprintf("Dangerous command blocked: %s", cmdName),
 				map[string]string{"tool": "shell", "command": rawCmd},
@@ -1647,8 +1690,8 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 			fmt.Sprintf("reason=auto-approve command_name=%s", cmdName))
 		fmt.Fprintf(os.Stderr, "[sidecar] AUTO-APPROVED exec: %s\n", cmdName)
 
-		if r.otel != nil {
-			r.otel.EndApprovalSpan(approvalSpan, "approved", "auto-approved safe command", true, false)
+		if otel != nil {
+			otel.EndApprovalSpan(approvalSpan, "approved", "auto-approved safe command", true, false)
 		}
 
 		r.resolveApprovalAsync(payload.ID, true, "defenseclaw: auto-approved safe command")
@@ -1659,8 +1702,8 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	r.logStreamAction(approvalSession, string(audit.ActionGatewayApprovalPending), payload.ID,
 		fmt.Sprintf("command_name=%s reason=awaiting-manual-approval", cmdName))
 
-	if r.otel != nil {
-		r.otel.EndApprovalSpan(approvalSpan, "pending", "awaiting manual approval", false, false)
+	if otel != nil {
+		otel.EndApprovalSpan(approvalSpan, "pending", "awaiting manual approval", false, false)
 	}
 }
 

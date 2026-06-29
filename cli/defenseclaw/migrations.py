@@ -489,7 +489,7 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
     except OSError as exc:
         ux.warn(f"could not migrate token_env in {config_path}: {exc}", indent="    ")
         return
-    ctx.changes.append(f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml ()")
+    ctx.changes.append(f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml")
 
 
 # Files under data_dir that carry credentials or pristine backups and
@@ -2077,7 +2077,9 @@ def _replace_yaml_value(line: str, rendered_value: str) -> str:
 
 def _yaml_scalar(value: str) -> str:
     if re.match(r"^[A-Za-z0-9_.-]+$", value):
-        return value
+        parsed = yaml.safe_load(value)
+        if isinstance(parsed, str) and parsed == value:
+            return value
     return json.dumps(value)
 
 

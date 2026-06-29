@@ -5175,6 +5175,27 @@ func TestHandleGuardrailConfig_PatchRollbackOnWriteFailure(t *testing.T) {
 	}
 }
 
+func TestPatchGuardrailConfigFile_RestoresInvalidPatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	original := []byte("config_version: 6\ndata_dir: " + dir + "\ndeployment_mode: standalone\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	api := &APIServer{}
+	if err := api.patchGuardrailConfigFile(path, map[string]any{"deployment_mode": "invalid"}); err == nil {
+		t.Fatal("patchGuardrailConfigFile succeeded with invalid deployment mode")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read restored config: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("restored config = %q, want %q", got, original)
+	}
+}
+
 func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	tmpDir := t.TempDir()
@@ -5193,9 +5214,11 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 		},
 	}
 
-	body, _ := json.Marshal(map[string]string{
-		"mode":         "action",
-		"scanner_mode": "both",
+	body, _ := json.Marshal(map[string]any{
+		"mode":              "action",
+		"scanner_mode":      "both",
+		"hilt_enabled":      true,
+		"hilt_min_severity": "medium",
 	})
 	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -5215,6 +5238,16 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 	}
 	if api.scannerCfg.Guardrail.ScannerMode != "both" {
 		t.Errorf("scanner_mode = %q, want both", api.scannerCfg.Guardrail.ScannerMode)
+	}
+	var response map[string]any
+	if err := json.NewDecoder(w.Result().Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["hilt_enabled"] != true {
+		t.Fatalf("hilt_enabled = %#v, want true", response["hilt_enabled"])
+	}
+	if response["hilt_min_severity"] != "MEDIUM" {
+		t.Fatalf("hilt_min_severity = %#v, want MEDIUM", response["hilt_min_severity"])
 	}
 }
 

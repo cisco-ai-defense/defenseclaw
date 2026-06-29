@@ -2553,12 +2553,14 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.applyGuardrailPatchLocked(updates)
 
 		resp := map[string]interface{}{
-			"status":        "updated",
-			"changed":       changed,
-			"mode":          a.scannerCfg.Guardrail.Mode,
-			"scanner_mode":  a.scannerCfg.Guardrail.ScannerMode,
-			"block_message": a.scannerCfg.Guardrail.BlockMessage,
-			"connector":     a.scannerCfg.Guardrail.Connector,
+			"status":            "updated",
+			"changed":           changed,
+			"mode":              a.scannerCfg.Guardrail.Mode,
+			"scanner_mode":      a.scannerCfg.Guardrail.ScannerMode,
+			"block_message":     a.scannerCfg.Guardrail.BlockMessage,
+			"connector":         a.scannerCfg.Guardrail.Connector,
+			"hilt_enabled":      a.scannerCfg.Guardrail.HILT.Enabled,
+			"hilt_min_severity": a.scannerCfg.Guardrail.HILT.MinSeverity,
 		}
 
 		a.cfgMu.Unlock()
@@ -2597,7 +2599,7 @@ func (a *APIServer) patchGuardrailConfigFile(path string, updates map[string]any
 	}
 	if _, err := config.LoadFromFile(path); err != nil {
 		if originalExisted {
-			if restoreErr := os.WriteFile(path, original, 0o600); restoreErr != nil {
+			if restoreErr := config.WriteFileAtomic(path, original, 0o600); restoreErr != nil {
 				return fmt.Errorf("api: patched config invalid: %w; restore failed: %v", err, restoreErr)
 			}
 		} else if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {

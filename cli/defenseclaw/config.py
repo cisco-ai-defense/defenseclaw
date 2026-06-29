@@ -2708,8 +2708,12 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         gw.pop("token", None)
     if gw:
         config_reload = gw.get("config_reload")
-        if isinstance(config_reload, dict) and (config_reload.get("mode") or "hot") == "hot":
-            gw.pop("config_reload", None)
+        if isinstance(config_reload, dict):
+            mode = _normalize_gateway_config_reload_mode(config_reload.get("mode"))
+            if mode == "hot":
+                gw.pop("config_reload", None)
+            else:
+                config_reload["mode"] = mode
     _strip_empty_llm(d, "llm")
     scanners = d.get("scanners") or {}
     _strip_empty_llm(scanners.get("skill_scanner"), "llm")
@@ -4242,7 +4246,14 @@ def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
 def _merge_gateway_config_reload(raw: dict[str, Any] | None) -> GatewayConfigReloadConfig:
     if not raw:
         return GatewayConfigReloadConfig()
-    return GatewayConfigReloadConfig(mode=str(raw.get("mode", "hot") or "hot"))
+    return GatewayConfigReloadConfig(mode=_normalize_gateway_config_reload_mode(raw.get("mode")))
+
+
+def _normalize_gateway_config_reload_mode(value: Any) -> str:
+    mode = str(value or "hot").strip().lower()
+    if mode not in {"hot", "restart"}:
+        raise ValueError("gateway.config_reload.mode must be 'hot' or 'restart'")
+    return mode
 
 
 def _apply_instance_overlay(out: LLMConfig, data_dir: str) -> None:

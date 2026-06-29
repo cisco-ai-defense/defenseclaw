@@ -599,7 +599,7 @@ jobs:
     # cleanup scripts). Run full-live only after core so their setup/cleanup
     # phases cannot cancel or corrupt each other on the same runner.
     needs: core
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && (github.event_name == 'schedule' || (needs.core.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)))) }}
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 45
     env:

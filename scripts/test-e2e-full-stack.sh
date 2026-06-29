@@ -455,7 +455,7 @@ sidecar_post_retry_config_patch_rate_limit() {
     local resp wait_s
     for attempt in $(seq 1 "$attempts"); do
         resp=$(sidecar_post "$path" "$body" 2>&1 || true)
-        if ! echo "$resp" | grep -Eqi 'rate limit exceeded for config\.patch|UNAVAILABLE'; then
+        if ! echo "$resp" | grep -Eqi 'rate limit exceeded( for config\.patch)?|rate_limit_error|UNAVAILABLE'; then
             printf '%s\n' "$resp"
             return 0
         fi
@@ -869,6 +869,10 @@ copy_skill_fixture() {
     local dest_root="$2"
     local dest_name="$3"
     local stage_parent stage_dir
+    if [ -z "$dest_root" ] || [ -z "$dest_name" ]; then
+        echo "missing destination for skill fixture copy" >&2
+        return 1
+    fi
     ensure_directory_writable "$dest_root" "copying skill fixture"
     stage_parent=$(dirname "$dest_root")
     stage_dir=$(mktemp -d "$stage_parent/.defenseclaw-skill-fixture.XXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/defenseclaw-skill-fixture.XXXXXX")
@@ -877,8 +881,8 @@ copy_skill_fixture() {
         return 1
     fi
     chmod -R u+rwX,go+rX "$stage_dir" 2>/dev/null || true
-    rm -rf "$dest_root/$dest_name" 2>/dev/null || true
-    if ! mv "$stage_dir" "$dest_root/$dest_name"; then
+    rm -rf -- "${dest_root:?}/${dest_name:?}" 2>/dev/null || true
+    if ! mv "$stage_dir" "${dest_root:?}/${dest_name:?}"; then
         rm -rf "$stage_dir"
         return 1
     fi
@@ -889,6 +893,10 @@ copy_plugin_fixture() {
     local dest_root="$2"
     local dest_name="$3"
     local stage_parent stage_dir
+    if [ -z "$dest_root" ] || [ -z "$dest_name" ]; then
+        echo "missing destination for plugin fixture copy" >&2
+        return 1
+    fi
     stage_parent=$(dirname "$dest_root")
     stage_dir=$(mktemp -d "$stage_parent/.defenseclaw-plugin-fixture.XXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/defenseclaw-plugin-fixture.XXXXXX")
     if ! cp -R "$fixture_dir"/. "$stage_dir/"; then
@@ -896,8 +904,8 @@ copy_plugin_fixture() {
         return 1
     fi
     chmod -R u+rwX,go+rX "$stage_dir" 2>/dev/null || true
-    rm -rf "$dest_root/$dest_name" 2>/dev/null || true
-    if ! mv "$stage_dir" "$dest_root/$dest_name"; then
+    rm -rf -- "${dest_root:?}/${dest_name:?}" 2>/dev/null || true
+    if ! mv "$stage_dir" "${dest_root:?}/${dest_name:?}"; then
         rm -rf "$stage_dir"
         return 1
     fi

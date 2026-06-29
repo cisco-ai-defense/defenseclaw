@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -75,7 +76,7 @@ func (m *ConfigManager) Current() *config.Config {
 	}
 	v := m.current.Load()
 	if cfg, ok := v.(*config.Config); ok {
-		return cfg
+		return cloneConfig(cfg)
 	}
 	return nil
 }
@@ -212,7 +213,18 @@ func cloneConfig(in *config.Config) *config.Config {
 	if in == nil {
 		return nil
 	}
-	out := *in
+	data, err := yaml.Marshal(in)
+	if err != nil {
+		panic(fmt.Errorf("config manager: clone config: %w", err))
+	}
+	var out config.Config
+	if err := yaml.Unmarshal(data, &out); err != nil {
+		panic(fmt.Errorf("config manager: decode cloned config: %w", err))
+	}
+	out.ConfigFilePath = in.ConfigFilePath
+	out.Gateway.NoTLS = in.Gateway.NoTLS
+	out.Gateway.SandboxHome = in.Gateway.SandboxHome
+	out.Gateway.ClawHome = in.Gateway.ClawHome
 	return &out
 }
 
