@@ -1805,10 +1805,19 @@ def _migrate_config_v7_named_otel_destinations(ctx: MigrationContext) -> bool:
     """
     # Pre-0.8 upgraders install the target wheel while the old CLI process is
     # still running, then import the new migrations module in-process. Their
-    # ``sys.modules`` can therefore contain the old observability writer even
-    # though this function came from the new wheel. Reload the installed
-    # submodule explicitly; newer upgraders already use a fresh child process,
-    # where the reload is harmless.
+    # ``sys.modules`` can therefore contain old transitive dependencies even
+    # though this function came from the new wheel. In particular, 0.6.6 keeps
+    # ``defenseclaw.config`` cached without ``locked_config_yaml``; reloading
+    # only the writer then fails while resolving its from-import. Refresh the
+    # dependency chain from leaf to consumer before importing the installed
+    # writer. Newer upgraders already use a fresh child process, where these
+    # reloads are harmless.
+    connector_paths = importlib.import_module("defenseclaw.connector_paths")
+    importlib.reload(connector_paths)
+    config = importlib.import_module("defenseclaw.config")
+    importlib.reload(config)
+    safety = importlib.import_module("defenseclaw.safety")
+    importlib.reload(safety)
     writer = importlib.import_module("defenseclaw.observability.writer")
     writer = importlib.reload(writer)
 

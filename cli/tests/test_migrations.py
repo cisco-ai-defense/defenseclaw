@@ -1892,6 +1892,35 @@ class TestMigrate080Compatibility(unittest.TestCase):
             if not hasattr(writer, "migrate_flat_otel"):
                 writer.migrate_flat_otel = original
 
+    def test_upgrade_reloads_stale_config_dependency_from_066_client(self):
+        self._write(
+            "config_version: 6\n"
+            "otel:\n"
+            "  enabled: true\n"
+            "  endpoint: 127.0.0.1:4317\n"
+        )
+        from defenseclaw import config
+
+        # DefenseClaw 0.6.6 has this module cached before the candidate wheel
+        # is installed, but it predates the lock helper imported by the new
+        # observability writer. Simulate that mixed old/new module graph.
+        original = config.locked_config_yaml
+        try:
+            delattr(config, "locked_config_yaml")
+            ctx = self._ctx()
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+            self.assertTrue(callable(config.locked_config_yaml))
+            with open(self.cfg_path) as handle:
+                doc = yaml.safe_load(handle) or {}
+            self.assertEqual(doc["config_version"], 7)
+            self.assertEqual(
+                doc["otel"]["destinations"][0]["name"],
+                "local-observability",
+            )
+        finally:
+            if not hasattr(config, "locked_config_yaml"):
+                config.locked_config_yaml = original
+
     def test_already_applied_080_cursor_still_runs_config_v7_migration(self):
         self._write(
             "config_version: 6\n"
