@@ -1864,7 +1864,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         self.assertIsNot(destination["logs"].get("enabled"), True)
         self.assertTrue(any("named otel.destinations" in change for change in ctx.changes))
 
-    def test_upgrade_reloads_stale_observability_writer_from_legacy_client(self):
+    def test_upgrade_isolates_stale_observability_writer_from_legacy_client(self):
         self._write(
             "config_version: 6\n"
             "otel:\n"
@@ -1878,7 +1878,9 @@ class TestMigrate080Compatibility(unittest.TestCase):
             delattr(writer, "migrate_flat_otel")
             ctx = self._ctx()
             self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
-            self.assertTrue(callable(writer.migrate_flat_otel))
+            # The old parent module remains untouched; the newly installed
+            # writer was loaded only in the isolated child interpreter.
+            self.assertFalse(hasattr(writer, "migrate_flat_otel"))
             with open(self.cfg_path) as handle:
                 doc = yaml.safe_load(handle) or {}
             self.assertEqual(doc["config_version"], 7)
@@ -1887,12 +1889,10 @@ class TestMigrate080Compatibility(unittest.TestCase):
                 "local-observability",
             )
         finally:
-            # The migration reload normally restores this itself. Keep the
-            # finally guard so a failing assertion cannot poison later tests.
             if not hasattr(writer, "migrate_flat_otel"):
                 writer.migrate_flat_otel = original
 
-    def test_upgrade_reloads_stale_config_dependency_from_066_client(self):
+    def test_upgrade_isolates_stale_config_dependency_from_066_client(self):
         self._write(
             "config_version: 6\n"
             "otel:\n"
@@ -1909,7 +1909,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
             delattr(config, "locked_config_yaml")
             ctx = self._ctx()
             self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
-            self.assertTrue(callable(config.locked_config_yaml))
+            self.assertFalse(hasattr(config, "locked_config_yaml"))
             with open(self.cfg_path) as handle:
                 doc = yaml.safe_load(handle) or {}
             self.assertEqual(doc["config_version"], 7)
@@ -1920,6 +1920,22 @@ class TestMigrate080Compatibility(unittest.TestCase):
         finally:
             if not hasattr(config, "locked_config_yaml"):
                 config.locked_config_yaml = original
+
+    def test_config_migration_preserves_parent_module_identities(self):
+        self._write(
+            "config_version: 6\n"
+            "otel:\n"
+            "  enabled: true\n"
+            "  endpoint: 127.0.0.1:4317\n"
+        )
+        from defenseclaw import connector_paths, safety
+
+        safety_error = safety.SafetyError
+        skill_dirs = connector_paths.skill_dirs
+
+        self.assertTrue(_migrate_config_v7_named_otel_destinations(self._ctx()))
+        self.assertIs(safety.SafetyError, safety_error)
+        self.assertIs(connector_paths.skill_dirs, skill_dirs)
 
     def test_already_applied_080_cursor_still_runs_config_v7_migration(self):
         self._write(

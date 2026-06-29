@@ -42,6 +42,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1807,26 +1808,56 @@ def _migrate_config_v7_named_otel_destinations(ctx: MigrationContext) -> bool:
     # still running, then import the new migrations module in-process. Their
     # ``sys.modules`` can therefore contain old transitive dependencies even
     # though this function came from the new wheel. In particular, 0.6.6 keeps
-    # ``defenseclaw.config`` cached without ``locked_config_yaml``; reloading
-    # only the writer then fails while resolving its from-import. Refresh the
-    # dependency chain from leaf to consumer before importing the installed
-    # writer. Newer upgraders already use a fresh child process, where these
-    # reloads are harmless.
-    connector_paths = importlib.import_module("defenseclaw.connector_paths")
-    importlib.reload(connector_paths)
-    config = importlib.import_module("defenseclaw.config")
-    importlib.reload(config)
-    safety = importlib.import_module("defenseclaw.safety")
-    importlib.reload(safety)
-    writer = importlib.import_module("defenseclaw.observability.writer")
-    writer = importlib.reload(writer)
+    # ``defenseclaw.config`` cached without ``locked_config_yaml``.
+    #
+    # Do not repair that mixed graph with importlib.reload(): reloading shared
+    # modules replaces exception classes and function globals underneath the
+    # still-running legacy CLI. That can make an exception raised by the new
+    # safety module impossible for callers holding the old class object to
+    # catch, and can invalidate connector-path monkeypatches. Instead, perform
+    # the atomic writer operation in an isolated child interpreter. ``-I``
+    # prevents the current directory or PYTHONPATH from shadowing the wheel
+    # that was just installed, while the normal process environment (including
+    # documented OTel endpoint variables) remains available to the writer.
+    script = (
+        "import json, sys\n"
+        "from defenseclaw.observability.writer import migrate_flat_otel\n"
+        "result = migrate_flat_otel(sys.argv[1], dry_run=False)\n"
+        "print(json.dumps({'name': result.name, "
+        "'yaml_changes': result.yaml_changes}))\n"
+    )
+    proc = subprocess.run(  # noqa: S603 - trusted interpreter and static script
+        [sys.executable, "-I", "-c", script, ctx.data_dir],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        detail = next(
+            (line.strip() for line in reversed(proc.stderr.splitlines()) if line.strip()),
+            f"child interpreter exited {proc.returncode}",
+        )
+        raise RuntimeError(f"isolated observability migration failed: {detail}")
 
-    result = writer.migrate_flat_otel(ctx.data_dir, dry_run=False)
-    if not result.yaml_changes:
+    payload_line = next(
+        (line.strip() for line in reversed(proc.stdout.splitlines()) if line.strip()),
+        "",
+    )
+    try:
+        payload = json.loads(payload_line)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "isolated observability migration returned an invalid result"
+        ) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("yaml_changes"), list):
+        raise RuntimeError("isolated observability migration returned an invalid result")
+    if not payload["yaml_changes"]:
         return False
+    name = str(payload.get("name") or "generic-otlp")
     ctx.changes.append(
         "migrated the legacy flat OTel exporter to named "
-        f"otel.destinations[{result.name}] and saved a pre-migration backup"
+        f"otel.destinations[{name}] and saved a pre-migration backup"
     )
     return True
 
