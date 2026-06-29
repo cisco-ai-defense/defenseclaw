@@ -46,6 +46,7 @@ type templateData struct {
 	APIAddr  string
 	APIToken string // gateway bearer token; empty when unconfigured (loopback-allow)
 	FailMode string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	Managed  bool
 }
 
 // defaultHookFailMode is the fail mode injected into the response-
@@ -432,6 +433,10 @@ func writeHookScriptsCommon(hookDir, apiAddr, token string, extras []string) err
 }
 
 func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string, extras []string) error {
+	return writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode, extras, false)
+}
+
+func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string, extras []string, managed bool) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -446,7 +451,7 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 		return err
 	}
 
-	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: normalizeHookFailMode(failMode)}
+	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: normalizeHookFailMode(failMode), Managed: managed}
 
 	scripts := hookScriptNamesFromExtras(extras)
 
@@ -589,7 +594,7 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 			failMode = "open"
 		}
 	}
-	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)
+	return writeHookScriptsCommonWithOptions(hookDir, opts.APIAddr, opts.APIToken, failMode, extras, opts.ManagedEnterprise)
 }
 
 // resolveHookFailMode picks the response-layer fail mode for a hook

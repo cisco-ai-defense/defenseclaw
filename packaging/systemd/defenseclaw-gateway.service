@@ -10,6 +10,8 @@ User=defenseclaw
 Group=defenseclaw
 Environment=DEFENSECLAW_HOME=/var/lib/defenseclaw
 Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
+Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise
+Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian
 ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway
 Restart=on-failure
 RestartSec=5s

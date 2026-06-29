@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
@@ -53,6 +54,7 @@ import (
 )
 
 var launchConfigRestartHelper = defaultLaunchConfigRestartHelper
+var validateManagedGuardianAuthorization = managed.ValidateTrustedFilePath
 
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
@@ -962,12 +964,6 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 		if s == nil || s.cfg == nil || newCfg == nil {
 			return nil
 		}
-		next := *newCfg
-		if next.Gateway.Token == "" && s.cfg.Gateway.Token != "" {
-			next.Gateway.Token = s.cfg.Gateway.Token
-		}
-		*s.cfg = next
-		redaction.SetDisableAll(s.cfg.Privacy.DisableRedaction)
 		fmt.Fprintf(os.Stderr, "[sidecar] config reload mode=restart: validated config change; requesting process restart\n")
 		if launchConfigRestartHelper != nil {
 			if err := launchConfigRestartHelper(); err != nil {
@@ -1061,8 +1057,7 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 		nextJudge = buildSharedJudge(&next, nextRulePack)
 	}
 
-	*s.cfg = next
-	redaction.SetDisableAll(s.cfg.Privacy.DisableRedaction)
+	redaction.SetDisableAll(next.Privacy.DisableRedaction)
 
 	if otelReload {
 		oldOTel := s.otel
@@ -1091,9 +1086,9 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 			ApplyRulePackOverrides(nextRulePack)
 			ApplyLocalPatternsOverride(nextRulePack.LocalPatterns)
 		}
-		s.router.SetGuardrailConfig(&s.cfg.Guardrail)
-		s.router.SetDefaultAgentName(string(s.cfg.Claw.Mode))
-		s.router.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
+		s.router.SetGuardrailConfig(&next.Guardrail)
+		s.router.SetDefaultAgentName(string(next.Claw.Mode))
+		s.router.SetDefaultPolicyID(next.Guardrail.Mode)
 	}
 
 	if judgeReload {
@@ -1107,7 +1102,7 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if notifierChanged(oldCfg, newCfg) {
-		s.osNotifier = notifier.New(s.cfg.Notifications)
+		s.osNotifier = notifier.New(next.Notifications)
 		if s.hilt != nil {
 			s.hilt.SetNotifier(s.osNotifier)
 		}
@@ -1121,7 +1116,7 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 
 	if webhooksChanged(oldCfg, newCfg) {
 		oldWebhooks := s.webhooks
-		s.webhooks = NewWebhookDispatcher(s.cfg.Webhooks, s.cfg.Observability)
+		s.webhooks = NewWebhookDispatcher(next.Webhooks, next.Observability)
 		if s.webhooks != nil {
 			s.webhooks.BindObservability(s.otel)
 		}
@@ -1135,9 +1130,9 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 
 	if !guardrailRestart {
 		if proxy := s.proxySnapshot(); proxy != nil {
-			proxy.ApplyGuardrailConfig(&s.cfg.Guardrail)
-			proxy.SetDefaultAgentName(string(s.cfg.Claw.Mode))
-			proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
+			proxy.ApplyGuardrailConfig(&next.Guardrail)
+			proxy.SetDefaultAgentName(string(next.Claw.Mode))
+			proxy.SetDefaultPolicyID(next.Guardrail.Mode)
 		}
 	}
 
@@ -2030,6 +2025,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// SetCredentials() again with the same values (idempotent restore).
 	masterKey := deriveMasterKey(s.cfg.DataDir)
 	conn.SetCredentials(apiToken, masterKey)
+	hookAPIToken, err := connectorSetupAPIToken(s.cfg.DataDir, conn, apiToken)
+	if err != nil {
+		return fmt.Errorf("connector %s scoped hook token: %w", conn.Name(), err)
+	}
 
 	workspaceDir := s.cfg.ConnectorWorkspaceDir()
 	agentVersion := connector.LoadCachedAgentVersion(s.cfg.DataDir, conn.Name())
@@ -2044,7 +2043,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// config — same source the proxy uses for credential wiring
 		// below, so the baked value and the value accepted by the API
 		// middleware stay in lockstep.
-		APIToken:     apiToken,
+		APIToken:     hookAPIToken,
 		WorkspaceDir: workspaceDir,
 		// HookFailMode is the operator-chosen response-layer fail mode
 		// for every generated hook (see GuardrailConfig.HookFailMode
@@ -2097,6 +2096,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 		if err := conn.VerifyClean(setupOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
+			teardownErr := fmt.Errorf("connector %s teardown incomplete: %w", conn.Name(), err)
+			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
+			return teardownErr
+		}
+		if err := connector.ClearHookContractLockEntry(s.cfg.DataDir, conn.Name()); err != nil {
+			teardownErr := fmt.Errorf("clear hook contract lock for %s: %w", conn.Name(), err)
+			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
+			return teardownErr
 		}
 		connector.ClearActiveConnector(s.cfg.DataDir)
 	} else if guardianManagedLifecycle {
@@ -2215,11 +2222,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		return err
 	}
 
-	// Hook-native short-circuit. When the active connector is codex,
-	// claudecode, or another hook-only connector, we never bind the proxy
-	// listener: the connector's Setup() has already installed hooks + native
-	// telemetry, and the agent talks DIRECTLY to its native upstream. In
-	// action mode the hook lane still enforces blocking decisions.
+	// Direct-upstream short-circuit. Hook/policy-native connectors never bind
+	// the proxy listener: Setup has already installed their lifecycle bridge
+	// and telemetry, and action-mode enforcement is returned through that
+	// native surface (hooks or OmniGent's custom policy API).
 	//
 	// We still construct the GuardrailProxy above and call Setup
 	// before this gate so:
@@ -2237,22 +2243,71 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// goroutine alive until shutdown, mirroring the existing
 	// !cfg.Guardrail.Enabled path in proxy.go (lines 313-318).
 	if !proxyShouldBindForConnector(conn, &s.cfg.Guardrail) {
-		hookEnforcement := strings.EqualFold(s.cfg.EffectiveGuardrailModeForConnector(conn.Name()), "action")
-		summary := "hook telemetry (no proxy binding)"
-		hint := "connector uses hooks/native telemetry; local guardrail proxy is not in the LLM data path"
-		if hookEnforcement {
+		policyMode := strings.ToLower(strings.TrimSpace(s.cfg.EffectiveGuardrailModeForConnector(conn.Name())))
+		if policyMode != "action" {
+			policyMode = "observe"
+		}
+		enforcementEnabled := policyMode == "action"
+		summary := "observability-only (no proxy binding)"
+		surface := "agent_lifecycle_hooks"
+		if enforcementEnabled {
 			summary = "hook enforcement (no proxy binding)"
-			hint = "connector uses hooks/native telemetry; action-mode hooks can block; local guardrail proxy is not in the LLM data path"
+		}
+		if conn.Name() == "omnigent" {
+			surface = "omnigent_policy_api"
+			if enforcementEnabled {
+				summary = "policy enforcement (no proxy binding)"
+			}
+		}
+		if guardianManagedLifecycle {
+			publishHealth := func() {
+				covered, status := managedGuardianCoversConnectors(s.cfg.DataDir, []string{conn.Name()})
+				state := StateStarting
+				verifiedEnforcement := false
+				hint := "awaiting a trusted enterprise hook guardian authorization record"
+				if covered {
+					state = StateRunning
+					verifiedEnforcement = enforcementEnabled
+					hint = "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path"
+				}
+				s.health.SetGuardrail(state, status, map[string]interface{}{
+					"summary":             summary,
+					"connector":           conn.Name(),
+					"mode":                "observability",
+					"policy_mode":         policyMode,
+					"enforcement_enabled": verifiedEnforcement,
+					"enforcement_surface": surface,
+					"proxy_port":          "closed",
+					"hint":                hint,
+					"lifecycle_manager":   "enterprise_hook_guardian",
+					"guardian_verified":   covered,
+				})
+			}
+			publishHealth()
+			fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — awaiting enterprise hook guardian verification\n", conn.Name(), policyMode, enforcementEnabled)
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-ticker.C:
+					publishHealth()
+				}
+			}
 		}
 		s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
 			"summary":             summary,
 			"connector":           conn.Name(),
-			"enforcement_enabled": hookEnforcement,
+			"mode":                "observability",
+			"policy_mode":         policyMode,
+			"enforcement_enabled": enforcementEnabled,
+			"enforcement_surface": surface,
 			"proxy_port":          "closed",
-			"hint":                hint,
+			"hint":                "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path",
 			"lifecycle_manager":   lifecycleManagerForConnector(s.cfg, conn),
 		})
-		fmt.Fprintf(os.Stderr, "[guardrail] hook mode: %s talks directly to its native upstream — proxy port intentionally not bound (hook_enforcement=%v)\n", conn.Name(), hookEnforcement)
+		fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — proxy port intentionally not bound\n", conn.Name(), policyMode, enforcementEnabled)
 		<-ctx.Done()
 		return nil
 	}
@@ -2260,6 +2315,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 }
 
 func (s *Sidecar) waitForConnectorSetup(ctx context.Context) error {
+	if err := s.reconcileUnconfiguredConnectors(ctx, nil); err != nil {
+		if s.health != nil {
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+		}
+		return err
+	}
 	details := map[string]interface{}{
 		"summary": "no connector configured; run defenseclaw setup for a connector",
 	}
@@ -2269,6 +2330,52 @@ func (s *Sidecar) waitForConnectorSetup(ctx context.Context) error {
 	fmt.Fprintln(os.Stderr, "[guardrail] no connector configured; guardrail connector boot is idle until setup runs")
 	<-ctx.Done()
 	return nil
+}
+
+// reconcileUnconfiguredConnectors tears down the persisted active set when
+// the operator removes the final connector from configuration. Both guardrail
+// boot paths short-circuit through waitForConnectorSetup when configuration is
+// empty, so this reconciliation must happen before the idle wait; otherwise
+// the final connector's host-agent files remain installed forever.
+//
+// A connector whose cleanup cannot be verified remains in active state so a
+// later boot retries it. Successfully cleaned connectors also lose their hook
+// contract lock entries through teardownRemovedConnectors.
+func (s *Sidecar) reconcileUnconfiguredConnectors(ctx context.Context, registry *connector.Registry) error {
+	if s == nil || s.cfg == nil || strings.TrimSpace(s.cfg.DataDir) == "" {
+		return nil
+	}
+	previous := connector.LoadActiveConnectors(s.cfg.DataDir)
+	if len(previous) == 0 {
+		return nil
+	}
+	if registry == nil {
+		registry = connector.NewDefaultRegistry()
+		if s.cfg.PluginDir != "" {
+			if err := registry.DiscoverPlugins(s.cfg.PluginDir); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] plugin discovery during teardown: %v\n", err)
+			}
+		}
+	}
+	apiBind := "127.0.0.1"
+	if s.cfg.Gateway.APIBind != "" {
+		apiBind = s.cfg.Gateway.APIBind
+	}
+	opts := connector.SetupOpts{
+		DataDir:      s.cfg.DataDir,
+		ProxyAddr:    guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host),
+		APIAddr:      fmt.Sprintf("%s:%d", apiBind, s.cfg.Gateway.APIPort),
+		WorkspaceDir: s.cfg.ConnectorWorkspaceDir(),
+	}
+	failed := teardownRemovedConnectors(registry, previous, nil, opts, ctx)
+	if len(failed) == 0 {
+		connector.ClearActiveConnector(s.cfg.DataDir)
+		return nil
+	}
+	if err := connector.SaveActiveConnectors(s.cfg.DataDir, failed); err != nil {
+		return fmt.Errorf("persist connectors awaiting teardown retry: %w", err)
+	}
+	return fmt.Errorf("connector teardown incomplete for: %s", strings.Join(failed, ", "))
 }
 
 // runGuardrailMulti is the multi-connector boot loop. It activates ONLY when
@@ -2403,11 +2510,12 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// base opts carrying just the fields Teardown needs.
 	baseOpts := connector.SetupOpts{DataDir: s.cfg.DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr}
 	previous := connector.LoadActiveConnectors(s.cfg.DataDir)
-	teardownRemovedConnectors(registry, previous, names, baseOpts, ctx)
+	failedRemoved := teardownRemovedConnectors(registry, previous, names, baseOpts, ctx)
 
 	// Disabled short-circuit: tear every configured connector down, clear
 	// persisted state, and idle until shutdown.
 	if !s.cfg.Guardrail.Enabled {
+		failedTeardown := append([]string(nil), failedRemoved...)
 		for _, conn := range conns {
 			opts := s.connectorSetupOpts(conn, apiToken, proxyAddr, apiAddr)
 			if err := conn.Teardown(ctx, opts); err != nil {
@@ -2415,9 +2523,30 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 			}
 			if err := conn.VerifyClean(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
+				failedTeardown = append(failedTeardown, conn.Name())
+				continue
+			}
+			if err := connector.ClearHookContractLockEntry(s.cfg.DataDir, conn.Name()); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: clear hook contract lock for %s: %v\n", conn.Name(), err)
+				failedTeardown = append(failedTeardown, conn.Name())
 			}
 		}
-		connector.ClearActiveConnector(s.cfg.DataDir)
+		if len(failedTeardown) == 0 {
+			connector.ClearActiveConnector(s.cfg.DataDir)
+		} else if err := connector.SaveActiveConnectors(s.cfg.DataDir, failedTeardown); err != nil {
+			persistErr := fmt.Errorf(
+				"save connectors awaiting teardown retry (%s): %w",
+				strings.Join(failedTeardown, ", "),
+				err,
+			)
+			s.health.SetGuardrail(StateError, persistErr.Error(), nil)
+			return persistErr
+		}
+		if len(failedTeardown) > 0 {
+			teardownErr := fmt.Errorf("connector teardown incomplete for: %s", strings.Join(failedTeardown, ", "))
+			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
+			return teardownErr
+		}
 		s.health.SetGuardrail(StateDisabled, "", nil)
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — tore down %d configured connector(s)\n", len(conns))
 		<-ctx.Done()
@@ -2433,8 +2562,19 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// failed setup" error below, which would misreport a deliberate
 	// per-connector disable as a boot failure.
 	if len(conns) == 0 {
-		if err := connector.SaveActiveConnectors(s.cfg.DataDir, nil); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] save active connector set: %v\n", err)
+		if err := connector.SaveActiveConnectors(s.cfg.DataDir, failedRemoved); err != nil {
+			persistErr := fmt.Errorf(
+				"save connectors awaiting teardown retry (%s): %w",
+				strings.Join(failedRemoved, ", "),
+				err,
+			)
+			s.health.SetGuardrail(StateError, persistErr.Error(), nil)
+			return persistErr
+		}
+		if len(failedRemoved) > 0 {
+			teardownErr := fmt.Errorf("connector teardown incomplete for: %s", strings.Join(failedRemoved, ", "))
+			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
+			return teardownErr
 		}
 		s.health.SetGuardrail(StateDisabled, "all configured connectors are individually disabled", nil)
 		fmt.Fprintf(os.Stderr, "[guardrail] all %d configured connector(s) disabled per-connector — none active; idle until shutdown\n", len(configured))
@@ -2450,8 +2590,18 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 
 	// Persist the set that actually came up so the next boot's
 	// set-difference teardown is accurate.
-	if err := connector.SaveActiveConnectors(s.cfg.DataDir, succeeded); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] save active connector set: %v\n", err)
+	persisted := append(append([]string(nil), succeeded...), failedRemoved...)
+	if err := connector.SaveActiveConnectors(s.cfg.DataDir, persisted); err != nil {
+		persistErr := fmt.Errorf("save active connector set: %w", err)
+		if len(failedRemoved) > 0 {
+			persistErr = fmt.Errorf(
+				"save active connector set with teardown retry state (%s): %w",
+				strings.Join(failedRemoved, ", "),
+				err,
+			)
+		}
+		s.health.SetGuardrail(StateError, persistErr.Error(), nil)
+		return persistErr
 	}
 
 	// Every connector failing is a real boot failure — surface it loudly
@@ -2477,25 +2627,25 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	if primary, ok := registry.Get(succeeded[0]); ok {
 		s.health.SetConnector(primary.Name(), primary.ToolInspectionMode(), primary.SubprocessPolicy())
 	}
-	hookEnforcement := false
+	connectorModes := make(map[string]string, len(succeeded))
+	anyEnforcement := false
 	for _, name := range succeeded {
-		if strings.EqualFold(s.cfg.EffectiveGuardrailModeForConnector(name), "action") {
-			hookEnforcement = true
-			break
+		mode := strings.ToLower(strings.TrimSpace(s.cfg.EffectiveGuardrailModeForConnector(name)))
+		if mode != "action" {
+			mode = "observe"
 		}
-	}
-	summary := fmt.Sprintf("multi-connector hook telemetry (%d active)", len(succeeded))
-	if hookEnforcement {
-		summary = fmt.Sprintf("multi-connector hook enforcement (%d active)", len(succeeded))
+		connectorModes[name] = mode
+		anyEnforcement = anyEnforcement || mode == "action"
 	}
 	s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
-		"summary":             summary,
+		"summary":             fmt.Sprintf("multi-connector direct-upstream mode (%d active)", len(succeeded)),
 		"connectors":          succeeded,
-		"enforcement_enabled": hookEnforcement,
+		"connector_modes":     connectorModes,
+		"enforcement_enabled": anyEnforcement,
 		"proxy_port":          "closed",
-		"hint":                "hook-only connectors talk directly to their native upstreams; action-mode hooks can block without a local guardrail proxy",
+		"hint":                "hook/policy connectors enforce through agent-native lifecycle surfaces; the local guardrail proxy is not in the LLM data path",
 	})
-	fmt.Fprintf(os.Stderr, "[guardrail] multi-connector hook mode: %d active connector(s): %s — proxy port intentionally not bound (hook_enforcement=%v)\n", len(succeeded), strings.Join(succeeded, ", "), hookEnforcement)
+	fmt.Fprintf(os.Stderr, "[guardrail] multi-connector direct-upstream mode: %d active connector(s): %s; enforcement=%t — proxy port intentionally not bound\n", len(succeeded), strings.Join(succeeded, ", "), anyEnforcement)
 
 	<-ctx.Done()
 	return nil
@@ -2557,18 +2707,73 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	if hookEnforcement {
 		summary = fmt.Sprintf("managed enterprise hook enforcement (%d guardian-managed)", len(succeeded))
 	}
-	s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
-		"summary":             summary,
-		"connectors":          succeeded,
-		"enforcement_enabled": hookEnforcement,
-		"proxy_port":          "closed",
-		"hint":                "hook-only connectors talk directly to their native upstreams; enterprise hook guardian owns installation and repair",
-		"lifecycle_manager":   "enterprise_hook_guardian",
-	})
+	publishHealth := func() {
+		covered, status := managedGuardianCoversConnectors(s.cfg.DataDir, succeeded)
+		state := StateStarting
+		enforcementEnabled := false
+		hint := "awaiting a trusted enterprise hook guardian authorization record"
+		if covered {
+			state = StateRunning
+			enforcementEnabled = hookEnforcement
+			hint = "hook-only connectors talk directly to their native upstreams; enterprise hook guardian owns installation and repair"
+		}
+		s.health.SetGuardrail(state, status, map[string]interface{}{
+			"summary":             summary,
+			"connectors":          succeeded,
+			"enforcement_enabled": enforcementEnabled,
+			"proxy_port":          "closed",
+			"hint":                hint,
+			"lifecycle_manager":   "enterprise_hook_guardian",
+			"guardian_verified":   covered,
+		})
+	}
+	publishHealth()
 	fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise multi-connector hook mode: %d connector(s): %s — proxy port closed; enterprise hook guardian owns hook files\n", len(succeeded), strings.Join(succeeded, ", "))
 
-	<-ctx.Done()
-	return nil
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			publishHealth()
+		}
+	}
+}
+
+type managedGuardianAuthorization struct {
+	ProtectedTargets []struct {
+		Connector string `json:"connector"`
+		OK        bool   `json:"ok"`
+	} `json:"protected_targets"`
+}
+
+func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (bool, string) {
+	path := managed.HookGuardianAuthorizationPath(dataDir)
+	if err := validateManagedGuardianAuthorization(path, "hook guardian authorization"); err != nil {
+		return false, err.Error()
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Sprintf("read hook guardian authorization: %v", err)
+	}
+	var authorization managedGuardianAuthorization
+	if err := json.Unmarshal(data, &authorization); err != nil {
+		return false, fmt.Sprintf("parse hook guardian authorization: %v", err)
+	}
+	covered := make(map[string]struct{}, len(authorization.ProtectedTargets))
+	for _, target := range authorization.ProtectedTargets {
+		if target.OK {
+			covered[strings.ToLower(strings.TrimSpace(target.Connector))] = struct{}{}
+		}
+	}
+	for _, name := range connectorNames {
+		if _, ok := covered[strings.ToLower(strings.TrimSpace(name))]; !ok {
+			return false, fmt.Sprintf("hook guardian has not authorized connector %s", name)
+		}
+	}
+	return true, ""
 }
 
 func connectorNames(conns []connector.Connector) []string {
@@ -2642,7 +2847,11 @@ func (s *Sidecar) notifyHookHealed(connectorName string, paths []string) {
 func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector.Connector, apiToken, proxyAddr, apiAddr, masterKey string, cache *guardrail.RulePackCache) []string {
 	succeeded := make([]string, 0, len(conns))
 	for _, conn := range conns {
-		opts := s.connectorSetupOpts(conn, apiToken, proxyAddr, apiAddr)
+		opts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s scoped hook token failed, skipping: %v\n", conn.Name(), err)
+			continue
+		}
 		if err := s.setupOneConnector(ctx, conn, opts, masterKey, cache); err != nil {
 			// Isolate: roll back this connector's partial state, log, leave
 			// the other connectors untouched, continue.
@@ -2662,20 +2871,39 @@ func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector
 // EffectiveHookFailModeFor so a per-connector hook_fail_mode override is
 // honored.
 func (s *Sidecar) connectorSetupOpts(conn connector.Connector, apiToken, proxyAddr, apiAddr string) connector.SetupOpts {
+	opts, _ := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
+	return opts
+}
+
+func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, proxyAddr, apiAddr string) (connector.SetupOpts, error) {
 	agentVersion := connector.LoadCachedAgentVersion(s.cfg.DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
+	setupToken, err := connectorSetupAPIToken(s.cfg.DataDir, conn, apiToken)
+	if err != nil {
+		return connector.SetupOpts{}, err
+	}
 	return connector.SetupOpts{
 		DataDir:          s.cfg.DataDir,
 		ProxyAddr:        proxyAddr,
 		APIAddr:          apiAddr,
-		APIToken:         apiToken,
+		APIToken:         setupToken,
 		WorkspaceDir:     s.cfg.ConnectorWorkspaceDir(),
 		HookFailMode:     s.cfg.EffectiveHookFailModeForConnector(conn.Name()),
 		HILTEnabled:      s.cfg.EffectiveHILTForConnector(conn.Name()).Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,
 		HookContractID:   contractResolution.Contract.ContractID,
+	}, nil
+}
+
+func connectorSetupAPIToken(dataDir string, conn connector.Connector, gatewayToken string) (string, error) {
+	if conn == nil || connector.IsProxyConnector(conn.Name()) {
+		return gatewayToken, nil
 	}
+	if _, ok := conn.(connector.HookScriptOwner); !ok {
+		return gatewayToken, nil
+	}
+	return connector.EnsureHookAPIToken(dataDir, conn.Name())
 }
 
 // setupOneConnector performs the full setup-and-verify sequence for a single
@@ -2758,20 +2986,21 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 	if conn == nil {
 		return true
 	}
-	switch conn.Name() {
-	case "codex", "claudecode":
-		return false
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode":
-		// opencode is a hook-only connector (it governs tool execution via
-		// an auto-loaded JS bridge plugin, not a proxy listener), so it can
-		// share a process in multi-connector mode like the other hook
-		// connectors. Omitting it here made the gateway reject any
-		// multi-connector set containing opencode as "requires a proxy
-		// binding".
-		return false
-	default:
+	if provider, ok := conn.(connector.ConnectorCapabilityProvider); ok {
+		switch provider.Capabilities(connector.SetupOpts{}).LLMTrafficMode {
+		case connector.LLMTrafficModeProxy:
+			return true
+		case connector.LLMTrafficModeHooksOnly:
+			return false
+		}
+	}
+	// Built-ins that predate ConnectorCapabilityProvider still use the shared
+	// proxy classification. Unknown/plugin connectors retain the conservative
+	// historical default unless they explicitly advertise a traffic mode.
+	if connector.IsProxyConnector(conn.Name()) {
 		return true
 	}
+	return !connector.IsKnownBuiltinConnector(conn.Name())
 }
 
 func managedEnterpriseGuardianOwnsConnectorLifecycle(cfg *config.Config, conn connector.Connector) bool {
@@ -2812,14 +3041,11 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 	if cfg == nil {
 		return true
 	}
-	switch configuredConnectorName(cfg) {
-	case "codex", "claudecode":
-		return false
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
-		return false
-	default:
+	name := configuredConnectorName(cfg)
+	if connector.IsProxyConnector(name) {
 		return true
 	}
+	return !connector.IsKnownBuiltinConnector(name)
 }
 
 // gatewayShouldConnectForConfiguredConnector decides whether the sidecar
@@ -2884,8 +3110,6 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		return true
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
-		return false
 	default:
 		// Empty / unknown connector: prefer DISABLED over reconnect
 		// spam. An operator who genuinely wants fleet dial will set
@@ -2933,17 +3157,30 @@ func isLoopbackGatewayHost(host string) bool {
 // that do not implement HookScriptOwner contribute no entries — there
 // is nothing connector-specific to verify and the generic inspect-*.sh
 // scripts are checked separately by the connector's own Setup path.
-func verifyHookScriptsOnDisk(dataDir string, conn connector.Connector) []string {
+func verifyHookScriptsOnDisk(opts connector.SetupOpts, conn connector.Connector) []string {
 	if conn == nil {
 		return nil
+	}
+	if runtimeProvider, ok := conn.(connector.HookRuntimeArtifactProvider); ok {
+		var missing []string
+		for _, path := range runtimeProvider.HookRuntimeArtifacts(opts) {
+			if strings.TrimSpace(path) == "" {
+				missing = append(missing, "<unresolved runtime artifact>")
+				continue
+			}
+			if _, err := os.Stat(path); err != nil {
+				missing = append(missing, path)
+			}
+		}
+		return missing
 	}
 	owner, ok := conn.(connector.HookScriptOwner)
 	if !ok {
 		return nil
 	}
-	hookDir := filepath.Join(dataDir, "hooks")
+	hookDir := filepath.Join(opts.DataDir, "hooks")
 	var missing []string
-	for _, name := range owner.HookScriptNames(connector.SetupOpts{DataDir: dataDir}) {
+	for _, name := range owner.HookScriptNames(opts) {
 		if _, err := os.Stat(filepath.Join(hookDir, name)); err != nil {
 			missing = append(missing, name)
 		}
@@ -2966,16 +3203,19 @@ func verifyHookScriptsOnDisk(dataDir string, conn connector.Connector) []string 
 // require it.
 func verifyHookScriptsOrRetry(ctx context.Context, opts connector.SetupOpts, conn connector.Connector) error {
 	_ = ctx
-	missing := verifyHookScriptsOnDisk(opts.DataDir, conn)
+	missing := verifyHookScriptsOnDisk(opts, conn)
 	if len(missing) == 0 {
 		return nil
+	}
+	if _, ok := conn.(connector.HookRuntimeArtifactProvider); ok {
+		return fmt.Errorf("connector %s setup completed but runtime artifacts are missing: %v", conn.Name(), missing)
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup completed but hook scripts missing on disk: %v — retrying hook writer\n", conn.Name(), missing)
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	if err := connector.WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
 		return fmt.Errorf("connector %s hook-writer retry after missing-hook detection failed: %w", conn.Name(), err)
 	}
-	if missing = verifyHookScriptsOnDisk(opts.DataDir, conn); len(missing) > 0 {
+	if missing = verifyHookScriptsOnDisk(opts, conn); len(missing) > 0 {
 		return fmt.Errorf("connector %s still missing hook scripts after hook-writer retry: %v", conn.Name(), missing)
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook-writer retry restored missing hook scripts\n", conn.Name())
@@ -3007,6 +3247,9 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: previous connector %s left stale state: %v\n", prev, err)
 		return err
 	}
+	if err := connector.ClearHookContractLockEntry(opts.DataDir, prev); err != nil {
+		return fmt.Errorf("clear hook contract lock for previous connector %s: %w", prev, err)
+	}
 	fmt.Fprintf(os.Stderr, "[guardrail] previous connector %s teardown verified clean\n", prev)
 	return nil
 }
@@ -3017,16 +3260,16 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 // multi-connector boot path (removed = previous − current). It is intended to
 // run once, before the per-connector setup loop.
 //
-// Failures are logged and skipped (continue-on-error): stale state left by a
+// Failures are logged and collected (continue-on-error): stale state left by a
 // connector being REMOVED must never block bringing up the connectors that
-// are still active (DN1). Membership is compared case-insensitively so a case
-// mismatch can never tear down a connector that is in fact still active. A
-// removed name absent from the registry is skipped with a log, mirroring
-// teardownPreviousConnector.
-func teardownRemovedConnectors(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, ctx context.Context) {
+// are still active (DN1), while the returned names remain persisted for a
+// later cleanup retry. Membership is compared case-insensitively so a case
+// mismatch can never tear down a connector that is in fact still active.
+func teardownRemovedConnectors(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, ctx context.Context) []string {
 	if registry == nil || len(previous) == 0 {
-		return
+		return nil
 	}
+	var failed []string
 	keep := make(map[string]struct{}, len(current))
 	for _, n := range current {
 		if trimmed := strings.TrimSpace(n); trimmed != "" {
@@ -3044,6 +3287,7 @@ func teardownRemovedConnectors(registry *connector.Registry, previous, current [
 		old, ok := registry.Get(prevName)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %q not in registry — skipping teardown\n", prevName)
+			failed = append(failed, prevName)
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s no longer active — tearing down\n", prevName)
@@ -3052,8 +3296,17 @@ func teardownRemovedConnectors(registry *connector.Registry, previous, current [
 		}
 		if err := old.VerifyClean(opts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: removed connector %s left stale state: %v\n", prevName, err)
+			failed = append(failed, prevName)
+			continue
 		}
+		if err := connector.ClearHookContractLockEntry(opts.DataDir, prevName); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: clear hook contract lock for removed connector %s: %v\n", prevName, err)
+			failed = append(failed, prevName)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s teardown verified clean\n", prevName)
 	}
+	return failed
 }
 
 // failGuardrailWithRollback is the shared fail-loud path for connector
@@ -3270,6 +3523,53 @@ func (s *Sidecar) logHello(h *HelloOK) {
 
 // reportTelemetryHealth sets the OTel telemetry subsystem health based on
 // whether the provider was initialized and which signals are active.
+type destinationRoutingHealth struct {
+	provider    *telemetry.Provider
+	destination string
+}
+
+func (h destinationRoutingHealth) MarshalJSON() ([]byte, error) {
+	stats := h.provider.DestinationRoutingStats(h.destination)
+	total := stats.Accepted + stats.Dropped
+	percentage := float64(0)
+	if total > 0 {
+		percentage = 100 * float64(stats.Accepted) / float64(total)
+	}
+	return json.Marshal(map[string]interface{}{
+		"eligible":               stats.Accepted,
+		"filtered":               stats.Dropped,
+		"total":                  total,
+		"eligibility_percentage": percentage,
+		// Compatibility aliases for clients predating delivery telemetry.
+		"accepted":            stats.Accepted,
+		"dropped":             stats.Dropped,
+		"accepted_percentage": percentage,
+	})
+}
+
+type destinationDeliveryHealth struct {
+	provider    *telemetry.Provider
+	destination string
+}
+
+func destinationSignalNames(destination config.OTelDestinationConfig) []string {
+	signals := make([]string, 0, 3)
+	if destination.Traces.Enabled {
+		signals = append(signals, "traces")
+	}
+	if destination.Metrics.Enabled {
+		signals = append(signals, "metrics")
+	}
+	if destination.Logs.Enabled {
+		signals = append(signals, "logs")
+	}
+	return signals
+}
+
+func (h destinationDeliveryHealth) MarshalJSON() ([]byte, error) {
+	return json.Marshal(h.provider.DestinationDeliveryStats(h.destination))
+}
+
 func (s *Sidecar) reportTelemetryHealth() {
 	if s.otel == nil || !s.otel.Enabled() {
 		s.health.SetTelemetry(StateDisabled, "", nil)
@@ -3277,29 +3577,38 @@ func (s *Sidecar) reportTelemetryHealth() {
 	}
 
 	details := map[string]interface{}{}
-	if s.cfg.OTel.Endpoint != "" {
-		details["endpoint"] = s.cfg.OTel.Endpoint
+	if len(s.cfg.OTel.Destinations) > 0 {
+		destinations := make([]map[string]interface{}, 0, len(s.cfg.OTel.Destinations))
+		for _, destination := range s.cfg.OTel.Destinations {
+			signals := destinationSignalNames(destination)
+			entry := map[string]interface{}{
+				"name":     destination.Name,
+				"preset":   destination.Preset,
+				"enabled":  destination.Enabled,
+				"scope":    "process",
+				"endpoint": netguard.EndpointForDisplay(destination.Endpoint),
+				"signals":  strings.Join(signals, ", "),
+			}
+			if destination.Traces.Enabled {
+				entry["delivery"] = destinationDeliveryHealth{
+					provider: s.otel, destination: destination.Name,
+				}
+			}
+			if destination.SpanFilter.Enabled() {
+				entry["routing"] = destinationRoutingHealth{
+					provider: s.otel, destination: destination.Name,
+				}
+			}
+			destinations = append(destinations, entry)
+		}
+		details["destination_count"] = len(destinations)
+		details["destinations"] = destinations
+		s.health.SetTelemetry(StateRunning, "", details)
+		return
 	}
-
-	var signals []string
-	if s.cfg.OTel.Traces.Enabled {
-		signals = append(signals, "traces")
-	}
-	if s.cfg.OTel.Metrics.Enabled {
-		signals = append(signals, "metrics")
-	}
-	if s.cfg.OTel.Logs.Enabled {
-		signals = append(signals, "logs")
-	}
-	if len(signals) > 0 {
-		details["signals"] = strings.Join(signals, ", ")
-	}
-
-	if ep := s.cfg.OTel.Traces.Endpoint; ep != "" {
-		details["traces_endpoint"] = ep
-	}
-
-	s.health.SetTelemetry(StateRunning, "", details)
+	// Config validation requires at least one named destination whenever OTel
+	// is enabled, so reaching this branch indicates an invalid in-memory config.
+	s.health.SetTelemetry(StateError, "otel enabled without named destinations", details)
 }
 
 // reportSandboxHealth sets the sandbox subsystem health when standalone mode is active.
@@ -3370,7 +3679,19 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 // audit_sinks model is provider-agnostic and operators bring their own
 // collector/SIEM credentials.
 func (s *Sidecar) reportSinksHealth() {
+	connectorNames := s.cfg.Observability.ConnectorNames()
 	total := len(s.cfg.AuditSinks)
+	for _, name := range connectorNames {
+		pc := s.cfg.Observability.Connectors[name]
+		if pc.AuditSinks == nil {
+			continue
+		}
+		if len(*pc.AuditSinks) == 0 {
+			total++ // explicit empty override suppresses global routing
+			continue
+		}
+		total += len(*pc.AuditSinks)
+	}
 	if total == 0 {
 		// Nothing configured — surface the explicit reason + a hint
 		// pointing operators at the right CLI command. Without this
@@ -3389,30 +3710,37 @@ func (s *Sidecar) reportSinksHealth() {
 	rows := make([]map[string]interface{}, 0, total)
 	details := make(map[string]interface{}, total+4)
 
-	for i, sink := range s.cfg.AuditSinks {
+	appendSink := func(sink config.AuditSink, scope string) {
 		row := map[string]interface{}{
 			"name":    sink.Name,
 			"kind":    string(sink.Kind),
 			"enabled": sink.Enabled,
+			"scope":   scope,
 		}
 		var endpoint string
 		switch sink.Kind {
 		case config.SinkKindSplunkHEC:
 			if sink.SplunkHEC != nil {
 				endpoint = sink.SplunkHEC.Endpoint
-				row["endpoint"] = endpoint
 				row["index"] = sink.SplunkHEC.Index
 			}
 		case config.SinkKindOTLPLogs:
 			if sink.OTLPLogs != nil {
 				endpoint = sink.OTLPLogs.Endpoint
-				row["endpoint"] = endpoint
 				row["protocol"] = sink.OTLPLogs.Protocol
 			}
 		case config.SinkKindHTTPJSONL:
 			if sink.HTTPJSONL != nil {
 				endpoint = sink.HTTPJSONL.URL
-				row["url"] = endpoint
+			}
+		}
+		displayEndpoint := ""
+		if endpoint != "" {
+			displayEndpoint = netguard.EndpointForDisplay(endpoint)
+			if sink.Kind == config.SinkKindHTTPJSONL {
+				row["url"] = displayEndpoint
+			} else {
+				row["endpoint"] = displayEndpoint
 			}
 		}
 		rows = append(rows, row)
@@ -3429,19 +3757,50 @@ func (s *Sidecar) reportSinksHealth() {
 		// index keeps the alphabetical key sort matching the config
 		// order (sink_01 before sink_10), so the rendered list
 		// follows config.yaml ordering rather than map iteration.
-		key := fmt.Sprintf("sink_%02d", i+1)
-		if endpoint != "" {
+		key := fmt.Sprintf("sink_%02d", len(rows))
+		prefix := ""
+		if scope != "global" {
+			prefix = scope + ": "
+		}
+		if displayEndpoint != "" {
 			details[key] = fmt.Sprintf(
-				"%s (%s) -> %s [%s]", sink.Name, sink.Kind, endpoint, state,
+				"%s%s (%s) -> %s [%s]", prefix, sink.Name, sink.Kind, displayEndpoint, state,
 			)
 		} else {
 			// Sink missing its kind block (validation should reject
 			// this at config-load, but be defensive — health is
 			// strictly read-only and must never panic).
 			details[key] = fmt.Sprintf(
-				"%s (%s) [%s, missing %s block]",
-				sink.Name, sink.Kind, state, sink.Kind,
+				"%s%s (%s) [%s, missing %s block]",
+				prefix, sink.Name, sink.Kind, state, sink.Kind,
 			)
+		}
+	}
+
+	for _, sink := range s.cfg.AuditSinks {
+		appendSink(sink, "global")
+	}
+	for _, connectorName := range connectorNames {
+		pc := s.cfg.Observability.Connectors[connectorName]
+		if pc.AuditSinks == nil {
+			continue // inherits global; no duplicate rows
+		}
+		if len(*pc.AuditSinks) == 0 {
+			rows = append(rows, map[string]interface{}{
+				"name":       "(none)",
+				"kind":       "suppressed",
+				"enabled":    false,
+				"scope":      "connector:" + connectorName,
+				"suppressed": true,
+			})
+			key := fmt.Sprintf("sink_%02d", len(rows))
+			details[key] = fmt.Sprintf(
+				"connector:%s: no sinks [global inheritance suppressed]", connectorName,
+			)
+			continue
+		}
+		for _, sink := range *pc.AuditSinks {
+			appendSink(sink, "connector:"+connectorName)
 		}
 	}
 

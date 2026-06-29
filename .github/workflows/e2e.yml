@@ -1,10 +1,6 @@
 name: E2E
 
 on:
-  push:
-    branches: [main, demo]
-  pull_request:
-  workflow_dispatch:
   schedule:
     - cron: "0 7 * * *"
 
@@ -31,7 +27,7 @@ jobs:
     # External contributors instead rely on the GitHub-hosted shadow
     # job further down the file. Mirrors the guard already in
     # `full-live` below — we just forgot to clone it onto `core`.
-    if: ${{ github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 30
     env:
@@ -1000,13 +996,9 @@ jobs:
           import os
           from pathlib import Path
 
-          def skip_full_live(reason: str) -> None:
-              print(f"::warning::{reason}")
-              Path(os.environ["FULL_LIVE_SUCCESS_MARKER"]).write_text(reason + "\n")
-              github_env = os.environ.get("GITHUB_ENV")
-              if github_env:
-                  with Path(github_env).open("a") as f:
-                      f.write("FULL_LIVE_SKIP=1\n")
+          def fail_full_live(reason: str) -> None:
+              print(f"::error::{reason}")
+              raise RuntimeError(reason)
 
           # Full-live CI LLM provider: AWS Bedrock via OpenClaw's stock
           # amazon-bedrock provider. We use a Claude Haiku 4.5 inference profile
@@ -1114,8 +1106,7 @@ jobs:
                   json.dump(cfg, f, indent=2)
                   f.write("\n")
           except PermissionError as exc:
-              skip_full_live(f"OpenClaw config is not writable; skipping full-live E2E: {exc}")
-              raise SystemExit(0)
+              fail_full_live(f"OpenClaw config is not writable; full-live E2E cannot proceed: {exc}")
 
           # auth-profiles.json: empty profile store. amazon-bedrock
           # authenticates via the AWS SDK default chain driven by the
@@ -1135,8 +1126,7 @@ jobs:
                   f.write("\n")
               auth_path.chmod(0o600)
           except PermissionError as exc:
-              skip_full_live(f"OpenClaw auth profile is not writable; skipping full-live E2E: {exc}")
-              raise SystemExit(0)
+              fail_full_live(f"OpenClaw auth profile is not writable; full-live E2E cannot proceed: {exc}")
           PY
           if [ -f "${FULL_LIVE_SUCCESS_MARKER}" ]; then
             echo "Full-live prepare marked skipped; skipping OpenClaw service setup."

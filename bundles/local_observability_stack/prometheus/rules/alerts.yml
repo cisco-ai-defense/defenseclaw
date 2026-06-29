@@ -23,7 +23,7 @@ groups:
             gatewaylog.Writer is rejecting events because they fail runtime
             JSON-schema validation. Any sustained non-zero rate means our
             observability contract is broken.
-            Open: Reliability dashboard → "Schema violations by event type".
+            Open Runtime & Reliability → "Schema violations by event type / code".
           runbook: "docs/OBSERVABILITY-CONTRACT.md#runbook-schema-violations"
 
       - alert: DefenseClawGatewayErrorsSpike
@@ -35,8 +35,8 @@ groups:
           summary: "Gateway error rate above 30/min for 5m"
           description: |
             defenseclaw.gateway.errors is emitting more than 30 events/min.
-            Drill into Reliability → "Top error codes (1h)" to isolate the
-            subsystem/code pair.
+            Open Runtime & Reliability → "Gateway errors by subsystem / code"
+            to isolate the subsystem/code pair.
 
       - alert: DefenseClawPanic
         expr: increase(defenseclaw_panics_total[5m]) > 0
@@ -47,8 +47,9 @@ groups:
           summary: "A DefenseClaw subsystem panicked"
           description: |
             RecordPanic fired. Go `recover()` caught a panic; the process
-            may still be alive but the triggering request failed.  Inspect
-            Reliability → "Panics by subsystem" and Loki for the stack.
+            may still be alive but the triggering request failed. Inspect
+            Runtime & Reliability → "Panics by subsystem" and
+            the correlated Loki error stream.
 
   - name: defenseclaw.slo.alerts
     rules:
@@ -68,7 +69,7 @@ groups:
           summary: "Block SLO below 99% over 10m"
           description: |
             Admission-block decisions are not completing under the 2s SLO.
-            Open Runtime & SLO dashboard → "Block SLO compliance".
+            Open Runtime & Reliability → "Block and TUI refresh SLO compliance".
           runbook: "docs/OBSERVABILITY-CONTRACT.md#runbook-block-slo"
 
       - alert: DefenseClawTUIRefreshSLOBreach
@@ -84,7 +85,7 @@ groups:
           summary: "TUI refresh SLO below 99% over 15m"
           description: |
             Bubbletea dashboards are not refreshing inside the 5s SLO.
-            Open Runtime & SLO dashboard → "TUI refresh SLO".
+            Open Runtime & Reliability → "Block and TUI refresh SLO compliance".
 
   - name: defenseclaw.pipeline
     rules:
@@ -112,7 +113,7 @@ groups:
           summary: "OTLP exporter errors sustained"
           description: |
             Exporter errors above 6/min for 10m — spans/metrics/logs may be
-            dropped. Drill into Runtime & SLO → "OTLP exporter errors".
+            dropped. Open Runtime & Reliability → "OTLP exporter errors by signal".
 
       # NOTE: defenseclaw.audit.sink.failures is recorded with
       # attributes sink.kind / sink.name / sink.reason (see
@@ -130,8 +131,8 @@ groups:
           summary: "Audit sink {{ $labels.sink_kind }}/{{ $labels.sink_name }} is failing"
           description: |
             A configured audit sink is returning errors for 10 minutes.
-            Compliance downstreams may be missing events. Open Reliability
-            dashboard → "Sink batches delivered vs dropped".
+            Compliance downstreams may be missing events. Open Runtime &
+            Reliability → "Sink batches delivered vs dropped".
           runbook: "docs/OBSERVABILITY-CONTRACT.md#runbook-audit-sink"
 
       - alert: DefenseClawAuditSinkCircuitOpen
@@ -162,8 +163,9 @@ groups:
           summary: "More than 25% of gateway verdicts are blocks"
           description: |
             Either a real attack is in progress or a recent policy/scanner
-            change is producing false positives. Open Security dashboard →
-            "Verdicts by stage" + "Verdict breakdown" table.
+            change is producing false positives. Open Guardrail Evaluations →
+            "Verdict funnel (hook event x action)" and
+            "Per-connector verdict summary (1h)".
 
       - alert: DefenseClawJudgeErrorRate
         expr: |
@@ -179,8 +181,8 @@ groups:
           summary: "LLM judge error rate above 10%"
           description: |
             Guardrail judge is erroring on >10% of calls. We fall back to
-            heuristics, so guardrail quality is degraded. Inspect Security
-            dashboard → "Judge errors by reason".
+            heuristics, so guardrail quality is degraded. Open Guardrail
+            Evaluations → "Judge errors/hour by reason".
 
       - alert: DefenseClawWebhookFailuresSustained
         expr: |
@@ -205,9 +207,8 @@ groups:
         annotations:
           summary: "Gateway 5xx ratio above 2% for 10m"
           description: |
-            The gateway is returning 5xx on >2% of requests. Drill into
-            Traffic & Traces → "Status code mix" and the 500-flavored
-            routes.
+            The gateway is returning 5xx on >2% of requests. Open Proxy &
+            LLM Guard → "Status code mix" and "Requests per route".
 
       - alert: DefenseClawHTTPAuthFailuresSurge
         expr: sum(rate(defenseclaw_http_auth_failures_total[5m])) > 1
@@ -229,8 +230,8 @@ groups:
         annotations:
           summary: "Rate-limit breaches > 120/min for 10m"
           description: |
-            A client is being throttled aggressively. Check Traffic & Traces
-            → "Rate-limit breaches" and the offending principal.
+            A client is being throttled aggressively. Open Proxy & LLM Guard
+            and correlate "Requests per route" with recent gateway events.
 
   - name: defenseclaw.runtime
     rules:
@@ -243,7 +244,7 @@ groups:
         annotations:
           summary: "Goroutine count above 10k for 15m"
           description: |
-            Possible leak. Inspect Runtime & SLO → "Goroutines" trend.
+            Possible leak. Open Runtime & Reliability → "Goroutines over time".
 
       - alert: DefenseClawSQLiteBusyRetries
         expr: sum(rate(defenseclaw_sqlite_busy_retries_total[5m])) > 1
@@ -255,7 +256,7 @@ groups:
           summary: "SQLite busy retries sustained"
           description: |
             The audit store is being contended. Long term this hurts the
-            block SLO. Inspect Runtime & SLO → "SQLite busy retries".
+            block SLO. Open Runtime & Reliability → "SQLite busy retries/hour".
 
       - alert: DefenseClawConfigLoadErrors
         expr: increase(defenseclaw_config_load_errors_total[5m]) > 0
@@ -291,7 +292,7 @@ groups:
             having received one previously this process lifetime.
             Either the connector process exited, the user disabled
             observability mode, or the gateway token / CSRF header
-            mapping drifted. Open the Connector Telemetry dashboard
+            mapping drifted. Open the Hook Connectors dashboard
             and inspect the audit log for `otel.ingest.malformed`
             events around the silence window.
 

@@ -55,6 +55,8 @@ var (
 
 const defaultEnterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
 const hookGuardianStateFile = "hook_guardian_state.json"
+const hookGuardianAuthorizationFile = managed.HookGuardianAuthorizationFile
+const hookGuardianAuthorizationDirEnv = managed.HookGuardianAuthorizationDirEnv
 
 var enterpriseCmd = &cobra.Command{
 	Use:   "enterprise",
@@ -537,6 +539,9 @@ func validateEnterpriseHookManagedRuntime() error {
 	if err := managed.ValidateTrustedRuntimeDir(cfg.DataDir, "hook guardian state data_dir"); err != nil {
 		return fmt.Errorf("enterprise hooks: data_dir trust check failed: %w", err)
 	}
+	if err := managed.ValidateTrustedRuntimeDir(managed.HookGuardianAuthorizationDir(cfg.DataDir), "hook guardian authorization directory"); err != nil {
+		return fmt.Errorf("enterprise hooks: authorization directory trust check failed: %w", err)
+	}
 	return nil
 }
 
@@ -552,6 +557,12 @@ type enterpriseHookGuardianState struct {
 	ProtectedTargets []enterpriseHookReconcileRow `json:"protected_targets,omitempty"`
 }
 
+type enterpriseHookGuardianAuthorization struct {
+	Version          int                          `json:"version"`
+	UpdatedAt        string                       `json:"updated_at"`
+	ProtectedTargets []enterpriseHookReconcileRow `json:"protected_targets"`
+}
+
 func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpriseHookReconcileRow, failures int) error {
 	dataDir = strings.TrimSpace(dataDir)
 	if dataDir == "" {
@@ -563,16 +574,42 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 			successes++
 		}
 	}
-	state := enterpriseHookGuardianState{
+	now := time.Now().UTC().Format(time.RFC3339)
+	protected := mergeProtectedEnterpriseHookTargets(loadProtectedEnterpriseHookTargets(dataDir), rows)
+	authorization := enterpriseHookGuardianAuthorization{
 		Version:          1,
-		UpdatedAt:        time.Now().UTC().Format(time.RFC3339),
-		Manifest:         strings.TrimSpace(manifest),
-		OK:               failures == 0,
-		TargetCount:      len(rows),
-		SuccessCount:     successes,
-		FailureCount:     failures,
-		Results:          rows,
-		ProtectedTargets: mergeProtectedEnterpriseHookTargets(loadProtectedEnterpriseHookTargets(dataDir), rows),
+		UpdatedAt:        now,
+		ProtectedTargets: protected,
+	}
+	authorizationData, err := json.MarshalIndent(authorization, "", "  ")
+	if err != nil {
+		return err
+	}
+	authorizationData = append(authorizationData, '\n')
+	authorizationDir := managed.HookGuardianAuthorizationDir(dataDir)
+	if err := os.MkdirAll(authorizationDir, 0o755); err != nil {
+		return fmt.Errorf("create hook guardian authorization directory: %w", err)
+	}
+	if err := os.Chmod(authorizationDir, 0o755); err != nil {
+		return fmt.Errorf("harden hook guardian authorization directory: %w", err)
+	}
+	authorizationPath := filepath.Join(authorizationDir, hookGuardianAuthorizationFile)
+	if err := safefile.Write(authorizationPath, authorizationData); err != nil {
+		return fmt.Errorf("write %s: %w", authorizationPath, err)
+	}
+	if err := os.Chmod(authorizationPath, 0o644); err != nil {
+		return fmt.Errorf("make hook guardian authorization readable: %w", err)
+	}
+
+	state := enterpriseHookGuardianState{
+		Version:      1,
+		UpdatedAt:    now,
+		Manifest:     strings.TrimSpace(manifest),
+		OK:           failures == 0,
+		TargetCount:  len(rows),
+		SuccessCount: successes,
+		FailureCount: failures,
+		Results:      rows,
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -603,22 +640,17 @@ func previousEnterpriseHookSuccess(dataDir, userName, userHome, connectorName st
 }
 
 func loadProtectedEnterpriseHookTargets(dataDir string) []enterpriseHookReconcileRow {
-	path := filepath.Join(strings.TrimSpace(dataDir), hookGuardianStateFile)
+	path := managed.HookGuardianAuthorizationPath(dataDir)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
-	var state enterpriseHookGuardianState
+	var state enterpriseHookGuardianAuthorization
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil
 	}
 	var rows []enterpriseHookReconcileRow
 	for _, row := range state.ProtectedTargets {
-		if row.OK {
-			rows = append(rows, row)
-		}
-	}
-	for _, row := range state.Results {
 		if row.OK {
 			rows = append(rows, row)
 		}

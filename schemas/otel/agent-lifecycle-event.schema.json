@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.dev/schemas/otel/agent-lifecycle-event.schema.json",
+  "title": "DefenseClaw Agent Lifecycle Correlation",
+  "description": "Canonical connector-neutral identity and lifecycle fields shared by gateway logs and runtime spans. lifecycle_id is stable across gateway restarts; execution_id identifies one observed execution; conversation_id preserves the upstream resumable session.",
+  "type": "object",
+  "required": [
+    "gen_ai.conversation.id",
+    "gen_ai.agent.id",
+    "defenseclaw.agent.root.id",
+    "defenseclaw.session.root.id",
+    "defenseclaw.agent.lifecycle.id",
+    "defenseclaw.agent.execution.id",
+    "defenseclaw.agent.lifecycle.event",
+    "defenseclaw.agent.lifecycle.state",
+    "defenseclaw.agent.depth"
+  ],
+  "properties": {
+    "gen_ai.conversation.id": { "type": "string", "minLength": 1 },
+    "gen_ai.agent.id": { "type": "string", "minLength": 1 },
+    "gen_ai.agent.name": { "type": "string" },
+    "gen_ai.agent.type": { "type": "string" },
+    "defenseclaw.agent.root.id": { "type": "string", "minLength": 1 },
+    "defenseclaw.agent.parent.id": { "type": "string", "minLength": 1 },
+    "defenseclaw.session.root.id": { "type": "string", "minLength": 1 },
+    "defenseclaw.session.parent.id": { "type": "string", "minLength": 1 },
+    "defenseclaw.agent.lifecycle.id": { "type": "string", "pattern": "^lifecycle-[0-9a-f]{16}$" },
+    "defenseclaw.agent.execution.id": { "type": "string", "pattern": "^execution-[0-9a-f]{16}$" },
+    "defenseclaw.agent.lifecycle.event": {
+      "type": "string",
+      "enum": ["session_start", "session_end", "subagent_start", "subagent_stop", "turn_start", "turn_end", "tool_start", "tool_end", "compact_start", "compact_end", "event"]
+    },
+    "defenseclaw.agent.lifecycle.state": {
+      "type": "string",
+      "enum": ["active", "completed", "failed", "interrupted", "observed"]
+    },
+    "defenseclaw.agent.phase": {
+      "type": "string",
+      "enum": ["session", "planning", "model", "tool", "approval", "waiting", "responding", "maintenance", "completed", "failed", "interrupted", "observed"]
+    },
+    "defenseclaw.agent.phase.previous": { "type": "string" },
+    "defenseclaw.agent.phase.code": { "type": "integer", "minimum": 0, "maximum": 12 },
+    "defenseclaw.agent.sequence": { "type": "integer", "minimum": 1 },
+    "defenseclaw.operation.id": { "type": "string", "minLength": 1 },
+    "defenseclaw.agent.depth": { "type": "integer", "minimum": 0 },
+    "defenseclaw.session.source": { "type": "string" },
+    "defenseclaw.session.resumed": { "type": "boolean" },
+    "user.id": { "type": "string" },
+    "defenseclaw.user.name": { "type": "string" }
+  },
+  "additionalProperties": true
+}

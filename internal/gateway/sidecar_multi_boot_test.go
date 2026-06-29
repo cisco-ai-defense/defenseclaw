@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // bootStubConnector embeds stubConnector (full connector.Connector) and lets a
@@ -329,7 +330,7 @@ func TestRunGuardrailManagedEnterpriseSingleHookSkipsServiceHomeLifecycle(t *tes
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.runGuardrail(ctx) }()
-	waitForGuardrailState(t, s, errCh, StateRunning)
+	waitForGuardrailState(t, s, errCh, StateStarting)
 	cancel()
 	requireGuardrailExitCleanly(t, errCh)
 
@@ -377,7 +378,7 @@ func TestRunGuardrailMultiManagedEnterpriseSkipsServiceHomeLifecycle(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.runGuardrailMulti(ctx) }()
-	waitForGuardrailState(t, s, errCh, StateRunning)
+	waitForGuardrailState(t, s, errCh, StateStarting)
 	cancel()
 	requireGuardrailExitCleanly(t, errCh)
 
@@ -391,6 +392,26 @@ func TestRunGuardrailMultiManagedEnterpriseSkipsServiceHomeLifecycle(t *testing.
 	}
 	if len(snap.Connectors) != 2 {
 		t.Fatalf("registered connectors = %d, want 2", len(snap.Connectors))
+	}
+}
+
+func TestManagedGuardianCoverageRequiresTrustedAuthorizationForEveryConnector(t *testing.T) {
+	authorizationDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authorizationDir)
+	oldValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(_, _ string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
+	path := managed.HookGuardianAuthorizationPath(t.TempDir())
+	data := []byte(`{"protected_targets":[{"connector":"codex","ok":true}]}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write authorization: %v", err)
+	}
+
+	if ok, reason := managedGuardianCoversConnectors("unused", []string{"codex"}); !ok {
+		t.Fatalf("coverage = false: %s", reason)
+	}
+	if ok, _ := managedGuardianCoversConnectors("unused", []string{"codex", "claudecode"}); ok {
+		t.Fatal("partial guardian authorization reported full connector coverage")
 	}
 }
 

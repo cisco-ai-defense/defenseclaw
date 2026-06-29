@@ -222,9 +222,25 @@ func (c *applicationProtectionController) OnDiscoveryReport(ctx context.Context,
 			}
 			continue
 		}
+		if strings.EqualFold(cfg.EffectiveGuardrailModeForConnector(name), "action") {
+			opts, err := c.sidecar.connectorSetupOptsChecked(conn, c.apiToken, c.proxyAddr, c.apiAddr)
+			if err != nil {
+				skipped = append(skipped, skippedRow(name, "scoped_token_error", err.Error(), sig))
+				continue
+			}
+			if ok, reason, detail := c.hookContractPreflightLocked(conn, opts); !ok {
+				delete(c.lastErrors, name)
+				skipped = append(skipped, skippedRow(name, reason, detail, sig))
+				continue
+			}
+		}
 
 		if _, active := c.activeAuto[name]; !active {
-			opts := c.sidecar.connectorSetupOpts(conn, c.apiToken, c.proxyAddr, c.apiAddr)
+			opts, err := c.sidecar.connectorSetupOptsChecked(conn, c.apiToken, c.proxyAddr, c.apiAddr)
+			if err != nil {
+				skipped = append(skipped, skippedRow(name, "scoped_token_error", err.Error(), sig))
+				continue
+			}
 			if ok, detail, err := activationSurfaceExists(conn, opts); err != nil {
 				skipped = append(skipped, skippedRow(name, "hook_config_check_error", err.Error(), sig))
 				continue
@@ -238,7 +254,11 @@ func (c *applicationProtectionController) OnDiscoveryReport(ctx context.Context,
 				continue
 			}
 		} else if c.sidecar.health == nil || !c.sidecar.health.HasConnector(name) {
-			opts := c.sidecar.connectorSetupOpts(conn, c.apiToken, c.proxyAddr, c.apiAddr)
+			opts, err := c.sidecar.connectorSetupOptsChecked(conn, c.apiToken, c.proxyAddr, c.apiAddr)
+			if err != nil {
+				skipped = append(skipped, skippedRow(name, "scoped_token_error", err.Error(), sig))
+				continue
+			}
 			if ok, reason, detail := c.hookContractPreflightLocked(conn, opts); !ok {
 				delete(c.lastErrors, name)
 				skipped = append(skipped, skippedRow(name, reason, detail, sig))
@@ -274,7 +294,10 @@ func (c *applicationProtectionController) ensureAutoConnectorLocked(ctx context.
 		c.startGuardLocked(ctx, conn)
 		return nil
 	}
-	opts := c.sidecar.connectorSetupOpts(conn, c.apiToken, c.proxyAddr, c.apiAddr)
+	opts, err := c.sidecar.connectorSetupOptsChecked(conn, c.apiToken, c.proxyAddr, c.apiAddr)
+	if err != nil {
+		return err
+	}
 	if err := c.sidecar.setupOneConnector(ctx, conn, opts, c.masterKey, c.cache); err != nil {
 		recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
 		return err
@@ -352,7 +375,11 @@ func (c *applicationProtectionController) startGuardLocked(ctx context.Context, 
 	debounce := time.Duration(c.sidecar.cfg.Guardrail.HookSelfHealDebounceMs) * time.Millisecond
 	guard := NewHookConfigGuard(c.sidecar.logger, c.sidecar.otel, debounce)
 	guard.SetHealNotifier(c.sidecar.notifyHookHealed)
-	opts := c.sidecar.connectorSetupOpts(conn, c.apiToken, c.proxyAddr, c.apiAddr)
+	opts, err := c.sidecar.connectorSetupOptsChecked(conn, c.apiToken, c.proxyAddr, c.apiAddr)
+	if err != nil {
+		c.lastErrors[conn.Name()] = err.Error()
+		return
+	}
 	guard.Start(ctx, conn, opts)
 	c.guards[conn.Name()] = guard
 }
@@ -363,7 +390,10 @@ func (c *applicationProtectionController) teardownAutoConnectorLocked(ctx contex
 		guard.Stop()
 		delete(c.guards, name)
 	}
-	opts := c.sidecar.connectorSetupOpts(conn, c.apiToken, c.proxyAddr, c.apiAddr)
+	opts, err := c.sidecar.connectorSetupOptsChecked(conn, c.apiToken, c.proxyAddr, c.apiAddr)
+	if err != nil {
+		return err
+	}
 	if err := conn.Teardown(ctx, opts); err != nil {
 		return fmt.Errorf("connector %s teardown failed: %w", name, err)
 	}

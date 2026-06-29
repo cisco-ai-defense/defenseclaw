@@ -20,11 +20,15 @@ POLICIES_ROOT="\${HOME}/.defenseclaw/policies"
 mkdir -p "\${POLICIES_ROOT}"
 `;
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 const FOOTER = (name: string) => `
 # Activate the new policy.
-defenseclaw policy activate "${name}"
+defenseclaw policy activate ${shellQuote(name)}
 echo
-echo "Activated policy: ${name}"
+printf 'Activated policy: %s\\n' ${shellQuote(name)}
 `;
 
 // Strip the leading "~/.defenseclaw/policies/" path prefix that emit()

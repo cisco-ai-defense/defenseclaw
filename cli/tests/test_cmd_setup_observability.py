@@ -215,8 +215,23 @@ class TestObservabilityWizard(unittest.TestCase):
     def test_judge_selection_enables_selected_hook_coverage_and_model(self):
         app, gc = _make_app("codex")
 
-        with patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=[True, False]), \
-             patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
+        confirm_answers = iter([True, False, False])
+
+        def _confirm(*args, **kwargs):
+            try:
+                return next(confirm_answers)
+            except StopIteration:
+                return kwargs.get("default", False)
+
+        def _prompt(label, *args, **kwargs):
+            if "Select mode" in str(label):
+                return "2"
+            return "1"
+
+        with patch("defenseclaw.commands.cmd_setup.click.confirm",
+                   side_effect=_confirm), \
+             patch("defenseclaw.commands.cmd_setup.click.prompt",
+                   side_effect=_prompt), \
              patch(
                  "defenseclaw.commands.cmd_setup._prompt_batch_scan_strategy",
                  side_effect=AssertionError("setup guardrail should not ask for scan strategy"),

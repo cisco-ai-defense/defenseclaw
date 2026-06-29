@@ -347,19 +347,24 @@ else:
   sys.stdout.write(json.dumps(val,separators=sep)+"\n")'
     return
   fi
-  # String-only last resort: covers action / reason / block_reason.
-  # Object fields (claude_code_output, codex_output, hook_output) return
-  # empty; callers already handle the empty case correctly.
+  # String-only last resort: covers action / reason / block_reason. Object
+  # fields cannot be decoded safely without jq or python3, so fail instead of
+  # returning an empty value that could turn a structured deny into allow.
   local _dcjq_field
   case "$_dcjq_filter" in
-    # Identity filter / validity probe with no jq and no python3: we can't
-    # parse JSON, so pass the body through and succeed rather than emitting
-    # a false "invalid JSON" that would route a real verdict into fail mode.
-    .|"") cat; return 0 ;;
+    .|"") cat >/dev/null; return 1 ;;
   esac
   _dcjq_field="${_dcjq_filter#.}"
   _dcjq_field="${_dcjq_field%%[[:space:]]*}"
-  defenseclaw_json_string_field "$(cat)" "$_dcjq_field"
+  case "$_dcjq_field" in
+    action|reason|block_reason|decision|permissionDecision|permissionDecisionReason)
+      defenseclaw_json_string_field "$(cat)" "$_dcjq_field"
+      ;;
+    *)
+      cat >/dev/null
+      return 1
+      ;;
+  esac
 }
 
 # defenseclaw_log_hook_failure writes a structured JSON line to

@@ -10,13 +10,31 @@
 
 package managed
 
-import "strings"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
 
 const (
 	DeploymentModeManagedEnterprise = "managed_enterprise"
 	ConfigPathEnv                   = "DEFENSECLAW_CONFIG"
+	DeploymentModeEnv               = "DEFENSECLAW_DEPLOYMENT_MODE"
+	HookGuardianAuthorizationDirEnv = "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"
+	HookGuardianAuthorizationFile   = "protected_targets.json"
 )
 
 func IsManagedEnterprise(mode string) bool {
 	return strings.EqualFold(strings.TrimSpace(mode), DeploymentModeManagedEnterprise)
+}
+
+func HookGuardianAuthorizationDir(dataDir string) string {
+	if configured := strings.TrimSpace(os.Getenv(HookGuardianAuthorizationDirEnv)); configured != "" {
+		return filepath.Clean(configured)
+	}
+	return filepath.Clean(strings.TrimSpace(dataDir)) + "-hook-guardian"
+}
+
+func HookGuardianAuthorizationPath(dataDir string) string {
+	return filepath.Join(HookGuardianAuthorizationDir(dataDir), HookGuardianAuthorizationFile)
 }

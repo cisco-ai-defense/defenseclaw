@@ -66,6 +66,11 @@ type SetupOpts struct {
 	APIAddr     string // 127.0.0.1:18970 (API server — inspection endpoints)
 	APIToken    string // gateway bearer token; baked into hook curl -H
 	Interactive bool
+	// ManagedEnterprise marks hook scripts installed by the privileged
+	// enterprise guardian. Managed scripts ignore user-controlled home and
+	// disable-sentinel overrides and derive their data directory from the
+	// verified script location instead.
+	ManagedEnterprise bool
 	// WorkspaceDir is the project/workspace root for connectors whose
 	// hook configuration is intentionally repository-scoped (for
 	// example Copilot CLI's .github/hooks/*.json files). When empty,
@@ -603,6 +608,16 @@ type EnvRequirementsProvider interface {
 // rest of the AgentPaths shape.
 type HookScriptProvider interface {
 	HookScripts(opts SetupOpts) []string
+}
+
+// HookRuntimeArtifactProvider is implemented by connectors whose installed
+// hook runtime is not made up of the generic shell scripts. The returned
+// absolute paths are persisted in the hook-contract lock and hashed for drift
+// detection. This keeps policy modules, import shims, and similar runtime
+// artifacts visible to doctor without asking the generic hook writer to own
+// them.
+type HookRuntimeArtifactProvider interface {
+	HookRuntimeArtifacts(opts SetupOpts) []string
 }
 
 // HookScriptOwner — plan C2 / S2.5: optional, connectors that own a

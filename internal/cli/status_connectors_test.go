@@ -257,8 +257,8 @@ func TestPrintHookGuardianStatusHealthy(t *testing.T) {
 // not just the primary connector's.
 func TestPrintConnectorModes_ListsAll(t *testing.T) {
 	modes := []connectorModeSummary{
-		{Connector: "codex", Mode: "observability", Telemetry: []string{"hooks", "otel", "notify"}, ProxyIntercept: false},
-		{Connector: "openclaw", Mode: "guardrail", Telemetry: []string{"hooks"}, ProxyIntercept: true},
+		{Connector: "codex", Mode: "observability", PolicyMode: "action", EnforcementSurface: "agent_lifecycle_hooks", Telemetry: []string{"hooks", "otel", "notify"}, ProxyIntercept: false},
+		{Connector: "openclaw", Mode: "guardrail", PolicyMode: "observe", EnforcementSurface: "llm_proxy", Telemetry: []string{"hooks"}, ProxyIntercept: true},
 	}
 
 	out := captureStdout(t, func() { printConnectorModes(modes) })
@@ -271,9 +271,22 @@ func TestPrintConnectorModes_ListsAll(t *testing.T) {
 			t.Errorf("connector %q missing from Connector Mode section:\n%s", name, out)
 		}
 	}
-	// Both DIFFERING modes must appear — the whole point of fanning out.
-	if !strings.Contains(out, "observability") || !strings.Contains(out, "guardrail") {
-		t.Errorf("expected both per-connector modes rendered, got:\n%s", out)
+	codexStart := strings.Index(out, "Codex (codex)")
+	openClawStart := strings.Index(out, "OpenClaw (openclaw)")
+	if codexStart < 0 || openClawStart < 0 || codexStart >= openClawStart {
+		t.Fatalf("connector blocks missing or out of order:\n%s", out)
+	}
+	codexBlock := out[codexStart:openClawStart]
+	openClawBlock := out[openClawStart:]
+	for _, want := range []string{"direct-to-upstream", "Policy mode:", "action"} {
+		if !strings.Contains(codexBlock, want) {
+			t.Errorf("expected %q in Codex status block, got:\n%s", want, codexBlock)
+		}
+	}
+	for _, want := range []string{"DefenseClaw proxy", "Policy mode:", "observe"} {
+		if !strings.Contains(openClawBlock, want) {
+			t.Errorf("expected %q in OpenClaw status block, got:\n%s", want, openClawBlock)
+		}
 	}
 }
 
@@ -286,6 +299,24 @@ func TestPrintConnectorModes_SingleEntry(t *testing.T) {
 	out := captureStdout(t, func() { printConnectorModes(modes) })
 	if !strings.Contains(out, "Connector Mode") || !strings.Contains(out, "codex") {
 		t.Errorf("single-entry Connector Mode render missing header/connector:\n%s", out)
+	}
+}
+
+func TestPrintConnectorModes_OmnigentPolicySurface(t *testing.T) {
+	modes := []connectorModeSummary{{
+		Connector:          "omnigent",
+		Mode:               "observability",
+		PolicyMode:         "action",
+		EnforcementSurface: "omnigent_policy_api",
+		Telemetry:          []string{"policy-api"},
+	}}
+
+	out := captureStdout(t, func() { printConnectorModes(modes) })
+
+	for _, want := range []string{"Data path:", "direct-to-upstream", "Policy mode:", "action", "omnigent policy api", "policy-api"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("OmniGent status missing %q:\n%s", want, out)
+		}
 	}
 }
 

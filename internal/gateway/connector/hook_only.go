@@ -212,18 +212,13 @@ func NewCopilotConnector() *hookOnlyConnector {
 			return HookCapability{
 				CanBlock:     true,
 				CanAskNative: true,
-				AskEvents:    []string{"preToolUse", "PreToolUse"},
+				AskEvents:    []string{"preToolUse"},
 				BlockEvents: []string{
 					"preToolUse",
-					"PreToolUse",
 					"permissionRequest",
-					"PermissionRequest",
 					"agentStop",
-					"Stop",
 					"subagentStop",
-					"SubagentStop",
 					"postToolUseFailure",
-					"PostToolUseFailure",
 				},
 				SupportsFailClosed: false,
 				Scope:              "user,workspace",
@@ -720,6 +715,7 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 		APIAddr:  opts.APIAddr,
 		APIToken: opts.APIToken,
 		FailMode: failMode,
+		Managed:  opts.ManagedEnterprise,
 	})
 	if err != nil {
 		return fmt.Errorf("%s render plugin template: %w", c.name, err)
@@ -843,13 +839,7 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 }
 
 func (c *hookOnlyConnector) Authenticate(r *http.Request) bool {
-	if c.gatewayToken != "" && SecureTokenMatch(ExtractBearerKey(r.Header.Get("Authorization")), c.gatewayToken) {
-		return true
-	}
-	if c.masterKey != "" && SecureTokenMatch(ExtractBearerKey(r.Header.Get("Authorization")), c.masterKey) {
-		return true
-	}
-	return AcceptLoopbackWithWarning(r, c.gatewayToken, c.name,
+	return authenticateHookBridgeRequest(r, c.gatewayToken, c.masterKey, c.name,
 		"hook-only connectors run as local shell hooks; setup injects Authorization when possible, but loopback remains accepted for legacy hook installs",
 		&c.loopbackWarn)
 }
@@ -1303,6 +1293,9 @@ func patchHermesHooks(path, hookScript string) error {
 		{"post_llm_call", ""},
 		{"on_session_start", ""},
 		{"on_session_end", ""},
+		{"on_session_finalize", ""},
+		{"on_session_reset", ""},
+		{"subagent_start", ""},
 		{"subagent_stop", ""},
 	} {
 		entry := map[string]interface{}{
@@ -1350,9 +1343,13 @@ func patchCursorHooks(path, hookScript string, failClosed bool) error {
 	hooks := ensureJSONObject(cfg, "hooks")
 	cfg["version"] = 1
 	for _, event := range []string{
+		"sessionStart",
+		"sessionEnd",
 		"preToolUse",
 		"postToolUse",
 		"postToolUseFailure",
+		"subagentStart",
+		"subagentStop",
 		"beforeShellExecution",
 		"beforeMCPExecution",
 		"afterShellExecution",
@@ -1365,9 +1362,8 @@ func patchCursorHooks(path, hookScript string, failClosed bool) error {
 		"afterAgentResponse",
 		"afterAgentThought",
 		"stop",
-		"sessionStart",
-		"sessionEnd",
 		"preCompact",
+		"workspaceOpen",
 	} {
 		entry := map[string]interface{}{
 			"type":       "command",
@@ -1396,6 +1392,9 @@ func patchWindsurfHooks(path, hookScript string) error {
 		"pre_mcp_tool_use",
 		"post_mcp_tool_use",
 		"pre_user_prompt",
+		"post_cascade_response",
+		"post_cascade_response_with_transcript",
+		"post_setup_worktree",
 	} {
 		entry := map[string]interface{}{
 			"command":     shellWord(hookScript),
@@ -1528,17 +1527,19 @@ func patchCopilotHooks(path, hookScript string) error {
 	hooks := ensureJSONObject(cfg, "hooks")
 	cfg["version"] = 1
 	for _, event := range []string{
-		"PreToolUse",
-		"PostToolUse",
-		"PostToolUseFailure",
-		"Stop",
-		"SubagentStop",
-		"PermissionRequest",
-		"Notification",
-		"PreCompact",
-		"SessionStart",
-		"SessionEnd",
-		"UserPromptSubmit",
+		"sessionStart",
+		"sessionEnd",
+		"userPromptSubmitted",
+		"preToolUse",
+		"postToolUse",
+		"postToolUseFailure",
+		"permissionRequest",
+		"agentStop",
+		"subagentStart",
+		"subagentStop",
+		"errorOccurred",
+		"preCompact",
+		"notification",
 	} {
 		entry := map[string]interface{}{
 			"type":       "command",
@@ -1774,7 +1775,7 @@ func ensureJSONObject(obj map[string]interface{}, key string) map[string]interfa
 func appendUniqueFlatHook(raw interface{}, hookScript string, entry map[string]interface{}) []interface{} {
 	list, _ := raw.([]interface{})
 	for _, item := range list {
-		if containsHookScript(item, hookScript) {
+		if managedHookCommandEntry(item, hookScript) {
 			return list
 		}
 	}
@@ -1784,7 +1785,7 @@ func appendUniqueFlatHook(raw interface{}, hookScript string, entry map[string]i
 func appendUniqueGeminiHookGroup(raw interface{}, hookScript string, group map[string]interface{}) []interface{} {
 	list, _ := raw.([]interface{})
 	for _, item := range list {
-		if containsHookScript(item, hookScript) {
+		if managedGeminiHookGroup(item, hookScript) {
 			return list
 		}
 	}
@@ -1910,8 +1911,6 @@ func pruneEmptyMapArrays(obj map[string]interface{}) {
 
 func containsHookScript(raw interface{}, hookScript string) bool {
 	switch v := raw.(type) {
-	case string:
-		return strings.Contains(v, hookScript) || strings.Contains(v, filepath.Base(hookScript))
 	case []interface{}:
 		for _, item := range v {
 			if containsHookScript(item, hookScript) {
@@ -1919,10 +1918,40 @@ func containsHookScript(raw interface{}, hookScript string) bool {
 			}
 		}
 	case map[string]interface{}:
-		for _, item := range v {
-			if containsHookScript(item, hookScript) {
-				return true
-			}
+		if managedHookCommandEntry(v, hookScript) {
+			return true
+		}
+		if hooks, ok := v["hooks"]; ok {
+			return containsHookScript(hooks, hookScript)
+		}
+	}
+	return false
+}
+
+func managedHookCommandEntry(raw interface{}, hookScript string) bool {
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"command", "bash"} {
+		command, _ := entry[key].(string)
+		command = strings.TrimSpace(command)
+		if command == strings.TrimSpace(hookScript) || command == strings.TrimSpace(shellWord(hookScript)) {
+			return true
+		}
+	}
+	return false
+}
+
+func managedGeminiHookGroup(raw interface{}, hookScript string) bool {
+	group, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	hooks, _ := group["hooks"].([]interface{})
+	for _, hook := range hooks {
+		if managedHookCommandEntry(hook, hookScript) {
+			return true
 		}
 	}
 	return false

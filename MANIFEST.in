@@ -1,4 +1,6 @@
 graft cli
+recursive-exclude cli __pycache__ *
+recursive-exclude cli *.py[cod]
 prune .venv
 prune extensions
 prune gateway

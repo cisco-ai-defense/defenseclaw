@@ -20,8 +20,10 @@ from types import SimpleNamespace
 
 import pytest
 from defenseclaw.config import RegistrySource
+from defenseclaw.db import Store
 from defenseclaw.models import Counts, Event
 from defenseclaw.tui.app import (
+    _DEFENSECLAW_LOGO,
     DefenseClawTUI,
     _catalog_panel_invalidated_by_command,
     _enforcement_label,
@@ -75,9 +77,170 @@ async def test_textual_shell_starts_on_overview() -> None:
         assert app.active_panel == "overview"
         assert "Overview" in app.body_text
         assert "SERVICES" in app.body_text
+        assert "OBSERVABILITY DESTINATIONS" in app.body_text
         assert "SCANNERS" in app.body_text
         assert "backend=textual" in app.status_text
         assert app.hint_text
+
+
+@pytest.mark.asyncio
+async def test_overview_renders_observability_destination_panel(tmp_path) -> None:
+    from rich.console import Console
+
+    overview = OverviewPanelModel(OverviewConfig(data_dir=str(tmp_path)), version="test")
+    overview.set_health(
+        HealthSnapshot(
+            telemetry=SubsystemHealth(
+                state="running",
+                details={
+                    "destinations": [
+                        {
+                            "name": "galileo",
+                            "preset": "galileo",
+                            "enabled": True,
+                            "signals": "traces",
+                            "endpoint": "https://api.example.test/otel/traces",
+                            "routing": {"accepted": 3, "dropped": 1},
+                        }
+                    ]
+                },
+            )
+        )
+    )
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 50)) as pilot:
+        await pilot.pause()
+        console = Console(width=170, height=80, record=True)
+        console.print(app._overview_renderable())
+        rendered = console.export_text()
+
+    assert "OBSERVABILITY DESTINATIONS · RUNTIME" in rendered
+    assert "Galileo" in rendered
+    assert "traces" in rendered
+    assert "75.0% (3/4)" in rendered
+    assert "api.example.test" in rendered
+    assert "/otel/traces" in rendered
+
+
+@pytest.mark.asyncio
+async def test_overview_scroll_keys_move_body_scroll_container() -> None:
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(
+            ("antigravity", "action"),
+            ("claudecode", "observe"),
+            ("codex", "observe"),
+            ("hermes", "action"),
+            ("opencode", "action"),
+        ),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(120, 18)) as pilot:
+        await pilot.pause()
+        scroller = app.query_one("#body-scroll", VerticalScroll)
+        assert scroller.max_scroll_y > 0
+
+        await pilot.press("j")
+        await pilot.pause()
+        assert scroller.scroll_y >= 5
+
+        await pilot.press("end")
+        await pilot.pause()
+        assert scroller.scroll_y == scroller.max_scroll_y
+
+        assert app._last_body_signature is not None
+        render_calls = 0
+        original_renderable = app._overview_renderable
+
+        def counted_renderable():
+            nonlocal render_calls
+            render_calls += 1
+            return original_renderable()
+
+        app._overview_renderable = counted_renderable  # type: ignore[method-assign]
+        app._mark_overview_scroll_activity()
+        app._render_chrome()
+        assert render_calls == 0
+
+        refresh_calls = 0
+
+        def counted_refresh() -> None:
+            nonlocal refresh_calls
+            refresh_calls += 1
+
+        metric_refresh_calls = 0
+
+        def counted_metric_refresh() -> None:
+            nonlocal metric_refresh_calls
+            metric_refresh_calls += 1
+
+        app._refresh_models_from_disk = counted_refresh  # type: ignore[method-assign]
+        app._render_overview_metrics = counted_metric_refresh  # type: ignore[method-assign]
+        app._overview_last_scroll_activity_at = 0.0
+        app._overview_sampled_refresh_scheduled = True
+        app._periodic_refresh()
+        assert refresh_calls == 0
+        assert metric_refresh_calls == 1
+
+        scroller.scroll_to(y=0, animate=False, immediate=True)
+        app._periodic_refresh()
+        assert refresh_calls == 0
+        assert metric_refresh_calls == 2
+
+        sampled_render_calls = 0
+
+        def counted_sampled_render() -> None:
+            nonlocal sampled_render_calls
+            sampled_render_calls += 1
+
+        sampled_timer_calls = 0
+
+        def immediate_sampled_timer(_delay: float, callback, **_kwargs: object) -> object:
+            nonlocal sampled_timer_calls
+            sampled_timer_calls += 1
+            callback()
+            return object()
+
+        app._render_chrome = counted_sampled_render  # type: ignore[method-assign]
+        app.set_timer = immediate_sampled_timer  # type: ignore[method-assign]
+        # Keep the mount-time interval from racing this direct sampler assertion on slow CI.
+        app._periodic_refresh_running = True  # noqa: SLF001
+        app._overview_sampled_refresh_scheduled = False  # noqa: SLF001 - isolate direct sampler assertions.
+
+        scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
+        await pilot.pause()
+        app._schedule_overview_sampled_refresh()
+        await pilot.pause()
+        assert sampled_timer_calls == 0
+        assert sampled_render_calls == 0
+
+        scroller.scroll_to(y=0, animate=False, immediate=True)
+        await pilot.pause()
+        app._overview_sampled_refresh_scheduled = False  # noqa: SLF001 - previous blocked call did not render.
+        app._overview_last_scroll_activity_at = 0.0
+        app._schedule_overview_sampled_refresh()
+        await pilot.pause()
+        assert sampled_timer_calls == 1
+        assert sampled_render_calls == 1
+
+
+def test_overview_body_signature_ignores_clock_only_labels() -> None:
+    app = DefenseClawTUI()
+
+    app.body_text = "DefenseClaw v0.0.0 uptime=12s\nCodex 0s ago\nDoctor 1m ago\nCalls 6"
+    first = app._overview_body_signature()
+
+    app.body_text = "DefenseClaw v0.0.0 uptime=13s\nCodex 1s ago\nDoctor 2m ago\nCalls 6"
+    assert app._overview_body_signature() == first
+
+    app.body_text = "DefenseClaw v0.0.0 uptime=13s\nCodex 1s ago\nDoctor 2m ago\nCalls 7"
+    assert app._overview_body_signature() != first
 
 
 @pytest.mark.asyncio
@@ -3746,10 +3909,13 @@ def test_enforcement_label_multi_connector() -> None:
         guardrail_mode="action",
         connector_modes=(("codex", "action"), ("claudecode", "action")),
     )
-    assert _enforcement_label(multi) == "2 connectors (hook observability)"
+    assert _enforcement_label(multi) == "2 connectors (per-connector modes)"
 
     single = OverviewConfig(guardrail_connector="codex", guardrail_mode="action")
-    assert _enforcement_label(single) == "codex hook observability (action)"
+    assert _enforcement_label(single) == "codex hook enforcement (action)"
+
+    omnigent = OverviewConfig(guardrail_connector="omnigent", guardrail_mode="action")
+    assert _enforcement_label(omnigent) == "omnigent policy enforcement (action)"
 
 
 @pytest.mark.asyncio
@@ -3802,6 +3968,56 @@ async def test_hook_calls_tile_counts_audit_events_and_deeplinks_to_logs() -> No
 
 
 @pytest.mark.asyncio
+async def test_hook_calls_tile_uses_unfiltered_hook_events_from_store(tmp_path) -> None:
+    """Default Audit refresh hides INFO hook rows; Overview metrics still count them."""
+
+    store = Store(str(tmp_path / "audit.sqlite"))
+    store.init()
+    for i in range(4):
+        store.log_event(
+            Event(
+                id=f"hook-info-{i}",
+                action="connector-hook",
+                target="preToolUse",
+                severity="INFO",
+                details="connector=cursor action=allow",
+            )
+        )
+    store.log_event(
+        Event(
+            id="hook-block",
+            action="connector-hook",
+            target="preToolUse",
+            severity="HIGH",
+            details="connector=cursor action=block",
+        )
+    )
+
+    cfg = OverviewConfig(data_dir=str(tmp_path), claw_mode="cursor", guardrail_connector="cursor")
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="running"),
+            connector=ConnectorHealth(name="cursor", state="running", requests=0),
+        )
+    )
+    audit = AuditPanelModel(store)
+    audit.refresh()
+
+    assert [event.id for event in audit.items] == ["hook-block"]
+
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["hook_calls"].value == 5
+        assert "a4" in metrics["hook_calls"].detail
+        assert "b1" in metrics["hook_calls"].detail
+
+
+@pytest.mark.asyncio
 async def test_hook_calls_tile_splits_stats_per_connector_in_multi() -> None:
     """D1=B: with >1 connector active, the Hook Calls tile relabels to the
     connector count and its detail attributes allow/block counts to each
@@ -3845,6 +4061,562 @@ async def test_hook_calls_tile_splits_stats_per_connector_in_multi() -> None:
         blocks_tile = metrics["blocks"]
         assert "codex" in blocks_tile.detail
         assert "cursor" not in blocks_tile.detail
+
+
+@pytest.mark.asyncio
+async def test_overview_header_tiles_scope_to_selected_connector() -> None:
+    """Connector-scoped Overview tiles show connector values plus fleet context."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="running"),
+            connectors=(
+                ConnectorHealth(name="codex", state="running"),
+                ConnectorHealth(name="cursor", state="running"),
+            ),
+        )
+    )
+    audit = AuditPanelModel()
+    audit.set_events(
+        [
+            Event(id="codex-a1", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=codex action=allow"),
+            Event(id="codex-a2", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=codex action=allow"),
+            Event(id="codex-b", action="connector-hook", target="preToolUse",
+                  severity="HIGH", details="connector=codex action=block"),
+            Event(id="cursor-a", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=cursor action=allow"),
+            Event(id="cursor-b", action="connector-hook", target="preToolUse",
+                  severity="HIGH", details="connector=cursor action=block"),
+            Event(id="old-a", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="action=allow"),
+            Event(id="old-b", action="connector-hook", target="preToolUse",
+                  severity="HIGH", details="connector=old action=block"),
+        ]
+    )
+    alerts = AlertsPanelModel()
+    alerts.set_events(
+        [
+            AlertEvent(id="codex-b", severity="INFO", action="connector-hook",
+                       target="preToolUse",
+                       details="connector=codex action=allow raw_action=alert severity=HIGH mode=observe"),
+            AlertEvent(id="cursor-b", severity="MEDIUM", action="connector-hook",
+                       target="preToolUse", details="connector=cursor action=alert"),
+            AlertEvent(id="cursor-finding-2", severity="LOW", action="scan",
+                       target="skill://cursor", details="connector=cursor scanner=skill"),
+            AlertEvent(id="old-b", severity="HIGH", action="connector-hook",
+                       target="preToolUse", details="connector=old action=block"),
+        ]
+    )
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit, alerts_model=alerts)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+
+        all_metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert all_metrics["hook_calls"].label == "Hook Calls (2 connectors)"
+        assert all_metrics["hook_calls"].value == 5
+        assert "outside roster 2" in all_metrics["hook_calls"].detail
+        assert all_metrics["blocks"].label == "Blocks"
+        assert all_metrics["blocks"].value == 2
+        assert "outside roster 1" in all_metrics["blocks"].detail
+        assert all_metrics["findings"].label == "Findings"
+        assert all_metrics["findings"].value == 3
+        assert "outside roster 1" in all_metrics["findings"].detail
+
+        app._set_connector_filter("codex")
+        codex_metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert codex_metrics["hook_calls"].label == "Hook Calls (codex)"
+        assert codex_metrics["hook_calls"].value == 3
+        assert "fleet 7" in codex_metrics["hook_calls"].detail
+        assert codex_metrics["blocks"].label == "Blocks (codex)"
+        assert codex_metrics["blocks"].value == 1
+        assert "fleet 3" in codex_metrics["blocks"].detail
+        assert codex_metrics["findings"].label == "Findings (codex)"
+        assert codex_metrics["findings"].value == 1
+        assert "fleet 4" in codex_metrics["findings"].detail
+
+        app._set_connector_filter("cursor")
+        cursor_metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert cursor_metrics["hook_calls"].label == "Hook Calls (cursor)"
+        assert cursor_metrics["hook_calls"].value == 2
+        assert cursor_metrics["blocks"].label == "Blocks (cursor)"
+        assert cursor_metrics["blocks"].value == 1
+        assert cursor_metrics["findings"].label == "Findings (cursor)"
+        assert cursor_metrics["findings"].value == 2
+        assert "fleet 4" in cursor_metrics["findings"].detail
+
+
+@pytest.mark.asyncio
+async def test_overview_connector_rows_use_total_hook_stats_not_recent_window() -> None:
+    """The CONNECTORS table should not look frozen at the 500-row window cap."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(
+            ("antigravity", "action"),
+            ("claudecode", "observe"),
+            ("codex", "observe"),
+            ("hermes", "action"),
+            ("opencode", "action"),
+        ),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    base = datetime.now(timezone.utc) - timedelta(minutes=5)
+    events = [
+        Event(
+            id=f"codex-{i}",
+            timestamp=base + timedelta(seconds=i),
+            action="connector-hook",
+            target="preToolUse",
+            severity="INFO",
+            details="connector=codex action=allow",
+        )
+        for i in range(498)
+    ]
+    events.extend(
+        Event(
+            id=f"claudecode-{i}",
+            timestamp=base + timedelta(seconds=498 + i),
+            action="connector-hook",
+            target="preToolUse",
+            severity="INFO",
+            details="connector=claudecode action=allow",
+        )
+        for i in range(2)
+    )
+    class HookStatsStore:
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(events[-limit:])
+
+        def connector_hook_event_stats(self) -> dict[str, dict[str, object]]:
+            return {
+                "antigravity": {
+                    "calls": 10,
+                    "alerts": 0,
+                    "blocks": 0,
+                    "newest": (base - timedelta(hours=1)).isoformat(),
+                },
+                "claudecode": {
+                    "calls": 4402,
+                    "alerts": 0,
+                    "blocks": 0,
+                    "newest": (base + timedelta(seconds=499)).isoformat(),
+                },
+                "codex": {
+                    "calls": 16090,
+                    "alerts": 0,
+                    "blocks": 0,
+                    "newest": (base + timedelta(minutes=10)).isoformat(),
+                },
+                "hermes": {
+                    "calls": 152,
+                    "alerts": 0,
+                    "blocks": 0,
+                    "newest": (base - timedelta(hours=2)).isoformat(),
+                },
+                "opencode": {
+                    "calls": 37,
+                    "alerts": 0,
+                    "blocks": 0,
+                    "newest": (base - timedelta(hours=3)).isoformat(),
+                },
+            }
+
+    audit = AuditPanelModel(HookStatsStore())
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(190, 50)) as pilot:
+        await pilot.pause()
+
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["hook_calls"].label == "Hook Calls (5 connectors)"
+        assert metrics["hook_calls"].value == 20691
+
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["codex"].calls == 16090
+        assert rows["claudecode"].calls == 4402
+        assert rows["antigravity"].calls == 10
+        assert rows["hermes"].calls == 152
+        assert rows["opencode"].calls == 37
+        assert rows["codex"].last_activity != "—"
+
+
+@pytest.mark.asyncio
+async def test_overview_startup_uses_recent_hooks_until_health_loads() -> None:
+    """Cold startup should not flash lifetime hook totals as active-session counts."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "observe"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    base = datetime.now(timezone.utc) - timedelta(minutes=1)
+    events = [
+        Event(
+            id="codex-a",
+            timestamp=base,
+            action="connector-hook",
+            target="preToolUse",
+            severity="INFO",
+            details="connector=codex action=allow",
+        ),
+        Event(
+            id="codex-b",
+            timestamp=base + timedelta(seconds=1),
+            action="connector-hook",
+            target="preToolUse",
+            severity="HIGH",
+            details="connector=codex action=block",
+        ),
+        Event(
+            id="cursor-a",
+            timestamp=base + timedelta(seconds=2),
+            action="connector-hook",
+            target="preToolUse",
+            severity="INFO",
+            details="connector=cursor action=allow",
+        ),
+    ]
+
+    class HookStatsStore:
+        def __init__(self) -> None:
+            self.stats_calls = 0
+
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(events[-limit:])
+
+        def connector_hook_event_stats(self) -> dict[str, dict[str, object]]:
+            self.stats_calls += 1
+            return {
+                "codex": {
+                    "calls": 20000,
+                    "alerts": 500,
+                    "blocks": 250,
+                    "newest": (base + timedelta(hours=1)).isoformat(),
+                },
+                "cursor": {
+                    "calls": 7000,
+                    "alerts": 100,
+                    "blocks": 50,
+                    "newest": (base + timedelta(hours=1, seconds=1)).isoformat(),
+                },
+            }
+
+    store = HookStatsStore()
+    audit = AuditPanelModel(store)
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(190, 50)) as pilot:
+        await pilot.pause()
+
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["hook_calls"].value == 3
+        assert metrics["blocks"].value == 1
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["codex"].calls == 2
+        assert rows["cursor"].calls == 1
+        assert store.stats_calls == 0
+
+        overview.set_health(
+            HealthSnapshot(
+                gateway=SubsystemHealth(state="running"),
+                connectors=(
+                    ConnectorHealth(name="codex", state="running"),
+                    ConnectorHealth(name="cursor", state="running"),
+                ),
+            )
+        )
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["hook_calls"].value == 27000
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["codex"].calls == 20000
+        assert rows["cursor"].calls == 7000
+        assert store.stats_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_overview_prefers_live_connector_counts_over_lifetime_history() -> None:
+    """Live health counters are the current dashboard number; history is fallback."""
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=2)
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("claudecode", "observe"), ("codex", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="disabled"),
+            guardrail=SubsystemHealth(state="running"),
+            connectors=(
+                ConnectorHealth(
+                    name="claudecode",
+                    state="running",
+                    since=since.isoformat(),
+                    requests=6,
+                    tool_inspections=1,
+                ),
+                ConnectorHealth(
+                    name="codex",
+                    state="running",
+                    since=since.isoformat(),
+                    requests=135,
+                    tool_inspections=73,
+                ),
+            ),
+        )
+    )
+    events = [
+        Event(
+            id=f"claude-live-{i}",
+            timestamp=since + timedelta(seconds=i),
+            action="connector-hook",
+            target="PreToolUse",
+            severity="INFO",
+            details="connector=claudecode action=allow",
+        )
+        for i in range(6)
+    ]
+    events.extend(
+        [
+            Event(
+                id="codex-observe-would-block",
+                timestamp=since + timedelta(seconds=7),
+                action="connector-hook",
+                target="PostToolUse",
+                severity="INFO",
+                details="connector=codex action=allow raw_action=block severity=CRITICAL mode=observe would_block=true",
+            ),
+            Event(
+                id="codex-observe-alert",
+                timestamp=since + timedelta(seconds=8),
+                action="connector-hook",
+                target="PostToolUse",
+                severity="INFO",
+                details="connector=codex action=allow raw_action=alert severity=HIGH mode=observe would_block=false",
+            ),
+        ]
+    )
+
+    class HookStatsStore:
+        def __init__(self) -> None:
+            self.stats_calls = 0
+
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(events[-limit:])
+
+        def connector_hook_event_stats(self) -> dict[str, dict[str, object]]:
+            self.stats_calls += 1
+            return {
+                "claudecode": {
+                    "calls": 4408,
+                    "alerts": 5,
+                    "blocks": 12,
+                    "newest": (since + timedelta(seconds=5)).isoformat(),
+                },
+                "codex": {
+                    "calls": 16216,
+                    "alerts": 54,
+                    "blocks": 27,
+                    "newest": (since + timedelta(seconds=10)).isoformat(),
+                },
+            }
+
+        def count_scan_results_since(self, since_arg: datetime | None) -> int:
+            assert since_arg is not None
+            return 2
+
+    store = HookStatsStore()
+    audit = AuditPanelModel(store)
+    alerts = AlertsPanelModel()
+    alerts.set_events(
+        [
+            AlertEvent(
+                id="old-claude-finding",
+                timestamp=since - timedelta(hours=1),
+                severity="CRITICAL",
+                action="connector-hook",
+                target="old",
+                details="connector=claudecode action=block",
+            ),
+            AlertEvent(
+                id="live-claude-finding",
+                timestamp=since + timedelta(seconds=3),
+                severity="MEDIUM",
+                action="connector-hook",
+                target="live",
+                details="connector=claudecode action=alert",
+            ),
+        ]
+    )
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit, alerts_model=alerts)
+
+    async with app.run_test(size=(190, 50)) as pilot:
+        await pilot.pause()
+
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["claudecode"].calls == 6
+        assert rows["codex"].calls == 135
+        assert rows["codex"].blocks == 0
+        assert rows["codex"].alerts == 2
+        assert store.stats_calls == 0
+
+        app._set_connector_filter("codex")
+        codex_metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert codex_metrics["findings"].value == 2
+        assert store.stats_calls == 0
+
+        app._set_connector_filter("claudecode")
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["hook_calls"].label == "Hook Calls (claudecode)"
+        assert metrics["hook_calls"].value == 6
+        assert metrics["findings"].value == 1
+        assert store.stats_calls == 0
+
+        session_counts = app._overview_session_enforcement_counts()
+        assert session_counts.active_alerts == 3
+        assert session_counts.total_scans == 2
+
+
+@pytest.mark.asyncio
+async def test_overview_alerts_and_findings_use_distinct_buckets() -> None:
+    """Hook alerts count decisions; Findings only count severity-bearing decisions."""
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=2)
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "observe"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="disabled"),
+            connectors=(
+                ConnectorHealth(
+                    name="codex",
+                    state="running",
+                    since=since.isoformat(),
+                    requests=2,
+                ),
+                ConnectorHealth(
+                    name="cursor",
+                    state="running",
+                    since=since.isoformat(),
+                    requests=0,
+                ),
+            ),
+        )
+    )
+    events = [
+        Event(
+            id="codex-alert-no-finding",
+            timestamp=since + timedelta(seconds=1),
+            action="connector-hook",
+            target="PostToolUse",
+            severity="INFO",
+            details="connector=codex action=allow raw_action=alert severity=NONE mode=observe",
+        ),
+        Event(
+            id="codex-alert-finding",
+            timestamp=since + timedelta(seconds=2),
+            action="connector-hook",
+            target="PostToolUse",
+            severity="INFO",
+            details="connector=codex action=allow raw_action=alert severity=HIGH mode=observe",
+        ),
+    ]
+
+    class HookStatsStore:
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(events[-limit:])
+
+    audit = AuditPanelModel(HookStatsStore())
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit, alerts_model=AlertsPanelModel())
+
+    async with app.run_test(size=(190, 50)) as pilot:
+        await pilot.pause()
+
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["codex"].alerts == 2
+
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert metrics["findings"].value == 1
+
+        session_counts = app._overview_session_enforcement_counts()
+        assert session_counts.active_alerts == 2
+
+
+def test_overview_reuses_hook_event_snapshot_within_one_render() -> None:
+    """Overview metrics/rows should not re-query the same hook window per connector."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(
+            ("antigravity", "action"),
+            ("claudecode", "observe"),
+            ("codex", "observe"),
+            ("hermes", "action"),
+            ("opencode", "action"),
+        ),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    events = [
+        Event(
+            id=f"codex-{i}",
+            action="connector-hook",
+            target="preToolUse",
+            severity="INFO",
+            details="connector=codex action=allow",
+        )
+        for i in range(10)
+    ]
+
+    class CountingHookStore:
+        calls = 0
+        scan_count_calls = 0
+
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            self.calls += 1
+            return list(events[:limit])
+
+        def count_scan_results_since(self, _since: datetime | None) -> int:
+            self.scan_count_calls += 1
+            return 0
+
+    store = CountingHookStore()
+    audit = AuditPanelModel(store)
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    with app._connector_hook_event_render_cache():
+        app._overview_renderable()
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+
+    assert store.calls == 1
+    assert store.scan_count_calls == 1
+    assert metrics["hook_calls"].value == 10
+    assert rows["codex"].calls == 10
 
 
 @pytest.mark.asyncio
@@ -3912,9 +4684,76 @@ async def test_catalog_inventory_show_connector_column_in_multi() -> None:
             assert model.show_connector_column is True
 
         app._set_connector_filter("cursor")
+        app._sync_catalog_connector_filters()
         for model in (app.skills_model, app.mcps_model, app.plugins_model, app.tools_model):
             assert model.connector_filter == "cursor"
         assert app.inventory_model.connector_filter == "cursor"
+
+
+@pytest.mark.asyncio
+async def test_overview_connector_filter_does_not_refilter_hidden_panels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Overview chip clicks should not synchronously filter every hidden table."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    hidden_filter_calls: list[str] = []
+
+    def record_filter(connector: str) -> None:
+        hidden_filter_calls.append(connector)
+
+    for model in (
+        app.alerts_model,
+        app.audit_model,
+        app.logs_model,
+        app.skills_model,
+        app.mcps_model,
+        app.plugins_model,
+        app.tools_model,
+        app.inventory_model,
+    ):
+        monkeypatch.setattr(model, "set_connector_filter", record_filter)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app.active_panel = "overview"
+        app._set_connector_filter("cursor")
+
+    assert hidden_filter_calls == []
+
+
+@pytest.mark.asyncio
+async def test_overview_connector_filter_defers_full_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Overview filter changes should avoid a full chrome render in the hot path."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app.active_panel = "overview"
+        render_calls: list[str] = []
+
+        def record_render() -> None:
+            render_calls.append("full")
+
+        monkeypatch.setattr(app, "_render_chrome", record_render)
+        app._set_connector_filter("cursor")
+
+        assert app._connector_filter() == "cursor"
+        assert render_calls == []
 
 
 @pytest.mark.asyncio
@@ -3997,6 +4836,27 @@ async def test_catalog_body_shows_connector_chip_in_multi() -> None:
         assert "Connector:" in body
         assert "All" in body
         assert "cursor" in body
+        assert "press" in body and "m" in body
+
+
+@pytest.mark.asyncio
+async def test_overview_body_shows_connector_chip_in_multi() -> None:
+    """Overview shows a compact scope label; table panes keep the full chip."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        body = app.body_text
+        assert "Connector scope:" in body
+        assert "All connectors" in body
         assert "press" in body and "m" in body
 
 
@@ -4241,7 +5101,8 @@ async def test_overview_enforcement_narrows_to_selected_connector() -> None:
         all_text = render()
         assert "ENFORCEMENT" in all_text
         assert "ENFORCEMENT · " not in all_text
-        assert "Hook calls" not in all_text
+        assert "Hook calls" in all_text
+        assert "Blocks" in all_text
 
         # Narrow to codex: connector-scoped hook metrics + per-connector
         # Skills/MCPs/scan coverage from codex's aibom snapshot.
@@ -4568,6 +5429,153 @@ async def test_connector_chip_click_sets_and_clears_filter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_overview_m_picker_updates_scope_before_deferred_render() -> None:
+    """Overview keeps the picker UX while deferring the heavy dashboard repaint."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "observe"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app._overview_renderable()
+
+        assert app._chip_click_segments == []
+        assert app._handle_body_chip_click(0, len(_DEFENSECLAW_LOGO.splitlines()) + 2) is False
+        scope = app.query_one("#overview-scope", Static)
+
+        def scope_text() -> str:
+            return str(scope.render())
+
+        metrics = app.query_one("#overview-metrics", OverviewMetrics)
+
+        def metric_labels() -> set[str]:
+            return {tile.metric.label for tile in metrics.query(MetricTile)}
+
+        assert "All connectors" in scope_text()
+        assert "Hook Calls (2 connectors)" in metric_labels()
+
+        render_calls = 0
+        deferred_calls = 0
+        original_renderable = app._overview_renderable
+
+        def counted_renderable():
+            nonlocal render_calls
+            render_calls += 1
+            return original_renderable()
+
+        def counted_deferred_render() -> None:
+            nonlocal deferred_calls
+            deferred_calls += 1
+
+        app._overview_renderable = counted_renderable  # type: ignore[method-assign]
+        app._schedule_overview_deferred_render = counted_deferred_render  # type: ignore[method-assign]
+
+        assert app._connector_filter() == ""
+        await pilot.press("m")
+        await pilot.pause()
+        assert app.screen_stack[-1].__class__.__name__ == "ActionMenuScreen"
+        assert app._connector_filter() == ""
+        assert render_calls == 0
+
+        await pilot.click("#action-menu-row-1")
+        await pilot.pause()
+        assert app._connector_filter() == "codex"
+        assert "Codex (codex)" in scope_text()
+        assert "Hook Calls (codex)" in metric_labels()
+        assert render_calls == 0
+        assert deferred_calls == 1
+
+        await pilot.press("m")
+        await pilot.pause()
+        await pilot.click("#action-menu-row-0")
+        await pilot.pause()
+        assert app._connector_filter() == ""
+        assert "All connectors" in scope_text()
+        assert "Hook Calls (2 connectors)" in metric_labels()
+        assert render_calls == 0
+        assert deferred_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_overview_repaints_connector_rows_when_activity_changes_while_scrolled() -> None:
+    """Lower CONNECTORS rows update live without idle clock-only body churn."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(
+            ("antigravity", "action"),
+            ("claudecode", "observe"),
+            ("codex", "observe"),
+            ("hermes", "action"),
+            ("opencode", "action"),
+        ),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    audit = AuditPanelModel()
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(120, 18)) as pilot:
+        await pilot.pause()
+        scroller = app.query_one("#body-scroll", VerticalScroll)
+        assert scroller.max_scroll_y > 0
+        scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
+        await pilot.pause()
+
+        app._overview_connector_rows_signature_cache = app._overview_connector_rows_signature()
+        render_calls = 0
+
+        original_render_chrome = app._render_chrome
+
+        def counted_render_chrome() -> None:
+            nonlocal render_calls
+            render_calls += 1
+            original_render_chrome()
+
+        def immediate_timer(_delay: float, callback, **_kwargs: object) -> object:
+            callback()
+            return object()
+
+        app._render_chrome = counted_render_chrome  # type: ignore[method-assign]
+        app.set_timer = immediate_timer  # type: ignore[method-assign]
+        app._overview_last_scroll_activity_at = 0.0
+
+        app._periodic_refresh()
+        await pilot.pause()
+        assert render_calls == 0
+
+        audit.set_events(
+            [
+                Event(
+                    id="claude-block",
+                    timestamp=datetime.now(timezone.utc),
+                    action="connector-hook",
+                    target="preToolUse",
+                    severity="HIGH",
+                    details="connector=claudecode action=block",
+                )
+            ]
+        )
+
+        app._periodic_refresh()
+        await pilot.pause()
+
+        assert render_calls == 1
+        assert app._overview_connector_rows_signature_cache == app._overview_connector_rows_signature()
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["claudecode"].blocks == 1
+        assert rows["claudecode"].last_activity.endswith("ago")
+
+
+@pytest.mark.asyncio
 async def test_setup_m_key_does_not_open_connector_filter_picker() -> None:
     """Setup is an action surface: connector scope is chosen inside wizards,
     not via the shared view filter used by catalog/signal panes."""
@@ -4590,6 +5598,8 @@ async def test_connector_filter_picker_highlights_current_filter() -> None:
     async with app.run_test(size=(170, 44)) as pilot:
         await pilot.pause()
         app._set_connector_filter("cursor")  # noqa: SLF001 - shared filter state setup.
+        app.action_switch_panel("alerts")
+        await pilot.pause()
         await pilot.press("m")
         await pilot.pause()
 

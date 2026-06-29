@@ -7,17 +7,16 @@ set -euo pipefail
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
 
-# Fail-open guard. If the operator has disabled the guardrail or fully
-# uninstalled DefenseClaw, exit 0 immediately so the agent isn't
-# bricked by a hook calling a gateway that no longer exists. The
-# sentinel is created by `defenseclaw setup guardrail --disable` and
-# is removed by `--enable`. A missing DEFENSECLAW_HOME directory is
-# treated as a hard uninstall.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+{{if .Managed}}
+DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+export DEFENSECLAW_HOME
+{{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   exit 0
 fi
-HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+{{end}}
 
 # Plan B4 / S0.4: shell-side hook hardening (sourced before reading
 # stdin so the bounded fd limit is in place when curl spawns).

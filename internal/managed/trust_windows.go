@@ -115,6 +115,11 @@ func validateTrustedWindowsPathElement(path string, wantDir bool, label string) 
 }
 
 func rejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL) error {
+	const (
+		accessAllowedObjectACEType         = 0x5
+		accessAllowedCallbackACEType       = 0x9
+		accessAllowedCallbackObjectACEType = 0xB
+	)
 	for i := uint16(0); i < dacl.AceCount; i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
@@ -123,7 +128,14 @@ func rejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL) error {
 		if ace == nil || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
 			continue
 		}
-		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || !windowsWriteLikeAccess(ace.Mask) {
+		switch ace.Header.AceType {
+		case accessAllowedObjectACEType, accessAllowedCallbackACEType, accessAllowedCallbackObjectACEType:
+			return fmt.Errorf("%s: unsupported allow ACE type 0x%x; refusing managed trust", path, ace.Header.AceType)
+		case windows.ACCESS_ALLOWED_ACE_TYPE:
+		default:
+			continue
+		}
+		if !windowsWriteLikeAccess(ace.Mask) {
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))

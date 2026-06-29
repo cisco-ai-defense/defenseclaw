@@ -155,6 +155,23 @@ jobs:
           uv --no-config pip install --python "$tmp/venv/bin/python" "$whl"
           "$tmp/venv/bin/defenseclaw" --help >/dev/null
 
+  upgrade-smoke:
+    name: Upgrade Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # Exercises real historical `defenseclaw upgrade` commands against a
+      # localhost-served candidate release before a tag exists. The seeded
+      # baselines keep the test stable even when an old release's dependency
+      # pins become unsatisfiable in today's resolver.
+      - run: make upgrade-smoke-matrix ARGS="--baseline-mode seed"
+
   connector-matrix:
     name: Connector Matrix
     runs-on: ubuntu-latest

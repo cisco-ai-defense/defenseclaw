@@ -59,6 +59,9 @@ func TestHookProfileMatrix(t *testing.T) {
 		// opencode's JS bridge does not propagate W3C traceparent, so
 		// SupportsTraceparent is false; it can block and fail closed.
 		{"opencode", false, "", true, false, true, true},
+		// OmniGent's in-process policy bridge injects the active OTel context;
+		// its runtime also accepts standard OTLP process environment variables.
+		{"omnigent", true, NativeOTLPEnvBlock, true, true, true, true},
 	}
 
 	reg := NewDefaultRegistry()

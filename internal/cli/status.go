@@ -353,6 +353,8 @@ func friendlyConnectorName(name string) string {
 		return "OpenHands"
 	case "antigravity":
 		return "Antigravity"
+	case "omnigent":
+		return "OmniGent"
 	default:
 		s := strings.TrimSpace(name)
 		if s == "" {
@@ -370,12 +372,14 @@ func defaultStr(s, fallback string) string {
 }
 
 type connectorModeSummary struct {
-	Connector       string   `json:"connector"`
-	Mode            string   `json:"mode"`
-	Telemetry       []string `json:"telemetry"`
-	ProxyIntercept  bool     `json:"proxy_intercept"`
-	GuardrailMode   string   `json:"guardrail_mode"`
-	HookEnforcement bool     `json:"hook_enforcement"`
+	Connector          string   `json:"connector"`
+	Mode               string   `json:"mode"`
+	PolicyMode         string   `json:"policy_mode"`
+	EnforcementSurface string   `json:"enforcement_surface"`
+	Telemetry          []string `json:"telemetry"`
+	ProxyIntercept     bool     `json:"proxy_intercept"`
+	GuardrailMode      string   `json:"guardrail_mode"`
+	HookEnforcement    bool     `json:"hook_enforcement"`
 }
 
 // fetchConnectorModes returns one mode summary per active connector. It
@@ -452,8 +456,23 @@ func printConnectorModeEntry(m *connectorModeSummary) {
 		connectorName = fmt.Sprintf("%s (%s)", friendlyConnectorName(m.Connector), m.Connector)
 	}
 	fmt.Printf("    %s%s\n", modeLabel, connectorName)
-	modeLine := Style(fmt.Sprintf("%-18s", "Mode:"), "fg=bright_black", "bold")
-	fmt.Printf("    %s%s\n", modeLine, m.Mode)
+	dataPath := m.Mode
+	if m.Mode == "observability" {
+		dataPath = "direct-to-upstream"
+	} else if m.Mode == "guardrail" {
+		dataPath = "DefenseClaw proxy"
+	}
+	dataPathLine := Style(fmt.Sprintf("%-18s", "Data path:"), "fg=bright_black", "bold")
+	fmt.Printf("    %s%s\n", dataPathLine, dataPath)
+	if m.PolicyMode != "" {
+		policyLine := Style(fmt.Sprintf("%-18s", "Policy mode:"), "fg=bright_black", "bold")
+		fmt.Printf("    %s%s\n", policyLine, m.PolicyMode)
+	}
+	if m.EnforcementSurface != "" {
+		surface := strings.ReplaceAll(m.EnforcementSurface, "_", " ")
+		surfaceLine := Style(fmt.Sprintf("%-18s", "Enforcement:"), "fg=bright_black", "bold")
+		fmt.Printf("    %s%s\n", surfaceLine, surface)
+	}
 	if len(m.Telemetry) > 0 {
 		telLabel := Style(fmt.Sprintf("%-18s", "Telemetry:"), "fg=bright_black", "bold")
 		fmt.Printf("    %s%s\n", telLabel, strings.Join(m.Telemetry, ", "))

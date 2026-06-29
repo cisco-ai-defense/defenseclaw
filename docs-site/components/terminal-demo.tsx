@@ -28,13 +28,15 @@ interface ScriptLine {
   text: string;
 }
 
+const INSTALL_VERSION = '0.8.2';
+
 // Static header — typed once on initial mount and never replayed.
 // `defenseclaw-gateway` is the canonical companion install line and
 // every connector setup runs after it.
 const HEADER: ScriptLine[] = [
   {
     kind: 'cmd',
-    text: 'curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash',
+    text: `curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${INSTALL_VERSION}/scripts/install.sh | VERSION=${INSTALL_VERSION} bash`,
   },
   { kind: 'ok', text: '✓ Installed defenseclaw + defenseclaw-gateway' },
 ];

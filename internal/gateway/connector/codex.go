@@ -569,6 +569,10 @@ var codexHookGroups = []struct {
 	{"PreToolUse", "*", 30},
 	{"PermissionRequest", "*", 30},
 	{"PostToolUse", "*", 30},
+	{"SubagentStart", "*", 30},
+	{"SubagentStop", "*", 90},
+	{"PreCompact", "", 30},
+	{"PostCompact", "", 30},
 	{"Stop", "", 90},
 }
 
@@ -789,6 +793,10 @@ func codexHookEventKeyLabel(eventType string) string {
 		return "permission_request"
 	case "PostToolUse":
 		return "post_tool_use"
+	case "SubagentStart":
+		return "subagent_start"
+	case "SubagentStop":
+		return "subagent_stop"
 	case "PreCompact":
 		return "pre_compact"
 	case "PostCompact":

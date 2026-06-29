@@ -74,7 +74,7 @@ func TestHookContractNeedsActionOverride(t *testing.T) {
 
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"} {
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
 		conn, ok := reg.Get(name)
 		if !ok {
 			t.Fatalf("registry missing %s", name)
@@ -96,8 +96,11 @@ func TestHookContractsCoverHookEndpoints(t *testing.T) {
 			if len(contract.AIDSurfaces) == 0 {
 				t.Fatalf("%s contract %s missing AID surfaces", name, contract.ContractID)
 			}
-			if contract.ResponseFieldName == "" {
+			if contract.ResponseFieldName == "" && name != "omnigent" {
 				t.Fatalf("%s contract %s missing response field", name, contract.ContractID)
+			}
+			if name == "omnigent" && contract.ResponseFieldName != "" {
+				t.Fatalf("%s contract %s must return its policy verdict directly, not through %q", name, contract.ContractID, contract.ResponseFieldName)
 			}
 		}
 	}

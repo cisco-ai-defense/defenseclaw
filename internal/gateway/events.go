@@ -190,6 +190,12 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 	if ev.AgentType == "" {
 		ev.AgentType = id.AgentType
 	}
+	if ev.UserID == "" {
+		ev.UserID = id.UserID
+	}
+	if ev.UserName == "" {
+		ev.UserName = id.UserName
+	}
 	if ev.AgentInstanceID == "" {
 		ev.AgentInstanceID = firstNonEmpty(id.AgentInstanceID, env.AgentInstanceID)
 	}
@@ -210,6 +216,20 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 	}
 	if ev.Connector == "" {
 		ev.Connector = env.Connector
+	}
+	if ev.SessionID != "" && ev.AgentID != "" {
+		source := strings.ToLower(strings.TrimSpace(ev.Connector))
+		if source == "" {
+			source = "unknown"
+		}
+		if ev.AgentLifecycleID == "" {
+			ev.AgentLifecycleID = stableLLMEventID("lifecycle", source, ev.SessionID, ev.AgentID)
+		}
+		if ev.AgentExecutionID == "" {
+			ev.AgentExecutionID = stableLLMEventID(
+				"execution", source, ev.SessionID, ev.AgentID, gatewaylog.ProcessRunID(),
+			)
+		}
 	}
 }
 
@@ -270,6 +290,11 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 			cp.ToolOutput = redaction.ForSinkMessageContent(cp.ToolOutput)
 		}
 		e.Tool = &cp
+	}
+	if h := e.HookDecision; h != nil {
+		cp := *h
+		cp.Reason = redaction.ForSinkReason(cp.Reason)
+		e.HookDecision = &cp
 	}
 	w.EmitContext(ctx, e)
 }

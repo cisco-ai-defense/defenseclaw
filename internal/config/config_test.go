@@ -20,10 +20,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -167,6 +169,25 @@ func TestConfigPath_ExplicitEnvOverride(t *testing.T) {
 	}
 }
 
+func TestLoadFromFile_ConfigOverrideKeepsRuntimeDataInDefenseClawHome(t *testing.T) {
+	configDir := t.TempDir()
+	dataDir := t.TempDir()
+	path := filepath.Join(configDir, "managed.yaml")
+	t.Setenv(managed.ConfigPathEnv, path)
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
+	if err := os.WriteFile(path, []byte("config_version: 6\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if cfg.DataDir != dataDir {
+		t.Fatalf("DataDir = %q, want DEFENSECLAW_HOME %q", cfg.DataDir, dataDir)
+	}
+}
+
 func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, DefaultConfigName)
@@ -180,6 +201,19 @@ func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
 		t.Fatalf("LoadFromFile error = %v, want managed trust check failure", err)
+	}
+}
+
+func TestLoadFromFile_ManagedEnterpriseEnvPinRejectsUntrustedUnmanagedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DefaultConfigName)
+	if err := os.WriteFile(path, []byte("config_version: 6\ndeployment_mode: unmanaged_byod\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv(managed.DeploymentModeEnv, string(DeploymentModeManagedEnterprise))
+	_, err := LoadFromFile(path)
+	if err == nil || !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
+		t.Fatalf("LoadFromFile error = %v, want pre-parse managed trust failure", err)
 	}
 }
 
@@ -867,196 +901,15 @@ func TestConfig_PluginDirs(t *testing.T) {
 	}
 }
 
-func TestDefaultConfig_OTelPerSignalFields(t *testing.T) {
+func TestDefaultConfig_OTelProcessPolicy(t *testing.T) {
 	cfg := DefaultConfig()
 
 	if cfg.OTel.Enabled {
 		t.Error("otel should be disabled by default")
 	}
 
-	t.Run("per-signal fields default to empty", func(t *testing.T) {
-		signals := []struct {
-			name     string
-			endpoint string
-			protocol string
-		}{
-			{"traces", cfg.OTel.Traces.Endpoint, cfg.OTel.Traces.Protocol},
-			{"metrics", cfg.OTel.Metrics.Endpoint, cfg.OTel.Metrics.Protocol},
-			{"logs", cfg.OTel.Logs.Endpoint, cfg.OTel.Logs.Protocol},
-		}
-		for _, s := range signals {
-			if s.endpoint != "" {
-				t.Errorf("%s.endpoint should be empty, got %q", s.name, s.endpoint)
-			}
-			if s.protocol != "" {
-				t.Errorf("%s.protocol should be empty, got %q", s.name, s.protocol)
-			}
-		}
-	})
-
-	t.Run("url_path fields default to empty", func(t *testing.T) {
-		if cfg.OTel.Traces.URLPath != "" {
-			t.Errorf("traces.url_path should be empty, got %q", cfg.OTel.Traces.URLPath)
-		}
-		if cfg.OTel.Metrics.URLPath != "" {
-			t.Errorf("metrics.url_path should be empty, got %q", cfg.OTel.Metrics.URLPath)
-		}
-	})
-}
-
-func TestLoad_DefaultOTelProtocolEmpty(t *testing.T) {
-	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if cfg.OTel.Protocol != "" {
-		t.Fatalf("otel.protocol default=%q want empty for SDK env fallback", cfg.OTel.Protocol)
-	}
-}
-
-func TestOTelConfig_PerSignalOverride(t *testing.T) {
-	cfg := OTelConfig{
-		Endpoint: "global:4317",
-		Protocol: "grpc",
-		Traces: OTelTracesConfig{
-			Endpoint: "traces:443",
-			Protocol: "http",
-			URLPath:  "/v2/trace/otlp",
-		},
-		Metrics: OTelMetricsConfig{
-			Endpoint: "metrics:443",
-			Protocol: "http",
-			URLPath:  "/v2/datapoint/otlp",
-		},
-	}
-
-	if cfg.Traces.Endpoint != "traces:443" {
-		t.Errorf("traces endpoint: got %q", cfg.Traces.Endpoint)
-	}
-	if cfg.Traces.Protocol != "http" {
-		t.Errorf("traces protocol: got %q", cfg.Traces.Protocol)
-	}
-	if cfg.Traces.URLPath != "/v2/trace/otlp" {
-		t.Errorf("traces url_path: got %q", cfg.Traces.URLPath)
-	}
-	if cfg.Metrics.Endpoint != "metrics:443" {
-		t.Errorf("metrics endpoint: got %q", cfg.Metrics.Endpoint)
-	}
-	if cfg.Metrics.URLPath != "/v2/datapoint/otlp" {
-		t.Errorf("metrics url_path: got %q", cfg.Metrics.URLPath)
-	}
-	if cfg.Logs.Endpoint != "" {
-		t.Errorf("logs endpoint should fall back to empty, got %q", cfg.Logs.Endpoint)
-	}
-	if cfg.Logs.Protocol != "" {
-		t.Errorf("logs protocol should fall back to empty, got %q", cfg.Logs.Protocol)
-	}
-}
-
-func TestOTelEnvVarBindings(t *testing.T) {
-	envTests := []struct {
-		envKey string
-		value  string
-		check  func(*Config) string
-	}{
-		{
-			"DEFENSECLAW_OTEL_TRACES_ENDPOINT",
-			"traces.example.com:443",
-			func(c *Config) string { return c.OTel.Traces.Endpoint },
-		},
-		{
-			"DEFENSECLAW_OTEL_TRACES_PROTOCOL",
-			"http",
-			func(c *Config) string { return c.OTel.Traces.Protocol },
-		},
-		{
-			"DEFENSECLAW_OTEL_TRACES_URL_PATH",
-			"/v2/trace/otlp",
-			func(c *Config) string { return c.OTel.Traces.URLPath },
-		},
-		{
-			"DEFENSECLAW_OTEL_METRICS_ENDPOINT",
-			"metrics.example.com:443",
-			func(c *Config) string { return c.OTel.Metrics.Endpoint },
-		},
-		{
-			"DEFENSECLAW_OTEL_METRICS_PROTOCOL",
-			"http",
-			func(c *Config) string { return c.OTel.Metrics.Protocol },
-		},
-		{
-			"DEFENSECLAW_OTEL_METRICS_URL_PATH",
-			"/v2/datapoint/otlp",
-			func(c *Config) string { return c.OTel.Metrics.URLPath },
-		},
-		{
-			"DEFENSECLAW_OTEL_LOGS_ENDPOINT",
-			"logs.example.com:443",
-			func(c *Config) string { return c.OTel.Logs.Endpoint },
-		},
-		{
-			"DEFENSECLAW_OTEL_LOGS_PROTOCOL",
-			"http",
-			func(c *Config) string { return c.OTel.Logs.Protocol },
-		},
-		{
-			"DEFENSECLAW_OTEL_ENDPOINT",
-			"global.example.com:4317",
-			func(c *Config) string { return c.OTel.Endpoint },
-		},
-		{
-			"DEFENSECLAW_OTEL_PROTOCOL",
-			"http",
-			func(c *Config) string { return c.OTel.Protocol },
-		},
-	}
-
-	for _, tt := range envTests {
-		t.Run(tt.envKey, func(t *testing.T) {
-			// Isolate Load() from the developer's real ~/.defenseclaw/
-			// config.yaml. Without this, a stale legacy `splunk:` block
-			// in the host config trips detectLegacySplunk() and the test
-			// fails for reasons unrelated to env var binding.
-			t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-			t.Setenv(tt.envKey, tt.value)
-
-			cfg, err := Load()
-			if err != nil {
-				t.Fatalf("Load() error: %v", err)
-			}
-			got := tt.check(cfg)
-			if got != tt.value {
-				t.Errorf("%s: got %q, want %q", tt.envKey, got, tt.value)
-			}
-		})
-	}
-}
-
-func TestOTelEnvVarEnabled(t *testing.T) {
-	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-	t.Setenv("DEFENSECLAW_OTEL_ENABLED", "true")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if !cfg.OTel.Enabled {
-		t.Error("OTel.Enabled should be true when DEFENSECLAW_OTEL_ENABLED=true")
-	}
-}
-
-func TestOTelEnvVarTLSInsecure(t *testing.T) {
-	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-	t.Setenv("DEFENSECLAW_OTEL_TLS_INSECURE", "true")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if !cfg.OTel.TLS.Insecure {
-		t.Error("OTel.TLS.Insecure should be true when DEFENSECLAW_OTEL_TLS_INSECURE=true")
+	if len(cfg.OTel.Destinations) != 0 {
+		t.Errorf("default destinations=%v want none", cfg.OTel.Destinations)
 	}
 }
 
@@ -1066,7 +919,7 @@ func TestLoadOTelResourceAttributesPreservesDottedKeys(t *testing.T) {
 
 	configFile := filepath.Join(tmpDir, DefaultConfigName)
 	data := []byte(`otel:
-  enabled: true
+  enabled: false
   resource:
     attributes:
       defenseclaw.preset: splunk-o11y
@@ -1094,6 +947,272 @@ func TestLoadOTelResourceAttributesPreservesDottedKeys(t *testing.T) {
 		if got := cfg.OTel.Resource.Attributes[key]; got != wantValue {
 			t.Errorf("OTel.Resource.Attributes[%q] = %q, want %q", key, got, wantValue)
 		}
+	}
+}
+
+func TestLoadOTelNamedDestinations(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", tmpDir)
+	data := []byte(`otel:
+  enabled: true
+  destinations:
+    - name: local-observability
+      preset: local-otlp
+      enabled: true
+      protocol: grpc
+      endpoint: 127.0.0.1:4317
+      traces: {enabled: true}
+      metrics: {enabled: true, export_interval_s: 15}
+      logs: {enabled: true}
+    - name: galileo
+      preset: galileo
+      enabled: true
+      protocol: http
+      endpoint: https://api.galileo.ai
+      headers:
+        Galileo-API-Key: ${GALILEO_API_KEY}
+        project: defenseclaw
+        logstream: default
+      span_filter:
+        operations:
+          - name: chat
+            require_attributes:
+              - gen_ai.operation.name
+              - gen_ai.request.model
+      traces:
+        enabled: true
+        url_path: /otel/traces
+      metrics: {enabled: false}
+      logs: {enabled: false}
+`)
+	configFile := filepath.Join(tmpDir, DefaultConfigName)
+	if err := os.WriteFile(configFile, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error: %v", configFile, err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.OTel.Destinations) != 2 {
+		t.Fatalf("len(OTel.Destinations)=%d want 2", len(cfg.OTel.Destinations))
+	}
+	local := cfg.OTel.Destinations[0]
+	if local.Name != "local-observability" || !local.Metrics.Enabled || local.Metrics.ExportIntervalS != 15 {
+		t.Errorf("local destination decoded incorrectly: %#v", local)
+	}
+	galileo := cfg.OTel.Destinations[1]
+	if galileo.Name != "galileo" || galileo.Preset != "galileo" {
+		t.Errorf("galileo identity decoded incorrectly: %#v", galileo)
+	}
+	if got := galileo.Headers["galileo-api-key"]; got != "${GALILEO_API_KEY}" {
+		t.Errorf("galileo-api-key=%q want env reference; headers=%v", got, galileo.Headers)
+	}
+	if galileo.Traces.URLPath != "/otel/traces" || galileo.Metrics.Enabled || galileo.Logs.Enabled {
+		t.Errorf("galileo signals decoded incorrectly: %#v", galileo)
+	}
+	if !reflect.DeepEqual(galileo.SpanFilter.Operations, []OTelSpanFilterOperationConfig{{
+		Name: "chat", RequireAttributes: []string{"gen_ai.operation.name", "gen_ai.request.model"},
+	}}) {
+		t.Errorf("galileo span filter decoded incorrectly: %#v", galileo.SpanFilter)
+	}
+}
+
+func TestOTelConfigValidateNamedDestinations(t *testing.T) {
+	valid := OTelConfig{Destinations: []OTelDestinationConfig{
+		{Name: "local", Enabled: true, Protocol: "http", Endpoint: "http://127.0.0.1:4318", Traces: OTelTracesConfig{Enabled: true}},
+		{Name: "filtered", Enabled: true, Protocol: "http", Endpoint: "https://collector.example.test", Traces: OTelTracesConfig{Enabled: true}},
+	}}
+	if err := valid.ValidateNamedDestinations(); err != nil {
+		t.Fatalf("valid destinations rejected: %v", err)
+	}
+	duplicate := OTelConfig{Destinations: append([]OTelDestinationConfig(nil), valid.Destinations...)}
+	duplicate.Destinations[1].Name = "local"
+	if err := duplicate.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate validation error=%v, want duplicate diagnostic", err)
+	}
+	noSignals := OTelConfig{Destinations: []OTelDestinationConfig{{Name: "empty", Enabled: true}}}
+	if err := noSignals.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "no enabled signals") {
+		t.Fatalf("no-signal validation error=%v, want actionable diagnostic", err)
+	}
+	noEndpoint := OTelConfig{Destinations: []OTelDestinationConfig{{
+		Name: "missing-endpoint", Enabled: true, Traces: OTelTracesConfig{Enabled: true},
+	}}}
+	if err := noEndpoint.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "no endpoint") {
+		t.Fatalf("no-endpoint validation error=%v, want actionable diagnostic", err)
+	}
+	missingLogEndpoint := OTelConfig{Destinations: []OTelDestinationConfig{{
+		Name: "partial", Enabled: true, Protocol: "http",
+		Traces: OTelTracesConfig{Enabled: true, Endpoint: "https://collector.example.test/v1/traces"},
+		Logs:   OTelLogsConfig{Enabled: true},
+	}}}
+	if err := missingLogEndpoint.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "enables logs but has no endpoint") {
+		t.Fatalf("partial endpoint validation error=%v, want signal-specific diagnostic", err)
+	}
+	filteredWithoutTraces := OTelConfig{Destinations: []OTelDestinationConfig{{
+		Name: "filtered", SpanFilter: OTelSpanFilterConfig{RequireOperation: "chat"},
+	}}}
+	if err := filteredWithoutTraces.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "traces are disabled") {
+		t.Fatalf("filter validation error=%v, want traces-disabled diagnostic", err)
+	}
+	badFilterAttrs := OTelConfig{Destinations: []OTelDestinationConfig{{
+		Name: "filtered", Endpoint: "https://collector.example.test",
+		Traces:     OTelTracesConfig{Enabled: true},
+		SpanFilter: OTelSpanFilterConfig{RequireAttributes: []string{"gen_ai.request.model", " gen_ai.request.model "}},
+	}}}
+	if err := badFilterAttrs.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "repeats") {
+		t.Fatalf("filter duplicate validation error=%v, want duplicate diagnostic", err)
+	}
+	emptyFilterAttr := OTelConfig{Destinations: []OTelDestinationConfig{{
+		Name: "filtered", Endpoint: "https://collector.example.test",
+		Traces:     OTelTracesConfig{Enabled: true},
+		SpanFilter: OTelSpanFilterConfig{RequireAttributes: []string{" "}},
+	}}}
+	if err := emptyFilterAttr.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "empty required attribute") {
+		t.Fatalf("empty filter validation error=%v, want empty-attribute diagnostic", err)
+	}
+	badOperations := OTelConfig{Destinations: []OTelDestinationConfig{{
+		Name: "filtered", Endpoint: "https://collector.example.test",
+		Traces: OTelTracesConfig{Enabled: true},
+		SpanFilter: OTelSpanFilterConfig{Operations: []OTelSpanFilterOperationConfig{
+			{Name: "chat", RequireAttributes: []string{"gen_ai.operation.name"}},
+			{Name: "chat", RequireAttributes: []string{"gen_ai.operation.name"}},
+		}},
+	}}}
+	if err := badOperations.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "repeats operation") {
+		t.Fatalf("operation validation error=%v, want duplicate-operation diagnostic", err)
+	}
+	mixedFilterShapes := OTelConfig{Destinations: []OTelDestinationConfig{{
+		Name: "filtered", Endpoint: "https://collector.example.test",
+		Traces: OTelTracesConfig{Enabled: true},
+		SpanFilter: OTelSpanFilterConfig{
+			RequireOperation: "chat",
+			Operations:       []OTelSpanFilterOperationConfig{{Name: "chat"}},
+		},
+	}}}
+	if err := mixedFilterShapes.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "cannot mix") {
+		t.Fatalf("mixed filter validation error=%v, want shape diagnostic", err)
+	}
+	empty := OTelConfig{Enabled: true}
+	if err := empty.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "at least one named destination") {
+		t.Fatalf("empty destination validation error=%v, want named-destination diagnostic", err)
+	}
+}
+
+func TestLoadMigratesFlatSignalsWithNamedDestinations(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	data := []byte(`otel:
+  enabled: true
+  protocol: grpc
+  endpoint: https://legacy.example.test
+  traces:
+    enabled: true
+  destinations:
+    - name: named
+      enabled: true
+      protocol: http
+      endpoint: https://collector.example.test
+      traces: {enabled: true}
+`)
+	if err := os.WriteFile(filepath.Join(DefaultDataPath(), DefaultConfigName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error=%v, want flat OTel migration", err)
+	}
+	if cfg.ConfigVersion != CurrentConfigVersion {
+		t.Fatalf("ConfigVersion=%d want %d", cfg.ConfigVersion, CurrentConfigVersion)
+	}
+	if got := len(cfg.OTel.Destinations); got != 2 {
+		t.Fatalf("destinations=%d want 2", got)
+	}
+	migrated := cfg.OTel.Destinations[0]
+	if migrated.Name != "generic-otlp" || migrated.Endpoint != "https://legacy.example.test" {
+		t.Fatalf("migrated destination=%+v", migrated)
+	}
+	if !migrated.Traces.Enabled || migrated.Logs.Enabled || migrated.Metrics.Enabled {
+		t.Fatalf("migrated signals=%+v %+v %+v, want traces-only", migrated.Traces, migrated.Logs, migrated.Metrics)
+	}
+	if cfg.OTel.Destinations[1].Name != "named" {
+		t.Fatalf("second destination=%+v, want named destination preserved", cfg.OTel.Destinations[1])
+	}
+}
+
+func TestLoadMigratesEnvironmentBackedLegacyOTelExporter(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_OTEL_ENDPOINT", "http://127.0.0.1:4318")
+	t.Setenv("DEFENSECLAW_OTEL_PROTOCOL", "http/protobuf")
+	t.Setenv("DEFENSECLAW_OTEL_TLS_INSECURE", "true")
+	data := []byte(`config_version: 6
+otel:
+  enabled: true
+`)
+	if err := os.WriteFile(filepath.Join(DefaultDataPath(), DefaultConfigName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error=%v, want env-backed flat OTel migration", err)
+	}
+	if got := len(cfg.OTel.Destinations); got != 1 {
+		t.Fatalf("destinations=%d want 1", got)
+	}
+	migrated := cfg.OTel.Destinations[0]
+	if migrated.Endpoint != "http://127.0.0.1:4318" || migrated.Protocol != "http/protobuf" {
+		t.Fatalf("migrated destination=%+v", migrated)
+	}
+	if !migrated.TLS.Insecure {
+		t.Fatalf("migrated TLS=%+v, want legacy insecure policy preserved", migrated.TLS)
+	}
+	if !migrated.Traces.Enabled || !migrated.Logs.Enabled || !migrated.Metrics.Enabled {
+		t.Fatalf("migrated signals=%+v %+v %+v, want all enabled", migrated.Traces, migrated.Logs, migrated.Metrics)
+	}
+}
+
+func TestLoadMigratesEnvironmentBackedLegacyOTelSignalExporters(t *testing.T) {
+	tests := []struct {
+		name     string
+		signal   string
+		endpoint string
+		protocol string
+	}{
+		{name: "traces", signal: "TRACES", endpoint: "http://127.0.0.1:4318/v1/traces", protocol: "http/protobuf"},
+		{name: "logs", signal: "LOGS", endpoint: "http://127.0.0.1:4318/v1/logs", protocol: "http/protobuf"},
+		{name: "metrics", signal: "METRICS", endpoint: "http://127.0.0.1:4318/v1/metrics", protocol: "http/protobuf"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+			t.Setenv("DEFENSECLAW_OTEL_"+tt.signal+"_ENDPOINT", tt.endpoint)
+			t.Setenv("DEFENSECLAW_OTEL_"+tt.signal+"_PROTOCOL", tt.protocol)
+			data := []byte("config_version: 6\notel:\n  enabled: true\n")
+			if err := os.WriteFile(filepath.Join(DefaultDataPath(), DefaultConfigName), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error=%v", err)
+			}
+			if got := len(cfg.OTel.Destinations); got != 1 {
+				t.Fatalf("destinations=%d want 1", got)
+			}
+			destination := cfg.OTel.Destinations[0]
+			switch tt.signal {
+			case "TRACES":
+				if !destination.Traces.Enabled || destination.Traces.Endpoint != tt.endpoint || destination.Traces.Protocol != tt.protocol || destination.Logs.Enabled || destination.Metrics.Enabled {
+					t.Fatalf("migrated destination=%+v, want traces-only", destination)
+				}
+			case "LOGS":
+				if !destination.Logs.Enabled || destination.Logs.Endpoint != tt.endpoint || destination.Logs.Protocol != tt.protocol || destination.Traces.Enabled || destination.Metrics.Enabled {
+					t.Fatalf("migrated destination=%+v, want logs-only", destination)
+				}
+			case "METRICS":
+				if !destination.Metrics.Enabled || destination.Metrics.Endpoint != tt.endpoint || destination.Metrics.Protocol != tt.protocol || destination.Traces.Enabled || destination.Logs.Enabled {
+					t.Fatalf("migrated destination=%+v, want metrics-only", destination)
+				}
+			}
+		})
 	}
 }
 

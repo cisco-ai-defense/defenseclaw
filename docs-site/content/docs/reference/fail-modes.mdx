@@ -74,15 +74,16 @@ defenseclaw guardrail fail-mode closed --yes     # CI / TUI form
 
 Flipping the knob regenerates every hook script (codex-hook, claude-code-hook, inspect-*) so the `FAIL_MODE` template variable picks up the new value, and restarts the gateway by default. `defenseclaw setup guardrail` and `defenseclaw init` / `quickstart` also accept `--fail-mode <open|closed>` for non-interactive flows.
 
-On a **multi-connector** install you can scope the fail mode to a single connector with `--connector` — it writes `guardrail.connectors.<name>.hook_fail_mode` and leaves the global default (and every other connector) untouched:
+On a **multi-connector** install you can scope the fail mode to a single connector with `--connector` — it writes `guardrail.connectors.<name>.hook_fail_mode` and leaves every other connector untouched:
 
 ```bash
 defenseclaw guardrail fail-mode closed --connector codex   # Codex blocks on bad hook responses
 defenseclaw guardrail fail-mode open   --connector claudecode
-defenseclaw guardrail fail-mode                            # bare = global default all connectors inherit
+defenseclaw guardrail fail-mode                            # bare read = global + per-connector effective values
+defenseclaw guardrail fail-mode closed                     # bare write = update active connector posture
 ```
 
-Omit `--connector` to set the global default. The flag is rejected on a single-connector install — there's only one posture to set. See [Setup → Multi-connector](/docs/setup/guardrail/multi-connector).
+Omit `--connector` to take the broad path. On a multi-connector install, a bare fail-mode write reconciles active connector overrides so a stale override does not keep a connector on the old value. On a single-connector install it updates the single global posture. See [Setup → Multi-connector](/docs/setup/guardrail/multi-connector).
 
 ## Knob 2: `DEFENSECLAW_STRICT_AVAILABILITY` (transport-layer)
 

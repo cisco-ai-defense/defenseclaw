@@ -1144,7 +1144,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     "connector": c,
                     "plugins": _plugin_list_json_items(
                         _collect_plugins_for_connector(app, c, scan_map),
-                        scan_map,
+                        _build_plugin_scan_map_for_connector(app, c),
                         _build_plugin_actions_map(app.store, c),
                         connector=c,
                     ),
@@ -1156,7 +1156,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
             plugins = _collect_plugins_for_connector(app, connectors[0], scan_map)
             _print_plugin_list_json(
                 plugins,
-                scan_map,
+                _build_plugin_scan_map_for_connector(app, connectors[0]),
                 _build_plugin_actions_map(app.store, connectors[0]),
                 connector=connectors[0],
             )
@@ -1172,7 +1172,8 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 click.echo(f"Plugins (connector={connector}): no plugins found")
             continue
         actions_map = _build_plugin_actions_map(app.store, connector)
-        _print_plugin_list_table(plugins, scan_map, actions_map, connector)
+        connector_scan_map = _build_plugin_scan_map_for_connector(app, connector)
+        _print_plugin_list_table(plugins, connector_scan_map, actions_map, connector)
         shown_any = True
 
     if not shown_any:
@@ -3031,6 +3032,31 @@ def _build_plugin_scan_map(store) -> dict:
     for ls in latest:
         name = os.path.basename(ls["target"])
         scan_map[name] = _plugin_scan_payload_from_latest(ls)
+    return scan_map
+
+
+def _build_plugin_scan_map_for_connector(app: AppContext, connector: str) -> dict:
+    """Build plugin-name -> latest scan entry scoped to one connector's roots."""
+    scan_map: dict[str, dict[str, Any]] = {}
+    if app.store is None:
+        return scan_map
+    try:
+        latest = app.store.latest_scans_by_scanner("plugin-scanner")
+    except Exception as exc:
+        click.echo(f"warning: failed to load plugin scan data: {exc}", err=True)
+        return scan_map
+    matches: dict[str, tuple[Any, dict[str, Any]]] = {}
+    for ls in latest:
+        name = os.path.basename(ls["target"])
+        payload = _plugin_scan_payload_from_latest(ls)
+        if connector and not _scan_entry_matches_plugin_connector(app, payload, connector):
+            continue
+        timestamp = ls.get("timestamp")
+        current = matches.get(name)
+        if current is None or timestamp > current[0]:
+            matches[name] = (timestamp, payload)
+    for name, (_timestamp, payload) in matches.items():
+        scan_map[name] = payload
     return scan_map
 
 

@@ -105,25 +105,29 @@ defenseclaw guardrail disable --connector codex      # scoped kill switch
 defenseclaw guardrail enable  --connector codex      # restore it
 ```
 
-Omit `--connector` and the same verbs operate on the **global default** that every connector inherits. `--connector` is rejected on a single-connector install — there is only one posture to set.
+`--connector X` is the explicit scope selector: it writes only that connector's override. On a multi-connector install, unscoped writes are the broad operator-intent path. `guardrail fail-mode`, `guardrail hilt`, and `guardrail block-message` reconcile the active connector posture so an existing override does not silently keep the old value. `block-message` also updates the shared `guardrail.block_message` fallback. On a single-connector install, `--connector` is rejected because there is only one posture to set.
 
-To **read** the resolved posture, run bare `defenseclaw guardrail status` — it prints one per-connector block for **every** active connector (there is no `--connector` flag on `status`):
+To **read** the resolved posture, run bare `defenseclaw guardrail status` — it prints one per-connector block for **every** active connector. Pass `--connector X` to narrow the status view to one active connector:
 
 ```bash
 defenseclaw guardrail status     # per-connector blocks for ALL active connectors
+defenseclaw guardrail status --connector codex
 ```
 
 See [Reference → CLI](/docs/reference/cli#guardrail) for the full command group.
 
 ## CLI contract: read vs write
 
-Once a gateway protects more than one connector, the CLI splits cleanly into commands that **read across the whole roster** and commands that **write to one connector at a time**:
+Once a gateway protects more than one connector, the CLI splits cleanly into commands that **read across the whole roster**, commands that **write broad state by default**, and commands that **write to one connector when you pass `--connector`**:
 
 | Commands | Scope | How to narrow |
 | --- | --- | --- |
-| `defenseclaw status`, `defenseclaw doctor`, `defenseclaw guardrail status`, bare `guardrail fail-mode` / `hilt` / `block-message`, `skill list`, `mcp list`, `plugin list` | **Read — fans out to every active connector.** Identical layout whether one or N are wired. | n/a — these always show the full roster. |
-| `guardrail enable` / `disable` / `fail-mode` / `hilt` / `block-message` (with an argument) | **Write — one connector.** Defaults to the active connector. | `--connector X` to target a specific connector; omit to set the global default. |
-| `skill scan` / `mcp scan` / `aibom scan` | **Scan — all active connectors by default.** | Positional target (or `--connector` where supported) to scope to one. |
+| `defenseclaw status`, `defenseclaw doctor`, bare `defenseclaw guardrail status`, bare `guardrail fail-mode` / `hilt` / `block-message`, `skill list`, `mcp list`, `plugin list`, `tool list`, `tool status`, `codeguard status` | **Read — fans out to every active connector.** Identical layout whether one or N are wired. | `guardrail status --connector X`, `skill list --connector X`, `mcp list --connector X`, `plugin list --connector X`, `tool list --connector X`, and `tool status --connector X` narrow where supported. |
+| `alerts` | **Read — recent decisions across connectors by default.** | `alerts --connector X` filters to events attributed to one connector. |
+| `guardrail enable` / `disable` / `fail-mode` / `hilt` / `block-message` (with an argument) | **Guardrail write — scoped or broad.** `--connector X` writes one connector override. Omit `--connector` for the broad path: enable/disable is global; fail-mode, HITL, and block-message update active connector posture. | `--connector X` to target a specific connector. |
+| `skill`, `mcp`, `plugin`, and `tool` policy verbs (`block`, `allow`, `unblock`, plus runtime verbs such as `disable` / `enable` where supported) | **Asset-policy write — broad fallback by default, connector-scoped when requested.** Bare writes apply across matching configured connector copies or the unscoped fallback tier for that asset family. | `--connector X` writes or clears only that connector's scoped state. |
+| `mcp set` / `mcp unset`, `skill install`, `plugin remove`, `codeguard install` / `install-skill` | **Config/install write — all configured/active connectors by default.** | `--connector X` writes or removes only one connector's source. |
+| `skill scan` / `mcp scan` / `plugin scan` / `aibom scan` | **Scan — configured/active connectors by default.** | Positional target and `--connector X` narrow where supported. |
 
 <Callout type="info">
 `defenseclaw doctor` and `defenseclaw status` both render a **per-connector block** for each active connector when more than one is wired — the same fan-out the rest of the read commands use. There is no single "active connector" summary to misread.

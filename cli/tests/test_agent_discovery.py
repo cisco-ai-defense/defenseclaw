@@ -51,6 +51,21 @@ def _pin_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
 
+def test_discovery_trust_config_honors_config_override(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    config_path = tmp_path / "managed" / "config.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        "ai_discovery:\n  require_trusted_binary_paths: true\n  trusted_binary_prefixes: [/opt/enterprise/bin]\n"
+    )
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(config_path))
+
+    required, prefixes = ad._ai_discovery_trust_config(data_dir)
+
+    assert required is True
+    assert prefixes == ("/opt/enterprise/bin",)
+
+
 def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     now = datetime(2026, 5, 4, 18, 21, tzinfo=timezone.utc)
@@ -93,12 +108,14 @@ def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
     data_dir = Path(os.environ["DEFENSECLAW_HOME"])
     data_dir.mkdir(parents=True)
     (data_dir / ad.CACHE_FILENAME).write_text(
-        json.dumps({
-            "version": 999,
-            "scanned_at": "2026-05-04T18:21:00Z",
-            "ttl_seconds": ad.CACHE_TTL_SECONDS,
-            "agents": {},
-        }),
+        json.dumps(
+            {
+                "version": 999,
+                "scanned_at": "2026-05-04T18:21:00Z",
+                "ttl_seconds": ad.CACHE_TTL_SECONDS,
+                "agents": {},
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(ad, "_now_utc", lambda: datetime(2026, 5, 4, 18, 22, tzinfo=timezone.utc))
@@ -207,6 +224,35 @@ def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
     assert kwargs["timeout"] == 8.0
 
 
+def test_omnigent_discovery_honors_config_home(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    config_home = tmp_path / "omnigent-config-home"
+    config_home.mkdir()
+    config_path = config_home / "config.yaml"
+    config_path.write_text("policies: {}\n", encoding="utf-8")
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("omnigent")
+
+    assert signal.installed is True
+    assert signal.config_path == str(config_path)
+
+
+def test_omnigent_discovery_does_not_fall_back_when_config_home_is_set(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    default_home = tmp_path / ".omnigent"
+    default_home.mkdir()
+    (default_home / "config.yaml").write_text("policies: {}\n", encoding="utf-8")
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "missing-custom-home"))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("omnigent")
+
+    assert signal.installed is False
+    assert signal.config_path == ""
+
+
 # M-4 regression coverage: the version probe MUST refuse to exec a
 # binary that lives outside the canonical install prefixes (an attacker
 # who can prepend a hostile directory to PATH could otherwise have us
@@ -271,6 +317,21 @@ def test_trust_check_accepts_canonical_prefix(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(binary)) is True
 
 
+def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path):
+    real_root = tmp_path / "real-tools"
+    binary = real_root / "bin" / "omnigent"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    binary.parent.chmod(0o755)
+    alias = tmp_path / "tools-alias"
+    alias.symlink_to(real_root, target_is_directory=True)
+
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(alias))
+
+    assert ad._is_trusted_binary_path(str(alias / "bin" / "omnigent")) is True
+
+
 def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
     data_dir = tmp_path / ".defenseclaw"
     data_dir.mkdir()
@@ -280,9 +341,7 @@ def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
     binary.chmod(0o755)
     binary.parent.chmod(0o755)
     (data_dir / "config.yaml").write_text(
-        "ai_discovery:\n"
-        "  require_trusted_binary_paths: true\n"
-        f"  trusted_binary_prefixes:\n    - {binary.parent}\n",
+        f"ai_discovery:\n  require_trusted_binary_paths: true\n  trusted_binary_prefixes:\n    - {binary.parent}\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(ad.shutil, "which", lambda name: str(binary))
@@ -322,6 +381,60 @@ def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
     monkeypatch.setenv(
         "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
         ":".join((str(link_dir), str(homebrew / "lib" / "node_modules"))),
+    )
+
+    assert ad._is_trusted_binary_path(str(link)) is True
+
+
+def test_operator_prefix_still_applies_after_default_prefix_ownership_failure(
+    monkeypatch,
+    tmp_path,
+):
+    """A default prefix match must not mask a later operator-added prefix."""
+    default_prefix = tmp_path / "homebrew"
+    operator_prefix = default_prefix / "lib" / "node_modules" / "@openai" / "codex" / "bin"
+    binary = operator_prefix / "codex.js"
+    operator_prefix.mkdir(parents=True)
+    binary.write_text("#!/usr/bin/env node\n")
+    binary.chmod(0o755)
+    operator_prefix.chmod(0o755)
+
+    monkeypatch.setattr(
+        ad,
+        "_trusted_bin_prefixes",
+        lambda *_args: (str(default_prefix), str(operator_prefix)),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_default_trusted_bin_prefixes",
+        lambda: frozenset({str(default_prefix)}),
+    )
+    monkeypatch.setattr(ad, "_bin_chain_is_system_owned", lambda _resolved, _prefix: False)
+
+    assert ad._is_trusted_binary_path(str(binary)) is True
+
+
+def test_trust_check_operator_prefix_wins_over_failed_default_ownership(monkeypatch, tmp_path):
+    # Regression: Homebrew npm globals live under a default prefix
+    # (/opt/homebrew/lib/node_modules) that fails F-0421 root-ownership on
+    # user-owned installs. Setup's "trust this directory?" prompt adds only
+    # the package bin dir; _is_trusted_binary_path must not return False
+    # when that narrower operator prefix matches after the default fails.
+    homebrew = tmp_path / "homebrew"
+    real = homebrew / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_text("#!/usr/bin/env node\n")
+    real.chmod(0o755)
+    real.parent.chmod(0o755)
+    link_dir = homebrew / "bin"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / "codex"
+    link.symlink_to(real)
+
+    monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+    monkeypatch.setenv(
+        "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
+        str(homebrew / "lib" / "node_modules" / "@openai" / "codex" / "bin"),
     )
 
     assert ad._is_trusted_binary_path(str(link)) is True
@@ -401,23 +514,13 @@ def test_default_trusted_prefixes_excludes_user_writable_roots():
 def test_trust_check_codex_standalone_symlink_requires_opt_in(monkeypatch, tmp_path):
     # Reproduce the Codex standalone layout under a fake HOME and assert
     # the secure-default behavior plus the documented opt-in escape
-    # hatch. realpath() the tmp dir up front so macOS's /var ->
-    # /private/var symlink doesn't desync the resolved binary path from
-    # the abspath'd prefix.
+    # hatch. Prefixes and binaries are both canonicalised before comparison,
+    # including macOS's /var -> /private/var indirection.
     home = Path(os.path.realpath(str(tmp_path)))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
 
-    real = (
-        home
-        / ".codex"
-        / "packages"
-        / "standalone"
-        / "releases"
-        / "0.136.0-aarch64-apple-darwin"
-        / "bin"
-        / "codex"
-    )
+    real = home / ".codex" / "packages" / "standalone" / "releases" / "0.136.0-aarch64-apple-darwin" / "bin" / "codex"
     real.parent.mkdir(parents=True, exist_ok=True)
     real.write_text("#!/bin/sh\nexit 0\n")
     real.chmod(0o755)

@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const configReloadDebounce = 500 * time.Millisecond
@@ -163,6 +165,9 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 		}
 		return err
 	}
+	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) && !managed.IsManagedEnterprise(next.DeploymentMode) {
+		return fmt.Errorf("config reload cannot downgrade deployment_mode from managed_enterprise")
+	}
 	diff := diffConfigs(oldCfg, next)
 	if len(diff.Changed) == 0 {
 		if m.health != nil {
@@ -273,6 +278,25 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("judge_bodies_db", oldCfg.JudgeBodiesDB, newCfg.JudgeBodiesDB)
 
 	var restart []string
+	hotReloadable := map[string]struct{}{
+		"otel":             {},
+		"audit_sinks":      {},
+		"webhooks":         {},
+		"observability":    {},
+		"notifications":    {},
+		"environment":      {},
+		"tenant_id":        {},
+		"workspace_id":     {},
+		"discovery_source": {},
+	}
+	for _, path := range changed {
+		if path == "gateway" && onlyConfigReloadModeChanged(oldCfg, newCfg) {
+			continue
+		}
+		if _, ok := hotReloadable[path]; !ok {
+			restart = append(restart, path)
+		}
+	}
 	if oldCfg.DataDir != newCfg.DataDir {
 		restart = append(restart, "data_dir")
 	}
@@ -285,5 +309,35 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	if oldCfg.Gateway.DeviceKeyFile != newCfg.Gateway.DeviceKeyFile {
 		restart = append(restart, "gateway.device_key_file")
 	}
-	return ConfigDiff{Changed: changed, RestartRequired: restart}
+	oldGateway := oldCfg.Gateway
+	newGateway := newCfg.Gateway
+	oldGateway.ConfigReload = config.GatewayConfigReloadConfig{}
+	newGateway.ConfigReload = config.GatewayConfigReloadConfig{}
+	if !reflect.DeepEqual(oldGateway, newGateway) {
+		restart = append(restart, "gateway")
+	}
+	if oldCfg.Guardrail.ScannerMode != newCfg.Guardrail.ScannerMode {
+		restart = append(restart, "guardrail.scanner_mode")
+	}
+	if oldCfg.Guardrail.Connector != newCfg.Guardrail.Connector ||
+		!reflect.DeepEqual(oldCfg.Guardrail.Connectors, newCfg.Guardrail.Connectors) {
+		restart = append(restart, "guardrail.connectors")
+	}
+	if oldCfg.DeploymentMode != newCfg.DeploymentMode {
+		restart = append(restart, "deployment_mode")
+	}
+	return ConfigDiff{Changed: changed, RestartRequired: sortedUniqueStrings(restart)}
+}
+
+func sortedUniqueStrings(values []string) []string {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for value := range set {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }

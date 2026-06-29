@@ -113,7 +113,7 @@ Python 3.11+ is recommended if you need the MCP scanner
 ### Clone and Build Everything
 
 ```bash
-git clone https://github.com/defenseclaw/defenseclaw.git
+git clone https://github.com/cisco-ai-defense/defenseclaw.git
 cd defenseclaw
 
 # Build all three components (does not install)
@@ -319,7 +319,9 @@ make clean        # Full clean (binaries, venv, node_modules, coverage)
 End users can install a released version without cloning the repo:
 
 ```bash
-curl -LsSf https://github.com/defenseclaw/defenseclaw/releases/latest/download/install.sh | bash
+VERSION=0.8.2
+INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
 
 The installer detects the platform, downloads the correct gateway
@@ -330,7 +332,9 @@ confirmations.
 Pin a specific version:
 
 ```bash
-VERSION=0.2.0 curl -LsSf .../install.sh | bash
+VERSION=0.8.2
+INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
 
 #### Picking an agent connector at install time
@@ -340,20 +344,23 @@ OpenClaw runtime and the DefenseClaw plugin). You can pick a different
 connector — or skip connector setup entirely — with `--connector`:
 
 ```bash
+VERSION=0.8.2
+INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
+
 # Codex (no OpenClaw, no plugin tarball; patches ~/.codex/config.toml + hooks)
-curl -LsSf .../install.sh | bash -s -- --connector codex
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector codex
 
 # Claude Code (no OpenClaw; patches ~/.claude/settings.json hooks)
-curl -LsSf .../install.sh | bash -s -- --connector claudecode
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector claudecode
 
 # ZeptoClaw (no OpenClaw; patches ~/.zeptoclaw/config.json)
-curl -LsSf .../install.sh | bash -s -- --connector zeptoclaw
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector zeptoclaw
 
 # Lay binaries only — pick a connector later
-curl -LsSf .../install.sh | bash -s -- --connector none
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector none
 
 # Shortcut for "skip OpenClaw" without naming another connector
-curl -LsSf .../install.sh | bash -s -- --no-openclaw
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --no-openclaw
 ```
 
 Run interactively (without `--yes` and without `--connector`) and the
@@ -688,21 +695,14 @@ entries directly into `~/.openclaw/openclaw.json`:
 In 0.3.0, routing is handled transparently by a fetch interceptor in the
 OpenClaw plugin, so these entries are no longer needed.
 
-The migration uses a **pristine-backup restore** strategy. When DefenseClaw's
-guardrail was first enabled, it captured a one-time snapshot of the original
-`openclaw.json` (before any DefenseClaw modifications). The migration:
-
-1. Restores `openclaw.json` from that pristine backup — removing all
-   DefenseClaw-injected entries in one clean step
-2. Re-applies only the minimal plugin registration that 0.3.0 needs
-   (`plugins.allow`, `plugins.entries`, `plugins.load.paths`)
-3. Saves a `.pre-0.3.0-migration` backup of the current file before
-   overwriting, for safety
-
-If no pristine backup exists (e.g. guardrail was never enabled, or the backup
-was deleted), the migration falls back to **surgical removal**: it deletes
-`models.providers.defenseclaw` / `models.providers.litellm` and strips the
-proxy prefix from `agents.defaults.model.primary`.
+The migration uses a **surgical live-file** strategy. A pristine snapshot may
+exist from initial guardrail setup, but the migration never restores that
+snapshot over the live `openclaw.json`. It deletes only
+`models.providers.defenseclaw` /
+`models.providers.litellm`, strips the old proxy prefix from
+`agents.defaults.model.primary`, and preserves operator-added providers,
+plugins, models, workspaces, and ordering. It saves a
+`.pre-0.3.0-migration` backup before changing the live file.
 
 If none of these legacy entries exist, the migration is a no-op.
 
@@ -858,7 +858,7 @@ DefenseClaw supports multiple agent frameworks. Set the active mode in `~/.defen
 
 ```yaml
 claw:
-  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex | hermes | cursor | windsurf | geminicli | copilot
+  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex | hermes | cursor | windsurf | geminicli | copilot | openhands | antigravity | opencode | omnigent
   home_dir: ""          # auto-detected; override to use a custom path
 ```
 

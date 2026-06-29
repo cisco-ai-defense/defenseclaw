@@ -10,6 +10,8 @@ User=root
 Group=root
 Environment=DEFENSECLAW_HOME=/var/lib/defenseclaw
 Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
+Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise
+Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian
 EnvironmentFile=-/etc/defenseclaw/hook-guardian/%i.env
 ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks install --user %i --connector ${DEFENSECLAW_GUARDIAN_CONNECTOR} --agent-version ${DEFENSECLAW_GUARDIAN_AGENT_VERSION}
 UMask=0077
@@ -26,8 +28,8 @@ ProtectKernelTunables=true
 ProtectProc=invisible
 ProcSubset=pid
 ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
-ReadWritePaths=/home -/var/home /var/lib/defenseclaw
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true

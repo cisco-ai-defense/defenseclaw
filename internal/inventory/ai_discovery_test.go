@@ -39,10 +39,41 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	for _, sig := range sigs {
 		seen[sig.ID] = true
 	}
-	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "ai-sdks"} {
+	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "ai-sdks"} {
 		if !seen[id] {
 			t.Fatalf("signature %q missing", id)
 		}
+	}
+}
+
+func TestExpandCandidatePath_ExpandsConfiguredEnvironment(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OMNIGENT_CONFIG_HOME", root)
+	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
+
+	got := service.expandCandidatePath("$OMNIGENT_CONFIG_HOME/config.yaml")
+	want := filepath.Join(root, "config.yaml")
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("expanded paths = %v, want [%s]", got, want)
+	}
+}
+
+func TestExpandCandidatePath_SkipsUnsetEnvironment(t *testing.T) {
+	previous, wasSet := os.LookupEnv("OMNIGENT_CONFIG_HOME")
+	if err := os.Unsetenv("OMNIGENT_CONFIG_HOME"); err != nil {
+		t.Fatalf("unset OMNIGENT_CONFIG_HOME: %v", err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("OMNIGENT_CONFIG_HOME", previous)
+		} else {
+			_ = os.Unsetenv("OMNIGENT_CONFIG_HOME")
+		}
+	})
+	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
+
+	if got := service.expandCandidatePath("$OMNIGENT_CONFIG_HOME/config.yaml"); got != nil {
+		t.Fatalf("expanded paths = %v, want nil for unset environment", got)
 	}
 }
 
@@ -626,6 +657,35 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 	}
 	if got := report.Signals[0].Source; got != AISourceExternal {
 		t.Errorf("signal.source = %q, want %q", got, AISourceExternal)
+	}
+}
+
+func TestIngestExternalReport_DoesNotNotifyAutomationObservers(t *testing.T) {
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true,
+		Mode:    "enhanced",
+		DataDir: t.TempDir(),
+		HomeDir: t.TempDir(),
+	}, []AISignature{testAISignature()}, nil, nil)
+	called := make(chan struct{}, 1)
+	svc.AddReportObserver(func(context.Context, AIDiscoveryReport) { called <- struct{}{} })
+	report := AIDiscoveryReport{
+		Summary: AIDiscoverySummary{ScanID: "external-scan"},
+		Signals: []AISignal{{
+			Fingerprint: "fp-1",
+			SignatureID: "shadowai",
+			Category:    SignalAICLI,
+			State:       AIStateSeen,
+			Detector:    "config_path",
+		}},
+	}
+	if err := svc.IngestExternalReport(context.Background(), &report); err != nil {
+		t.Fatalf("IngestExternalReport: %v", err)
+	}
+	select {
+	case <-called:
+		t.Fatal("external report reached application-protection observer")
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

@@ -82,6 +82,15 @@ func applyHermeticConnectorHomes(t *testing.T) {
 	connector.AntigravityHooksPathOverride = filepath.Join(tmpHome, ".gemini", "config", "hooks.json")
 	t.Cleanup(func() { connector.AntigravityHooksPathOverride = prevAntigravity })
 
+	prevOmnigentConfig := connector.OmnigentConfigPathOverride
+	prevOmnigentSite := connector.OmnigentSitePackagesPathOverride
+	connector.OmnigentConfigPathOverride = filepath.Join(tmpHome, ".omnigent", "config.yaml")
+	connector.OmnigentSitePackagesPathOverride = filepath.Join(tmpHome, "site-packages")
+	t.Cleanup(func() {
+		connector.OmnigentConfigPathOverride = prevOmnigentConfig
+		connector.OmnigentSitePackagesPathOverride = prevOmnigentSite
+	})
+
 	// Plan A4 / S0.12: ZeptoClaw's Setup refuses to proceed when the
 	// provider list is empty. Seed a single usable provider so the
 	// matrix subtest reaches the persist step.
@@ -133,6 +142,14 @@ func TestApplyHermeticConnectorHomes_RedirectsHOME(t *testing.T) {
 	if !strings.HasPrefix(connector.CodexConfigPathOverride, got) {
 		t.Errorf("CodexConfigPathOverride = %q does not live under tmp HOME %q",
 			connector.CodexConfigPathOverride, got)
+	}
+	if !strings.HasPrefix(connector.OmnigentConfigPathOverride, got) {
+		t.Errorf("OmnigentConfigPathOverride = %q does not live under tmp HOME %q",
+			connector.OmnigentConfigPathOverride, got)
+	}
+	if !strings.HasPrefix(connector.OmnigentSitePackagesPathOverride, got) {
+		t.Errorf("OmnigentSitePackagesPathOverride = %q does not live under tmp HOME %q",
+			connector.OmnigentSitePackagesPathOverride, got)
 	}
 }
 
@@ -196,7 +213,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	// under -race.
 	applyHermeticConnectorHomes(t)
 
-	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"}
+	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"}
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
@@ -292,7 +309,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	// than parallelize them.
 	applyHermeticConnectorHomes(t)
 
-	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"} {
+	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
 			// See note in TestSwitchConnector_PerConnectorPersistsState:

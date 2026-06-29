@@ -20,6 +20,7 @@ import (
 
 func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
 	rows := []enterpriseHookReconcileRow{
 		{User: "alice", Connector: "codex", OK: true},
 		{User: "bob", Connector: "claudecode", OK: false, Error: "hook config file missing"},
@@ -49,6 +50,7 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 
 func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
 	outside := filepath.Join(t.TempDir(), "outside.json")
 	if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write outside: %v", err)
@@ -64,6 +66,8 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 
 func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T) {
 	dir := t.TempDir()
+	authorizationDir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatalf("chmod state dir: %v", err)
 	}
@@ -94,11 +98,11 @@ func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T)
 	if err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", failureRows, 1); err != nil {
 		t.Fatalf("write failure state: %v", err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, hookGuardianStateFile))
+	data, err := os.ReadFile(filepath.Join(authorizationDir, hookGuardianAuthorizationFile))
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	var state enterpriseHookGuardianState
+	var state enterpriseHookGuardianAuthorization
 	if err := json.Unmarshal(data, &state); err != nil {
 		t.Fatalf("unmarshal state: %v", err)
 	}
@@ -107,6 +111,25 @@ func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T)
 	}
 	if !previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "codex") {
 		t.Fatal("previousEnterpriseHookSuccess = false after failed state overwrote results")
+	}
+}
+
+func TestPreviousEnterpriseHookSuccessIgnoresServiceWritableStatus(t *testing.T) {
+	dataDir := t.TempDir()
+	authorizationDir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
+	forged := enterpriseHookGuardianState{ProtectedTargets: []enterpriseHookReconcileRow{{
+		User: "alice", UserHome: "/home/alice", Connector: "codex", OK: true,
+	}}}
+	data, err := json.Marshal(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, hookGuardianStateFile), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if previousEnterpriseHookSuccess(dataDir, "alice", "/home/alice", "codex") {
+		t.Fatal("service-writable status file granted privileged repair authorization")
 	}
 }
 

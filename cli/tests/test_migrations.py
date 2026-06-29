@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shutil
@@ -24,6 +25,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import yaml
 from defenseclaw.migrations import (
     _LEGACY_FLAT_REGO_FILENAMES,
     MigrationContext,
@@ -35,6 +37,8 @@ from defenseclaw.migrations import (
     _migrate_0_5_0,
     _migrate_0_5_0_strip_codex_enforcement_keys,
     _migrate_0_8_0,
+    _migrate_0_8_0_guardrail_runtime_json,
+    _migrate_config_v7_named_otel_destinations,
     _parse_dotenv,
     _read_active_connector_from_yaml,
     run_migrations,
@@ -84,6 +88,7 @@ class TestMigrate030PreservesOperatorChanges(unittest.TestCase):
         # The pristine helper itself is gone. Keep this test as a guardrail
         # against regressions that re-introduce the dangerous branch.
         from defenseclaw import migrations
+
         self.assertFalse(
             hasattr(migrations, "_migrate_0_3_0_from_pristine"),
             "_migrate_0_3_0_from_pristine must remain removed ()",
@@ -103,11 +108,7 @@ class TestMigrate030PreservesOperatorChanges(unittest.TestCase):
                     "litellm": {"url": "http://localhost:8081"},
                 }
             },
-            "agents": {
-                "defaults": {
-                    "model": {"primary": "defenseclaw/claude-sonnet-4-20250514"}
-                }
-            },
+            "agents": {"defaults": {"model": {"primary": "defenseclaw/claude-sonnet-4-20250514"}}},
         }
         _write_json(self.oc_json, cfg)
 
@@ -121,9 +122,7 @@ class TestMigrate030PreservesOperatorChanges(unittest.TestCase):
         # Operator-added providers preserved.
         self.assertIn("openai", providers)
         self.assertIn("azure-openai", providers)
-        self.assertEqual(
-            providers["azure-openai"]["endpoint"], "https://op-only.azure.example"
-        )
+        self.assertEqual(providers["azure-openai"]["endpoint"], "https://op-only.azure.example")
         # Model primary unprefixed.
         self.assertEqual(
             result["agents"]["defaults"]["model"]["primary"],
@@ -172,9 +171,7 @@ class TestMigrate030PreservesOperatorChanges(unittest.TestCase):
 
         backup = self.oc_json + ".pre-0.3.0-migration"
         self.assertTrue(os.path.isfile(backup))
-        self.assertIn(
-            "defenseclaw", _read_json(backup)["models"]["providers"]
-        )
+        self.assertIn("defenseclaw", _read_json(backup)["models"]["providers"])
 
 
 class TestMigrate030Surgical(unittest.TestCase):
@@ -216,9 +213,7 @@ class TestMigrate030Surgical(unittest.TestCase):
         _migrate_0_3_0_surgical(self.oc_json)
 
         result = _read_json(self.oc_json)
-        self.assertEqual(
-            result["agents"]["defaults"]["model"]["primary"], "claude-sonnet-4-20250514"
-        )
+        self.assertEqual(result["agents"]["defaults"]["model"]["primary"], "claude-sonnet-4-20250514")
 
     def test_restores_model_primary_litellm_prefix(self):
         cfg = {
@@ -432,14 +427,76 @@ class TestRunMigrations(unittest.TestCase):
         cursor model the loader needs a writable dir to persist
         state).
         """
-        with tempfile.TemporaryDirectory() as env_dir, \
-             patch.dict(os.environ, {"DEFENSECLAW_HOME": env_dir}):
+        with tempfile.TemporaryDirectory() as env_dir, patch.dict(os.environ, {"DEFENSECLAW_HOME": env_dir}):
             count = run_migrations("0.3.0", "0.4.0", tempfile.mkdtemp())
             self.assertTrue(
                 os.path.exists(os.path.join(env_dir, ".migration_state.json")),
                 "run_migrations should persist the cursor under $DEFENSECLAW_HOME",
             )
         self.assertEqual(count, 1)
+
+    def test_run_migrations_reloads_stale_migration_state_module(self):
+        """0.7.x upgraders cache migration_state before installing 0.8.0.
+
+        The newly imported migrations module must refresh that stale module
+        before it reaches APIs introduced after 0.7.x.
+        """
+        import defenseclaw
+        import defenseclaw.commands.cmd_version as cmd_version
+        from defenseclaw import migration_state
+
+        defenseclaw.__version__ = "0.7.0"
+        cmd_version.__version__ = "0.7.0"
+        for attr in ("detect_schema", "is_future_schema", "FutureSchemaError"):
+            delattr(migration_state, attr)
+
+        calls: list[str] = []
+
+        def record(_ctx: MigrationContext) -> None:
+            calls.append("0.8.0")
+
+        try:
+            with patch("defenseclaw.migrations.MIGRATIONS", [("0.8.0", "compat", record)]):
+                with tempfile.TemporaryDirectory() as data_dir:
+                    count = run_migrations("0.7.0", "0.8.0", tempfile.mkdtemp(), data_dir)
+                    refreshed_version = defenseclaw.__version__
+                    refreshed_cmd_version = cmd_version.__version__
+        finally:
+            importlib.reload(defenseclaw)
+            importlib.reload(cmd_version)
+            importlib.reload(migration_state)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(calls, ["0.8.0"])
+        self.assertEqual(refreshed_version, "0.8.0")
+        self.assertEqual(refreshed_cmd_version, "0.8.0")
+
+    def test_legacy_openclaw_restart_shim_for_pre_061_upgrade(self):
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            patch("defenseclaw.migrations.MIGRATIONS", []),
+            patch("defenseclaw.migrations.shutil.which", return_value=None),
+            patch.dict(os.environ, {"PATH": "/usr/bin"}),
+        ):
+            run_migrations("0.6.0", "0.8.0", tempfile.mkdtemp(), data_dir)
+
+            shim_dir = os.path.join(data_dir, ".upgrade-shims")
+            shim_path = os.path.join(shim_dir, "openclaw")
+            self.assertTrue(os.path.isfile(shim_path))
+            self.assertTrue(os.access(shim_path, os.X_OK))
+            self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], shim_dir)
+
+    def test_legacy_openclaw_restart_shim_skips_fixed_upgraders(self):
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            patch("defenseclaw.migrations.MIGRATIONS", []),
+            patch("defenseclaw.migrations.shutil.which", return_value=None),
+            patch.dict(os.environ, {"PATH": "/usr/bin"}),
+        ):
+            run_migrations("0.6.1", "0.8.0", tempfile.mkdtemp(), data_dir)
+
+            self.assertFalse(os.path.exists(os.path.join(data_dir, ".upgrade-shims")))
+            self.assertEqual(os.environ["PATH"], "/usr/bin")
 
 
 # ---------------------------------------------------------------------------
@@ -725,11 +782,7 @@ class TestMigrate040ClawModeNormalize(unittest.TestCase):
         a value that fails OTel schema validation."""
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         with open(cfg_path, "w") as f:
-            f.write(
-                "claw:\n"
-                "  mode: nemoclaw  # legacy enum, retired in 0.4.0\n"
-                "  home_dir: ~/.openclaw\n"
-            )
+            f.write("claw:\n  mode: nemoclaw  # legacy enum, retired in 0.4.0\n  home_dir: ~/.openclaw\n")
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
@@ -748,11 +801,7 @@ class TestMigrate040ClawModeNormalize(unittest.TestCase):
         the other surgical rewriters that already preserve CRLF."""
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         with open(cfg_path, "w", newline="") as f:
-            f.write(
-                "claw:\r\n"
-                "  mode: nemoclaw  # legacy enum\r\n"
-                "  home_dir: ~/.openclaw\r\n"
-            )
+            f.write("claw:\r\n  mode: nemoclaw  # legacy enum\r\n  home_dir: ~/.openclaw\r\n")
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0_normalize_claw_mode(ctx)
@@ -805,10 +854,7 @@ class TestMigrate040SeedActiveConnector(unittest.TestCase):
     def test_respects_explicit_guardrail_connector(self):
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         with open(cfg_path, "w") as f:
-            f.write(
-                "claw:\n  mode: openclaw\n"
-                "guardrail:\n  enabled: true\n  connector: codex\n"
-            )
+            f.write("claw:\n  mode: openclaw\nguardrail:\n  enabled: true\n  connector: codex\n")
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
@@ -844,15 +890,10 @@ class TestMigrate040SeedActiveConnector(unittest.TestCase):
         """
         import time
 
-        body_lines = "".join(
-            f"  key_{i}: value-{i}-with-some-trailing-text\n" for i in range(40)
-        )
+        body_lines = "".join(f"  key_{i}: value-{i}-with-some-trailing-text\n" for i in range(40))
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         with open(cfg_path, "w") as f:
-            f.write(
-                "claw:\n  mode: openclaw\n"
-                "guardrail:\n  enabled: true\n  mode: action\n" + body_lines
-            )
+            f.write("claw:\n  mode: openclaw\nguardrail:\n  enabled: true\n  mode: action\n" + body_lines)
 
         start = time.perf_counter()
         name = _read_active_connector_from_yaml(cfg_path)
@@ -871,10 +912,7 @@ class TestMigrate040SeedActiveConnector(unittest.TestCase):
         body_lines = "".join(f"  k{i}: v{i}\n" for i in range(40))
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         with open(cfg_path, "w") as f:
-            f.write(
-                "claw:\n  mode: openclaw\n"
-                "guardrail:\n  enabled: true\n" + body_lines
-            )
+            f.write("claw:\n  mode: openclaw\nguardrail:\n  enabled: true\n" + body_lines)
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
@@ -891,10 +929,7 @@ class TestMigrate040SeedActiveConnector(unittest.TestCase):
         blank line)."""
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         with open(cfg_path, "w") as f:
-            f.write(
-                "claw:\n  mode: openclaw\n"
-                "guardrail:\n  enabled: true\n\n  connector: codex\n"
-            )
+            f.write("claw:\n  mode: openclaw\nguardrail:\n  enabled: true\n\n  connector: codex\n")
 
         self.assertEqual(_read_active_connector_from_yaml(cfg_path), "codex")
 
@@ -940,16 +975,14 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
 
     def _read_yaml(self) -> dict:
         import yaml
+
         with open(os.path.join(self.data_dir, "config.yaml")) as f:
             return yaml.safe_load(f) or {}
 
     def test_seeds_open_when_field_missing(self):
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         with open(cfg_path, "w") as f:
-            f.write(
-                "claw:\n  mode: openclaw\n"
-                "guardrail:\n  enabled: true\n  mode: observe\n"
-            )
+            f.write("claw:\n  mode: openclaw\nguardrail:\n  enabled: true\n  mode: observe\n")
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
@@ -965,10 +998,7 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         # newline="" keeps our explicit \r\n bytes verbatim on write.
         with open(cfg_path, "w", newline="") as f:
-            f.write(
-                "claw:\r\n  mode: openclaw\r\n"
-                "guardrail:\r\n  enabled: true\r\n  mode: observe\r\n"
-            )
+            f.write("claw:\r\n  mode: openclaw\r\nguardrail:\r\n  enabled: true\r\n  mode: observe\r\n")
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
@@ -985,11 +1015,7 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
     def test_does_not_overwrite_explicit_open(self):
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         with open(cfg_path, "w") as f:
-            f.write(
-                "claw:\n  mode: openclaw\n"
-                "guardrail:\n  enabled: true\n"
-                "  hook_fail_mode: open\n"
-            )
+            f.write("claw:\n  mode: openclaw\nguardrail:\n  enabled: true\n  hook_fail_mode: open\n")
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
@@ -1004,11 +1030,7 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
         we think the new default is friendlier."""
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         with open(cfg_path, "w") as f:
-            f.write(
-                "claw:\n  mode: openclaw\n"
-                "guardrail:\n  enabled: true\n"
-                "  hook_fail_mode: closed\n"
-            )
+            f.write("claw:\n  mode: openclaw\nguardrail:\n  enabled: true\n  hook_fail_mode: closed\n")
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
@@ -1038,7 +1060,7 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
             "  # Threshold tuned during the Q2 incident response review.\n"
             "  enabled: true\n"
             "  mode: action\n"
-            "  block_message: \"Blocked by DefenseClaw — see #sec-help\"\n"
+            '  block_message: "Blocked by DefenseClaw — see #sec-help"\n'
         )
         with open(cfg_path, "w") as f:
             f.write(original)
@@ -1078,10 +1100,7 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
         different indent and confuse PyYAML on the next save."""
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         with open(cfg_path, "w") as f:
-            f.write(
-                "claw:\n    mode: openclaw\n"
-                "guardrail:\n    enabled: true\n    mode: observe\n"
-            )
+            f.write("claw:\n    mode: openclaw\nguardrail:\n    enabled: true\n    mode: observe\n")
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
@@ -1110,9 +1129,7 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
     def test_no_op_when_no_config_yaml(self):
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
-        self.assertFalse(
-            os.path.isfile(os.path.join(self.data_dir, "config.yaml"))
-        )
+        self.assertFalse(os.path.isfile(os.path.join(self.data_dir, "config.yaml")))
         self.assertFalse(any("hook_fail_mode" in c for c in ctx.changes))
 
 
@@ -1131,6 +1148,7 @@ class TestGuardrailConfigHookFailModeRoundTrip(unittest.TestCase):
         # response-layer boundary. The "open" sentinel still
         # round-trips because it is the documented opt-in.
         from defenseclaw.config import _merge_guardrail
+
         gc = _merge_guardrail({"hook_fail_mode": "OpEn"}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "open")
 
@@ -1143,6 +1161,7 @@ class TestGuardrailConfigHookFailModeRoundTrip(unittest.TestCase):
 
     def test_loader_accepts_explicit_closed(self):
         from defenseclaw.config import _merge_guardrail
+
         gc = _merge_guardrail({"hook_fail_mode": "closed"}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "closed")
 
@@ -1151,6 +1170,7 @@ class TestGuardrailConfigHookFailModeRoundTrip(unittest.TestCase):
         # New v4 default is the safer "closed". Existing v3 installs
         # are pinned to "open" by _migrate_0_4_0_seed_hook_fail_mode.
         from defenseclaw.config import _merge_guardrail
+
         gc = _merge_guardrail({"enabled": True}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "closed")
 
@@ -1184,7 +1204,8 @@ class TestMigrate050PurgeLegacyFlatPolicyBundle(unittest.TestCase):
 
     def _ctx(self) -> MigrationContext:
         return MigrationContext(
-            openclaw_home=self.tmp, data_dir=self.tmp,
+            openclaw_home=self.tmp,
+            data_dir=self.tmp,
         )
 
     def _seed_canonical_bundle(self):
@@ -1246,8 +1267,7 @@ class TestMigrate050PurgeLegacyFlatPolicyBundle(unittest.TestCase):
         backup = os.path.join(self.policies, "data.json.pre-0.5.0")
         self.assertTrue(
             os.path.isfile(backup),
-            "differing flat data.json must be renamed (not deleted) "
-            "so operator edits aren't silently lost",
+            "differing flat data.json must be renamed (not deleted) so operator edits aren't silently lost",
         )
         with open(backup) as f:
             self.assertEqual(json.load(f), {"guardrail": {"layer": "flat"}})
@@ -1300,7 +1320,8 @@ class TestMigrate050PurgeLegacyFlatPolicyBundle(unittest.TestCase):
 
         self.assertTrue(os.path.islink(flat_data), "symlink must be preserved")
         self.assertEqual(
-            os.readlink(flat_data), nested_data,
+            os.readlink(flat_data),
+            nested_data,
             "symlink target must be unchanged",
         )
 
@@ -1324,15 +1345,15 @@ class TestMigrate050PurgeLegacyFlatPolicyBundle(unittest.TestCase):
         # Original backup is unchanged.
         with open(old_backup) as f:
             self.assertEqual(
-                json.load(f), {"guardrail": {"layer": "flat-first-pass"}},
+                json.load(f),
+                {"guardrail": {"layer": "flat-first-pass"}},
                 "prior backup must not be clobbered",
             )
         # Second-pass content lands in a numbered suffix.
         suffixed = os.path.join(self.policies, "data.json.pre-0.5.0.1")
         self.assertTrue(
             os.path.isfile(suffixed),
-            "differing flat data.json must rename to a fresh suffix when "
-            "the base backup name is taken",
+            "differing flat data.json must rename to a fresh suffix when the base backup name is taken",
         )
         with open(suffixed) as f:
             self.assertEqual(json.load(f), {"guardrail": {"layer": "flat-second-pass"}})
@@ -1498,11 +1519,7 @@ class TestMigrate050StripCodexEnforcementKeys(unittest.TestCase):
         self.assertEqual(ctx.changes, [])
 
     def test_strips_key_with_inline_comment(self):
-        self._write(
-            "guardrail:\n"
-            "  codex_enforcement_enabled: true  # legacy knob, retired 0.5.0\n"
-            "  mode: action\n"
-        )
+        self._write("guardrail:\n  codex_enforcement_enabled: true  # legacy knob, retired 0.5.0\n  mode: action\n")
 
         ctx = self._ctx()
         _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
@@ -1515,12 +1532,7 @@ class TestMigrate050StripCodexEnforcementKeys(unittest.TestCase):
     def test_preserves_crlf_line_endings(self):
         """The deleted line must take its CRLF terminator with it — no
         orphaned ``\\r`` and no flatten of the surviving lines."""
-        self._write(
-            "guardrail:\r\n"
-            "  enabled: true\r\n"
-            "  codex_enforcement_enabled: true\r\n"
-            "  mode: action\r\n"
-        )
+        self._write("guardrail:\r\n  enabled: true\r\n  codex_enforcement_enabled: true\r\n  mode: action\r\n")
 
         ctx = self._ctx()
         _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
@@ -1536,9 +1548,7 @@ class TestMigrate050StripCodexEnforcementKeys(unittest.TestCase):
 
     def test_strips_key_on_final_line_without_trailing_newline(self):
         self._write(
-            "guardrail:\n"
-            "  mode: action\n"
-            "  codex_enforcement_enabled: true"  # deliberately no EOL
+            "guardrail:\n  mode: action\n  codex_enforcement_enabled: true"  # deliberately no EOL
         )
 
         ctx = self._ctx()
@@ -1603,7 +1613,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
             "    kind: http_jsonl\n"
             "    http_jsonl:\n"
             "      url: https://hooks.local/events\n"
-            "      verify_tls: \"false\"\n"
+            '      verify_tls: "false"\n'
             "  - name: prod-splunk\n"
             "    kind: splunk_hec\n"
             "    splunk_hec:\n"
@@ -1623,23 +1633,19 @@ class TestMigrate080Compatibility(unittest.TestCase):
         after = self._read()
         self.assertIn("  hook_fail_mode: open\n", after)
         self.assertIn(
-            "      verify_tls: false  # self-signed lab HEC\n"
-            "      insecure_skip_verify: true\n",
+            "      verify_tls: false  # self-signed lab HEC\n      insecure_skip_verify: true\n",
             after,
         )
         self.assertIn(
-            "      verify_tls: \"false\"\n"
-            "      insecure_skip_verify: true\n",
+            '      verify_tls: "false"\n      insecure_skip_verify: true\n',
             after,
         )
         self.assertIn(
-            "      verify_tls: true\n"
-            "  - name: explicit-new-flag\n",
+            "      verify_tls: true\n  - name: explicit-new-flag\n",
             after,
         )
         self.assertIn(
-            "      verify_tls: false\n"
-            "      insecure_skip_verify: false\n",
+            "      verify_tls: false\n      insecure_skip_verify: false\n",
             after,
         )
         self.assertEqual(after.count("insecure_skip_verify: true"), 2)
@@ -1665,14 +1671,17 @@ class TestMigrate080Compatibility(unittest.TestCase):
             "    enabled: false\n"
             "    min_severity: HIGH\n"
         )
-        _write_json(runtime_path, {
-            "mode": "action",
-            "scanner_mode": "both",
-            "block_message": "Blocked by upgrade migration",
-            "connector": "Codex",
-            "hilt_enabled": True,
-            "hilt_min_severity": "medium",
-        })
+        _write_json(
+            runtime_path,
+            {
+                "mode": "action",
+                "scanner_mode": "both",
+                "block_message": "Blocked by upgrade migration",
+                "connector": "Codex",
+                "hilt_enabled": True,
+                "hilt_min_severity": "medium",
+            },
+        )
 
         ctx = self._ctx()
         _migrate_0_8_0(ctx)
@@ -1692,6 +1701,48 @@ class TestMigrate080Compatibility(unittest.TestCase):
         ctx2 = self._ctx()
         _migrate_0_8_0(ctx2)
         self.assertFalse(any("guardrail_runtime.json" in c for c in ctx2.changes))
+
+    def test_preserves_runtime_overlay_when_supported_value_is_invalid(self):
+        runtime_path = os.path.join(self.data_dir, "guardrail_runtime.json")
+        self._write("guardrail:\n  mode: observe\n")
+        _write_json(runtime_path, {"mode": "disabled", "scanner_mode": "both"})
+
+        before = self._read()
+        ctx = self._ctx()
+        _migrate_0_8_0_guardrail_runtime_json(ctx)
+
+        self.assertEqual(self._read(), before)
+        self.assertTrue(os.path.exists(runtime_path))
+        self.assertFalse(ctx.changes)
+
+    def test_runtime_migration_does_not_patch_block_scalar_contents(self):
+        runtime_path = os.path.join(self.data_dir, "guardrail_runtime.json")
+        self._write("guardrail:\n  block_message: |\n    mode: observe\n  mode: observe\n")
+        _write_json(runtime_path, {"mode": "action"})
+
+        _migrate_0_8_0_guardrail_runtime_json(self._ctx())
+
+        after = self._read()
+        self.assertIn("    mode: observe\n", after)
+        self.assertIn("  mode: action\n", after)
+        self.assertFalse(os.path.exists(runtime_path))
+
+    def test_runtime_migration_honors_config_path_override(self):
+        runtime_path = os.path.join(self.data_dir, "guardrail_runtime.json")
+        external_dir = tempfile.mkdtemp(prefix="dclaw-managed-config-")
+        self.addCleanup(shutil.rmtree, external_dir)
+        external_config = os.path.join(external_dir, "config.yaml")
+        with open(external_config, "w") as handle:
+            handle.write("guardrail:\n  mode: observe\n")
+        _write_json(runtime_path, {"mode": "action"})
+
+        ctx = self._ctx()
+        ctx.config_path = external_config
+        _migrate_0_8_0_guardrail_runtime_json(ctx)
+
+        with open(external_config) as handle:
+            self.assertIn("  mode: action\n", handle.read())
+        self.assertFalse(os.path.exists(runtime_path))
 
     def test_preserves_crlf_line_endings_for_sink_tls_insert(self):
         self._write(
@@ -1727,8 +1778,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
 
         after = self._read()
         self.assertIn(
-            "    verify_tls: false\n"
-            "    insecure_skip_verify: true\n",
+            "    verify_tls: false\n    insecure_skip_verify: true\n",
             after,
         )
         self.assertTrue(any("verify_tls=false" in c for c in ctx.changes))
@@ -1753,6 +1803,168 @@ class TestMigrate080Compatibility(unittest.TestCase):
         self.assertIn("      insecure_skip_verify: true\n", after)
         cursor = _read_json(os.path.join(self.data_dir, ".migration_state.json"))
         self.assertIn("0.7.0", cursor["applied"])
+        self.assertIn("0.8.0", cursor["applied"])
+
+    def test_upgrade_persists_flat_otel_and_preserves_named_routes(self):
+        self._write(
+            "config_version: 6\n"
+            "otel:\n"
+            "  enabled: true\n"
+            "  protocol: grpc\n"
+            "  endpoint: 127.0.0.1:4317\n"
+            "  headers: {X-Legacy-Tenant: preserved}\n"
+            "  tls: {insecure: true}\n"
+            "  batch: {scheduled_delay_ms: 250}\n"
+            "  traces: {enabled: true, sampler: always_on}\n"
+            "  metrics: {enabled: true}\n"
+            "  logs: {enabled: true, emit_individual_findings: true}\n"
+            "  destinations:\n"
+            "    - name: galileo\n"
+            "      preset: galileo\n"
+            "      enabled: true\n"
+            "      protocol: http/protobuf\n"
+            "      endpoint: https://api.galileo.ai/otel/traces\n"
+            "      traces: {enabled: true}\n"
+            "      metrics: {enabled: false}\n"
+            "      logs: {enabled: false}\n"
+        )
+
+        ctx = self._ctx()
+        self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+
+        with open(self.cfg_path) as handle:
+            doc = yaml.safe_load(handle) or {}
+        self.assertEqual(doc["config_version"], 7)
+        otel = doc["otel"]
+        self.assertEqual(
+            [destination["name"] for destination in otel["destinations"]],
+            ["local-observability", "galileo"],
+        )
+        migrated = otel["destinations"][0]
+        self.assertEqual(migrated["preset"], "local-otlp")
+        self.assertEqual(migrated["endpoint"], "127.0.0.1:4317")
+        self.assertEqual(migrated["headers"], {"X-Legacy-Tenant": "preserved"})
+        self.assertEqual(migrated["tls"], {"insecure": True})
+        self.assertEqual(migrated["batch"], {"scheduled_delay_ms": 250})
+        self.assertTrue(migrated["traces"]["enabled"])
+        self.assertTrue(migrated["metrics"]["enabled"])
+        self.assertTrue(migrated["logs"]["enabled"])
+        self.assertEqual(otel["traces"], {"sampler": "always_on"})
+        self.assertEqual(otel["logs"], {"emit_individual_findings": True})
+        self.assertNotIn("endpoint", otel)
+        self.assertNotIn("protocol", otel)
+        self.assertTrue(os.path.isfile(self.cfg_path + ".pre-observability-migration.bak"))
+        self.assertTrue(any("named otel.destinations" in change for change in ctx.changes))
+
+        # The config migration can be reapplied safely. It must not
+        # duplicate either the converted local route or the existing vendor
+        # route, and it must leave the already-canonical file byte-identical.
+        after = self._read()
+        second = self._ctx()
+        self.assertFalse(_migrate_config_v7_named_otel_destinations(second))
+        self.assertEqual(self._read(), after)
+        self.assertFalse(any("named otel.destinations" in change for change in second.changes))
+
+    def test_upgrade_persists_environment_backed_signal_exporter(self):
+        self._write("config_version: 6\notel:\n  enabled: true\n")
+        environment = {
+            "DEFENSECLAW_OTEL_TRACES_ENDPOINT": "http://127.0.0.1:4318/v1/traces",
+            "DEFENSECLAW_OTEL_TRACES_PROTOCOL": "http/protobuf",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            ctx = self._ctx()
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+
+        with open(self.cfg_path) as handle:
+            destination = (yaml.safe_load(handle) or {})["otel"]["destinations"][0]
+        self.assertEqual(destination["name"], "generic-otlp")
+        self.assertEqual(
+            destination["traces"],
+            {
+                "endpoint": "http://127.0.0.1:4318/v1/traces",
+                "protocol": "http/protobuf",
+                "enabled": True,
+            },
+        )
+        self.assertIsNot(destination["metrics"].get("enabled"), True)
+        self.assertIsNot(destination["logs"].get("enabled"), True)
+        self.assertTrue(any("named otel.destinations" in change for change in ctx.changes))
+
+    def test_upgrade_isolates_stale_observability_writer_from_legacy_client(self):
+        self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
+        from defenseclaw.observability import writer
+
+        original = writer.migrate_flat_otel
+        try:
+            delattr(writer, "migrate_flat_otel")
+            ctx = self._ctx()
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+            # The old parent module remains untouched; the newly installed
+            # writer was loaded only in the isolated child interpreter.
+            self.assertFalse(hasattr(writer, "migrate_flat_otel"))
+            with open(self.cfg_path) as handle:
+                doc = yaml.safe_load(handle) or {}
+            self.assertEqual(doc["config_version"], 7)
+            self.assertEqual(
+                doc["otel"]["destinations"][0]["name"],
+                "local-observability",
+            )
+        finally:
+            if not hasattr(writer, "migrate_flat_otel"):
+                writer.migrate_flat_otel = original
+
+    def test_upgrade_isolates_stale_config_dependency_from_066_client(self):
+        self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
+        from defenseclaw import config
+
+        # DefenseClaw 0.6.6 has this module cached before the candidate wheel
+        # is installed, but it predates the lock helper imported by the new
+        # observability writer. Simulate that mixed old/new module graph.
+        original = config.locked_config_yaml
+        try:
+            delattr(config, "locked_config_yaml")
+            ctx = self._ctx()
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+            self.assertFalse(hasattr(config, "locked_config_yaml"))
+            with open(self.cfg_path) as handle:
+                doc = yaml.safe_load(handle) or {}
+            self.assertEqual(doc["config_version"], 7)
+            self.assertEqual(
+                doc["otel"]["destinations"][0]["name"],
+                "local-observability",
+            )
+        finally:
+            if not hasattr(config, "locked_config_yaml"):
+                config.locked_config_yaml = original
+
+    def test_config_migration_preserves_parent_module_identities(self):
+        self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
+        from defenseclaw import connector_paths, safety
+
+        safety_error = safety.SafetyError
+        skill_dirs = connector_paths.skill_dirs
+
+        self.assertTrue(_migrate_config_v7_named_otel_destinations(self._ctx()))
+        self.assertIs(safety.SafetyError, safety_error)
+        self.assertIs(connector_paths.skill_dirs, skill_dirs)
+
+    def test_already_applied_080_cursor_still_runs_config_v7_migration(self):
+        self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
+
+        # Bootstrapping from a published 0.8.x marks the release-owned 0.8.0
+        # migration as already applied. The config-shape migration must still
+        # run so existing 0.8.x hosts are not stranded on the flat schema.
+        count = run_migrations("0.8.2", "0.8.3", self.tmp, self.data_dir)
+
+        self.assertEqual(count, 1)
+        with open(self.cfg_path) as handle:
+            doc = yaml.safe_load(handle) or {}
+        self.assertEqual(doc["config_version"], 7)
+        self.assertEqual(
+            doc["otel"]["destinations"][0]["name"],
+            "local-observability",
+        )
+        cursor = _read_json(os.path.join(self.data_dir, ".migration_state.json"))
         self.assertIn("0.8.0", cursor["applied"])
 
     def test_run_migrations_applies_080_runtime_json_cleanup_after_072_bootstrap(self):

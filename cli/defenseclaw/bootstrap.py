@@ -36,8 +36,10 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from defenseclaw.connector_paths import omnigent_config_path
 from defenseclaw.inventory import agent_discovery
 
 if TYPE_CHECKING:
@@ -358,7 +360,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             StepResult(
                 "Sandbox",
                 "warn",
-                "sandbox bootstrap remains Linux-only; run the dedicated sandbox setup",
+                "sandbox setup is experimental, Linux-only, and OpenClaw/OpenShell-only",
                 "defenseclaw sandbox setup",
             )
         )
@@ -1113,6 +1115,24 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "warn",
             "OpenCode bridge plugin not found yet",
             "defenseclaw setup opencode",
+        )
+    if connector == "omnigent":
+        path = omnigent_config_path()
+        try:
+            config_text = Path(path).read_text(encoding="utf-8")
+            configured = all(
+                marker in config_text
+                for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
+            )
+        except (OSError, UnicodeError):
+            configured = False
+        if configured:
+            return StepResult("Connector", "pass", f"OmniGent custom policy found at {path}")
+        return StepResult(
+            "Connector",
+            "warn",
+            f"OmniGent custom policy not found at {path}",
+            "defenseclaw setup omnigent",
         )
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 

@@ -53,6 +53,27 @@
       "url": "/d/defenseclaw-security?${__url_time_range}",
       "icon": "external link",
       "targetBlank": false
+    },
+    {
+      "title": "Agent360",
+      "type": "link",
+      "url": "/d/defenseclaw-agent-360?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "AI Discovery",
+      "type": "link",
+      "url": "/d/defenseclaw-ai-discovery?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Runtime & Reliability",
+      "type": "link",
+      "url": "/d/defenseclaw-runtime?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
     }
   ],
   "templating": {
@@ -110,6 +131,63 @@
           "selected": true
         },
         "hide": 0
+      },
+      {
+        "name": "agent",
+        "label": "Agent ID regex",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "hide": 0
+      },
+      {
+        "name": "lifecycle",
+        "label": "Lifecycle ID regex",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "hide": 0
+      },
+      {
+        "name": "user",
+        "label": "User ID regex",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "hide": 0
       }
     ]
   },
@@ -148,7 +226,8 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(increase(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[$__range]))"
+          "expr": "sum(increase(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[$__range])) or vector(0)",
+          "instant": true
         }
       ],
       "options": {
@@ -205,7 +284,8 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "count(count by (connector)(increase(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[$__range])))"
+          "expr": "count(sum by (connector) (increase(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[$__range])) > 0) or vector(0)",
+          "instant": true
         }
       ],
       "options": {
@@ -248,7 +328,7 @@
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
       },
-      "description": "Prompt-submit hook events.",
+      "description": "Prompt-submit hook invocations observed in the selected range. Invocation telemetry is authoritative for lifecycle events; outcome telemetry is reserved for evaluated results.",
       "gridPos": {
         "x": 6,
         "y": 1,
@@ -262,7 +342,8 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(increase(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\",event_type=\"prompt\"}[$__range]))"
+          "expr": "sum(increase(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\",event_type=\"prompt\"}[$__range])) or vector(0)",
+          "instant": true
         }
       ],
       "options": {
@@ -319,7 +400,8 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(increase(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\",event_type=\"tool_call\"}[$__range]))"
+          "expr": "sum(increase(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\",event_type=\"tool_call\"}[$__range])) or vector(0)",
+          "instant": true
         }
       ],
       "options": {
@@ -376,7 +458,8 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(increase(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\",would_block=\"true\"}[$__range]))"
+          "expr": "sum(increase(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\",would_block=\"true\"}[$__range])) or vector(0)",
+          "instant": true
         }
       ],
       "options": {
@@ -437,7 +520,8 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total[$__range]))"
+          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total[$__range])) or vector(0)",
+          "instant": true
         }
       ],
       "options": {
@@ -478,13 +562,13 @@
     },
     {
       "type": "stat",
-      "title": "Tokens (in+out)",
+      "title": "Input tokens",
       "id": 8,
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
       },
-      "description": "Total GenAI tokens observed (gen_ai.client.token.usage).",
+      "description": "Prompt plus cache-read and cache-creation tokens reported during the selected range. Historical range aggregation keeps completed gateway runs visible after the exporter stops.",
       "gridPos": {
         "x": 18,
         "y": 1,
@@ -498,7 +582,8 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(increase(gen_ai_client_token_usage_sum[$__range]))"
+          "expr": "sum(increase(gen_ai_client_token_usage_sum{gen_ai_token_type=~\"input|cacheRead|cacheCreation\"}[$__range])) or vector(0)",
+          "instant": true
         }
       ],
       "options": {
@@ -534,13 +619,13 @@
     },
     {
       "type": "stat",
-      "title": "Est. LLM cost",
+      "title": "Output tokens",
       "id": 9,
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
       },
-      "description": "Approx cost from tokens x per-model price (gpt-5/claude-opus/other). Estimate only.",
+      "description": "Model output tokens reported during the selected range. Historical range aggregation keeps completed gateway runs visible after the exporter stops.",
       "gridPos": {
         "x": 21,
         "y": 1,
@@ -554,7 +639,8 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "(sum(increase(gen_ai_client_token_usage_sum{gen_ai_request_model=\"gpt-5\",gen_ai_token_type=~\"input|cacheCreation\"}[$__range])) or vector(0))*1.25e-06 + (sum(increase(gen_ai_client_token_usage_sum{gen_ai_request_model=\"gpt-5\",gen_ai_token_type=\"output\"}[$__range])) or vector(0))*1e-05 + (sum(increase(gen_ai_client_token_usage_sum{gen_ai_request_model=\"claude-opus\",gen_ai_token_type=~\"input|cacheCreation\"}[$__range])) or vector(0))*1.5e-05 + (sum(increase(gen_ai_client_token_usage_sum{gen_ai_request_model=\"claude-opus\",gen_ai_token_type=\"output\"}[$__range])) or vector(0))*7.5e-05 + (sum(increase(gen_ai_client_token_usage_sum{gen_ai_request_model=\"other\",gen_ai_token_type=~\"input|cacheCreation\"}[$__range])) or vector(0))*1e-06 + (sum(increase(gen_ai_client_token_usage_sum{gen_ai_request_model=\"other\",gen_ai_token_type=\"output\"}[$__range])) or vector(0))*4e-06"
+          "expr": "sum(increase(gen_ai_client_token_usage_sum{gen_ai_token_type=\"output\"}[$__range])) or vector(0)",
+          "instant": true
         }
       ],
       "options": {
@@ -564,14 +650,14 @@
           ],
           "values": false
         },
-        "colorMode": "background",
+        "colorMode": "value",
         "graphMode": "area",
         "textMode": "auto",
         "justifyMode": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD",
+          "unit": "short",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1163,14 +1249,60 @@
       }
     },
     {
+      "type": "stat",
+      "title": "Token usage observations",
+      "id": 56,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "description": "Number of input/output/cache usage measurements reported by providers in the selected range. This is telemetry coverage, not the number of LLM calls.",
+      "gridPos": {
+        "x": 18,
+        "y": 58,
+        "w": 6,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(gen_ai_client_token_usage_count[$__range])) or vector(0)",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      }
+    },
+    {
       "type": "logs",
-      "title": "Shadow block detail (full payload + policy reason)",
+      "title": "Shadow block decision detail",
       "id": 20,
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
       },
-      "description": "Every would-be block with connector, phase, severity and policy reason. Expand a line for the full structured payload + the exact command.",
+      "description": "Connector-facing hook decisions where would_block=true. The bounded decision metadata is shown without re-emitting the raw command payload.",
       "gridPos": {
         "x": 0,
         "y": 31,
@@ -1184,7 +1316,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} |= \"\\\"would_block\\\":true\" | json | line_format \"{{.gen_ai_agent_name}} | {{.defenseclaw_gateway_event_type}} | sev={{.severity}} | {{.reason}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"hook_decision\" | defenseclaw_hook_would_block=\"true\" | line_format \"{{.gen_ai_agent_name}} | {{.defenseclaw_hook_event}} | severity={{.severity_text}} | raw={{.defenseclaw_hook_raw_action}} effective={{.defenseclaw_hook_action}} | {{.defenseclaw_hook_reason}}\"",
           "queryType": "range"
         }
       ],
@@ -1337,13 +1469,13 @@
     },
     {
       "type": "piechart",
-      "title": "Tokens by model (range)",
+      "title": "Tokens by model family (gateway run)",
       "id": 24,
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
       },
-      "description": "Total tokens attributed to each model.",
+      "description": "Total reported tokens by bounded model family. The 'other' bucket is intentional cardinality protection; inspect prompt/response logs or trace attributes for the exact raw model name.",
       "gridPos": {
         "x": 0,
         "y": 50,
@@ -1396,7 +1528,7 @@
     },
     {
       "type": "piechart",
-      "title": "Tokens by provider (range)",
+      "title": "Tokens by provider (gateway run)",
       "id": 25,
       "datasource": {
         "type": "prometheus",
@@ -1507,17 +1639,17 @@
     },
     {
       "type": "table",
-      "title": "Tokens & est. cost by conversation (range)",
+      "title": "Tokens by conversation, model & type (gateway run)",
       "id": 27,
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
       },
-      "description": "Per-conversation token totals by model. Conversation id correlates to session_id in logs/traces.",
+      "description": "Per-conversation provider-reported token totals split into input, output, cacheRead, and cacheCreation. Blank conversation means the upstream metric did not carry a session id; absent rows mean usage was not reported, not zero.",
       "gridPos": {
         "x": 0,
         "y": 58,
-        "w": 24,
+        "w": 18,
         "h": 9
       },
       "targets": [
@@ -1527,7 +1659,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum by (gen_ai_conversation_id, gen_ai_request_model)(increase(gen_ai_client_token_usage_sum[$__range]))",
+          "expr": "sum by (gen_ai_conversation_id, gen_ai_agent_id, gen_ai_agent_name, gen_ai_request_model, gen_ai_token_type)(increase(gen_ai_client_token_usage_sum[$__range]))",
           "instant": true,
           "format": "table"
         }
@@ -1561,6 +1693,7 @@
             "renameByName": {
               "gen_ai_conversation_id": "conversation",
               "gen_ai_request_model": "model",
+              "gen_ai_token_type": "type",
               "Value": "tokens"
             }
           }
@@ -1630,7 +1763,7 @@
       "gridPos": {
         "x": 0,
         "y": 67,
-        "w": 24,
+        "w": 12,
         "h": 8
       },
       "targets": [
@@ -1641,6 +1774,41 @@
             "uid": "defenseclaw-loki"
           },
           "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"llm_prompt\"",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "type": "logs",
+      "title": "LLM responses (live)",
+      "id": 55,
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "description": "Observed model/agent outputs with exact model, conversation, agent, and user correlation. Expand a row for the full structured response.",
+      "gridPos": {
+        "x": 12,
+        "y": 67,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"llm_response\"",
           "queryType": "range"
         }
       ],
@@ -2053,677 +2221,6 @@
     },
     {
       "type": "row",
-      "title": "Findings - rules, severity, runtime vs supply chain",
-      "id": 37,
-      "gridPos": {
-        "x": 0,
-        "y": 115,
-        "w": 24,
-        "h": 1
-      },
-      "collapsed": false
-    },
-    {
-      "type": "bargauge",
-      "title": "Most common finding rules (range)",
-      "id": 38,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
-      },
-      "description": "Top finding RULE codes by volume (e.g. CMD-ENV-DUMP, PATH-ETC-PASSWD). Zero-volume rules hidden.",
-      "gridPos": {
-        "x": 0,
-        "y": 116,
-        "w": 12,
-        "h": 10
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "topk(15, sum by (rule_id)(increase(defenseclaw_scan_findings_by_rule_total[$__range])) > 0)",
-          "legendFormat": "{{rule_id}}",
-          "instant": true
-        }
-      ],
-      "options": {
-        "displayMode": "gradient",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
-        },
-        "showUnfilled": true,
-        "valueMode": "color"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "color": {
-            "mode": "continuous-GrYlRd"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "piechart",
-      "title": "Findings by severity",
-      "id": 39,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
-      },
-      "description": "Severity distribution of findings.",
-      "gridPos": {
-        "x": 12,
-        "y": 116,
-        "w": 6,
-        "h": 10
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "sum by (severity)(increase(defenseclaw_scan_findings_by_rule_total[$__range]))",
-          "legendFormat": "{{severity}}",
-          "instant": true
-        }
-      ],
-      "transformations": [],
-      "options": {
-        "pieType": "donut",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": [
-            "value",
-            "percent"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "CRITICAL"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "dark-red"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "HIGH"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "MEDIUM"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "orange"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "LOW"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "yellow"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "INFO"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "blue"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "NONE"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "green"
-                }
-              }
-            ]
-          }
-        ]
-      }
-    },
-    {
-      "type": "piechart",
-      "title": "Runtime vs supply-chain (by scanner)",
-      "id": 40,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
-      },
-      "description": "hook-rules = runtime tool/command findings; plugin-scanner = supply-chain (skills/mcp/plugins).",
-      "gridPos": {
-        "x": 18,
-        "y": 116,
-        "w": 6,
-        "h": 10
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "sum by (scanner)(increase(defenseclaw_scan_findings_by_rule_total[$__range]))",
-          "legendFormat": "{{scanner}}",
-          "instant": true
-        }
-      ],
-      "transformations": [],
-      "options": {
-        "pieType": "donut",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": [
-            "value",
-            "percent"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "table",
-      "title": "Findings by rule x severity x scanner (range)",
-      "id": 41,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
-      },
-      "description": "Full finding breakdown. scanner column distinguishes runtime (hook-rules) from supply-chain (plugin-scanner).",
-      "gridPos": {
-        "x": 0,
-        "y": 126,
-        "w": 24,
-        "h": 10
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "sum by (rule_id, severity, scanner)(increase(defenseclaw_scan_findings_by_rule_total[$__range]))",
-          "instant": true,
-          "format": "table"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "job": true,
-              "instance": true,
-              "service": true,
-              "service_name": true,
-              "service_namespace": true,
-              "service_version": true,
-              "exported_job": true,
-              "deployment_environment": true,
-              "host_arch": true,
-              "host_name": true,
-              "os_type": true,
-              "connector": true,
-              "defenseclaw_claw_mode": true,
-              "defenseclaw_device_id": true,
-              "defenseclaw_gateway_host": true,
-              "defenseclaw_gateway_port": true,
-              "defenseclaw_instance_id": true,
-              "defenseclaw_preset": true,
-              "defenseclaw_preset_name": true
-            },
-            "renameByName": {
-              "rule_id": "rule",
-              "severity": "severity",
-              "scanner": "scanner",
-              "Value": "count"
-            }
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "fields": "",
-            "sort": [
-              {
-                "field": "count",
-                "desc": true
-              }
-            ]
-          }
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "left",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "filterable": true
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "count"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "severity"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "CRITICAL": {
-                        "color": "dark-red",
-                        "index": 0
-                      },
-                      "HIGH": {
-                        "color": "red",
-                        "index": 1
-                      },
-                      "MEDIUM": {
-                        "color": "orange",
-                        "index": 2
-                      },
-                      "LOW": {
-                        "color": "yellow",
-                        "index": 3
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "footer": {
-          "show": false
-        }
-      }
-    },
-    {
-      "type": "logs",
-      "title": "Finding detail (rule, target, severity)",
-      "id": 42,
-      "datasource": {
-        "type": "loki",
-        "uid": "defenseclaw-loki"
-      },
-      "description": "Per-finding events with scanner, target and rule. Expand for full detail.",
-      "gridPos": {
-        "x": 0,
-        "y": 136,
-        "w": 24,
-        "h": 9
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "defenseclaw-loki"
-          },
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"scan_finding\"",
-          "queryType": "range"
-        }
-      ],
-      "options": {
-        "showTime": true,
-        "wrapLogMessage": true,
-        "prettifyLogMessage": false,
-        "enableLogDetails": true,
-        "dedupStrategy": "none",
-        "sortOrder": "Descending"
-      }
-    },
-    {
-      "type": "row",
-      "title": "Supply chain - AI tool & dependency discovery",
-      "id": 43,
-      "gridPos": {
-        "x": 0,
-        "y": 145,
-        "w": 24,
-        "h": 1
-      },
-      "collapsed": false
-    },
-    {
-      "type": "table",
-      "title": "Discovered AI products (skills / mcp / plugins / deps)",
-      "id": 44,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
-      },
-      "description": "AI products & dependencies discovered on the host (supply-chain inventory).",
-      "gridPos": {
-        "x": 0,
-        "y": 146,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "sum by (ai_product, ai_vendor, detector, signal_category, confidence)(max_over_time(defenseclaw_ai_discovery_signals_total[$__range]))",
-          "instant": true,
-          "format": "table"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "job": true,
-              "instance": true,
-              "service": true,
-              "service_name": true,
-              "service_namespace": true,
-              "service_version": true,
-              "exported_job": true,
-              "deployment_environment": true,
-              "host_arch": true,
-              "host_name": true,
-              "os_type": true,
-              "defenseclaw_claw_mode": true,
-              "defenseclaw_device_id": true,
-              "defenseclaw_gateway_host": true,
-              "defenseclaw_gateway_port": true,
-              "defenseclaw_instance_id": true,
-              "defenseclaw_preset": true,
-              "defenseclaw_preset_name": true
-            },
-            "renameByName": {
-              "ai_product": "product",
-              "ai_vendor": "vendor",
-              "detector": "detector",
-              "signal_category": "category",
-              "confidence": "confidence",
-              "Value": "signals"
-            }
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "fields": "",
-            "sort": [
-              {
-                "field": "signals",
-                "desc": true
-              }
-            ]
-          }
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "left",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "filterable": true
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "footer": {
-          "show": false
-        }
-      }
-    },
-    {
-      "type": "piechart",
-      "title": "Discovery signals by category",
-      "id": 45,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
-      },
-      "description": "package_dependency vs supported_connector signals.",
-      "gridPos": {
-        "x": 12,
-        "y": 146,
-        "w": 6,
-        "h": 8
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "sum by (signal_category)(max_over_time(defenseclaw_ai_discovery_signals_total[$__range]))",
-          "legendFormat": "{{signal_category}}",
-          "instant": true
-        }
-      ],
-      "transformations": [],
-      "options": {
-        "pieType": "donut",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": [
-            "value",
-            "percent"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "bargauge",
-      "title": "Discovery signals by detector",
-      "id": 46,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
-      },
-      "description": "config vs package_manifest detectors.",
-      "gridPos": {
-        "x": 18,
-        "y": 146,
-        "w": 6,
-        "h": 8
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "sum by (detector)(max_over_time(defenseclaw_ai_discovery_signals_total[$__range]))",
-          "legendFormat": "{{detector}}",
-          "instant": true
-        }
-      ],
-      "options": {
-        "displayMode": "gradient",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
-        },
-        "showUnfilled": true,
-        "valueMode": "color"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "color": {
-            "mode": "continuous-GrYlRd"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "row",
       "title": "Session drilldown - correlate one run end-to-end",
       "id": 47,
       "gridPos": {
@@ -2736,13 +2233,13 @@
     },
     {
       "type": "table",
-      "title": "Tokens by model for selected session",
+      "title": "Tokens by model & type for selected session (gateway run)",
       "id": 48,
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
       },
-      "description": "Token totals for the conversation selected in the $session variable.",
+      "description": "Input, output, cache-read, and cache-creation totals for the selected conversation.",
       "gridPos": {
         "x": 0,
         "y": 155,
@@ -2756,7 +2253,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum by (gen_ai_request_model)(increase(gen_ai_client_token_usage_sum{gen_ai_conversation_id=~\"$session\"}[$__range]))",
+          "expr": "sum by (gen_ai_agent_id, gen_ai_agent_name, gen_ai_request_model, gen_ai_token_type)(increase(gen_ai_client_token_usage_sum{gen_ai_conversation_id=~\"$session\",gen_ai_agent_id=~\"$agent\"}[$__range]))",
           "instant": true,
           "format": "table"
         }
@@ -2770,6 +2267,7 @@
             },
             "renameByName": {
               "gen_ai_request_model": "model",
+              "gen_ai_token_type": "type",
               "Value": "tokens"
             }
           }
@@ -2817,7 +2315,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | gen_ai_conversation_id=~\"$session\" [$__range]))",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | (gen_ai_conversation_id=~\"$session\" or defenseclaw_session_parent_id=~\"$session\") [$__range]))",
           "queryType": "instant"
         }
       ],
@@ -2860,7 +2358,7 @@
         "type": "loki",
         "uid": "defenseclaw-loki"
       },
-      "description": "Would-be blocks within the selected session.",
+      "description": "Canonical hook_decision records with would_block=true in the selected session. Zero means no advisory block occurred.",
       "gridPos": {
         "x": 16,
         "y": 155,
@@ -2874,7 +2372,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | gen_ai_conversation_id=~\"$session\" |= \"\\\"would_block\\\":true\" [$__range]))",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | (gen_ai_conversation_id=~\"$session\" or defenseclaw_session_parent_id=~\"$session\") | defenseclaw_gateway_event_type=\"hook_decision\" | defenseclaw_hook_would_block=\"true\" [$__range])) or vector(0)",
           "queryType": "instant"
         }
       ],
@@ -2935,7 +2433,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} | gen_ai_conversation_id=~\"$session\" | line_format \"[{{.gen_ai_agent_name}}] {{.defenseclaw_tool_name}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | (gen_ai_conversation_id=~\"$session\" or defenseclaw_session_parent_id=~\"$session\") | gen_ai_agent_id=~\"$agent\" | defenseclaw_agent_lifecycle_id=~\"$lifecycle\" | user_id=~\"$user\" | line_format \"[user={{.user_id}} agent={{.gen_ai_agent_name}} depth={{.defenseclaw_agent_depth}} state={{.defenseclaw_agent_lifecycle_state}}] {{.defenseclaw_agent_lifecycle_event}} {{.defenseclaw_tool_name}}\"",
           "queryType": "range"
         }
       ],
@@ -2946,135 +2444,6 @@
         "enableLogDetails": true,
         "dedupStrategy": "none",
         "sortOrder": "Ascending"
-      }
-    },
-    {
-      "type": "row",
-      "title": "Telemetry pipeline health",
-      "id": 52,
-      "gridPos": {
-        "x": 0,
-        "y": 179,
-        "w": 24,
-        "h": 1
-      },
-      "collapsed": false
-    },
-    {
-      "type": "timeseries",
-      "title": "OTLP records / sec by signal",
-      "id": 53,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
-      },
-      "description": "Inbound OTLP records by signal (metrics/logs/traces).",
-      "gridPos": {
-        "x": 0,
-        "y": 180,
-        "w": 12,
-        "h": 7
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "sum by (signal)(rate(defenseclaw_otel_ingest_records_total[$__rate_interval]))",
-          "legendFormat": "{{signal}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "cps",
-          "custom": {
-            "fillOpacity": 18,
-            "showPoints": "never",
-            "lineWidth": 2,
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Audit sink delivery & exporter errors / sec",
-      "id": 54,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
-      },
-      "description": "Audit sink throughput and OTLP exporter error rate.",
-      "gridPos": {
-        "x": 12,
-        "y": 180,
-        "w": 12,
-        "h": 7
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "sum(rate(defenseclaw_audit_sink_batches_delivered_total[$__rate_interval]))",
-          "legendFormat": "sink batches delivered"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "sum(rate(defenseclaw_telemetry_exporter_errors_total[$__rate_interval]))",
-          "legendFormat": "exporter errors"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "cps",
-          "custom": {
-            "fillOpacity": 18,
-            "showPoints": "never",
-            "lineWidth": 2,
-            "spanNulls": true
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
       }
     }
   ],
@@ -3095,6 +2464,7 @@
   "timepicker": {},
   "timezone": "",
   "title": "DefenseClaw - Agent Activity (Live)",
+  "description": "Cross-agent live activity explorer for hook events, model usage, tools, internet destinations, and session correlation. Dedicated Agent360, Findings, AI Discovery, and Runtime dashboards own deep lifecycle, finding, inventory, and pipeline analysis.",
   "uid": "defenseclaw-activity",
   "version": 1,
   "weekStart": ""

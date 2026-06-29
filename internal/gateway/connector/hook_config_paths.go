@@ -6,9 +6,14 @@ package connector
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // HookConfigPathsForConnector returns the absolute agent config file path(s)
@@ -124,10 +129,52 @@ func configFileReferencesHook(path string, needles []string) (bool, error) {
 		}
 		return false, err
 	}
+	var decoded interface{}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".json":
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.UseNumber()
+		if err := decoder.Decode(&decoded); err != nil {
+			return false, fmt.Errorf("parse hook config %s: %w", path, err)
+		}
+	case ".yaml", ".yml":
+		if err := yaml.Unmarshal(data, &decoded); err != nil {
+			return false, fmt.Errorf("parse hook config %s: %w", path, err)
+		}
+	}
+	if decoded != nil {
+		return structuredHookCommandReferences(decoded, needles), nil
+	}
 	for _, needle := range needles {
 		if needle != "" && bytes.Contains(data, []byte(needle)) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+func structuredHookCommandReferences(raw interface{}, needles []string) bool {
+	switch value := raw.(type) {
+	case []interface{}:
+		for _, item := range value {
+			if structuredHookCommandReferences(item, needles) {
+				return true
+			}
+		}
+	case map[string]interface{}:
+		for key, item := range value {
+			if key == "command" || key == "bash" {
+				command, _ := item.(string)
+				for _, needle := range needles {
+					if needle != "" && strings.Contains(command, needle) {
+						return true
+					}
+				}
+			}
+			if structuredHookCommandReferences(item, needles) {
+				return true
+			}
+		}
+	}
+	return false
 }

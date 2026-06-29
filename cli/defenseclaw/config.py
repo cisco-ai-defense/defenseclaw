@@ -28,6 +28,7 @@ import platform
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -155,6 +156,17 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+def _as_int(value: Any, default: int) -> int:
+    """Coerce a config scalar without letting malformed YAML brick the CLI."""
+
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def _home() -> Path:
     return Path.home()
 
@@ -174,6 +186,7 @@ def default_data_path() -> Path:
     if sudo_user and os.getuid() == 0:
         try:
             import pwd
+
             pw = pwd.getpwnam(sudo_user)
             candidate = Path(pw.pw_dir) / DATA_DIR_NAME
             if (candidate / CONFIG_FILE_NAME).is_file():
@@ -210,6 +223,7 @@ def _expand(p: str) -> str:
 # Environment detection (mirrors config.DetectEnvironment)
 # ---------------------------------------------------------------------------
 
+
 def detect_environment() -> str:
     system = platform.system()
     if system == "Windows":
@@ -220,7 +234,9 @@ def detect_environment() -> str:
         return "dgx-spark"
     try:
         out = subprocess.check_output(
-            ["nvidia-smi", "-L"], stderr=subprocess.DEVNULL, text=True,
+            ["nvidia-smi", "-L"],
+            stderr=subprocess.DEVNULL,
+            text=True,
         )
         if "DGX" in out:
             return "dgx-spark"
@@ -299,6 +315,7 @@ def openclaw_cmd_prefix() -> list[str]:
             cp = config_path()
             if cp.is_file():
                 import yaml
+
                 with open(cp) as f:
                     raw = yaml.safe_load(f) or {}
                 mode = raw.get("openshell", {}).get("mode", "")
@@ -325,9 +342,11 @@ def openclaw_bin() -> str:
     global _openclaw_bin_cache
     if _openclaw_bin_cache is None:
         import shutil
+
         found = shutil.which("openclaw")
         if not found:
             from pathlib import Path
+
             candidates = [
                 Path.home() / ".npm-global" / "bin" / "openclaw",
                 Path("/usr/local/bin/openclaw"),
@@ -383,13 +402,34 @@ _DEFAULT_LLM_MAX_RETRIES = 2
 # (LiteLLM accepts the same "provider/model" shape). Anything outside
 # this set triggers a one-shot warning so typos surface early. Keep in
 # lockstep with recognizedLLMProviders in internal/config/config.go.
-_RECOGNIZED_LLM_PROVIDERS = frozenset({
-    "openai", "anthropic", "azure", "gemini", "gemini-openai", "vertex_ai",
-    "bedrock", "groq", "mistral", "cohere", "ollama", "vllm", "deepseek", "xai",
-    "fireworks_ai", "perplexity", "huggingface", "replicate",
-    "openrouter", "together_ai", "cerebras", "lm_studio", "lmstudio",
-    "local",
-})
+_RECOGNIZED_LLM_PROVIDERS = frozenset(
+    {
+        "openai",
+        "anthropic",
+        "azure",
+        "gemini",
+        "gemini-openai",
+        "vertex_ai",
+        "bedrock",
+        "groq",
+        "mistral",
+        "cohere",
+        "ollama",
+        "vllm",
+        "deepseek",
+        "xai",
+        "fireworks_ai",
+        "perplexity",
+        "huggingface",
+        "replicate",
+        "openrouter",
+        "together_ai",
+        "cerebras",
+        "lm_studio",
+        "lmstudio",
+        "local",
+    }
+)
 
 _LOCAL_LLM_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "lmstudio", "local"})
 
@@ -410,7 +450,8 @@ def _maybe_warn_unknown_provider(prefix: str, component_path: str) -> None:
         "perplexity/huggingface/replicate/openrouter/together_ai/cerebras/"
         "lm_studio/local. Gateway (Bifrost) and scanners (LiteLLM) may "
         "disagree on how to route this model",
-        prefix, component_path,
+        prefix,
+        component_path,
     )
 
 
@@ -612,6 +653,7 @@ class InspectLLMConfig:
     values into ``config.llm`` so every new caller can go through
     :meth:`Config.resolve_llm`.
     """
+
     provider: str = ""
     model: str = ""
     api_key: str = ""
@@ -632,6 +674,7 @@ class InspectLLMConfig:
 @dataclass
 class CiscoAIDefenseConfig:
     """Shared Cisco AI Defense configuration used by scanners and guardrail."""
+
     endpoint: str = "https://us.api.inspect.aidefense.security.cisco.com"
     api_key: str = ""
     api_key_env: str = ""
@@ -642,6 +685,7 @@ class CiscoAIDefenseConfig:
         """Return api_key from env var (if set) or direct value."""
         if self.api_key_env:
             import os
+
             val = os.environ.get(self.api_key_env, "")
             if val:
                 return val
@@ -812,6 +856,7 @@ class OTelLogsConfig:
 class OTelMetricsConfig:
     enabled: bool = True
     export_interval_s: int = 60
+    temporality: str = "delta"
     endpoint: str = ""
     protocol: str = ""
     url_path: str = ""
@@ -830,8 +875,30 @@ class OTelResourceConfig:
 
 
 @dataclass
-class OTelConfig:
-    enabled: bool = False
+class OTelSpanFilterOperationConfig:
+    name: str = ""
+    require_attributes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class OTelSpanFilterConfig:
+    require_operation: str = ""
+    require_attributes: list[str] = field(default_factory=list)
+    operations: list[OTelSpanFilterOperationConfig] = field(default_factory=list)
+
+
+@dataclass
+class OTelDestinationConfig:
+    """One named OTLP fan-out destination.
+
+    Process-wide resource attributes and trace sampling remain on
+    :class:`OTelConfig`; transport, credentials, signal selection, and queue
+    settings are isolated per destination.
+    """
+
+    name: str = ""
+    preset: str = ""
+    enabled: bool = True
     protocol: str = "grpc"
     endpoint: str = ""
     headers: dict[str, str] = field(default_factory=dict)
@@ -840,7 +907,35 @@ class OTelConfig:
     logs: OTelLogsConfig = field(default_factory=OTelLogsConfig)
     metrics: OTelMetricsConfig = field(default_factory=OTelMetricsConfig)
     batch: OTelBatchConfig = field(default_factory=OTelBatchConfig)
+    span_filter: OTelSpanFilterConfig = field(default_factory=OTelSpanFilterConfig)
+
+
+@dataclass
+class OTelTracePolicyConfig:
+    sampler: str = "always_on"
+    sampler_arg: str = "1.0"
+
+
+@dataclass
+class OTelLogPolicyConfig:
+    emit_individual_findings: bool = False
+
+
+@dataclass
+class OTelMetricPolicyConfig:
+    export_interval_s: int = 60
+    temporality: str = "delta"
+
+
+@dataclass
+class OTelConfig:
+    enabled: bool = False
+    traces: OTelTracePolicyConfig = field(default_factory=OTelTracePolicyConfig)
+    logs: OTelLogPolicyConfig = field(default_factory=OTelLogPolicyConfig)
+    metrics: OTelMetricPolicyConfig = field(default_factory=OTelMetricPolicyConfig)
+    batch: OTelBatchConfig = field(default_factory=OTelBatchConfig)
     resource: OTelResourceConfig = field(default_factory=OTelResourceConfig)
+    destinations: list[OTelDestinationConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -1135,9 +1230,7 @@ class AssetPolicyConfig:
             return self.mode.strip()
         return "observe"
 
-    def effective_asset_type_policy(
-        self, connector: str, target_type: str
-    ) -> AssetTypePolicy | None:
+    def effective_asset_type_policy(self, connector: str, target_type: str) -> AssetTypePolicy | None:
         """Resolve the effective per-type policy for a connector.
 
         Returns a copy of the global per-type :class:`AssetTypePolicy` with
@@ -1161,9 +1254,7 @@ class AssetPolicyConfig:
         if override.registry_required is not None:
             changes["registry_required"] = override.registry_required
         if override.registry_empty_action.strip():
-            changes["registry_empty_action"] = (
-                override.registry_empty_action.strip().lower()
-            )
+            changes["registry_empty_action"] = override.registry_empty_action.strip().lower()
         if not changes:
             return base
         return replace(base, **changes)
@@ -1184,9 +1275,7 @@ class AssetPolicyConfig:
         seen: dict[str, str] = {}
         for name in sorted(self.connectors):
             if not name.strip():
-                raise ValueError(
-                    "asset_policy.connectors: empty connector name is not allowed"
-                )
+                raise ValueError("asset_policy.connectors: empty connector name is not allowed")
             norm = connector_paths.normalize(name)
             if norm in seen:
                 raise ValueError(
@@ -1203,31 +1292,22 @@ class AssetPolicyConfig:
                         _validate_asset_type_default(block.default)
                         _validate_registry_empty_action(block.registry_empty_action)
             except ValueError as exc:
-                raise ValueError(
-                    f"asset_policy.connectors[{name!r}]: {exc}"
-                ) from exc
+                raise ValueError(f"asset_policy.connectors[{name!r}]: {exc}") from exc
 
 
 def _validate_asset_policy_mode(mode: str) -> None:
     if (mode or "").strip().lower() not in {"", "observe", "action"}:
-        raise ValueError(
-            f'invalid asset_policy mode {mode!r} (want "observe" or "action")'
-        )
+        raise ValueError(f'invalid asset_policy mode {mode!r} (want "observe" or "action")')
 
 
 def _validate_asset_type_default(value: str) -> None:
     if (value or "").strip().lower() not in {"", "allow", "deny", "block"}:
-        raise ValueError(
-            f'invalid asset_policy default {value!r} (want "allow" or "deny")'
-        )
+        raise ValueError(f'invalid asset_policy default {value!r} (want "allow" or "deny")')
 
 
 def _validate_registry_empty_action(value: str) -> None:
     if (value or "").strip().lower() not in {"", "deny", "warn", "allow", "block"}:
-        raise ValueError(
-            f"invalid registry_empty_action {value!r} "
-            '(want "deny", "warn", or "allow")'
-        )
+        raise ValueError(f'invalid registry_empty_action {value!r} (want "deny", "warn", or "allow")')
 
 
 # ---------------------------------------------------------------------------
@@ -1474,7 +1554,9 @@ class ObservabilityConfig:
         return None
 
     def effective_audit_sinks(
-        self, connector: str, global_sinks: list[dict[str, Any]] | None,
+        self,
+        connector: str,
+        global_sinks: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
         """Resolve the audit sinks a connector's events route to.
 
@@ -1489,7 +1571,9 @@ class ObservabilityConfig:
         return list(global_sinks or [])
 
     def effective_webhooks(
-        self, connector: str, global_webhooks: list[WebhookConfig] | None,
+        self,
+        connector: str,
+        global_webhooks: list[WebhookConfig] | None,
     ) -> list[WebhookConfig]:
         """Resolve the webhooks a connector's events route to.
 
@@ -1511,9 +1595,7 @@ class ObservabilityConfig:
         seen: dict[str, str] = {}
         for name in sorted(self.connectors):
             if not name.strip():
-                raise ValueError(
-                    "observability.connectors: empty connector name is not allowed"
-                )
+                raise ValueError("observability.connectors: empty connector name is not allowed")
             norm = connector_paths.normalize(name)
             if norm in seen:
                 raise ValueError(
@@ -1561,9 +1643,9 @@ class PerConnectorGuardrailConfig:
 @dataclass
 class GuardrailConfig:
     enabled: bool = False
-    mode: str = "observe"           # observe | action
-    scanner_mode: str = "both"      # local | remote | both
-    host: str = "localhost"         # host where guardrail proxy is reachable (bridge IP in sandbox mode)
+    mode: str = "observe"  # observe | action
+    scanner_mode: str = "both"  # local | remote | both
+    host: str = "localhost"  # host where guardrail proxy is reachable (bridge IP in sandbox mode)
     port: int = 4000
     # LLM overrides the top-level ``llm:`` block for the guardrail
     # upstream (the model DefenseClaw proxies client traffic to).
@@ -1571,19 +1653,19 @@ class GuardrailConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     # DEPRECATED (v<5): migrated into ``llm`` at load time. Kept for
     # pre-v5 round-tripping only — new writers should emit ``llm:``.
-    model: str = ""                 # upstream model, e.g. "anthropic/claude-opus-4-5"
-    model_name: str = ""            # alias exposed to OpenClaw, e.g. "claude-opus"
-    api_key_env: str = ""           # env var holding the API key, e.g. "ANTHROPIC_API_KEY"
-    api_base: str = ""              # base URL override for Azure, custom endpoints
+    model: str = ""  # upstream model, e.g. "anthropic/claude-opus-4-5"
+    model_name: str = ""  # alias exposed to OpenClaw, e.g. "claude-opus"
+    api_key_env: str = ""  # env var holding the API key, e.g. "ANTHROPIC_API_KEY"
+    api_base: str = ""  # base URL override for Azure, custom endpoints
     # OriginalModel is NOT a secret-bearing LLM config field — it just
     # records the upstream model name the client sees rewritten onto
     # outgoing requests (Bifrost model-routing). Orthogonal to ``llm``.
-    original_model: str = ""        # original OpenClaw model (for revert)
-    block_message: str = ""         # custom message shown when a request is blocked (empty = default)
+    original_model: str = ""  # original OpenClaw model (for revert)
+    block_message: str = ""  # custom message shown when a request is blocked (empty = default)
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     detection_strategy: str = "regex_judge"  # regex_only | regex_judge | judge_first
-    detection_strategy_prompt: str = ""     # per-direction override
-    detection_strategy_completion: str = "" # per-direction override
+    detection_strategy_prompt: str = ""  # per-direction override
+    detection_strategy_completion: str = ""  # per-direction override
     detection_strategy_tool_call: str = ""  # per-direction override
     # Run full judge classification on content with no regex signal
     # (regex_judge mode). Flipped from False to True in the
@@ -1596,7 +1678,7 @@ class GuardrailConfig:
     # (the YAML parser below uses .get(key, <default>) so the presence
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
-    rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
+    rule_pack_dir: str = ""  # path to guardrail rule-pack profile directory
     connector: str = ""  # empty => fall back to claw.mode; otherwise a registered connector name
     hilt: HILTConfig = field(default_factory=HILTConfig)
     # ``hook_fail_mode`` is the operator-chosen response-layer fail
@@ -1652,9 +1734,7 @@ class GuardrailConfig:
     # ``effective_*`` methods, never by reading the map directly.
     connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
 
-    def _connector_override(
-        self, connector: str
-    ) -> PerConnectorGuardrailConfig | None:
+    def _connector_override(self, connector: str) -> PerConnectorGuardrailConfig | None:
         """Return the override block for ``connector`` if configured.
 
         An empty connector name or empty map yields ``None`` so callers
@@ -1751,9 +1831,7 @@ class GuardrailConfig:
         seen: dict[str, str] = {}
         for name in sorted(self.connectors):
             if not name.strip():
-                raise ValueError(
-                    "guardrail.connectors: empty connector name is not allowed"
-                )
+                raise ValueError("guardrail.connectors: empty connector name is not allowed")
             # Reject two distinct keys that canonicalize to the same connector
             # (e.g. "claude-code" + "claudecode", or "OpenHands" + "openhands").
             # connector_override()/active_connectors() resolve keys through
@@ -1779,24 +1857,17 @@ class GuardrailConfig:
 
 def _validate_guardrail_mode(mode: str) -> None:
     if (mode or "").strip() not in {"", "observe", "action"}:
-        raise ValueError(
-            f'invalid guardrail mode {mode!r} (want "observe" or "action")'
-        )
+        raise ValueError(f'invalid guardrail mode {mode!r} (want "observe" or "action")')
 
 
 def _validate_guardrail_hook_fail_mode(mode: str) -> None:
     if (mode or "").strip().lower() not in {"", "open", "closed"}:
-        raise ValueError(
-            f'invalid hook_fail_mode {mode!r} (want "open" or "closed")'
-        )
+        raise ValueError(f'invalid hook_fail_mode {mode!r} (want "open" or "closed")')
 
 
 def _validate_guardrail_min_severity(sev: str) -> None:
     if (sev or "").strip().upper() not in {"", "LOW", "MEDIUM", "HIGH", "CRITICAL"}:
-        raise ValueError(
-            f"invalid hilt.min_severity {sev!r} "
-            "(want LOW, MEDIUM, HIGH, or CRITICAL)"
-        )
+        raise ValueError(f"invalid hilt.min_severity {sev!r} (want LOW, MEDIUM, HIGH, or CRITICAL)")
 
 
 @dataclass
@@ -2012,9 +2083,7 @@ class ApplicationProtectionConfig:
         seen: dict[str, str] = {}
         for name in sorted(self.connectors):
             if not name.strip():
-                raise ValueError(
-                    "application_protection.connectors: empty connector name is not allowed"
-                )
+                raise ValueError("application_protection.connectors: empty connector name is not allowed")
             norm = _normalize_connector_key(name)
             if norm in seen:
                 raise ValueError(
@@ -2035,9 +2104,7 @@ class ApplicationProtectionConfig:
                     _validate_guardrail_min_severity(pc.guardrail.hilt.min_severity)
                 _validate_asset_policy_mode(pc.asset_policy.mode)
             except ValueError as exc:
-                raise ValueError(
-                    f"application_protection.connectors[{name!r}]: {exc}"
-                ) from exc
+                raise ValueError(f"application_protection.connectors[{name!r}]: {exc}") from exc
 
 
 def _validate_confidence(path: str, value: float) -> None:
@@ -2052,10 +2119,7 @@ def _validate_connector_name_list(path: str, names: list[str]) -> None:
             raise ValueError(f"{path}: empty connector name is not allowed")
         norm = _normalize_connector_key(str(name))
         if norm in seen:
-            raise ValueError(
-                f"{path}: {seen[norm]!r} and {name!r} refer to the same "
-                f"connector {norm!r}; keep only one"
-            )
+            raise ValueError(f"{path}: {seen[norm]!r} and {name!r} refer to the same connector {norm!r}; keep only one")
         seen[norm] = str(name)
 
 
@@ -2187,11 +2251,7 @@ class Config:
         there — the unconfigured signal is the explicit empty marker
         written on removal, not file absence.
         """
-        return bool(
-            self.guardrail.connectors
-            or self.guardrail.connector.strip()
-            or self.claw.mode.strip()
-        )
+        return bool(self.guardrail.connectors or self.guardrail.connector.strip() or self.claw.mode.strip())
 
     def active_connectors(self) -> list[str]:
         """Return the full resolved set of connector names, sorted.
@@ -2218,13 +2278,7 @@ class Config:
             # and "claudecode") can never make the boot loop iterate the same
             # connector twice. validate() rejects such configs at load, but
             # this stays robust for any caller that bypasses validation.
-            names = sorted(
-                {
-                    connector_paths.normalize(name)
-                    for name in self.guardrail.connectors
-                    if name.strip()
-                }
-            )
+            names = sorted({connector_paths.normalize(name) for name in self.guardrail.connectors if name.strip()})
             if names:
                 return names
         if not self.has_connector_configured():
@@ -2461,7 +2515,9 @@ class Config:
         with locked_config_yaml(path):
             existing = _load_existing_config_yaml(path)
             merged = _merge_preserving_unmodeled(
-                existing, dataclass_data, owned_keys,
+                existing,
+                dataclass_data,
+                owned_keys,
                 authoritative_base=self._loaded_authoritative_dicts,
                 owned_base=self._loaded_owned_nested_values,
             )
@@ -2471,6 +2527,7 @@ class Config:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 @contextmanager
 def locked_config_yaml(path: str):
@@ -2501,8 +2558,8 @@ def locked_config_yaml(path: str):
 def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
     """Atomically write YAML without widening config.yaml permissions."""
     _assert_config_write_allowed(path, data)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
     existing_mode: int | None = None
     try:
         existing_mode = stat.S_IMODE(os.stat(path).st_mode)
@@ -2511,15 +2568,12 @@ def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
     except OSError:
         existing_mode = None
 
-    try:
-        os.unlink(tmp)
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        _log.debug("config: cannot remove stale temp file %s: %s", tmp, exc)
-
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(tmp, flags, 0o600)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    os.fchmod(fd, 0o600)
     try:
         with os.fdopen(fd, "w") as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
@@ -2543,7 +2597,9 @@ def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
         except OSError as exc:
             _log.warning(
                 "config.save: cannot mirror %o mode onto %s (%s); writing as 0600",
-                existing_mode, tmp, exc,
+                existing_mode,
+                tmp,
+                exc,
             )
     os.replace(tmp, path)
     try:
@@ -2559,13 +2615,23 @@ def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
 def _llm_is_empty(d: dict[str, Any] | None) -> bool:
     if not d:
         return True
-    return not any((
-        d.get("model"), d.get("provider"), d.get("api_key"),
-        d.get("api_key_env"), d.get("base_url"),
-        d.get("timeout", 0), d.get("max_retries", 0),
-        d.get("region"), d.get("instance_name"),
-        d.get("bedrock"), d.get("vertex"), d.get("azure"), d.get("tls"),
-    ))
+    return not any(
+        (
+            d.get("model"),
+            d.get("provider"),
+            d.get("api_key"),
+            d.get("api_key_env"),
+            d.get("base_url"),
+            d.get("timeout", 0),
+            d.get("max_retries", 0),
+            d.get("region"),
+            d.get("instance_name"),
+            d.get("bedrock"),
+            d.get("vertex"),
+            d.get("azure"),
+            d.get("tls"),
+        )
+    )
 
 
 def _strip_empty_llm(parent: dict[str, Any] | None, key: str = "llm") -> None:
@@ -2652,9 +2718,37 @@ def _is_default_tls(d: Any) -> bool:
 def _config_to_dict(cfg: Config) -> dict[str, Any]:
     """Serialize Config to a dict suitable for YAML."""
     from dataclasses import asdict
+
     d = asdict(cfg)
     d.pop("_loaded_authoritative_dicts", None)
     d.pop("_loaded_owned_nested_values", None)
+    otel = d.get("otel") or {}
+    destinations = otel.get("destinations") or []
+    for destination in destinations:
+        if not isinstance(destination, dict):
+            continue
+        span_filter = destination.get("span_filter")
+        if not isinstance(span_filter, dict):
+            continue
+        if span_filter.get("operations"):
+            span_filter.pop("require_operation", None)
+            span_filter.pop("require_attributes", None)
+        else:
+            span_filter.pop("operations", None)
+            if not span_filter.get("require_operation"):
+                span_filter.pop("require_operation", None)
+            if not span_filter.get("require_attributes"):
+                span_filter.pop("require_attributes", None)
+        if not span_filter:
+            destination.pop("span_filter", None)
+    # Named destinations are the only transport/signal source of truth.
+    # Serialize only process-wide policy outside destinations.
+    traces = otel.get("traces") or {}
+    otel["traces"] = {key: value for key, value in traces.items() if key in {"sampler", "sampler_arg"}}
+    logs = otel.get("logs") or {}
+    otel["logs"] = {key: value for key, value in logs.items() if key == "emit_individual_findings"}
+    metrics = otel.get("metrics") or {}
+    otel["metrics"] = {key: value for key, value in metrics.items() if key in {"export_interval_s", "temporality"}}
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
@@ -2694,11 +2788,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     # guardrail merge rescue the stale connectors from disk, so the
     # removal would silently fail to persist.
     if isinstance(guardrail, dict) and not guardrail.get("connectors"):
-        had_connectors = bool(
-            (getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get(
-                "guardrail.connectors"
-            )
-        )
+        had_connectors = bool((getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get("guardrail.connectors"))
         if had_connectors:
             guardrail["connectors"] = {}
         else:
@@ -2788,6 +2878,7 @@ def _owned_top_level_keys(cfg: Config) -> frozenset[str]:
     on lazily-populated nested dataclasses.
     """
     from dataclasses import fields
+
     return frozenset(f.name for f in fields(cfg) if not f.name.startswith("_"))
 
 
@@ -2809,24 +2900,25 @@ def _load_existing_config_yaml(path: str) -> dict[str, Any]:
         return {}
     except OSError as exc:
         _log.warning(
-            "config.save: cannot read existing %s (%s); "
-            "writing dataclass-only view (any unmodelled keys will be lost)",
-            path, exc,
+            "config.save: cannot read existing %s (%s); writing dataclass-only view (any unmodelled keys will be lost)",
+            path,
+            exc,
         )
         return {}
     except yaml.YAMLError as exc:
         backup = _backup_unparseable_config(path)
         _log.warning(
-            "config.save: existing %s failed to parse (%s); "
-            "writing dataclass-only view (backup=%s)",
-            path, exc, backup or "unavailable",
+            "config.save: existing %s failed to parse (%s); writing dataclass-only view (backup=%s)",
+            path,
+            exc,
+            backup or "unavailable",
         )
         return {}
     if not isinstance(raw, dict):
         _log.warning(
-            "config.save: existing %s is not a YAML mapping (got %s); "
-            "writing dataclass-only view",
-            path, type(raw).__name__,
+            "config.save: existing %s is not a YAML mapping (got %s); writing dataclass-only view",
+            path,
+            type(raw).__name__,
         )
         return {}
     return raw
@@ -2864,9 +2956,7 @@ def _backup_unparseable_config(path: str) -> str:
 # collection — i.e. the dataclass is the SINGLE SOURCE OF TRUTH for
 # the contents of the dict. When the caller clears one of these
 # (sets it to ``{}``), the on-disk file MUST be cleared too;
-# preserving the previous keys would leak stale secrets like an
-# ``otel.headers.Authorization`` token across an OTLP endpoint
-# rotation.
+# preserving the previous keys would leak stale secrets across rotations.
 #
 # The list is intentionally explicit (not auto-derived from
 # dataclass introspection) because not every nested dataclass field
@@ -2877,46 +2967,43 @@ def _backup_unparseable_config(path: str) -> str:
 # operator's intent.
 #
 # Format: dotted YAML path from the top-level config dict.
-_AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset({
-    # Outbound OTLP credentials (Authorization, x-honeycomb-team,
-    # vendor-specific bearer headers). Letting a stale
-    # Authorization survive a clear is a credential-leak class
-    # regression.
-    "otel.headers",
-    # OpenTelemetry resource attributes (service.name,
-    # deployment.environment, custom operator labels). Some
-    # operators use this for tenant identifiers, so leftover keys
-    # after a clear leak prior tenant identity into the new
-    # session.
-    "otel.resource.attributes",
-    # Per-connector guardrail overrides map. This is fully modeled by
-    # the dataclass (``guardrail.connectors``) and is the single source
-    # of truth for the configured connector set. Without atomic replace,
-    # the non-authoritative merge rescues keys that exist only on disk —
-    # so ``setup remove <connector>`` would delete the key in-memory,
-    # save, and then have it resurrected from the prior file on reload
-    # (the removal never persists). Marking it authoritative makes a
-    # deleted/cleared connector propagate to disk, which is the whole
-    # point of the removal.
-    "guardrail.connectors",
-    # Per-connector asset_policy overrides map (OTHER-7). Same rationale as
-    # guardrail.connectors: the dataclass is the single source of truth for
-    # the configured per-connector set, so clearing an override in-memory and
-    # saving must propagate to disk rather than being rescued by the
-    # non-authoritative merge from the prior file.
-    "asset_policy.connectors",
-    # Per-connector automatic application-protection overrides map. Same
-    # authoritative-merge rationale as guardrail.connectors: the dataclass is
-    # the modeled source of truth, so cleared connector overrides must not be
-    # resurrected from the prior file.
-    "application_protection.connectors",
-    # Per-connector observability overrides map (D5b). Same rationale: the
-    # dataclass is the single source of truth for the configured per-connector
-    # routing set, so clearing a connector's sinks/webhooks override in-memory
-    # and saving must propagate to disk rather than being rescued by the
-    # non-authoritative merge from the prior file.
-    "observability.connectors",
-})
+_AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset(
+    {
+        # OpenTelemetry resource attributes (service.name,
+        # deployment.environment, custom operator labels). Some
+        # operators use this for tenant identifiers, so leftover keys
+        # after a clear leak prior tenant identity into the new
+        # session.
+        "otel.resource.attributes",
+        # Per-connector guardrail overrides map. This is fully modeled by
+        # the dataclass (``guardrail.connectors``) and is the single source
+        # of truth for the configured connector set. Without atomic replace,
+        # the non-authoritative merge rescues keys that exist only on disk —
+        # so ``setup remove <connector>`` would delete the key in-memory,
+        # save, and then have it resurrected from the prior file on reload
+        # (the removal never persists). Marking it authoritative makes a
+        # deleted/cleared connector propagate to disk, which is the whole
+        # point of the removal.
+        "guardrail.connectors",
+        # Per-connector asset_policy overrides map (OTHER-7). Same rationale as
+        # guardrail.connectors: the dataclass is the single source of truth for
+        # the configured per-connector set, so clearing an override in-memory and
+        # saving must propagate to disk rather than being rescued by the
+        # non-authoritative merge from the prior file.
+        "asset_policy.connectors",
+        # Per-connector automatic application-protection overrides map. Same
+        # authoritative-merge rationale as guardrail.connectors: the dataclass is
+        # the modeled source of truth, so cleared connector overrides must not be
+        # resurrected from the prior file.
+        "application_protection.connectors",
+        # Per-connector observability overrides map (D5b). Same rationale: the
+        # dataclass is the single source of truth for the configured per-connector
+        # routing set, so clearing a connector's sinks/webhooks override in-memory
+        # and saving must propagate to disk rather than being rescued by the
+        # non-authoritative merge from the prior file.
+        "observability.connectors",
+    }
+)
 
 # Nested NON-dict keys the dataclass owns and may intentionally omit.
 #
@@ -2934,12 +3021,14 @@ _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset({
 # them.
 #
 # Format: dotted YAML path of the KEY (not the containing dict).
-_OWNED_NESTED_KEYS: frozenset[str] = frozenset({
-    # Hook-lane judge gate: empty list = lane off, stripped on save.
-    "guardrail.judge.hook_connectors",
-    # Hook-lane judge timeout: 0 = gateway default, stripped on save.
-    "guardrail.judge.hook_timeout",
-})
+_OWNED_NESTED_KEYS: frozenset[str] = frozenset(
+    {
+        # Hook-lane judge gate: empty list = lane off, stripped on save.
+        "guardrail.judge.hook_connectors",
+        # Hook-lane judge timeout: 0 = gateway default, stripped on save.
+        "guardrail.judge.hook_timeout",
+    }
+)
 
 
 def _merge_preserving_unmodeled(
@@ -2975,10 +3064,8 @@ def _merge_preserving_unmodeled(
       that doesn't touch it) BUT atomically replaces dicts whose
       dotted path appears in
       :data:`_AUTHORITATIVE_MODELED_DICT_PATHS`. The latter
-      includes ``otel.headers`` and ``otel.resource.attributes``,
-      both of which are dataclass-authoritative collections — a
-      caller that clears ``cfg.otel.headers = {}`` to rotate OTLP
-      credentials gets the on-disk block cleared, which is the
+      includes ``otel.resource.attributes``. A caller that clears a
+      modeled collection gets the on-disk block cleared, which is the
       whole point of clearing it.
     * Lists → atomic replacement (the dataclass list is authoritative;
       partial list merges would mis-handle operator deletions of list
@@ -2995,8 +3082,11 @@ def _merge_preserving_unmodeled(
             nv = new[k]
             if isinstance(ev, dict) and isinstance(nv, dict):
                 out[k] = _deep_merge_nested(
-                    ev, nv, path=k,
-                    authoritative_base=authoritative_base, owned_base=owned_base,
+                    ev,
+                    nv,
+                    path=k,
+                    authoritative_base=authoritative_base,
+                    owned_base=owned_base,
                 )
             else:
                 out[k] = nv
@@ -3027,13 +3117,12 @@ def _deep_merge_nested(
     Behaviour:
 
     * If the dotted path of the recursing dict is in
-      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS` (e.g. ``otel.headers``,
+      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS` (e.g.
       ``otel.resource.attributes``), the dataclass dict is the
       single source of truth. ``new`` wins atomically — no per-key
       rescue from ``existing``. Setting the modeled map to ``{}``
       therefore CLEARS the on-disk block, which is what callers
-      expect when they rotate OTLP credentials or change tenant
-      identifiers.
+      expect when they change tenant identifiers.
 
     * Otherwise, keys only in ``existing`` are preserved (the
       operator-added free-form rescue path) and keys in ``new``
@@ -3054,8 +3143,11 @@ def _deep_merge_nested(
             nv = new[k]
             if isinstance(ev, dict) and isinstance(nv, dict):
                 out[k] = _deep_merge_nested(
-                    ev, nv, path=child,
-                    authoritative_base=authoritative_base, owned_base=owned_base,
+                    ev,
+                    nv,
+                    path=child,
+                    authoritative_base=authoritative_base,
+                    owned_base=owned_base,
                 )
             else:
                 out[k] = nv
@@ -3087,11 +3179,13 @@ def _deep_merge_nested(
 
 def _default_notifications_dict() -> dict[str, Any]:
     from dataclasses import asdict
+
     return asdict(NotificationsConfig())
 
 
 def _default_asset_policy_dict() -> dict[str, Any]:
     from dataclasses import asdict
+
     return asdict(AssetPolicyConfig())
 
 
@@ -3119,11 +3213,7 @@ def _serialize_asset_policy_connectors(cfg: Config, asset_policy: Any) -> None:
         return
     connectors = asset_policy.get("connectors")
     if not connectors:
-        had_connectors = bool(
-            (getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get(
-                "asset_policy.connectors"
-            )
-        )
+        had_connectors = bool((getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get("asset_policy.connectors"))
         if had_connectors:
             asset_policy["connectors"] = {}
         else:
@@ -3191,11 +3281,7 @@ def _serialize_observability(cfg: Config, observability: Any, d: dict[str, Any])
         return
     connectors = observability.get("connectors")
     if not connectors:
-        had_connectors = bool(
-            (getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get(
-                "observability.connectors"
-            )
-        )
+        had_connectors = bool((getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get("observability.connectors"))
         if had_connectors:
             d["observability"] = {"connectors": {}}
         else:
@@ -3221,11 +3307,13 @@ def _serialize_observability(cfg: Config, observability: Any, d: dict[str, Any])
 
 def _disabled_ai_discovery_dict() -> dict[str, Any]:
     from dataclasses import asdict
+
     return asdict(AIDiscoveryConfig(enabled=False))
 
 
 def _default_application_protection_dict() -> dict[str, Any]:
     from dataclasses import asdict
+
     return asdict(ApplicationProtectionConfig())
 
 
@@ -3251,9 +3339,7 @@ def _serialize_application_protection(cfg: Config, block: Any) -> None:
     conns = block.get("connectors")
     if not conns:
         had_connectors = bool(
-            (getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get(
-                "application_protection.connectors"
-            )
+            (getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get("application_protection.connectors")
         )
         if had_connectors:
             block["connectors"] = {}
@@ -3360,8 +3446,7 @@ def _merge_vertex(raw: Any) -> VertexKeyConfig | None:
         region=str(raw.get("region", "") or ""),
         auth_mode=str(raw.get("auth_mode", "service_account") or "service_account"),
         service_account_json_env=str(
-            raw.get("service_account_json_env", "GOOGLE_APPLICATION_CREDENTIALS")
-            or "GOOGLE_APPLICATION_CREDENTIALS"
+            raw.get("service_account_json_env", "GOOGLE_APPLICATION_CREDENTIALS") or "GOOGLE_APPLICATION_CREDENTIALS"
         ),
     )
 
@@ -3641,7 +3726,9 @@ def _merge_asset_type_policy(raw: dict[str, Any] | None, *, runtime: bool) -> As
             runtime_detection=_merge_asset_runtime_detection(raw.get("runtime_detection")),
             registry_empty_action=str(
                 raw.get("registry_empty_action", "deny") or "deny",
-            ).strip().lower(),
+            )
+            .strip()
+            .lower(),
         )
     if not runtime:
         base.runtime_detection = AssetRuntimeDetectionConfig(
@@ -3700,18 +3787,20 @@ def _merge_registries(raw: Any) -> RegistriesConfig:
         kind = raw_kind.lower()
         if kind not in REGISTRY_KINDS:
             _log.warning(
-                "registries.sources[id=%r]: unknown kind %r; coercing to "
-                "'http_yaml'. Valid kinds: %s",
-                sid, raw_kind, ", ".join(REGISTRY_KINDS),
+                "registries.sources[id=%r]: unknown kind %r; coercing to 'http_yaml'. Valid kinds: %s",
+                sid,
+                raw_kind,
+                ", ".join(REGISTRY_KINDS),
             )
             kind = "http_yaml"
         raw_content = str(entry.get("content", "skill") or "skill").strip()
         content = raw_content.lower()
         if content not in REGISTRY_CONTENT_TYPES:
             _log.warning(
-                "registries.sources[id=%r]: unknown content %r; coercing to "
-                "'skill'. Valid content types: %s",
-                sid, raw_content, ", ".join(REGISTRY_CONTENT_TYPES),
+                "registries.sources[id=%r]: unknown content %r; coercing to 'skill'. Valid content types: %s",
+                sid,
+                raw_content,
+                ", ".join(REGISTRY_CONTENT_TYPES),
             )
             content = "skill"
         sync_interval = entry.get("sync_interval_hours", 24)
@@ -3719,18 +3808,20 @@ def _merge_registries(raw: Any) -> RegistriesConfig:
             sync_interval_int = max(0, int(sync_interval))
         except (TypeError, ValueError):
             sync_interval_int = 24
-        sources.append(RegistrySource(
-            id=sid,
-            kind=kind,
-            url=str(entry.get("url", "") or ""),
-            content=content,
-            auth_env=str(entry.get("auth_env", "") or ""),
-            enabled=bool(entry.get("enabled", True)),
-            auto_sync=bool(entry.get("auto_sync", False)),
-            sync_interval_hours=sync_interval_int,
-            last_sync=str(entry.get("last_sync", "") or ""),
-            last_status=str(entry.get("last_status", "") or ""),
-        ))
+        sources.append(
+            RegistrySource(
+                id=sid,
+                kind=kind,
+                url=str(entry.get("url", "") or ""),
+                content=content,
+                auth_env=str(entry.get("auth_env", "") or ""),
+                enabled=bool(entry.get("enabled", True)),
+                auto_sync=bool(entry.get("auto_sync", False)),
+                sync_interval_hours=sync_interval_int,
+                last_sync=str(entry.get("last_sync", "") or ""),
+                last_status=str(entry.get("last_status", "") or ""),
+            )
+        )
     return RegistriesConfig(sources=sources)
 
 
@@ -3747,16 +3838,18 @@ def _merge_asset_rules(raw: Any) -> list[AssetPolicyRule]:
         source_path_contains = entry.get("source_path_contains", [])
         if not isinstance(source_path_contains, list):
             source_path_contains = []
-        rules.append(AssetPolicyRule(
-            name=str(entry.get("name", "") or ""),
-            connector=str(entry.get("connector", "") or ""),
-            reason=str(entry.get("reason", "") or ""),
-            url=str(entry.get("url", "") or ""),
-            command=str(entry.get("command", "") or ""),
-            args_prefix=[str(v) for v in args_prefix],
-            transport=str(entry.get("transport", "") or ""),
-            source_path_contains=[str(v) for v in source_path_contains],
-        ))
+        rules.append(
+            AssetPolicyRule(
+                name=str(entry.get("name", "") or ""),
+                connector=str(entry.get("connector", "") or ""),
+                reason=str(entry.get("reason", "") or ""),
+                url=str(entry.get("url", "") or ""),
+                command=str(entry.get("command", "") or ""),
+                args_prefix=[str(v) for v in args_prefix],
+                transport=str(entry.get("transport", "") or ""),
+                source_path_contains=[str(v) for v in source_path_contains],
+            )
+        )
     return rules
 
 
@@ -3928,47 +4021,99 @@ def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
     logs_raw = _as_mapping(raw.get("logs"))
     metrics_raw = _as_mapping(raw.get("metrics"))
     batch_raw = _as_mapping(raw.get("batch"))
-    tls_raw = _as_mapping(raw.get("tls"))
     resource_raw = _as_mapping(raw.get("resource"))
+    destinations: list[OTelDestinationConfig] = []
+    for item in raw.get("destinations") or []:
+        if not isinstance(item, dict):
+            continue
+        dest_traces = _as_mapping(item.get("traces"))
+        dest_logs = _as_mapping(item.get("logs"))
+        dest_metrics = _as_mapping(item.get("metrics"))
+        dest_batch = _as_mapping(item.get("batch"))
+        dest_tls = _as_mapping(item.get("tls"))
+        dest_span_filter = _as_mapping(item.get("span_filter"))
+        required_filter_attrs = dest_span_filter.get("require_attributes", [])
+        if not isinstance(required_filter_attrs, (list, tuple)):
+            required_filter_attrs = []
+        filter_operations: list[OTelSpanFilterOperationConfig] = []
+        for operation in dest_span_filter.get("operations") or []:
+            if not isinstance(operation, dict):
+                continue
+            operation_attrs = operation.get("require_attributes", [])
+            if not isinstance(operation_attrs, (list, tuple)):
+                operation_attrs = []
+            filter_operations.append(
+                OTelSpanFilterOperationConfig(
+                    name=str(operation.get("name", "") or ""),
+                    require_attributes=[str(value) for value in operation_attrs if str(value).strip()],
+                )
+            )
+        destinations.append(
+            OTelDestinationConfig(
+                name=str(item.get("name", "") or ""),
+                preset=str(item.get("preset", "") or ""),
+                enabled=_coerce_bool(item.get("enabled", True), default=True),
+                protocol=str(item.get("protocol", "grpc") or "grpc"),
+                endpoint=str(item.get("endpoint", "") or ""),
+                headers={str(k): str(v) for k, v in _as_mapping(item.get("headers")).items()},
+                tls=OTelTLSConfig(
+                    insecure=_coerce_bool(dest_tls.get("insecure", False)),
+                    ca_cert=str(dest_tls.get("ca_cert", "") or ""),
+                ),
+                traces=OTelTracesConfig(
+                    enabled=_coerce_bool(dest_traces.get("enabled", False)),
+                    endpoint=str(dest_traces.get("endpoint", "") or ""),
+                    protocol=str(dest_traces.get("protocol", "") or ""),
+                    url_path=str(dest_traces.get("url_path", "") or ""),
+                ),
+                logs=OTelLogsConfig(
+                    enabled=_coerce_bool(dest_logs.get("enabled", False)),
+                    endpoint=str(dest_logs.get("endpoint", "") or ""),
+                    protocol=str(dest_logs.get("protocol", "") or ""),
+                    url_path=str(dest_logs.get("url_path", "") or ""),
+                ),
+                metrics=OTelMetricsConfig(
+                    enabled=_coerce_bool(dest_metrics.get("enabled", False)),
+                    export_interval_s=_as_int(dest_metrics.get("export_interval_s", 60), 60),
+                    temporality=str(dest_metrics.get("temporality", "delta") or "delta"),
+                    endpoint=str(dest_metrics.get("endpoint", "") or ""),
+                    protocol=str(dest_metrics.get("protocol", "") or ""),
+                    url_path=str(dest_metrics.get("url_path", "") or ""),
+                ),
+                batch=OTelBatchConfig(
+                    max_export_batch_size=_as_int(dest_batch.get("max_export_batch_size", 512), 512),
+                    scheduled_delay_ms=_as_int(dest_batch.get("scheduled_delay_ms", 5000), 5000),
+                    max_queue_size=_as_int(dest_batch.get("max_queue_size", 2048), 2048),
+                ),
+                span_filter=OTelSpanFilterConfig(
+                    require_operation=str(dest_span_filter.get("require_operation", "") or ""),
+                    require_attributes=[str(value) for value in required_filter_attrs if str(value).strip()],
+                    operations=filter_operations,
+                ),
+            )
+        )
     return OTelConfig(
-        enabled=raw.get("enabled", False),
-        protocol=raw.get("protocol", "grpc"),
-        endpoint=raw.get("endpoint", ""),
-        headers=_as_mapping(raw.get("headers")),
-        tls=OTelTLSConfig(
-            insecure=tls_raw.get("insecure", False),
-            ca_cert=tls_raw.get("ca_cert", ""),
-        ),
-        traces=OTelTracesConfig(
-            enabled=traces_raw.get("enabled", True),
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        traces=OTelTracePolicyConfig(
             sampler=traces_raw.get("sampler", "always_on"),
             sampler_arg=traces_raw.get("sampler_arg", "1.0"),
-            endpoint=traces_raw.get("endpoint", ""),
-            protocol=traces_raw.get("protocol", ""),
-            url_path=traces_raw.get("url_path", ""),
         ),
-        logs=OTelLogsConfig(
-            enabled=logs_raw.get("enabled", True),
-            emit_individual_findings=logs_raw.get("emit_individual_findings", False),
-            endpoint=logs_raw.get("endpoint", ""),
-            protocol=logs_raw.get("protocol", ""),
-            url_path=logs_raw.get("url_path", ""),
+        logs=OTelLogPolicyConfig(
+            emit_individual_findings=_coerce_bool(logs_raw.get("emit_individual_findings", False)),
         ),
-        metrics=OTelMetricsConfig(
-            enabled=metrics_raw.get("enabled", True),
-            export_interval_s=metrics_raw.get("export_interval_s", 60),
-            endpoint=metrics_raw.get("endpoint", ""),
-            protocol=metrics_raw.get("protocol", ""),
-            url_path=metrics_raw.get("url_path", ""),
+        metrics=OTelMetricPolicyConfig(
+            export_interval_s=_as_int(metrics_raw.get("export_interval_s", 60), 60),
+            temporality=metrics_raw.get("temporality", "delta"),
         ),
         batch=OTelBatchConfig(
-            max_export_batch_size=batch_raw.get("max_export_batch_size", 512),
-            scheduled_delay_ms=batch_raw.get("scheduled_delay_ms", 5000),
-            max_queue_size=batch_raw.get("max_queue_size", 2048),
+            max_export_batch_size=_as_int(batch_raw.get("max_export_batch_size", 512), 512),
+            scheduled_delay_ms=_as_int(batch_raw.get("scheduled_delay_ms", 5000), 5000),
+            max_queue_size=_as_int(batch_raw.get("max_queue_size", 2048), 2048),
         ),
         resource=OTelResourceConfig(
             attributes=_as_mapping(resource_raw.get("attributes")),
         ),
+        destinations=destinations,
     )
 
 
@@ -4036,18 +4181,20 @@ def _merge_webhooks(raw: list[dict[str, Any]] | None) -> list[WebhookConfig]:
                 cooldown = None
             if cooldown is not None and cooldown < 0:
                 cooldown = None
-        webhooks.append(WebhookConfig(
-            name=str(entry.get("name", "") or ""),
-            url=entry.get("url", ""),
-            type=entry.get("type", "generic"),
-            secret_env=entry.get("secret_env", ""),
-            room_id=entry.get("room_id", ""),
-            min_severity=entry.get("min_severity", "HIGH"),
-            events=entry.get("events", []),
-            timeout_seconds=entry.get("timeout_seconds", 10),
-            cooldown_seconds=cooldown,
-            enabled=entry.get("enabled", False),
-        ))
+        webhooks.append(
+            WebhookConfig(
+                name=str(entry.get("name", "") or ""),
+                url=entry.get("url", ""),
+                type=entry.get("type", "generic"),
+                secret_env=entry.get("secret_env", ""),
+                room_id=entry.get("room_id", ""),
+                min_severity=entry.get("min_severity", "HIGH"),
+                events=entry.get("events", []),
+                timeout_seconds=entry.get("timeout_seconds", 10),
+                cooldown_seconds=cooldown,
+                enabled=entry.get("enabled", False),
+            )
+        )
     return webhooks
 
 
@@ -4079,16 +4226,8 @@ def _merge_observability_connectors(
         sinks = entry.get("audit_sinks")
         webhooks_raw = entry.get("webhooks")
         out[str(name)] = PerConnectorObservability(
-            audit_sinks=(
-                [dict(s) for s in sinks if isinstance(s, dict)]
-                if isinstance(sinks, list)
-                else None
-            ),
-            webhooks=(
-                _merge_webhooks(webhooks_raw)
-                if isinstance(webhooks_raw, list)
-                else None
-            ),
+            audit_sinks=([dict(s) for s in sinks if isinstance(s, dict)] if isinstance(sinks, list) else None),
+            webhooks=(_merge_webhooks(webhooks_raw) if isinstance(webhooks_raw, list) else None),
         )
     return out
 
@@ -4173,6 +4312,7 @@ def _apply_instance_overlay(out: LLMConfig, data_dir: str) -> None:
     overlay_path = os.path.join(data_dir, "custom-providers.json")
     try:
         import json as _json
+
         with open(overlay_path, encoding="utf-8") as f:
             data = _json.load(f)
     except (OSError, ValueError):
@@ -4242,12 +4382,19 @@ def _load_dotenv_into_os(data_dir: str) -> None:
 
 def _warn_plaintext_secrets(cfg: Config) -> None:
     """Emit deprecation warnings for plain-text secrets in config.yaml."""
+
     def _warn(section: str, field: str, env_default: str) -> None:
         _log.warning(
             "%s.%s contains a plain-text secret in config.yaml — "
             "migrate it to ~/.defenseclaw/.env as %s and set %s.%s_env=%s instead",
-            section, field, env_default, section, field, env_default,
+            section,
+            field,
+            env_default,
+            section,
+            field,
+            env_default,
         )
+
     if cfg.llm.api_key:
         _warn("llm", "api_key", "DEFENSECLAW_LLM_KEY")
     if cfg.inspect_llm.api_key:
@@ -4631,9 +4778,7 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
         sources = NotificationSourceFilter()
 
     dedup_raw = raw.get("dedup_window", defaults.dedup_window)
-    dedup_window = (
-        str(dedup_raw).strip() if dedup_raw not in (None, "") else defaults.dedup_window
-    )
+    dedup_window = str(dedup_raw).strip() if dedup_raw not in (None, "") else defaults.dedup_window
 
     try:
         max_per_minute = int(raw.get("max_per_minute", defaults.max_per_minute))

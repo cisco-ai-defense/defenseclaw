@@ -36,15 +36,19 @@ Design contract for every migration:
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
 import secrets
 import shutil
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import click
+import yaml
 
 from defenseclaw import ux
 
@@ -62,6 +66,48 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
         m = re.match(r"\d+", part)
         out.append(int(m.group(0)) if m else 0)
     return tuple(out)
+
+
+def _ensure_legacy_openclaw_restart_shim(
+    from_version: str,
+    to_version: str,
+    data_dir: str,
+) -> None:
+    """Prevent pre-0.6.1 upgraders from crashing when ``openclaw`` is absent.
+
+    The 0.4.0-0.6.0 ``cmd_upgrade`` path installs the target wheel, imports
+    this module, runs migrations, and then calls ``subprocess.run(["openclaw",
+    "gateway", "restart"], check=False)``. If ``openclaw`` is not installed,
+    Python raises ``FileNotFoundError`` before ``check=False`` can matter,
+    aborting an otherwise successful upgrade. We cannot patch those already
+    released command modules, but we can provide a process-local PATH shim
+    before their ``finally`` block runs.
+    """
+    if os.name == "nt":
+        return
+    if _ver_tuple(to_version) < _ver_tuple("0.8.0"):
+        return
+    if _ver_tuple(from_version) >= _ver_tuple("0.6.1"):
+        return
+    if shutil.which("openclaw"):
+        return
+
+    shim_dir = os.path.join(data_dir, ".upgrade-shims")
+    shim_path = os.path.join(shim_dir, "openclaw")
+    try:
+        os.makedirs(shim_dir, mode=0o700, exist_ok=True)
+        with open(shim_path, "w", encoding="utf-8") as fh:
+            fh.write(
+                "#!/bin/sh\nprintf '%s\\n' 'openclaw CLI not found; skipping automatic gateway restart' >&2\nexit 127\n"
+            )
+        os.chmod(shim_path, 0o700)
+    except OSError as exc:
+        ux.warn(f"could not create legacy openclaw restart shim: {exc}", indent="    ")
+        return
+
+    path_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+    if shim_dir not in path_parts:
+        os.environ["PATH"] = os.pathsep.join([shim_dir, *path_parts])
 
 
 # ---------------------------------------------------------------------------
@@ -87,10 +133,19 @@ class MigrationContext:
     data_dir: str
     from_version: str = ""
     to_version: str = ""
+    config_path: str = ""
     # changes accumulates a one-line summary per applied step. The
     # upgrade command surfaces these so an operator can audit what the
     # no-touch migration actually changed under their HOME.
     changes: list[str] = field(default_factory=list)
+
+    def active_config_path(self) -> str:
+        if self.config_path:
+            return self.config_path
+        override = os.environ.get("DEFENSECLAW_CONFIG", "").strip()
+        if override:
+            return override
+        return os.path.join(self.data_dir, "config.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +244,7 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
                 existing["enabled"] = True
                 changes.append("enabled plugins.entries.defenseclaw")
                 changed = True
-        install_path = os.path.join(
-            os.path.dirname(oc_json), "extensions", "defenseclaw"
-        )
+        install_path = os.path.join(os.path.dirname(oc_json), "extensions", "defenseclaw")
         load = plugins.setdefault("load", {})
         if isinstance(load, dict):
             paths = load.setdefault("paths", [])
@@ -371,9 +424,7 @@ def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
             updates={"DEFENSECLAW_GATEWAY_TOKEN": legacy},
             removes=("OPENCLAW_GATEWAY_TOKEN",),
         ):
-            ctx.changes.append(
-                "renamed legacy OPENCLAW_GATEWAY_TOKEN → DEFENSECLAW_GATEWAY_TOKEN in .env"
-            )
+            ctx.changes.append("renamed legacy OPENCLAW_GATEWAY_TOKEN → DEFENSECLAW_GATEWAY_TOKEN in .env")
         return
 
     # No token at all — synthesise a 32-byte CSPRNG hex string. Use
@@ -384,10 +435,7 @@ def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
         env_path,
         updates={"DEFENSECLAW_GATEWAY_TOKEN": token},
     ):
-        ctx.changes.append(
-            "generated first-boot DEFENSECLAW_GATEWAY_TOKEN at "
-            f"{env_path} (mode 0600, 32-byte CSPRNG)"
-        )
+        ctx.changes.append(f"generated first-boot DEFENSECLAW_GATEWAY_TOKEN at {env_path} (mode 0600, 32-byte CSPRNG)")
 
 
 def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
@@ -405,7 +453,7 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
     ``config.yaml`` to the new name so the upgraded clients read the
     same key the sidecar minted.
     """
-    config_path = os.path.join(ctx.data_dir, "config.yaml")
+    config_path = ctx.active_config_path()
     if not os.path.isfile(config_path):
         return
     try:
@@ -423,10 +471,8 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
     rewritten = 0
     for line in content.splitlines(keepends=True):
         stripped = line.lstrip()
-        if (stripped.startswith("token_env:")
-                and "OPENCLAW_GATEWAY_TOKEN" in line):
-            new_lines.append(line.replace(
-                "OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN", 1))
+        if stripped.startswith("token_env:") and "OPENCLAW_GATEWAY_TOKEN" in line:
+            new_lines.append(line.replace("OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN", 1))
             rewritten += 1
             continue
         new_lines.append(line)
@@ -443,10 +489,7 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
     except OSError as exc:
         ux.warn(f"could not migrate token_env in {config_path}: {exc}", indent="    ")
         return
-    ctx.changes.append(
-        f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml "
-        "()"
-    )
+    ctx.changes.append(f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml ()")
 
 
 # Files under data_dir that carry credentials or pristine backups and
@@ -516,8 +559,7 @@ def _migrate_0_4_0_remove_legacy_codex_env(ctx: MigrationContext) -> None:
         try:
             os.remove(path)
             ctx.changes.append(
-                f"removed legacy codex env override {name} "
-                "(S8.1: replaced by ~/.codex/config.toml patch)"
+                f"removed legacy codex env override {name} (S8.1: replaced by ~/.codex/config.toml patch)"
             )
         except OSError as exc:
             ux.warn(f"could not remove {path}: {exc}", indent="    ")
@@ -542,7 +584,7 @@ def _migrate_0_4_0_normalize_claw_mode(ctx: MigrationContext) -> None:
     so the operator either edited them manually or the upgrade is
     harmless.
     """
-    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    cfg_path = ctx.active_config_path()
     if not os.path.isfile(cfg_path):
         return
 
@@ -571,15 +613,13 @@ def _migrate_0_4_0_normalize_claw_mode(ctx: MigrationContext) -> None:
         )
         new_body, count = pattern.subn(
             lambda m, repl=replacement: (
-                f"{m.group('prefix')}{m.group('quote')}{repl}"
-                f"{m.group('quote')}{m.group('suffix')}"
+                f"{m.group('prefix')}{m.group('quote')}{repl}{m.group('quote')}{m.group('suffix')}"
             ),
             new_body,
         )
         if count:
             ctx.changes.append(
-                f"normalized claw.mode: {legacy} → {replacement} "
-                "(S3.1: legacy enum dropped from OTel schema)"
+                f"normalized claw.mode: {legacy} → {replacement} (S3.1: legacy enum dropped from OTel schema)"
             )
 
     if new_body == body:
@@ -610,9 +650,7 @@ def _migrate_0_4_0_seed_active_connector(ctx: MigrationContext) -> None:
     # Best-effort active-connector inference. We don't load the full
     # config (it has v3-only fields) but we do read claw.mode out of
     # the raw YAML so the seed reflects the operator's actual setup.
-    name = _read_active_connector_from_yaml(
-        os.path.join(ctx.data_dir, "config.yaml")
-    )
+    name = _read_active_connector_from_yaml(ctx.active_config_path())
     if not name:
         # Pre-v3 default — config.yaml's claw.mode defaulted to
         # "openclaw" and that is the only connector that pre-v3
@@ -621,10 +659,7 @@ def _migrate_0_4_0_seed_active_connector(ctx: MigrationContext) -> None:
 
     payload = json.dumps({"name": name}, ensure_ascii=False)
     if _atomic_write_text(state_path, payload, mode=0o600):
-        ctx.changes.append(
-            f"seeded active_connector.json with {name!r} "
-            "(pre-v3 had no connector state file)"
-        )
+        ctx.changes.append(f"seeded active_connector.json with {name!r} (pre-v3 had no connector state file)")
 
 
 _GUARDRAIL_BLOCK_RE = re.compile(
@@ -689,7 +724,7 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     file. Everything else under ``guardrail:`` (comments, alphabetic
     or grouped key ordering, embedded blanks) survives byte-for-byte.
     """
-    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    cfg_path = ctx.active_config_path()
     if not os.path.isfile(cfg_path):
         return
 
@@ -722,7 +757,9 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     terminator = "\r\n" if block_match.group(0).endswith("\r\n") else "\n"
     insertion = f"{indent}hook_fail_mode: open{terminator}"
     new_text = _GUARDRAIL_BLOCK_RE.sub(
-        lambda m: m.group(0) + insertion, text, count=1,
+        lambda m: m.group(0) + insertion,
+        text,
+        count=1,
     )
 
     if new_text == text:
@@ -1331,9 +1368,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
     # flat layout. ``hasRegoFiles`` in the Go loader is satisfied by a
     # single .rego file, so we mirror that contract here.
     canonical_rego_present = any(
-        name.endswith(".rego")
-        for name in os.listdir(nested_dir)
-        if os.path.isfile(os.path.join(nested_dir, name))
+        name.endswith(".rego") for name in os.listdir(nested_dir) if os.path.isfile(os.path.join(nested_dir, name))
     )
     if not canonical_rego_present:
         return
@@ -1404,10 +1439,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
     if identical:
         try:
             os.remove(flat_data)
-            ctx.changes.append(
-                f"removed duplicate {flat_data} "
-                f"(canonical {nested_data} is the one the loader reads)"
-            )
+            ctx.changes.append(f"removed duplicate {flat_data} (canonical {nested_data} is the one the loader reads)")
         except OSError as exc:
             ux.warn(f"could not remove {flat_data}: {exc}", indent="    ")
         return
@@ -1424,8 +1456,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
         suffix += 1
         if suffix > 100:  # noqa: PLR2004 — sanity cap on degenerate dirs
             ux.warn(
-                f"too many existing backups at {base_backup}.* — "
-                "leaving flat data.json in place",
+                f"too many existing backups at {base_backup}.* — leaving flat data.json in place",
                 indent="    ",
             )
             return
@@ -1515,7 +1546,7 @@ def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
     ``observe`` is left at observe — the same posture they had before
     the upgrade, just expressed through the surviving knob.
     """
-    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    cfg_path = ctx.active_config_path()
     if not os.path.isfile(cfg_path):
         return
 
@@ -1638,7 +1669,7 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     name via ``defenseclaw setup gateway``), the migration leaves it
     alone. Operator intent always wins over migration defaults.
     """
-    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    cfg_path = ctx.active_config_path()
     if not os.path.isfile(cfg_path):
         return
 
@@ -1687,7 +1718,9 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     )
 
     new_body, count = pattern.subn(
-        lambda m: f"{m.group('prefix')}{m.group('quote')}DEFENSECLAW_GATEWAY_TOKEN{m.group('quote')}{m.group('suffix')}",
+        lambda m: (
+            f"{m.group('prefix')}{m.group('quote')}DEFENSECLAW_GATEWAY_TOKEN{m.group('quote')}{m.group('suffix')}"
+        ),
         body,
     )
     if count == 0:
@@ -1741,9 +1774,81 @@ def _migrate_0_8_0(ctx: MigrationContext) -> None:
     _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx)
 
 
+def _migrate_config_v7_named_otel_destinations(ctx: MigrationContext) -> bool:
+    """Persist the v6 flat OTel exporter as one v7 named destination.
+
+    ``internal/config.Load`` deliberately performs a write-free, in-memory
+    conversion so the gateway can always start, including when a release
+    migration was interrupted. This migration is keyed to the configuration
+    shape rather than the release cursor: 0.8.x releases already exist, so a
+    host may have marked the 0.8.0 release migration before named destinations
+    shipped. Checking the idempotent config shape on every compatible upgrade
+    covers those hosts without replaying any release-owned migration.
+
+    Upgrade is the correct write boundary: it has already snapshotted the data
+    directory, and the shared observability writer adds its own one-time config
+    backup before atomically replacing the file. Reusing that writer keeps
+    explicit ``migrate-otel --apply``, setup commands, and release upgrades on
+    exactly the same lossless conversion.
+    """
+    # Pre-0.8 upgraders install the target wheel while the old CLI process is
+    # still running, then import the new migrations module in-process. Their
+    # ``sys.modules`` can therefore contain old transitive dependencies even
+    # though this function came from the new wheel. In particular, 0.6.6 keeps
+    # ``defenseclaw.config`` cached without ``locked_config_yaml``.
+    #
+    # Do not repair that mixed graph with importlib.reload(): reloading shared
+    # modules replaces exception classes and function globals underneath the
+    # still-running legacy CLI. That can make an exception raised by the new
+    # safety module impossible for callers holding the old class object to
+    # catch, and can invalidate connector-path monkeypatches. Instead, perform
+    # the atomic writer operation in an isolated child interpreter. ``-I``
+    # prevents the current directory or PYTHONPATH from shadowing the wheel
+    # that was just installed, while the normal process environment (including
+    # documented OTel endpoint variables) remains available to the writer.
+    script = (
+        "import json, sys\n"
+        "from defenseclaw.observability.writer import migrate_flat_otel\n"
+        "result = migrate_flat_otel(sys.argv[1], dry_run=False)\n"
+        "print(json.dumps({'name': result.name, "
+        "'yaml_changes': result.yaml_changes}))\n"
+    )
+    proc = subprocess.run(  # noqa: S603 - trusted interpreter and static script
+        [sys.executable, "-I", "-c", script, ctx.data_dir],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        detail = next(
+            (line.strip() for line in reversed(proc.stderr.splitlines()) if line.strip()),
+            f"child interpreter exited {proc.returncode}",
+        )
+        raise RuntimeError(f"isolated observability migration failed: {detail}")
+
+    payload_line = next(
+        (line.strip() for line in reversed(proc.stdout.splitlines()) if line.strip()),
+        "",
+    )
+    try:
+        payload = json.loads(payload_line)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("isolated observability migration returned an invalid result") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("yaml_changes"), list):
+        raise RuntimeError("isolated observability migration returned an invalid result")
+    if not payload["yaml_changes"]:
+        return False
+    name = str(payload.get("name") or "generic-otlp")
+    ctx.changes.append(
+        f"migrated the legacy flat OTel exporter to named otel.destinations[{name}] and saved a pre-migration backup"
+    )
+    return True
+
+
 def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
     """Fold the removed guardrail_runtime.json overlay into config.yaml."""
-    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    cfg_path = ctx.active_config_path()
     runtime_path = os.path.join(ctx.data_dir, "guardrail_runtime.json")
     if not os.path.isfile(runtime_path):
         return
@@ -1764,12 +1869,30 @@ def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
         ux.warn(f"{runtime_path} is not an object; gateway startup will retry migration", indent="    ")
         return
 
+    if _guardrail_runtime_has_invalid_supported_values(runtime):
+        ux.warn(
+            f"{runtime_path} contains invalid supported values; preserving it for repair",
+            indent="    ",
+        )
+        return
     updates = _guardrail_runtime_updates(runtime)
+    if runtime and not updates:
+        ux.warn(
+            f"{runtime_path} contains no valid supported values; preserving it for repair",
+            indent="    ",
+        )
+        return
     text = _read_config_text(cfg_path)
     if text is None:
         return
 
     new_text = _patch_guardrail_runtime_yaml(text, updates)
+    if not _guardrail_runtime_yaml_contains_updates(new_text, updates):
+        ux.warn(
+            f"could not verify guardrail runtime values in {cfg_path}; preserving {runtime_path}",
+            indent="    ",
+        )
+        return
     if new_text != text and not _atomic_write_text(cfg_path, new_text):
         ux.warn(f"could not write {cfg_path}", indent="    ")
         return
@@ -1782,6 +1905,34 @@ def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
 
     migrated = ", ".join(path for path, _ in updates) if updates else "no supported values"
     ctx.changes.append(f"migrated guardrail_runtime.json into config.yaml ({migrated})")
+
+
+def _guardrail_runtime_yaml_contains_updates(
+    text: str,
+    updates: list[tuple[str, str]],
+) -> bool:
+    try:
+        parsed = yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    guardrail = parsed.get("guardrail")
+    if not isinstance(guardrail, dict):
+        return not updates
+    for path, rendered in updates:
+        current: object = guardrail
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False
+            current = current[part]
+        try:
+            expected = yaml.safe_load(rendered)
+        except yaml.YAMLError:
+            return False
+        if current != expected:
+            return False
+    return True
 
 
 def _guardrail_runtime_updates(runtime: dict) -> list[tuple[str, str]]:
@@ -1803,6 +1954,20 @@ def _guardrail_runtime_updates(runtime: dict) -> list[tuple[str, str]]:
     if isinstance(runtime.get("hilt_min_severity"), str) and runtime["hilt_min_severity"].strip():
         updates.append(("hilt.min_severity", _yaml_scalar(runtime["hilt_min_severity"].strip().upper())))
     return updates
+
+
+def _guardrail_runtime_has_invalid_supported_values(runtime: dict) -> bool:
+    validators = {
+        "mode": lambda value: isinstance(value, str) and value.strip().lower() in {"observe", "action"},
+        "scanner_mode": lambda value: isinstance(value, str) and value.strip().lower() in {"local", "remote", "both"},
+        "block_message": lambda value: isinstance(value, str),
+        "connector": lambda value: isinstance(value, str) and bool(value.strip()),
+        "hilt_enabled": lambda value: isinstance(value, bool),
+        "hilt_min_severity": lambda value: (
+            isinstance(value, str) and value.strip().upper() in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}
+        ),
+    }
+    return any(key in runtime and not validator(runtime[key]) for key, validator in validators.items())
 
 
 def _patch_guardrail_runtime_yaml(text: str, updates: list[tuple[str, str]]) -> str:
@@ -1930,7 +2095,7 @@ def _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx: MigrationContext) -> None
     block. It does not YAML round-trip the file, so comments, ordering, scalar
     quoting, and CRLF line endings survive.
     """
-    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    cfg_path = ctx.active_config_path()
     if not os.path.isfile(cfg_path):
         return
 
@@ -1992,11 +2157,7 @@ def _preserve_legacy_sink_tls_skip_verify_in_yaml_block(body: str) -> tuple[str,
 
             if child.key == "insecure_skip_verify":
                 has_insecure_skip_verify = True
-            elif (
-                child.key == "verify_tls"
-                and verify_idx is None
-                and _is_falsey_yaml_bool_literal(child.value)
-            ):
+            elif child.key == "verify_tls" and verify_idx is None and _is_falsey_yaml_bool_literal(child.value):
                 verify_idx = j
                 verify_indent = child.indent
             j += 1
@@ -2156,12 +2317,25 @@ def run_migrations(
     """
     from defenseclaw import migration_state
 
+    if not all(hasattr(migration_state, attr) for attr in ("detect_schema", "is_future_schema", "FutureSchemaError")):
+        migration_state = importlib.reload(migration_state)
+    import defenseclaw as defenseclaw_pkg
+
+    if getattr(defenseclaw_pkg, "__version__", "") != to_version:
+        importlib.reload(defenseclaw_pkg)
+    cmd_version = sys.modules.get("defenseclaw.commands.cmd_version")
+    if cmd_version is not None:
+        importlib.reload(cmd_version)
+
     if data_dir is None:
         data_dir = os.environ.get("DEFENSECLAW_HOME") or os.path.expanduser("~/.defenseclaw")
+
+    _ensure_legacy_openclaw_restart_shim(from_version, to_version, data_dir)
 
     from_t = _ver_tuple(from_version)
     to_t = _ver_tuple(to_version)
     same_version_reapply = from_t == to_t
+    applied_count = 0
 
     # Load the cursor; treat "missing" / "unparseable" / "future
     # schema" as "first upgrade on this host" and bootstrap from
@@ -2204,7 +2378,35 @@ def run_migrations(
         except OSError as exc:
             ux.warn(f"could not persist migration cursor: {exc}", indent="    ")
 
-    applied_count = 0
+    # Configuration-schema migrations are intentionally separate from the
+    # release cursor. A host may already carry an applied 0.8.0 cursor from a
+    # published build that predates named OTel destinations. The flat/v6
+    # shape itself is the durable applicability check, and the shared writer
+    # is atomic + idempotent. This runs only after validating the cursor so a
+    # downgrade facing newer cursor state refuses before mutating config.
+    # Gate on the target so tests/downgrades to older releases never receive a
+    # schema they do not understand.
+    if to_t >= _ver_tuple("0.8.0"):
+        schema_ctx = MigrationContext(
+            openclaw_home=openclaw_home,
+            data_dir=data_dir,
+            from_version=from_version,
+            to_version=to_version,
+        )
+        try:
+            if _migrate_config_v7_named_otel_destinations(schema_ctx):
+                ux.ok("Configuration schema v7 OTel migration applied.", indent="    ")
+                applied_count += 1
+        except Exception as exc:  # noqa: BLE001 - runtime fallback keeps startup safe
+            ux.warn(
+                f"configuration schema v7 OTel migration deferred: {exc}",
+                indent="    ",
+            )
+            ux.subhead(
+                "the gateway will use its in-memory compatibility route; "
+                "repair with 'defenseclaw setup observability migrate-otel --apply'",
+                indent="    ",
+            )
 
     for ver, desc, fn in MIGRATIONS:
         ver_t = _ver_tuple(ver)
@@ -2260,7 +2462,9 @@ def run_migrations(
             continue
 
         migration_state.mark_applied(
-            state, ver, package_version=to_version,
+            state,
+            ver,
+            package_version=to_version,
         )
         applied_count += 1
 

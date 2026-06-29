@@ -64,7 +64,7 @@ _UPGRADE_MANIFEST_FILENAME = "upgrade-manifest.json"
     default=False,
     help=(
         "Proceed even when release artifacts cannot be cryptographically "
-        "verified (missing/unsigned checksums.txt, missing cosign, or "
+        "verified (missing/unsigned checksums.txt, invalid signature, or "
         "missing upgrade-manifest.json). UNSAFE: only use when you knowingly "
         "accept the supply-chain risk."
     ),
@@ -145,7 +145,8 @@ def upgrade(
         )
         if checksums is None:
             # F-0581 (BREAKING CHANGE): the only signed integrity manifest is
-            # the Sigstore-verified checksums.txt. GitHub's per-asset `digest`
+            # checksums.txt when it is either Sigstore-verified or accepted
+            # with an explicit missing-cosign warning. GitHub's per-asset `digest`
             # values come from the same (untrusted, remote) release service and
             # are UNSIGNED metadata — a compromised/spoofed release endpoint can
             # serve matching bytes + digest, so they are NOT a substitute for a
@@ -159,7 +160,7 @@ def upgrade(
             # verification (we do not pretend unsigned digests are trusted).
             if not allow_unverified:
                 ux.err(
-                    "No Sigstore-verified checksums.txt is available for this "
+                    "No trusted checksums.txt is available for this "
                     "release — refusing to install release artifacts that "
                     "cannot be cryptographically integrity-verified. GitHub "
                     "per-asset digests are unsigned metadata and are NOT "
@@ -181,7 +182,7 @@ def upgrade(
                 indent="  ",
             )
         else:
-            ux.ok("Checksum manifest verified (checksums.txt)")
+            ux.ok("Checksum manifest accepted (checksums.txt)")
             # F-0582 (BREAKING CHANGE): do NOT silently fill missing artifact
             # entries from unsigned GitHub asset digests. Doing so would
             # downgrade those artifacts from signed to unsigned authentication
@@ -267,10 +268,22 @@ def upgrade(
             else os.path.expanduser("~/.defenseclaw")
         )
 
-        from defenseclaw.migrations import run_migrations
-        count = run_migrations(current_version, target_version, openclaw_home, data_dir)
+        migration_failed = False
+        try:
+            count = _run_installed_migrations(
+                current_version,
+                target_version,
+                openclaw_home,
+                data_dir,
+                os_name=os_name,
+            )
+        except subprocess.CalledProcessError:
+            migration_failed = True
+            count = 0
         click.echo()
-        if count == 0:
+        if migration_failed:
+            ux.warn("Migration runner failed; upgrade will continue. Run: defenseclaw doctor --fix")
+        elif count == 0:
             ux.ok("No migrations needed")
         else:
             ux.ok(f"Applied {count} migration(s)")
@@ -519,10 +532,13 @@ def _download_checksums(
     parse, not just download, because a 200 with garbage body would
     otherwise look "verified" to the caller.
 
-    F-0202: a downloaded ``checksums.txt`` is only trusted once its
-    Sigstore signature verifies. ``_verify_checksums_sigstore`` fails
-    closed when the manifest is unsigned/unverifiable unless the operator
-    passed ``allow_unverified``.
+    F-0202: a downloaded ``checksums.txt`` is trusted when either its
+    Sigstore signature verifies or the release shipped signature assets but
+    the local host cannot run cosign. The latter is a deliberate operator-UX
+    compromise: checksum validation still protects against a corrupt or
+    swapped payload, and the command prints a warning naming the missing
+    verifier. Other unsigned/unverifiable states still fail closed unless the
+    operator passed ``allow_unverified``.
     """
     dest = _download_optional_release_asset(version, _CHECKSUMS_FILENAME, staging_dir)
     if not dest:
@@ -585,14 +601,17 @@ def _verify_checksums_sigstore(
 ) -> None:
     """Verify checksums.txt with its Sigstore cert/signature.
 
-    Fails closed (``SystemExit``) when the manifest cannot be
-    cryptographically authenticated, unless ``allow_unverified`` is set:
+    Fails closed (``SystemExit``) when the manifest cannot be trusted, unless
+    ``allow_unverified`` is set:
 
     * F-0202: an unsigned manifest (no ``.sig``/``.pem`` assets, or only
       one of them) is untrusted — a checksum match against an unsigned
       manifest proves nothing about provenance.
-    * F-0704: a manifest that ships Sigstore assets but cannot be verified
-      because ``cosign`` is missing must not be downgraded to "unsigned".
+    * Bad Sigstore signatures are untrusted.
+    * Missing local ``cosign`` is a warning, not a hard stop, when both
+      Sigstore assets are present. The operator still gets SHA-256 checksum
+      validation and an explicit reminder to install cosign for provenance
+      verification.
     """
     sig_path = _download_optional_release_asset(version, f"{_CHECKSUMS_FILENAME}.sig", staging_dir)
     cert_path = _download_optional_release_asset(version, f"{_CHECKSUMS_FILENAME}.pem", staging_dir)
@@ -615,11 +634,11 @@ def _verify_checksums_sigstore(
 
     cosign = shutil.which("cosign")
     if not cosign:
-        _fail_unsigned_checksums(
+        ux.warn(
             "checksums.txt Sigstore signature is present, but cosign was "
-            "not found on PATH — refusing to downgrade signed verification "
-            "to unsigned.",
-            allow_unverified,
+            "not found on PATH; continuing with checksum verification only. "
+            "Install cosign to verify release provenance.",
+            indent="  ",
         )
         return
 
@@ -1352,6 +1371,68 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
                 os.remove(symlink)
             os.symlink(venv_bin, symlink)
     ux.ok("Python CLI installed")
+
+
+def _run_installed_migrations(
+    from_version: str,
+    to_version: str,
+    openclaw_home: str,
+    data_dir: str,
+    *,
+    os_name: str | None = None,
+) -> int:
+    """Run migrations in the freshly installed managed venv.
+
+    ``defenseclaw upgrade`` replaces the wheel while this command is already
+    running. Importing ``defenseclaw.migrations`` in-process can therefore mix
+    old modules cached in ``sys.modules`` with new files on disk. A child
+    interpreter starts with a clean import graph from the just-installed wheel.
+    """
+    if os_name is None:
+        os_name = platform.system().lower()
+
+    venv = os.path.expanduser("~/.defenseclaw/.venv")
+    venv_python = _venv_python_path(venv, os_name)
+    if not os.path.isfile(venv_python):
+        raise subprocess.CalledProcessError(1, [venv_python, "-c", "<missing managed venv>"])
+
+    fd, result_path = tempfile.mkstemp(prefix="defenseclaw-migrations-", suffix=".json")
+    os.close(fd)
+    script = """
+import json
+import sys
+
+from defenseclaw.migrations import run_migrations
+
+count = run_migrations(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
+with open(sys.argv[5], "w", encoding="utf-8") as fh:
+    json.dump({"count": count}, fh)
+"""
+    try:
+        subprocess.run(
+            [
+                venv_python,
+                "-c",
+                script,
+                from_version,
+                to_version,
+                openclaw_home,
+                data_dir,
+                result_path,
+            ],
+            check=True,
+        )
+        with open(result_path, encoding="utf-8") as f:
+            payload = json.load(f)
+        count = payload.get("count")
+        if not isinstance(count, int):
+            raise subprocess.CalledProcessError(1, [venv_python, "-c", "<invalid migration count>"])
+        return count
+    finally:
+        try:
+            os.remove(result_path)
+        except OSError:
+            pass
 
 
 def _venv_python_path(venv: str, os_name: str) -> str:

@@ -167,6 +167,32 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertTrue(cfg["guardrail"]["enabled"])
         self.assertEqual(cfg["guardrail"]["detection_strategy"], "regex_judge")
 
+    def test_sandbox_flag_reports_explicit_scope(self):
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "openclaw",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--sandbox",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        summary = json.loads(result.output)
+        sandbox_steps = [s for s in summary["setup"] if s["name"] == "Sandbox"]
+        self.assertEqual(len(sandbox_steps), 1, summary["setup"])
+        self.assertEqual(sandbox_steps[0]["status"], "warn")
+        self.assertIn("Linux-only", sandbox_steps[0]["detail"])
+        self.assertIn("OpenClaw/OpenShell-only", sandbox_steps[0]["detail"])
+        self.assertEqual(sandbox_steps[0]["next_command"], "defenseclaw sandbox setup")
+
     def test_with_judge_defaults_hook_coverage_to_all(self):
         result = self._invoke([
             "--non-interactive",
@@ -815,8 +841,9 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
     def test_init_no_token_shows_local(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which, _mock_gw):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
-        os.environ.pop("DEFENSECLAW_GATEWAY_TOKEN", None)
-        os.environ.pop("OPENCLAW_GATEWAY_TOKEN", None)
+        for k in list(os.environ.keys()):
+            if k.startswith("DEFENSECLAW_") or k.startswith("OPENCLAW_"):
+                os.environ.pop(k, None)
 
         app = AppContext()
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
@@ -2120,6 +2147,12 @@ class TestMultiConnectorInit(unittest.TestCase):
         # scanner mode, fail mode, HITL severity
         prompts = iter(["local", "closed", "MEDIUM"])
         confirms = iter([True, False, True])  # action HITL, start_gateway, verify
+        checkbox_returns = iter([["codex", "claudecode"], ["claudecode"], []])
+        checkbox_calls: list[tuple[list[str], str]] = []
+
+        def checkbox(options, **kwargs):
+            checkbox_calls.append((list(options), kwargs.get("title", "")))
+            return next(checkbox_returns)
 
         with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
                 patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
@@ -2127,11 +2160,7 @@ class TestMultiConnectorInit(unittest.TestCase):
                     "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
                     return_value=True,
                 ), \
-                patch.object(
-                    cmd_init,
-                    "_prompt_checkbox_selection",
-                    side_effect=[["codex", "claudecode"], ["claudecode"], []],
-                ), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", side_effect=checkbox), \
                 patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
                 patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
             settings, scanner_mode, with_judge, judge_connectors, start_gateway, verify = cmd_init._prompt_first_run(
@@ -2157,6 +2186,7 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertEqual(judge_connectors, [])
         self.assertFalse(start_gateway)
         self.assertTrue(verify)
+        self.assertEqual(checkbox_calls[2], (["claudecode"], "Select action connector(s) for LLM judge."))
 
     def test_prompt_first_run_blank_action_keeps_all_observe(self):
         """Pressing Enter at the action prompt keeps every connector observe
@@ -2172,7 +2202,7 @@ class TestMultiConnectorInit(unittest.TestCase):
                 patch.object(
                     cmd_init,
                     "_prompt_checkbox_selection",
-                    side_effect=[["codex", "claudecode"], [], []],
+                    side_effect=[["codex", "claudecode"], []],
                 ), \
                 patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
                 patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):

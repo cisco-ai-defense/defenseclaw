@@ -6,10 +6,12 @@
 
 package cli
 
+import "fmt"
+
 func validateEnterpriseHookScopedTokenLocation(_, _ string) error {
-	return nil
+	return fmt.Errorf("enterprise hook scoped tokens are unsupported on Windows until SID and DACL validation is implemented")
 }
 
 func alignEnterpriseHookScopedTokenOwner(_, _ string) error {
-	return nil
+	return fmt.Errorf("enterprise hook scoped tokens are unsupported on Windows until target-user impersonation is implemented")
 }

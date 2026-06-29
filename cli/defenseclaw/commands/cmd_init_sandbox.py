@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -18,6 +19,29 @@ OPENCLAW_OWNERSHIP_BACKUP = "openclaw-ownership-backup.json"
 
 _SANDBOX_SYSTEM_DEPS = ["iptables"]
 
+_TRUSTED_SYSTEM_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
+
+
+def _trusted_system_command(name: str) -> str | None:
+    """Resolve a privileged helper only from root-owned system directories."""
+    if not name or os.path.basename(name) != name:
+        return None
+    for directory in _TRUSTED_SYSTEM_DIRS:
+        candidate = os.path.join(directory, name)
+        try:
+            resolved = os.path.realpath(candidate)
+            info = os.stat(resolved)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0:
+            continue
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            continue
+        if not os.access(resolved, os.X_OK):
+            continue
+        return resolved
+    return None
+
 
 def _needs_sudo() -> bool:
     """Return True when the current process is not root."""
@@ -26,7 +50,12 @@ def _needs_sudo() -> bool:
 
 def _sudo_prefix() -> list[str]:
     """Return ``["sudo"]`` when not root, empty list otherwise."""
-    return ["sudo"] if _needs_sudo() else []
+    if not _needs_sudo():
+        return []
+    sudo = _trusted_system_command("sudo")
+    if not sudo:
+        raise click.ClickException("trusted system sudo binary not found")
+    return [sudo]
 
 
 def _ensure_sudo_cache() -> None:
@@ -56,11 +85,12 @@ def _sudo_write(content: str, path: str, mode: int = 0o644) -> bool:
         return True
     result = subprocess.run(
         ["sudo", "tee", path],
-        input=content, capture_output=True, text=True,
+        input=content,
+        capture_output=True,
+        text=True,
     )
     if result.returncode == 0 and mode != 0o644:
-        subprocess.run(["sudo", "chmod", oct(mode)[-3:], path],
-                       capture_output=True, check=False)
+        subprocess.run(["sudo", "chmod", oct(mode)[-3:], path], capture_output=True, check=False)
     return result.returncode == 0
 
 
@@ -77,10 +107,12 @@ def _fix_data_dir_ownership(data_dir: str) -> None:
         return
     try:
         import pwd
+
         pw = pwd.getpwnam(sudo_user)
         subprocess.run(
             ["chown", "-R", f"{pw.pw_uid}:{pw.pw_gid}", data_dir],
-            capture_output=True, check=False,
+            capture_output=True,
+            check=False,
         )
     except KeyError:
         pass
@@ -161,13 +193,22 @@ def sandbox_init_cmd(app: AppContext) -> None:
             click.echo("  ── Sandbox Networking ────────────────────────────────")
             click.echo()
             from defenseclaw.commands.cmd_setup_sandbox import setup_sandbox
+
             ctx = click.Context(setup_sandbox, parent=click.get_current_context())
-            ctx.invoke(setup_sandbox, sandbox_ip="10.200.0.2", host_ip="10.200.0.1",
-                       sandbox_home=None, openclaw_port=18789, dns="8.8.8.8,1.1.1.1",
-                       policy="default", no_auto_pair=False,
-                       no_host_networking=not cfg.openshell.host_networking,
-                       no_guardrail=not cfg.guardrail.enabled,
-                       disable=False, non_interactive=True)
+            ctx.invoke(
+                setup_sandbox,
+                sandbox_ip="10.200.0.2",
+                host_ip="10.200.0.1",
+                sandbox_home=None,
+                openclaw_port=18789,
+                dns="8.8.8.8,1.1.1.1",
+                policy="default",
+                no_auto_pair=False,
+                no_host_networking=not cfg.openshell.host_networking,
+                no_guardrail=not cfg.guardrail.enabled,
+                disable=False,
+                non_interactive=True,
+            )
 
     _fix_data_dir_ownership(cfg.data_dir)
 
@@ -192,6 +233,7 @@ def sandbox_init_cmd(app: AppContext) -> None:
 # Sandbox helpers
 # ---------------------------------------------------------------------------
 
+
 def _ensure_iptables() -> None:
     """Install iptables if not present. Required by openshell-sandbox for bypass detection."""
     if shutil.which("iptables"):
@@ -200,7 +242,9 @@ def _ensure_iptables() -> None:
     try:
         result = subprocess.run(
             [*_sudo_prefix(), "apt-get", "install", "-y", "-qq", "iptables"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         if result.returncode == 0 and shutil.which("iptables"):
             click.echo(" done")
@@ -254,8 +298,7 @@ def _init_sandbox(cfg, logger) -> bool:
     sandbox_dirs = [os.path.join(sandbox_home, ".defenseclaw")]
     all_exist = all(os.path.isdir(d) for d in sandbox_dirs)
     for d in sandbox_dirs:
-        subprocess.run([*_sudo_prefix(), "mkdir", "-p", d],
-                       capture_output=True, check=False)
+        subprocess.run([*_sudo_prefix(), "mkdir", "-p", d], capture_output=True, check=False)
     if all_exist:
         click.echo(f"  Sandbox dirs:  exist at {sandbox_home}")
     else:
@@ -303,7 +346,8 @@ def _init_sandbox(cfg, logger) -> bool:
     try:
         subprocess.run(
             [*_sudo_prefix(), "chown", "-R", "sandbox:sandbox", oc_target],
-            capture_output=True, check=False,
+            capture_output=True,
+            check=False,
         )
     except FileNotFoundError:
         pass
@@ -412,7 +456,8 @@ def _ensure_parent_traversal(target_path: str) -> None:
                 new_mode = mode | _stat.S_IXOTH
                 result = subprocess.run(
                     [*_sudo_prefix(), "chmod", oct(new_mode)[-4:], parent],
-                    capture_output=True, check=False,
+                    capture_output=True,
+                    check=False,
                 )
                 if result.returncode == 0:
                     click.echo(f"  Traversal:     added o+x to {parent}")
@@ -426,7 +471,7 @@ def _install_acl_package() -> str | None:
 
     Returns the path to ``setfacl`` on success, ``None`` on failure.
     """
-    pkg_mgr = shutil.which("apt-get") or shutil.which("dnf") or shutil.which("yum")
+    pkg_mgr = _trusted_system_command("apt-get") or _trusted_system_command("dnf") or _trusted_system_command("yum")
     if not pkg_mgr:
         click.echo("  ACL:           setfacl not found and no supported package manager detected")
         click.echo("                 Install the 'acl' package manually, then re-run this command")
@@ -445,7 +490,7 @@ def _install_acl_package() -> str | None:
         click.echo(f"                 Install manually: {mgr_name} install acl")
         return None
 
-    path = shutil.which("setfacl")
+    path = _trusted_system_command("setfacl")
     if path:
         click.echo("  ACL:           acl package installed")
     else:
@@ -471,7 +516,7 @@ def _ensure_sandbox_acls(target_path: str, sandbox_user: str = "sandbox") -> boo
     if not os.path.isdir(target_path):
         return False
 
-    setfacl = shutil.which("setfacl")
+    setfacl = _trusted_system_command("setfacl")
     if not setfacl:
         setfacl = _install_acl_package()
     if not setfacl:
@@ -480,18 +525,15 @@ def _ensure_sandbox_acls(target_path: str, sandbox_user: str = "sandbox") -> boo
     sudo = _sudo_prefix()
     ok = True
     for args, desc in [
-        (["-R", "-m", f"u:{sandbox_user}:rwX", target_path],
-         "grant sandbox access on existing files"),
-        (["-R", "-d", "-m", f"u:{sandbox_user}:rwX", target_path],
-         "set default ACL for new files"),
-        (["-R", "-m", "m::rwx", target_path],
-         "fix ACL mask on existing files"),
-        (["-R", "-d", "-m", "m::rwx", target_path],
-         "fix default ACL mask for new files"),
+        (["-R", "-m", f"u:{sandbox_user}:rwX", target_path], "grant sandbox access on existing files"),
+        (["-R", "-d", "-m", f"u:{sandbox_user}:rwX", target_path], "set default ACL for new files"),
+        (["-R", "-m", "m::rwx", target_path], "fix ACL mask on existing files"),
+        (["-R", "-d", "-m", "m::rwx", target_path], "fix default ACL mask for new files"),
     ]:
         result = subprocess.run(
             [*sudo, setfacl] + args,
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             click.echo(f"  ACL:           {desc} failed ({result.stderr.strip()})")
@@ -611,9 +653,9 @@ def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
     try:
         sandbox_pw = _pwd.getpwnam("sandbox")
         result = subprocess.run(
-            [*_sudo_prefix(), "chown", "-R",
-             f"{sandbox_pw.pw_uid}:{sandbox_pw.pw_gid}", confirmed_path],
-            capture_output=True, text=True,
+            [*_sudo_prefix(), "chown", "-R", f"{sandbox_pw.pw_uid}:{sandbox_pw.pw_gid}", confirmed_path],
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             click.echo(f"  Ownership:     chown failed ({result.stderr.strip()})")
@@ -627,15 +669,14 @@ def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
 
     sudo = _sudo_prefix()
     if os.path.isdir(symlink_path) and not os.path.islink(symlink_path):
-        subprocess.run([*sudo, "rm", "-rf", symlink_path],
-                       capture_output=True, check=False)
+        subprocess.run([*sudo, "rm", "-rf", symlink_path], capture_output=True, check=False)
     elif os.path.islink(symlink_path):
-        subprocess.run([*sudo, "rm", "-f", symlink_path],
-                       capture_output=True, check=False)
+        subprocess.run([*sudo, "rm", "-f", symlink_path], capture_output=True, check=False)
 
     result = subprocess.run(
         [*sudo, "ln", "-sf", os.path.realpath(confirmed_path), symlink_path],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         click.echo(f"  Symlink:       failed ({result.stderr.strip()})")
@@ -652,6 +693,7 @@ def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
 def _create_sandbox_user(sandbox_home: str) -> None:
     """Create the 'sandbox' system user if it doesn't exist."""
     import pwd
+
     try:
         pwd.getpwnam("sandbox")
         click.echo("  Sandbox user:  exists")
@@ -662,19 +704,22 @@ def _create_sandbox_user(sandbox_home: str) -> None:
     try:
         subprocess.run(
             [*_sudo_prefix(), "groupadd", "-r", "sandbox"],
-            capture_output=True, check=False,
+            capture_output=True,
+            check=False,
         )
         result = subprocess.run(
-            [*_sudo_prefix(), "useradd", "-r", "-g", "sandbox", "-d", sandbox_home,
-             "-m", "-s", "/bin/bash", "sandbox"],
-            capture_output=True, text=True,
+            [*_sudo_prefix(), "useradd", "-r", "-g", "sandbox", "-d", sandbox_home, "-m", "-s", "/bin/bash", "sandbox"],
+            capture_output=True,
+            text=True,
         )
         if result.returncode == 0:
             click.echo("  Sandbox user:  created")
         else:
             click.echo(f"  Sandbox user:  failed ({result.stderr.strip()})")
-            click.echo("                 create manually: sudo useradd -r -g sandbox "
-                        f"-d {sandbox_home} -m -s /bin/bash sandbox")
+            click.echo(
+                "                 create manually: sudo useradd -r -g sandbox "
+                f"-d {sandbox_home} -m -s /bin/bash sandbox"
+            )
     except FileNotFoundError:
         click.echo("  Sandbox user:  useradd not found (create manually)")
 
@@ -687,13 +732,13 @@ def _find_plugin_source() -> str | None:
     from pathlib import Path
 
     from defenseclaw.config import default_data_path
+
     staging = Path(str(default_data_path())) / "extensions" / "defenseclaw" / "dist" / "index.js"
     if staging.is_file():
         return str(staging.parent.parent)
 
     here = Path(__file__).resolve()
-    for ancestor in [here.parent.parent.parent.parent,
-                     here.parent.parent.parent]:
+    for ancestor in [here.parent.parent.parent.parent, here.parent.parent.parent]:
         candidate = ancestor / "extensions" / "defenseclaw"
         if (candidate / "dist" / "index.js").is_file():
             return str(candidate)
@@ -717,11 +762,11 @@ def _install_plugin_to_sandbox(cfg, sandbox_home: str) -> None:
     sudo = _sudo_prefix()
     try:
         if os.path.isdir(target_dir):
-            subprocess.run([*sudo, "rm", "-rf", target_dir],
-                           capture_output=True, check=False)
+            subprocess.run([*sudo, "rm", "-rf", target_dir], capture_output=True, check=False)
         result = subprocess.run(
             [*sudo, "cp", "-r", source_dir, target_dir],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode == 0:
             click.echo(f"  Plugin:        installed to {target_dir}")
@@ -734,6 +779,7 @@ def _install_plugin_to_sandbox(cfg, sandbox_home: str) -> None:
 def _find_openshell_policies_dir() -> Path | None:
     """Locate the openshell policy templates directory."""
     from defenseclaw.paths import bundled_openshell_policies_dir
+
     return bundled_openshell_policies_dir()
 
 
@@ -796,7 +842,11 @@ def _install_openshell_sandbox(cfg) -> bool:
 
     try:
         result = subprocess.run(
-            cmd, env=env, capture_output=True, text=True, timeout=120,
+            cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         if result.returncode != 0:
             stderr = (result.stderr or "").strip()

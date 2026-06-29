@@ -24,10 +24,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -287,6 +289,54 @@ func TestHandleAgentHook_EnrichesHTTPSpanWithAgentIdentity(t *testing.T) {
 		if !ok || got.AsString() != want {
 			t.Fatalf("%s=%q ok=%v want %q", key, got.AsString(), ok, want)
 		}
+	}
+}
+
+func TestFinalizeAgentHook_EmitsFinalCorrelatedDecision(t *testing.T) {
+	events := withCapturedEvents(t)
+	api := &APIServer{}
+	req := agentHookRequest{
+		ConnectorName: "codex",
+		AgentID:       "agent-root",
+		AgentName:     "Codex",
+		AgentType:     "codex",
+		HookEventName: "PreToolUse",
+		SessionID:     "session-1",
+		TurnID:        "turn-1",
+		ToolName:      "Bash",
+		Payload:       map[string]interface{}{"model": "gpt-5"},
+	}
+	ctx := enrichAgentHookContext(t.Context(), req)
+	api.finalizeAgentHook(ctx, "codex", req, agentHookResponse{
+		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
+		Reason: "policy denied command", EvaluationID: "eval-1", RuleIDs: []string{"TOOL.BLOCK"},
+	}, nil, []byte(`{"hook":"payload"}`), 17*time.Millisecond, false, nil)
+
+	var got *gatewaylog.Event
+	for i := range *events {
+		if (*events)[i].EventType == gatewaylog.EventHookDecision {
+			got = &(*events)[i]
+			break
+		}
+	}
+	if got == nil || got.HookDecision == nil {
+		t.Fatalf("hook decision was not emitted: %+v", *events)
+	}
+	if got.AgentID != "agent-root" || got.RootAgentID != "agent-root" {
+		t.Fatalf("agent correlation = (%q,%q), want root agent", got.AgentID, got.RootAgentID)
+	}
+	if got.AgentLifecycleEvent != "tool_start" || got.AgentPhase != "tool" {
+		t.Fatalf("lifecycle correlation = (%q,%q), want tool_start/tool", got.AgentLifecycleEvent, got.AgentPhase)
+	}
+	if got.AgentLifecycleID == "" || got.AgentExecutionID == "" {
+		t.Fatalf("missing lifecycle/execution identity: %+v", got)
+	}
+	hook := got.HookDecision
+	if hook.Action != "block" || hook.RawAction != "block" || !hook.Enforced || hook.WouldBlock {
+		t.Fatalf("incorrect enforcement semantics: %+v", hook)
+	}
+	if hook.StepIdx != 1 || hook.EvaluationID != "eval-1" || len(hook.RuleIDs) != 1 {
+		t.Fatalf("missing decision correlation: %+v", hook)
 	}
 }
 

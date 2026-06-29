@@ -8,11 +8,16 @@
 # or {"decision":"ask","reason":"..."}.
 set -euo pipefail
 
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+{{if .Managed}}
+DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+export DEFENSECLAW_HOME
+{{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   exit 0
 fi
-HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+{{end}}
 
 # Plan B4 / S0.4: shell-side hook hardening — sourced BEFORE the
 # missing-token branch so the bypass goes through

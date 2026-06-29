@@ -774,6 +774,24 @@ class TestConnectorConfigFiles:
         ) in files
         assert os.path.join(str(tmp_path), ".agents", "mcp_config.json") in files
 
+    def test_omnigent_honors_config_home(self, tmp_path, monkeypatch):
+        config_home = tmp_path / "isolated-omnigent"
+        monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+
+        assert connector_paths.omnigent_config_path() == str(config_home / "config.yaml")
+        assert connector_paths.connector_home("omnigent") == str(config_home)
+        assert connector_paths.connector_config_files("omnigent") == [
+            str(config_home / "config.yaml")
+        ]
+
+    def test_omnigent_relative_config_home_is_resolved_consistently(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OMNIGENT_CONFIG_HOME", "relative-omnigent")
+        config_home = tmp_path / "relative-omnigent"
+
+        assert connector_paths.omnigent_config_path() == str(config_home / "config.yaml")
+        assert connector_paths.connector_home("omnigent") == str(config_home)
+
 
 class TestConfigDispatch:
     def test_config_skill_dirs_uses_active_connector(self):

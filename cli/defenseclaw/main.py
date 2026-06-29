@@ -88,8 +88,8 @@ def cli(ctx: click.Context) -> None:
 
     \b
     Multi-connector:
-      One gateway enforces N hook connectors (codex, claudecode,
-      antigravity, openclaw) tracked under guardrail.connectors. Add one
+      One gateway enforces N agent-native connectors (codex, claudecode,
+      hermes, antigravity, omnigent, and others) tracked under guardrail.connectors. Add one
       with 'defenseclaw setup <connector>' (choose Add when prompted),
       remove with 'defenseclaw setup remove <name>'. Scope policy per peer
       with 'defenseclaw guardrail ... --connector X', and inspect the

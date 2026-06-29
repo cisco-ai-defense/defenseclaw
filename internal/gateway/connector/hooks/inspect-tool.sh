@@ -8,12 +8,16 @@ set -euo pipefail
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
 
-# Fail-open guard. See inspect-request.sh for rationale.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+{{if .Managed}}
+DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+export DEFENSECLAW_HOME
+{{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   exit 0
 fi
-HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+{{end}}
 
 # Plan B4 / S0.4: shell-side hook hardening. Source the helpers BEFORE
 # touching any agent-supplied data so resource caps + env sanitization

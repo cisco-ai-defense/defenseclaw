@@ -232,6 +232,80 @@ func TestNativeOTLPShape_Copilot(t *testing.T) {
 	}
 }
 
+func TestNativeOTLPShape_Omnigent(t *testing.T) {
+	t.Parallel()
+	opts := fixedSetupOpts(t)
+
+	spec := NewOmnigentConnector().HookProfile(opts).NativeOTLP
+	if spec == nil {
+		t.Fatal("omnigent NativeOTLP spec is nil")
+	}
+	env, err := spec.EnvBlock()
+	if err != nil {
+		t.Fatalf("omnigent EnvBlock: %v", err)
+	}
+
+	for _, want := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_LOGS_EXPORTER",
+		"OTEL_METRICS_EXPORTER",
+		"OTEL_TRACES_EXPORTER",
+		"OTEL_RESOURCE_ATTRIBUTES",
+		"OTEL_SERVICE_NAME",
+		"OMNIGENT_OTEL_CAPTURE_CONTENT",
+	} {
+		if _, ok := env[want]; !ok {
+			t.Errorf("missing required omnigent env var %q", want)
+		}
+	}
+	if env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "http/protobuf" {
+		t.Errorf("OTEL_EXPORTER_OTLP_PROTOCOL = %q; want http/protobuf", env["OTEL_EXPORTER_OTLP_PROTOCOL"])
+	}
+	if env["OTEL_SERVICE_NAME"] != "omnigent" {
+		t.Errorf("OTEL_SERVICE_NAME = %q; want omnigent", env["OTEL_SERVICE_NAME"])
+	}
+	if env["OMNIGENT_OTEL_CAPTURE_CONTENT"] != "false" {
+		t.Errorf("OMNIGENT_OTEL_CAPTURE_CONTENT = %q; want false", env["OMNIGENT_OTEL_CAPTURE_CONTENT"])
+	}
+	for _, signal := range []string{"LOGS", "METRICS", "TRACES"} {
+		if got := env["OTEL_"+signal+"_EXPORTER"]; got != "otlp" {
+			t.Errorf("OTEL_%s_EXPORTER = %q; want otlp", signal, got)
+		}
+		want := "http://" + opts.APIAddr + "/v1/" + strings.ToLower(signal)
+		if got := env["OTEL_EXPORTER_OTLP_"+signal+"_ENDPOINT"]; got != want {
+			t.Errorf("OTEL_EXPORTER_OTLP_%s_ENDPOINT = %q; want %q", signal, got, want)
+		}
+	}
+	headers := splitOTelHeader(env["OTEL_EXPORTER_OTLP_HEADERS"])
+	wantHeaders := map[string]bool{
+		"x-defenseclaw-source=omnigent":          true,
+		"x-defenseclaw-client=omnigent-otel/1.0": true,
+		"x-defenseclaw-token=" + opts.APIToken:   true,
+	}
+	for _, header := range headers {
+		delete(wantHeaders, header)
+	}
+	if len(wantHeaders) != 0 {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing entries %v; got %v", wantHeaders, env["OTEL_EXPORTER_OTLP_HEADERS"])
+	}
+	attrs := splitOTelHeader(env["OTEL_RESOURCE_ATTRIBUTES"])
+	wantAttrs := map[string]bool{
+		"service.name=omnigent":          true,
+		"defenseclaw.connector=omnigent": true,
+	}
+	for _, attr := range attrs {
+		delete(wantAttrs, attr)
+	}
+	if len(wantAttrs) != 0 {
+		t.Errorf("OTEL_RESOURCE_ATTRIBUTES missing entries %v; got %v", wantAttrs, env["OTEL_RESOURCE_ATTRIBUTES"])
+	}
+}
+
 // TestNativeOTLPShape_GeminiCLI pins the Gemini CLI telemetry
 // sub-object to the schema the vendor's settings.json loader
 // requires: enabled/target/useCollector/otlpEndpoint/otlpProtocol/

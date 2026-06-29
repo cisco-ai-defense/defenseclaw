@@ -2258,7 +2258,7 @@ phase_block_allow() {
             RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent could use exec before block"
         elif agent_backend_unavailable_output "$allow_out"; then
-            skip "block/allow: agent could use exec before block" "live agent backend unavailable"
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "block/allow: agent could use exec before block" "live agent backend unavailable"
         else
             fail "block/allow: agent could use exec before block" "$allow_out"
         fi
@@ -2282,7 +2282,7 @@ phase_block_allow() {
             RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent was blocked from exec after block"
         elif agent_backend_unavailable_output "$block_out"; then
-            skip "block/allow: agent was blocked from exec after block" "live agent backend unavailable"
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "block/allow: agent was blocked from exec after block" "live agent backend unavailable"
         else
             fail "block/allow: agent was blocked from exec after block" "$block_out"
         fi
@@ -2314,7 +2314,7 @@ phase_block_allow() {
             RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent recovered exec after unblock"
         elif agent_backend_unavailable_output "$recover_out"; then
-            skip "block/allow: agent recovered exec after unblock" "live agent backend unavailable"
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "block/allow: agent recovered exec after unblock" "live agent backend unavailable"
         else
             fail "block/allow: agent recovered exec after unblock" "$recover_out"
         fi
@@ -3405,7 +3405,7 @@ phase_agent_chat() {
 
     if [ "$install_verified" = false ]; then
         if [ "$install_backend_unavailable" = true ]; then
-            skip "agent chat: skill install" "live agent backend unavailable"
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: skill install" "live agent backend unavailable"
         else
             skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: skill install" "agent install could not be verified"
         fi

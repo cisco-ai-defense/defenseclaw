@@ -67,6 +67,31 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 	}
 }
 
+func TestHardeningJQFallbackRejectsStructuredOutputWithoutParser(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	dir := t.TempDir()
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	emptyPath := filepath.Join(dir, "empty-path")
+	if err := os.Mkdir(emptyPath, 0o700); err != nil {
+		t.Fatalf("create empty PATH: %v", err)
+	}
+	cmd := exec.Command("/bin/bash", "-c", `. "$1"; _dc_jq -c '.hook_output // empty'`, "bash", helperPath)
+	cmd.Env = []string{"HOME=" + dir, "PATH=" + emptyPath}
+	cmd.Stdin = strings.NewReader(`{"hook_output":{"permissionDecision":"deny"}}`)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("structured output was accepted without jq or python3")
+	}
+}
+
 func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: t.TempDir(), APIAddr: "127.0.0.1:18970"}
 	cases := []struct {
@@ -283,7 +308,8 @@ func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
 	}
 	for _, event := range []string{
 		"pre_llm_call", "pre_tool_call", "post_tool_call", "post_llm_call",
-		"on_session_start", "on_session_end", "subagent_stop",
+		"on_session_start", "on_session_end", "on_session_finalize", "on_session_reset",
+		"subagent_start", "subagent_stop",
 	} {
 		if _, ok := hooks[event]; !ok {
 			t.Errorf("hooks block missing lifecycle event %q; got keys %v", event, mapKeys(hooks))

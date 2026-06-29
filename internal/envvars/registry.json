@@ -215,19 +215,6 @@
       "since": "0.4.0"
     },
     {
-      "name": "DEFENSECLAW_OTEL_TLS_INSECURE",
-      "category": "security_opt_out",
-      "purpose": "Disable TLS certificate verification on the OTel exporter. Use only with privately-signed collectors during initial bring-up; never in production.",
-      "default": "unset (TLS verified)",
-      "accepted_values": ["true", "1", "unset"],
-      "security_impact": "high",
-      "surface_in_doctor": true,
-      "consumers": [
-        {"location": "internal/config/config.go:2300", "description": "viper.BindEnv binds this to otel.tls.insecure"}
-      ],
-      "since": "0.4.0"
-    },
-    {
       "name": "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
       "category": "security_opt_out",
       "purpose": "Disable the AWS Bedrock HTTP/1 monkey-patch the OpenClaw plugin installs to make Bedrock traffic visible to the guardrail proxy. Disabling means Bedrock traffic bypasses the proxy.",
@@ -425,123 +412,129 @@
     {
       "name": "DEFENSECLAW_OTEL_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Default OTLP endpoint (host:port[/path]). Per-signal vars below take precedence.",
-      "default": "(value from otel.endpoint)",
+      "purpose": "Legacy flat OTLP exporter endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].endpoint.",
+      "default": "unset",
       "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2298", "description": "viper.BindEnv otel.endpoint"}],
+      "consumers": [
+        {"location": "internal/config/config.go:2684", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:634", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+      ],
       "since": "0.4.0"
     },
     {
       "name": "DEFENSECLAW_OTEL_PROTOCOL",
       "category": "telemetry",
-      "purpose": "Default OTLP protocol (http/protobuf or grpc).",
-      "default": "(value from otel.protocol)",
-      "accepted_values": ["http/protobuf", "grpc", "unset"],
+      "purpose": "Legacy flat OTLP exporter protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].protocol.",
+      "default": "unset",
+      "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2299", "description": "viper.BindEnv otel.protocol"}],
+      "consumers": [
+        {"location": "internal/config/config.go:2695", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:699", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_TLS_INSECURE",
+      "category": "security_opt_out",
+      "purpose": "Legacy flat OTLP TLS toggle consumed only for upgrade compatibility. New setups should configure otel.destinations[].tls.insecure.",
+      "default": "unset",
+      "accepted_values": ["true", "false", "1", "0", "unset"],
+      "security_impact": "high",
+      "security_note": "Enabling this variable disables OTLP server-certificate verification after legacy configuration is migrated into a named destination.",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/config/config.go:2769", "description": "Migrates legacy env-backed flat OTel TLS policy into a named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:742", "description": "Preserves legacy env-backed TLS policy when setup adds a named destination"}
+      ],
       "since": "0.4.0"
     },
     {
       "name": "DEFENSECLAW_OTEL_TRACES_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Per-signal override for traces endpoint.",
-      "default": "(value from otel.traces.endpoint)",
+      "purpose": "Legacy trace-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].traces.endpoint or destination endpoint.",
+      "default": "unset",
       "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2301", "description": "viper.BindEnv otel.traces.endpoint"}],
+      "consumers": [
+        {"location": "internal/config/config.go:2683", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:633", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+      ],
       "since": "0.4.0"
     },
     {
       "name": "DEFENSECLAW_OTEL_TRACES_PROTOCOL",
       "category": "telemetry",
-      "purpose": "Per-signal override for traces protocol.",
-      "default": "(value from otel.traces.protocol)",
-      "accepted_values": ["http/protobuf", "grpc", "unset"],
+      "purpose": "Legacy trace-specific flat OTLP protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].traces.protocol or destination protocol.",
+      "default": "unset",
+      "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2302", "description": "viper.BindEnv otel.traces.protocol"}],
-      "since": "0.4.0"
-    },
-    {
-      "name": "DEFENSECLAW_OTEL_TRACES_URL_PATH",
-      "category": "telemetry",
-      "purpose": "Per-signal override for traces URL path (when using HTTP).",
-      "default": "(value from otel.traces.url_path)",
-      "accepted_values": ["any-url-path", "unset"],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2303", "description": "viper.BindEnv otel.traces.url_path"}],
-      "since": "0.4.0"
-    },
-    {
-      "name": "DEFENSECLAW_OTEL_METRICS_ENDPOINT",
-      "category": "telemetry",
-      "purpose": "Per-signal override for metrics endpoint.",
-      "default": "(value from otel.metrics.endpoint)",
-      "accepted_values": ["any-otlp-endpoint", "unset"],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2304", "description": "viper.BindEnv otel.metrics.endpoint"}],
-      "since": "0.4.0"
-    },
-    {
-      "name": "DEFENSECLAW_OTEL_METRICS_PROTOCOL",
-      "category": "telemetry",
-      "purpose": "Per-signal override for metrics protocol.",
-      "default": "(value from otel.metrics.protocol)",
-      "accepted_values": ["http/protobuf", "grpc", "unset"],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2305", "description": "viper.BindEnv otel.metrics.protocol"}],
-      "since": "0.4.0"
-    },
-    {
-      "name": "DEFENSECLAW_OTEL_METRICS_URL_PATH",
-      "category": "telemetry",
-      "purpose": "Per-signal override for metrics URL path.",
-      "default": "(value from otel.metrics.url_path)",
-      "accepted_values": ["any-url-path", "unset"],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2306", "description": "viper.BindEnv otel.metrics.url_path"}],
+      "consumers": [
+        {"location": "internal/config/config.go:2694", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:698", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+      ],
       "since": "0.4.0"
     },
     {
       "name": "DEFENSECLAW_OTEL_LOGS_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Per-signal override for logs endpoint.",
-      "default": "(value from otel.logs.endpoint)",
+      "purpose": "Legacy log-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].logs.endpoint or the destination endpoint.",
+      "default": "unset",
       "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2307", "description": "viper.BindEnv otel.logs.endpoint"}],
-      "since": "0.4.0"
+      "consumers": [
+        {"location": "internal/config/config.go:2724", "description": "Migrates a legacy logs-only env-backed exporter into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:655", "description": "Preserves a legacy logs-only route when setup adds a named destination"}
+      ],
+      "since": "0.8.0"
     },
     {
       "name": "DEFENSECLAW_OTEL_LOGS_PROTOCOL",
       "category": "telemetry",
-      "purpose": "Per-signal override for logs protocol.",
-      "default": "(value from otel.logs.protocol)",
-      "accepted_values": ["http/protobuf", "grpc", "unset"],
+      "purpose": "Legacy log-specific flat OTLP protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].logs.protocol or the destination protocol.",
+      "default": "unset",
+      "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2308", "description": "viper.BindEnv otel.logs.protocol"}],
-      "since": "0.4.0"
+      "consumers": [
+        {"location": "internal/config/config.go:2740", "description": "Migrates a legacy logs-only env-backed exporter into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:664", "description": "Preserves a legacy logs-only route when setup adds a named destination"}
+      ],
+      "since": "0.8.0"
     },
     {
-      "name": "DEFENSECLAW_OTEL_LOGS_URL_PATH",
+      "name": "DEFENSECLAW_OTEL_METRICS_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Per-signal override for logs URL path.",
-      "default": "(value from otel.logs.url_path)",
-      "accepted_values": ["any-url-path", "unset"],
+      "purpose": "Legacy metric-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].metrics.endpoint or the destination endpoint.",
+      "default": "unset",
+      "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2309", "description": "viper.BindEnv otel.logs.url_path"}],
-      "since": "0.4.0"
+      "consumers": [
+        {"location": "internal/config/config.go:2723", "description": "Migrates a legacy metrics-only env-backed exporter into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:655", "description": "Preserves a legacy metrics-only route when setup adds a named destination"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_METRICS_PROTOCOL",
+      "category": "telemetry",
+      "purpose": "Legacy metric-specific flat OTLP protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].metrics.protocol or the destination protocol.",
+      "default": "unset",
+      "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/config/config.go:2739", "description": "Migrates a legacy metrics-only env-backed exporter into a generic-otlp named destination"},
+        {"location": "cli/defenseclaw/observability/writer.py:664", "description": "Preserves a legacy metrics-only route when setup adds a named destination"}
+      ],
+      "since": "0.8.0"
     },
     {
       "name": "DEFENSECLAW_TELEMETRY_ENABLED",
@@ -605,6 +598,38 @@
       ],
       "since": "0.8.0",
       "security_note": "Managed config path separation — lets system services read admin-owned policy without making the runtime data directory admin-writable."
+    },
+    {
+      "name": "DEFENSECLAW_DEPLOYMENT_MODE",
+      "category": "runtime_path",
+      "purpose": "Pin the process deployment mode independently from config.yaml. Managed service definitions set this to managed_enterprise so a service-writable config replacement cannot downgrade enterprise trust enforcement.",
+      "default": "unset (use config.yaml deployment_mode)",
+      "accepted_values": ["managed_enterprise", "unmanaged_byod", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/config/config.go", "description": "Pins deployment mode before parsing or trusting config.yaml"},
+        {"location": "packaging/systemd/defenseclaw-gateway.service", "description": "Managed Linux service pin"},
+        {"location": "packaging/launchd/com.defenseclaw.gateway.plist", "description": "Managed macOS service pin"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks."
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR",
+      "category": "runtime_path",
+      "purpose": "Select the administrator-owned directory containing the hook guardian protected-target authorization ledger.",
+      "default": "${DEFENSECLAW_HOME}-hook-guardian",
+      "accepted_values": ["any-absolute-admin-owned-path", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/managed/managed.go", "description": "Resolves the protected-target authorization path"},
+        {"location": "internal/cli/enterprise_hooks.go", "description": "Privileged guardian writes successful protected targets"},
+        {"location": "internal/gateway/sidecar.go", "description": "Managed health verifies connector coverage before advertising enforcement"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Privileged repair authorization — must remain root/admin-owned and non-writable by the DefenseClaw service account."
     },
     {
       "name": "DEFENSECLAW_GUARDIAN_CONNECTOR",

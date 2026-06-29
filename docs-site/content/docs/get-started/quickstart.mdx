@@ -54,9 +54,9 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 | `--action-connectors codex,claudecode` | Comma-separated connectors to configure in `action` mode. Composable with `--observe-all` (everything else stays observe); the named connectors are configured even on their own. |
 | `--non-interactive` | Skip every prompt. |
 | `--yes` / `-y` | Auto-accept every confirmation. |
-| `--connector <x>` | Pre-select a single agent. Legacy single-connector path — wins over the multi flags. |
+| `--connector <x>` | Pre-select a single agent. Single-connector path — wins over the multi flags. |
 
-With neither multi flag nor `--connector`, non-interactive init keeps the legacy single-connector default: one discovery-backed connector in `observe`. An explicit `--connector` always wins.
+With neither multi flag nor `--connector`, non-interactive init keeps the single-connector default: one discovery-backed connector in `observe`. An explicit `--connector` always wins.
 
 ## Path B — Zero prompts (`defenseclaw quickstart`)
 
@@ -72,7 +72,7 @@ The scripted equivalent. Same backend, no prompts ever, safe defaults baked in: 
 defenseclaw quickstart --connector claudecode
 ```
 
-Replace `claudecode` with `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `openclaw`, or `zeptoclaw` to target the agent you actually use. If you skip `--connector`, quickstart consults `~/.defenseclaw/picked_connector` (written by the installer when you passed `--connector` to it) and falls back to `codex`.
+Replace `claudecode` with `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `omnigent`, `openclaw`, or `zeptoclaw` to target the agent you actually use. `quickstart` configures **one** connector. If you skip `--connector`, it uses the single configured or detected connector; if more than one connector is configured/detected, or the installer hint disagrees with the detected connector, it exits and asks you to rerun with `--connector <name>`.
 
 </Step>
 
@@ -130,7 +130,7 @@ tail -f ~/.defenseclaw/gateway.jsonl | jq .
   <Node id="bootstrap" kind="generic">{`run_first_run()\nbootstrap.py`}</Node>
   <Node id="apply" kind="generic">apply choices to config.yaml</Node>
   <Node id="env" kind="generic">{`bootstrap_env\nseed DB · dirs · scanners`}</Node>
-  <Node id="guard" kind="connector">{`quiet guardrail setup\nfor picked connector`}</Node>
+  <Node id="guard" kind="connector">{`quiet guardrail setup\nfor resolved connector`}</Node>
   <Node id="gw" kind="gateway">{`start defenseclaw-gateway\n(unless --skip-gateway)`}</Node>
   <Node id="report" kind="generic">first-run report</Node>
   <Edge from="init" to="bootstrap" />
@@ -147,8 +147,8 @@ tail -f ~/.defenseclaw/gateway.jsonl | jq .
 <TypeTable
   type={{
     "--connector / --agent": {
-      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode",
-      description: "Agent connector. Defaults to ~/.defenseclaw/picked_connector (written by the installer) or codex.",
+      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|omnigent",
+      description: "Agent connector. Required when more than one connector is configured or detected; otherwise quickstart uses the single configured/detected connector, then the installer hint if no connector can be detected.",
     },
     "--mode": {
       type: "observe|action",

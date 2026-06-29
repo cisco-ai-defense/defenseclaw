@@ -121,7 +121,7 @@ WIZARD_NAMES: tuple[str, ...] = (
     "Gateway",
     "Guardrail",
     "Splunk",
-    "Observability",
+    "Observability / Galileo",
     "Webhooks",
     "Sandbox",
     "Registries",
@@ -187,7 +187,7 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "Configure gateway host, ports, TLS, and auth.",
     "Configure the LLM guardrail proxy and judge.",
     "Configure Splunk HEC or local Splunk integration.",
-    "Add unified OTel and audit sink presets.",
+    "Add and manage Galileo, unified OTel, and audit sink destinations.",
     "Add chat or incident notifier webhooks.",
     "Initialize and configure OpenShell sandbox policy.",
     "Register an external skill or MCP catalog source.",
@@ -211,7 +211,8 @@ WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup gateway. Need host, ports, TLS posture, and optional token source.",
     "Runs: defenseclaw setup guardrail. Need mode, scanner mode, optional judge model, and remote scanner credentials.",
     "Runs: defenseclaw setup splunk. Need HEC endpoint/token or local Docker and license acceptance.",
-    "Runs: defenseclaw setup observability add <preset>. Need vendor preset, endpoint/realm, token, and signals.",
+    "Runs: defenseclaw setup observability add <preset>. Choose Galileo or another vendor, then provide "
+    "endpoint/project, credentials, and signals.",
     "Runs: defenseclaw setup webhook add <type>. Need webhook URL, secret env where required, and event filters.",
     "Runs: defenseclaw sandbox setup. Need OpenShell policy choices and optional sandbox home/network settings.",
     "Runs: defenseclaw registry add <id> --non-interactive. Need source id, kind, content type, and manifest URL.",
@@ -230,6 +231,7 @@ OBSERVABILITY_PRESETS: tuple[tuple[str, str], ...] = (
     ("honeycomb", "Honeycomb"),
     ("newrelic", "New Relic"),
     ("grafana-cloud", "Grafana Cloud"),
+    ("galileo", "Galileo Cloud / Self-hosted"),
     ("local-otlp", "Local Observability Stack"),
     ("otlp", "Generic OTLP"),
     ("webhook", "Generic HTTP JSONL"),
@@ -2464,6 +2466,12 @@ def _observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizard
             presets={"@Preset": "grafana-cloud"},
         ),
         WizardGoal(
+            "galileo",
+            "Galileo Cloud / Self-hosted",
+            summary="Send GenAI OTLP traces to a Galileo project and Log stream.",
+            presets={"@Preset": "galileo"},
+        ),
+        WizardGoal(
             "otlp",
             "Generic OTLP endpoint",
             summary="Add a generic OTLP exporter preset.",
@@ -4665,6 +4673,30 @@ def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
                 WizardFormField("OTLP Token", "password", "--token"),
             ),
         )
+    elif preset_id == "galileo":
+        fields.extend(
+            (
+                WizardFormField(
+                    "Trace Endpoint",
+                    "string",
+                    "--endpoint",
+                    value="https://api.galileo.ai/otel/traces",
+                    default="https://api.galileo.ai/otel/traces",
+                    required=True,
+                    hint="Cloud default or exact self-hosted /otel/traces endpoint.",
+                ),
+                WizardFormField("Project", "string", "--project", required=True),
+                WizardFormField(
+                    "Log Stream", "string", "--logstream", value="default", default="default", required=True
+                ),
+                WizardFormField(
+                    "API Key",
+                    "password",
+                    "--token",
+                    hint="Required unless GALILEO_API_KEY is already configured in the environment or .env.",
+                ),
+            ),
+        )
     elif preset_id == "otlp":
         fields.extend(
             (
@@ -5631,15 +5663,9 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
 
 def _otel_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
     return (
-        _header(".. Globals .."),
+        _header(".. Process-wide policy .."),
         _field(cfg, "Enabled", "otel.enabled", "bool", hint="Master OpenTelemetry export switch."),
-        _field(cfg, "Protocol", "otel.protocol", "choice", ("grpc", "http/protobuf"), "Default OTLP transport."),
-        _field(cfg, "Endpoint", "otel.endpoint", hint="Default collector URL."),
-        _field(cfg, "TLS Insecure", "otel.tls.insecure", "bool", hint="Skip TLS verification."),
-        _field(cfg, "TLS CA Cert", "otel.tls.ca_cert", hint="Path to CA bundle."),
-        _field(cfg, "Headers", "otel.headers", hint="CSV key=value headers; values redacted in summaries."),
         _header(".. Traces .."),
-        _field(cfg, "Enabled", "otel.traces.enabled", "bool", hint="Export spans."),
         _field(
             cfg,
             "Sampler",
@@ -5656,18 +5682,7 @@ def _otel_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, .
             "Trace sampler.",
         ),
         _field(cfg, "Sampler Arg", "otel.traces.sampler_arg", hint="Trace sampler argument."),
-        _field(cfg, "Endpoint override", "otel.traces.endpoint", hint="Traces-only collector URL."),
-        _field(
-            cfg,
-            "Protocol override",
-            "otel.traces.protocol",
-            "choice",
-            ("", "grpc", "http/protobuf"),
-            "Traces-only protocol.",
-        ),
-        _field(cfg, "URL Path", "otel.traces.url_path", hint="HTTP path suffix."),
         _header(".. Logs .."),
-        _field(cfg, "Enabled", "otel.logs.enabled", "bool", hint="Export OTel log records."),
         _field(
             cfg,
             "Emit individual findings",
@@ -5675,34 +5690,13 @@ def _otel_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, .
             "bool",
             hint="One record per finding.",
         ),
-        _field(cfg, "Endpoint override", "otel.logs.endpoint", hint="Logs-only collector URL."),
-        _field(
-            cfg,
-            "Protocol override",
-            "otel.logs.protocol",
-            "choice",
-            ("", "grpc", "http/protobuf"),
-            "Logs-only protocol.",
-        ),
-        _field(cfg, "URL Path", "otel.logs.url_path", hint="HTTP path suffix."),
         _header(".. Metrics .."),
-        _field(cfg, "Enabled", "otel.metrics.enabled", "bool", hint="Export metrics."),
         _field(
             cfg, "Export interval (s)", "otel.metrics.export_interval_s", "int", hint="Seconds between metric pushes."
         ),
         _field(
             cfg, "Temporality", "otel.metrics.temporality", "choice", ("delta", "cumulative"), "Metric temporality."
         ),
-        _field(cfg, "Endpoint override", "otel.metrics.endpoint", hint="Metrics-only collector URL."),
-        _field(
-            cfg,
-            "Protocol override",
-            "otel.metrics.protocol",
-            "choice",
-            ("", "grpc", "http/protobuf"),
-            "Metrics-only protocol.",
-        ),
-        _field(cfg, "URL Path", "otel.metrics.url_path", hint="HTTP path suffix."),
         _header(".. Batch .."),
         _field(
             cfg, "Max export batch size", "otel.batch.max_export_batch_size", "int", hint="Max records per request."
@@ -6131,7 +6125,7 @@ def _connector_setup_alias(wire: str) -> str:
     normalized = wire.strip().lower().replace("_", "-")
     if normalized in {"claudecode", "claude-code"}:
         return "claude-code"
-    if normalized in {"openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode"}:
+    if normalized in {"openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"}:
         return normalized
     return ""
 

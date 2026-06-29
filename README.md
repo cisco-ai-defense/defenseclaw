@@ -107,7 +107,9 @@ make all
 ### Install with the release script
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash
+VERSION=0.8.2
+INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
+curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 defenseclaw init --enable-guardrail
 ```
 
@@ -200,7 +202,7 @@ DefenseClaw records enforcement and runtime evidence across several channels:
 |---------|-----|
 | SQLite audit store | Local durable event history |
 | Gateway JSONL | Correlated structured runtime events |
-| OTLP | Metrics, logs, and traces to compatible collectors |
+| OTLP | Named, independent metrics/logs/traces destinations with native fan-out |
 | Splunk HEC | SIEM forwarding and local Splunk app workflows |
 | Splunk O11y dashboards | Native Splunk Observability Cloud dashboards and detectors for DefenseClaw metrics |
 | Webhooks | Slack, PagerDuty, Webex, and generic event notifications |
@@ -214,7 +216,18 @@ defenseclaw-gateway start
 defenseclaw setup local-observability status
 ```
 
-See [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) and [docs/SPLUNK_APP.md](docs/SPLUNK_APP.md).
+Add Galileo Cloud or self-hosted Galileo without replacing the local route:
+
+```bash
+export GALILEO_API_KEY='...'
+defenseclaw setup galileo --project defenseclaw --logstream production
+defenseclaw setup galileo test
+```
+
+See [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md), the
+[Galileo guide](docs-site/content/docs/observability/galileo.mdx), and
+[schema ownership map](schemas/README.md). Splunk-specific setup is in
+[docs/SPLUNK_APP.md](docs/SPLUNK_APP.md).
 
 For Splunk Observability Cloud, use the dashboard bundle at
 [bundles/splunk_o11y_dashboards/README.md](bundles/splunk_o11y_dashboards/README.md):
