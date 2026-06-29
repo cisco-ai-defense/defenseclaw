@@ -31,6 +31,7 @@ endif
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
+        packaging-macos-test \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
@@ -493,6 +494,12 @@ cli-test-snap:
 
 gateway-test: sync-openclaw-extension
 	go test -race ./internal/gateway/ ./test/... -v
+
+# packaging-macos-test runs the pure-bash unit tests for the macOS installer
+# scripts under packaging/macos/. They don't touch /Library, sudo, or
+# launchctl and are safe to run on any macOS or Linux dev host.
+packaging-macos-test:
+	packaging/macos/tests/run_tests.sh
 
 # security-suite-test runs the deterministic security + PII coverage suite
 # (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.
