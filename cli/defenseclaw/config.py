@@ -2573,7 +2573,11 @@ def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
         suffix=".tmp",
         dir=directory,
     )
-    os.fchmod(fd, 0o600)
+    descriptor_chmod = getattr(os, "fchmod", None)
+    if descriptor_chmod is not None:
+        descriptor_chmod(fd, 0o600)
+    else:
+        os.chmod(tmp, 0o600)
     try:
         with os.fdopen(fd, "w") as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
