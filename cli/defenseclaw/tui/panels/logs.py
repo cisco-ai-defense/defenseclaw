@@ -353,6 +353,13 @@ class LogsPanelModel:
         next_data_dir = Path(data_dir) if data_dir else None
         if next_data_dir != self.data_dir:
             self._refresh_signatures.clear()
+            if next_data_dir is None:
+                self.lines = {source: [] for source in LOG_SOURCES}
+                self.error_messages = {source: "" for source in LOG_SOURCES}
+                self.verdict_rows = []
+                self.otel_rows = []
+                self._filtered_lines_cache.clear()
+                self._clamp_cursor()
         self.data_dir = next_data_dir
 
     @property
@@ -577,12 +584,14 @@ class LogsPanelModel:
         # style; doing that for a cursor-only repaint cost ~25-30 ms at the
         # 5,000-line tail limit even though the table contents were unchanged.
         lines = self.filtered_lines()
+        return tuple(self._table_cells(line) for line in lines)
+
+    def _table_cells(self, line: str) -> tuple[str, ...]:
+        """Return the shared row shape for shell and metadata consumers."""
+
         if self.show_connector_column:
-            return tuple(
-                (_line_connector(line) or "—", line)
-                for line in lines
-            )
-        return tuple((line,) for line in lines)
+            return (_line_connector(line) or "—", line)
+        return (line,)
 
     def data_table_row_models(self) -> tuple[LogTableRow, ...]:
         """Return active rows with stable row keys and cursor indexes."""
@@ -599,7 +608,7 @@ class LogsPanelModel:
                 key=_log_row_key(self.source, index, structured.get(index), line),
                 cursor_index=index,
                 source=self.source,
-                cells=(line,),
+                cells=self._table_cells(line),
                 selected=index == selected,
                 style_key=self.line_style_key(line),
                 detail_title=self._detail_title_for_row(structured.get(index)),

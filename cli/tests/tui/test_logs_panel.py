@@ -269,6 +269,23 @@ def test_logs_refresh_retries_transient_raw_and_structured_reads(tmp_path, monke
     assert view_calls == 2
 
 
+def test_logs_set_data_dir_none_clears_loaded_state(tmp_path) -> None:
+    panel = LogsPanelModel(tmp_path)
+    panel.lines["gateway"] = ["gateway ready"]
+    panel.lines["verdicts"] = ["VERDICT ALLOW"]
+    panel.verdict_rows = [GatewayLogRow(raw="{}", event_type="verdict", action="allow")]
+    panel.otel_rows = [GatewayLogRow(raw="{}", event_type="lifecycle")]
+    panel.filtered_lines()
+
+    panel.set_data_dir(None)
+
+    assert all(not lines for lines in panel.lines.values())
+    assert all(not error for error in panel.error_messages.values())
+    assert panel.verdict_rows == []
+    assert panel.otel_rows == []
+    assert panel.filtered_lines() == []
+
+
 def test_logs_no_noise_default_hides_low_signal_severities() -> None:
     panel = LogsPanelModel()
     panel.filter_mode = FILTER_NO_NOISE
@@ -517,6 +534,7 @@ def test_logs_connector_column_and_shared_filter() -> None:
     panel.show_connector_column = True
     assert panel.data_table_columns() == ("Connector", "Line")
     rows = panel.data_table_rows()
+    assert all(len(row.cells) == 2 for row in panel.data_table_row_models())
     # First cell is the parsed connector; untagged lines show the em dash.
     connectors = {row[0] for row in rows}
     assert "codex" in connectors and "cursor" in connectors and "—" in connectors
