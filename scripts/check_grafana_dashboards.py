@@ -104,6 +104,54 @@ def target_datasource(panel: dict[str, Any], target: dict[str, Any]) -> str | No
     return value.get("type")
 
 
+def tempo_target_query(target: dict[str, Any]) -> str | None:
+    """Return executable TraceQL for raw and structured Grafana Tempo targets."""
+
+    raw_query = target.get("query")
+    if raw_query:
+        return str(raw_query)
+    if target.get("queryType") != "traceqlSearch":
+        raise AuditError(
+            f"unsupported Tempo target queryType {target.get('queryType')!r}; "
+            "expected a raw query or traceqlSearch filters",
+        )
+
+    filters = target.get("filters")
+    if not isinstance(filters, list) or not filters:
+        raise AuditError("traceqlSearch targets must provide a raw query or structured filters")
+
+    conditions: list[str] = []
+    for item in filters:
+        if not isinstance(item, dict):
+            raise AuditError("TraceQL filter entries must be objects")
+        tag = item.get("tag")
+        scope = item.get("scope")
+        operator = item.get("operator")
+        values = item.get("value")
+        if not isinstance(tag, str) or not tag:
+            raise AuditError("TraceQL filters require a tag")
+        if operator not in {"=", "!=", "=~", "!~"}:
+            raise AuditError(f"unsupported TraceQL filter operator {operator!r}")
+        if not isinstance(values, list) or not values:
+            raise AuditError(f"TraceQL filter {tag!r} requires at least one value")
+
+        if scope == "resource":
+            attribute = tag if tag.startswith("resource.") else f"resource.{tag}"
+        elif scope == "span":
+            if tag == "name":
+                attribute = "name"
+            else:
+                attribute = tag if tag.startswith("span.") else f"span.{tag}"
+        else:
+            raise AuditError(f"unsupported TraceQL filter scope {scope!r}")
+
+        comparisons = [f"{attribute} {operator} {json.dumps(value)}" for value in values]
+        joiner = " && " if operator in {"!=", "!~"} else " || "
+        condition = comparisons[0] if len(comparisons) == 1 else f"({joiner.join(comparisons)})"
+        conditions.append(condition)
+    return f"{{ {' && '.join(conditions)} }}"
+
+
 def interpolate(query: str, variables: dict[str, str] | None = None) -> str:
     replacements = VARIABLES if variables is None else variables
     for variable, value in sorted(replacements.items(), key=lambda item: -len(item[0])):
@@ -194,6 +242,11 @@ def static_audit(
                     errors.append(f"{uid}/{title}: {datasource} must use {DATASOURCES[datasource]!r}")
 
                 expression = target.get("expr", "")
+                if datasource == "tempo":
+                    try:
+                        tempo_target_query(target)
+                    except AuditError as exc:
+                        errors.append(f"{uid}/{title}: {exc}")
                 if datasource == "loki" and "| json" in expression and '__error__=""' not in expression:
                     errors.append(f"{uid}/{title}: JSON parsing must discard malformed log lines")
                 range_function = re.search(
@@ -312,7 +365,8 @@ def live_inventory(
     instrumented but no matching event occurred, while ``empty`` means the
     selected deployment/range has no matching series or event.  Trace
     waterfalls that require a user-selected trace are reported as
-    ``interactive`` instead of being mislabeled as broken.
+    ``interactive`` instead of being mislabeled as broken, and text panels are
+    ``static`` because they intentionally have no datasource.
     """
 
     errors: list[str] = []
@@ -324,7 +378,7 @@ def live_inventory(
     variables = _inventory_variables(range_seconds)
     step_seconds = max(60, min(900, range_seconds // 200))
     has_tempo_search = any(
-        (query := target.get("query", ""))
+        (query := tempo_target_query(target))
         and not any(variable in query for variable in ("$trace", "$agent", "$scope_label"))
         for _, dashboard in dashboards
         for panel in panels(dashboard)
@@ -336,14 +390,23 @@ def live_inventory(
     for _, dashboard in dashboards:
         panel_results: list[dict[str, Any]] = []
         for panel in panels(dashboard):
-            if panel.get("type") in {"row", "text"}:
+            if panel.get("type") == "row":
+                continue
+            if panel.get("type") == "text":
+                panel_results.append(
+                    {
+                        "title": panel.get("title", "untitled"),
+                        "type": "text",
+                        "status": "static",
+                    },
+                )
                 continue
             target_statuses: list[str] = []
             target_errors: list[str] = []
             for target in panel.get("targets", []):
                 datasource = target_datasource(panel, target)
                 expression = target.get("expr", "")
-                trace_query = target.get("query", "")
+                trace_query = tempo_target_query(target) if datasource == "tempo" else None
                 try:
                     if datasource == "prometheus" and expression:
                         params = {"query": interpolate(expression, variables)}
@@ -440,7 +503,7 @@ def live_inventory(
 
         status_counts = {
             status: sum(result["status"] == status for result in panel_results)
-            for status in ("data", "zero", "empty", "interactive", "error")
+            for status in ("data", "zero", "empty", "interactive", "static", "error")
         }
         inventory.append(
             {
@@ -457,8 +520,10 @@ def live_inventory(
 def print_inventory(inventory: list[dict[str, Any]], *, range_seconds: int) -> None:
     hours = range_seconds / 3600
     print(f"Live Grafana inventory ({hours:g}h, representative connector=codex, all agents)")
-    print("| Dashboard | Panels | Data | Zero | Empty | Interactive | Errors | Empty panels |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+    print(
+        "| Dashboard | Panels | Data | Zero | Empty | Interactive | Static | Errors | Empty panels |",
+    )
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
     for dashboard in inventory:
         counts = dashboard["status_counts"]
         empty_titles = [
@@ -467,7 +532,8 @@ def print_inventory(inventory: list[dict[str, Any]], *, range_seconds: int) -> N
         print(
             f"| {dashboard['title']} (`{dashboard['uid']}`) "
             f"| {len(dashboard['panels'])} | {counts['data']} | {counts['zero']} "
-            f"| {counts['empty']} | {counts['interactive']} | {counts['error']} "
+            f"| {counts['empty']} | {counts['interactive']} | {counts['static']} "
+            f"| {counts['error']} "
             f"| {', '.join(empty_titles) or 'None'} |",
         )
 
@@ -521,7 +587,7 @@ def live_audit(dashboards: list[tuple[Path, dict[str, Any]]]) -> list[str]:
                         if result.get("status") != "success":
                             raise AuditError(str(result))
                     elif datasource == "tempo" and tempo_error is None:
-                        query = target.get("query")
+                        query = tempo_target_query(target)
                         if query and query != "$trace":
                             request_json(
                                 "http://127.0.0.1:3200/api/search",

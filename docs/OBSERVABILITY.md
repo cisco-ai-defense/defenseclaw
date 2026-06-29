@@ -944,9 +944,9 @@ by Grafana via the file provisioner
 | --- | --- | --- |
 | **Overview** | `defenseclaw-overview` | KPI strip (verdicts, blocks, confirm-rate, HITL pending, top blocked rule, exporter freshness, panics), firing alerts, SLO gauges. Top-of-funnel landing — every other board is one click away. |
 | **Agent Activity (Live)** | `defenseclaw-activity` | Cross-agent prompts, model usage, tools, internet destinations, and session correlation. |
-| **Connectors (Overview)** | `defenseclaw-connectors` | Cross-connector compare board: per-connector traffic, blocks, redactions, errors, hooks-vs-OTel drift, identity assignment rate. The connector table cell drills into Connector Detail. |
+| **Hook Connectors** | `defenseclaw-connectors` | Cross-connector compare board: per-connector traffic, blocks, redactions, errors, hooks-vs-OTel drift, identity assignment rate. The connector table cell drills into Connector Detail. |
 | **Connector Detail** | `defenseclaw-connector-detail` | Single-connector deep dive driven by `$connector`: identity, ingest, hooks, verdicts, judge, findings, HITL, SSE, tools, scoped Loki streams. |
-| **Security (Verdicts)** | `defenseclaw-security` | Verdict funnel by stage × action, action mix over time, prompt/completion/tool_call split, confirm-rate handoff to HITL, judge + cache + redactions, top blocked categories and rules. |
+| **Guardrail Evaluations** | `defenseclaw-security` | Verdict funnel by stage × action, action mix over time, prompt/completion/tool_call split, confirm-rate handoff to HITL, judge + cache + redactions, top blocked categories and rules. |
 | **HITL (Human-in-the-Loop)** | `defenseclaw-hitl` | Two stacked sections: chat HILT (`openclaw:hilt` status mix, approval / denial / timeout rates, pending gauge, mean-time-to-decision) and exec approvals (`RecordApproval` result mix, auto-approval ratio, dangerous share, latency, top denied commands). |
 | **Findings (Rule detail)** | `defenseclaw-findings` | Top rules with sparklines, rule_id × time heatmap, last-seen / first-seen tables, top targets, finding-to-verdict correlation, scoped Loki `scan_finding` stream. |
 | **Policy decisions** | `defenseclaw-policy-decisions` | OPA verdicts by `policy_domain` × `policy_verdict`, egress branch / decision split, block-list hits, multi-turn injection trips, schema violation panel. |
@@ -955,7 +955,7 @@ by Grafana via the file provisioner
 | **Scanners (Ops)** | `defenseclaw-scanners` | Scanner ops focus: sparse-safe rolling throughput and duration, errors by `error_type`, quarantine actions, and top rules with drill into Findings. Queue depth is omitted because scanner execution is currently synchronous and does not emit a durable queue series. |
 | **AI Agent Usage & Detection** | `defenseclaw-ai-discovery` | Continuous AI inventory loop: active signals, scan completions, new / gone signals, detector errors, per-vendor / per-product tables, two-axis Bayesian confidence, scoped traces and logs. |
 | **Runtime & Reliability** | `defenseclaw-runtime` | Process, SQLite, exporter, audit-sink, and canonical gateway-error health. The former Reliability board is consolidated here. |
-| **Traffic & Traces** | `defenseclaw-traffic` | HTTP surface latency / status, OTel ingest rates, trace samples. |
+| **Proxy & LLM Guard** | `defenseclaw-traffic` | HTTP surface latency / status, OTel ingest rates, trace samples. |
 
 ### 8.0.1 Shared template-variable contract
 

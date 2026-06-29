@@ -113,6 +113,15 @@ def test_static_audit_checks_variable_datasources_and_over_time_stats(
                     },
                 ],
             },
+            {
+                "type": "table",
+                "title": "Unsupported structured Tempo target",
+                "datasource": {
+                    "type": "tempo",
+                    "uid": "defenseclaw-tempo",
+                },
+                "targets": [{"queryType": "traceqlSearch", "filters": []}],
+            },
         ],
     }
     (tmp_path / "fixture.json").write_text(json.dumps(dashboard), encoding="utf-8")
@@ -124,6 +133,7 @@ def test_static_audit_checks_variable_datasources_and_over_time_stats(
     assert any("prometheus must use 'defenseclaw-prometheus'" in error for error in errors)
     assert any("range-aggregate stat targets must be instant" in error for error in errors)
     assert any("grouped zero fallbacks must use `or on() vector(0)`" in error for error in errors)
+    assert any("traceqlSearch targets must provide" in error for error in errors)
 
 
 def test_live_inventory_distinguishes_data_zero_empty_and_interactive(
@@ -159,6 +169,11 @@ def test_live_inventory_distinguishes_data_zero_empty_and_interactive(
                 "datasource": {"type": "tempo", "uid": "defenseclaw-tempo"},
                 "targets": [{"query": "$trace", "refId": "A"}],
             },
+            {
+                "type": "text",
+                "title": "Instructions",
+                "options": {"content": "Choose a trace."},
+            },
         ],
     }
 
@@ -183,6 +198,7 @@ def test_live_inventory_distinguishes_data_zero_empty_and_interactive(
         "zero": 1,
         "empty": 1,
         "interactive": 1,
+        "static": 1,
         "error": 0,
     }
     assert {panel["title"]: panel["status"] for panel in inventory[0]["panels"]} == {
@@ -190,6 +206,7 @@ def test_live_inventory_distinguishes_data_zero_empty_and_interactive(
         "Healthy zero": "zero",
         "No matching event": "empty",
         "Selected waterfall": "interactive",
+        "Instructions": "static",
     }
 
 
@@ -241,7 +258,25 @@ def test_live_inventory_checks_tempo_before_search(monkeypatch: pytest.MonkeyPat
                 "type": "table",
                 "title": "Recent traces",
                 "datasource": {"type": "tempo", "uid": "defenseclaw-tempo"},
-                "targets": [{"query": '{ resource.service.name = "defenseclaw" }'}],
+                "targets": [
+                    {
+                        "queryType": "traceqlSearch",
+                        "filters": [
+                            {
+                                "tag": "service.name",
+                                "scope": "resource",
+                                "operator": "=",
+                                "value": ["defenseclaw"],
+                            },
+                            {
+                                "tag": "name",
+                                "scope": "span",
+                                "operator": "=",
+                                "value": ["defenseclaw.ai.discovery"],
+                            },
+                        ],
+                    },
+                ],
             },
         ],
     }
@@ -250,7 +285,12 @@ def test_live_inventory_checks_tempo_before_search(monkeypatch: pytest.MonkeyPat
         call_order.append("ready")
         return None
 
-    def fake_request(_url: str, _params: dict[str, str] | None = None) -> dict[str, object]:
+    def fake_request(_url: str, params: dict[str, str] | None = None) -> dict[str, object]:
+        assert params is not None
+        assert params["q"] == (
+            '{ resource.service.name = "defenseclaw" '
+            '&& name = "defenseclaw.ai.discovery" }'
+        )
         call_order.append("search")
         return {"traces": [{"traceID": "1"}]}
 
@@ -262,3 +302,39 @@ def test_live_inventory_checks_tempo_before_search(monkeypatch: pytest.MonkeyPat
     assert errors == []
     assert call_order == ["ready", "search"]
     assert inventory[0]["panels"][0]["status"] == "data"
+
+
+def test_tempo_target_query_uses_operator_correct_multi_value_join() -> None:
+    audit = _load_audit_module()
+
+    positive = audit.tempo_target_query(
+        {
+            "queryType": "traceqlSearch",
+            "filters": [
+                {
+                    "tag": "service.name",
+                    "scope": "resource",
+                    "operator": "=",
+                    "value": ["gateway", "worker"],
+                },
+            ],
+        },
+    )
+    negative = audit.tempo_target_query(
+        {
+            "queryType": "traceqlSearch",
+            "filters": [
+                {
+                    "tag": "name",
+                    "scope": "span",
+                    "operator": "!=",
+                    "value": ["health", "ready"],
+                },
+            ],
+        },
+    )
+
+    assert positive == (
+        '{ (resource.service.name = "gateway" || resource.service.name = "worker") }'
+    )
+    assert negative == '{ (name != "health" && name != "ready") }'

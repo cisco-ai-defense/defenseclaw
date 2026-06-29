@@ -662,7 +662,7 @@
       "targets": [
         {
           "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[$__rate_interval])) or on() vector(0)",
-          "legendFormat": "{{alert_type}} [{{alert_severity}}]",
+          "legendFormat": "{{action}} [{{severity}}]",
           "refId": "A"
         }
       ],

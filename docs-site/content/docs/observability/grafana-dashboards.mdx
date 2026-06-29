@@ -126,8 +126,9 @@ For a panel-by-panel data inventory over the last 48 hours, run:
 python scripts/check_grafana_dashboards.py --inventory --inventory-hours 48
 ```
 
-The inventory reports **Data**, **Zero**, **Empty**, **Interactive**, and
-**Error** separately for every dashboard. It uses the representative `codex`
+The inventory reports **Data**, **Zero**, **Empty**, **Interactive**, **Static**,
+and **Error** separately for every dashboard. Static panels are intentional
+text/instructions. It uses the representative `codex`
 connector and all agent IDs: connector-detail queries exercise a real
 single-selection value, while trace waterfalls that need an explicit agent or
 trace selection are classified as interactive instead of broken.
