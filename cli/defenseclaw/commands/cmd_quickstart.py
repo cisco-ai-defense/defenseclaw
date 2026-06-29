@@ -120,6 +120,7 @@ import click
             "openhands",
             "antigravity",
             "opencode",
+            "omnigent",
         ],
         case_sensitive=False,
     ),

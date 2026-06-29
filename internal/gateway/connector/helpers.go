@@ -236,13 +236,13 @@ func isChatPath(path string) bool {
 //     caller falls through to its real auth path;
 //   - returns true when r IS loopback;
 //   - emits a single `[SECURITY] <connector>: loopback request accepted
-//     without X-DC-Auth — DEFENSECLAW_GATEWAY_TOKEN is set but the
+//     without X-DC-Auth — gateway authentication is configured but the
 //     <connector> native binary has no seam to inject it. <reason>` line
-//     to stderr the FIRST time it returns true while gatewayToken is
-//     non-empty (subsequent calls suppress the warning via warned).
-//   - never logs when gatewayToken is empty — that is the "no gateway
-//     auth configured at all" case where loopback trust is the explicit
-//     operator default.
+//     to stderr the FIRST time it returns true while configuredCredential
+//     is non-empty (subsequent calls suppress the warning via warned).
+//   - never logs when configuredCredential is empty — that is the "no
+//     gateway auth configured at all" case where loopback trust is the
+//     explicit operator default.
 //
 // # SECURITY MODEL — IMPORTANT
 //
@@ -262,7 +262,7 @@ func isChatPath(path string) bool {
 //     connector's Authenticate() godoc, AND
 //  2. add a test asserting the [SECURITY] line is emitted exactly once
 //     per process for that new caller.
-func AcceptLoopbackWithWarning(r *http.Request, gatewayToken, connectorName, reason string, warned *sync.Once) bool {
+func AcceptLoopbackWithWarning(r *http.Request, configuredCredential, connectorName, reason string, warned *sync.Once) bool {
 	if !IsLoopback(r) {
 		return false
 	}
@@ -287,16 +287,16 @@ func AcceptLoopbackWithWarning(r *http.Request, gatewayToken, connectorName, rea
 		reason = "vendor CLI has no header-injection seam"
 	}
 	// Only emit the warning when the operator has actually
-	// configured a token; without a token there is no "bypass"
+	// configured a credential; without one there is no "bypass"
 	// (the gateway accepts unauthenticated loopback by default).
 	// We keep the warning at WARN-only because the carve-out is a
 	// deliberate trust decision documented in INFO.md, not an
 	// unexpected configuration.
-	if strings.TrimSpace(gatewayToken) != "" {
+	if strings.TrimSpace(configuredCredential) != "" {
 		warned.Do(func() {
 			fmt.Fprintf(os.Stderr,
 				"[SECURITY] %s: loopback request accepted without X-DC-Auth — "+
-					"DEFENSECLAW_GATEWAY_TOKEN is set but the %s native binary "+
+					"gateway authentication is configured but the %s native binary "+
 					"has no seam to inject it. %s. Any process on this host "+
 					"can route through this connector's API with no further "+
 					"authentication.\n",
@@ -304,4 +304,19 @@ func AcceptLoopbackWithWarning(r *http.Request, gatewayToken, connectorName, rea
 		})
 	}
 	return true
+}
+
+func authenticateHookBridgeRequest(r *http.Request, gatewayToken, masterKey, connectorName, loopbackReason string, warned *sync.Once) bool {
+	provided := ExtractBearerKey(r.Header.Get("Authorization"))
+	if gatewayToken != "" && SecureTokenMatch(provided, gatewayToken) {
+		return true
+	}
+	if masterKey != "" && SecureTokenMatch(provided, masterKey) {
+		return true
+	}
+	configuredCredential := gatewayToken
+	if configuredCredential == "" {
+		configuredCredential = masterKey
+	}
+	return AcceptLoopbackWithWarning(r, configuredCredential, connectorName, loopbackReason, warned)
 }

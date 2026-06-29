@@ -1,6 +1,6 @@
 {
   "_source": "Hand-curated from internal/gateway/connector hook profiles plus cli/defenseclaw/inventory/hook_contracts.json. Re-extract on every connector or hook-contract change.",
-  "_lastVerified": "2026-05-19",
+  "_lastVerified": "2026-06-26",
   "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/meta.json).",
   "connectors": [
     {
@@ -112,6 +112,23 @@
       },
       "hilt": "No native human-approval surface; blocks by throwing in the bridge plugin's tool.execute.before. confirm verdicts fall back to allow.",
       "notes": "Governed by a DefenseClaw JS bridge plugin auto-loaded from ~/.config/opencode/plugins/defenseclaw.js (no opencode.json edit). tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) to abort the tool on a block decision; tool.execute.after is observe-only. Fail-closed is genuine — the bridge throws when the gateway is unreachable and FAIL_MODE=closed."
+    },
+    {
+      "id": "omnigent",
+      "label": "OmniGent",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["UserPromptSubmit", "PreToolUse", "BeforeModel"],
+        "blockEvents": ["UserPromptSubmit", "PreToolUse", "PostToolUse", "AfterAgentResponse", "BeforeModel", "AfterModel"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "OmniGent parks request, tool_call, and llm_request policy phases for native ASK approval; post-action confirm verdicts use the configured fallback.",
+      "notes": "Documented custom Python policy bridge maps all six OmniGent policy phases to DefenseClaw. Optional native OTLP is inactive until the OmniGent launch process exports the standard environment variables; native traces require OmniGent's optional tracing extra."
     },
     {
       "id": "geminicli",

@@ -11,6 +11,7 @@ OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 
 DIST_DIR    := dist
+UPGRADE_SMOKE_FROM ?= 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
 
 # Cross-platform virtualenv / executable layout. Windows Python venvs expose
 # console entry points under Scripts/ (not bin/) and binaries carry a .exe
@@ -33,7 +34,8 @@ endif
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
+        check check-audit-actions check-error-codes check-schemas check-grafana-dashboards check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
+        upgrade-smoke upgrade-smoke-matrix \
         set-version \
         _bundle-data \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
@@ -554,7 +556,7 @@ test-file:
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-provider-coverage check-llm-catalog check-upgrade-manifest
+check: check-v7 check-grafana-dashboards check-provider-coverage check-llm-catalog check-upgrade-manifest
 
 check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
@@ -570,6 +572,9 @@ check-error-codes:
 
 check-schemas:
 	@$(VENV)/bin/python scripts/check_schemas.py
+
+check-grafana-dashboards: _bundle-data
+	@$(VENV)/bin/python scripts/check_grafana_dashboards.py --require-packaged
 
 # check-provider-coverage runs the shared test/testdata/llm-endpoints.json
 # corpus through both the Go shape detector (provider_coverage_test.go)
@@ -600,6 +605,12 @@ check-llm-catalog:
 
 check-upgrade-manifest:
 	@python3 scripts/generate-upgrade-manifest.py --check
+
+upgrade-smoke:
+	@scripts/test-upgrade-release.sh $(ARGS)
+
+upgrade-smoke-matrix:
+	@scripts/test-upgrade-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)
 
 # ---------------------------------------------------------------------------
 # Lint targets
@@ -663,6 +674,7 @@ dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-
 dist-cli: _bundle-data
 	@mkdir -p $(DIST_DIR)
 	@rm -rf build cli/*.egg-info
+	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv build --wheel --out-dir $(DIST_DIR)
 
 _bundle-data:
@@ -670,6 +682,7 @@ _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/policies/openshell
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/scripts
+	@mkdir -p cli/defenseclaw/_data/envvars
 	@mkdir -p cli/defenseclaw/_data/skills
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
@@ -687,6 +700,7 @@ _bundle-data:
 	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
+	cp internal/envvars/registry.json cli/defenseclaw/_data/envvars/
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	@# Curated LLM model catalog consumed by `defenseclaw setup llm` and the

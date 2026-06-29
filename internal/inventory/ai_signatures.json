@@ -610,6 +610,43 @@
       "local_endpoints": []
     },
     {
+      "id": "omnigent",
+      "name": "OmniGent",
+      "vendor": "OmniGent",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "omnigent",
+      "binary_names": [
+        "omnigent",
+        "omni"
+      ],
+      "process_names": [
+        "omnigent",
+        "omni"
+      ],
+      "config_paths": [
+        "$OMNIGENT_CONFIG_HOME/config.yaml",
+        "$OMNIGENT_CONFIG_HOME",
+        "~/.omnigent/config.yaml",
+        "~/.omnigent"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "omnigent"
+      ],
+      "env_var_names": [
+        "OMNIGENT_CONFIG_HOME",
+        "OMNIGENT_DATA_DIR"
+      ],
+      "domain_patterns": [],
+      "history_patterns": [
+        "omnigent"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
       "id": "continue",
       "name": "Continue",
       "vendor": "Continue",

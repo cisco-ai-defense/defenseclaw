@@ -11,7 +11,7 @@
         "iconColor": "red",
         "name": "Firing alerts",
         "tagKeys": "alertname,severity",
-        "titleFormat": "{{alertname}} \u2014 {{severity}}",
+        "titleFormat": "{{alertname}} — {{severity}}",
         "useValueForTime": false
       }
     ]
@@ -92,14 +92,7 @@
       "targetBlank": false
     },
     {
-      "title": "Reliability",
-      "type": "link",
-      "url": "/d/defenseclaw-reliability?${__url_time_range}",
-      "icon": "external link",
-      "targetBlank": false
-    },
-    {
-      "title": "Runtime",
+      "title": "Runtime & Reliability",
       "type": "link",
       "url": "/d/defenseclaw-runtime?${__url_time_range}",
       "icon": "external link",
@@ -215,7 +208,7 @@
     {
       "type": "stat",
       "title": "Verdicts / min",
-      "description": "Guardrail verdicts emitted per minute across every stage.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "Guardrail verdicts emitted per minute across every stage.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -229,7 +222,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -259,7 +253,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -316,7 +311,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\"}[5m])) / clamp_min(sum(rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\"}[5m])), 0.0001) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -362,7 +358,7 @@
     {
       "type": "stat",
       "title": "Hook invocations / min",
-      "description": "Connector hook callbacks per minute. Chat-HITL pending queue is not emitted in hook-only mode.",
+      "description": "Connector hook callbacks per minute. Chat-HITL pending queue is not emitted in hook-only mode.\n\ncovered_by:\n  - defenseclaw_connector_hook_invocations → internal/gateway/hook_telemetry.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -376,7 +372,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -419,7 +416,7 @@
     {
       "type": "stat",
       "title": "Exporter freshness",
-      "description": "Seconds since the gateway last exported OTLP metrics. Spikes when the gateway process is idle or restarting; hook activity may continue via audit logs.",
+      "description": "Seconds since the gateway last exported OTLP metrics. Spikes when the gateway process is idle or restarting; hook activity may continue via audit logs.\n\ncovered_by:\n  - defenseclaw_telemetry_exporter_last_export_ts_seconds → internal/telemetry/provider.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -462,7 +459,7 @@
     {
       "type": "stat",
       "title": "Top finding rule (range)",
-      "description": "Scanner rule_id with the most findings in the selected time range.",
+      "description": "Scanner rule_id with the most findings in the selected time range.\n\ncovered_by:\n  - defenseclaw_scan_findings_by_rule → internal/telemetry/scan.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -503,7 +500,7 @@
     {
       "type": "stat",
       "title": "Findings / min",
-      "description": "Scanner findings emitted per minute across all rules.",
+      "description": "Scanner findings emitted per minute across all rules.\n\ncovered_by:\n  - defenseclaw_scan_findings_by_rule → internal/telemetry/scan.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -517,7 +514,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_scan_findings_by_rule_total[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -550,7 +548,7 @@
     {
       "type": "stat",
       "title": "Gateway errors / min",
-      "description": "EventError emissions by subsystem. Drill into Reliability \u2192 Gateway errors by subsystem/code.\n\ncovered_by:\n  - defenseclaw_gateway_errors \u2192 internal/telemetry/gateway_events.go (EventError)",
+      "description": "EventError emissions by subsystem. Drill into Runtime & Reliability → Gateway errors by subsystem/code.\n\ncovered_by:\n  - defenseclaw_gateway_errors → internal/telemetry/gateway_events.go (EventError)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -564,7 +562,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_gateway_errors_total[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -612,7 +611,7 @@
     {
       "type": "stat",
       "title": "Scan findings (range)",
-      "description": "Total scanner findings emitted in the selected time range.",
+      "description": "Total scanner findings emitted in the selected time range.\n\ncovered_by:\n  - defenseclaw_scan_findings_by_rule → internal/telemetry/scan.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -626,7 +625,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total[$__range])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -658,7 +658,7 @@
     {
       "type": "gauge",
       "title": "Hook latency SLO < 2.5s (5m)",
-      "description": "Fraction of hook evaluations completing within 2.5s (nearest histogram bucket to 2s target).",
+      "description": "Fraction of hook evaluations completing within 2.5s (nearest histogram bucket to 2s target).\n\ncovered_by:\n  - defenseclaw_connector_hook_latency_milliseconds → internal/gateway/hook_telemetry.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -703,7 +703,7 @@
     {
       "type": "gauge",
       "title": "Active connectors (5m)",
-      "description": "Distinct connectors that emitted hook invocations or OTLP records in the last 5 minutes. Click to open Connectors Overview.\n\ncovered_by:\n  - defenseclaw_connector_hook_invocations \u2192 internal/gateway/hook_telemetry.go\n  - defenseclaw_otel_ingest_records \u2192 internal/gateway/otel_ingest.go",
+      "description": "Distinct connectors that emitted hook invocations or OTLP records in the last 5 minutes. Click to open Connectors Overview.\n\ncovered_by:\n  - defenseclaw_connector_hook_invocations → internal/gateway/hook_telemetry.go\n  - defenseclaw_otel_ingest_records → internal/gateway/otel_ingest.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -749,7 +749,7 @@
     {
       "type": "timeseries",
       "title": "Gateway events / sec by type",
-      "description": "All gateway event types (tool_invocation, lifecycle, egress, llm_prompt, llm_response, verdict, judge, error, scan). This is the canonical 'what is DefenseClaw seeing' panel.\n\ncovered_by:\n  - defenseclaw_gateway_events_emitted \u2192 internal/telemetry/gateway_events.go",
+      "description": "All gateway event types (tool_invocation, lifecycle, egress, llm_prompt, llm_response, verdict, judge, error, scan). This is the canonical 'what is DefenseClaw seeing' panel.\n\ncovered_by:\n  - defenseclaw_gateway_events_emitted → internal/telemetry/gateway_events.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -782,7 +782,7 @@
     {
       "type": "timeseries",
       "title": "Audit events / sec by action",
-      "description": "Total audit records written by action type: claude-code-hook, otel.ingest.logs, otel.ingest.metrics.\n\ncovered_by:\n  - defenseclaw_audit_events \u2192 internal/audit (RecordAuditEvent)",
+      "description": "Total audit records written by action type: claude-code-hook, otel.ingest.logs, otel.ingest.metrics.\n\ncovered_by:\n  - defenseclaw_audit_events → internal/audit (RecordAuditEvent)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -826,7 +826,7 @@
     {
       "type": "timeseries",
       "title": "Evaluations by action",
-      "description": "Stacked guardrail decisions. A wedge of 'block' > 10% usually means a policy is too aggressive or the caller is probing.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "Stacked guardrail decisions. A wedge of 'block' > 10% usually means a policy is too aggressive or the caller is probing.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -865,7 +865,7 @@
     {
       "type": "timeseries",
       "title": "Runtime alerts / sec",
-      "description": "Runtime alerts (dangerous-command, guardrail-flag, guardrail-block, prompt-injection, data-exfiltration, content-violation, codeguard-finding). Non-zero means a security-relevant event is occurring.\n\ncovered_by:\n  - defenseclaw_alert_count \u2192 internal/telemetry/alerts.go (RecordAlert)",
+      "description": "Runtime alerts (dangerous-command, guardrail-flag, guardrail-block, prompt-injection, data-exfiltration, content-violation, codeguard-finding). Non-zero means a security-relevant event is occurring.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -878,8 +878,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert|block\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "{{alert_type}} [{{alert_severity}}]",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert|block\"}[$__rate_interval])) or on() vector(0)",
+          "legendFormat": "{{action}}",
           "refId": "A"
         }
       ],
@@ -895,7 +895,7 @@
     {
       "type": "timeseries",
       "title": "Guardrail latency (p50/p95/p99)",
-      "description": "Per-scanner guardrail latency quantiles. Investigate if p99 > 500 ms.\n\ncovered_by:\n  - defenseclaw_inspect_latency_milliseconds \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "Per-scanner guardrail latency quantiles. Investigate if p99 > 500 ms.\n\ncovered_by:\n  - defenseclaw_inspect_latency_milliseconds → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -943,7 +943,7 @@
     {
       "type": "timeseries",
       "title": "Scan findings by severity",
-      "description": "All findings (skill, MCP, plugin) stacked by severity. Click a series to drill into Findings.\n\ncovered_by:\n  - defenseclaw_scan_findings \u2192 internal/telemetry/scan.go",
+      "description": "All findings (skill, MCP, plugin) stacked by severity. Click a series to drill into Findings.\n\ncovered_by:\n  - defenseclaw_scan_findings_by_rule → internal/telemetry/scan.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -982,7 +982,7 @@
     {
       "type": "timeseries",
       "title": "Gateway errors by subsystem / code",
-      "description": "Stacked structured errors. Each (subsystem, code) pair is a stable enum \u2014 no cardinality explosion.\n\ncovered_by:\n  - defenseclaw_gateway_errors \u2192 internal/telemetry/gateway_events.go (EventError)",
+      "description": "Stacked structured errors. Each (subsystem, code) pair is a stable enum — no cardinality explosion.\n\ncovered_by:\n  - defenseclaw_gateway_errors → internal/telemetry/gateway_events.go (EventError)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1061,7 +1061,7 @@
     {
       "type": "stat",
       "title": "LLM events / min",
-      "description": "Normalized prompt, response, and tool invocation gateway events. Content fields follow the current DefenseClaw redaction setting.\n\ncovered_by:\n  - defenseclaw_gateway_events_emitted \u2192 internal/telemetry/gateway_events.go",
+      "description": "Normalized prompt, response, and tool invocation gateway events. Content fields follow the current DefenseClaw redaction setting.\n\ncovered_by:\n  - defenseclaw_gateway_events_emitted → internal/telemetry/gateway_events.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1075,7 +1075,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_gateway_events_emitted_total{event_type=~\"llm_prompt|llm_response|tool_invocation\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -1091,7 +1092,7 @@
     {
       "type": "timeseries",
       "title": "LLM events by type",
-      "description": "Prompt, response, and tool events emitted from proxy traffic, Codex hooks/OTLP, Claude Code hooks/OTLP, OpenClaw, and ZeptoClaw.\n\ncovered_by:\n  - defenseclaw_gateway_events_emitted \u2192 internal/telemetry/gateway_events.go",
+      "description": "Prompt, response, and tool events emitted from proxy traffic, Codex hooks/OTLP, Claude Code hooks/OTLP, OpenClaw, and ZeptoClaw.\n\ncovered_by:\n  - defenseclaw_gateway_events_emitted → internal/telemetry/gateway_events.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1145,223 +1146,6 @@
         "dedupStrategy": "none",
         "enableLogDetails": true
       }
-    },
-    {
-      "type": "row",
-      "title": "Audit sink + runtime health",
-      "description": "Panels in this row reference metrics that are NOT emitted by any current gateway code path. They are kept here on purpose \u2014 collapsed and clearly fenced \u2014 so dashboard authors can iterate on the visualization while the underlying instrumentation lands across the v7 tracks. Each panel's own description carries an explicit ``covered_by: ... \u2192 EMITTED-NOWHERE`` tag so the next time a panel mysteriously goes empty, the description is its own bug report.",
-      "gridPos": {
-        "x": 0,
-        "y": 75,
-        "w": 24,
-        "h": 1
-      },
-      "collapsed": true,
-      "panels": [
-        {
-          "type": "stat",
-          "title": "Sink failures / min",
-          "description": "Audit sinks that returned a permanent failure for a batch. Drill into Reliability \u2192 Sinks.\n\ncovered_by:\n  - defenseclaw_audit_sink_failures \u2192 EMITTED-NOWHERE (orphan, see speculative row)",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "gridPos": {
-            "x": 0,
-            "y": 0,
-            "w": 12,
-            "h": 8
-          },
-          "targets": [
-            {
-              "expr": "sum(rate(defenseclaw_audit_sink_failures_total[5m])) * 60 or vector(0)",
-              "refId": "A"
-            }
-          ],
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "colorMode": "background",
-            "graphMode": "area"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "orange",
-                    "value": 0.01
-                  },
-                  {
-                    "color": "red",
-                    "value": 1
-                  }
-                ]
-              }
-            }
-          }
-        },
-        {
-          "type": "stat",
-          "title": "Panics (1h)",
-          "description": "Recovered Go panics in the last hour. Each one corresponds to a stack trace in EventError with subsystem=runtime.\n\ncovered_by:\n  - defenseclaw_runtime_panics \u2192 EMITTED-NOWHERE (orphan, see speculative row)",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "gridPos": {
-            "x": 12,
-            "y": 0,
-            "w": 12,
-            "h": 8
-          },
-          "targets": [
-            {
-              "expr": "sum(increase(defenseclaw_runtime_panics_total[1h])) or vector(0)",
-              "refId": "A"
-            }
-          ],
-          "options": {
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "colorMode": "background",
-            "graphMode": "none"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "red",
-                    "value": 1
-                  }
-                ]
-              }
-            }
-          }
-        },
-        {
-          "type": "gauge",
-          "title": "TUI SLO \u2014 refresh < 5000 ms (5m)",
-          "description": "Fraction of TUI panel refreshes in < 5s. Target \u2265 99%.\n\ncovered_by:\n  - defenseclaw_slo_tui_refresh_milliseconds \u2192 EMITTED-NOWHERE (orphan, see speculative row)",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "gridPos": {
-            "x": 0,
-            "y": 8,
-            "w": 12,
-            "h": 8
-          },
-          "targets": [
-            {
-              "expr": "sum(rate(defenseclaw_slo_tui_refresh_milliseconds_bucket{le=\"5000\"}[5m])) / sum(rate(defenseclaw_slo_tui_refresh_milliseconds_count[5m]))",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percentunit",
-              "min": 0,
-              "max": 1,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "orange",
-                    "value": 0.95
-                  },
-                  {
-                    "color": "green",
-                    "value": 0.99
-                  }
-                ]
-              }
-            }
-          }
-        },
-        {
-          "type": "gauge",
-          "title": "Sink circuit health",
-          "description": "Max sink circuit state (0=closed/healthy, 1=open/rejecting, 2=half-open).\n\ncovered_by:\n  - defenseclaw_audit_sink_circuit_state \u2192 EMITTED-NOWHERE (orphan, see speculative row)",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "gridPos": {
-            "x": 12,
-            "y": 8,
-            "w": 12,
-            "h": 8
-          },
-          "targets": [
-            {
-              "expr": "max(defenseclaw_audit_sink_circuit_state) or vector(0)",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "min": 0,
-              "max": 2,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "orange",
-                    "value": 1
-                  },
-                  {
-                    "color": "red",
-                    "value": 2
-                  }
-                ]
-              },
-              "mappings": [
-                {
-                  "type": "value",
-                  "options": {
-                    "0": {
-                      "text": "closed"
-                    },
-                    "1": {
-                      "text": "open"
-                    },
-                    "2": {
-                      "text": "half-open"
-                    }
-                  }
-                }
-              ]
-            }
-          }
-        }
-      ]
     }
   ],
   "preload": false,
@@ -1378,8 +1162,8 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw \u2014 Overview",
+  "title": "DefenseClaw — Overview",
   "uid": "defenseclaw-overview",
-  "version": 5,
+  "version": 6,
   "weekStart": ""
 }

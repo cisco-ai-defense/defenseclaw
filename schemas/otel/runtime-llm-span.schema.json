@@ -2,48 +2,61 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.dev/schemas/otel/runtime-llm-span.schema.json",
   "title": "DefenseClaw Runtime LLM Call Span",
-  "description": "OTEL Span representing an LLM request/response lifecycle. Uses OTEL GenAI semantic conventions (gen_ai.* namespace). Emitted when connector hook scripts or the LLM gateway proxy capture LLM calls for openclaw, zeptoclaw, claudecode, codex, hermes, cursor, windsurf, geminicli, copilot, and openhands.",
+  "description": "OTEL CLIENT span for one LLM inference. Standard gen_ai.* and OpenInference attributes form the interoperable projection; defenseclaw.* attributes retain security and policy context.",
   "type": "object",
   "required": ["name", "kind", "startTimeUnixNano", "attributes"],
+  "x-required-attribute-keys": [
+    "gen_ai.operation.name",
+    "gen_ai.provider.name",
+    "gen_ai.request.model",
+    "gen_ai.input.messages",
+    "gen_ai.output.messages"
+  ],
+  "x-optional-attribute-keys": [
+    "defenseclaw.agent.root.id",
+    "defenseclaw.agent.parent.id",
+    "defenseclaw.session.root.id",
+    "defenseclaw.session.parent.id",
+    "defenseclaw.agent.lifecycle.id",
+    "defenseclaw.agent.execution.id",
+    "defenseclaw.agent.lifecycle.event",
+    "defenseclaw.agent.lifecycle.state",
+    "defenseclaw.agent.phase",
+    "defenseclaw.agent.phase.previous",
+    "defenseclaw.agent.phase.code",
+    "defenseclaw.agent.sequence",
+    "defenseclaw.operation.id",
+    "defenseclaw.agent.depth",
+    "defenseclaw.session.source",
+    "defenseclaw.session.resumed",
+    "defenseclaw.telemetry.input.reported",
+    "defenseclaw.telemetry.output.reported",
+    "defenseclaw.telemetry.tokens.reported",
+    "user.id",
+    "defenseclaw.user.name"
+  ],
+  "x-galileo-exported": true,
   "properties": {
-    "traceId": {
-      "type": "string",
-      "description": "16-byte hex trace ID."
-    },
-    "spanId": {
-      "type": "string",
-      "description": "8-byte hex span ID."
-    },
-    "parentSpanId": {
-      "type": "string",
-      "description": "Parent span ID (agent session span)."
-    },
+    "traceId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "spanId": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+    "parentSpanId": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
     "name": {
       "type": "string",
-      "pattern": "^llm/.+$",
-      "description": "Format: llm/{model_name}",
-      "examples": ["llm/gpt-4", "llm/claude-sonnet-4-20250514", "llm/llama-3.1-70b"]
+      "pattern": "^chat .+$",
+      "description": "OTEL GenAI span name: chat {request_model}.",
+      "examples": ["chat gpt-4o-mini", "chat claude-sonnet-4-20250514"]
     },
     "kind": {
       "type": "integer",
       "const": 3,
-      "description": "SPAN_KIND_CLIENT = 3 (calling an external LLM service)."
+      "description": "SPAN_KIND_CLIENT"
     },
-    "startTimeUnixNano": {
-      "type": "string",
-      "description": "LLM request sent timestamp."
-    },
-    "endTimeUnixNano": {
-      "type": "string",
-      "description": "LLM response received timestamp."
-    },
+    "startTimeUnixNano": { "type": "string" },
+    "endTimeUnixNano": { "type": "string" },
     "status": {
       "type": "object",
       "properties": {
-        "code": {
-          "type": "integer",
-          "enum": [0, 1, 2]
-        },
+        "code": { "type": "integer", "enum": [0, 1, 2] },
         "message": { "type": "string" }
       }
     },
@@ -63,63 +76,81 @@
     },
     "attributeDefinitions": {
       "type": "object",
-      "description": "Semantic definition of all span attributes. gen_ai.* follows OTEL GenAI semantic conventions.",
+      "description": "Attributes emitted by StartLLMSpan, SetGenAIInput/Output, EndLLMSpan, and the gateway proxy/router/hook-correlation enrichment sites.",
       "properties": {
-        "gen_ai.system": {
-          "type": "string",
-          "enum": ["openai", "anthropic", "nvidia-nim", "google", "cohere", "mistral"],
-          "description": "LLM provider system identifier."
-        },
-        "gen_ai.request.model": {
-          "type": "string",
-          "description": "Model requested by the caller.",
-          "examples": ["gpt-4", "claude-sonnet-4-20250514", "llama-3.1-70b-instruct"]
-        },
-        "gen_ai.response.model": {
-          "type": "string",
-          "description": "Actual model used (may differ from requested)."
-        },
-        "gen_ai.request.max_tokens": {
-          "type": "integer",
-          "description": "Max tokens parameter sent with the request."
-        },
-        "gen_ai.request.temperature": {
-          "type": "number",
-          "description": "Temperature parameter."
-        },
+        "tenant.id": { "type": "string" },
+        "workspace.id": { "type": "string" },
+        "deployment.environment": { "type": "string" },
+        "deployment.mode": { "type": "string" },
+        "discovery.source": { "type": "string" },
+        "defenseclaw.device.id": { "type": "string" },
+        "gen_ai.operation.name": { "type": "string", "const": "chat" },
+        "gen_ai.system": { "type": "string" },
+        "gen_ai.provider.name": { "type": "string" },
+        "gen_ai.request.model": { "type": "string" },
+        "gen_ai.request.max_tokens": { "type": "integer", "minimum": 0 },
+        "gen_ai.request.temperature": { "type": "number" },
+        "gen_ai.response.model": { "type": "string" },
         "gen_ai.response.finish_reasons": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Why the model stopped generating.",
-          "examples": [["stop"], ["tool_use"], ["length"]]
+          "items": { "type": "string" }
         },
-        "gen_ai.usage.prompt_tokens": {
-          "type": "integer",
-          "description": "Number of input/prompt tokens."
-        },
-        "gen_ai.usage.completion_tokens": {
-          "type": "integer",
-          "description": "Number of output/completion tokens."
-        },
-        "defenseclaw.llm.provider": {
+        "gen_ai.usage.input_tokens": { "type": "integer", "minimum": 0 },
+        "gen_ai.usage.output_tokens": { "type": "integer", "minimum": 0 },
+        "gen_ai.input.messages": {
           "type": "string",
-          "description": "Provider identifier (may match gen_ai.system)."
+          "contentMediaType": "application/json",
+          "description": "JSON message array. Content is persistent-sink redacted unless redaction is explicitly disabled."
         },
-        "defenseclaw.llm.tool_calls": {
-          "type": "integer",
-          "description": "Number of tool_use blocks in the LLM response."
-        },
-        "defenseclaw.llm.guardrail": {
+        "gen_ai.output.messages": {
           "type": "string",
-          "enum": ["none", "local", "ai-defense"],
-          "description": "Which guardrail evaluated this LLM call."
+          "contentMediaType": "application/json",
+          "description": "JSON message array. Content is persistent-sink redacted unless redaction is explicitly disabled."
         },
-        "defenseclaw.llm.guardrail.result": {
-          "type": "string",
-          "enum": ["pass", "flagged", "blocked"],
-          "description": "Guardrail evaluation outcome."
+        "input.value": { "type": "string" },
+        "input.mime_type": { "type": "string", "const": "text/plain" },
+        "output.value": { "type": "string" },
+        "output.mime_type": { "type": "string", "const": "text/plain" },
+        "openinference.span.kind": { "type": "string", "const": "LLM" },
+        "gen_ai.conversation.id": { "type": "string" },
+        "gen_ai.agent.name": { "type": "string" },
+        "gen_ai.agent.type": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" },
+        "defenseclaw.agent.root.id": { "type": "string" },
+        "defenseclaw.agent.parent.id": { "type": "string" },
+        "defenseclaw.session.root.id": { "type": "string" },
+        "defenseclaw.session.parent.id": { "type": "string" },
+        "defenseclaw.agent.lifecycle.id": { "type": "string" },
+        "defenseclaw.agent.execution.id": { "type": "string" },
+        "defenseclaw.agent.lifecycle.event": { "type": "string" },
+        "defenseclaw.agent.lifecycle.state": { "type": "string" },
+        "defenseclaw.agent.phase": { "type": "string" },
+        "defenseclaw.agent.phase.previous": { "type": "string" },
+        "defenseclaw.agent.phase.code": { "type": "integer", "minimum": 0, "maximum": 12 },
+        "defenseclaw.agent.sequence": { "type": "integer", "minimum": 1 },
+        "defenseclaw.operation.id": { "type": "string" },
+        "defenseclaw.agent.depth": { "type": "integer", "minimum": 0 },
+        "defenseclaw.session.source": { "type": "string" },
+        "defenseclaw.session.resumed": { "type": "boolean" },
+        "defenseclaw.telemetry.input.reported": { "type": "boolean" },
+        "defenseclaw.telemetry.output.reported": { "type": "boolean" },
+        "defenseclaw.telemetry.tokens.reported": { "type": "boolean" },
+        "user.id": { "type": "string" },
+        "defenseclaw.user.name": { "type": "string" },
+        "defenseclaw.run.id": { "type": "string" },
+        "defenseclaw.llm.tool_calls": { "type": "integer", "minimum": 0 },
+        "defenseclaw.llm.guardrail": { "type": "string" },
+        "defenseclaw.llm.guardrail.result": { "type": "string" },
+        "defenseclaw.llm.request.body": { "type": "string" },
+        "defenseclaw.llm.response.body": { "type": "string" },
+        "defenseclaw.llm.response.content": { "type": "string" },
+        "defenseclaw.llm.response.raw_content": { "type": "string" },
+        "defenseclaw.telemetry.canary": {
+          "type": "boolean",
+          "description": "Marks diagnostic traces that require isolated destination acknowledgement."
         }
-      }
+      },
+      "additionalProperties": false
     }
   }
 }

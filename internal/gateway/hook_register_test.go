@@ -26,10 +26,10 @@ import (
 )
 
 // TestHookRegister_HasBuiltinFactories confirms init() wired up the
-// two known connectors without anyone editing the api.go switch
+// built-in hook connectors without anyone editing the api.go switch
 // statement they replace. Plan C1 / S2.4.
 func TestHookRegister_HasBuiltinFactories(t *testing.T) {
-	for _, name := range []string{"claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"} {
+	for _, name := range []string{"claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
 		if _, ok := connectorHookHandlerByName[name]; !ok {
 			t.Errorf("expected hook factory for connector %q to be registered", name)
 		}

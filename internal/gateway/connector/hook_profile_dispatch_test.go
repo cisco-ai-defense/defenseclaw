@@ -55,6 +55,7 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		// ship), so it needs no Decode; Respond comes from the shared
 		// hookOnlyProfileRespond opencode case.
 		{"opencode", func() Connector { return NewOpenCodeConnector() }, false, true, true},
+		{"omnigent", func() Connector { return NewOmnigentConnector() }, false, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

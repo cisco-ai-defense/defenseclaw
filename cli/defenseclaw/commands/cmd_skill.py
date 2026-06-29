@@ -387,9 +387,12 @@ def _get_openclaw_skill_info(
     if out is None:
         return None
     try:
-        return json.loads(out)
+        data = json.loads(out)
     except json.JSONDecodeError:
         return None
+    if isinstance(data, dict) and data.get("error"):
+        return None
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +539,11 @@ def _skill_info_card(
     suppress_global_action_only: bool = False,
 ) -> dict[str, Any] | None:
     """Build the rendered ``skill info`` payload for one connector scope."""
+    if (
+        isinstance(info_map, dict)
+        and "not found" in str(info_map.get("error") or "").lower()
+    ):
+        info_map = None
     scan_map = _build_scan_map(app.store)
     scan_entry: dict[str, Any] | None = None
     if (
@@ -1170,6 +1178,46 @@ def scan(
     # Resolve scan directory
     scan_dir = scan_path
     scan_connector = ""
+    if not scan_dir:
+        if not connector_flag:
+            # Bare named scans must fan out over every configured connector copy
+            # before the active connector's info path can short-circuit.
+            matches = _skill_match_dir_scopes(app, target)
+            if len(matches) > 1:
+                json_rows: list[dict[str, Any]] = []
+                if remote:
+                    for match_connector, match_dir in matches:
+                        if not as_json:
+                            click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                        _scan_via_sidecar(
+                            app,
+                            target=match_dir,
+                            name=os.path.basename(match_dir),
+                            as_json=as_json,
+                            connector=match_connector,
+                            json_sink=json_rows if as_json else None,
+                        )
+                    if as_json:
+                        click.echo(json.dumps(json_rows, indent=2, default=str))
+                    return
+                for match_connector, match_dir in matches:
+                    if not as_json:
+                        click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                    _scan_one_local_skill(
+                        app,
+                        scanner,
+                        scan_dir=match_dir,
+                        as_json=as_json,
+                        action=action,
+                        connector=match_connector,
+                        json_sink=json_rows if as_json else None,
+                    )
+                if as_json:
+                    click.echo(json.dumps(json_rows, indent=2, default=str))
+                return
+            if matches:
+                scan_connector, scan_dir = matches[0]
+
     if not scan_dir:
         info = _get_openclaw_skill_info(target, app, connector=connector_flag or None)
         if info and _skill_info_path(info):

@@ -48,6 +48,7 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
     ModeChoice("openhands", "OpenHands", "n", False, "command hooks via ~/.openhands/hooks.json"),
     ModeChoice("antigravity", "Antigravity", "a", False, "PreToolUse hooks via ~/.gemini/config/hooks.json"),
     ModeChoice("opencode", "OpenCode", "e", False, "auto-loaded JS bridge plugin; tool.execute.before blocking"),
+    ModeChoice("omnigent", "OmniGent", "m", False, "custom policy ALLOW/ASK/DENY + optional native OTLP"),
 )
 
 
@@ -230,12 +231,22 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
     current = normalize_connector(current_wire)
     dest = normalize_connector(dest_wire)
     label = choice_for_wire(dest).label
+    if current == dest and dest == "omnigent":
+        return (
+            "OmniGent: setup will re-run to refresh the custom Python policy runtime, "
+            "config, and runtime files."
+        )
     if current == dest:
         return f"{label}: setup will re-run to refresh hooks, config, and runtime files."
     if choice_for_wire(dest).guardrail_ok:
         return (
             f"{label}: runs proxy-backed connector setup and pins claw.mode plus guardrail.connector; "
             "preserves the existing guardrail.mode."
+        )
+    if dest == "omnigent":
+        return (
+            "OmniGent: installs the custom Python policy runtime, maps all six phases "
+            "to ALLOW/ASK/DENY, and honors per-connector policy mode."
         )
     return (
         f"{label}: runs hook-driven connector setup, wires hooks and native OTel where supported, "
@@ -245,7 +256,7 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
 
 def _choice_action(choice: ModeChoice, *, current_wire: str) -> MenuAction:
     active = " (active)" if normalize_connector(current_wire) == choice.wire else ""
-    guardrail = "guardrail" if choice.guardrail_ok else "hooks"
+    guardrail = "guardrail" if choice.guardrail_ok else ("policy" if choice.wire == "omnigent" else "hooks")
     return MenuAction(
         action_id=choice.wire,
         # Escape the opening bracket so Rich treats ``[c] Codex`` as

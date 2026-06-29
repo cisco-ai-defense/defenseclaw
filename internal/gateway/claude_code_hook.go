@@ -33,6 +33,8 @@ import (
 type claudeCodeHookRequest struct {
 	HookEventName        string                 `json:"hook_event_name"`
 	SessionID            string                 `json:"session_id,omitempty"`
+	TurnID               string                 `json:"turn_id,omitempty"`
+	MessageID            string                 `json:"message_id,omitempty"`
 	TranscriptPath       string                 `json:"transcript_path,omitempty"`
 	CWD                  string                 `json:"cwd,omitempty"`
 	PermissionMode       string                 `json:"permission_mode,omitempty"`
@@ -57,6 +59,9 @@ type claudeCodeHookRequest struct {
 	Error                string                 `json:"error,omitempty"`
 	ErrorDetails         string                 `json:"error_details,omitempty"`
 	Message              string                 `json:"message,omitempty"`
+	Delta                string                 `json:"delta,omitempty"`
+	DisplayIndex         int                    `json:"index,omitempty"`
+	DisplayFinal         bool                   `json:"final,omitempty"`
 	Title                string                 `json:"title,omitempty"`
 	FilePath             string                 `json:"file_path,omitempty"`
 	LoadReason           string                 `json:"load_reason,omitempty"`

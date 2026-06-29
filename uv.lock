@@ -877,6 +877,7 @@ dependencies = [
     { name = "cisco-ai-mcp-scanner", marker = "python_full_version >= '3.11'" },
     { name = "cisco-ai-skill-scanner" },
     { name = "click" },
+    { name = "opentelemetry-proto" },
     { name = "pyyaml" },
     { name = "requests" },
     { name = "rich" },
@@ -911,6 +912,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1.8,<9" },
     { name = "google-auth", marker = "extra == 'vertex'", specifier = ">=2.30" },
     { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.60" },
+    { name = "opentelemetry-proto", specifier = ">=1.28.0,<2" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "requests", specifier = "==2.33.0" },
     { name = "rich", specifier = ">=13.0" },
@@ -2639,6 +2641,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/47/8e/3778a7e87801d994869a9396b9fc2a289e5f9be91ff54a27d41eace494b0/opentelemetry_api-1.41.0.tar.gz", hash = "sha256:9421d911326ec12dee8bc933f7839090cad7a3f13fcfb0f9e82f8174dc003c09", size = 71416, upload-time = "2026-04-09T14:38:34.544Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/58/ee/99ab786653b3bda9c37ade7e24a7b607a1b1f696063172768417539d876d/opentelemetry_api-1.41.0-py3-none-any.whl", hash = "sha256:0e77c806e6a89c9e4f8d372034622f3e1418a11bdbe1c80a50b3d3397ad0fa4f", size = 69007, upload-time = "2026-04-09T14:38:11.833Z" },
+]
+
+[[package]]
+name = "opentelemetry-proto"
+version = "1.43.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e0/b9/d357faefb40bda1d4799913e6af611171ff22a2dedcb93576bc92242d056/opentelemetry_proto-1.43.0.tar.gz", hash = "sha256:224778df17e1f3fafeaaa21d874236ca5f6ffc2f86e0899298ec7351aac27924", size = 46481, upload-time = "2026-06-24T15:20:07.625Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ed/a7/3e5308cf548b8f72529c7db1afdb3a404211982376a12927fd7759f77bf3/opentelemetry_proto-1.43.0-py3-none-any.whl", hash = "sha256:c58f1f7ef84bc7dc2834016c0c37fe0081dde7ca9f6339be1970fbf9cdaaa90d", size = 72489, upload-time = "2026-06-24T15:19:51.164Z" },
 ]
 
 [[package]]

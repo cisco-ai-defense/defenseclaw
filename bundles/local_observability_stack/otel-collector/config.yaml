@@ -28,6 +28,13 @@ processors:
     send_batch_max_size: 2048
     timeout: 5s
 
+  # Prometheus remote write requires cumulative monotonic sums. The Go OTLP
+  # SDK intentionally exports many counters as delta sums; without this
+  # stateful conversion gauges arrived but lifecycle/tool/token counters were
+  # silently absent from Prometheus after the single-ingestion-path cleanup.
+  # Keep this in the metrics pipeline only.
+  deltatocumulative:
+
   # Defense-in-depth resource enrichment so every signal carries the
   # service.namespace=defenseclaw label even if the sidecar forgets to
   # set it. The `insert` action keeps the sidecar-supplied value when
@@ -94,6 +101,43 @@ processors:
           - truncate_all(attributes, 8192)
           - set(body, Substring(body, 0, 200000)) where IsString(body) and Len(body) > 200000
 
+connectors:
+  # Turn completed runtime spans into per-agent RED metrics. These dimensions
+  # are the stable Agent360 correlation contract; request IDs and prompt text
+  # are intentionally excluded from labels. The native agent.last_seen metric
+  # powers the durable directory while these derived metrics power latency,
+  # throughput, tool, model, and error panels.
+  spanmetrics/agent360:
+    namespace: defenseclaw.agent.span
+    histogram:
+      explicit:
+        buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s, 10s, 30s, 1m, 5m]
+    dimensions:
+      - name: gen_ai.operation.name
+      - name: gen_ai.agent.id
+      - name: gen_ai.agent.name
+      - name: gen_ai.agent.type
+      - name: defenseclaw.agent.root.id
+      - name: defenseclaw.agent.parent.id
+      - name: defenseclaw.agent.lifecycle.id
+      - name: defenseclaw.agent.execution.id
+      - name: defenseclaw.agent.lifecycle.event
+      - name: defenseclaw.agent.lifecycle.state
+      - name: defenseclaw.agent.phase
+      - name: defenseclaw.agent.phase.previous
+      - name: defenseclaw.agent.phase.code
+      - name: connector
+      - name: gen_ai.tool.name
+      - name: defenseclaw.destination.app
+      - name: gen_ai.provider.name
+      - name: gen_ai.request.model
+    exemplars:
+      enabled: true
+    dimensions_cache_size: 10000
+    resource_metrics_cache_size: 1000
+    metrics_flush_interval: 15s
+    metrics_expiration: 24h
+
 exporters:
   # Traces -> Tempo.
   otlp/tempo:
@@ -125,13 +169,6 @@ exporters:
     sampling_initial: 5
     sampling_thereafter: 200
 
-  # Prometheus-format exporter so Prometheus can scrape the collector
-  # directly if remote_write is ever disabled.
-  prometheus:
-    endpoint: 0.0.0.0:8889
-    resource_to_telemetry_conversion:
-      enabled: true
-
 extensions:
   health_check:
     endpoint: 0.0.0.0:13133
@@ -144,16 +181,29 @@ service:
     logs:
       level: info
     metrics:
-      address: 0.0.0.0:8888
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+                # Preserve the pre-v0.123 metric names consumed by the
+                # bundled Prometheus alert rules and dashboards.
+                without_type_suffix: true
+                without_units: true
   pipelines:
     traces:
       receivers: [otlp]
       processors: [resource, batch]
-      exporters: [otlp/tempo, debug]
+      exporters: [otlp/tempo, spanmetrics/agent360, debug]
     metrics:
-      receivers: [otlp]
-      processors: [resource, batch]
-      exporters: [prometheusremotewrite/prometheus, prometheus, debug]
+      receivers: [otlp, spanmetrics/agent360]
+      processors: [resource, deltatocumulative, batch]
+      # One application-metric path only. Prometheus still scrapes the
+      # collector's own operational metrics on 8888, while OTLP and derived
+      # span metrics reach Prometheus exclusively through remote write.
+      exporters: [prometheusremotewrite/prometheus, debug]
     logs:
       receivers: [otlp]
       processors: [resource, attributes/strip-bodies, transform/loki-payload-cap, batch]

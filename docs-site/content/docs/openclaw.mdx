@@ -7,6 +7,7 @@ keywords:
   - OpenClaw before_tool_call
   - OpenClaw fetch interceptor
   - OpenClaw HITL
+  - OpenClaw protocol v4
 ---
 
 OpenClaw is the connector DefenseClaw was designed against. It is also the only connector that ships a first-party plugin in the same repository (`extensions/defenseclaw/`). That plugin owns the OpenClaw-side wiring; the gateway and CLI own everything else.
@@ -23,6 +24,10 @@ OpenClaw is the connector DefenseClaw was designed against. It is also the only 
   <Card title="defenseclaw-gateway" description="Go sidecar. Receives plugin requests, evaluates policy, returns verdicts, and writes the audit row." />
   <Card title="DefenseClaw CLI" description="Python operator surface. Runs setup, exposes the TUI, drives HITL approvals." />
 </Cards>
+
+## Protocol compatibility
+
+The DefenseClaw gateway client speaks the OpenClaw WebSocket handshake across the protocol v3-v4 range. During connect it sends `minProtocol: 3` and `maxProtocol: 4`; OpenClaw returns the negotiated `hello-ok` protocol plus the supported method and event feature sets. That keeps current OpenClaw protocol v4 installs compatible while preserving the v3 challenge-response device flow for older OpenClaw endpoints.
 
 ## End-to-end flow
 

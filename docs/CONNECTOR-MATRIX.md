@@ -11,27 +11,76 @@ For the historical change log of how each row got to its current state, see
 
 ## At a glance
 
-| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex | Hermes | Cursor | Windsurf | Gemini CLI | Copilot CLI | OpenHands |
-| --------------------------- | -------- | --------- | ----------- | ----- | ------ | ------ | -------- | ---------- | ----------- | --------- |
-| LLM traffic interception    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       |
-| Proxy-side response scan    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       |
-| Hook telemetry              | OK       | n/a*      | OK          | OK    | OK     | OK     | OK       | OK         | OK          | OK        |
-| Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     | partial   |
-| Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | PreToolUse | no        |
-| Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          | no        |
-| Skill scan / list / enable  | OK       | OK        | OK          | OK    | skills | skills/rules | no skills | skills | skills/rules | skills |
-| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | skills/plugins | skills | discovery | skills/extensions | skills | skills |
-| Native OTLP ingest          | OK       | n/a       | OK          | OK    | hook-only | hook-only | hook-only | OK | env-opt-in | hook-only |
+| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex | Hermes | Cursor | Windsurf | Gemini CLI | Copilot CLI | OpenHands | Antigravity | OpenCode | OmniGent |
+| --------------------------- | -------- | --------- | ----------- | ----- | ------ | ------ | -------- | ---------- | ----------- | --------- | ----------- | -------- | -------- |
+| LLM traffic interception    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       | n/a         | n/a      | n/a      |
+| Proxy-side response scan    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       | n/a         | n/a      | n/a      |
+| Hook telemetry              | OK       | n/a*      | OK          | OK    | OK     | OK     | OK       | OK         | OK          | OK        | OK          | OK       | OK       |
+| Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     | partial   | partial     | partial  | OK       |
+| Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | PreToolUse | no        | ask         | no       | ASK      |
+| Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          | no        | no          | no       | no       |
+| Skill scan / list / enable  | OK       | OK        | OK          | OK    | skills | skills/rules | no skills | skills | skills/rules | skills | skills/rules | no skills | no skills |
+| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | skills/plugins | skills | discovery | skills/extensions | skills | skills | skills/plugins | no | no |
+| Native OTLP ingest          | OK       | n/a       | OK          | OK    | hook-only | hook-only | hook-only | OK | env-opt-in | hook-only | hook-only | hook-only | env-opt-in |
 
 `*` = "not applicable" because the host agent has no schema slot for
 external-script hook invocation. See **By-design connector limitations**
 below for the architectural reason and how the security guarantee is
 preserved without it.
 
-The Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, and OpenCode connectors do not
+The Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, OpenCode, and OmniGent connectors do not
 redirect LLM traffic through the proxy in v1. They are still first-class
 connectors with explicit hook, MCP, skill/rule/plugin/agent, CodeGuard, and
 telemetry capability rows where the vendor has documented local surfaces.
+
+### OmniGent custom-policy setup
+
+OmniGent integrates through its documented custom Python policy API rather
+than a command hook. On POSIX shells, run:
+
+```bash
+defenseclaw setup omnigent --mode action --yes
+omnigent server --config "${OMNIGENT_CONFIG_HOME:-$HOME/.omnigent}/config.yaml"
+```
+
+On Windows PowerShell, run:
+
+```powershell
+defenseclaw setup omnigent --mode action --yes
+$configHome = if ($env:OMNIGENT_CONFIG_HOME) { $env:OMNIGENT_CONFIG_HOME } else { Join-Path $HOME ".omnigent" }
+omnigent server --config (Join-Path $configHome "config.yaml")
+```
+
+`~/.omnigent/config.yaml` is the default. When `OMNIGENT_CONFIG_HOME` is set,
+both OmniGent and DefenseClaw use `OMNIGENT_CONFIG_HOME/config.yaml` instead
+(`$OMNIGENT_CONFIG_HOME/config.yaml` on POSIX or
+`$env:OMNIGENT_CONFIG_HOME\config.yaml` in PowerShell).
+
+Setup installs an owner-only policy module under
+`~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`, adds its directory to
+the OmniGent CLI environment through `defenseclaw_omnigent.pth`, registers
+`defenseclaw_omnigent_policy` in `policy_modules`, and activates the
+`defenseclaw_guardrail` server-wide policy. Restart OmniGent after setup so it
+reloads the module and policy registry. Managed backups restore the original
+YAML and Python environment files on connector teardown. OmniGent policy
+events map as follows: `request` → `UserPromptSubmit`, `tool_call` →
+`PreToolUse`, `tool_result` → `PostToolUse`, `response` →
+`AfterAgentResponse`, `llm_request` → `BeforeModel`, and `llm_response` →
+`AfterModel`. DefenseClaw verdicts map back to OmniGent `ALLOW`, `ASK`, and
+`DENY`. OmniGent can park `request`, `tool_call`, and `llm_request` for native
+`ASK` approval; post-action phases cannot pause cleanly and use DefenseClaw's
+explicit confirm fallback. The bridge forwards an active OpenTelemetry W3C
+trace context when one exists.
+
+OmniGent also honors the standard OpenTelemetry process environment variables,
+but this channel is not activated by connector setup. Export the variables in
+the process that starts OmniGent.
+Point `OTEL_EXPORTER_OTLP_ENDPOINT` at the DefenseClaw gateway, use
+`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, and provide the DefenseClaw source,
+client, and token headers through `OTEL_EXPORTER_OTLP_HEADERS`. Logs and metrics
+are available with OmniGent's base install; native traces require its optional
+`tracing` extra. DefenseClaw reports these variables but does not modify shell
+startup files. Hook telemetry remains available without native OTLP.
 
 ### Observability dimension (multi-connector)
 
@@ -58,7 +107,7 @@ touches the *agent* is per-connector. Each connector reports an
 | Connector class | `llm_traffic_mode` | A bound custom provider… |
 | --- | --- | --- |
 | OpenClaw, ZeptoClaw | `proxy` | is **enforced** on the agent's model traffic (agent upstream, judge, or both) |
-| every hook connector (Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot, OpenHands, Antigravity, OpenCode) | `hooks-only` | configures DefenseClaw's **judge/aux model only** — the agent's own model calls are never routed through or inspected |
+| every hook connector (Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot, OpenHands, Antigravity, OpenCode, OmniGent) | `hooks-only` | configures DefenseClaw's **judge/aux model only** — the agent's own model calls are never routed through or inspected |
 
 The CLI states this when binding (`setup llm`) and when listing
 (`setup provider list`), so an operator can't silently attach a custom provider
@@ -69,7 +118,7 @@ to a hook connector believing it changes the agent's model.
 | Connector | macOS | Linux | Windows |
 | --------- | ----- | ----- | ------- |
 | OpenClaw, ZeptoClaw (proxy) | OK | OK | not supported |
-| Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, OpenCode (hook-based) | OK | OK | OK |
+| Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, OpenCode, OmniGent (hook-based) | OK | OK | OK |
 
 Windows is **hook-only**: the shell-hook connectors run their hook
 decisions natively in the `defenseclaw` binary (the agent invokes
@@ -114,6 +163,7 @@ with a warning. Action mode fails closed unless
 | Copilot CLI | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | OpenHands | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | OpenCode | hook contract | unversioned / stable plugin API | `opencode-hooks-v1` / `v6` (JS bridge plugin) | tool_call, tool_result |
+| OmniGent | hook contract | unversioned / documented custom-policy API | `omnigent-custom-policy-v1` / `v1` (Python policy bridge) | prompt, tool_call, tool_result, event_content |
 
 No hook contract currently has a `max_exclusive` ceiling. We only add an upper
 bound when an upstream release publishes a breaking hook change; otherwise,
@@ -145,6 +195,7 @@ Claude Code is pinned to the current documented hook surface captured at
 | Copilot CLI | yes | yes | `preToolUse` / `PreToolUse` | `PreToolUse`, `PermissionRequest`, stop/failure hooks | no | user,workspace | `~/.copilot/hooks/defenseclaw.json` or `<workspace>/.github/hooks/defenseclaw.json` |
 | OpenHands | yes | no | none | `pre_tool_use`, `user_prompt_submit`, `stop` | yes | user,workspace | `~/.openhands/hooks.json` or `<workspace>/.openhands/hooks.json` |
 | OpenCode | yes | no | none | `tool.execute.before` | yes | user | `~/.config/opencode/plugins/defenseclaw.js` (JS bridge plugin) |
+| OmniGent | yes | yes | `UserPromptSubmit`, `PreToolUse`, `BeforeModel` | all six mapped policy phases | yes | user | `$OMNIGENT_CONFIG_HOME/config.yaml` when set, otherwise `~/.omnigent/config.yaml`, plus installed Python policy |
 
 `confirm` verdicts are rendered as native ask only when the event is listed in
 `ask_events`. Unsupported `confirm` decisions are downgraded explicitly while
@@ -162,6 +213,7 @@ preserving `raw_action: "confirm"` in the hook response.
 | OpenHands | `~/.openhands/mcp.json` | `~/.agents/skills`, `~/.openhands/skills/installed`, `~/.openhands/cache/skills/public-skills/skills` (`~/.openhands/skills`, `~/.openhands/microagents` discovery only; workspace equivalents with `--workspace`) | `AGENTS.md` discovery only when workspace-pinned | unsupported | unsupported | opt-in skill |
 | Antigravity | `~/.gemini/config/mcp_config.json`, `<workspace>/.agents/mcp_config.json` (read/write); `<plugin>/mcp_config.json` discovery only | AgentSkills folder form read/write: `~/.gemini/config/skills/<skill>/SKILL.md`, `<workspace>/.agents/skills/<skill>/SKILL.md`; CLI direct `~/.gemini/antigravity-cli/skills/*.md` discovery only | `~/.gemini/GEMINI.md`, `<workspace>/.agents/rules/`, `<plugin>/rules/*.md` discovery only | `~/.gemini/config/plugins/<plugin>/`, `~/.gemini/antigravity-cli/plugins/<plugin>/`, `<workspace>/.agents/plugins/<plugin>/` discovery/scan only | plugin-contained `<plugin>/agents/` discovery only; standalone agents unsupported | opt-in skill |
 | OpenCode | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) |
+| OmniGent | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) |
 
 CodeGuard native assets are never installed by CLI startup, `init`, sandbox
 setup, or sidecar setup. Operators must run `defenseclaw codeguard install`
@@ -177,6 +229,7 @@ non-CodeGuard paths require `--replace`.
 | Gemini CLI | native logs/metrics/traces in settings.json | loopback path token | hook telemetry |
 | Copilot CLI | native traces/metrics via documented env vars | header token | hook telemetry |
 | OpenHands | no documented native OTLP | header token | hook telemetry |
+| OmniGent | optional logs/metrics via externally supplied OTLP env vars; traces with optional `tracing` extra | header token | hook-generated logs, spans, counters |
 | Hermes / Cursor / Windsurf / OpenCode | no documented native OTLP | n/a | hook-generated logs, spans, counters |
 
 ---
@@ -225,6 +278,7 @@ harmless (permission denied) if a regression ever lets it through.
 | Hermes | contract-only | contract-only | contract-only | — | full lifecycle mapped (`hermes-hooks-v1`): `pre_tool_call` blocks, `pre_llm_call` injects context, `post_tool_call`/`post_llm_call`/session/subagent observe; live smoke pending |
 | Windsurf | contract-only | contract-only | contract-only | — | no headless CLI/SDK |
 | Antigravity | contract-only | contract-only | contract-only | — | headless auth is OAuth, no API key |
+| OmniGent | contract-only | contract-only | contract-only | — | Python custom-policy bridge covered by local integration tests; live smoke pending |
 
 `\*` = advisory cell (`continue-on-error`) until it goes consistently green.
 All Windows live cells and every Copilot cell start advisory; they are promoted

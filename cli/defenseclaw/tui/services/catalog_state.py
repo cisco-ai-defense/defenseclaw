@@ -1640,6 +1640,8 @@ def mcp_unset_target_for_connector(connector: str) -> str:
             return "~/.openhands/mcp.json"
         case "antigravity":
             return "~/.gemini/config/mcp_config.json / <workspace>/.agents/mcp_config.json"
+        case "omnigent":
+            return "unsupported (OmniGent manages MCP configuration)"
         case _:
             return "OpenClaw config" if normalized_connector(connector) == "openclaw" else "connector MCP config"
 
@@ -1688,6 +1690,8 @@ def friendly_connector_name(connector: str) -> str:
             return "Antigravity"
         case "opencode":
             return "OpenCode"
+        case "omnigent":
+            return "OmniGent"
         case value:
             return value[:1].upper() + value[1:] if value else "No connector"
 
@@ -1704,6 +1708,7 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.agents/skills/<skill>/SKILL.md",
             "~/.gemini/antigravity-cli/skills/*.md (discovery-only)",
         ),
+        ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): ("~/.claude/settings.json (mcpServers)", "./.mcp.json"),
         ("codex", "mcps"): ("~/.codex/config.toml ([mcp_servers])", "./.mcp.json"),
@@ -1713,12 +1718,15 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.agents/mcp_config.json",
             "<plugin>/mcp_config.json (discovery-only)",
         ),
+        ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("antigravity", "plugins"): (
             "~/.gemini/config/plugins/<plugin>/ (discovery-only)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
             "<workspace>/.agents/plugins/<plugin>/ (discovery-only)",
         ),
+        ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
+        ("omnigent", "config"): ("$OMNIGENT_CONFIG_HOME/config.yaml or ~/.omnigent/config.yaml",),
     }
     return ", ".join(sources.get((connector, category), ()))
 

@@ -171,22 +171,47 @@ func (r *Registry) Names() []string {
 	return names
 }
 
+func newBuiltinConnectors() []Connector {
+	return []Connector{
+		NewOpenClawConnector(),
+		NewZeptoClawConnector(),
+		NewClaudeCodeConnector(),
+		NewCodexConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
+		NewOpenHandsConnector(),
+		NewAntigravityConnector(),
+		NewOpenCodeConnector(),
+		NewOmnigentConnector(),
+	}
+}
+
+var builtinConnectorNames = sync.OnceValue(func() map[string]struct{} {
+	names := make(map[string]struct{})
+	for _, conn := range newBuiltinConnectors() {
+		names[conn.Name()] = struct{}{}
+	}
+	return names
+})
+
 // NewDefaultRegistry creates a registry pre-loaded with all built-in connectors.
 func NewDefaultRegistry() *Registry {
 	r := NewRegistry()
-	r.RegisterBuiltin(NewOpenClawConnector())
-	r.RegisterBuiltin(NewZeptoClawConnector())
-	r.RegisterBuiltin(NewClaudeCodeConnector())
-	r.RegisterBuiltin(NewCodexConnector())
-	r.RegisterBuiltin(NewHermesConnector())
-	r.RegisterBuiltin(NewCursorConnector())
-	r.RegisterBuiltin(NewWindsurfConnector())
-	r.RegisterBuiltin(NewGeminiCLIConnector())
-	r.RegisterBuiltin(NewCopilotConnector())
-	r.RegisterBuiltin(NewOpenHandsConnector())
-	r.RegisterBuiltin(NewAntigravityConnector())
-	r.RegisterBuiltin(NewOpenCodeConnector())
+	for _, conn := range newBuiltinConnectors() {
+		r.RegisterBuiltin(conn)
+	}
 	return r
+}
+
+// IsKnownBuiltinConnector reports whether name is reserved by the compiled-in
+// registry. Unknown/plugin connectors intentionally return false so callers
+// retain their conservative fallback.
+func IsKnownBuiltinConnector(name string) bool {
+	_, ok := builtinConnectorNames()[name]
+	return ok
 }
 
 // DiscoverPlugins scans a directory for Go plugin .so files and loads them.

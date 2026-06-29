@@ -1,6 +1,6 @@
 ---
 title: Connectors
-description: Twelve first-class connectors — OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode — with a single enforcement contract.
+description: Thirteen first-class connectors — OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, OmniGent — with a single enforcement contract.
 keywords:
   - DefenseClaw connectors
   - Claude Code connector
@@ -14,6 +14,7 @@ keywords:
   - Windsurf connector
   - Hermes connector
   - OpenCode connector
+  - OmniGent connector
 ---
 
 Connectors are the adapter layer between agent frameworks and DefenseClaw's guardrail proxy. Each connector owns all security surfaces for its agent: LLM traffic routing, tool call inspection, agent hook events, component scanning, CodeGuard file scanning, and subprocess enforcement.
@@ -22,7 +23,7 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw's guar
 
 <Cards>
   <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. DefenseClaw sits in the LLM data path — every request and response is intercepted, scored, and forwarded." />
-  <Card title="Hook connectors" description="Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream." />
+  <Card title="Hook connectors" description="Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, OmniGent. DefenseClaw wires into the agent's native lifecycle hooks or policy API; the agent talks directly to its upstream." />
   <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
 </Cards>
 
@@ -45,6 +46,7 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw's guar
   <Card title="Antigravity" href="/docs/connectors/antigravity" description="All five Antigravity 2.0 lifecycle hooks (PreInvocation/PreToolUse/PostToolUse/PostInvocation/Stop) in ~/.gemini/config/hooks.json, with native ask that overrides --dangerously-skip-permissions." />
   <Card title="Hermes" href="/docs/connectors/hermes" description="config.yaml hooks for the Hermes agent runtime." />
   <Card title="OpenCode" href="/docs/connectors/opencode" description="Auto-loaded JS bridge plugin with tool.execute.before blocking." />
+  <Card title="OmniGent" href="/docs/connectors/omnigent" description="Custom Python policy bridge with ALLOW/ASK/DENY enforcement and optional native OTLP." />
 </Cards>
 
 ## Capability summary

@@ -333,4 +333,6 @@ type AgentIdentity struct {
 	AgentType         string
 	AgentInstanceID   string
 	SidecarInstanceID string
+	UserID            string
+	UserName          string
 }

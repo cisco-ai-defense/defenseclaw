@@ -57,7 +57,7 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		//	post_tool_call   → inspect tool output (observe)
 		//	post_llm_call    → inspect model output (observe)
 		//	on_session_*     → lifecycle telemetry (observe)
-		//	subagent_stop    → delegate-task telemetry (observe)
+		//	subagent_start/stop → delegate-task telemetry (observe)
 		//
 		// Hermes reads a blocking stdout response only for
 		// pre_tool_call and a {"context":...} injection for
@@ -114,6 +114,11 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		}
 	case "antigravity":
 		output = antigravityHookOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, reason, in.AdditionalContext)
+	case "omnigent":
+		// The installed Python policy reads the unified top-level action
+		// and translates allow/block/confirm to ALLOW/DENY/ASK. No nested
+		// hook_output body is required by OmniGent's policy API.
+		return HookRespondOutput{}
 	}
 	if output == nil && in.RawAction == "confirm" && in.AdditionalContext != "" && !in.Caps.CanAskNative {
 		output = map[string]interface{}{"systemMessage": in.AdditionalContext}

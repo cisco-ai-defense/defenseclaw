@@ -72,6 +72,9 @@ func TestTeardownPreviousConnector_CleansCodexTrustedHookState(t *testing.T) {
 	if err := connector.SaveActiveConnector(dir, "codex"); err != nil {
 		t.Fatalf("save active connector: %v", err)
 	}
+	if err := connector.SaveHookContractLockEntry(dir, connector.HookContractLockEntry{Connector: "codex"}); err != nil {
+		t.Fatalf("save hook contract lock: %v", err)
+	}
 
 	registry := connector.NewDefaultRegistry()
 	if err := teardownPreviousConnector(registry, "claudecode", opts, context.Background()); err != nil {
@@ -110,6 +113,9 @@ func TestTeardownPreviousConnector_CleansCodexTrustedHookState(t *testing.T) {
 	}
 	if strings.Contains(string(data), "trusted_hash") {
 		t.Fatalf("teardown left trusted_hash entry in config:\n%s", data)
+	}
+	if got := connector.LoadHookContractLockEntry(dir, "codex"); got.Connector != "" {
+		t.Fatalf("teardown left codex hook contract lock: %+v", got)
 	}
 }
 

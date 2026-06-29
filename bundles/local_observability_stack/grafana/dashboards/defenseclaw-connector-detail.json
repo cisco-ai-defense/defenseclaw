@@ -63,7 +63,7 @@
       {
         "name": "connector",
         "label": "Connector",
-        "description": "Connector to deep-dive on. Sourced from defenseclaw_connector_hook_invocations_total{connector} so hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) appear \u2014 defenseclaw_otel_ingest_records_total{source} only covers connectors that push native OTLP and would silently exclude every hook-only connector.",
+        "description": "Connector to deep-dive on. Sourced from defenseclaw_connector_hook_invocations_total{connector} so hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) appear — defenseclaw_otel_ingest_records_total{source} only covers connectors that push native OTLP and would silently exclude every hook-only connector.",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -91,7 +91,7 @@
   "panels": [
     {
       "type": "row",
-      "title": "Connector $connector \u2014 at a glance",
+      "title": "Connector $connector — at a glance",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -117,7 +117,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_otel_ingest_records_total{source=\"$connector\"}[5m])) * 60 or sum(rate(defenseclaw_connector_hook_invocations_total{connector=\"$connector\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -146,7 +147,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_connector_hook_invocations_total{connector=\"$connector\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -162,7 +164,7 @@
     {
       "type": "stat",
       "title": "Tokens / min",
-      "description": "OTel GenAI token rate (gen_ai.client.token.usage). Populated only when the connector proxies LLM calls through DefenseClaw (claudecode-bridge, codex-notify, openclaw). Hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) do not see LLM bodies and will read 0 \u2014 that is by design.",
+      "description": "OTel GenAI token rate (gen_ai.client.token.usage). Populated only when the connector proxies LLM calls through DefenseClaw (claudecode-bridge, codex-notify, openclaw). Hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) do not see LLM bodies and will read 0 — that is by design.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -176,7 +178,8 @@
       "targets": [
         {
           "expr": "sum(rate(gen_ai_client_token_usage_sum{gen_ai_agent_name=\"$connector\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -206,7 +209,8 @@
       "targets": [
         {
           "expr": "time() - max(defenseclaw_otel_ingest_last_seen_ts_seconds{source=\"$connector\"}) or (time() - timestamp(sum(rate(defenseclaw_connector_hook_invocations_total{connector=\"$connector\"}[1m])) > bool 0)) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -249,7 +253,8 @@
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=\"$connector\"}[5m])) by (le)) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -292,7 +297,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -520,7 +526,7 @@
     {
       "type": "timeseries",
       "title": "Verdicts by action (stacked)",
-      "description": "Verdict action mix: allow / warn / alert / confirm / block. In observe mode every action is reported as allow \u2014 a rule that would block is reclassified to allow with would_block=true, so use the Would-block panel to the right to see shadow blocks.",
+      "description": "Verdict action mix: allow / warn / alert / confirm / block. In observe mode every action is reported as allow — a rule that would block is reclassified to allow with would_block=true, so use the Would-block panel to the right to see shadow blocks.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -586,7 +592,7 @@
     {
       "type": "timeseries",
       "title": "Would-block / min (observe shadow blocks)",
-      "description": "Rules that WOULD have blocked but were allowed because this connector runs in observe mode (would_block=true on defenseclaw_connector_hook_outcome_total). This is the observe-mode shadow-block signal \u2014 it stays empty in action mode (real blocks show under action=block instead). Split by severity. Filtered by $connector.",
+      "description": "Rules that WOULD have blocked but were allowed because this connector runs in observe mode (would_block=true on defenseclaw_connector_hook_outcome_total). This is the observe-mode shadow-block signal — it stays empty in action mode (real blocks show under action=block instead). Split by severity. Filtered by $connector.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -599,7 +605,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (severity) (rate(defenseclaw_connector_hook_outcome_total{connector=\"$connector\", severity!=\"NONE\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum by (severity) (rate(defenseclaw_connector_hook_outcome_total{connector=\"$connector\", severity!=\"NONE\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{severity}}",
           "refId": "A"
         }
@@ -788,7 +794,7 @@
     },
     {
       "type": "logs",
-      "title": "$connector \u2014 gateway events",
+      "title": "$connector — gateway events",
       "description": "All gateway log events associated with this connector via gen_ai_agent_name or defenseclaw_claw_mode labels.",
       "datasource": {
         "type": "loki",
@@ -834,7 +840,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw \u2014 Connector Detail",
+  "title": "DefenseClaw — Connector Detail",
   "uid": "defenseclaw-connector-detail",
   "version": 2,
   "weekStart": ""

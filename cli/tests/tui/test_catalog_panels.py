@@ -268,6 +268,9 @@ def test_catalog_empty_connector_stays_unowned_and_antigravity_labels_contract_p
     assert "hooks-only" not in connector_source_label("antigravity", "mcps")
     assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
     assert "discovery-only" in connector_source_label("antigravity", "plugins")
+    assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
+    assert "managed by OmniGent" in connector_source_label("omnigent", "mcps")
+    assert "unsupported" in mcp_unset_target_for_connector("omnigent")
 
 
 def test_plugin_parse_connector_gate_actions_and_intents() -> None:

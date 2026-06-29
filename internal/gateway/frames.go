@@ -210,8 +210,9 @@ type ConfigPatchParams struct {
 // Unlike config.set (which replaces the entire config), config.patch performs
 // a deep merge into the existing config.
 type ConfigPatchRawParams struct {
-	Raw      string `json:"raw"`
-	BaseHash string `json:"baseHash,omitempty"`
+	Raw          string   `json:"raw"`
+	BaseHash     string   `json:"baseHash,omitempty"`
+	ReplacePaths []string `json:"replacePaths,omitempty"`
 }
 
 // configGetResponse extracts the hash and config from a config.get response.

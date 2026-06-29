@@ -154,6 +154,17 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+def _as_int(value: Any, default: int) -> int:
+    """Coerce a config scalar without letting malformed YAML brick the CLI."""
+
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def _home() -> Path:
     return Path.home()
 
@@ -762,6 +773,7 @@ class OTelLogsConfig:
 class OTelMetricsConfig:
     enabled: bool = True
     export_interval_s: int = 60
+    temporality: str = "delta"
     endpoint: str = ""
     protocol: str = ""
     url_path: str = ""
@@ -780,8 +792,30 @@ class OTelResourceConfig:
 
 
 @dataclass
-class OTelConfig:
-    enabled: bool = False
+class OTelSpanFilterOperationConfig:
+    name: str = ""
+    require_attributes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class OTelSpanFilterConfig:
+    require_operation: str = ""
+    require_attributes: list[str] = field(default_factory=list)
+    operations: list[OTelSpanFilterOperationConfig] = field(default_factory=list)
+
+
+@dataclass
+class OTelDestinationConfig:
+    """One named OTLP fan-out destination.
+
+    Process-wide resource attributes and trace sampling remain on
+    :class:`OTelConfig`; transport, credentials, signal selection, and queue
+    settings are isolated per destination.
+    """
+
+    name: str = ""
+    preset: str = ""
+    enabled: bool = True
     protocol: str = "grpc"
     endpoint: str = ""
     headers: dict[str, str] = field(default_factory=dict)
@@ -790,7 +824,35 @@ class OTelConfig:
     logs: OTelLogsConfig = field(default_factory=OTelLogsConfig)
     metrics: OTelMetricsConfig = field(default_factory=OTelMetricsConfig)
     batch: OTelBatchConfig = field(default_factory=OTelBatchConfig)
+    span_filter: OTelSpanFilterConfig = field(default_factory=OTelSpanFilterConfig)
+
+
+@dataclass
+class OTelTracePolicyConfig:
+    sampler: str = "always_on"
+    sampler_arg: str = "1.0"
+
+
+@dataclass
+class OTelLogPolicyConfig:
+    emit_individual_findings: bool = False
+
+
+@dataclass
+class OTelMetricPolicyConfig:
+    export_interval_s: int = 60
+    temporality: str = "delta"
+
+
+@dataclass
+class OTelConfig:
+    enabled: bool = False
+    traces: OTelTracePolicyConfig = field(default_factory=OTelTracePolicyConfig)
+    logs: OTelLogPolicyConfig = field(default_factory=OTelLogPolicyConfig)
+    metrics: OTelMetricPolicyConfig = field(default_factory=OTelMetricPolicyConfig)
+    batch: OTelBatchConfig = field(default_factory=OTelBatchConfig)
     resource: OTelResourceConfig = field(default_factory=OTelResourceConfig)
+    destinations: list[OTelDestinationConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -2602,6 +2664,45 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     d = asdict(cfg)
     d.pop("_loaded_authoritative_dicts", None)
     d.pop("_loaded_owned_nested_values", None)
+    otel = d.get("otel") or {}
+    destinations = otel.get("destinations") or []
+    for destination in destinations:
+        if not isinstance(destination, dict):
+            continue
+        span_filter = destination.get("span_filter")
+        if not isinstance(span_filter, dict):
+            continue
+        if span_filter.get("operations"):
+            span_filter.pop("require_operation", None)
+            span_filter.pop("require_attributes", None)
+        else:
+            span_filter.pop("operations", None)
+            if not span_filter.get("require_operation"):
+                span_filter.pop("require_operation", None)
+            if not span_filter.get("require_attributes"):
+                span_filter.pop("require_attributes", None)
+        if not span_filter:
+            destination.pop("span_filter", None)
+    # Named destinations are the only transport/signal source of truth.
+    # Serialize only process-wide policy outside destinations.
+    traces = otel.get("traces") or {}
+    otel["traces"] = {
+        key: value
+        for key, value in traces.items()
+        if key in {"sampler", "sampler_arg"}
+    }
+    logs = otel.get("logs") or {}
+    otel["logs"] = {
+        key: value
+        for key, value in logs.items()
+        if key == "emit_individual_findings"
+    }
+    metrics = otel.get("metrics") or {}
+    otel["metrics"] = {
+        key: value
+        for key, value in metrics.items()
+        if key in {"export_interval_s", "temporality"}
+    }
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
@@ -2811,9 +2912,7 @@ def _backup_unparseable_config(path: str) -> str:
 # collection — i.e. the dataclass is the SINGLE SOURCE OF TRUTH for
 # the contents of the dict. When the caller clears one of these
 # (sets it to ``{}``), the on-disk file MUST be cleared too;
-# preserving the previous keys would leak stale secrets like an
-# ``otel.headers.Authorization`` token across an OTLP endpoint
-# rotation.
+# preserving the previous keys would leak stale secrets across rotations.
 #
 # The list is intentionally explicit (not auto-derived from
 # dataclass introspection) because not every nested dataclass field
@@ -2825,11 +2924,6 @@ def _backup_unparseable_config(path: str) -> str:
 #
 # Format: dotted YAML path from the top-level config dict.
 _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset({
-    # Outbound OTLP credentials (Authorization, x-honeycomb-team,
-    # vendor-specific bearer headers). Letting a stale
-    # Authorization survive a clear is a credential-leak class
-    # regression.
-    "otel.headers",
     # OpenTelemetry resource attributes (service.name,
     # deployment.environment, custom operator labels). Some
     # operators use this for tenant identifiers, so leftover keys
@@ -2922,10 +3016,8 @@ def _merge_preserving_unmodeled(
       that doesn't touch it) BUT atomically replaces dicts whose
       dotted path appears in
       :data:`_AUTHORITATIVE_MODELED_DICT_PATHS`. The latter
-      includes ``otel.headers`` and ``otel.resource.attributes``,
-      both of which are dataclass-authoritative collections — a
-      caller that clears ``cfg.otel.headers = {}`` to rotate OTLP
-      credentials gets the on-disk block cleared, which is the
+      includes ``otel.resource.attributes``. A caller that clears a
+      modeled collection gets the on-disk block cleared, which is the
       whole point of clearing it.
     * Lists → atomic replacement (the dataclass list is authoritative;
       partial list merges would mis-handle operator deletions of list
@@ -2974,13 +3066,12 @@ def _deep_merge_nested(
     Behaviour:
 
     * If the dotted path of the recursing dict is in
-      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS` (e.g. ``otel.headers``,
+      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS` (e.g.
       ``otel.resource.attributes``), the dataclass dict is the
       single source of truth. ``new`` wins atomically — no per-key
       rescue from ``existing``. Setting the modeled map to ``{}``
       therefore CLEARS the on-disk block, which is what callers
-      expect when they rotate OTLP credentials or change tenant
-      identifiers.
+      expect when they change tenant identifiers.
 
     * Otherwise, keys only in ``existing`` are preserved (the
       operator-added free-form rescue path) and keys in ``new``
@@ -3875,47 +3966,113 @@ def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
     logs_raw = _as_mapping(raw.get("logs"))
     metrics_raw = _as_mapping(raw.get("metrics"))
     batch_raw = _as_mapping(raw.get("batch"))
-    tls_raw = _as_mapping(raw.get("tls"))
     resource_raw = _as_mapping(raw.get("resource"))
+    destinations: list[OTelDestinationConfig] = []
+    for item in raw.get("destinations") or []:
+        if not isinstance(item, dict):
+            continue
+        dest_traces = _as_mapping(item.get("traces"))
+        dest_logs = _as_mapping(item.get("logs"))
+        dest_metrics = _as_mapping(item.get("metrics"))
+        dest_batch = _as_mapping(item.get("batch"))
+        dest_tls = _as_mapping(item.get("tls"))
+        dest_span_filter = _as_mapping(item.get("span_filter"))
+        required_filter_attrs = dest_span_filter.get("require_attributes", [])
+        if not isinstance(required_filter_attrs, (list, tuple)):
+            required_filter_attrs = []
+        filter_operations: list[OTelSpanFilterOperationConfig] = []
+        for operation in dest_span_filter.get("operations") or []:
+            if not isinstance(operation, dict):
+                continue
+            operation_attrs = operation.get("require_attributes", [])
+            if not isinstance(operation_attrs, (list, tuple)):
+                operation_attrs = []
+            filter_operations.append(
+                OTelSpanFilterOperationConfig(
+                    name=str(operation.get("name", "") or ""),
+                    require_attributes=[
+                        str(value) for value in operation_attrs if str(value).strip()
+                    ],
+                )
+            )
+        destinations.append(
+            OTelDestinationConfig(
+                name=str(item.get("name", "") or ""),
+                preset=str(item.get("preset", "") or ""),
+                enabled=_coerce_bool(item.get("enabled", True), default=True),
+                protocol=str(item.get("protocol", "grpc") or "grpc"),
+                endpoint=str(item.get("endpoint", "") or ""),
+                headers={str(k): str(v) for k, v in _as_mapping(item.get("headers")).items()},
+                tls=OTelTLSConfig(
+                    insecure=_coerce_bool(dest_tls.get("insecure", False)),
+                    ca_cert=str(dest_tls.get("ca_cert", "") or ""),
+                ),
+                traces=OTelTracesConfig(
+                    enabled=_coerce_bool(dest_traces.get("enabled", False)),
+                    endpoint=str(dest_traces.get("endpoint", "") or ""),
+                    protocol=str(dest_traces.get("protocol", "") or ""),
+                    url_path=str(dest_traces.get("url_path", "") or ""),
+                ),
+                logs=OTelLogsConfig(
+                    enabled=_coerce_bool(dest_logs.get("enabled", False)),
+                    endpoint=str(dest_logs.get("endpoint", "") or ""),
+                    protocol=str(dest_logs.get("protocol", "") or ""),
+                    url_path=str(dest_logs.get("url_path", "") or ""),
+                ),
+                metrics=OTelMetricsConfig(
+                    enabled=_coerce_bool(dest_metrics.get("enabled", False)),
+                    export_interval_s=_as_int(dest_metrics.get("export_interval_s", 60), 60),
+                    temporality=str(dest_metrics.get("temporality", "delta") or "delta"),
+                    endpoint=str(dest_metrics.get("endpoint", "") or ""),
+                    protocol=str(dest_metrics.get("protocol", "") or ""),
+                    url_path=str(dest_metrics.get("url_path", "") or ""),
+                ),
+                batch=OTelBatchConfig(
+                    max_export_batch_size=_as_int(
+                        dest_batch.get("max_export_batch_size", 512), 512
+                    ),
+                    scheduled_delay_ms=_as_int(
+                        dest_batch.get("scheduled_delay_ms", 5000), 5000
+                    ),
+                    max_queue_size=_as_int(dest_batch.get("max_queue_size", 2048), 2048),
+                ),
+                span_filter=OTelSpanFilterConfig(
+                    require_operation=str(
+                        dest_span_filter.get("require_operation", "") or ""
+                    ),
+                    require_attributes=[
+                        str(value)
+                        for value in required_filter_attrs
+                        if str(value).strip()
+                    ],
+                    operations=filter_operations,
+                ),
+            )
+        )
     return OTelConfig(
-        enabled=raw.get("enabled", False),
-        protocol=raw.get("protocol", "grpc"),
-        endpoint=raw.get("endpoint", ""),
-        headers=_as_mapping(raw.get("headers")),
-        tls=OTelTLSConfig(
-            insecure=tls_raw.get("insecure", False),
-            ca_cert=tls_raw.get("ca_cert", ""),
-        ),
-        traces=OTelTracesConfig(
-            enabled=traces_raw.get("enabled", True),
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        traces=OTelTracePolicyConfig(
             sampler=traces_raw.get("sampler", "always_on"),
             sampler_arg=traces_raw.get("sampler_arg", "1.0"),
-            endpoint=traces_raw.get("endpoint", ""),
-            protocol=traces_raw.get("protocol", ""),
-            url_path=traces_raw.get("url_path", ""),
         ),
-        logs=OTelLogsConfig(
-            enabled=logs_raw.get("enabled", True),
-            emit_individual_findings=logs_raw.get("emit_individual_findings", False),
-            endpoint=logs_raw.get("endpoint", ""),
-            protocol=logs_raw.get("protocol", ""),
-            url_path=logs_raw.get("url_path", ""),
+        logs=OTelLogPolicyConfig(
+            emit_individual_findings=_coerce_bool(
+                logs_raw.get("emit_individual_findings", False)
+            ),
         ),
-        metrics=OTelMetricsConfig(
-            enabled=metrics_raw.get("enabled", True),
-            export_interval_s=metrics_raw.get("export_interval_s", 60),
-            endpoint=metrics_raw.get("endpoint", ""),
-            protocol=metrics_raw.get("protocol", ""),
-            url_path=metrics_raw.get("url_path", ""),
+        metrics=OTelMetricPolicyConfig(
+            export_interval_s=_as_int(metrics_raw.get("export_interval_s", 60), 60),
+            temporality=metrics_raw.get("temporality", "delta"),
         ),
         batch=OTelBatchConfig(
-            max_export_batch_size=batch_raw.get("max_export_batch_size", 512),
-            scheduled_delay_ms=batch_raw.get("scheduled_delay_ms", 5000),
-            max_queue_size=batch_raw.get("max_queue_size", 2048),
+            max_export_batch_size=_as_int(batch_raw.get("max_export_batch_size", 512), 512),
+            scheduled_delay_ms=_as_int(batch_raw.get("scheduled_delay_ms", 5000), 5000),
+            max_queue_size=_as_int(batch_raw.get("max_queue_size", 2048), 2048),
         ),
         resource=OTelResourceConfig(
             attributes=_as_mapping(resource_raw.get("attributes")),
         ),
+        destinations=destinations,
     )
 
 

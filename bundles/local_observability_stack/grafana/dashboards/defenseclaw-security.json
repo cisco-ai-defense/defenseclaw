@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Hook guardrail evaluations \u2014 verdict funnel, severity breakdown, runtime alerts, and inspect latency. All panels source from defenseclaw_inspect_evaluations_total which fires on every hook connector.",
+  "description": "Hook guardrail evaluations — verdict funnel, severity breakdown, runtime alerts, and inspect latency. All panels source from defenseclaw_inspect_evaluations_total which fires on every hook connector.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -70,7 +70,7 @@
       {
         "name": "connector",
         "label": "Connector",
-        "description": "Filter panels by connector name. Sourced from defenseclaw_connector_hook_invocations_total{connector} so hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) show up too \u2014 defenseclaw_otel_ingest_records_total only carries connectors that push native OTLP and would silently exclude every hook-only connector.",
+        "description": "Filter panels by connector name. Sourced from defenseclaw_connector_hook_invocations_total{connector} so hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) show up too — defenseclaw_otel_ingest_records_total only carries connectors that push native OTLP and would silently exclude every hook-only connector.",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -257,7 +257,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action=~\"$action\", severity=~\"$severity\"}[1h])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -285,7 +286,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -328,7 +330,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -353,7 +356,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -379,7 +383,8 @@
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[5m])) by (le)) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -422,7 +427,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=~\"alert|warn\", tool=~\"$connector:.*\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -655,8 +661,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "{{alert_type}} [{{alert_severity}}]",
+          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[$__rate_interval])) or on() vector(0)",
+          "legendFormat": "{{action}} [{{severity}}]",
           "refId": "A"
         }
       ],
@@ -753,7 +759,7 @@
     {
       "type": "table",
       "title": "Per-connector verdict summary (1h)",
-      "description": "Snapshot: total verdicts, blocks, would-blocks, alerts, and confirm per connector in the last hour. The inspect metric only carries the hook-event label `tool` (shaped `<connector>:<event>`), so the connector is derived with label_replace and re-aggregated so each row is a real connector, not a hook event. would-block/1h counts observe-mode shadow blocks (would_block=true on defenseclaw_connector_hook_outcome_total) \u2014 the rules that would have blocked had the connector been enforcing. Filtered by $connector.",
+      "description": "Snapshot: total verdicts, blocks, would-blocks, alerts, and confirm per connector in the last hour. The inspect metric only carries the hook-event label `tool` (shaped `<connector>:<event>`), so the connector is derived with label_replace and re-aggregated so each row is a real connector, not a hook event. would-block/1h counts observe-mode shadow blocks (would_block=true on defenseclaw_connector_hook_outcome_total) — the rules that would have blocked had the connector been enforcing. Filtered by $connector.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -831,10 +837,48 @@
     },
     {
       "type": "row",
-      "title": "Recent verdict events (Loki)",
+      "title": "Judge reliability",
       "gridPos": {
         "x": 0,
         "y": 49,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Judge errors/hour by reason",
+      "description": "Rolling one-hour LLM judge provider and parse errors, grouped by bounded judge kind and reason labels. Zero is healthy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 50,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (judge_kind, judge_reason) (increase(defenseclaw_gateway_judge_errors_total[1h])) or on() vector(0)",
+          "legendFormat": "{{judge_kind}} · {{judge_reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Recent verdict events (Loki)",
+      "gridPos": {
+        "x": 0,
+        "y": 58,
         "w": 24,
         "h": 1
       },
@@ -850,7 +894,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 59,
         "w": 24,
         "h": 12
       },
@@ -888,7 +932,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw \u2014 Guardrail Evaluations",
+  "title": "DefenseClaw — Guardrail Evaluations",
   "uid": "defenseclaw-security",
   "version": 4,
   "weekStart": ""

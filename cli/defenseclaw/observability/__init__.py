@@ -33,6 +33,7 @@ from defenseclaw.observability.writer import (
     WriteResult,
     apply_preset,
     list_destinations,
+    migrate_flat_otel,
     remove_destination,
     set_destination_enabled,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "WriteResult",
     "apply_preset",
     "list_destinations",
+    "migrate_flat_otel",
     "preset_choices",
     "remove_destination",
     "resolve_preset",

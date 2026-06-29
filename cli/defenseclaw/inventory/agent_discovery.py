@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover - non-POSIX
     _grp = None  # type: ignore[assignment]
 
 from defenseclaw.config import CONFIG_FILE_NAME, default_data_path
-from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand
+from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand, omnigent_config_path
 
 # Sentinel error returned by ``_version_for_binary`` when a connector
 # binary resolves outside the trusted install prefixes. Callers (e.g.
@@ -114,6 +114,7 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "openhands",
     "antigravity",
     "opencode",
+    "omnigent",
 )
 
 
@@ -196,6 +197,11 @@ _SPECS: dict[str, _AgentSpec] = {
             ".opencode",
         ),
         "opencode",
+        ("--version",),
+    ),
+    "omnigent": _AgentSpec(
+        ("~/.omnigent/config.yaml", "~/.omnigent"),
+        "omnigent",
         ("--version",),
     ),
 }
@@ -287,7 +293,11 @@ def _scan_agent(
     require_trusted_binary_paths: bool = False,
 ) -> AgentSignal:
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
-    config_path = _first_existing_path(spec.config_candidates)
+    config_candidates = spec.config_candidates
+    if name == "omnigent":
+        config_path = omnigent_config_path()
+        config_candidates = (config_path, os.path.dirname(config_path))
+    config_path = _first_existing_path(config_candidates)
     binary_path = _which(spec.binary_name) if spec.binary_name else ""
     version = ""
     error = ""
@@ -329,11 +339,7 @@ def _ai_discovery_trust_config(
     block = raw.get("ai_discovery")
     if not isinstance(block, dict):
         return False, ()
-    prefixes = tuple(
-        str(v).strip()
-        for v in (block.get("trusted_binary_prefixes", []) or [])
-        if str(v).strip()
-    )
+    prefixes = tuple(str(v).strip() for v in (block.get("trusted_binary_prefixes", []) or []) if str(v).strip())
     return bool(block.get("require_trusted_binary_paths", False)), prefixes
 
 
@@ -365,7 +371,12 @@ def _expand_bin_prefixes(prefixes: tuple[str, ...]) -> list[str]:
     expanded: list[str] = []
     for prefix in prefixes:
         try:
-            absolute = os.path.abspath(_expand(prefix))
+            # Binary admission compares against the binary's realpath, so
+            # trusted prefixes must use the same canonical form. This matters
+            # on macOS where /tmp and /var are symlinks into /private: an
+            # operator-approved /tmp/tool/bin prefix otherwise never matches
+            # the resolved /private/tmp/tool/bin/binary path.
+            absolute = os.path.realpath(os.path.abspath(_expand(prefix)))
         except Exception:
             continue
         # Refuse degenerate prefixes that would defeat the allow-list:
@@ -566,7 +577,7 @@ def _is_trusted_binary_path(
             # during passive discovery. Operator opt-in prefixes
             # (DEFENSECLAW_TRUSTED_BIN_PREFIXES) keep the looser checks.
             if prefix in default_prefixes and not _bin_chain_is_system_owned(resolved, prefix):
-                return False
+                continue
             return True
     return False
 

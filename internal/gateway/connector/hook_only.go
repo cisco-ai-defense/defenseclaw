@@ -212,18 +212,13 @@ func NewCopilotConnector() *hookOnlyConnector {
 			return HookCapability{
 				CanBlock:     true,
 				CanAskNative: true,
-				AskEvents:    []string{"preToolUse", "PreToolUse"},
+				AskEvents:    []string{"preToolUse"},
 				BlockEvents: []string{
 					"preToolUse",
-					"PreToolUse",
 					"permissionRequest",
-					"PermissionRequest",
 					"agentStop",
-					"Stop",
 					"subagentStop",
-					"SubagentStop",
 					"postToolUseFailure",
-					"PostToolUseFailure",
 				},
 				SupportsFailClosed: false,
 				Scope:              "user,workspace",
@@ -843,13 +838,7 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 }
 
 func (c *hookOnlyConnector) Authenticate(r *http.Request) bool {
-	if c.gatewayToken != "" && SecureTokenMatch(ExtractBearerKey(r.Header.Get("Authorization")), c.gatewayToken) {
-		return true
-	}
-	if c.masterKey != "" && SecureTokenMatch(ExtractBearerKey(r.Header.Get("Authorization")), c.masterKey) {
-		return true
-	}
-	return AcceptLoopbackWithWarning(r, c.gatewayToken, c.name,
+	return authenticateHookBridgeRequest(r, c.gatewayToken, c.masterKey, c.name,
 		"hook-only connectors run as local shell hooks; setup injects Authorization when possible, but loopback remains accepted for legacy hook installs",
 		&c.loopbackWarn)
 }
@@ -1303,6 +1292,9 @@ func patchHermesHooks(path, hookScript string) error {
 		{"post_llm_call", ""},
 		{"on_session_start", ""},
 		{"on_session_end", ""},
+		{"on_session_finalize", ""},
+		{"on_session_reset", ""},
+		{"subagent_start", ""},
 		{"subagent_stop", ""},
 	} {
 		entry := map[string]interface{}{
@@ -1350,9 +1342,13 @@ func patchCursorHooks(path, hookScript string, failClosed bool) error {
 	hooks := ensureJSONObject(cfg, "hooks")
 	cfg["version"] = 1
 	for _, event := range []string{
+		"sessionStart",
+		"sessionEnd",
 		"preToolUse",
 		"postToolUse",
 		"postToolUseFailure",
+		"subagentStart",
+		"subagentStop",
 		"beforeShellExecution",
 		"beforeMCPExecution",
 		"afterShellExecution",
@@ -1365,9 +1361,8 @@ func patchCursorHooks(path, hookScript string, failClosed bool) error {
 		"afterAgentResponse",
 		"afterAgentThought",
 		"stop",
-		"sessionStart",
-		"sessionEnd",
 		"preCompact",
+		"workspaceOpen",
 	} {
 		entry := map[string]interface{}{
 			"type":       "command",
@@ -1396,6 +1391,9 @@ func patchWindsurfHooks(path, hookScript string) error {
 		"pre_mcp_tool_use",
 		"post_mcp_tool_use",
 		"pre_user_prompt",
+		"post_cascade_response",
+		"post_cascade_response_with_transcript",
+		"post_setup_worktree",
 	} {
 		entry := map[string]interface{}{
 			"command":     shellWord(hookScript),
@@ -1528,17 +1526,19 @@ func patchCopilotHooks(path, hookScript string) error {
 	hooks := ensureJSONObject(cfg, "hooks")
 	cfg["version"] = 1
 	for _, event := range []string{
-		"PreToolUse",
-		"PostToolUse",
-		"PostToolUseFailure",
-		"Stop",
-		"SubagentStop",
-		"PermissionRequest",
-		"Notification",
-		"PreCompact",
-		"SessionStart",
-		"SessionEnd",
-		"UserPromptSubmit",
+		"sessionStart",
+		"sessionEnd",
+		"userPromptSubmitted",
+		"preToolUse",
+		"postToolUse",
+		"postToolUseFailure",
+		"permissionRequest",
+		"agentStop",
+		"subagentStart",
+		"subagentStop",
+		"errorOccurred",
+		"preCompact",
+		"notification",
 	} {
 		entry := map[string]interface{}{
 			"type":       "command",

@@ -1,0 +1,184 @@
+---
+title: Upgrade DefenseClaw
+description: Safely upgrade DefenseClaw with verified artifacts, automatic schema migrations, backups, health checks, and durable OTel destination conversion.
+keywords:
+  - defenseclaw upgrade
+  - DefenseClaw migration
+  - config version 7
+  - migrate OTel destinations
+  - DefenseClaw rollback
+---
+
+Use `defenseclaw upgrade` for an existing installation. It treats a release as
+one transaction across the Python CLI, Go gateway, operator configuration, and
+release-owned migrations:
+
+```bash
+defenseclaw upgrade --yes
+```
+
+To install a specific release:
+
+```bash
+defenseclaw upgrade --version X.Y.Z --yes
+```
+
+<Callout title="Prefer the upgrade command over re-running the installer">
+The install scripts are appropriate for a fresh host. `defenseclaw upgrade`
+adds the safety work an existing host needs: artifact verification, a state
+backup, release-manifest validation, migrations, service restart, and a health
+check.
+</Callout>
+
+## What the upgrade does
+
+1. Resolves the target release and downloads its checksum, provenance, gateway,
+   and CLI artifacts.
+2. Verifies the release manifest and SHA-256 checksums. When `cosign` is
+   installed, it also verifies Sigstore provenance.
+3. Saves managed state under
+   `~/.defenseclaw/backups/upgrade-<timestamp>/`, including `config.yaml`,
+   `.env`, policies, connector backups, device identity, and the previous
+   gateway binary.
+4. Stops the gateway, installs the matched CLI and gateway artifacts, and
+   verifies the installed gateway version.
+5. Runs every release-required migration through the durable migration cursor
+   at `~/.defenseclaw/.migration_state.json`.
+6. Restarts services and polls gateway health.
+
+The migration cursor records each successful version independently. If one
+step fails, it remains unapplied and can be retried without replaying unrelated
+successful migrations. The release manifest is checked before the command
+reports success.
+
+## Configuration schema v7 and OTel
+
+Configuration v7 replaces the legacy single-exporter fields with named fan-out
+routes under `otel.destinations[]`. A legacy installation such as:
+
+```yaml
+config_version: 6
+otel:
+  enabled: true
+  protocol: grpc
+  endpoint: 127.0.0.1:4317
+  traces: { enabled: true }
+```
+
+is persisted during upgrade as:
+
+```yaml
+config_version: 7
+otel:
+  enabled: true
+  destinations:
+    - name: local-observability
+      preset: local-otlp
+      enabled: true
+      protocol: grpc
+      endpoint: 127.0.0.1:4317
+      traces: { enabled: true }
+      metrics: { enabled: false }
+      logs: { enabled: false }
+```
+
+The conversion preserves global and per-signal endpoints, protocols, headers,
+TLS policy, batching, signal enablement, process-wide sampling/log policy, and
+all existing named destinations. Environment-backed legacy endpoints are
+materialized into the matching named route. The writer creates
+`config.yaml.pre-observability-migration.bak` and is idempotent.
+
+There are three layers of protection:
+
+| Layer | Purpose |
+| --- | --- |
+| Configuration migration | Persists the named-destination shape during every compatible `defenseclaw upgrade`, even when an older release cursor is already applied. |
+| Runtime compatibility | Converts the old shape in memory before validation if persistence was interrupted. It does not write on read. |
+| Manual repair | `migrate-otel` previews or reapplies the same shared conversion. |
+
+```bash
+defenseclaw setup observability migrate-otel          # preview only
+defenseclaw setup observability migrate-otel --apply  # persist/repair
+```
+
+<Callout title="Multi-OTLP routes survive the upgrade">
+The converted legacy route is inserted beside existing destinations. For
+example, an existing local collector remains active when Galileo is present;
+neither route replaces the other.
+</Callout>
+
+## Refresh the bundled observability stack
+
+The local Grafana dashboards and collector configuration are host-mounted
+files, not container image contents. After upgrading, refresh them from the
+new CLI bundle:
+
+```bash
+defenseclaw setup local-observability up
+```
+
+This refresh is the default. Use `--no-refresh-config` only when you
+intentionally maintain a local fork of the Compose, collector, or dashboard
+files. The refresh overwrites current bundled dashboards and removes only
+explicitly retired DefenseClaw dashboard files; destination-only team and
+operator dashboards are preserved. Historical events are not backfilled with newly introduced schema
+attributes; generate a new agent turn when validating Agent360 after an
+upgrade.
+
+## Verify the result
+
+```bash
+defenseclaw --version
+defenseclaw migrations status
+defenseclaw doctor
+defenseclaw setup observability list
+defenseclaw-gateway status
+```
+
+If Galileo is configured, verify both OTLP acceptance and runtime routing:
+
+```bash
+defenseclaw setup galileo status
+defenseclaw setup galileo test
+```
+
+For local observability, send a canary and inspect the collector if needed:
+
+```bash
+defenseclaw setup observability test local-observability
+defenseclaw setup local-observability status
+defenseclaw setup local-observability logs --service otel-collector
+```
+
+## Recover an interrupted migration
+
+Start with read-only checks:
+
+```bash
+defenseclaw migrations status
+defenseclaw doctor
+defenseclaw setup observability migrate-otel
+```
+
+If only the OTel write is missing, apply the focused repair command. If a
+release migration remains unapplied, mark only that version for retry and run
+the same-version upgrade again:
+
+```bash
+defenseclaw migrations unmark 0.8.0
+defenseclaw upgrade --version 0.8.0 --yes
+```
+
+The upgrade summary prints the timestamped backup directory. Preserve it until
+the new gateway, connectors, and observability destinations have been
+validated. Restore individual managed files from that directory when needed;
+do not replace the whole data directory because it also contains newer audit
+and migration state.
+
+## Next
+
+<Cards>
+  <Card title="Configuration reference" href="/docs/reference/configuration" description="Current config.yaml shape, named OTel destinations, and ownership boundaries." />
+  <Card title="Local observability" href="/docs/observability/local-observability" description="Refresh and verify Grafana, Prometheus, Loki, Tempo, and the OTel Collector." />
+  <Card title="Galileo" href="/docs/observability/galileo" description="Verify cloud or self-hosted Galileo delivery after schema migration." />
+</Cards>

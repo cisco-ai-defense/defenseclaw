@@ -23,7 +23,7 @@ defenseclaw setup codex                # observe (default) — record only
 defenseclaw setup codex --mode action  # block on policy hits via PreToolUse deny
 ```
 
-Pins `claw.mode=codex`, wires hooks + OTel + notify bridge. No proxy listener binds for Codex in either mode.
+`setup codex` is shorthand for `setup guardrail --connector codex`: it adds or reconfigures Codex, wires hooks + OTel + notify bridge, and can join an existing hook-connector roster when you choose **Add**. No proxy listener binds for Codex in either mode.
 
 #### What this command sets vs. leaves at defaults
 

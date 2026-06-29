@@ -139,7 +139,11 @@ type AgentConfig struct {
 // legacy singular `guardrail.connector` field stays valid and keeps
 // driving the single-connector path, so the v5→v6 step is a no-op
 // normalization — no field rewrite is required.
-const CurrentConfigVersion = 6
+//
+// v7: introduces named OTel destinations. Legacy flat exporter fields
+// (`otel.endpoint`, `otel.protocol`, and per-signal transport blocks) are
+// migrated in-process so existing installations keep exporting on upgrade.
+const CurrentConfigVersion = 7
 
 type Config struct {
 	ConfigVersion  int    `mapstructure:"config_version"        yaml:"config_version"`
@@ -741,16 +745,164 @@ func (c *Config) EffectiveInspectLLM() InspectLLMConfig {
 }
 
 type OTelConfig struct {
-	Enabled  bool               `mapstructure:"enabled"  yaml:"enabled"`
-	Protocol string             `mapstructure:"protocol" yaml:"protocol"`
-	Endpoint string             `mapstructure:"endpoint" yaml:"endpoint"`
-	Headers  map[string]string  `mapstructure:"headers"  yaml:"headers"`
-	TLS      OTelTLSConfig      `mapstructure:"tls"      yaml:"tls"`
-	Traces   OTelTracesConfig   `mapstructure:"traces"   yaml:"traces"`
-	Logs     OTelLogsConfig     `mapstructure:"logs"     yaml:"logs"`
-	Metrics  OTelMetricsConfig  `mapstructure:"metrics"  yaml:"metrics"`
-	Batch    OTelBatchConfig    `mapstructure:"batch"    yaml:"batch"`
-	Resource OTelResourceConfig `mapstructure:"resource" yaml:"resource"`
+	Enabled      bool                    `mapstructure:"enabled"      yaml:"enabled"`
+	Traces       OTelTracePolicyConfig   `mapstructure:"traces"       yaml:"traces"`
+	Logs         OTelLogPolicyConfig     `mapstructure:"logs"         yaml:"logs"`
+	Metrics      OTelMetricPolicyConfig  `mapstructure:"metrics"      yaml:"metrics"`
+	Batch        OTelBatchConfig         `mapstructure:"batch"        yaml:"batch"`
+	Resource     OTelResourceConfig      `mapstructure:"resource"     yaml:"resource"`
+	Destinations []OTelDestinationConfig `mapstructure:"destinations" yaml:"destinations,omitempty"`
+}
+
+// OTelDestinationConfig is one independently queued OTLP destination. The
+// top-level OTelConfig remains the master switch and owns process-wide resource
+// attributes, sampling, and emission policy. Keeping those concerns global
+// lets one SDK provider fan the same spans/logs/metrics out to multiple OTLP
+// backends without creating competing global providers.
+//
+// A configuration with no destinations is invalid when OTel is enabled.
+type OTelDestinationConfig struct {
+	Name       string               `mapstructure:"name"        yaml:"name"`
+	Preset     string               `mapstructure:"preset"      yaml:"preset,omitempty"`
+	Enabled    bool                 `mapstructure:"enabled"     yaml:"enabled"`
+	Protocol   string               `mapstructure:"protocol"    yaml:"protocol"`
+	Endpoint   string               `mapstructure:"endpoint"    yaml:"endpoint"`
+	Headers    map[string]string    `mapstructure:"headers"     yaml:"headers,omitempty"`
+	TLS        OTelTLSConfig        `mapstructure:"tls"         yaml:"tls"`
+	Traces     OTelTracesConfig     `mapstructure:"traces"      yaml:"traces"`
+	Logs       OTelLogsConfig       `mapstructure:"logs"        yaml:"logs"`
+	Metrics    OTelMetricsConfig    `mapstructure:"metrics"     yaml:"metrics"`
+	Batch      OTelBatchConfig      `mapstructure:"batch"       yaml:"batch"`
+	SpanFilter OTelSpanFilterConfig `mapstructure:"span_filter" yaml:"span_filter,omitempty"`
+}
+
+// OTelSpanFilterConfig is a vendor-neutral projection applied to one trace
+// destination. Presets may use it when a backend accepts only a subset of the
+// process trace graph (for example, GenAI inference spans).
+type OTelSpanFilterConfig struct {
+	RequireOperation  string                          `json:"require_operation,omitempty"  mapstructure:"require_operation"  yaml:"require_operation,omitempty"`
+	RequireAttributes []string                        `json:"require_attributes,omitempty" mapstructure:"require_attributes" yaml:"require_attributes,omitempty"`
+	Operations        []OTelSpanFilterOperationConfig `json:"operations,omitempty"         mapstructure:"operations"         yaml:"operations,omitempty"`
+}
+
+func (f OTelSpanFilterConfig) Enabled() bool {
+	return strings.TrimSpace(f.RequireOperation) != "" ||
+		len(f.RequireAttributes) > 0 || len(f.Operations) > 0
+}
+
+// OTelSpanFilterOperationConfig defines one operation-specific schema branch.
+// It permits destinations such as Galileo to accept chat, agent, and tool
+// spans without weakening the required attributes for any individual branch.
+type OTelSpanFilterOperationConfig struct {
+	Name              string   `json:"name"                         mapstructure:"name"               yaml:"name"`
+	RequireAttributes []string `json:"require_attributes,omitempty" mapstructure:"require_attributes" yaml:"require_attributes,omitempty"`
+}
+
+// ValidateNamedDestinations rejects ambiguous fan-out configuration before
+// the SDK providers are created. Runtime transport failures remain isolated
+// per exporter, but duplicate/empty names would make CLI lifecycle operations
+// nondeterministic and must fail fast.
+func (c OTelConfig) ValidateNamedDestinations() error {
+	if c.Enabled && len(c.Destinations) == 0 {
+		return fmt.Errorf("otel.enabled requires at least one named destination in otel.destinations[]")
+	}
+	seen := make(map[string]struct{}, len(c.Destinations))
+	for i, destination := range c.Destinations {
+		name := strings.TrimSpace(destination.Name)
+		if name == "" {
+			return fmt.Errorf("destinations[%d].name is required", i)
+		}
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("duplicate destination name %q", name)
+		}
+		seen[name] = struct{}{}
+		if destination.Enabled &&
+			!destination.Traces.Enabled &&
+			!destination.Logs.Enabled &&
+			!destination.Metrics.Enabled {
+			return fmt.Errorf("destination %q is enabled but has no enabled signals", name)
+		}
+		if destination.Enabled {
+			destinationEndpoint := strings.TrimSpace(destination.Endpoint)
+			for _, signal := range []struct {
+				name     string
+				enabled  bool
+				endpoint string
+			}{
+				{"traces", destination.Traces.Enabled, destination.Traces.Endpoint},
+				{"logs", destination.Logs.Enabled, destination.Logs.Endpoint},
+				{"metrics", destination.Metrics.Enabled, destination.Metrics.Endpoint},
+			} {
+				if signal.enabled && destinationEndpoint == "" && strings.TrimSpace(signal.endpoint) == "" {
+					return fmt.Errorf("destination %q enables %s but has no endpoint", name, signal.name)
+				}
+			}
+		}
+		if destination.Enabled {
+			protocol := strings.ToLower(strings.TrimSpace(destination.Protocol))
+			switch protocol {
+			case "grpc", "grpc/protobuf", "http", "http/protobuf", "http/json":
+			default:
+				return fmt.Errorf("destination %q requires protocol grpc or http/protobuf", name)
+			}
+		}
+		if destination.SpanFilter.Enabled() && !destination.Traces.Enabled {
+			return fmt.Errorf("destination %q has a span_filter but traces are disabled", name)
+		}
+		if len(destination.SpanFilter.Operations) > 0 &&
+			(strings.TrimSpace(destination.SpanFilter.RequireOperation) != "" ||
+				len(destination.SpanFilter.RequireAttributes) > 0) {
+			return fmt.Errorf("destination %q span_filter cannot mix operations with top-level require_operation/require_attributes", name)
+		}
+		filterAttrs := make(map[string]struct{}, len(destination.SpanFilter.RequireAttributes))
+		for _, attributeName := range destination.SpanFilter.RequireAttributes {
+			attributeName = strings.TrimSpace(attributeName)
+			if attributeName == "" {
+				return fmt.Errorf("destination %q span_filter contains an empty required attribute", name)
+			}
+			if _, exists := filterAttrs[attributeName]; exists {
+				return fmt.Errorf("destination %q span_filter repeats required attribute %q", name, attributeName)
+			}
+			filterAttrs[attributeName] = struct{}{}
+		}
+		seenOperations := make(map[string]struct{}, len(destination.SpanFilter.Operations))
+		for _, operation := range destination.SpanFilter.Operations {
+			name := strings.TrimSpace(operation.Name)
+			if name == "" {
+				return fmt.Errorf("destination %q span_filter operation name is required", destination.Name)
+			}
+			if _, exists := seenOperations[name]; exists {
+				return fmt.Errorf("destination %q span_filter repeats operation %q", destination.Name, name)
+			}
+			seenOperations[name] = struct{}{}
+			seenAttrs := make(map[string]struct{}, len(operation.RequireAttributes))
+			for _, attributeName := range operation.RequireAttributes {
+				attributeName = strings.TrimSpace(attributeName)
+				if attributeName == "" {
+					return fmt.Errorf("destination %q span_filter operation %q contains an empty required attribute", destination.Name, name)
+				}
+				if _, exists := seenAttrs[attributeName]; exists {
+					return fmt.Errorf("destination %q span_filter operation %q repeats required attribute %q", destination.Name, name, attributeName)
+				}
+				seenAttrs[attributeName] = struct{}{}
+			}
+		}
+	}
+	return nil
+}
+
+type OTelTracePolicyConfig struct {
+	Sampler    string `mapstructure:"sampler"     yaml:"sampler"`
+	SamplerArg string `mapstructure:"sampler_arg" yaml:"sampler_arg"`
+}
+
+type OTelLogPolicyConfig struct {
+	EmitIndividualFindings bool `mapstructure:"emit_individual_findings" yaml:"emit_individual_findings"`
+}
+
+type OTelMetricPolicyConfig struct {
+	ExportIntervalS int    `mapstructure:"export_interval_s" yaml:"export_interval_s"`
+	Temporality     string `mapstructure:"temporality"       yaml:"temporality"`
 }
 
 type OTelTLSConfig struct {
@@ -2064,6 +2216,7 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	}
 
 	migrateConfig(&cfg)
+	migrateFlatOTelConfigFromViper(&cfg)
 	warnDisableRedactionConfig(&cfg)
 	cfg.DeploymentMode = normalizeDeploymentMode(cfg.DeploymentMode)
 
@@ -2081,13 +2234,12 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 		return nil, err
 	}
 
-	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
+	if err := cfg.OTel.ValidateNamedDestinations(); err != nil {
 		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
+			ReportConfigLoadError(context.Background(), "otel_destination_invalid")
 		}
-		return nil, err
+		return nil, fmt.Errorf("config: otel: %w", err)
 	}
-
 	for i := range cfg.AuditSinks {
 		if err := cfg.AuditSinks[i].Validate(); err != nil {
 			if ReportConfigLoadError != nil {
@@ -2488,6 +2640,13 @@ func migrateConfig(cfg *Config) {
 		// no-op: singular connector config remains valid as-is.
 	}
 
+	// v6 → v7: named OTel destinations are migrated in-process after
+	// unmarshalling because legacy transport keys are not fields on OTelConfig.
+	// See migrateFlatOTelConfigFromViper.
+	if cfg.ConfigVersion < 7 {
+		// no-op here; Load wires the runtime destination from Viper below.
+	}
+
 	cfg.ConfigVersion = CurrentConfigVersion
 	// Intentionally silent: migrateConfig() runs on every Load() because
 	// we don't rewrite the YAML file (that would be a surprising
@@ -2497,6 +2656,188 @@ func migrateConfig(cfg *Config) {
 	// initial render clean and stops `defenseclaw-gateway status` from
 	// printing a banner above the actual status output.
 	_ = oldVersion
+}
+
+func migrateFlatOTelConfigFromViper(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	globalEndpoint := firstNonEmptyString(viper.GetString("otel.endpoint"), flatOTelEnvEndpoint(""))
+	traceEndpoint := firstNonEmptyString(viper.GetString("otel.traces.endpoint"), flatOTelEnvEndpoint("TRACES"))
+	logEndpoint := firstNonEmptyString(viper.GetString("otel.logs.endpoint"), flatOTelEnvEndpoint("LOGS"))
+	metricEndpoint := firstNonEmptyString(viper.GetString("otel.metrics.endpoint"), flatOTelEnvEndpoint("METRICS"))
+	if !hasFlatOTelTransportInConfig() && !(cfg.OTel.Enabled && firstNonEmptyString(
+		globalEndpoint, traceEndpoint, logEndpoint, metricEndpoint,
+	) != "") {
+		return
+	}
+	globalProtocol := firstNonEmptyString(viper.GetString("otel.protocol"), flatOTelEnvProtocol(""))
+	traceProtocol := firstNonEmptyString(viper.GetString("otel.traces.protocol"), flatOTelEnvProtocol("TRACES"))
+	logProtocol := firstNonEmptyString(viper.GetString("otel.logs.protocol"), flatOTelEnvProtocol("LOGS"))
+	metricProtocol := firstNonEmptyString(viper.GetString("otel.metrics.protocol"), flatOTelEnvProtocol("METRICS"))
+	tracesEnabled := flatOTelSignalEnabled("otel.traces.enabled")
+	logsEnabled := flatOTelSignalEnabled("otel.logs.enabled")
+	metricsEnabled := flatOTelSignalEnabled("otel.metrics.enabled")
+	hasExplicitSignalEnabled := viper.InConfig("otel.traces.enabled") ||
+		viper.InConfig("otel.logs.enabled") || viper.InConfig("otel.metrics.enabled")
+	if !viper.InConfig("otel.traces.enabled") && (traceEndpoint != "" || (globalEndpoint != "" && !hasExplicitSignalEnabled)) {
+		tracesEnabled = true
+	}
+	if !viper.InConfig("otel.logs.enabled") && (logEndpoint != "" || (globalEndpoint != "" && !hasExplicitSignalEnabled)) {
+		logsEnabled = true
+	}
+	if !viper.InConfig("otel.metrics.enabled") && (metricEndpoint != "" || (globalEndpoint != "" && !hasExplicitSignalEnabled)) {
+		metricsEnabled = true
+	}
+
+	destination := OTelDestinationConfig{
+		Name:    uniqueOTelDestinationName(cfg.OTel.Destinations, "generic-otlp"),
+		Preset:  "generic-otlp",
+		Enabled: cfg.OTel.Enabled,
+		Protocol: firstNonEmptyString(
+			globalProtocol,
+			traceProtocol,
+			logProtocol,
+			metricProtocol,
+			"grpc",
+		),
+		Endpoint: globalEndpoint,
+		Headers:  viper.GetStringMapString("otel.headers"),
+		TLS:      cfg.OTelTLSFromFlatConfig(),
+		Batch:    cfg.OTel.Batch,
+		Traces: OTelTracesConfig{
+			Enabled:  tracesEnabled,
+			Endpoint: traceEndpoint,
+			Protocol: traceProtocol,
+			URLPath:  viper.GetString("otel.traces.url_path"),
+		},
+		Logs: OTelLogsConfig{
+			Enabled:  logsEnabled,
+			Endpoint: logEndpoint,
+			Protocol: logProtocol,
+			URLPath:  viper.GetString("otel.logs.url_path"),
+		},
+		Metrics: OTelMetricsConfig{
+			Enabled:         metricsEnabled,
+			ExportIntervalS: cfg.OTel.Metrics.ExportIntervalS,
+			Temporality:     cfg.OTel.Metrics.Temporality,
+			Endpoint:        metricEndpoint,
+			Protocol:        metricProtocol,
+			URLPath:         viper.GetString("otel.metrics.url_path"),
+		},
+	}
+
+	if !destination.Traces.Enabled && !destination.Logs.Enabled && !destination.Metrics.Enabled {
+		destination.Traces.Enabled = true
+		destination.Logs.Enabled = true
+		destination.Metrics.Enabled = true
+	}
+	if destination.Protocol == "" {
+		destination.Protocol = "grpc"
+	}
+	cfg.OTel.Destinations = append([]OTelDestinationConfig{destination}, cfg.OTel.Destinations...)
+}
+
+func hasFlatOTelTransportInConfig() bool {
+	for _, key := range []string{
+		"otel.protocol", "otel.endpoint", "otel.headers", "otel.tls",
+		"otel.traces.enabled", "otel.traces.endpoint", "otel.traces.protocol", "otel.traces.url_path",
+		"otel.logs.enabled", "otel.logs.endpoint", "otel.logs.protocol", "otel.logs.url_path",
+		"otel.metrics.enabled", "otel.metrics.endpoint", "otel.metrics.protocol", "otel.metrics.url_path",
+	} {
+		if viper.InConfig(key) {
+			return true
+		}
+	}
+	return false
+}
+
+func flatOTelSignalEnabled(key string) bool {
+	if viper.InConfig(key) {
+		return viper.GetBool(key)
+	}
+	return false
+}
+
+func flatOTelEnvEndpoint(signal string) string {
+	signal = strings.ToUpper(strings.TrimSpace(signal))
+	if signal == "" {
+		return firstNonEmptyString(
+			os.Getenv("DEFENSECLAW_OTEL_ENDPOINT"),
+			os.Getenv("OPENCLAW_OTEL_ENDPOINT"),
+			os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		)
+	}
+	return firstNonEmptyString(
+		os.Getenv("DEFENSECLAW_OTEL_"+signal+"_ENDPOINT"),
+		os.Getenv("OPENCLAW_OTEL_"+signal+"_ENDPOINT"),
+		os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_ENDPOINT"),
+	)
+}
+
+func flatOTelEnvProtocol(signal string) string {
+	signal = strings.ToUpper(strings.TrimSpace(signal))
+	if signal == "" {
+		return firstNonEmptyString(
+			os.Getenv("DEFENSECLAW_OTEL_PROTOCOL"),
+			os.Getenv("OPENCLAW_OTEL_PROTOCOL"),
+			os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"),
+		)
+	}
+	return firstNonEmptyString(
+		os.Getenv("DEFENSECLAW_OTEL_"+signal+"_PROTOCOL"),
+		os.Getenv("OPENCLAW_OTEL_"+signal+"_PROTOCOL"),
+		os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_PROTOCOL"),
+	)
+}
+
+func uniqueOTelDestinationName(destinations []OTelDestinationConfig, base string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "generic-otlp"
+	}
+	seen := make(map[string]struct{}, len(destinations))
+	for _, destination := range destinations {
+		if name := strings.TrimSpace(destination.Name); name != "" {
+			seen[name] = struct{}{}
+		}
+	}
+	name := base
+	for suffix := 2; ; suffix++ {
+		if _, ok := seen[name]; !ok {
+			return name
+		}
+		name = fmt.Sprintf("%s-%d", base, suffix)
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (cfg Config) OTelTLSFromFlatConfig() OTelTLSConfig {
+	var tls OTelTLSConfig
+	if viper.InConfig("otel.tls") {
+		_ = viper.UnmarshalKey("otel.tls", &tls)
+	}
+	if !viper.InConfig("otel.tls.insecure") {
+		switch strings.ToLower(firstNonEmptyString(
+			os.Getenv("DEFENSECLAW_OTEL_TLS_INSECURE"),
+			os.Getenv("OPENCLAW_OTEL_TLS_INSECURE"),
+		)) {
+		case "1", "true", "yes", "on":
+			tls.Insecure = true
+		case "0", "false", "no", "off":
+			tls.Insecure = false
+		}
+	}
+	return tls
 }
 
 // migrateLLMConfigFields performs the v4→v5 migration: legacy fields
@@ -2974,42 +3315,14 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("notifications.max_per_minute", NotificationsDefaultMaxPerMinute)
 
 	viper.SetDefault("otel.enabled", false)
-	viper.SetDefault("otel.protocol", "")
-	viper.SetDefault("otel.endpoint", "")
-	viper.SetDefault("otel.tls.insecure", false)
-	viper.SetDefault("otel.tls.ca_cert", "")
-	viper.SetDefault("otel.traces.enabled", true)
 	viper.SetDefault("otel.traces.sampler", "always_on")
 	viper.SetDefault("otel.traces.sampler_arg", "1.0")
-	viper.SetDefault("otel.traces.endpoint", "")
-	viper.SetDefault("otel.traces.protocol", "")
-	viper.SetDefault("otel.traces.url_path", "")
-	viper.SetDefault("otel.logs.enabled", true)
 	viper.SetDefault("otel.logs.emit_individual_findings", false)
-	viper.SetDefault("otel.logs.endpoint", "")
-	viper.SetDefault("otel.logs.protocol", "")
-	viper.SetDefault("otel.logs.url_path", "")
-	viper.SetDefault("otel.metrics.enabled", true)
 	viper.SetDefault("otel.metrics.export_interval_s", 60)
 	viper.SetDefault("otel.metrics.temporality", "delta")
-	viper.SetDefault("otel.metrics.endpoint", "")
-	viper.SetDefault("otel.metrics.protocol", "")
-	viper.SetDefault("otel.metrics.url_path", "")
 	viper.SetDefault("otel.batch.max_export_batch_size", 512)
 	viper.SetDefault("otel.batch.scheduled_delay_ms", 5000)
 	viper.SetDefault("otel.batch.max_queue_size", 2048)
 
 	_ = viper.BindEnv("otel.enabled", "DEFENSECLAW_OTEL_ENABLED")
-	_ = viper.BindEnv("otel.endpoint", "DEFENSECLAW_OTEL_ENDPOINT")
-	_ = viper.BindEnv("otel.protocol", "DEFENSECLAW_OTEL_PROTOCOL")
-	_ = viper.BindEnv("otel.tls.insecure", "DEFENSECLAW_OTEL_TLS_INSECURE")
-	_ = viper.BindEnv("otel.traces.endpoint", "DEFENSECLAW_OTEL_TRACES_ENDPOINT")
-	_ = viper.BindEnv("otel.traces.protocol", "DEFENSECLAW_OTEL_TRACES_PROTOCOL")
-	_ = viper.BindEnv("otel.traces.url_path", "DEFENSECLAW_OTEL_TRACES_URL_PATH")
-	_ = viper.BindEnv("otel.metrics.endpoint", "DEFENSECLAW_OTEL_METRICS_ENDPOINT")
-	_ = viper.BindEnv("otel.metrics.protocol", "DEFENSECLAW_OTEL_METRICS_PROTOCOL")
-	_ = viper.BindEnv("otel.metrics.url_path", "DEFENSECLAW_OTEL_METRICS_URL_PATH")
-	_ = viper.BindEnv("otel.logs.endpoint", "DEFENSECLAW_OTEL_LOGS_ENDPOINT")
-	_ = viper.BindEnv("otel.logs.protocol", "DEFENSECLAW_OTEL_LOGS_PROTOCOL")
-	_ = viper.BindEnv("otel.logs.url_path", "DEFENSECLAW_OTEL_LOGS_URL_PATH")
 }

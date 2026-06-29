@@ -111,8 +111,10 @@ CREATE TABLE IF NOT EXISTS target_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
+CREATE INDEX IF NOT EXISTS idx_audit_action_timestamp ON audit_events(action, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_severity_timestamp ON audit_events(severity, timestamp);
 CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
+CREATE INDEX IF NOT EXISTS idx_scan_timestamp ON scan_results(timestamp);
 CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 -- The actions uniqueness index is connector-aware (target_type, target_name,
@@ -257,6 +259,7 @@ class Store:
     def init(self) -> None:
         self.db.executescript(SCHEMA)
         self._ensure_run_id_columns()
+        self._ensure_audit_connector_columns()
         # Add the per-connector column + swap the actions uniqueness index to
         # (target_type, target_name, connector) BEFORE migrating the legacy
         # block/allow lists, so the INSERT OR REPLACE block-last-wins ordering
@@ -326,6 +329,28 @@ class Store:
             self.db.execute("ALTER TABLE audit_events ADD COLUMN structured_json TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_scan_run_id ON scan_results(run_id)")
+        self.db.commit()
+
+    def _ensure_audit_connector_columns(self) -> None:
+        """Mirror Go's additive audit_events connector columns and indexes."""
+
+        columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
+        }
+        for column, ddl in (
+            ("connector", "ALTER TABLE audit_events ADD COLUMN connector TEXT"),
+            ("step_idx", "ALTER TABLE audit_events ADD COLUMN step_idx INTEGER"),
+            ("enforced", "ALTER TABLE audit_events ADD COLUMN enforced INTEGER"),
+            ("rule_pack_dir", "ALTER TABLE audit_events ADD COLUMN rule_pack_dir TEXT"),
+        ):
+            if column not in columns:
+                self.db.execute(ddl)
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)")
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp "
+            "ON audit_events(action, connector, timestamp DESC)"
+        )
         self.db.commit()
 
     def _ensure_connector_column(self) -> None:
@@ -447,20 +472,22 @@ class Store:
         if not event.run_id:
             event.run_id = _current_run_id()
         structured_json = json.dumps(event.structured, separators=(",", ":")) if event.structured else None
+        connector = _event_connector_value(event)
         self.db.execute(
             """INSERT INTO audit_events (
                 id, timestamp, action, target, actor, details,
-                structured_json, severity, run_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                structured_json, severity, run_id, connector
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (event.id, event.timestamp.isoformat(), event.action,
              event.target or None, event.actor, event.details or None,
-             structured_json, event.severity or None, event.run_id or None),
+             structured_json, event.severity or None, event.run_id or None,
+             connector or None),
         )
         self.db.commit()
 
     def list_events(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
                FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (max(limit, 1),),
         )
@@ -472,7 +499,7 @@ class Store:
         cur = self.db.execute(
             """SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id
+                      severity, run_id, NULL AS structured_json, connector
                FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
@@ -484,17 +511,98 @@ class Store:
         cur = self.db.execute(
             """SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id
+                      severity, run_id, NULL AS structured_json, connector
                FROM audit_events
-               WHERE severity IN ('CRITICAL','HIGH','ERROR')
+               WHERE (
+                   severity IN ('CRITICAL','HIGH','ERROR')
+                   OR (
+                       action = 'connector-hook'
+                       AND (
+                           details LIKE '%severity=CRITICAL%'
+                           OR details LIKE '%severity=HIGH%'
+                       )
+                   )
+               )
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
 
+    def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+        """List recent connector-hook rows without the actionable filter."""
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id, NULL AS structured_json, connector
+               FROM audit_events
+               WHERE action = 'connector-hook'
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
+        """Return all-time connector-hook counters grouped by connector.
+
+        The Overview chart still uses a bounded event window for sparklines
+        and target breakdowns, but the CONNECTORS table's ``CALLS`` column
+        must not look frozen just because that window is full. Newer sidecar
+        schemas populate ``audit_events.connector`` and index it, so use a
+        grouped aggregate instead of loading every hook row into the TUI.
+        """
+
+        details_expr = "' ' || COALESCE(details, '') || ' '"
+        cur = self.db.execute(
+            f"""SELECT connector AS connector_name,
+                       COUNT(*) AS calls,
+                       SUM(CASE
+                             WHEN {details_expr} LIKE '% action=block %'
+                               OR {details_expr} LIKE '% action=deny %'
+                             THEN 1 ELSE 0
+                           END) AS blocks,
+                       SUM(CASE
+                             WHEN {details_expr} LIKE '% action=alert %'
+                               OR {details_expr} LIKE '% action=warn %'
+                             THEN 1 ELSE 0
+                           END) AS alerts,
+                       MAX(timestamp) AS newest
+                FROM audit_events
+                WHERE action = 'connector-hook'
+                  AND connector <> ''
+                GROUP BY connector"""
+        )
+        stats: dict[str, dict[str, Any]] = {}
+        for connector, calls, blocks, alerts, newest in cur.fetchall():
+            key = str(connector or "").strip().lower()
+            if not key:
+                continue
+            entry = stats.setdefault(key, {"calls": 0, "blocks": 0, "alerts": 0, "newest": ""})
+            entry["calls"] = int(entry["calls"]) + int(calls or 0)
+            entry["blocks"] = int(entry["blocks"]) + int(blocks or 0)
+            entry["alerts"] = int(entry["alerts"]) + int(alerts or 0)
+            if newest and str(newest) > str(entry["newest"]):
+                entry["newest"] = newest
+        return stats
+
+    def count_scan_results_since(self, since: datetime | None) -> int:
+        """Count scan results in the active Overview session window."""
+
+        if since is None:
+            return int(
+                self.db.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0] or 0
+            )
+        return int(
+            self.db.execute(
+                "SELECT COUNT(*) FROM scan_results WHERE datetime(timestamp) >= datetime(?)",
+                (since.isoformat(),),
+            ).fetchone()[0]
+            or 0
+        )
+
     def list_alerts(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
                FROM audit_events
                WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
                  AND action NOT LIKE 'dismiss%'
@@ -509,7 +617,7 @@ class Store:
         cur = self.db.execute(
             """SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id
+                      severity, run_id, NULL AS structured_json, connector
                FROM audit_events
                WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
                  AND action NOT LIKE 'dismiss%'
@@ -524,9 +632,18 @@ class Store:
         cur = self.db.execute(
             """SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id
+                      severity, run_id, NULL AS structured_json, connector
                FROM audit_events
-               WHERE severity IN ('CRITICAL','HIGH','ERROR')
+               WHERE (
+                   severity IN ('CRITICAL','HIGH','ERROR')
+                   OR (
+                       action = 'connector-hook'
+                       AND (
+                           details LIKE '%severity=CRITICAL%'
+                           OR details LIKE '%severity=HIGH%'
+                       )
+                   )
+               )
                  AND action NOT LIKE 'dismiss%'
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
@@ -535,7 +652,7 @@ class Store:
 
     def get_event(self, event_id: str) -> Event | None:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
                FROM audit_events WHERE id = ?""",
             (event_id,),
         )
@@ -910,6 +1027,7 @@ class Store:
             severity=row[6] or "",
             run_id=row[7] or "",
             structured=structured,
+            connector=(row[9] or "") if len(row) > 9 else "",
         )
 
     def get_target_snapshot(
@@ -985,13 +1103,54 @@ class Store:
         )
 
 
+def _event_connector_value(event: Event) -> str:
+    connector = (event.connector or "").strip().lower()
+    if connector:
+        return connector
+    raw = event.structured.get("connector") if isinstance(event.structured, dict) else ""
+    connector = str(raw or "").strip().lower()
+    if connector:
+        return connector
+    return _details_connector(event.details)
+
+
+def _details_connector(details: str) -> str:
+    marker = "connector="
+    text = (details or "").strip()
+    if not text:
+        return ""
+    start = text.find(marker)
+    if start < 0:
+        return ""
+    value_start = start + len(marker)
+    if value_start >= len(text):
+        return ""
+    if text[value_start] == '"':
+        value_start += 1
+        value_end = text.find('"', value_start)
+        if value_end < 0:
+            value_end = len(text)
+    else:
+        value_end = text.find(" ", value_start)
+        if value_end < 0:
+            value_end = len(text)
+    return text[value_start:value_end].strip().lower()
+
+
 def _parse_ts(val: Any) -> datetime:
     if isinstance(val, datetime):
         return val
     if isinstance(val, str):
+        text = val.strip()
+        if text:
+            iso_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+            try:
+                return datetime.fromisoformat(iso_text)
+            except ValueError:
+                pass
         for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
             try:
-                return datetime.strptime(val, fmt)
+                return datetime.strptime(text, fmt)
             except ValueError:
                 continue
     return datetime.now(timezone.utc)
