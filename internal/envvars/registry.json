@@ -585,6 +585,20 @@
       "since": "0.1.0"
     },
     {
+      "name": "DEFENSECLAW_CONFIG",
+      "category": "runtime_path",
+      "purpose": "Override the config.yaml path independently from DEFENSECLAW_HOME when migrations are applied to an explicitly selected configuration file.",
+      "default": "${DEFENSECLAW_HOME}/config.yaml",
+      "accepted_values": ["any-absolute-path", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/migrations.py:145", "description": "Migration config path resolver"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Explicit config path selection keeps migrations aligned with the configuration file chosen by the operator or managed service."
+    },
+    {
       "name": "DEFENSECLAW_GATEWAY_BIN",
       "category": "runtime_path",
       "purpose": "Override path to the defenseclaw-gateway binary. Used by CI / packagers when the binary isn't on PATH.",
