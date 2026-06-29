@@ -594,7 +594,8 @@
       "surface_in_doctor": false,
       "consumers": [
         {"location": "internal/config/defaults.go:78", "description": "Go config path resolver"},
-        {"location": "cli/defenseclaw/config.py:187", "description": "Python config path resolver"}
+        {"location": "cli/defenseclaw/config.py:187", "description": "Python config path resolver"},
+        {"location": "cli/defenseclaw/migrations.py:145", "description": "Migration config path resolver"}
       ],
       "since": "0.8.0",
       "security_note": "Managed config path separation — lets system services read admin-owned policy without making the runtime data directory admin-writable."
