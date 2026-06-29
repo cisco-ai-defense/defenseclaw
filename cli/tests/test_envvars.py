@@ -9,6 +9,7 @@ truthy-value semantics).
 
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from pathlib import Path
