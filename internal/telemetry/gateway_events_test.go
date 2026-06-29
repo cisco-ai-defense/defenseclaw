@@ -544,6 +544,35 @@ func TestEmitGatewayEvent_LLMEventAttributes(t *testing.T) {
 	}
 }
 
+func TestEmitGatewayEvent_HookDecisionAttributes(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+	p.EmitGatewayEvent(gatewaylog.Event{
+		EventType: gatewaylog.EventHookDecision,
+		Severity:  gatewaylog.SeverityHigh,
+		SessionID: "sess-hook",
+		AgentID:   "agent-hook",
+		Connector: "codex",
+		HookDecision: &gatewaylog.HookDecisionPayload{
+			Connector: "codex", Event: "PreToolUse", Result: "ok",
+			Action: "block", RawAction: "block", Severity: gatewaylog.SeverityHigh,
+			Mode: "action", WouldBlock: false, Enforced: true, StepIdx: 4,
+			LatencyMs: 17, Reason: "blocked by policy", EvaluationID: "eval-1",
+			RuleIDs: []string{"TOOL.BLOCK"},
+		},
+	})
+	rec := exp.snapshot()[0]
+	assertAttrString(t, rec, "defenseclaw.gateway.event_type", "hook_decision")
+	assertAttrString(t, rec, "defenseclaw.hook.connector", "codex")
+	assertAttrString(t, rec, "defenseclaw.hook.event", "PreToolUse")
+	assertAttrString(t, rec, "defenseclaw.hook.action", "block")
+	assertAttrString(t, rec, "defenseclaw.hook.raw_action", "block")
+	assertAttrString(t, rec, "defenseclaw.hook.evaluation_id", "eval-1")
+	assertAttrString(t, rec, "defenseclaw.hook.rule_ids", "TOOL.BLOCK")
+	if got, ok := intAttrValue(rec, "defenseclaw.hook.step_idx"); !ok || got != 4 {
+		t.Fatalf("defenseclaw.hook.step_idx=%d ok=%v, want 4", got, ok)
+	}
+}
+
 func TestRecordGatewayEvent_UpdatesMetrics(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	p, err := NewProviderForTest(reader)

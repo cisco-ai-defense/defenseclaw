@@ -140,7 +140,7 @@ func TestEventMarshalOmitsEmptyPayloads(t *testing.T) {
 	for _, banned := range []string{
 		`,"verdict":{`, `,"judge":{`, `,"lifecycle":{`,
 		`,"error":{`, `,"diagnostic":{`, `,"scan_finding":{`, `,"activity":{`,
-		`,"llm_prompt":{`, `,"llm_response":{`, `,"tool_invocation":{`,
+		`,"llm_prompt":{`, `,"llm_response":{`, `,"tool_invocation":{`, `,"hook_decision":{`,
 	} {
 		if strings.Contains(s, banned) {
 			t.Errorf("marshalled event should not carry %s for EventScan: %s", banned, s)
@@ -148,6 +148,30 @@ func TestEventMarshalOmitsEmptyPayloads(t *testing.T) {
 	}
 	if !strings.Contains(s, `"scan":`) {
 		t.Errorf("scan payload missing: %s", s)
+	}
+}
+
+func TestEventHookDecisionPayloadPreservesEnforcementSemantics(t *testing.T) {
+	e := Event{
+		Timestamp: time.Unix(0, 0).UTC(), EventType: EventHookDecision,
+		Severity: SeverityHigh,
+		HookDecision: &HookDecisionPayload{
+			Connector: "claudecode", Event: "PreToolUse", Result: "ok",
+			Action: "allow", RawAction: "block", Severity: SeverityHigh,
+			Mode: "observe", WouldBlock: true, Enforced: false, StepIdx: 7,
+		},
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"event_type":"hook_decision"`, `"raw_action":"block"`,
+		`"would_block":true`, `"enforced":false`, `"step_idx":7`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("marshalled hook decision missing %s: %s", want, b)
+		}
 	}
 }
 

@@ -379,6 +379,147 @@ func (a *APIServer) finalizeAgentHook(
 	safeSection("audit", func() {
 		a.logConnectorHookAuditEnvelope(ctx, env)
 	})
+
+	// Emit one first-class, agent-scoped hook outcome after the shared audit
+	// envelope is finalized. The guardrail's EventVerdict records the scanner's
+	// decision, but it cannot say whether this connector actually received a
+	// block or whether action/connector capabilities downgraded it to an
+	// observe-mode would-block. This event carries that final answer and shares
+	// the exact execution/lifecycle identity used by the preceding and
+	// subsequent model/tool events, giving Agent360 a durable recovery path.
+	safeSection("hook_decision", func() {
+		a.emitHookDecisionEvent(ctx, req, resp, env)
+	})
+}
+
+// emitHookDecisionEvent materializes the final connector-facing decision as a
+// gatewaylog EventHookDecision. It deliberately does not update lifecycle
+// metrics or the phase cursor: a decision is an observation within the hook
+// operation, not an invented agent transition. The following hook event tells
+// us whether the agent retried, selected another tool, asked the model again,
+// or terminated.
+func (a *APIServer) emitHookDecisionEvent(
+	ctx context.Context,
+	req agentHookRequest,
+	resp agentHookResponse,
+	env HookAuditEnvelope,
+) {
+	source := strings.TrimSpace(req.ConnectorName)
+	if source == "" {
+		return
+	}
+
+	// Use the exact same deterministic normalization as the LLM/lifecycle
+	// emitter. At this point that emitter has already populated the bounded
+	// hook-session snapshot, so mergeHookSessionLifecycle recovers the active
+	// execution identity without advancing the phase sequence a second time.
+	meta := hookLLMEventMeta(
+		source,
+		req.SessionID,
+		req.TurnID,
+		firstString(req.Payload, "model", "model_name", "modelName"),
+		source,
+		req.AgentID,
+		req.AgentName,
+		req.AgentType,
+		req.Payload,
+	)
+	meta.ToolID = firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")
+	meta.ToolName = req.ToolName
+	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
+	meta = a.reconcileHookParent(meta)
+	meta = a.mergeHookSessionLifecycle(meta)
+	if snapshot, ok := a.hookLifecycleSnapshot(meta.Source, meta.SessionID, meta.AgentID); ok {
+		// The lifecycle emitter advanced the execution cursor immediately
+		// before evaluation. Reuse its phase/sequence/operation identifiers
+		// so the decision nests beside that hook transition rather than
+		// looking like a second, synthetic phase change.
+		meta.Phase = firstNonEmpty(snapshot.Phase, meta.Phase)
+		meta.PreviousPhase = firstNonEmpty(snapshot.PreviousPhase, meta.PreviousPhase)
+		meta.OperationID = firstNonEmpty(snapshot.OperationID, meta.OperationID)
+		if snapshot.Sequence > 0 {
+			meta.Sequence = snapshot.Sequence
+		}
+	}
+
+	// A request that did not create an LLM/lifecycle anchor (for example a
+	// malformed early hook) can still carry reliable identity in the context.
+	// Fill only blank fields so an upstream-native agent ID remains canonical.
+	identity := AgentIdentityFromContext(ctx)
+	meta.AgentID = firstNonEmpty(meta.AgentID, identity.AgentID)
+	meta.AgentName = firstNonEmpty(meta.AgentName, identity.AgentName)
+	meta.AgentType = firstNonEmpty(meta.AgentType, identity.AgentType)
+
+	correlation := audit.EnvelopeFromContext(ctx)
+	meta.RunID = firstNonEmpty(meta.RunID, correlation.RunID)
+	meta.RequestID = firstNonEmpty(meta.RequestID, correlation.RequestID)
+	meta.PolicyID = firstNonEmpty(meta.PolicyID, correlation.PolicyID)
+	meta.DestinationApp = firstNonEmpty(
+		meta.DestinationApp,
+		correlation.DestinationApp,
+		hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName),
+	)
+
+	result := strings.TrimSpace(env.Result)
+	if result == "" {
+		result = "ok"
+	}
+	if result != "ok" && result != "panic" {
+		result = "panic"
+	}
+
+	emitEvent(ctx, gatewaylog.Event{
+		EventType:           gatewaylog.EventHookDecision,
+		Severity:            deriveSeverity(resp.Severity),
+		RunID:               meta.RunID,
+		RequestID:           meta.RequestID,
+		SessionID:           meta.SessionID,
+		TurnID:              meta.TurnID,
+		Provider:            meta.Provider,
+		Model:               meta.Model,
+		AgentID:             meta.AgentID,
+		AgentName:           meta.AgentName,
+		AgentType:           meta.AgentType,
+		RootAgentID:         meta.RootAgentID,
+		ParentAgentID:       meta.ParentAgentID,
+		RootSessionID:       meta.RootSessionID,
+		ParentSessionID:     meta.ParentSessionID,
+		AgentLifecycleID:    meta.LifecycleID,
+		AgentExecutionID:    meta.ExecutionID,
+		AgentLifecycleEvent: meta.LifecycleEvent,
+		AgentLifecycleState: meta.LifecycleState,
+		AgentPhase:          meta.Phase,
+		AgentPreviousPhase:  meta.PreviousPhase,
+		AgentPhaseCode:      agentPhaseCodePointer(meta),
+		AgentSequence:       meta.Sequence,
+		AgentOperationID:    meta.OperationID,
+		AgentDepth:          agentDepthPointer(meta),
+		SessionSource:       meta.SessionSource,
+		SessionResumed:      boolPointer(meta.SessionResumed),
+		UserID:              meta.UserID,
+		UserName:            meta.UserName,
+		PolicyID:            meta.PolicyID,
+		DestinationApp:      meta.DestinationApp,
+		ToolName:            meta.ToolName,
+		ToolID:              meta.ToolID,
+		Connector:           source,
+		HookDecision: &gatewaylog.HookDecisionPayload{
+			Connector:    source,
+			Event:        req.HookEventName,
+			Result:       result,
+			Action:       normalizeHookActionLabel(resp.Action),
+			RawAction:    normalizeHookActionLabel(resp.RawAction),
+			Severity:     deriveSeverity(resp.Severity),
+			Mode:         hookLogLabel(resp.Mode),
+			WouldBlock:   resp.WouldBlock,
+			Enforced:     env.Enforced,
+			StepIdx:      env.StepIdx,
+			LatencyMs:    env.ElapsedMs,
+			Reason:       resp.Reason,
+			EvaluationID: resp.EvaluationID,
+			RuleIDs:      append([]string(nil), resp.RuleIDs...),
+		},
+	})
 }
 
 // renderAgentHookResponse projects the unified agentHookResponse

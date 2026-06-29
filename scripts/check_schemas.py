@@ -38,7 +38,7 @@ EXPECTED_ENVELOPE_EVENT_TYPES = {
     "verdict", "judge", "lifecycle", "error", "diagnostic",
     "scan", "scan_finding", "activity", "egress",
     "llm_prompt", "llm_response", "tool_invocation",
-    "ai_discovery",
+    "hook_decision", "ai_discovery",
 }
 
 EXPECTED_PROVENANCE_FIELDS = {

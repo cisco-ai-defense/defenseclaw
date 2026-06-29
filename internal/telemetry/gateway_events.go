@@ -441,6 +441,28 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 				attrs = append(attrs, log.Int("defenseclaw.tool.exit_code", *t.ExitCode))
 			}
 		}
+	case gatewaylog.EventHookDecision:
+		if h := e.HookDecision; h != nil {
+			attrs = append(attrs,
+				log.String("defenseclaw.hook.connector", h.Connector),
+				log.String("defenseclaw.hook.event", h.Event),
+				log.String("defenseclaw.hook.result", h.Result),
+				log.String("defenseclaw.hook.action", h.Action),
+				log.String("defenseclaw.hook.raw_action", h.RawAction),
+				log.String("defenseclaw.hook.mode", h.Mode),
+				log.Bool("defenseclaw.hook.would_block", h.WouldBlock),
+				log.Bool("defenseclaw.hook.enforced", h.Enforced),
+				log.Int("defenseclaw.hook.step_idx", h.StepIdx),
+				log.Int64("defenseclaw.hook.latency_ms", h.LatencyMs),
+				log.String("defenseclaw.hook.reason", truncateReasonAttr(h.Reason)),
+			)
+			if h.EvaluationID != "" {
+				attrs = append(attrs, log.String("defenseclaw.hook.evaluation_id", h.EvaluationID))
+			}
+			if len(h.RuleIDs) > 0 {
+				attrs = append(attrs, log.String("defenseclaw.hook.rule_ids", strings.Join(h.RuleIDs, ",")))
+			}
+		}
 	}
 
 	rec.AddAttributes(attrs...)

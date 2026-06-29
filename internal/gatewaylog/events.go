@@ -151,6 +151,15 @@ const (
 	// can join input and output without scraping free-form details.
 	EventToolInvocation EventType = "tool_invocation"
 
+	// EventHookDecision records the connector-facing outcome of one hook
+	// evaluation. It is distinct from EventVerdict: Verdict describes what a
+	// guardrail stage concluded, while HookDecision records what DefenseClaw
+	// actually returned to the agent after enforcement-mode and connector
+	// capability mapping. This lets operators distinguish an enforced block
+	// from an observe-mode would-block and then follow the next lifecycle,
+	// model, or tool event in the same agent execution.
+	EventHookDecision EventType = "hook_decision"
+
 	// EventAIDiscovery records sanitized continuous AI usage discovery
 	// deltas. It is metadata-only: no raw paths, commands, prompt text,
 	// file contents, or secret values.
@@ -383,19 +392,20 @@ type Event struct {
 	PayloadHMAC string `json:"payload_hmac,omitempty"`
 
 	// Type-specific payloads — exactly one is populated.
-	Verdict     *VerdictPayload     `json:"verdict,omitempty"`
-	Judge       *JudgePayload       `json:"judge,omitempty"`
-	Lifecycle   *LifecyclePayload   `json:"lifecycle,omitempty"`
-	Error       *ErrorPayload       `json:"error,omitempty"`
-	Diagnostic  *DiagnosticPayload  `json:"diagnostic,omitempty"`
-	Scan        *ScanPayload        `json:"scan,omitempty"`
-	ScanFinding *ScanFindingPayload `json:"scan_finding,omitempty"`
-	Activity    *ActivityPayload    `json:"activity,omitempty"`
-	Egress      *EgressPayload      `json:"egress,omitempty"`
-	LLMPrompt   *LLMPromptPayload   `json:"llm_prompt,omitempty"`
-	LLMResponse *LLMResponsePayload `json:"llm_response,omitempty"`
-	Tool        *ToolPayload        `json:"tool_invocation,omitempty"`
-	AIDiscovery *AIDiscoveryPayload `json:"ai_discovery,omitempty"`
+	Verdict      *VerdictPayload      `json:"verdict,omitempty"`
+	Judge        *JudgePayload        `json:"judge,omitempty"`
+	Lifecycle    *LifecyclePayload    `json:"lifecycle,omitempty"`
+	Error        *ErrorPayload        `json:"error,omitempty"`
+	Diagnostic   *DiagnosticPayload   `json:"diagnostic,omitempty"`
+	Scan         *ScanPayload         `json:"scan,omitempty"`
+	ScanFinding  *ScanFindingPayload  `json:"scan_finding,omitempty"`
+	Activity     *ActivityPayload     `json:"activity,omitempty"`
+	Egress       *EgressPayload       `json:"egress,omitempty"`
+	LLMPrompt    *LLMPromptPayload    `json:"llm_prompt,omitempty"`
+	LLMResponse  *LLMResponsePayload  `json:"llm_response,omitempty"`
+	Tool         *ToolPayload         `json:"tool_invocation,omitempty"`
+	HookDecision *HookDecisionPayload `json:"hook_decision,omitempty"`
+	AIDiscovery  *AIDiscoveryPayload  `json:"ai_discovery,omitempty"`
 }
 
 // StampPayloadHMAC fills the PayloadHMAC field with HMAC-SHA256 over
@@ -432,6 +442,8 @@ func (e *Event) StampPayloadHMAC() {
 		e.PayloadHMAC = ComputePayloadHMAC(e.LLMResponse)
 	case e.Tool != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.Tool)
+	case e.HookDecision != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.HookDecision)
 	case e.AIDiscovery != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.AIDiscovery)
 	}
@@ -495,6 +507,30 @@ type VerdictPayload struct {
 	// drove this verdict. Operators get a quick SIEM-pivot key
 	// without joining against scan_findings rows.
 	RuleIDs []string `json:"rule_ids,omitempty"`
+}
+
+// HookDecisionPayload is the agent-facing decision after the hook runtime
+// applies connector capability and enforcement-mode mapping. Action is what
+// the connector received; RawAction is the guardrail's original result. The
+// two differ for observe-mode would-blocks and non-enforceable hook surfaces.
+// EvaluationID and RuleIDs link this decision to the matching verdict and
+// per-rule scan-finding events without embedding content in the dashboard
+// correlation path.
+type HookDecisionPayload struct {
+	Connector    string   `json:"connector"`
+	Event        string   `json:"event"`
+	Result       string   `json:"result"`
+	Action       string   `json:"action"`
+	RawAction    string   `json:"raw_action"`
+	Severity     Severity `json:"severity"`
+	Mode         string   `json:"mode"`
+	WouldBlock   bool     `json:"would_block"`
+	Enforced     bool     `json:"enforced"`
+	StepIdx      int      `json:"step_idx,omitempty"`
+	LatencyMs    int64    `json:"latency_ms,omitempty"`
+	Reason       string   `json:"reason,omitempty"`
+	EvaluationID string   `json:"evaluation_id,omitempty"`
+	RuleIDs      []string `json:"rule_ids,omitempty"`
 }
 
 // Finding matches the shape guardrail scanners emit. Keep the field

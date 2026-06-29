@@ -470,10 +470,21 @@ previous phase, a monotonically increasing per-execution sequence, and a stable
 operation ID. The native `defenseclaw.agent.phase.current` gauge gives Agent360
 a continuous state timeline between scrapes, while
 `defenseclaw.agent.phase.transitions` supplies real directed `from → to` edges.
-The Loki sequence keeps every sub-scrape transition in order. Agent360's trace
-table intentionally lists completed operation traces (`tool_end`, `turn_end`,
-terminal session/subagent events) rather than real-time start anchors or HTTP
-hook envelopes; selecting the Trace ID drives the adjacent Tempo waterfall.
+The Loki sequence keeps every sub-scrape transition in order. Every hook also
+emits a first-class `hook_decision` event after connector enforcement and
+capability mapping. This separates an enforced `block` from a raw guardrail
+block that became an observe-mode `would_block`, and carries the same
+agent/root/lifecycle/execution/trace/evaluation identifiers as nearby model and
+tool events. Agent360's recovery-path timeline renders those records in
+timestamp order so the next tool call, model retry, decision, or terminal
+lifecycle event is visible without inferring a missing retry.
+
+Agent360's trace table lists completed operation traces (`tool_end`,
+`turn_end`, terminal session/subagent events) **and** enforcement attempts
+whose hook span records `defenseclaw.raw_action` or `defenseclaw.decision` as
+block/confirm/alert. The Trace ID link preserves the selected scope and replaces
+the trace variable directly, so the adjacent Tempo waterfall opens the exact
+operation rather than retaining an empty previous trace value.
 
 Connector-native child IDs are authoritative. Codex, Claude Code, Cursor,
 Copilot, and Hermes expose subagent lifecycle hooks; OpenCode exposes child

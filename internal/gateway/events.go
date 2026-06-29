@@ -291,6 +291,11 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		}
 		e.Tool = &cp
 	}
+	if h := e.HookDecision; h != nil {
+		cp := *h
+		cp.Reason = redaction.ForSinkReason(cp.Reason)
+		e.HookDecision = &cp
+	}
 	w.EmitContext(ctx, e)
 }
 

@@ -108,11 +108,13 @@ def test_agent360_durable_counts_use_loki_event_history() -> None:
 def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
     dashboard = _dashboard(AGENT360)
     recent = _panel_by_title(
-        dashboard, "Completed operation traces — click a Trace ID"
+        dashboard, "Operation and enforcement traces — click a Trace ID"
     )
     assert "with (most_recent=true)" in recent["targets"][0]["query"]
     assert "tool_end|turn_end|session_end|subagent_stop" in recent["targets"][0]["query"]
     assert "span.gen_ai.operation.name" in recent["targets"][0]["query"]
+    assert "span.defenseclaw.raw_action" in recent["targets"][0]["query"]
+    assert "span.defenseclaw.decision" in recent["targets"][0]["query"]
     trace_override = next(
         override
         for override in recent["fieldConfig"]["overrides"]
@@ -126,7 +128,7 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
     assert links == [
         {
             "title": "Select trace in Agent360",
-            "url": "/d/defenseclaw-agent-360/agent360?orgId=1&${__all_variables}&var-trace=${__value.raw}&from=${__from}&to=${__to}",
+            "url": "/d/defenseclaw-agent-360/agent360?orgId=1&${connector:queryparam}&${agent:queryparam}&${scope_label:queryparam}&${lifecycle:queryparam}&${execution:queryparam}&var-trace=${__value.raw}&from=${__from}&to=${__to}",
             "targetBlank": False,
         }
     ]
@@ -242,7 +244,9 @@ def test_agent360_uses_canonical_gateway_event_types() -> None:
     decisions = _panel_by_title(
         dashboard, "Errors, blocks, approvals, and guardrail decisions"
     )["targets"][0]["expr"]
-    assert 'defenseclaw_gateway_event_type=~"error|verdict|judge|scan_finding"' in decisions
+    assert 'defenseclaw_gateway_event_type=~"error|verdict|judge|scan_finding|hook_decision"' in decisions
+    assert ".hook_decision_enforced" in decisions
+    assert ".hook_decision_would_block" in decisions
     for nonexistent in ("runtime_error", "approval|", "guardrail|"):
         assert nonexistent not in decisions
 
@@ -251,6 +255,48 @@ def test_agent360_uses_canonical_gateway_event_types() -> None:
     )["targets"][0]["expr"]
     assert 'defenseclaw_gateway_event_type=~"tool_invocation|egress"' in network
     assert "network_egress" not in network
+
+
+def test_agent360_correlates_hook_decisions_to_recovery_paths() -> None:
+    dashboard = _dashboard(AGENT360)
+
+    for title, field in (
+        ("Enforced hook blocks", "hook_decision_enforced"),
+        ("Observe-mode would-blocks", "hook_decision_would_block"),
+    ):
+        panel = _panel_by_title(dashboard, title)
+        assert panel["datasource"]["uid"] == "defenseclaw-loki"
+        expr = panel["targets"][0]["expr"]
+        assert 'defenseclaw_gateway_event_type="hook_decision"' in expr
+        assert field in expr
+        assert "defenseclaw_agent_lifecycle_id=~\"$lifecycle\"" in expr
+        assert "defenseclaw_agent_execution_id=~\"$execution\"" in expr
+
+    outcomes = _panel_by_title(dashboard, "Hook action outcomes over time")
+    assert outcomes["type"] == "timeseries"
+    assert {target["legendFormat"] for target in outcomes["targets"]} == {
+        "enforced block", "would block", "alert or approval"
+    }
+
+    recovery = _panel_by_title(dashboard, "Decision → recovery path")
+    assert recovery["options"]["sortOrder"] == "Ascending"
+    expr = recovery["targets"][0]["expr"]
+    for event_type in (
+        "hook_decision",
+        "tool_invocation",
+        "llm_prompt",
+        "llm_response",
+        "lifecycle",
+    ):
+        assert event_type in expr
+    for field in (
+        ".hook_decision_event",
+        ".hook_decision_action",
+        ".hook_decision_enforced",
+        ".hook_decision_would_block",
+        ".trace_id",
+    ):
+        assert field in expr
 
 
 def test_agent360_exposes_model_tool_cost_and_reliability_analytics() -> None:

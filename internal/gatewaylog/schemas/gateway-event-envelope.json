@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.io/schemas/gateway-event-envelope.json",
   "title": "DefenseClaw Gateway Event Envelope (v7)",
-  "description": "One JSONL line emitted by the DefenseClaw gateway sidecar to gateway.jsonl / stderr / HTTP sinks. The envelope carries correlation + provenance; exactly one of the type-specific payload sub-objects is populated and selected by `event_type`.",
+  "description": "One JSONL line emitted by the DefenseClaw gateway sidecar to gateway.jsonl / stderr / HTTP sinks. The envelope carries correlation + provenance; exactly one of the type-specific payload sub-objects is populated and selected by `event_type`. `hook_decision` records the final connector-facing action after enforcement-mode/capability mapping, distinct from the underlying guardrail verdict.",
   "type": "object",
   "required": ["ts", "event_type", "severity", "schema_version"],
   "properties": {
     "ts":         { "type": "string", "format": "date-time" },
     "event_type": {
       "type": "string",
-      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation", "ai_discovery"]
+      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation", "hook_decision", "ai_discovery"]
     },
     "severity":   { "type": "string", "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"] },
 
@@ -83,6 +83,7 @@
     "llm_prompt":      { "$ref": "#/$defs/LLMPromptPayload" },
     "llm_response":    { "$ref": "#/$defs/LLMResponsePayload" },
     "tool_invocation": { "$ref": "#/$defs/ToolPayload" },
+    "hook_decision":   { "$ref": "#/$defs/HookDecisionPayload" },
     "ai_discovery":    { "$ref": "#/$defs/AIDiscoveryPayload" }
   },
   "oneOf": [
@@ -98,6 +99,7 @@
     { "required": ["llm_prompt"] },
     { "required": ["llm_response"] },
     { "required": ["tool_invocation"] },
+    { "required": ["hook_decision"] },
     { "required": ["ai_discovery"] }
   ],
   "$defs": {
@@ -112,6 +114,27 @@
         "latency_ms": { "type": ["integer", "null"] },
         "evaluation_id": { "type": ["string", "null"], "description": "Optional join key linking this verdict to its per-finding scan_findings rows / EventScanFinding fan-out." },
         "rule_ids":   { "type": ["array", "null"], "items": { "type": "string" }, "description": "Top detection rule identifiers that drove this verdict (capped at 8). Quick SIEM-pivot key." }
+      }
+    },
+    "HookDecisionPayload": {
+      "type": "object",
+      "description": "The final action delivered to a hook connector. action may differ from raw_action when observe mode or connector capability downgrades a guardrail block; this is the durable source for recovery-path analysis.",
+      "required": ["connector", "event", "result", "action", "raw_action", "severity", "mode", "would_block", "enforced"],
+      "properties": {
+        "connector": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "event": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "result": { "type": "string", "enum": ["ok", "panic"] },
+        "action": { "type": "string", "enum": ["allow", "warn", "alert", "confirm", "block", "unknown"] },
+        "raw_action": { "type": "string", "enum": ["allow", "warn", "alert", "confirm", "block", "unknown"] },
+        "severity": { "type": "string", "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"] },
+        "mode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "would_block": { "type": "boolean" },
+        "enforced": { "type": "boolean" },
+        "step_idx": { "type": ["integer", "null"], "minimum": 1 },
+        "latency_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "reason": { "type": ["string", "null"], "maxLength": 4096 },
+        "evaluation_id": { "type": ["string", "null"], "maxLength": 256 },
+        "rule_ids": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 256 }, "maxItems": 8 }
       }
     },
     "JudgePayload": {

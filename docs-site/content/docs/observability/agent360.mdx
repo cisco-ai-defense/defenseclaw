@@ -1,6 +1,6 @@
 ---
 title: Agent360 dashboard
-description: Drill from any observed agent into lifecycle, executions, model and tool activity, tokens, cost, security decisions, traces, and agent topology.
+description: Drill from any observed agent into lifecycle, executions, model and tool activity, tokens, cost, security decisions, hook enforcement/recovery paths, traces, and agent topology.
 keywords:
   - DefenseClaw Agent360
   - agent lifecycle dashboard
@@ -53,12 +53,44 @@ execution detail:
 | **Input/output tokens** | Connector- or provider-reported usage only. | Tracks context growth and response volume without inventing estimates. |
 | **Reported cost** | Cost reported by the connector, normalized for cumulative and per-call semantics. | Supports cost investigation while preserving the source's meaning. |
 | **Terminal success** | Successful terminal events divided by all terminal outcomes. | Measures completed versus failed/interrupted lifecycles; notification-only events do not inflate it. |
+| **Enforced hook blocks** | Final hook decisions returned to a connector as `block`. | Separates a real prevented action from a scanner-only or observe-mode result. |
+| **Observe-mode would-blocks** | Guardrail blocks that were returned as advisory/allow because enforcement was unavailable or disabled. | Shows where a policy would stop work before switching a connector to action mode. |
 
 The **Execution phase timeline** preserves sub-second ordering for lifecycle,
 model, and tool phases. Throughput and p95 latency show whether activity is
 increasing and which operation class is slow. **Executions and last activity**
 keeps the lifecycle and execution IDs visible so a resumed long-running agent
 does not look like an unrelated process.
+
+## Follow an enforced or alternative path
+
+The **Hook enforcement and recovery paths** section answers a different
+question from the verdict list: *what did DefenseClaw actually return to the
+agent, and what did the agent do next?*
+
+Each hook delivery emits a durable `hook_decision` record after connector
+capability and enforcement-mode mapping. It carries the same agent, root,
+lifecycle, execution, operation, trace, evaluation, and rule identifiers as
+the surrounding lifecycle, model, and tool records.
+
+| Field | Meaning |
+| --- | --- |
+| **Action** | The final response sent to the connector. `block` means the hook was enforced. |
+| **Raw action** | The guardrail result before connector/mode mapping. |
+| **Enforced** | `true` only when the connector was actually told to stop. |
+| **Would block** | `true` when a raw block became advisory/allow, such as observe mode or a non-enforceable hook surface. |
+| **Evaluation / rule IDs** | Join keys for the matching verdict and individual scanner findings. |
+
+Start with a spike in **Hook action outcomes over time**, then read
+**Decision → recovery path** from top to bottom. Every row is scoped to the
+selected lifecycle and execution. The rows immediately after a decision are
+the observed path: a new tool call indicates an alternative tool attempt, a
+new prompt/model response indicates the agent reconsidered, another decision
+shows a retry, and a terminal lifecycle event shows that the session ended.
+
+An enforced block does not guarantee that an agent retries; when no later row
+appears, DefenseClaw did not observe another hook event in that execution. It
+does not infer a retry from a missing signal.
 
 ## Follow models, tools, destinations, and cost
 
@@ -100,14 +132,15 @@ The lower dashboard correlates all three local backends:
 | Backend | Agent360 uses it for |
 | --- | --- |
 | **Prometheus** | Directory, counts, state, throughput, latency, token/cost totals, and aggregate topology. |
-| **Loki** | Lifecycle, model, tool, network, error, verdict, judge, finding, and approval-stage event details. |
-| **Tempo** | Completed-operation trace list, waterfall, ordered execution sequence, phase durations, directed phase edges, and per-trace node graph. |
+| **Loki** | Lifecycle, model, tool, network, error, verdict, judge, finding, final hook decision, and approval-stage event details. |
+| **Tempo** | Completed-operation and enforcement-attempt trace list, waterfall, ordered execution sequence, phase durations, directed phase edges, and per-trace node graph. |
 
-Select a **Trace ID** in **Completed operation traces**. The data link sets the
-dashboard's `Trace ID` variable, which populates the selected-trace waterfall,
-ordered execution sequence, directed phase graph, and raw correlated event
-stream. If the trace is outside the current dashboard time range, widen the
-time picker before selecting it.
+Select a **Trace ID** in **Operation and enforcement traces**. The data link
+preserves the selected connector, agent, scope, lifecycle, execution, and time
+range while replacing only the trace ID; it does not carry an empty trace
+variable. The selected-trace waterfall then shows the hook attempt alongside
+its child operation spans. If the trace is outside the current dashboard time
+range, widen the time picker before selecting it.
 
 ## Interpret missing values correctly
 
@@ -134,7 +167,7 @@ validate newly supported fields.
 | Which tool made the execution slow? | Top tools + tool p95 | Selected trace waterfall and ordered sequence. |
 | Did a subagent cause the failure? | Agent tree + dependency map | Child agent ID, errors/decisions, then its trace. |
 | Why did tokens or cost spike? | Tokens/cost over time | Provider/model breakdown and LLM turn details. |
-| Was the action blocked or approved? | Errors, blocks, approvals, and guardrail decisions | Verdict/judge event details and matching trace ID. |
+| Was the action blocked, advisory, or approved—and what happened next? | Hook enforcement and recovery paths | Decision → recovery path, verdict/finding details, then the matching Tempo trace. |
 | Why is a panel empty? | Scope and time-range variables | Use the table above, then confirm the connector reported the field. |
 
 <Callout type="warn" title="Prompts and outputs are persistent telemetry">
