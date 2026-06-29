@@ -172,6 +172,7 @@ class Registry:
 # Loading
 
 _REGISTRY_RELATIVE_PATH = Path("internal") / "envvars" / "registry.json"
+_BUNDLED_REGISTRY_PATH = Path("_data") / "envvars" / "registry.json"
 _cached: Registry | None = None
 
 
@@ -192,6 +193,9 @@ def _registry_path() -> Path:
         candidate = parent / _REGISTRY_RELATIVE_PATH
         if candidate.is_file():
             return candidate
+        bundled = parent / _BUNDLED_REGISTRY_PATH
+        if bundled.is_file():
+            return bundled
     raise FileNotFoundError(
         f"could not locate {_REGISTRY_RELATIVE_PATH} starting from {here}"
     )
