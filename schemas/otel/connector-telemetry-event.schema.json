@@ -80,6 +80,8 @@
             "copilot",
             "openhands",
             "antigravity",
+            "opencode",
+            "omnigent",
             "unknown"
           ],
           "description": "Connector that produced the event. `unknown` is used when an older client omits the source header."

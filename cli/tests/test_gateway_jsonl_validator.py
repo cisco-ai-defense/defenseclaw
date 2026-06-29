@@ -25,8 +25,8 @@ VALIDATOR = ROOT / "scripts" / "assert-gateway-jsonl.py"
 
 
 class GatewayJSONLValidatorTests(unittest.TestCase):
-    def test_accepts_llm_and_tool_telemetry_event_types(self) -> None:
-        """The live validator must stay in lockstep with the v7.1 schema."""
+    def test_accepts_llm_tool_and_hook_decision_event_types(self) -> None:
+        """The live validator must stay in lockstep with the v7 envelope."""
         events = [
             {
                 "ts": "2026-04-29T22:09:45Z",
@@ -52,6 +52,24 @@ class GatewayJSONLValidatorTests(unittest.TestCase):
                 "request_id": "123e4567-e89b-42d3-a456-426614174002",
                 "tool_invocation": {"phase": "call", "tool": "search"},
             },
+            {
+                "ts": "2026-04-29T22:09:45Z",
+                "event_type": "hook_decision",
+                "severity": "HIGH",
+                "schema_version": 7,
+                "request_id": "123e4567-e89b-42d3-a456-426614174003",
+                "hook_decision": {
+                    "connector": "codex",
+                    "event": "pre_tool_use",
+                    "result": "ok",
+                    "action": "block",
+                    "raw_action": "block",
+                    "severity": "HIGH",
+                    "mode": "action",
+                    "would_block": False,
+                    "enforced": True,
+                },
+            },
         ]
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -66,7 +84,7 @@ class GatewayJSONLValidatorTests(unittest.TestCase):
                     sys.executable,
                     str(VALIDATOR),
                     "--min-events",
-                    "3",
+                    "4",
                     "--require-uuid-request-id",
                     "--require-type",
                     "llm_prompt",
@@ -74,6 +92,8 @@ class GatewayJSONLValidatorTests(unittest.TestCase):
                     "llm_response",
                     "--require-type",
                     "tool_invocation",
+                    "--require-type",
+                    "hook_decision",
                     str(jsonl),
                 ],
                 capture_output=True,
@@ -85,7 +105,7 @@ class GatewayJSONLValidatorTests(unittest.TestCase):
         self.assertEqual(
             res.returncode,
             0,
-            f"validator should accept v7.1 LLM/tool events\n"
+            f"validator should accept v7 LLM/tool/hook decision events\n"
             f"stdout={res.stdout}\nstderr={res.stderr}",
         )
 

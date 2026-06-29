@@ -46,7 +46,7 @@ The wrapper accepts the same hook-alias flags as the other hook connectors. The 
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
 
-Pinned by the alias regardless of flags: `claw.mode=antigravity`, `guardrail.connector=antigravity`, `guardrail.scanner_mode=local`, `guardrail.judge.enabled=false`, `guardrail.detection_strategy=regex_only`. `claw.workspace_dir` is always cleared — Antigravity setup is global by design. `guardrail.mode` defaults to `observe` and changes to `action` only when `--mode action` is passed. To tune the broader guardrail matrix after install, use [`defenseclaw setup guardrail --connector antigravity`](/docs/setup/guardrail).
+`setup antigravity` is shorthand for `setup guardrail --connector antigravity`: it adds or reconfigures Antigravity, defaults the connector to observe mode, and can join an existing hook-connector roster when you choose **Add**. `claw.workspace_dir` is always cleared — Antigravity setup is global by design. `guardrail.mode` changes to `action` only when `--mode action` is passed. To tune Antigravity after install, keep using [`defenseclaw setup guardrail --connector antigravity`](/docs/setup/guardrail).
 
 #### Version contract
 

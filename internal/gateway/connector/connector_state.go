@@ -257,7 +257,7 @@ func ResolvedConnectorLocations(opts SetupOpts, conn Connector) ConnectorLocatio
 		caps := hp.HookCapabilities(opts)
 		loc.HookConfigPaths = uniqueNonEmptyStrings(append(loc.HookConfigPaths, caps.ConfigPath))
 	}
-	for _, path := range hookScriptPathsForConnector(opts, conn) {
+	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
 		loc.HookScriptPaths = append(loc.HookScriptPaths, path)
 	}
 	loc.HookScriptPaths = uniqueNonEmptyStrings(loc.HookScriptPaths)
@@ -321,7 +321,7 @@ func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
 		return nil
 	}
 	out := map[string]string{}
-	for _, path := range hookScriptPathsForConnector(opts, conn) {
+	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -333,6 +333,13 @@ func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
+	if provider, ok := conn.(HookRuntimeArtifactProvider); ok {
+		return uniqueNonEmptyStrings(provider.HookRuntimeArtifacts(opts))
+	}
+	return hookScriptPathsForConnector(opts, conn)
 }
 
 func LoadCachedAgentVersion(dataDir, connectorName string) string {

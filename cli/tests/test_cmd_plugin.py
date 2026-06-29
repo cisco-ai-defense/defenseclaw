@@ -311,6 +311,51 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertEqual(payload[0]["connector"], "codex")
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_connector_json_uses_connector_scoped_scan_target(self, _mock_oc):
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import ScanResult
+
+        opencode_dir = os.path.join(self.tmp_dir, "opencode-plugins")
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        plugin_name = "dc-plugin-overview"
+        opencode_path = os.path.join(opencode_dir, plugin_name)
+        hermes_path = os.path.join(hermes_dir, plugin_name)
+        os.makedirs(opencode_path)
+        os.makedirs(hermes_path)
+        self.app.cfg.active_connectors = lambda: ["opencode", "hermes"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: {  # type: ignore[method-assign]
+            "opencode": [opencode_dir],
+            "hermes": [hermes_dir],
+        }.get(connector or "opencode", [])
+        now = datetime.now(timezone.utc)
+        self.app.logger.log_scan(
+            ScanResult(
+                scanner="plugin-scanner", target=opencode_path,
+                timestamp=now, findings=[], duration=timedelta(seconds=0.1),
+            )
+        )
+        self.app.logger.log_scan(
+            ScanResult(
+                scanner="plugin-scanner", target=hermes_path,
+                timestamp=now + timedelta(seconds=1),
+                findings=[], duration=timedelta(seconds=0.1),
+            )
+        )
+
+        scoped = self.invoke(["list", "--connector", "hermes", "--json"])
+        self.assertEqual(scoped.exit_code, 0, scoped.output)
+        scoped_row = json.loads(scoped.output)[0]
+        self.assertEqual(scoped_row["connector"], "hermes")
+        self.assertEqual(scoped_row["scan"]["target"], hermes_path)
+
+        bare = self.invoke(["list", "--json"])
+        self.assertEqual(bare.exit_code, 0, bare.output)
+        groups = {group["connector"]: group["plugins"] for group in json.loads(bare.output)}
+        hermes_row = next(item for item in groups["hermes"] if item["id"] == plugin_name)
+        self.assertEqual(hermes_row["scan"]["target"], hermes_path)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_table_title_counts_effectively_enabled_plugins(self, _mock_oc):
         codex_dir = os.path.join(self.tmp_dir, "codex-plugins")
         os.makedirs(os.path.join(codex_dir, "dc-plugin-alpha"))

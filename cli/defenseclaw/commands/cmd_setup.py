@@ -23,12 +23,15 @@ from __future__ import annotations
 
 import json as _json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import click
 
@@ -69,7 +72,7 @@ from defenseclaw.connector_contracts import (
 )
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory import agent_discovery
-from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
+from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.safety import reject_symlink, sanitize_dotenv_value
 
 # Key used to stash the pre-invocation config.yaml mtime in the Click
@@ -173,8 +176,8 @@ def setup(
 
     \b
     Multi-connector:
-      One gateway enforces N hook connectors (codex, claudecode,
-      hermes, antigravity) tracked under guardrail.connectors. Add one
+      One gateway enforces N agent-native connectors (codex, claudecode,
+      hermes, antigravity, omnigent, and others) tracked under guardrail.connectors. Add one
       with 'defenseclaw setup <connector>' (choose Add when prompted),
       remove with 'defenseclaw setup remove <name>'. Scope policy per peer
       with 'defenseclaw guardrail ... --connector X', and inspect the
@@ -227,6 +230,13 @@ def setup(
 from defenseclaw.commands.cmd_setup_observability import observability  # noqa: E402
 
 setup.add_command(observability)
+
+# Register the first-class Galileo cloud/self-hosted setup workflow. It writes
+# a named OTel destination through the shared observability writer, so Galileo
+# can coexist with local-observability and every other OTLP backend.
+from defenseclaw.commands.cmd_setup_galileo import galileo  # noqa: E402
+
+setup.add_command(galileo)
 
 # Register `defenseclaw setup local-observability` (bundled
 # Prom/Loki/Tempo/Grafana stack driver). Mirrors the `setup splunk
@@ -2468,6 +2478,7 @@ _CONNECTOR_NAMES_FALLBACK = [
     "openhands",
     "antigravity",
     "opencode",
+    "omnigent",
 ]
 
 
@@ -2579,6 +2590,12 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
+    "omnigent": {
+        "label": "OmniGent",
+        "description": "custom Python policy bridge with ALLOW/ASK/DENY and optional native OTLP",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
 }
 
 _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
@@ -2660,6 +2677,12 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
             "plugin auto-loaded by opencode; no opencode.json edit and no "
             "shell-hook config patch"
         ),
+    ),
+    "omnigent": (
+        "OmniGent's effective config.yaml policy_modules and server-wide policies",
+        "~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py",
+        "OmniGent Python environment defenseclaw_omnigent.pth import-path file",
+        "Optional native OTLP uses documented process environment variables; shell startup files are not modified",
     ),
 }
 
@@ -3136,6 +3159,11 @@ def _hilt_support_note(connector: str) -> str:
         return (
             "Antigravity supports native PreToolUse ask; returning decision=ask "
             "from a hook overrides agy's --dangerously-skip-permissions flag."
+        )
+    if connector == "omnigent":
+        return (
+            "OmniGent parks request, tool_call, and llm_request policy phases for native ASK approval; "
+            "post-action confirm verdicts use the configured fallback."
         )
     if connector in {"hermes", "windsurf", "geminicli", "openhands", "opencode"}:
         return (
@@ -3703,7 +3731,7 @@ def setup_guardrail(
         # B2: snapshot the judge gate state BEFORE the judge config below can
         # flip ``gc.judge.enabled`` on, so the hook-gate default only fires when
         # this run actually turns the judge on (not on every re-run).
-        was_judge_enabled = bool(gc.judge.enabled)
+        judge_enabled_by_this_run = False
         # Connector resolution order in non-interactive mode:
         #   1. explicit --connector / --agent flag (operator intent always wins)
         #   2. existing gc.connector if already set to a non-default value
@@ -3761,6 +3789,17 @@ def setup_guardrail(
             gc.connectors[target_connector].block_message = block_message
         elif block_message is not None:
             gc.block_message = block_message
+            block_message_targets = (
+                _guardrail_setup_check_targets(app, gc, None)
+                if getattr(gc, "connectors", None)
+                else []
+            )
+            for connector in block_message_targets:
+                entry = gc.connectors.get(connector)
+                if entry is None:
+                    entry = PerConnectorGuardrailConfig()
+                    gc.connectors[connector] = entry
+                entry.block_message = block_message
         if detection_strategy is not None:
             gc.detection_strategy = detection_strategy
         _apply_guardrail_extra_options(
@@ -3786,6 +3825,7 @@ def setup_guardrail(
             gc.judge.model = judge_model
             gc.judge.llm.model = judge_model
             gc.judge.enabled = True
+            judge_enabled_by_this_run = True
         if judge_api_base is not None:
             gc.judge.api_base = judge_api_base
             gc.judge.llm.base_url = judge_api_base
@@ -3864,6 +3904,7 @@ def setup_guardrail(
         if detection_strategy is not None:
             if _strategy_uses_judge(detection_strategy):
                 gc.judge.enabled = True
+                judge_enabled_by_this_run = True
             elif detection_strategy == "regex_only":
                 gc.judge.enabled = False
         if judge_hook_connectors is not None:
@@ -3874,6 +3915,7 @@ def setup_guardrail(
                 gc.detection_strategy_completion = "regex_only"
             else:
                 gc.judge.enabled = True
+                judge_enabled_by_this_run = True
                 if not gc.detection_strategy or gc.detection_strategy == "regex_only":
                     gc.detection_strategy = "regex_judge"
         gc.enabled = True
@@ -3903,7 +3945,8 @@ def setup_guardrail(
             judge_hook_connectors,
             judge_just_enabled=(
                 gc.judge.enabled
-                and (not was_judge_enabled or not list(gc.judge.hook_connectors or []))
+                and judge_enabled_by_this_run
+                and not list(gc.judge.hook_connectors or [])
             ),
             current=list(gc.judge.hook_connectors or []),
         )
@@ -4677,7 +4720,7 @@ def _apply_hook_connector_setup(
 
     if restart:
         click.echo()
-        click.echo("  Restarting gateway to wire connector telemetry...")
+        click.echo("  Restarting gateway to wire connector runtime and telemetry...")
         _restart_services(
             cfg.data_dir,
             cfg.gateway.host,
@@ -4720,19 +4763,37 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo(f"  DefenseClaw — {label} {mode} setup")
     click.echo("  ─────────────────────────────────────────────────────────")
     click.echo()
-    click.echo(f"  This wires {label} into DefenseClaw via the agent's")
-    click.echo("  native hook bus. No proxy is inserted in the LLM data")
-    if mode == "action":
-        click.echo("  path; tool calls flagged by policy are blocked by the")
-        click.echo("  connector's pre-tool hook returning a deny verdict.")
+    if connector == "omnigent":
+        click.echo("  This wires OmniGent into DefenseClaw through its custom")
+        click.echo("  Python policy API. No proxy is inserted in the LLM data")
+        if mode == "action":
+            click.echo("  path; supported policy phases return ALLOW, ASK, or DENY")
+            click.echo("  directly through OmniGent's native approval flow.")
+        else:
+            click.echo("  path; policy activity is recorded but never blocked.")
     else:
-        click.echo("  path; activity is recorded but never blocked.")
+        click.echo(f"  This wires {label} into DefenseClaw via the agent's")
+        click.echo("  native hook bus. No proxy is inserted in the LLM data")
+        if mode == "action":
+            click.echo("  path; supported actions flagged by policy are blocked")
+            click.echo("  by the connector's native lifecycle verdict.")
+        else:
+            click.echo("  path; activity is recorded but never blocked.")
     click.echo()
     click.echo("  Telemetry channels:")
-    click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → /api/v1/{connector}/hook")
-    native_otel_connectors = {"codex", "claudecode", "geminicli", "copilot"}
+    if connector == "omnigent":
+        click.echo("    • Policy API — six request/tool/model phases → /api/v1/omnigent/hook")
+    else:
+        click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → /api/v1/{connector}/hook")
+    native_otel_connectors = {"codex", "claudecode", "geminicli", "copilot", "omnigent"}
     if connector in native_otel_connectors:
-        click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
+        if connector == "omnigent":
+            click.echo(
+                "    • Native OTel — optional; inactive until OTEL_* variables "
+                "are exported for the OmniGent process"
+            )
+        else:
+            click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
     if connector == "codex":
         click.echo("    • Notify     — agent-turn-complete events → /api/v1/codex/notify")
     click.echo()
@@ -4750,7 +4811,12 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
 def _print_observability_summary(connector: str, cfg=None, *, mode: str = "observe") -> None:
     """One-screen summary surfaced after a successful alias run."""
     label = _CONNECTOR_META[connector]["label"]
-    enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
+    if connector == "omnigent":
+        enforcement_label = (
+            "enabled (custom policy API)" if mode == "action" else "disabled (observe-only)"
+        )
+    else:
+        enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
 
     # Multi-connector awareness: a singular legacy mirror row + a global
     # "setup guardrail --disable" revert line both read as if this one
@@ -4790,6 +4856,8 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
         ("enforcement", enforcement_label),
         ("ai_discovery", f"enabled ({cfg.ai_discovery.mode})" if cfg else "enabled"),
     ]
+    if connector == "omnigent":
+        rows.append(("native OTel", "optional; inactive until OTEL_* is exported for OmniGent"))
     for k, v in rows:
         click.echo(f"    {k + ':':<22s} {v}")
     click.echo()
@@ -5071,7 +5139,12 @@ def _setup_observability_alias(
     # didn't already decide via --enable-judge/--no-enable-judge. On yes,
     # _apply_hook_connector_setup flips the judge on for this connector and
     # bumps the strategy off regex_only.
-    if interactive and enable_judge is None and _prompt_enable_judge(connector, gc):
+    if (
+        interactive
+        and normalized_mode == "action"
+        and enable_judge is None
+        and _prompt_enable_judge(connector, gc)
+    ):
         enable_judge = True
 
     trusted_prompt_cache: dict[str, bool] | None = {} if interactive else None
@@ -5118,7 +5191,10 @@ def _setup_observability_alias(
     if not ok:
         raise click.ClickException(f"failed to configure {connector} (mode={normalized_mode}) — see errors above")
 
-    if interactive and enable_judge:
+    if interactive:
+        _prune_judge_gate_to_action_scope(app.cfg.guardrail, [connector])
+
+    if interactive and enable_judge and normalized_mode == "action":
         configure_model = click.confirm(
             "  Configure LLM judge provider/model/API settings now?",
             default=_judge_llm_needs_configuration(app),
@@ -5396,17 +5472,58 @@ def _merge_batch_judge_selection(
     return new_gate
 
 
+def _prune_judge_gate_to_action_scope(gc, connectors: list[str]) -> list[str]:
+    """Remove observe-mode connectors in this interactive setup scope from judge."""
+    targets = {
+        normalize_connector(c)
+        for c in connectors
+        if c and normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS
+    }
+    if not targets:
+        return list(getattr(gc.judge, "hook_connectors", []) or [])
+
+    action_targets = {
+        c
+        for c in targets
+        if (gc.effective_mode(c) if hasattr(gc, "effective_mode") else getattr(gc, "mode", "observe")) == "action"
+    }
+    current_gate = [
+        normalize_connector(str(c))
+        for c in (getattr(gc.judge, "hook_connectors", []) or [])
+        if str(c).strip()
+    ]
+    if not current_gate:
+        return []
+
+    if current_gate == ["*"]:
+        configured_hook_connectors = {
+            normalize_connector(c)
+            for c in _configured_connector_set(gc)
+            if normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS
+        }
+        new_gate = sorted((configured_hook_connectors - targets) | action_targets)
+    else:
+        new_gate = sorted(c for c in current_gate if c not in targets or c in action_targets)
+
+    gc.judge.hook_connectors = new_gate
+    if not new_gate:
+        gc.judge.enabled = False
+        gc.detection_strategy = "regex_only"
+        gc.detection_strategy_completion = "regex_only"
+    return new_gate
+
+
 def _prompt_batch_judge_connectors(connectors: list[str], gc) -> set[str]:
-    """Ask once which selected connectors should add LLM judge review."""
+    """Ask once which selected action connectors should add LLM judge review."""
     options, display_by_connector, connector_by_display = _connector_display_options(connectors)
     ux.section("Optional LLM judge")
     ux.subhead("Rule/regex scanning is enabled by default for every active connector selected above.")
-    ux.subhead("Checked active connectors add LLM judge review on top.")
+    ux.subhead("Only action-mode connectors can add LLM judge review in this setup flow.")
     ux.subhead("These LLM settings are shared by all connectors with judge enabled.")
     selected = _prompt_checkbox_selection(
         options,
         default_selected=_default_batch_judge_labels(connectors, gc, display_by_connector),
-        title="Select active connector(s) that should use the LLM judge.",
+        title="Select action connector(s) that should use the LLM judge.",
         empty_ok=True,
     )
     selected_connectors = {connector_by_display[label] for label in selected}
@@ -5424,12 +5541,12 @@ def _prompt_guardrail_judge_enablement(
     if judge_targets:
         options, display_by_connector, connector_by_display = _connector_display_options(judge_targets)
         ux.subhead("Rule/regex scanning is already enabled for every active connector.")
-        ux.subhead("Checked active connectors add LLM judge review on top.")
+        ux.subhead("Only action-mode connectors can add LLM judge review in this setup flow.")
         ux.subhead("These LLM settings are shared by all connectors with judge enabled.")
         selected = _prompt_checkbox_selection(
             options,
             default_selected=_default_batch_judge_labels(judge_targets, gc, display_by_connector),
-            title="Select active connector(s) for LLM judge.",
+            title="Select action connector(s) for LLM judge.",
             empty_ok=True,
         )
         selected_connectors = {connector_by_display[label] for label in selected}
@@ -5664,7 +5781,15 @@ def _dispatch_bare_setup(
         gc = app.cfg.guardrail
         connector_modes = _prompt_batch_connector_modes(targets, gc, default_mode=mode)
         trusted_prompt_cache = _prompt_batch_trusted_prefixes(app, connector_modes)
-        judge_connectors = _prompt_batch_judge_connectors(targets, gc)
+        judge_targets = [
+            c for c in targets
+            if (connector_modes.get(c, "observe") or "").strip().lower() == "action"
+        ]
+        if judge_targets:
+            judge_connectors = _prompt_batch_judge_connectors(judge_targets, gc)
+        else:
+            judge_connectors = set()
+            click.echo("  " + ux.dim("LLM judge: skipped because no selected connector is in action mode."))
         if judge_connectors:
             configure_model = click.confirm(
                 "  Configure LLM judge provider/model/API settings now?",
@@ -5685,6 +5810,8 @@ def _dispatch_bare_setup(
         allow_trusted_path_prompt=prompt_batch,
         trusted_prompt_cache=trusted_prompt_cache,
     )
+    if prompt_batch:
+        _prune_judge_gate_to_action_scope(app.cfg.guardrail, targets)
 
 
 def _hook_guardrail_options(fn):
@@ -6259,21 +6386,22 @@ def setup_remove(
 def _make_observability_setup_command(connector: str) -> click.Command:
     """Create a ``defenseclaw setup <connector>`` hook-driven alias."""
     label = _CONNECTOR_META[connector]["label"]
+    surface_name = "custom policy API" if connector == "omnigent" else "agent lifecycle hooks"
 
     @click.command(
         connector,
         help=(
-            f"Configure DefenseClaw for {label} via the agent's hook bus.\n\n"
+            f"Configure DefenseClaw for {label} via its {surface_name}.\n\n"
             "Configures this connector in the hook connector set so CLI/TUI "
             "scanners read that agent's documented local surfaces. Default "
             "mode is observe; pass "
-            "--mode action to enable hook-driven blocking on policy hits "
-            "(pre-tool hook deny verdict). No proxy is involved in either mode."
+            "--mode action to enable agent-native blocking/approval verdicts "
+            "on supported events. No proxy is involved in either mode."
         ),
         short_help=f"Configure DefenseClaw for {label}.",
         epilog=(
-            "Hook connectors enforce via the agent's PreToolUse deny verdict "
-            "(no LLM proxy). The judge/HILT/block-message options here write "
+            "Hook and policy connectors enforce through agent-native lifecycle "
+            "verdicts (no LLM proxy). The judge/HILT/block-message options here write "
             "per-connector overrides; openclaw/zeptoclaw use the proxy backend "
             "(`setup openclaw --help`) and additionally expose proxy/scanner "
             "options that do not apply to hook connectors."
@@ -6292,7 +6420,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         show_default=True,
         help=(
             "Restart defenseclaw-gateway after applying changes "
-            "(needed so the connector's hook scripts and telemetry are wired)."
+            "(needed so the connector's runtime artifacts and telemetry are wired)."
         ),
     )
     @click.option(
@@ -6310,9 +6438,8 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         default="observe",
         show_default=True,
         help=(
-            "Hook policy mode. observe records only; action returns a "
-            "deny verdict from the connector's pre-tool hook on policy hits so the agent "
-            "blocks the tool call inside its own permission flow."
+            "Lifecycle policy mode. observe records only; action returns the "
+            "connector's native blocking or approval verdict on supported events."
         ),
     )
     @click.option(
@@ -6394,11 +6521,11 @@ def _make_observability_setup_command(connector: str) -> click.Command:
 
     _cmd.__name__ = f"setup_{connector}"
     _cmd.__doc__ = (
-        f"Configure DefenseClaw for {label} via the agent's hook bus.\n\n"
+        f"Configure DefenseClaw for {label} via its {surface_name}.\n\n"
         "Configures this connector in the hook connector set so CLI/TUI "
         "scanners read that agent's documented local surfaces. Default "
         "mode is observe; pass "
-        "--mode action to enable hook-driven blocking on policy hits."
+        "--mode action to enable agent-native lifecycle verdicts on policy hits."
     )
     return _cmd
 
@@ -6412,6 +6539,7 @@ for _observability_connector in (
     "openhands",
     "antigravity",
     "opencode",
+    "omnigent",
 ):
     setup.add_command(_make_observability_setup_command(_observability_connector))
 
@@ -6449,6 +6577,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "openhands",
         "antigravity",
         "opencode",
+        "omnigent",
     }
 )
 
@@ -7661,13 +7790,9 @@ def _interactive_guardrail_setup(
     # --- LLM Judge section ---
     #
     # The judge is a gateway-side verification layer that runs on
-    # any inspectable payload — proxy responses for the proxy data
-    # path, AND hook events (UserPromptSubmit, PreToolUse) for the
-    # hook-enforced connectors. So we offer it for every connector
-    # type. The hook surface stamps the verdict on the deny verdict
-    # exactly the same way the proxy surface stamps it on the
-    # response body, which is why the operator's judge config is
-    # connector-agnostic.
+    # inspectable payloads. Proxy connectors can still opt in here directly;
+    # hook connectors only see judge choices for connectors currently in action
+    # mode, so the wizard does not imply observe-mode judge enforcement.
     ux.section("Optional LLM judge")
     ux.subhead("Uses an LLM to verify detections and catch novel attacks.")
     ux.subhead("Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
@@ -7679,7 +7804,7 @@ def _interactive_guardrail_setup(
     click.echo("  " + ux.dim("Tool calls additionally run the tool_injection judge."))
     click.echo()
 
-    judge_targets = [
+    hook_judge_scope = [
         c for c in (
             mode_targets
             if is_multi
@@ -7687,9 +7812,21 @@ def _interactive_guardrail_setup(
         )
         if c in _HOOK_ENFORCED_CONNECTORS
     ]
+    judge_targets = [
+        c for c in hook_judge_scope
+        if (gc.effective_mode(c) if hasattr(gc, "effective_mode") else gc.mode) == "action"
+    ]
 
-    judge_kwargs = {"preserve_outside_targets": True} if agent_name and is_multi else {}
-    _prompt_guardrail_judge_enablement(gc, judge_targets, **judge_kwargs)
+    if hook_judge_scope and not judge_targets:
+        _prune_judge_gate_to_action_scope(gc, hook_judge_scope)
+        click.echo("  " + ux.dim("LLM judge: skipped because no selected connector is in action mode."))
+    else:
+        judge_kwargs = {"preserve_outside_targets": True} if agent_name and is_multi else {}
+        _prompt_guardrail_judge_enablement(gc, judge_targets, **judge_kwargs)
+    if not getattr(gc, "detection_strategy", None):
+        gc.detection_strategy = "regex_only"
+    if not getattr(gc, "detection_strategy_completion", None):
+        gc.detection_strategy_completion = "regex_only"
     if gc.judge.enabled:
         if not getattr(gc, "detection_strategy_completion", None):
             gc.detection_strategy_completion = "regex_only"
@@ -7972,8 +8109,8 @@ def _restart_services(
     if connector != "openclaw" and len(hook_multi) > 1:
         names = ", ".join(sorted(hook_multi))
         ux.subhead(
-            f"{len(hook_multi)} hook connectors ({names}): enforcement via the hook "
-            f"bus on the sidecar API port. No proxy listener — each talks directly "
+            f"{len(hook_multi)} hook connectors ({names}): enforcement via native "
+            f"lifecycle surfaces on the sidecar API port. No proxy listener — each talks directly "
             f"to its native upstream."
         )
         click.echo()
@@ -7993,8 +8130,9 @@ def _restart_services(
         # No proxy listener binds for hook-only connectors — the agent
         # talks directly to its native upstream and DefenseClaw
         # observes/enforces via the hook bus on the sidecar API port.
+        surface = "custom policy API" if connector == "omnigent" else "hook bus"
         ux.subhead(
-            f"{connector} connector: enforcement via hook bus on the sidecar API port. "
+            f"{connector} connector: enforcement via {surface} on the sidecar API port. "
             f"No proxy listener — {connector} talks directly to its native upstream."
         )
 
@@ -8334,6 +8472,8 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
     "source": "defenseclaw",
     "sourcetype": "defenseclaw:json",
 }
+
+_SPLUNK_BRIDGE_ENV_REL = os.path.join("splunk-bridge", "env", ".env")
 
 
 @click.group("splunk", invoke_without_command=True)
@@ -9201,7 +9341,11 @@ def _resolve_bridge_bin(data_dir: str) -> str | None:
     return splunk_bridge_bin(data_dir)
 
 
-def _refresh_and_maybe_restart_splunk_bridge(data_dir: str) -> RefreshResult:
+def _refresh_and_maybe_restart_splunk_bridge(
+    data_dir: str,
+    *,
+    env_file: str | None = None,
+) -> RefreshResult:
     """Refresh the seeded Splunk bridge, stopping any running stack first.
 
     Sequence (all best-effort — refresh failures don't abort the parent
@@ -9229,8 +9373,11 @@ def _refresh_and_maybe_restart_splunk_bridge(data_dir: str) -> RefreshResult:
         bridge = _resolve_bridge_bin(data_dir)
         if bridge:
             try:
+                down_args = [bridge, "down"]
+                if env_file:
+                    down_args.extend(["--env-file", env_file])
                 subprocess.run(
-                    [bridge, "down"],
+                    down_args,
                     capture_output=True,
                     text=True,
                     timeout=120,
@@ -9287,8 +9434,9 @@ def _bootstrap_bridge(
     volumes survive ``down``, so user data is preserved) so the new
     bundle is what gets brought back up.
     """
+    env_file = _ensure_private_splunk_bridge_env(data_dir)
     if refresh_bundle:
-        _refresh_and_maybe_restart_splunk_bridge(data_dir)
+        _refresh_and_maybe_restart_splunk_bridge(data_dir, env_file=env_file)
 
     bridge = _resolve_bridge_bin(data_dir)
     if not bridge:
@@ -9318,7 +9466,7 @@ def _bootstrap_bridge(
         if env is not None:
             run_kwargs["env"] = env
         result = subprocess.run(
-            [bridge, "up", "--output", "json"],
+            [bridge, "up", "--env-file", env_file, "--output", "json"],
             **run_kwargs,
         )
         if result.returncode != 0:
@@ -9361,6 +9509,72 @@ def _bootstrap_bridge(
         if result is not None:
             _echo_bridge_output_tail(result)
         return None
+
+
+def _ensure_private_splunk_bridge_env(data_dir: str) -> str:
+    """Create the private bridge env file used by the local Splunk stack.
+
+    The bridge intentionally refuses to fall back to the checked-in
+    ``.env.example`` because it contains public placeholders. The CLI
+    setup path is responsible for creating an operator-owned copy with
+    fresh local credentials, then passing it explicitly to the bridge.
+    Existing files are preserved.
+    """
+    env_file = os.path.join(data_dir, _SPLUNK_BRIDGE_ENV_REL)
+    reject_symlink(env_file, what="Splunk bridge env file")
+    if os.path.isfile(env_file):
+        _chmod_private_best_effort(env_file)
+        return env_file
+
+    example = _load_splunk_bridge_example_env(data_dir)
+    if not example.get("SPLUNK_IMAGE"):
+        raise click.ClickException("Splunk bridge env template is missing SPLUNK_IMAGE")
+
+    env_dir = os.path.dirname(env_file)
+    os.makedirs(env_dir, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(env_dir, 0o700)
+    except OSError:
+        pass
+
+    hec_token = str(uuid.uuid4())
+    entries = dict(example)
+    entries.update({
+        "SPLUNK_START_ARGS": "--accept-license",
+        "SPLUNK_LICENSE_URI": "Free",
+        "SPLUNK_GENERAL_TERMS": "--accept-sgt-current-at-splunk-com",
+        "SPLUNK_PASSWORD": f"DefenseClawLocal-{secrets.token_hex(16)}!",
+        "SPLUNK_HEC_TOKEN": hec_token,
+        "DEFENSECLAW_HEC_URL": entries.get(
+            "DEFENSECLAW_HEC_URL",
+            "https://127.0.0.1:8088/services/collector/event",
+        ),
+        "DEFENSECLAW_HEC_TOKEN": hec_token,
+        "DEFENSECLAW_INDEX": entries.get("DEFENSECLAW_INDEX", "defenseclaw_local"),
+        "DEFENSECLAW_SOURCETYPE": entries.get("DEFENSECLAW_SOURCETYPE", "defenseclaw:json"),
+        "DEFENSECLAW_SOURCE": entries.get("DEFENSECLAW_SOURCE", "defenseclaw"),
+        "DEFENSECLAW_INTEGRATION_ENABLED": "true",
+    })
+    _write_dotenv(env_file, entries)
+    return env_file
+
+
+def _load_splunk_bridge_example_env(data_dir: str) -> dict[str, str]:
+    candidates = (
+        os.path.join(data_dir, "splunk-bridge", "env", ".env.example"),
+        str(bundled_splunk_bridge_dir() / "env" / ".env.example"),
+    )
+    for path in candidates:
+        if os.path.isfile(path):
+            return _load_dotenv(path)
+    return {}
+
+
+def _chmod_private_best_effort(path: str) -> None:
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _echo_bridge_output_tail(
@@ -9473,22 +9687,26 @@ def _disable_splunk(
     click.echo("  Disabling Splunk integration...")
 
     from defenseclaw.observability import list_destinations, set_destination_enabled
+    dests = list_destinations(app.cfg.data_dir)
 
     if disable_both or o11y_only:
-        # Flip otel.enabled via the observability writer so unmodeled
-        # fields (resource.attributes, etc.) are preserved.
-        try:
-            set_destination_enabled("otel", False, app.cfg.data_dir)
-        except ValueError:
-            # No otel: block — nothing to disable.
-            pass
+        # Disable only Splunk's named OTLP routes. The top-level otel.enabled
+        # flag is now a master switch shared with Galileo, local-observability,
+        # and other destinations, so toggling it here would cause collateral
+        # telemetry loss.
+        for destination in dests:
+            if destination.target != "otel" or destination.preset_id != "splunk-o11y":
+                continue
+            try:
+                set_destination_enabled(destination.name, False, app.cfg.data_dir)
+            except ValueError:
+                pass
         click.echo("    Splunk O11y (OTLP): disabled")
 
     if disable_both or logs_only or enterprise_only:
         # Find splunk_hec audit sinks and flip enabled=false. The legacy
         # Config.splunk dataclass hydrates from the first enabled one, so
         # the gateway will see it as disabled on next load.
-        dests = list_destinations(app.cfg.data_dir)
         disabled_local = False
         disabled_enterprise = False
         for d in dests:
@@ -9580,22 +9798,54 @@ def _print_splunk_status(app: AppContext) -> None:
     otel = app.cfg.otel
     sc = app.cfg.splunk
 
-    if otel.enabled:
-        click.echo("  Splunk Observability Cloud (OTLP):")
-        click.echo("    Status:      enabled")
-        if otel.traces.endpoint:
-            realm = otel.traces.endpoint.replace("ingest.", "").replace(".observability.splunkcloud.com", "")
-            click.echo(f"    Realm:       {realm}")
-        if otel.traces.enabled:
-            click.echo(f"    Traces:      {otel.traces.endpoint}{otel.traces.url_path}")
+    splunk_destinations = [
+        item for item in otel.destinations if item.preset == "splunk-o11y"
+    ]
+    any_route_enabled = False
+    for destination in splunk_destinations:
+        route_enabled = otel.enabled and destination.enabled
+        any_route_enabled = any_route_enabled or route_enabled
+        traces = destination.traces
+        metrics = destination.metrics
+        logs = destination.logs
+        base_endpoint = destination.endpoint
+
+        def signal_endpoint(signal) -> str:
+            return signal.endpoint or base_endpoint
+
+        suffix = f" [{destination.name}]" if len(splunk_destinations) > 1 else ""
+        click.echo(f"  Splunk Observability Cloud (OTLP){suffix}:")
+        click.echo(f"    Status:      {'enabled' if route_enabled else 'disabled'}")
+        realm_endpoint = next(
+            (
+                signal_endpoint(signal)
+                for signal in (traces, metrics, logs)
+                if signal_endpoint(signal)
+            ),
+            "",
+        )
+        if realm_endpoint:
+            parse_target = (
+                realm_endpoint
+                if "://" in realm_endpoint
+                else f"//{realm_endpoint}"
+            )
+            hostname = urlparse(parse_target).hostname or ""
+            realm = hostname.removeprefix("ingest.").removesuffix(
+                ".observability.splunkcloud.com"
+            )
+            if realm:
+                click.echo(f"    Realm:       {realm}")
+        if route_enabled and traces.enabled:
+            click.echo(f"    Traces:      {signal_endpoint(traces)}{traces.url_path}")
         else:
             click.echo("    Traces:      disabled")
-        if otel.metrics.enabled:
-            click.echo(f"    Metrics:     {otel.metrics.endpoint}{otel.metrics.url_path}")
+        if route_enabled and metrics.enabled:
+            click.echo(f"    Metrics:     {signal_endpoint(metrics)}{metrics.url_path}")
         else:
             click.echo("    Metrics:     disabled")
-        if otel.logs.enabled:
-            click.echo(f"    Logs:        {otel.logs.endpoint}{otel.logs.url_path}")
+        if route_enabled and logs.enabled:
+            click.echo(f"    Logs:        {signal_endpoint(logs)}{logs.url_path}")
         else:
             click.echo("    Logs:        disabled")
         dotenv_path = os.path.join(app.cfg.data_dir, ".env")
@@ -9614,7 +9864,7 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo(f"    Sourcetype:  {sc.sourcetype}")
         click.echo()
 
-    if not otel.enabled and not sc.enabled:
+    if not any_route_enabled and not sc.enabled:
         click.echo("  No Splunk integrations are currently enabled.")
         click.echo()
 

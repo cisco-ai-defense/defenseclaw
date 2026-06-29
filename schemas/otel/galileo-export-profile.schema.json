@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.dev/schemas/otel/galileo-export-profile.schema.json",
+  "title": "DefenseClaw Galileo OTLP Export Profile",
+  "description": "Durable operation-aware contract for the Galileo destination filter and delivery funnel.",
+  "type": "object",
+  "required": [
+    "preset",
+    "signals",
+    "operations",
+    "delivery_funnel"
+  ],
+  "properties": {
+    "preset": {
+      "type": "string",
+      "const": "galileo"
+    },
+    "signals": {
+      "type": "array",
+      "const": [
+        "traces"
+      ]
+    },
+    "operations": {
+      "type": "array",
+      "const": [
+        {
+          "name": "chat",
+          "required_attributes": [
+            "gen_ai.operation.name",
+            "gen_ai.provider.name",
+            "gen_ai.request.model",
+            "gen_ai.input.messages",
+            "gen_ai.output.messages"
+          ]
+        },
+        {
+          "name": "invoke_agent",
+          "required_attributes": [
+            "gen_ai.operation.name",
+            "gen_ai.agent.name",
+            "gen_ai.provider.name",
+            "openinference.span.kind",
+            "gen_ai.input.messages",
+            "gen_ai.output.messages"
+          ]
+        },
+        {
+          "name": "execute_tool",
+          "required_attributes": [
+            "gen_ai.operation.name",
+            "gen_ai.tool.name",
+            "openinference.span.kind",
+            "gen_ai.tool.call.arguments",
+            "gen_ai.tool.call.result",
+            "gen_ai.input.messages",
+            "gen_ai.output.messages"
+          ]
+        }
+      ]
+    },
+    "delivery_funnel": {
+      "type": "array",
+      "const": [
+        "observed",
+        "eligible",
+        "attempted",
+        "delivered",
+        "rejected",
+        "failed"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

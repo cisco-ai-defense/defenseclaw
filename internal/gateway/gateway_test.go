@@ -28,8 +28,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -291,6 +293,8 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 		{"copilot_observability", &stubConnector{name: "copilot"}, false},
 		{"openhands_observability", &stubConnector{name: "openhands"}, false},
 		{"antigravity_observability", &stubConnector{name: "antigravity"}, false},
+		{"opencode_observability", &stubConnector{name: "opencode"}, false},
+		{"omnigent_observability", &stubConnector{name: "omnigent"}, false},
 		// Unknown connectors default to bind=true (conservative
 		// fail-closed for the proxy data path).
 		{"unknown_connector", &stubConnector{name: "frobozz"}, true},
@@ -326,6 +330,8 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 		{"geminicli", "geminicli", false},
 		{"copilot", "copilot", false},
 		{"openhands", "openhands", false},
+		{"opencode", "opencode", false},
+		{"omnigent", "omnigent", false},
 		{"unknown", "frobozz", true},
 	}
 	for _, tc := range cases {
@@ -2594,6 +2600,13 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks"},
 		},
+		{
+			name:             "omnigent_direct_policy_api_until_optional_otel_is_configured",
+			connector:        "omnigent",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"policy-api"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -2622,6 +2635,12 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			}
 			if cm["mode"] != c.wantMode {
 				t.Errorf("mode = %v, want %s", cm["mode"], c.wantMode)
+			}
+			if cm["policy_mode"] != "observe" {
+				t.Errorf("policy_mode = %v, want observe", cm["policy_mode"])
+			}
+			if c.connector == "omnigent" && cm["enforcement_surface"] != "omnigent_policy_api" {
+				t.Errorf("enforcement_surface = %v, want omnigent_policy_api", cm["enforcement_surface"])
 			}
 			if cm["proxy_intercept"] != c.wantIntercept {
 				t.Errorf("proxy_intercept = %v, want %v", cm["proxy_intercept"], c.wantIntercept)
@@ -2655,7 +2674,36 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			if first["mode"] != c.wantMode {
 				t.Errorf("connector_modes[0].mode = %v, want %s", first["mode"], c.wantMode)
 			}
+			if first["policy_mode"] != cm["policy_mode"] {
+				t.Errorf("connector_modes[0].policy_mode = %v, want %v", first["policy_mode"], cm["policy_mode"])
+			}
+			if first["enforcement_surface"] != cm["enforcement_surface"] {
+				t.Errorf("connector_modes[0].enforcement_surface = %v, want %v", first["enforcement_surface"], cm["enforcement_surface"])
+			}
 		})
+	}
+}
+
+func TestAPIStatusOmnigentActionPolicyMode(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "omnigent"
+	cfg.Guardrail.Mode = "action"
+	api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+
+	api.handleStatus(w, req)
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	cm, _ := result["connector_mode"].(map[string]interface{})
+	if cm["policy_mode"] != "action" {
+		t.Fatalf("policy_mode = %v, want action", cm["policy_mode"])
+	}
+	if cm["enforcement_surface"] != "omnigent_policy_api" {
+		t.Fatalf("enforcement_surface = %v, want omnigent_policy_api", cm["enforcement_surface"])
 	}
 }
 
@@ -4063,6 +4111,117 @@ func TestReportSinksHealth_NoSinksConfigured(t *testing.T) {
 	}
 }
 
+func TestDestinationRoutingHealthMarshal(t *testing.T) {
+	raw, err := json.Marshal(destinationRoutingHealth{
+		provider: &telemetry.Provider{}, destination: "filtered",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]float64
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"accepted", "dropped", "total", "accepted_percentage"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("routing health missing %q: %s", key, raw)
+		}
+	}
+}
+
+func TestDestinationSignalNamesDoesNotInventTraces(t *testing.T) {
+	destination := config.OTelDestinationConfig{}
+	destination.Metrics.Enabled = true
+	destination.Logs.Enabled = true
+	if got := destinationSignalNames(destination); !reflect.DeepEqual(got, []string{"metrics", "logs"}) {
+		t.Fatalf("destinationSignalNames() = %v, want [metrics logs]", got)
+	}
+}
+
+func TestTelemetryCanaryUsesRuntimeExporterAcknowledgement(t *testing.T) {
+	var targetRequests atomic.Int64
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests.Add(1)
+		if r.URL.Path != "/otel/traces" {
+			t.Errorf("collector path=%q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+	var unrelatedRequests atomic.Int64
+	unrelated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		unrelatedRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer unrelated.Close()
+
+	cfg := &config.Config{
+		Environment: "test",
+		Claw:        config.ClawConfig{Mode: config.ClawOpenClaw},
+		OTel: config.OTelConfig{
+			Enabled: true,
+			Traces:  config.OTelTracePolicyConfig{Sampler: "always_on", SamplerArg: "1.0"},
+			Batch: config.OTelBatchConfig{
+				MaxExportBatchSize: 16, ScheduledDelayMs: 10, MaxQueueSize: 32,
+			},
+			Destinations: []config.OTelDestinationConfig{{
+				Name: "galileo", Preset: "galileo", Enabled: true,
+				Protocol: "http", Endpoint: collector.URL,
+				Traces: config.OTelTracesConfig{Enabled: true, URLPath: "/otel/traces"},
+				SpanFilter: config.OTelSpanFilterConfig{Operations: []config.OTelSpanFilterOperationConfig{
+					{Name: "chat", RequireAttributes: []string{
+						"gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model",
+						"gen_ai.input.messages", "gen_ai.output.messages",
+					}},
+					{Name: "invoke_agent", RequireAttributes: []string{
+						"gen_ai.operation.name", "gen_ai.agent.name",
+						"gen_ai.input.messages", "gen_ai.output.messages",
+					}},
+				}},
+			}, {
+				Name: "unrelated", Preset: "generic-otlp", Enabled: true,
+				Protocol: "http", Endpoint: unrelated.URL,
+				Traces: config.OTelTracesConfig{Enabled: true, URLPath: "/otel/traces"},
+			}},
+		},
+	}
+	provider, err := telemetry.NewProvider(context.Background(), cfg, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	api := &APIServer{otel: provider}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost, "/api/v1/telemetry/canary", strings.NewReader(`{"destination":"galileo"}`),
+	)
+	api.handleTelemetryCanary(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		TraceID      string                                `json:"trace_id"`
+		Acknowledged bool                                  `json:"acknowledged"`
+		Delivery     telemetry.DestinationDeliverySnapshot `json:"delivery"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Acknowledged || len(payload.TraceID) != 32 {
+		t.Fatalf("payload=%+v", payload)
+	}
+	if payload.Delivery.Attempted != 2 || payload.Delivery.Delivered != 2 {
+		t.Fatalf("delivery=%+v want two acknowledged runtime spans", payload.Delivery)
+	}
+	if targetRequests.Load() == 0 || unrelatedRequests.Load() != 0 {
+		t.Fatalf(
+			"target requests=%d unrelated requests=%d; canary must be destination-scoped",
+			targetRequests.Load(), unrelatedRequests.Load(),
+		)
+	}
+}
+
 func TestReportSinksHealth_AllDisabledStillSurfacesEntries(t *testing.T) {
 	s := &Sidecar{
 		cfg: &config.Config{
@@ -4154,6 +4313,48 @@ func TestReportSinksHealth_MixedEnabledDisabled(t *testing.T) {
 	}
 	if rows[1]["enabled"] != true {
 		t.Errorf("rows[1].enabled = %v, want true", rows[1]["enabled"])
+	}
+}
+
+func TestReportSinksHealth_IncludesConnectorOverridesAndSuppression(t *testing.T) {
+	codexSinks := []config.AuditSink{
+		{
+			Name: "codex-otlp", Kind: config.SinkKindOTLPLogs, Enabled: true,
+			OTLPLogs: &config.OTLPLogsSinkConfig{
+				Endpoint: "collector.example.test:4317", Protocol: "grpc",
+			},
+		},
+	}
+	claudeSinks := []config.AuditSink{}
+	s := &Sidecar{
+		cfg: &config.Config{
+			Observability: config.ObservabilityConfig{
+				Connectors: map[string]config.PerConnectorObservability{
+					"codex":      {AuditSinks: &codexSinks},
+					"claudecode": {AuditSinks: &claudeSinks},
+				},
+			},
+		},
+		health: NewSidecarHealth(),
+	}
+
+	s.reportSinksHealth()
+	snap := s.health.Snapshot()
+	if snap.Sinks.State != StateRunning {
+		t.Fatalf("State = %q, want %q", snap.Sinks.State, StateRunning)
+	}
+	if got, _ := snap.Sinks.Details["summary"].(string); got != "1 of 2 enabled" {
+		t.Fatalf("summary = %q, want %q", got, "1 of 2 enabled")
+	}
+	rows, ok := snap.Sinks.Details["sinks"].([]map[string]interface{})
+	if !ok || len(rows) != 2 {
+		t.Fatalf("sinks = %#v, want two connector-scoped rows", snap.Sinks.Details["sinks"])
+	}
+	if rows[0]["scope"] != "connector:claudecode" || rows[0]["suppressed"] != true {
+		t.Errorf("rows[0] = %#v, want claudecode suppression", rows[0])
+	}
+	if rows[1]["scope"] != "connector:codex" || rows[1]["name"] != "codex-otlp" {
+		t.Errorf("rows[1] = %#v, want codex OTLP sink", rows[1])
 	}
 }
 
@@ -6077,6 +6278,41 @@ func TestAPINetworkEgressHandlerRejectsInvalidBlockedFilter(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "blocked must be true, false, 1, or 0") {
 		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestAPINetworkEgressIngestDerivesAgentLifecycleCorrelation(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	meta := llmEventMeta{
+		Source: "codex", SessionID: "egress-session", AgentID: "egress-agent",
+		LifecycleID: "lifecycle-0123456789abcdef", ExecutionID: "execution-0123456789abcdef",
+	}
+	api := &APIServer{
+		store: store, logger: logger,
+		hookSessionTraces: map[string]hookSessionTrace{
+			hookSessionTraceKey(meta): {meta: meta},
+		},
+	}
+	body := strings.NewReader(`{"hostname":"docs.example.com","policy_outcome":"allowed"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/network-egress", body)
+	ctx := ContextWithSessionID(req.Context(), meta.SessionID)
+	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{AgentID: meta.AgentID, AgentName: "codex", AgentType: "codex"})
+	ctx = audit.ContextWithEnvelope(ctx, audit.CorrelationEnvelope{Connector: "codex", ToolID: "web-tool-1"})
+	req = req.WithContext(ctx)
+	req.Header.Set(llmEventUserIDHeader, "user-egress")
+	w := httptest.NewRecorder()
+	api.handleNetworkEgress(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Result().StatusCode, w.Body.String())
+	}
+	rows, err := store.QueryNetworkEgressEvents(audit.NetworkEgressFilter{AgentID: meta.AgentID})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("egress rows=%d err=%v", len(rows), err)
+	}
+	got := rows[0]
+	if got.AgentLifecycleID != meta.LifecycleID || got.AgentExecutionID != meta.ExecutionID ||
+		got.UserID != "user-egress" || got.ToolID != "web-tool-1" {
+		t.Fatalf("egress correlation=%+v", got)
 	}
 }
 

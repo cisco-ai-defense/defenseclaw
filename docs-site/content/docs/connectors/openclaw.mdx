@@ -22,7 +22,7 @@ defenseclaw setup openclaw --mode observe --restart
 defenseclaw setup openclaw --mode action --human-approval --rule-pack strict --restart
 ```
 
-`setup openclaw` is an alias around [`defenseclaw setup guardrail --connector openclaw`](/docs/setup/guardrail) — it pins `claw.mode=openclaw` and inherits every guardrail flag. Unlike Claude Code / Codex, the proxy is **always** in the data path here: there is no observability-only branch, only `--mode observe` (log without blocking) vs `--mode action` (enforce).
+`setup openclaw` is an alias around [`defenseclaw setup guardrail --connector openclaw`](/docs/setup/guardrail) and inherits every guardrail flag. Unlike Claude Code / Codex, the proxy is **always** in the data path here: there is no observability-only branch, only `--mode observe` (log without blocking) vs `--mode action` (enforce).
 
 #### What this command sets vs. leaves at defaults
 

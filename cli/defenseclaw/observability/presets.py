@@ -19,9 +19,9 @@
 Each preset describes a first-class telemetry destination. A preset
 resolves to one of two targets:
 
-* ``otel`` — the top-level ``otel:`` block in ``config.yaml``, used by
-  the gateway's unified OTel exporter (traces + metrics + logs via
-  ``internal/telemetry/provider.go``).
+* ``otel`` — a named entry in ``otel.destinations[]`` in ``config.yaml``,
+  used by the gateway's unified OTel provider (traces + metrics + logs via
+  independent processors/readers in ``internal/telemetry/provider.go``).
 * ``audit_sinks`` — an entry in the ``audit_sinks:`` list, used by the
   audit manager to fan out security events (see
   ``internal/audit/sinks``). Supported kinds: ``splunk_hec``,
@@ -77,6 +77,12 @@ class Preset:
     # Whether the gateway OTel exporter should use plaintext transport.
     # Required for loopback collectors that expose grpc/http without TLS.
     otel_tls_insecure: bool = False
+    # Optional destination-local trace projection. Backends that accept only
+    # a subset of the process trace graph declare the contract here instead of
+    # requiring vendor checks in the Go runtime.
+    span_filter_operation: str = ""
+    span_filter_required_attributes: tuple[str, ...] = ()
+    span_filter_operations: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     # ---- audit_sinks target ----
     sink_kind: SinkKind | None = None
@@ -119,9 +125,7 @@ SPLUNK_O11Y = Preset(
     otel_headers={"X-SF-Token": "${SPLUNK_ACCESS_TOKEN}"},
     token_env="SPLUNK_ACCESS_TOKEN",
     token_label="Splunk Observability access token",
-    prompts=(
-        ("realm", "us1", "Splunk O11y realm (e.g. us1, us0, eu0)", "us1"),
-    ),
+    prompts=(("realm", "us1", "Splunk O11y realm (e.g. us1, us0, eu0)", "us1"),),
 )
 
 SPLUNK_HEC = Preset(
@@ -177,9 +181,7 @@ DATADOG = Preset(
     otel_headers={"DD-API-KEY": "${DD_API_KEY}"},
     token_env="DD_API_KEY",
     token_label="Datadog API key",
-    prompts=(
-        ("site", "us5", "Datadog site (us1, us3, us5, eu, ...)", "us5"),
-    ),
+    prompts=(("site", "us5", "Datadog site (us1, us3, us5, eu, ...)", "us5"),),
 )
 
 HONEYCOMB = Preset(
@@ -222,9 +224,7 @@ NEWRELIC = Preset(
     otel_headers={"api-key": "${NEW_RELIC_LICENSE_KEY}"},
     token_env="NEW_RELIC_LICENSE_KEY",
     token_label="New Relic license key",
-    prompts=(
-        ("region", "us", "New Relic region (us or eu)", "us"),
-    ),
+    prompts=(("region", "us", "New Relic region (us or eu)", "us"),),
 )
 
 GRAFANA_CLOUD = Preset(
@@ -242,8 +242,72 @@ GRAFANA_CLOUD = Preset(
     otel_headers={"Authorization": "Basic ${GRAFANA_OTLP_TOKEN}"},
     token_env="GRAFANA_OTLP_TOKEN",
     token_label="Grafana Cloud OTLP token (base64(instance_id:token))",
+    prompts=(("region", "prod-us-east-0", "Grafana Cloud region/zone", "prod-us-east-0"),),
+)
+
+GALILEO = Preset(
+    id="galileo",
+    display_name="Galileo",
+    target="otel",
+    description="GenAI traces via OTLP HTTP/protobuf to Galileo Cloud or a self-hosted deployment",
+    otel_protocol="http",
+    endpoint_template="{endpoint}",
+    # Galileo documents a complete signal endpoint rather than an OTLP base
+    # URL. Leaving url_path unset makes the Go exporter preserve /otel/traces
+    # (including any self-hosted path prefix) exactly.
+    signal_url_paths={},
+    default_signals=("traces",),
+    span_filter_operations=(
+        (
+            "chat",
+            (
+                "gen_ai.operation.name",
+                "gen_ai.provider.name",
+                "gen_ai.request.model",
+                "gen_ai.input.messages",
+                "gen_ai.output.messages",
+            ),
+        ),
+        (
+            "invoke_agent",
+            (
+                "gen_ai.operation.name",
+                "gen_ai.agent.name",
+                "gen_ai.provider.name",
+                "openinference.span.kind",
+                "gen_ai.input.messages",
+                "gen_ai.output.messages",
+            ),
+        ),
+        (
+            "execute_tool",
+            (
+                "gen_ai.operation.name",
+                "gen_ai.tool.name",
+                "openinference.span.kind",
+                "gen_ai.tool.call.arguments",
+                "gen_ai.tool.call.result",
+                "gen_ai.input.messages",
+                "gen_ai.output.messages",
+            ),
+        ),
+    ),
+    otel_headers={
+        "Galileo-API-Key": "${GALILEO_API_KEY}",
+        "project": "{project}",
+        "logstream": "{logstream}",
+    },
+    token_env="GALILEO_API_KEY",
+    token_label="Galileo API key",
     prompts=(
-        ("region", "prod-us-east-0", "Grafana Cloud region/zone", "prod-us-east-0"),
+        (
+            "endpoint",
+            "https://api.galileo.ai/otel/traces",
+            "Galileo OTLP traces endpoint",
+            "https://api.galileo.ai/otel/traces",
+        ),
+        ("project", "defenseclaw", "Galileo project name or ID", ""),
+        ("logstream", "default", "Galileo Log stream name or ID", "default"),
     ),
 )
 
@@ -327,6 +391,7 @@ PRESETS: dict[str, Preset] = {
         HONEYCOMB,
         NEWRELIC,
         GRAFANA_CLOUD,
+        GALILEO,
         LOCAL_OTLP,
         GENERIC_OTLP,
         GENERIC_WEBHOOK,
@@ -357,6 +422,7 @@ def preset_choices() -> list[str]:
         "honeycomb",
         "newrelic",
         "grafana-cloud",
+        "galileo",
         "local-otlp",
         "otlp",
         "webhook",

@@ -68,6 +68,11 @@
       "version_probe": "agy --version",
       "live": false,
       "notes": "contract-only (Layer A); headless auth is Google Sign-In/keyring OAuth, no API key"
+    },
+    "omnigent": {
+      "version_probe": "omnigent --version",
+      "live": false,
+      "notes": "contract-only (Layer A); custom Python policy bridge"
     }
   }
 }

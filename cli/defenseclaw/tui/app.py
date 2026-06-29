@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -656,6 +657,11 @@ class DefenseClawTUI(App[None]):
         first_run: bool = False,
     ) -> None:
         super().__init__()
+        # Textual defaults to two rows per wheel notch, which makes the dense
+        # Overview dashboard feel like it is crawling. Keep this moderate so
+        # logs/tables are still controllable while trackpad/wheel scrolling
+        # moves a visible chunk of content.
+        self.scroll_sensitivity_y = 6.0
         self.first_run_model = first_run_model or FirstRunPanelModel(active=first_run)
         self.executor = CommandExecutor()
         self.config = config
@@ -743,9 +749,7 @@ class DefenseClawTUI(App[None]):
         # ``_periodic_refresh`` ticker tore the panel body down and
         # rebuilt it every tick — operators saw it as the panel
         # flickering and "switching between Activity and Logs". A
-        # ``None`` sentinel means "force a repaint next render"
-        # (used after the overview panel, whose renderable is a fresh
-        # Rich ``Group`` we cannot fingerprint reliably).
+        # ``None`` sentinel means "force a repaint next render".
         self._last_body_signature: tuple[object, ...] | None = None
         self._last_detail_signature: tuple[object, ...] | None = None
         # Same idempotence guard for the shared ``#panel-table`` DataTable.
@@ -758,6 +762,25 @@ class DefenseClawTUI(App[None]):
         # now skip the rebuild when the panel, columns, rows, and cursor are
         # all unchanged. ``None`` forces a repaint.
         self._last_table_signature: tuple[object, ...] | None = None
+        # Overview renders ask for the same recent hook-event window several
+        # times (header metrics, Enforcement, CONNECTORS rows). Cache it for a
+        # single frame so keypresses don't wait behind repeated SQLite reads.
+        self._connector_hook_event_cache_enabled = False
+        self._recent_connector_hook_events_cache: list[Any] | None = None
+        self._recent_connector_hook_scope_cache: dict[tuple[tuple[str, ...], str], dict[str, Any]] = {}
+        self._hook_event_connector_cache: dict[int, str] = {}
+        self._hook_event_decision_cache: dict[int, str] = {}
+        self._hook_event_severity_cache: dict[int, str] = {}
+        self._overview_metric_data_render_cache: tuple[MetricDatum, ...] | None = None
+        self._overview_connector_rows_render_cache: list[ConnectorOverviewRow] | None = None
+        self._overview_session_enforcement_counts_render_cache: EnforcementCounts | None = None
+        self._connector_hook_event_stats_cache: dict[str, dict[str, Any]] | None = None
+        self._connector_hook_event_stats_loaded_at: float = 0.0
+        self._overview_last_render_scroll_y: float | None = None
+        self._overview_last_scroll_activity_at: float = 0.0
+        self._overview_deferred_render_token: int = 0
+        self._overview_sampled_refresh_scheduled = False
+        self._overview_connector_rows_signature_cache: tuple[object, ...] | None = None
         # Set while ``_render_panel_table`` programmatically restores the
         # DataTable cursor. Textual fires ``RowHighlighted`` for that move just
         # like a real keypress, and the handler would call the model's
@@ -822,6 +845,7 @@ class DefenseClawTUI(App[None]):
                 yield Button("?", id="help-button", compact=True, tooltip="Open help")
             with Vertical(id="body-panel"):
                 yield OverviewMetrics(self._overview_metric_data(), id="overview-metrics", classes="hidden")
+                yield Static("", id="overview-scope", classes="hidden")
                 with VerticalScroll(id="body-scroll"):
                     yield _BodyStatic("", id="body")
                 with Horizontal(id="overview-controls", classes="panel-controls hidden"):
@@ -1459,6 +1483,63 @@ class DefenseClawTUI(App[None]):
 
         self.action_switch_panel(panel)
         event.stop()
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._mark_overview_scroll_activity()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._mark_overview_scroll_activity()
+
+    def _mark_overview_scroll_activity(self) -> None:
+        if self.active_panel == "overview" and not self.help_open and len(self.screen_stack) <= 1:
+            self._overview_last_scroll_activity_at = monotonic()
+
+    def _overview_scroll_activity_recent(self) -> bool:
+        if not self._overview_last_scroll_activity_at:
+            return False
+        return monotonic() - self._overview_last_scroll_activity_at < 0.45
+
+    def _overview_scroll_reading_active(self) -> bool:
+        """True while Overview scroll position should not be disturbed."""
+
+        if self.active_panel != "overview" or self.help_open or len(self.screen_stack) > 1:
+            return False
+        if self._overview_scroll_activity_recent():
+            return True
+        try:
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except Exception:  # noqa: BLE001 - timer may fire while widgets settle.
+            return False
+        return float(scroller.scroll_y) > 0.0
+
+    def _overview_sampled_refresh_allowed(self, *, allow_scrolled: bool = False) -> bool:
+        """True when a passive sampled Overview repaint should run."""
+
+        if self.active_panel != "overview" or self.help_open or len(self.screen_stack) > 1:
+            return False
+        if self._overview_scroll_activity_recent():
+            return False
+        try:
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except Exception:  # noqa: BLE001 - timer may fire while widgets settle.
+            return False
+        return allow_scrolled or float(scroller.scroll_y) <= 0.0
+
+    def _restore_overview_scroll(
+        self,
+        scroller: VerticalScroll | None,
+        scroll_y: float | None,
+    ) -> float | None:
+        """Keep Overview scroll stable across body relayouts."""
+
+        if scroller is None or scroll_y is None:
+            return scroll_y
+        target = max(0.0, min(float(scroll_y), float(scroller.max_scroll_y)))
+        try:
+            scroller.scroll_to(y=target, animate=False, immediate=True)
+        except Exception:  # noqa: BLE001 - scroll restoration is best-effort.
+            return scroll_y
+        return target
 
     def _panel_hidden(self, panel: str) -> bool:
         """Return True if ``panel`` should be hidden from tabs + cycling.
@@ -2419,33 +2500,59 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             return
         activity.set_class(self.active_panel != "activity", "hidden")
+        self._render_overview_scope_indicator()
         # The Overview body can exceed the viewport (metric tiles + notices +
         # SERVICES/CONFIG/ENFORCEMENT/SCANNERS + the CONNECTORS roster), so let
         # its wrapper scroll. DataTable panels keep #body as a short, auto-sized
         # header (the table does its own scrolling), so the class is overview-only.
         overview_active = self.active_panel == "overview" and not self.help_open
+        body_scroller: VerticalScroll | None = None
         try:
-            self.query_one("#body-scroll").set_class(overview_active, "overview-scroll")
+            body_scroller = self.query_one("#body-scroll", VerticalScroll)
+            body_scroller.set_class(overview_active, "overview-scroll")
         except Exception:  # noqa: BLE001 - the wrapper is always present; never break a render.
             pass
         if overview_active:
-            renderable = self._overview_renderable()
-            body_widget.update(renderable)
-            # The overview renderable is a freshly composed Rich
-            # ``Group`` every call (banner + notices + service cards),
-            # so equality comparisons aren't reliable. Bust the cache
-            # so the next text-body panel always paints, and accept
-            # that overview itself paints every tick (cheap; no
-            # DataTable underneath it).
-            self._last_body_signature = None
-            # Overview has no DataTable of its own and skips _body_text()
-            # (the only place these are reset), so clear the panel-table
-            # state here. Otherwise the columns/rows left over from the
-            # previously-viewed Audit/Logs panel survive and
-            # _render_panel_table() paints that stale feed at the bottom
-            # of the overview.
-            self._table_columns = ()
-            self._table_rows = ()
+            current_scroll_y = body_scroller.scroll_y if body_scroller is not None else None
+            scrolling_now = (
+                current_scroll_y is not None
+                and self._overview_last_render_scroll_y is not None
+                and current_scroll_y != self._overview_last_render_scroll_y
+                and self._last_body_signature is not None
+            )
+            wheel_active = self._overview_scroll_activity_recent() and self._last_body_signature is not None
+            connector_rows_changed = (
+                False if wheel_active else self._overview_connector_rows_changed_since_render()
+            )
+            if (scrolling_now or wheel_active) and not connector_rows_changed:
+                self._overview_last_render_scroll_y = current_scroll_y
+                self._table_columns = ()
+                self._table_rows = ()
+            else:
+                with self._connector_hook_event_render_cache():
+                    renderable = self._overview_renderable()
+                    body_signature = self._overview_body_signature()
+                    connector_rows_signature = self._overview_connector_rows_signature()
+                    if (
+                        body_signature != self._last_body_signature
+                        or connector_rows_signature != self._overview_connector_rows_signature_cache
+                    ):
+                        body_widget.update(renderable)
+                        self._last_body_signature = body_signature
+                        self._overview_connector_rows_signature_cache = connector_rows_signature
+                        current_scroll_y = self._restore_overview_scroll(
+                            body_scroller, current_scroll_y
+                        )
+                    self._overview_last_render_scroll_y = current_scroll_y
+                    # Overview has no DataTable of its own and skips _body_text()
+                    # (the only place these are reset), so clear the panel-table
+                    # state here. Otherwise the columns/rows left over from the
+                    # previously-viewed Audit/Logs panel survive and
+                    # _render_panel_table() paints that stale feed at the bottom
+                    # of the overview.
+                    self._table_columns = ()
+                    self._table_rows = ()
+                    self._render_native_widgets()
         else:
             text = self._body_text()
             # Skip the layout-triggering ``Static.update`` when the body
@@ -2461,7 +2568,7 @@ class DefenseClawTUI(App[None]):
             if body_signature != self._last_body_signature:
                 body_widget.update(self._safe_body_renderable(text))
                 self._last_body_signature = body_signature
-        self._render_native_widgets()
+            self._render_native_widgets()
         self._render_panel_controls()
         self._render_panel_table()
         self._render_detail_panel()
@@ -2785,9 +2892,35 @@ class DefenseClawTUI(App[None]):
         return f"backend=textual  panel={self.active_panel}  hints=: command | ? help | q local close | Ctrl+C quit"
 
     def _render_native_widgets(self) -> None:
-        metrics = self.query_one("#overview-metrics", OverviewMetrics)
-        metrics.refresh_metrics(self._overview_metric_data())
-        metrics.set_class(self.active_panel != "overview" or self.help_open, "hidden")
+        self._render_overview_metrics()
+
+    def _render_overview_metrics(self) -> None:
+        """Refresh only the native Overview metric tiles."""
+
+        try:
+            metrics = self.query_one("#overview-metrics", OverviewMetrics)
+        except NoMatches:
+            return
+        overview_visible = self.active_panel == "overview" and not self.help_open
+        metrics.set_class(not overview_visible, "hidden")
+        if overview_visible:
+            if self._connector_hook_event_cache_enabled:
+                metric_data = self._overview_metric_data()
+            else:
+                with self._connector_hook_event_render_cache():
+                    metric_data = self._overview_metric_data()
+            metrics.refresh_metrics(metric_data)
+
+    def _render_overview_scope_indicator(self) -> None:
+        try:
+            scope = self.query_one("#overview-scope", Static)
+        except NoMatches:
+            return
+        overview_visible = self.active_panel == "overview" and not self.help_open
+        text = self._overview_connector_scope_text().strip() if overview_visible else ""
+        scope.set_class(not bool(text), "hidden")
+        if text:
+            scope.update(self._safe_body_renderable(text))
 
     def _render_panel_controls(self) -> None:
         overview = self.query_one("#overview-controls", Horizontal)
@@ -3904,7 +4037,13 @@ class DefenseClawTUI(App[None]):
         generic alert / scan / guardrail / agent set.
         """
 
-        counts = self.overview_model.enforcement
+        if (
+            self._connector_hook_event_cache_enabled
+            and self._overview_metric_data_render_cache is not None
+        ):
+            return self._overview_metric_data_render_cache
+
+        counts = self._overview_session_enforcement_counts()
         state_by_key = {
             card.key: card.state.strip().lower()
             for card in self.overview_model.service_cards()
@@ -3914,22 +4053,28 @@ class DefenseClawTUI(App[None]):
         ai_box = self.overview_model.ai_discovery_box()
         ai_count = len(ai_box.rows) + ai_box.overflow
 
-        connector = self.overview_model.active_connector_name()
-        connector_health = None
+        selected_connector = self._connector_filter()
+        multi_connectors = self._active_connector_names()
+        scope_connectors = (selected_connector,) if selected_connector else tuple(multi_connectors)
+        connector = selected_connector or self.overview_model.active_connector_name()
+        connector_health = (
+            None
+            if multi_connectors and not selected_connector
+            else self._connector_health_for_metric(connector, use_single=not multi_connectors or bool(selected_connector))
+        )
         health = self.overview_model.health
-        if health is not None:
-            connector_health = health.connector
         gateway_state = (health.gateway.state if health is not None else "").strip().lower()
         gateway_online = gateway_state in {"running", "ready", "healthy", "ok"}
 
-        sev = self.alerts_model.severity_counts() if self.alerts_model else {
-            "CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0,
-        }
+        sev = self._alert_severity_counts_for_connectors(scope_connectors)
+        fleet_sev = self._alert_severity_counts("")
         critical = sev.get("CRITICAL", 0)
         high = sev.get("HIGH", 0)
         medium = sev.get("MEDIUM", 0)
         low = sev.get("LOW", 0)
         total_findings = critical + high + medium + low
+        fleet_findings = sum(fleet_sev.values())
+        outside_roster_findings = max(fleet_findings - total_findings, 0) if scope_connectors and not selected_connector else 0
 
         cfg = self.overview_model.cfg
         guardrail_mode = (cfg.guardrail_mode if cfg else "") or "observe"
@@ -3977,27 +4122,70 @@ class DefenseClawTUI(App[None]):
             else:
                 requests = inspections = errors = tool_blocks = subprocess_blocks = 0
             blocks_total = tool_blocks + subprocess_blocks
-            allow_count, alert_count, block_decisions, top_hook = self._connector_hook_breakdown()
+            session_since = self._session_start_for_connectors(scope_connectors)
+            allow_count, alert_count, block_decisions, top_hook = self._connector_hook_breakdown_for_connectors(
+                scope_connectors, since=session_since
+            )
+            history_ready = health is not None
+            live_hook_calls, live_blocks_value, has_live_hook_counts = self._connector_live_counts_for_connectors(scope_connectors)
+            fleet_live_hook_calls, fleet_live_blocks_value, has_fleet_live_hook_counts = self._connector_live_counts_for_connectors(())
+            if history_ready and not has_live_hook_counts:
+                total_allow, total_alert, total_block, _total_newest = self._connector_hook_stats_for_connectors(scope_connectors)
+            else:
+                total_allow = total_alert = total_block = 0
+            if history_ready and not has_fleet_live_hook_counts:
+                fleet_total_allow, fleet_total_alert, fleet_total_block, _fleet_total_newest = self._connector_hook_stats_for_connectors()
+            else:
+                fleet_total_allow = fleet_total_alert = fleet_total_block = 0
 
-            # Hook connectors don't advance the gateway ``requests``
-            # counter, so fall back to the count of connector-hook audit
-            # events — the same events the operator sees streaming in the
-            # Logs panel — when the live counter is zero.
-            hook_timestamps = self._hook_event_timestamps()
-            hook_calls = requests or len(hook_timestamps)
-            block_timestamps = self._block_event_timestamps()
-            blocks_value = blocks_total or len(block_timestamps)
-            finding_timestamps = self._finding_event_timestamps()
+            # Prefer the gateway's live per-connector request counters when
+            # available. Older gateways did not expose the connector array,
+            # so after /health has loaded fall back to grouped audit totals.
+            # Before the first health poll, avoid flashing all-time history in
+            # the header; use the bounded recent window instead.
+            hook_timestamps = self._hook_event_timestamps_for_connectors(scope_connectors)
+            total_hook_calls = total_allow + total_alert + total_block
+            fleet_total_hook_calls = fleet_total_allow + fleet_total_alert + fleet_total_block
+            fleet_hook_calls = (
+                fleet_live_hook_calls
+                if has_fleet_live_hook_counts
+                else fleet_total_hook_calls
+            )
+            hook_calls = (
+                live_hook_calls
+                if has_live_hook_counts
+                else (requests or total_hook_calls or len(hook_timestamps))
+            )
+            outside_roster_hook_calls = max(fleet_hook_calls - hook_calls, 0) if scope_connectors and not selected_connector else 0
+            block_timestamps = self._block_event_timestamps_for_connectors(scope_connectors)
+            fleet_block_timestamps = self._block_event_timestamps()
+            blocks_value = (
+                live_blocks_value
+                if has_live_hook_counts
+                else (blocks_total or total_block or len(block_timestamps))
+            )
+            fleet_blocks_value = (
+                fleet_live_blocks_value
+                if has_fleet_live_hook_counts
+                else (fleet_total_block or len(fleet_block_timestamps))
+            )
+            outside_roster_blocks = max(fleet_blocks_value - blocks_value, 0) if scope_connectors and not selected_connector else 0
+            finding_timestamps = self._finding_event_timestamps_for_connectors(scope_connectors)
 
             call_detail_parts: list[str] = []
             if allow_count or alert_count or block_decisions:
                 call_detail_parts.append(
-                    f"[{TOKENS.accent_green}]a{allow_count}[/] "
+                    f"session [{TOKENS.accent_green}]a{allow_count}[/] "
                     f"[{TOKENS.accent_amber}]w{alert_count}[/] "
                     f"[{TOKENS.accent_red}]b{block_decisions}[/]"
                 )
                 if top_hook:
                     call_detail_parts.append(f"top: [{TOKENS.accent_cyan}]{top_hook}[/]")
+                if selected_connector:
+                    fleet_prefix = "live fleet" if has_fleet_live_hook_counts else "fleet"
+                    call_detail_parts.append(f"{fleet_prefix} {fleet_hook_calls}")
+                elif outside_roster_hook_calls:
+                    call_detail_parts.append(f"outside roster {outside_roster_hook_calls}")
             elif inspections or errors:
                 if inspections:
                     call_detail_parts.append(f"[{TOKENS.accent_blue}]{inspections}[/] inspected")
@@ -4009,9 +4197,11 @@ class DefenseClawTUI(App[None]):
                 call_detail_parts.append("waiting for tool calls")
             else:
                 call_detail_parts.append("agent active")
+                if selected_connector:
+                    call_detail_parts.append(f"fleet {fleet_hook_calls}")
             calls_detail = " · ".join(call_detail_parts)
 
-            top_blocked_target, top_blocked_count = self._top_block_target()
+            top_blocked_target, top_blocked_count = self._top_block_target_for_connectors(scope_connectors)
             block_detail_parts: list[str] = []
             if tool_blocks:
                 block_detail_parts.append(f"[{TOKENS.accent_red}]{tool_blocks}[/] tool")
@@ -4025,6 +4215,10 @@ class DefenseClawTUI(App[None]):
                     block_detail_parts.append(f"[{TOKENS.text_muted}]no data — gateway offline[/]")
                 else:
                     block_detail_parts.append("no blocks yet")
+            if selected_connector:
+                block_detail_parts.append(f"fleet {fleet_blocks_value}")
+            elif outside_roster_blocks:
+                block_detail_parts.append(f"outside roster {outside_roster_blocks}")
             blocks_detail = " · ".join(block_detail_parts)
 
             # D1=B: in multi-connector installs the aggregate counts above
@@ -4032,17 +4226,47 @@ class DefenseClawTUI(App[None]):
             # replace the detail sub-lines with a per-connector split and
             # relabel the Hook Calls tile to the connector count. No-op for
             # single-connector installs (helpers return empty).
-            multi_connectors = self._active_connector_names()
             hook_calls_label = f"Hook Calls ({connector})"
-            if multi_connectors:
+            blocks_label = "Blocks"
+            findings_label = "Findings"
+            if selected_connector:
+                hook_calls_label = f"Hook Calls ({selected_connector})"
+                blocks_label = f"Blocks ({selected_connector})"
+                findings_label = f"Findings ({selected_connector})"
+            elif multi_connectors:
                 multi_calls_detail, multi_blocks_detail = self._multi_connector_tile_details()
                 if multi_calls_detail:
                     calls_detail = multi_calls_detail
                 if multi_blocks_detail:
                     blocks_detail = multi_blocks_detail
+                if outside_roster_hook_calls and "outside roster" not in calls_detail:
+                    calls_detail = (
+                        f"{calls_detail} · outside roster {outside_roster_hook_calls}"
+                        if calls_detail
+                        else f"outside roster {outside_roster_hook_calls}"
+                    )
+                if outside_roster_blocks and "outside roster" not in blocks_detail:
+                    blocks_detail = (
+                        f"{blocks_detail} · outside roster {outside_roster_blocks}"
+                        if blocks_detail
+                        else f"outside roster {outside_roster_blocks}"
+                    )
                 hook_calls_label = f"Hook Calls ({len(multi_connectors)} connectors)"
 
-            return (
+            findings_detail = self._findings_metric_detail(
+                critical,
+                high,
+                medium,
+                low,
+                connector=selected_connector,
+                connectors=scope_connectors,
+            )
+            if selected_connector:
+                findings_detail = f"{findings_detail} · fleet {fleet_findings}"
+            elif outside_roster_findings:
+                findings_detail = f"{findings_detail} · outside roster {outside_roster_findings}"
+
+            metrics = (
                 MetricDatum(
                     key="hook_calls",
                     label=hook_calls_label,
@@ -4055,7 +4279,7 @@ class DefenseClawTUI(App[None]):
                 ),
                 MetricDatum(
                     key="blocks",
-                    label="Blocks",
+                    label=blocks_label,
                     value=blocks_value,
                     progress=min(float(blocks_value) * 5, 100.0),
                     detail=blocks_detail,
@@ -4065,10 +4289,10 @@ class DefenseClawTUI(App[None]):
                 ),
                 MetricDatum(
                     key="findings",
-                    label="Findings",
+                    label=findings_label,
                     value=total_findings,
                     progress=min(float(total_findings) * 5, 100.0),
-                    detail=self._findings_metric_detail(critical, high, medium, low),
+                    detail=findings_detail,
                     trend=self._metric_history(finding_timestamps),
                     state="error" if critical or high else ("warn" if medium else "ok"),
                     target_panel="alerts",
@@ -4085,8 +4309,11 @@ class DefenseClawTUI(App[None]):
                     value_text=guardrail_value_text,
                 ),
             )
+            if self._connector_hook_event_cache_enabled:
+                self._overview_metric_data_render_cache = metrics
+            return metrics
 
-        return (
+        metrics = (
             MetricDatum(
                 key="risk",
                 label="Alert Risk",
@@ -4132,8 +4359,524 @@ class DefenseClawTUI(App[None]):
                 target_panel="ai",
             ),
         )
+        if self._connector_hook_event_cache_enabled:
+            self._overview_metric_data_render_cache = metrics
+        return metrics
 
-    def _findings_metric_detail(self, critical: int, high: int, medium: int, low: int) -> str:
+    @contextmanager
+    def _connector_hook_event_render_cache(self):
+        previous_enabled = self._connector_hook_event_cache_enabled
+        previous_cache = self._recent_connector_hook_events_cache
+        previous_scope_cache = self._recent_connector_hook_scope_cache
+        previous_connector_cache = self._hook_event_connector_cache
+        previous_decision_cache = self._hook_event_decision_cache
+        previous_severity_cache = self._hook_event_severity_cache
+        previous_metrics_cache = self._overview_metric_data_render_cache
+        previous_rows_cache = self._overview_connector_rows_render_cache
+        previous_counts_cache = self._overview_session_enforcement_counts_render_cache
+        self._connector_hook_event_cache_enabled = True
+        self._recent_connector_hook_events_cache = None
+        self._recent_connector_hook_scope_cache = {}
+        self._hook_event_connector_cache = {}
+        self._hook_event_decision_cache = {}
+        self._hook_event_severity_cache = {}
+        self._overview_metric_data_render_cache = None
+        self._overview_connector_rows_render_cache = None
+        self._overview_session_enforcement_counts_render_cache = None
+        try:
+            yield
+        finally:
+            self._connector_hook_event_cache_enabled = previous_enabled
+            self._recent_connector_hook_events_cache = previous_cache
+            self._recent_connector_hook_scope_cache = previous_scope_cache
+            self._hook_event_connector_cache = previous_connector_cache
+            self._hook_event_decision_cache = previous_decision_cache
+            self._hook_event_severity_cache = previous_severity_cache
+            self._overview_metric_data_render_cache = previous_metrics_cache
+            self._overview_connector_rows_render_cache = previous_rows_cache
+            self._overview_session_enforcement_counts_render_cache = previous_counts_cache
+
+    def _connector_health_for_metric(self, connector: str, *, use_single: bool) -> Any | None:
+        """Live health row for a metric's connector scope."""
+
+        health = self.overview_model.health
+        if health is None:
+            return None
+        want = connector.strip().lower()
+        for conn in health.connectors:
+            if conn.name.strip().lower() == want:
+                return conn
+        if use_single and health.connector is not None:
+            if not want or health.connector.name.strip().lower() == want:
+                return health.connector
+        return None
+
+    @staticmethod
+    def _connector_health_has_live_window(connector_health: Any) -> bool:
+        """True when a health row represents a current gateway counter window."""
+
+        if not connector_health:
+            return False
+        if (getattr(connector_health, "since", "") or "").strip():
+            return True
+        return any(
+            _coerce_nonnegative_int(getattr(connector_health, field, 0))
+            for field in (
+                "requests",
+                "errors",
+                "tool_inspections",
+                "tool_blocks",
+                "subprocess_blocks",
+            )
+        )
+
+    def _connector_live_counts_for_connectors(
+        self, connectors: Iterable[str] = (),
+    ) -> tuple[int, int, bool]:
+        """Return live ``(requests, blocks, has_live_window)`` for a scope."""
+
+        health = self.overview_model.health
+        if health is None:
+            return 0, 0, False
+        scope = self._normalize_connector_scope(connectors)
+        rows: list[Any] = []
+        for conn in health.connectors:
+            name = conn.name.strip().lower()
+            if not scope or any(want in name for want in scope):
+                rows.append(conn)
+        if not rows and health.connector is not None:
+            name = health.connector.name.strip().lower()
+            if not scope or any(want in name for want in scope):
+                rows.append(health.connector)
+        live_rows = [row for row in rows if self._connector_health_has_live_window(row)]
+        if not live_rows:
+            return 0, 0, False
+        requests = sum(_coerce_nonnegative_int(getattr(row, "requests", 0)) for row in live_rows)
+        blocks = sum(
+            _coerce_nonnegative_int(getattr(row, "tool_blocks", 0))
+            + _coerce_nonnegative_int(getattr(row, "subprocess_blocks", 0))
+            for row in live_rows
+        )
+        return requests, blocks, True
+
+    def _session_start_for_connectors(
+        self, connectors: Iterable[str] = (),
+    ) -> datetime | None:
+        """Start of the active gateway/session window for a connector scope."""
+
+        health = self.overview_model.health
+        if health is None:
+            return None
+        scope = self._normalize_connector_scope(connectors)
+        starts: list[datetime] = []
+        for conn in health.connectors:
+            name = conn.name.strip().lower()
+            if scope and not any(want in name for want in scope):
+                continue
+            since = _parse_timestamp(conn.since)
+            if since is not None:
+                starts.append(since)
+        if not starts and health.connector is not None:
+            name = health.connector.name.strip().lower()
+            if not scope or any(want in name for want in scope):
+                since = _parse_timestamp(health.connector.since)
+                if since is not None:
+                    starts.append(since)
+        if not starts:
+            since = _parse_timestamp(health.guardrail.since)
+            if since is not None:
+                starts.append(since)
+        return min(starts) if starts else None
+
+    def _overview_session_enforcement_counts(self) -> EnforcementCounts:
+        """Overview counts using the active gateway/session where possible."""
+
+        if (
+            self._connector_hook_event_cache_enabled
+            and self._overview_session_enforcement_counts_render_cache is not None
+        ):
+            return self._overview_session_enforcement_counts_render_cache
+
+        current = self.overview_model.enforcement
+        scope = tuple(self._active_connector_names())
+        session_start = self._session_start_for_connectors(scope)
+        total_scans = current.total_scans
+        store = getattr(self.alerts_model, "store", None) or getattr(self.audit_model, "store", None)
+        loader = getattr(store, "count_scan_results_since", None)
+        if callable(loader):
+            try:
+                total_scans = int(loader(session_start))
+            except Exception:  # noqa: BLE001 - retain the last known count.
+                total_scans = current.total_scans
+        counts = EnforcementCounts(
+            blocked_skills=current.blocked_skills,
+            allowed_skills=current.allowed_skills,
+            blocked_mcps=current.blocked_mcps,
+            allowed_mcps=current.allowed_mcps,
+            total_scans=total_scans,
+            active_alerts=self._session_alert_count_for_connectors(scope),
+        )
+        if self._connector_hook_event_cache_enabled:
+            self._overview_session_enforcement_counts_render_cache = counts
+        return counts
+
+    def _session_alert_count_for_connectors(self, connectors: Iterable[str] = ()) -> int:
+        """Count current-session alert decisions for an Overview connector scope."""
+
+        scope = self._normalize_connector_scope(connectors)
+        since = self._session_start_for_connectors(scope)
+        seen: set[tuple[str, ...]] = set()
+
+        if self.alerts_model is not None:
+            for row in self.alerts_model.flat_rows():
+                if row.kind == "scan_finding":
+                    continue
+                event = row.event
+                if not self._event_in_session(event, since):
+                    continue
+                if not self._cached_event_matches_scope(event, scope):
+                    continue
+                bucket = self._cached_event_metric_severity_bucket(event)
+                if bucket in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+                    seen.add(self._event_count_key(event))
+
+        summary = self._recent_hook_scope_summary(scope, since=since)
+        if summary["alert"]:
+            for event in summary["alert_events"]:
+                seen.add(self._event_count_key(event))
+
+        return len(seen)
+
+    @staticmethod
+    def _event_count_key(event: Any) -> tuple[str, ...]:
+        event_id = str(getattr(event, "id", "") or "").strip()
+        if event_id:
+            return ("id", event_id)
+        timestamp = getattr(event, "timestamp", None)
+        timestamp_key = timestamp.isoformat() if isinstance(timestamp, datetime) else ""
+        return (
+            "event",
+            timestamp_key,
+            str(getattr(event, "action", "") or ""),
+            str(getattr(event, "target", "") or ""),
+            str(getattr(event, "details", "") or ""),
+        )
+
+    @staticmethod
+    def _event_in_session(event: Any, since: datetime | None) -> bool:
+        if since is None:
+            return True
+        ts = getattr(event, "timestamp", None)
+        if not isinstance(ts, datetime):
+            return False
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts >= since
+
+    def _alert_severity_counts(self, connector: str = "") -> dict[str, int]:
+        """Severity counts for the active Overview metric scope."""
+
+        return self._alert_severity_counts_for_connectors((connector,) if connector else ())
+
+    def _alert_severity_counts_for_connectors(self, connectors: Iterable[str] = ()) -> dict[str, int]:
+        """Severity counts for a connector roster scope."""
+
+        counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        scope = self._normalize_connector_scope(connectors)
+        since = self._session_start_for_connectors(scope)
+        seen: set[tuple[str, ...]] = set()
+        if self.alerts_model is not None:
+            for row in self.alerts_model.flat_rows():
+                if row.kind == "scan_finding":
+                    continue
+                if not self._event_in_session(row.event, since):
+                    continue
+                if not self._cached_event_matches_scope(row.event, scope):
+                    continue
+                bucket = self._cached_event_metric_severity_bucket(row.event)
+                if bucket in counts:
+                    seen.add(self._event_count_key(row.event))
+                    counts[bucket] += 1
+        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+            key = self._event_count_key(event)
+            if key in seen:
+                continue
+            bucket = self._cached_event_metric_severity_bucket(event)
+            if bucket in counts:
+                seen.add(key)
+                counts[bucket] += 1
+        return counts
+
+    @staticmethod
+    def _normalize_connector_scope(connectors: Iterable[str]) -> tuple[str, ...]:
+        return tuple(connector.strip().lower() for connector in connectors if connector.strip())
+
+    @staticmethod
+    def _event_connector(event: Any) -> str:
+        connector = str(getattr(event, "connector", "") or "").strip().lower()
+        if connector:
+            return connector
+        structured = getattr(event, "structured", None)
+        if isinstance(structured, dict):
+            connector = str(structured.get("connector") or "").strip().lower()
+            if connector:
+                return connector
+        return _parse_kv_details(getattr(event, "details", "") or "").get("connector", "").strip().lower()
+
+    @staticmethod
+    def _event_metric_severity_bucket(event: Any) -> str:
+        bucket = _metric_severity_bucket(getattr(event, "severity", "") or "")
+        if bucket in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+            return bucket
+        if str(getattr(event, "action", "") or "").strip().lower() == "connector-hook":
+            structured = getattr(event, "structured", None)
+            if isinstance(structured, dict):
+                structured_bucket = _metric_severity_bucket(str(structured.get("severity") or ""))
+                if structured_bucket in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+                    return structured_bucket
+            detail_bucket = _metric_severity_bucket(
+                _parse_kv_details(getattr(event, "details", "") or "").get("severity", "")
+            )
+            if detail_bucket in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+                return detail_bucket
+        return bucket
+
+    @staticmethod
+    def _event_matches_connector(event: Any, connector: str) -> bool:
+        return DefenseClawTUI._event_matches_connectors(event, (connector,) if connector else ())
+
+    @staticmethod
+    def _event_matches_connectors(event: Any, connectors: Iterable[str]) -> bool:
+        scope = DefenseClawTUI._normalize_connector_scope(connectors)
+        if not scope:
+            return True
+        got = DefenseClawTUI._event_connector(event)
+        return bool(got) and any(want in got for want in scope)
+
+    def _cached_event_connector(self, event: Any) -> str:
+        if not self._connector_hook_event_cache_enabled:
+            return self._event_connector(event)
+        key = id(event)
+        if key not in self._hook_event_connector_cache:
+            self._hook_event_connector_cache[key] = self._event_connector(event)
+        return self._hook_event_connector_cache[key]
+
+    def _cached_event_metric_severity_bucket(self, event: Any) -> str:
+        if not self._connector_hook_event_cache_enabled:
+            return self._event_metric_severity_bucket(event)
+        key = id(event)
+        if key not in self._hook_event_severity_cache:
+            self._hook_event_severity_cache[key] = self._event_metric_severity_bucket(event)
+        return self._hook_event_severity_cache[key]
+
+    def _cached_hook_decision(self, event: Any) -> str:
+        if not self._connector_hook_event_cache_enabled:
+            return self._hook_decision(event)
+        key = id(event)
+        if key not in self._hook_event_decision_cache:
+            self._hook_event_decision_cache[key] = self._hook_decision(event)
+        return self._hook_event_decision_cache[key]
+
+    def _cached_event_matches_scope(self, event: Any, scope: Iterable[str]) -> bool:
+        normalized = self._normalize_connector_scope(scope)
+        if not normalized:
+            return True
+        got = self._cached_event_connector(event)
+        return bool(got) and any(want in got for want in normalized)
+
+    @staticmethod
+    def _hook_decision(event: Any) -> str:
+        details = _parse_kv_details(getattr(event, "details", "") or "")
+        structured = getattr(event, "structured", None)
+        if isinstance(structured, dict):
+            action = str(structured.get("action") or details.get("action", "")).strip().lower()
+            raw_action = str(structured.get("raw_action") or details.get("raw_action", "")).strip().lower()
+            mode = str(structured.get("mode") or details.get("mode", "")).strip().lower()
+            if "would_block" in structured:
+                would_block = bool(structured.get("would_block"))
+            else:
+                would_block = details.get("would_block", "").strip().lower() == "true"
+        else:
+            action = details.get("action", "").strip().lower()
+            raw_action = details.get("raw_action", "").strip().lower()
+            mode = details.get("mode", "").strip().lower()
+            would_block = details.get("would_block", "").strip().lower() == "true"
+
+        if action in {"block", "deny"}:
+            return "block"
+        if action in {"alert", "warn"}:
+            return "alert"
+        if action == "allow" and mode == "observe":
+            if raw_action in {"block", "deny"} or would_block:
+                return "alert"
+            if raw_action in {"alert", "warn"}:
+                return "alert"
+        return action
+
+    def _connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
+        """All-time connector-hook counts plus latest timestamps.
+
+        The recent event window is intentionally capped for render speed and
+        trend sparklines. These grouped totals power user-facing counters so a
+        busy connector does not appear stuck at ``498`` just because the latest
+        500 rows also include two old rows from another connector.
+        """
+
+        stats_ttl_seconds = 1.5
+        if (
+            self._connector_hook_event_stats_cache is not None
+            and monotonic() - self._connector_hook_event_stats_loaded_at < stats_ttl_seconds
+        ):
+            return self._connector_hook_event_stats_cache
+        stats: dict[str, dict[str, Any]] = {}
+        store = getattr(self.audit_model, "store", None) if self.audit_model is not None else None
+        loader = getattr(store, "connector_hook_event_stats", None)
+        if callable(loader):
+            try:
+                raw_stats = loader() or {}
+            except Exception:  # noqa: BLE001 - fall back to the recent in-memory window.
+                raw_stats = {}
+            for raw_connector, raw in raw_stats.items():
+                connector = str(raw_connector or "").strip().lower()
+                if not connector or not isinstance(raw, dict):
+                    continue
+                calls = _coerce_nonnegative_int(raw.get("calls"))
+                blocks = _coerce_nonnegative_int(raw.get("blocks"))
+                alerts = _coerce_nonnegative_int(raw.get("alerts"))
+                stats[connector] = {
+                    "calls": calls,
+                    "blocks": min(blocks, calls),
+                    "alerts": min(alerts, calls),
+                    "newest": _parse_timestamp(raw.get("newest")),
+                }
+        if not stats:
+            for event in self._recent_connector_hook_events():
+                connector = self._event_connector(event) or "__unattributed__"
+                entry = stats.setdefault(
+                    connector,
+                    {"calls": 0, "blocks": 0, "alerts": 0, "newest": None},
+                )
+                entry["calls"] = int(entry["calls"]) + 1
+                decision = self._hook_decision(event)
+                if decision in {"block", "deny"}:
+                    entry["blocks"] = int(entry["blocks"]) + 1
+                elif decision in {"alert", "warn"}:
+                    entry["alerts"] = int(entry["alerts"]) + 1
+                ts = getattr(event, "timestamp", None)
+                if isinstance(ts, datetime):
+                    newest = entry.get("newest")
+                    if newest is None or ts > newest:
+                        entry["newest"] = ts
+        self._connector_hook_event_stats_cache = stats
+        self._connector_hook_event_stats_loaded_at = monotonic()
+        return stats
+
+    def _connector_hook_stats_for_connectors(
+        self, connectors: Iterable[str] = (),
+    ) -> tuple[int, int, int, datetime | None]:
+        """Return ``(allow, alert, block, newest)`` for the connector scope."""
+
+        scope = self._normalize_connector_scope(connectors)
+        allow = alert = block = 0
+        newest: datetime | None = None
+        for connector, row in self._connector_hook_event_stats().items():
+            if scope and not any(want in connector for want in scope):
+                continue
+            calls = _coerce_nonnegative_int(row.get("calls"))
+            row_alerts = min(_coerce_nonnegative_int(row.get("alerts")), calls)
+            row_blocks = min(_coerce_nonnegative_int(row.get("blocks")), calls)
+            alert += row_alerts
+            block += row_blocks
+            allow += max(calls - row_alerts - row_blocks, 0)
+            ts = row.get("newest")
+            if isinstance(ts, datetime) and (newest is None or ts > newest):
+                newest = ts
+        return allow, alert, block, newest
+
+    def _recent_hook_scope_summary(
+        self,
+        connectors: Iterable[str] = (),
+        *,
+        since: datetime | None = None,
+    ) -> dict[str, Any]:
+        """One-pass summary of recent connector-hook rows for an Overview scope."""
+
+        scope = self._normalize_connector_scope(connectors)
+        since_key = since.isoformat() if isinstance(since, datetime) else ""
+        cache_key = (scope, since_key)
+        if self._connector_hook_event_cache_enabled:
+            cached = self._recent_connector_hook_scope_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        allow = alert = block = 0
+        events_by_target: dict[str, int] = {}
+        hook_timestamps: list[datetime] = []
+        alert_events: list[Any] = []
+        block_events: list[Any] = []
+        finding_events: list[Any] = []
+        for event in self._recent_connector_hook_events():
+            if not self._event_in_session(event, since):
+                continue
+            if not self._cached_event_matches_scope(event, scope):
+                continue
+            ts = getattr(event, "timestamp", None)
+            if isinstance(ts, datetime):
+                hook_timestamps.append(ts)
+            decision = self._cached_hook_decision(event)
+            if decision == "allow":
+                allow += 1
+            elif decision in {"alert", "warn"}:
+                alert += 1
+                alert_events.append(event)
+            elif decision in {"block", "deny"}:
+                block += 1
+                block_events.append(event)
+            target = (getattr(event, "target", "") or "").strip()
+            if target:
+                events_by_target[target] = events_by_target.get(target, 0) + 1
+            if decision in {"alert", "warn", "block"}:
+                bucket = self._cached_event_metric_severity_bucket(event)
+                if bucket in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+                    finding_events.append(event)
+
+        top_event = ""
+        if events_by_target:
+            top_event, _count = max(events_by_target.items(), key=lambda kv: kv[1])
+        summary = {
+            "allow": allow,
+            "alert": alert,
+            "block": block,
+            "top_event": top_event,
+            "hook_timestamps": hook_timestamps,
+            "alert_events": alert_events,
+            "block_events": block_events,
+            "finding_events": finding_events,
+        }
+        if self._connector_hook_event_cache_enabled:
+            self._recent_connector_hook_scope_cache[cache_key] = summary
+        return summary
+
+    @staticmethod
+    def _is_block_event(event: Any) -> bool:
+        action = (getattr(event, "action", "") or "").lower()
+        details = (getattr(event, "details", "") or "").lower()
+        return (
+            action in {"block", "guardrail-block", "deny", "quarantine"}
+            or "action=block" in details
+            or "action=deny" in details
+        )
+
+    def _findings_metric_detail(
+        self,
+        critical: int,
+        high: int,
+        medium: int,
+        low: int,
+        *,
+        connector: str = "",
+        connectors: Iterable[str] = (),
+    ) -> str:
         """Severity breakdown plus the top severity event target (if any).
 
         The breakdown is the primary signal; the top target gives one
@@ -4143,7 +4886,12 @@ class DefenseClawTUI(App[None]):
         """
 
         breakdown = _severity_breakdown_markup(critical, high, medium, low)
-        target, severity_letter_src = self._top_finding_target()
+        if connector:
+            target, severity_letter_src = self._top_finding_target(connector)
+        elif self._normalize_connector_scope(connectors):
+            target, severity_letter_src = self._top_finding_target_for_connectors(connectors)
+        else:
+            target, severity_letter_src = self._top_finding_target()
         if not target:
             return breakdown
         short_target = target if len(target) <= 18 else target[:17] + "…"
@@ -4190,35 +4938,23 @@ class DefenseClawTUI(App[None]):
         original aggregate behaviour for single-connector installs.
         """
 
-        allow = alert = block = 0
-        events_by_target: dict[str, int] = {}
-        if self.audit_model is None:
-            return 0, 0, 0, ""
-        want = connector.strip().lower()
-        for event in self.audit_model.items[-200:]:
-            if event.action != "connector-hook":
-                continue
-            details = event.details or ""
-            if want and _parse_kv_details(details).get("connector", "").strip().lower() != want:
-                continue
-            decision = ""
-            for token in details.split():
-                if token.startswith("action="):
-                    decision = token[len("action="):].strip().lower()
-                    break
-            if decision == "allow":
-                allow += 1
-            elif decision == "alert" or decision == "warn":
-                alert += 1
-            elif decision in {"block", "deny"}:
-                block += 1
-            target = (event.target or "").strip()
-            if target:
-                events_by_target[target] = events_by_target.get(target, 0) + 1
-        top_event = ""
-        if events_by_target:
-            top_event, _ = max(events_by_target.items(), key=lambda kv: kv[1])
-        return allow, alert, block, top_event
+        return self._connector_hook_breakdown_for_connectors((connector,) if connector else ())
+
+    def _connector_hook_breakdown_for_connectors(
+        self,
+        connectors: Iterable[str] = (),
+        *,
+        since: datetime | None = None,
+    ) -> tuple[int, int, int, str]:
+        """Hook decision breakdown for a connector roster scope."""
+
+        summary = self._recent_hook_scope_summary(connectors, since=since)
+        return (
+            int(summary["allow"]),
+            int(summary["alert"]),
+            int(summary["block"]),
+            str(summary["top_event"]),
+        )
 
     def _enforcement_connector_breakdown(self, connector: str) -> tuple[int, int, int]:
         """``(calls, alerts, blocks)`` for ``connector`` from the hook stream.
@@ -4229,8 +4965,21 @@ class DefenseClawTUI(App[None]):
         (allow + alert + block) the connector's hooks produced.
         """
 
-        allow, alert, block, _top = self._connector_hook_breakdown(connector)
-        return allow + alert + block, alert, block
+        return self._enforcement_scope_breakdown((connector,))
+
+    def _enforcement_scope_breakdown(self, connectors: Iterable[str]) -> tuple[int, int, int]:
+        """``(calls, alerts, blocks)`` for an Overview connector scope."""
+
+        since = self._session_start_for_connectors(connectors)
+        allow, alert, block, _top = self._connector_hook_breakdown_for_connectors(
+            connectors, since=since
+        )
+        live_calls, live_blocks, has_live = self._connector_live_counts_for_connectors(connectors)
+        return (
+            live_calls if has_live else allow + alert + block,
+            alert,
+            live_blocks if has_live else block,
+        )
 
     _BLOCK_VERDICTS = frozenset({"block", "blocked", "deny", "denied", "quarantine", "quarantined"})
     _ALLOW_VERDICTS = frozenset({"allow", "allowed", "clean", "ok", "pass"})
@@ -4421,8 +5170,16 @@ class DefenseClawTUI(App[None]):
             self._set_status(f"Filtered to {friendly} ({connector}).")
         else:
             self._set_status("Showing all connectors.")
-        self._sync_signal_connector_filters()
-        self._sync_catalog_connector_filters()
+        # Keep connector-chip clicks responsive: the active panel syncs its
+        # model filters during render, and hidden panels sync when opened.
+        # Eagerly refiltering Logs/Audit/catalog data here made an Overview
+        # chip click pay for every table in the app.
+        overview_active = self.active_panel == "overview" and not self.help_open
+        if overview_active:
+            self._render_overview_scope_indicator()
+            self._render_overview_metrics()
+            self._schedule_overview_deferred_render()
+            return
         self._render_chrome()
 
     def _sync_catalog_connector_filters(self) -> None:
@@ -4502,6 +5259,66 @@ class DefenseClawTUI(App[None]):
             f"[{TOKENS.text_muted}](press [bold]m[/] to filter)[/]\n\n"
         )
 
+    def _overview_connector_scope_text(self) -> str:
+        """Compact Overview connector scope label.
+
+        Overview is the expensive dashboard path, so it avoids the full
+        clickable connector chip used by table panes. Operators can still
+        change scope with ``m``, which opens the connector picker.
+        """
+
+        self._chip_click_segments = []
+        if len(self._active_connector_names()) <= 1:
+            return ""
+        selected = self._connector_filter()
+        label = (
+            f"{friendly_connector_name(selected)} ({selected})"
+            if selected
+            else "All connectors"
+        )
+        return (
+            f"[{TOKENS.text_secondary}]Connector scope:[/] "
+            f"[{TOKENS.accent_cyan} bold]{rich_escape(label)}[/]  "
+            f"[{TOKENS.text_muted}](press [bold]m[/] to switch)[/]\n\n"
+        )
+
+    def _schedule_overview_deferred_render(self) -> None:
+        """Debounce expensive Overview repaints after connector-scope changes."""
+
+        self._overview_deferred_render_token += 1
+        token = self._overview_deferred_render_token
+
+        def render_if_current() -> None:
+            if token != self._overview_deferred_render_token:
+                return
+            if self.active_panel != "overview" or self.help_open or len(self.screen_stack) > 1:
+                return
+            self._render_chrome()
+
+        self.set_timer(0.2, render_if_current)
+
+    def _schedule_overview_sampled_refresh(
+        self,
+        *,
+        delay: float = 0.25,
+        allow_scrolled: bool = False,
+    ) -> None:
+        """Refresh Overview on an interval without colliding with interaction."""
+
+        if self._overview_sampled_refresh_scheduled:
+            return
+        if not self._overview_sampled_refresh_allowed(allow_scrolled=allow_scrolled):
+            return
+        self._overview_sampled_refresh_scheduled = True
+
+        def refresh_if_still_allowed() -> None:
+            self._overview_sampled_refresh_scheduled = False
+            if not self._overview_sampled_refresh_allowed(allow_scrolled=allow_scrolled):
+                return
+            self._render_chrome()
+
+        self.set_timer(delay, refresh_if_still_allowed)
+
     def _handle_body_chip_click(self, x: int, y: int) -> bool:
         """Resolve a click on the ``#body`` Static to a connector chip action.
 
@@ -4521,7 +5338,7 @@ class DefenseClawTUI(App[None]):
         if y < 0 or y >= len(lines):
             return False
         plain = re.sub(r"\[/?[^\[\]]*\]", "", lines[y])
-        if not plain.startswith("Connector:"):
+        if not plain.startswith("Connector:") and not self._overview_chip_visual_line(y):
             return False
         for start, end, value in segments:
             if start <= x < end:
@@ -4533,6 +5350,22 @@ class DefenseClawTUI(App[None]):
             self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
             return True
         return False
+
+    def _overview_chip_visual_line(self, y: int) -> bool:
+        """True when ``y`` is the rendered Overview connector-chip line."""
+
+        if self.active_panel != "overview" or self.help_open:
+            return False
+        try:
+            if self.query_one("#body-scroll", VerticalScroll).scroll_y > 0:
+                return False
+        except NoMatches:
+            pass
+        # ``_overview_renderable`` paints the five-line logo, the tagline, and
+        # one spacer before the connector chip. The fallback ``body_text`` has
+        # a different line layout, so content validation alone misses clicks on
+        # the visible chip.
+        return y == len(_DEFENSECLAW_LOGO.splitlines()) + 2
 
     def _sync_signal_connector_filters(self) -> None:
         """Push the shared connector filter + column flag to the signal panes.
@@ -4555,9 +5388,9 @@ class DefenseClawTUI(App[None]):
         Returns ``(calls_detail, blocks_detail)``. Each active connector is
         scored independently via :meth:`_connector_hook_breakdown` so the
         single tile row stays intact (D1=B) while the detail sub-line
-        attributes activity to the right connector — e.g.
-        ``codex a12 w0 b3 · cursor a8 w1 b1``. ``blocks_detail`` lists only
-        connectors that actually blocked something. Returns ``("", "")``
+        attributes recent activity to the right connector — e.g.
+        ``recent codex a12 w0 b3 · cursor a8 w1 b1``. ``blocks_detail`` lists
+        only connectors that actually blocked something. Returns ``("", "")``
         when fewer than two connectors are active, leaving the
         single-connector detail lines unchanged.
         """
@@ -4568,9 +5401,12 @@ class DefenseClawTUI(App[None]):
         call_parts: list[str] = []
         block_parts: list[str] = []
         for connector in connectors:
-            allow, alert, block, _top = self._connector_hook_breakdown(connector)
+            since = self._session_start_for_connectors((connector,))
+            allow, alert, block, _top = self._connector_hook_breakdown_for_connectors(
+                (connector,), since=since
+            )
             call_parts.append(
-                f"[{TOKENS.accent_cyan}]{connector}[/] "
+                f"[{TOKENS.text_secondary}]session[/] [{TOKENS.accent_cyan}]{connector}[/] "
                 f"[{TOKENS.accent_green}]a{allow}[/] "
                 f"[{TOKENS.accent_amber}]w{alert}[/] "
                 f"[{TOKENS.accent_red}]b{block}[/]"
@@ -4598,17 +5434,19 @@ class DefenseClawTUI(App[None]):
                     out[conn.name.strip().lower()] = (conn.state or "").strip()
         return out
 
-    def _connector_last_activity(self, connector: str) -> datetime | None:
+    def _connector_last_activity(self, connector: str, *, use_stats: bool = True) -> datetime | None:
         """Most recent audit-event timestamp attributed to ``connector``."""
 
-        if self.audit_model is None:
-            return None
         want = connector.strip().lower()
+        if use_stats and self.overview_model.health is not None:
+            stats_newest = self._connector_hook_event_stats().get(want, {}).get("newest")
+            if isinstance(stats_newest, datetime):
+                return stats_newest
         latest: datetime | None = None
-        for event in self.audit_model.items:
+        for event in self._recent_connector_hook_events():
             if event.timestamp is None:
                 continue
-            attributed = _parse_kv_details(event.details or "").get("connector", "").strip().lower()
+            attributed = self._cached_event_connector(event)
             if attributed != want:
                 continue
             if latest is None or event.timestamp > latest:
@@ -4624,9 +5462,18 @@ class DefenseClawTUI(App[None]):
         the audit store. Empty for single-connector installs.
         """
 
+        if (
+            self._connector_hook_event_cache_enabled
+            and self._overview_connector_rows_render_cache is not None
+        ):
+            return self._overview_connector_rows_render_cache
+
         cfg = self.overview_model.cfg
         if cfg is None or len(cfg.connector_modes) <= 1:
-            return []
+            rows: list[ConnectorOverviewRow] = []
+            if self._connector_hook_event_cache_enabled:
+                self._overview_connector_rows_render_cache = rows
+            return rows
         packs = dict(cfg.connector_packs)
         status_map = self._connector_status_map()
         # Fallback status when the gateway doesn't expose connectors[] yet:
@@ -4639,8 +5486,27 @@ class DefenseClawTUI(App[None]):
         for connector, mode in cfg.connector_modes:
             if not connector:
                 continue
-            allow, alert, block, _top = self._connector_hook_breakdown(connector)
-            last = self._connector_last_activity(connector)
+            health_row = self._connector_health_for_metric(connector, use_single=False)
+            health_has_live_window = health_row is not None and self._connector_health_has_live_window(health_row)
+            if health_has_live_window:
+                calls = _coerce_nonnegative_int(getattr(health_row, "requests", 0))
+                blocks = (
+                    _coerce_nonnegative_int(getattr(health_row, "tool_blocks", 0))
+                    + _coerce_nonnegative_int(getattr(health_row, "subprocess_blocks", 0))
+                )
+                since = _parse_timestamp(getattr(health_row, "since", ""))
+                _allow, alerts, audit_blocks, _top = self._connector_hook_breakdown_for_connectors(
+                    (connector,), since=since
+                )
+                if blocks == 0:
+                    blocks = audit_blocks
+            else:
+                if self.overview_model.health is None:
+                    allow, alerts, blocks, _top = self._connector_hook_breakdown_for_connectors((connector,))
+                else:
+                    allow, alerts, blocks, _newest = self._connector_hook_stats_for_connectors((connector,))
+                calls = allow + alerts + blocks
+            last = self._connector_last_activity(connector, use_stats=not health_has_live_window)
             # A guardrail-disabled connector keeps its historical counts (so
             # the row still tells the story) but its STATUS is forced to
             # "disabled" — the gateway drops it from connectors[], so without
@@ -4656,15 +5522,57 @@ class DefenseClawTUI(App[None]):
                     mode=mode or "",
                     rule_pack=(packs.get(connector) or "").strip(),
                     last_activity=_relative_time_label(last, now),
-                    calls=allow + alert + block,
-                    blocks=block,
-                    alerts=alert,
+                    calls=calls,
+                    blocks=blocks,
+                    alerts=alerts,
                     status=status,
                 )
             )
+        if self._connector_hook_event_cache_enabled:
+            self._overview_connector_rows_render_cache = rows
         return rows
 
-    def _hook_event_timestamps(self) -> list[datetime]:
+    def _overview_connector_rows_signature(self) -> tuple[object, ...]:
+        """Stable fingerprint for real CONNECTORS table data changes."""
+
+        def activity_bucket(label: str) -> str:
+            text = (label or "").strip()
+            if not text or text == "—":
+                return "none"
+            if re.fullmatch(r"\d+(?:s|m|h|d) ago", text):
+                return "active"
+            return text
+
+        rows = self._overview_connector_rows()
+        return tuple(
+            (
+                row.connector,
+                row.mode,
+                row.rule_pack,
+                activity_bucket(row.last_activity),
+                row.calls,
+                row.blocks,
+                row.alerts,
+                row.status,
+            )
+            for row in rows
+        )
+
+    def _overview_connector_rows_changed_since_render(self) -> bool:
+        """True when the lower CONNECTORS table has new non-clock data."""
+
+        if self._connector_hook_event_cache_enabled:
+            signature = self._overview_connector_rows_signature()
+        else:
+            with self._connector_hook_event_render_cache():
+                signature = self._overview_connector_rows_signature()
+        changed = signature != self._overview_connector_rows_signature_cache
+        if changed:
+            self._connector_hook_event_stats_cache = None
+            self._connector_hook_event_stats_loaded_at = 0.0
+        return changed
+
+    def _hook_event_timestamps(self, connector: str = "") -> list[datetime]:
         """Timestamps of recent connector-hook audit events.
 
         Each connector-hook event is one hook call (preToolUse,
@@ -4675,52 +5583,144 @@ class DefenseClawTUI(App[None]):
         moves for them.
         """
 
-        if self.audit_model is None:
-            return []
-        return [
-            event.timestamp
-            for event in self.audit_model.items
-            if event.action == "connector-hook" and event.timestamp is not None
-        ]
+        return self._hook_event_timestamps_for_connectors((connector,) if connector else ())
 
-    def _block_event_timestamps(self) -> list[datetime]:
+    def _hook_event_timestamps_for_connectors(self, connectors: Iterable[str] = ()) -> list[datetime]:
+        """Timestamps of recent connector-hook audit events for a roster scope."""
+
+        return list(self._recent_hook_scope_summary(connectors)["hook_timestamps"])
+
+    def _recent_connector_hook_events(self) -> list[Any]:
+        """Recent connector-hook events, bypassing the Audit panel's noise filter."""
+
+        if self._connector_hook_event_cache_enabled and self._recent_connector_hook_events_cache is not None:
+            return self._recent_connector_hook_events_cache
+        if self.audit_model is None:
+            if self._connector_hook_event_cache_enabled:
+                self._recent_connector_hook_events_cache = []
+            return []
+        events: list[Any]
+        store = getattr(self.audit_model, "store", None)
+        loader = getattr(store, "list_connector_hook_event_summaries", None)
+        if callable(loader):
+            try:
+                events = list(loader(500))
+            except Exception:  # noqa: BLE001 - metric tiles should degrade to cached panel rows.
+                events = []
+        else:
+            events = []
+        if not events:
+            events = [
+                event
+                for event in self.audit_model.items
+                if getattr(event, "action", "") == "connector-hook"
+            ]
+
+        def sort_key(event: Any) -> datetime:
+            ts = getattr(event, "timestamp", None)
+            if not isinstance(ts, datetime):
+                return datetime.min.replace(tzinfo=timezone.utc)
+            if ts.tzinfo is None:
+                return ts.replace(tzinfo=timezone.utc)
+            return ts
+
+        events = sorted(events, key=sort_key)
+        if self._connector_hook_event_cache_enabled:
+            self._recent_connector_hook_events_cache = events
+        return events
+
+    def _recent_block_events(self, connector: str = "") -> list[Any]:
+        """Recent block/deny events, including unfiltered connector-hook blocks."""
+
+        return self._recent_block_events_for_connectors((connector,) if connector else ())
+
+    def _recent_block_events_for_connectors(self, connectors: Iterable[str] = ()) -> list[Any]:
+        """Recent block/deny events for a connector roster scope."""
+
+        scope = self._normalize_connector_scope(connectors)
+        since = self._session_start_for_connectors(scope)
+        events: list[Any] = list(self._recent_hook_scope_summary(scope, since=since)["block_events"])
+        if self.audit_model is not None:
+            events.extend(self.audit_model.items)
+        out: list[Any] = []
+        seen: set[str] = set()
+        for event in events:
+            key = str(getattr(event, "id", "") or id(event))
+            if key in seen:
+                continue
+            seen.add(key)
+            if not self._event_in_session(event, since):
+                continue
+            if not self._cached_event_matches_scope(event, scope):
+                continue
+            if self._is_block_event(event):
+                out.append(event)
+        return out[-200:]
+
+    def _block_event_timestamps(self, connector: str = "") -> list[datetime]:
         """Timestamps of recent block / deny / quarantine audit events."""
 
-        if self.audit_model is None:
-            return []
-        stamps: list[datetime] = []
-        for event in self.audit_model.items:
-            action = (event.action or "").lower()
-            details = (event.details or "").lower()
-            is_block = (
-                action in {"block", "guardrail-block", "deny", "quarantine"}
-                or "action=block" in details
-                or "action=deny" in details
-            )
-            if is_block and event.timestamp is not None:
-                stamps.append(event.timestamp)
-        return stamps
+        return self._block_event_timestamps_for_connectors((connector,) if connector else ())
 
-    def _finding_event_timestamps(self) -> list[datetime]:
-        """Timestamps of recent severity-bearing alert events."""
+    def _block_event_timestamps_for_connectors(self, connectors: Iterable[str] = ()) -> list[datetime]:
+        """Timestamps of recent block / deny / quarantine events for a roster scope."""
 
-        if self.alerts_model is None:
-            return []
         return [
             event.timestamp
-            for event in self.alerts_model.audit_events
+            for event in self._recent_block_events_for_connectors(connectors)
             if event.timestamp is not None
         ]
+
+    def _finding_event_timestamps(self, connector: str = "") -> list[datetime]:
+        """Timestamps of recent severity-bearing alert events."""
+
+        return self._finding_event_timestamps_for_connectors((connector,) if connector else ())
+
+    def _finding_event_timestamps_for_connectors(self, connectors: Iterable[str] = ()) -> list[datetime]:
+        """Timestamps of recent severity-bearing alert events for a roster scope."""
+
+        if self.alerts_model is None:
+            alert_events: list[Any] = []
+        else:
+            alert_events = list(self.alerts_model.audit_events)
+        scope = self._normalize_connector_scope(connectors)
+        since = self._session_start_for_connectors(scope)
+        stamps: list[datetime] = []
+        seen: set[tuple[str, ...]] = set()
+        for event in alert_events:
+            if (
+                event.timestamp is not None
+                and self._event_in_session(event, since)
+                and self._cached_event_matches_scope(event, scope)
+                and self._cached_event_metric_severity_bucket(event) in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+            ):
+                stamps.append(event.timestamp)
+                seen.add(self._event_count_key(event))
+        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+            key = self._event_count_key(event)
+            if key in seen:
+                continue
+            if self._cached_event_metric_severity_bucket(event) not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+                continue
+            if event.timestamp is not None:
+                stamps.append(event.timestamp)
+                seen.add(key)
+        return stamps
 
     def _scan_event_timestamps(self) -> list[datetime]:
         """Timestamps of recent scan / finding audit events."""
 
         if self.audit_model is None:
             return []
+        since = self._session_start_for_connectors(tuple(self._active_connector_names()))
         stamps: list[datetime] = []
         for event in self.audit_model.items:
             action = (event.action or "").lower()
-            if ("scan" in action or "finding" in action) and event.timestamp is not None:
+            if (
+                ("scan" in action or "finding" in action)
+                and event.timestamp is not None
+                and self._event_in_session(event, since)
+            ):
                 stamps.append(event.timestamp)
         return stamps
 
@@ -4733,22 +5733,16 @@ class DefenseClawTUI(App[None]):
 
         return _event_histogram(timestamps, now=datetime.now(timezone.utc))
 
-    def _top_block_target(self) -> tuple[str, int]:
+    def _top_block_target(self, connector: str = "") -> tuple[str, int]:
         """Most-frequently blocked audit target across recent events."""
 
-        if self.audit_model is None:
-            return "", 0
+        return self._top_block_target_for_connectors((connector,) if connector else ())
+
+    def _top_block_target_for_connectors(self, connectors: Iterable[str] = ()) -> tuple[str, int]:
+        """Most-frequently blocked audit target for a connector roster scope."""
+
         blocked: dict[str, int] = {}
-        for event in self.audit_model.items[-200:]:
-            action = (event.action or "").lower()
-            details = (event.details or "").lower()
-            is_block = (
-                action in {"block", "guardrail-block", "deny", "quarantine"}
-                or "action=block" in details
-                or "action=deny" in details
-            )
-            if not is_block:
-                continue
+        for event in self._recent_block_events_for_connectors(connectors):
             target = (event.target or "").strip() or "(unknown)"
             blocked[target] = blocked.get(target, 0) + 1
         if not blocked:
@@ -4756,19 +5750,43 @@ class DefenseClawTUI(App[None]):
         top, count = max(blocked.items(), key=lambda kv: kv[1])
         return top, count
 
-    def _top_finding_target(self) -> tuple[str, str]:
+    def _top_finding_target(self, connector: str = "") -> tuple[str, str]:
         """Highest-severity recent alert's target + severity letter."""
 
-        if self.alerts_model is None:
-            return "", ""
+        return self._top_finding_target_for_connectors((connector,) if connector else ())
+
+    def _top_finding_target_for_connectors(self, connectors: Iterable[str] = ()) -> tuple[str, str]:
+        """Highest-severity recent alert target for a connector roster scope."""
+
+        alert_events: list[Any] = [] if self.alerts_model is None else list(self.alerts_model.audit_events[-200:])
+        scope = self._normalize_connector_scope(connectors)
+        since = self._session_start_for_connectors(scope)
         severity_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
         best: tuple[int, str, str] = (0, "", "")
-        for event in self.alerts_model.audit_events[-200:]:
-            rank = severity_rank.get((event.severity or "").upper(), 0)
+        seen: set[tuple[str, ...]] = set()
+
+        def consider(event: Any) -> None:
+            nonlocal best
+            if not self._event_in_session(event, since):
+                return
+            if not self._cached_event_matches_scope(event, scope):
+                return
+            severity = self._cached_event_metric_severity_bucket(event)
+            rank = severity_rank.get(severity, 0)
             if rank <= best[0]:
-                continue
+                return
             target = (event.target or "").strip() or "(unknown)"
-            best = (rank, target, (event.severity or "").upper())
+            best = (rank, target, severity)
+
+        for event in alert_events:
+            seen.add(self._event_count_key(event))
+            consider(event)
+        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+            key = self._event_count_key(event)
+            if key in seen:
+                continue
+            seen.add(key)
+            consider(event)
         return best[1], best[2]
 
     @staticmethod
@@ -5142,7 +6160,7 @@ class DefenseClawTUI(App[None]):
         doctor = self.overview_model.doctor_box()
         ai_box = self.overview_model.ai_discovery_box()
         cfg = self.overview_model.cfg
-        counts = self.overview_model.enforcement
+        counts = self._overview_session_enforcement_counts()
         health = self.overview_model.health
         state_by_key = {card.key: card.state or "unknown" for card in service_cards}
         detail_by_key = {card.key: card.detail or card.last_error for card in service_cards}
@@ -5303,12 +6321,24 @@ class DefenseClawTUI(App[None]):
                 Text.from_markup(f"[{blocks_color} bold]{block_n}[/]"),
             )
         else:
+            calls_n, _hook_alert_n, block_n = self._enforcement_scope_breakdown(
+                self._active_connector_names()
+            )
             alerts_color = TOKENS.accent_red if counts.active_alerts else TOKENS.accent_green
             enf_table.add_row(
                 Text("Alerts", style=TOKENS.text_secondary),
                 Text.from_markup(
                     f"[{alerts_color} bold]{counts.active_alerts:<3}[/] {_mini_bar(counts.active_alerts, 20)}"
                 ),
+            )
+            enf_table.add_row(
+                Text("Hook calls", style=TOKENS.text_secondary),
+                Text.from_markup(f"[{TOKENS.accent_green}]{calls_n}[/]"),
+            )
+            blocks_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
+            enf_table.add_row(
+                Text("Blocks", style=TOKENS.text_secondary),
+                Text.from_markup(f"[{blocks_color} bold]{block_n}[/]"),
             )
         if self.overview_model.silent_bypass > 0:
             enf_table.add_row(
@@ -5598,6 +6628,8 @@ class DefenseClawTUI(App[None]):
         columns.add_column(ratio=1)
         columns.add_row(Group(services_panel, cfg_panel), Group(enf_panel, sc_panel, doc_panel))
 
+        observability_panel = self._overview_observability_panel()
+
         # 8.13: dedicated per-connector CONNECTORS table for multi-connector
         # installs. Empty for single-connector (panel omitted from the Group).
         connectors_panel = self._overview_connectors_panel(overview_connector_rows)
@@ -5641,12 +6673,21 @@ class DefenseClawTUI(App[None]):
             Text(""),
             columns,
             Text(""),
+            observability_panel,
+            Text(""),
             *connectors_block,
             ai_panel,
             Text(""),
             quick_text,
             footer_hint,
         )
+
+    def _overview_body_signature(self) -> tuple[object, ...]:
+        """Fingerprint Overview content without volatile clock-only labels."""
+
+        stable_text = re.sub(r"\buptime=\d+s\b", "uptime=<live>", self.body_text)
+        stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
+        return ("overview", self.help_open, stable_text)
 
     def _overview_connectors_panel(
         self, rows: list[ConnectorOverviewRow]
@@ -5720,6 +6761,67 @@ class DefenseClawTUI(App[None]):
             padding=(0, 1),
         )
 
+    def _overview_observability_panel(self) -> RenderableType:
+        """Full-width inventory of runtime-loaded telemetry destinations."""
+
+        rows = self.overview_model.observability_destination_rows()
+        if rows:
+            table = Table.grid(padding=(0, 2), expand=True)
+            table.add_column(no_wrap=True, min_width=18)  # NAME
+            table.add_column(no_wrap=True, min_width=11)  # TARGET
+            table.add_column(no_wrap=True, min_width=16)  # SCOPE
+            table.add_column(no_wrap=True, min_width=12)  # KIND
+            table.add_column(no_wrap=True, min_width=10)  # STATE
+            table.add_column(no_wrap=True, min_width=18)  # SIGNALS
+            table.add_column(no_wrap=True, min_width=13)  # ROUTING
+            table.add_column(overflow="ellipsis")  # ENDPOINT
+            table.add_row(
+                Text("NAME", style=TOKENS.text_secondary),
+                Text("TARGET", style=TOKENS.text_secondary),
+                Text("SCOPE", style=TOKENS.text_secondary),
+                Text("KIND/PRESET", style=TOKENS.text_secondary),
+                Text("STATE", style=TOKENS.text_secondary),
+                Text("SIGNALS", style=TOKENS.text_secondary),
+                Text("ROUTING", style=TOKENS.text_secondary),
+                Text("ENDPOINT", style=TOKENS.text_secondary),
+            )
+            for row in rows:
+                color = state_color(row.state)
+                table.add_row(
+                    Text(row.name, style=TOKENS.text_primary),
+                    Text(row.target, style=TOKENS.text_secondary),
+                    Text(row.scope, style=TOKENS.text_secondary),
+                    Text(row.kind, style=TOKENS.text_secondary),
+                    Text(row.state, style=color),
+                    Text(row.signals, style=TOKENS.text_secondary),
+                    Text(row.routing or "—", style=TOKENS.accent_cyan),
+                    Text(row.endpoint, style=TOKENS.text_muted, overflow="ellipsis"),
+                )
+            body: RenderableType = Group(
+                table,
+                Text(
+                    "Names are identities: a new name adds a route; the same name updates it. "
+                    "Manage in 0 Setup → Observability / Galileo.",
+                    style=f"italic {TOKENS.text_muted}",
+                ),
+            )
+        else:
+            body = Text(
+                "No runtime-loaded destinations. Configure one in 0 Setup → "
+                "Observability / Galileo, then restart the gateway.",
+                style=TOKENS.text_secondary,
+            )
+        return Panel(
+            body,
+            title=Text(
+                "OBSERVABILITY DESTINATIONS · RUNTIME",
+                style=f"bold {TOKENS.accent_cyan}",
+            ),
+            title_align="left",
+            border_style=TOKENS.accent_cyan,
+            padding=(0, 1),
+        )
+
     def _overview_connectors_text(self, rows: list[ConnectorOverviewRow]) -> str:
         """Plain-text CONNECTORS section for the fallback body (or "")."""
 
@@ -5748,15 +6850,54 @@ class DefenseClawTUI(App[None]):
         body = "\n".join(lines)
         return f"[bold {TOKENS.accent_green}]CONNECTORS[/]\n{body}\n\n"
 
+    def _overview_observability_text(self) -> str:
+        """Plain-text equivalent of the observability destination panel."""
+
+        rows = self.overview_model.observability_destination_rows()
+        if not rows:
+            return (
+                f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
+                "  No runtime-loaded destinations. Configure one in 0 Setup → "
+                "Observability / Galileo, then restart the gateway.\n\n"
+            )
+        lines = [
+            f"  {'NAME':<20}{'TARGET':<14}{'SCOPE':<20}{'KIND/PRESET':<16}{'STATE':<11}"
+            f"{'SIGNALS':<20}{'ROUTING':<16}ENDPOINT"
+        ]
+        for row in rows:
+            color = state_color(row.state)
+            name = rich_escape(row.name[:19])
+            target = rich_escape(row.target[:13])
+            scope = rich_escape(row.scope[:19])
+            kind = rich_escape(row.kind[:15])
+            state = rich_escape(row.state[:10])
+            signals = rich_escape(row.signals[:19])
+            routing = rich_escape((row.routing or "—")[:15])
+            lines.append(
+                f"  {name:<20}{target:<14}{scope:<20}{kind:<16}"
+                f"[{color}]{state:<11}[/]{signals:<20}"
+                f"{routing:<16}{rich_escape(row.endpoint)}"
+            )
+        lines.append(
+            "  Names are identities: a new name adds; the same name updates. "
+            "Manage in 0 Setup → Observability / Galileo."
+        )
+        return (
+            f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
+            + "\n".join(lines)
+            + "\n\n"
+        )
+
     def _overview_body_text(self, service_cards: tuple[Any, ...]) -> str:
         notices = self.overview_model.build_notices()
         doctor = self.overview_model.doctor_box()
         ai_box = self.overview_model.ai_discovery_box()
         cfg = self.overview_model.cfg
-        counts = self.overview_model.enforcement
+        counts = self._overview_session_enforcement_counts()
         state_by_key = {card.key: card.state or "unknown" for card in service_cards}
         detail_by_key = {card.key: card.detail or card.last_error for card in service_cards}
         health = self.overview_model.health
+        connector_scope = self._overview_connector_scope_text()
 
         notice_lines = []
         for notice in notices[:3]:
@@ -5799,6 +6940,7 @@ class DefenseClawTUI(App[None]):
         config_text = "\n".join(f"  {key:<16} {value}" for key, value in config_lines)
 
         connectors_text = self._overview_connectors_text(overview_connector_rows)
+        observability_text = self._overview_observability_text()
 
         scanner_lines = [
             ("Gateway", state_by_key.get("gateway", "unknown"), detail_by_key.get("gateway", "")),
@@ -5845,11 +6987,17 @@ class DefenseClawTUI(App[None]):
                 + scan_lines
             ).rstrip("\n")
         else:
+            calls_n, _hook_alert_n, block_n = self._enforcement_scope_breakdown(
+                self._active_connector_names()
+            )
             alert_color = TOKENS.accent_red if counts.active_alerts else TOKENS.accent_green
+            block_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
             enforcement_text = (
                 f"  Active alerts    [{alert_color} bold]{counts.active_alerts}[/]   "
                 f"Total scans [{TOKENS.accent_green}]{counts.total_scans}[/]\n"
                 + silent_line
+                + f"  Hook calls       [{TOKENS.accent_green}]{calls_n}[/]   "
+                f"Blocks [{block_color} bold]{block_n}[/]\n"
                 + f"  Skills           [{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
                 f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed\n"
                 f"  MCPs             [{TOKENS.accent_red}]{counts.blocked_mcps}[/] blocked   "
@@ -5919,10 +7067,12 @@ class DefenseClawTUI(App[None]):
         return (
             "[bold #22D3EE]Overview[/]  [#9FB2CC]Command center for live risk, setup health, and next actions.[/]\n"
             f"[italic]DefenseClaw v{__version__}{uptime}[/]\n\n"
+            f"{connector_scope}"
             f"[bold {TOKENS.accent_green}]WHAT NEEDS ATTENTION[/]\n"
             + "\n".join(notice_lines)
             + "\n\n"
             f"[bold {TOKENS.accent_blue}]SERVICES[/]\n{services_text}\n\n"
+            + observability_text
             + (
                 f"[bold {TOKENS.accent_amber}]ENFORCEMENT · {enf_selected}[/]\n"
                 if enf_selected
@@ -6054,9 +7204,11 @@ class DefenseClawTUI(App[None]):
         # crash). Build a Text object via the defensive wrapper so a
         # hostile filter degrades to plain text instead of tearing
         # down the status strip mid-frame.
-        self.query_one("#status", Static).update(
-            self._safe_body_renderable(f"{text}  [#444444]│[/]  {strip}")
-        )
+        try:
+            status = self.query_one("#status", Static)
+        except NoMatches:
+            return
+        status.update(self._safe_body_renderable(f"{text}  [#444444]│[/]  {strip}"))
 
     def _write_activity(self, text: str) -> None:
         self.activity_lines.append(text)
@@ -6374,8 +7526,22 @@ class DefenseClawTUI(App[None]):
     def _update_body_only(self) -> None:
         body_widget = self.query_one("#body", Static)
         if self.active_panel == "overview" and not self.help_open:
-            body_widget.update(self._overview_renderable())
-            self._last_body_signature = None
+            try:
+                current_scroll_y = self.query_one("#body-scroll", VerticalScroll).scroll_y
+            except NoMatches:
+                current_scroll_y = None
+            with self._connector_hook_event_render_cache():
+                renderable = self._overview_renderable()
+                body_signature = self._overview_body_signature()
+                if body_signature != self._last_body_signature:
+                    body_widget.update(renderable)
+                    self._last_body_signature = body_signature
+                    try:
+                        scroller = self.query_one("#body-scroll", VerticalScroll)
+                    except NoMatches:
+                        scroller = None
+                    current_scroll_y = self._restore_overview_scroll(scroller, current_scroll_y)
+                self._overview_last_render_scroll_y = current_scroll_y
         else:
             # Same defense-in-depth as ``_render_chrome`` — any panel's
             # body string can contain malformed markup (the audit
@@ -6454,6 +7620,8 @@ class DefenseClawTUI(App[None]):
             if key == "m":
                 self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
+            if self._scroll_overview_body(key):
+                return True
             # 8.13 drill-down: with a connector selected in the shared filter,
             # Enter jumps to that connector's Alerts (already pre-filtered).
             # With no selection in a multi-connector install, Enter opens the
@@ -6488,6 +7656,7 @@ class DefenseClawTUI(App[None]):
                 return True
             action = self._handle_inventory_key(key)
             return self._apply_inventory_action(action)
+
         if self.active_panel == "ai":
             action = self.ai_discovery_model.handle_key(_vim_key(key))
             return self._apply_ai_discovery_action(action)
@@ -6499,6 +7668,46 @@ class DefenseClawTUI(App[None]):
                 return self._apply_first_run_action(action)
             action = self._handle_setup_key(_vim_key(key))
             return self._apply_setup_action(action)
+        return False
+
+    def _scroll_overview_body(self, key: str) -> bool:
+        """Handle fast keyboard scrolling for the dense Overview dashboard."""
+
+        if self.active_panel != "overview" or self.help_open or len(self.screen_stack) > 1:
+            return False
+        key = key.lower()
+        scroll_line_keys = {"down", "j"}
+        scroll_up_keys = {"up", "k"}
+        page_down_keys = {"pagedown", "page_down", "ctrl+f"}
+        page_up_keys = {"pageup", "page_up", "ctrl+b"}
+        try:
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except NoMatches:
+            return False
+        if key in scroll_line_keys:
+            self._mark_overview_scroll_activity()
+            scroller.scroll_relative(y=6, animate=False, immediate=True)
+            return True
+        if key in scroll_up_keys:
+            self._mark_overview_scroll_activity()
+            scroller.scroll_relative(y=-6, animate=False, immediate=True)
+            return True
+        if key in page_down_keys:
+            self._mark_overview_scroll_activity()
+            scroller.scroll_page_down(animate=False)
+            return True
+        if key in page_up_keys:
+            self._mark_overview_scroll_activity()
+            scroller.scroll_page_up(animate=False)
+            return True
+        if key == "home":
+            self._mark_overview_scroll_activity()
+            scroller.scroll_to(y=0, animate=False, immediate=True)
+            return True
+        if key == "end":
+            self._mark_overview_scroll_activity()
+            scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
+            return True
         return False
 
     def _apply_alert_action(self, action: AlertPanelAction) -> bool:
@@ -8009,6 +9218,11 @@ class DefenseClawTUI(App[None]):
             return
         if len(self.screen_stack) > 1:
             return
+        if self.active_panel == "overview" and not self.help_open:
+            connector_rows_changed = self._overview_connector_rows_changed_since_render()
+            self._render_overview_metrics()
+            self._schedule_overview_sampled_refresh(allow_scrolled=connector_rows_changed)
+            return
         self._periodic_refresh_running = True
         try:
             self._refresh_models_from_disk()
@@ -8169,23 +9383,29 @@ class DefenseClawTUI(App[None]):
         # Rebuild Setup readiness now that we have a fresh health
         # snapshot (the gateway/api/guardrail rows depend on it).
         self._sync_setup_readiness()
-        # Only repaint the chrome when the Overview panel is actually
-        # being shown; otherwise we'd churn the screen for nothing.
+        # Passive health polls update the model but do not force a full
+        # Overview repaint. The dashboard render is expensive enough that a
+        # 3s timer can block the first wheel/key event after idle.
         if self.active_panel == "overview" and not self.help_open:
-            self._render_chrome()
+            self._render_overview_scope_indicator()
+            self._schedule_overview_sampled_refresh()
 
     async def _poll_ai_usage(self, *, force_render: bool) -> None:
         snapshot = await asyncio.to_thread(_fetch_ai_usage, self.config)
         if snapshot is None:
             if self.ai_discovery_model.snapshot is None:
                 self.ai_discovery_model.message = "ai discovery offline or unauthorized"
-            if force_render or self.active_panel in {"overview", "ai"}:
+            if not force_render and self.active_panel == "overview":
+                self._schedule_overview_sampled_refresh()
+            if force_render or self.active_panel == "ai":
                 self._render_chrome()
             return
         self.overview_model.set_ai_usage(snapshot)
         self.ai_discovery_model.set_snapshot(snapshot)
         self.ai_discovery_model.message = ""
-        if force_render or self.active_panel in {"overview", "ai"}:
+        if not force_render and self.active_panel == "overview":
+            self._schedule_overview_sampled_refresh()
+        if force_render or self.active_panel == "ai":
             self._render_chrome()
 
     def _sync_setup_readiness(self) -> None:
@@ -9026,6 +10246,10 @@ def _coerce_int(value: Any) -> int:
         return 0
 
 
+def _coerce_nonnegative_int(value: Any) -> int:
+    return max(_coerce_int(value), 0)
+
+
 def _subsystem_from_mapping(raw: Any) -> SubsystemHealth:
     """Build a SubsystemHealth from a permissive dict payload.
 
@@ -9241,6 +10465,13 @@ def _severity_breakdown_markup(critical: int, high: int, medium: int, low: int) 
     )
 
 
+def _metric_severity_bucket(severity: str) -> str:
+    normalized = (severity or "").strip().upper()
+    if normalized == "WARNING":
+        return "MEDIUM"
+    return normalized
+
+
 def _metric_trend(value: int, *, invert: bool = False) -> tuple[float, ...]:
     bounded = max(0, min(value, 100))
     if bounded == 0:
@@ -9321,14 +10552,16 @@ def _enforcement_label(cfg: OverviewConfig | None) -> str:
     # instead; the per-connector modes live in the roster below.
     if len(cfg.connector_modes) > 1:
         n = len(cfg.connector_modes)
-        return f"{n} connectors (hook observability)"
+        return f"{n} connectors (per-connector modes)"
     connector = cfg.guardrail_connector or cfg.claw_mode
     mode = cfg.guardrail_mode or "observe"
     if not connector:
         return f"not configured ({mode})"
     if connector in {"openclaw", "zeptoclaw"}:
         return f"{connector} proxy guardrail ({mode})"
-    return f"{connector} hook observability ({mode})"
+    surface = "policy" if connector == "omnigent" else "hook"
+    posture = "enforcement" if mode == "action" else "observability"
+    return f"{connector} {surface} {posture} ({mode})"
 
 
 def _cycle_value(current: str, options: tuple[str, ...], delta: int) -> str:

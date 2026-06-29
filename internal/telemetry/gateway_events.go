@@ -234,6 +234,62 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 	if e.AgentType != "" {
 		attrs = append(attrs, log.String("gen_ai.agent.type", e.AgentType))
 	}
+	if e.RootAgentID != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.root.id", e.RootAgentID))
+	}
+	if e.ParentAgentID != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.parent.id", e.ParentAgentID))
+	}
+	if e.RootSessionID != "" {
+		attrs = append(attrs, log.String("defenseclaw.session.root.id", e.RootSessionID))
+	}
+	if e.ParentSessionID != "" {
+		attrs = append(attrs, log.String("defenseclaw.session.parent.id", e.ParentSessionID))
+	}
+	if e.AgentLifecycleID != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.lifecycle.id", e.AgentLifecycleID))
+	}
+	if e.AgentExecutionID != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.execution.id", e.AgentExecutionID))
+	}
+	if e.AgentLifecycleEvent != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.lifecycle.event", e.AgentLifecycleEvent))
+	}
+	if e.AgentLifecycleState != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.lifecycle.state", e.AgentLifecycleState))
+	}
+	if e.AgentPhase != "" {
+		attrs = append(attrs,
+			log.String("defenseclaw.agent.phase", e.AgentPhase),
+		)
+	}
+	if e.AgentPhaseCode != nil {
+		attrs = append(attrs, log.Int("defenseclaw.agent.phase.code", *e.AgentPhaseCode))
+	}
+	if e.AgentPreviousPhase != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent.phase.previous", e.AgentPreviousPhase))
+	}
+	if e.AgentSequence > 0 {
+		attrs = append(attrs, log.Int64("defenseclaw.agent.sequence", e.AgentSequence))
+	}
+	if e.AgentOperationID != "" {
+		attrs = append(attrs, log.String("defenseclaw.operation.id", e.AgentOperationID))
+	}
+	if e.AgentReportedCost != nil {
+		attrs = append(attrs, log.Bool("defenseclaw.agent.reported_cost.present", *e.AgentReportedCost))
+		if *e.AgentReportedCost && e.AgentReportedCostUSD != nil {
+			attrs = append(attrs, log.Float64("defenseclaw.agent.reported_cost.usd", *e.AgentReportedCostUSD))
+		}
+	}
+	if e.AgentDepth != nil {
+		attrs = append(attrs, log.Int("defenseclaw.agent.depth", *e.AgentDepth))
+	}
+	if e.SessionSource != "" {
+		attrs = append(attrs, log.String("defenseclaw.session.source", e.SessionSource))
+	}
+	if e.SessionResumed != nil {
+		attrs = append(attrs, log.Bool("defenseclaw.session.resumed", *e.SessionResumed))
+	}
 	if e.AgentInstanceID != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent_instance_id", e.AgentInstanceID))
 	}
@@ -242,6 +298,7 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 	}
 	if e.UserID != "" {
 		attrs = append(attrs, log.String("defenseclaw.user_id", e.UserID))
+		attrs = append(attrs, log.String("user.id", e.UserID))
 	}
 	if e.UserName != "" {
 		attrs = append(attrs, log.String("defenseclaw.user_name", e.UserName))
@@ -382,6 +439,28 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 			}
 			if t.ExitCode != nil {
 				attrs = append(attrs, log.Int("defenseclaw.tool.exit_code", *t.ExitCode))
+			}
+		}
+	case gatewaylog.EventHookDecision:
+		if h := e.HookDecision; h != nil {
+			attrs = append(attrs,
+				log.String("defenseclaw.hook.connector", h.Connector),
+				log.String("defenseclaw.hook.event", h.Event),
+				log.String("defenseclaw.hook.result", h.Result),
+				log.String("defenseclaw.hook.action", h.Action),
+				log.String("defenseclaw.hook.raw_action", h.RawAction),
+				log.String("defenseclaw.hook.mode", h.Mode),
+				log.Bool("defenseclaw.hook.would_block", h.WouldBlock),
+				log.Bool("defenseclaw.hook.enforced", h.Enforced),
+				log.Int("defenseclaw.hook.step_idx", h.StepIdx),
+				log.Int64("defenseclaw.hook.latency_ms", h.LatencyMs),
+				log.String("defenseclaw.hook.reason", truncateReasonAttr(h.Reason)),
+			)
+			if h.EvaluationID != "" {
+				attrs = append(attrs, log.String("defenseclaw.hook.evaluation_id", h.EvaluationID))
+			}
+			if len(h.RuleIDs) > 0 {
+				attrs = append(attrs, log.String("defenseclaw.hook.rule_ids", strings.Join(h.RuleIDs, ",")))
 			}
 		}
 	}

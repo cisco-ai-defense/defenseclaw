@@ -421,6 +421,54 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         with open(operator, encoding="utf-8") as handle:
             self.assertIn("bundled-v2", handle.read())
 
+    @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
+    def test_refresh_config_removes_only_retired_managed_dashboards(
+        self, mock_bundle: MagicMock,
+    ) -> None:
+        """Upgrade tombstones prune retired DefenseClaw assets without
+        deleting destination-only operator dashboards.
+        """
+        from defenseclaw.bundle_refresh import refresh_local_observability_stack
+
+        mock_bundle.return_value = Path(self.bundle)
+        refresh_local_observability_stack(self.tmp)
+        dashboards = os.path.join(self._dest(), "grafana", "dashboards")
+        retired = os.path.join(dashboards, "defenseclaw-reliability.json")
+        custom = os.path.join(dashboards, "team-custom.json")
+        with open(retired, "w", encoding="utf-8") as handle:
+            handle.write('{"title": "retired"}\n')
+        with open(custom, "w", encoding="utf-8") as handle:
+            handle.write('{"title": "custom"}\n')
+
+        result = refresh_local_observability_stack(self.tmp, refresh_config=True)
+
+        self.assertFalse(os.path.exists(retired))
+        self.assertTrue(os.path.exists(custom))
+        self.assertIn(
+            "grafana/dashboards/defenseclaw-reliability.json (removed)",
+            result.refreshed_paths,
+        )
+
+    def test_retired_path_tombstones_reject_traversal_and_external_symlinks(self) -> None:
+        from defenseclaw.bundle_refresh import _remove_retired_paths
+
+        root = Path(self._dest())
+        root.mkdir(parents=True)
+        outside = Path(self.tmp) / "outside.json"
+        outside.write_text("keep me\n", encoding="utf-8")
+        link = root / "external-link.json"
+        link.symlink_to(outside)
+
+        removed, errors = _remove_retired_paths(
+            root,
+            ("../outside.json", "external-link.json"),
+        )
+
+        self.assertEqual(removed, [])
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(outside.exists())
+        self.assertTrue(link.is_symlink())
+
 
 class TestIsComposeProjectRunning(unittest.TestCase):
     """Cover :func:`is_compose_project_running`."""

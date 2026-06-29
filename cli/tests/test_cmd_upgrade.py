@@ -28,6 +28,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _normalize_target_version,
     _preflight_wheel_install,
     _print_migration_cursor_summary,
+    _run_installed_migrations,
     _run_silent,
     _validate_upgrade_manifest,
     _verify_checksums_sigstore,
@@ -139,6 +140,36 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         self.assertIn("--dry-run", calls[1])
         self.assertEqual(calls[1][-1], "/tmp/defenseclaw.whl")
 
+    def test_run_installed_migrations_uses_managed_venv_python(self):
+        with TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}), \
+             patch("subprocess.run") as run_mock:
+            venv_python = os.path.join(home, ".defenseclaw", ".venv", "bin", "python")
+            os.makedirs(os.path.dirname(venv_python), exist_ok=True)
+            with open(venv_python, "w") as f:
+                f.write("# python")
+
+            def side_effect(args, **_kwargs):
+                result_path = args[-1]
+                with open(result_path, "w", encoding="utf-8") as f:
+                    json.dump({"count": 1}, f)
+                return Mock(returncode=0)
+
+            run_mock.side_effect = side_effect
+
+            count = _run_installed_migrations(
+                "0.7.0",
+                "0.8.0",
+                "/tmp/openclaw",
+                "/tmp/defenseclaw",
+                os_name="darwin",
+            )
+
+        self.assertEqual(count, 1)
+        call = run_mock.call_args.args[0]
+        self.assertEqual(call[0], venv_python)
+        self.assertEqual(call[1], "-c")
+        self.assertEqual(call[3:7], ["0.7.0", "0.8.0", "/tmp/openclaw", "/tmp/defenseclaw"])
+
 
 class TestUpgradeSameVersionRepair(unittest.TestCase):
     def test_same_version_reapplies_migrations(self):
@@ -195,7 +226,7 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
                 return_value=Mock(returncode=0),
             ))
             run_migrations = stack.enter_context(
-                patch("defenseclaw.migrations.run_migrations", return_value=1)
+                patch("defenseclaw.commands.cmd_upgrade._run_installed_migrations", return_value=1)
             )
             result = runner.invoke(upgrade, ["--yes", "--version", "9.9.9"], obj=app)
 
@@ -262,7 +293,7 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._run_silent"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._poll_health"))
             stack.enter_context(
-                patch("defenseclaw.migrations.run_migrations", return_value=0)
+                patch("defenseclaw.commands.cmd_upgrade._run_installed_migrations", return_value=0)
             )
             result = runner.invoke(upgrade, ["--yes", "--version", "9.9.9"], obj=app)
 
@@ -335,7 +366,7 @@ class TestUpgradeWithoutOpenClawCli(unittest.TestCase):
                 side_effect=fake_run,
             ))
             stack.enter_context(
-                patch("defenseclaw.migrations.run_migrations", return_value=0)
+                patch("defenseclaw.commands.cmd_upgrade._run_installed_migrations", return_value=0)
             )
             result = runner.invoke(upgrade, ["--yes", "--version", "9.9.9"], obj=app)
 
@@ -501,10 +532,9 @@ class TestChecksumVerification(unittest.TestCase):
 
         self.assertEqual(ctx.exception.code, 1)
 
-    def test_checksums_sigstore_fails_closed_without_cosign(self):
-        """F-0704: a release that ships Sigstore assets must NOT be downgraded
-        to unsigned verification just because cosign is missing. The default
-        (no --allow-unverified) now fails closed."""
+    def test_checksums_sigstore_warns_without_cosign(self):
+        """A release that ships Sigstore assets should still be upgradeable on
+        hosts without cosign; checksum validation continues after a warning."""
         with TemporaryDirectory() as tmp:
             checksums = os.path.join(tmp, "checksums.txt")
             sig = os.path.join(tmp, "checksums.txt.sig")
@@ -521,15 +551,48 @@ class TestChecksumVerification(unittest.TestCase):
                 return_value=None,
             ), patch(
                 "defenseclaw.commands.cmd_upgrade.subprocess.run"
-            ) as run_mock, self.assertRaises(SystemExit) as ctx:
+            ) as run_mock, patch(
+                "defenseclaw.commands.cmd_upgrade.ux.warn"
+            ) as warn_mock:
                 _verify_checksums_sigstore("9.9.9", tmp, checksums)
 
-        self.assertEqual(ctx.exception.code, 1)
         run_mock.assert_not_called()
+        warn_mock.assert_called_once()
+        self.assertIn("continuing with checksum verification only", warn_mock.call_args.args[0])
+
+    def test_download_checksums_accepts_signed_manifest_without_cosign(self):
+        """Regression for 0.8.0 -> 0.8.1: signed release assets must not
+        require cosign to be installed before checksum validation can proceed."""
+        with TemporaryDirectory() as tmp:
+            checksums = os.path.join(tmp, "checksums.txt")
+            sig = os.path.join(tmp, "checksums.txt.sig")
+            cert = os.path.join(tmp, "checksums.txt.pem")
+            sha = "a" * 64
+            with open(checksums, "w", encoding="utf-8") as f:
+                f.write(f"{sha}  defenseclaw-9.9.9-py3-none-any.whl\n")
+            for path in (sig, cert):
+                with open(path, "wb") as f:
+                    f.write(b"release asset")
+
+            with patch(
+                "defenseclaw.commands.cmd_upgrade._download_optional_release_asset",
+                side_effect=[checksums, sig, cert],
+            ), patch(
+                "defenseclaw.commands.cmd_upgrade.shutil.which",
+                return_value=None,
+            ), patch(
+                "defenseclaw.commands.cmd_upgrade.subprocess.run"
+            ) as run_mock, patch(
+                "defenseclaw.commands.cmd_upgrade.ux.warn"
+            ) as warn_mock:
+                result = _download_checksums("9.9.9", tmp)
+
+        self.assertEqual(result, {"defenseclaw-9.9.9-py3-none-any.whl": sha})
+        run_mock.assert_not_called()
+        warn_mock.assert_called_once()
 
     def test_checksums_sigstore_allow_unverified_skips_cosign(self):
-        """With the explicit operator opt-in, a missing cosign degrades to a
-        warning instead of aborting (F-0704 escape hatch)."""
+        """The explicit operator opt-in still permits the missing-cosign path."""
         with TemporaryDirectory() as tmp:
             checksums = os.path.join(tmp, "checksums.txt")
             sig = os.path.join(tmp, "checksums.txt.sig")

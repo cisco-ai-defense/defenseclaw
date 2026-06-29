@@ -60,6 +60,7 @@ HOOK_CONNECTORS = {
     "openhands",
     "antigravity",
     "opencode",
+    "omnigent",
 }
 
 

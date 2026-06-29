@@ -427,6 +427,21 @@ trace.
 | `gen_ai.agent.name` | string | agent name (e.g. `openclaw`) |
 | `gen_ai.conversation.id` | string | conversation/session identifier |
 | `gen_ai.provider.name` | string | provider (if set) |
+| `defenseclaw.agent.lifecycle.id` | string | stable agent/subagent lifecycle identity across gateway restarts |
+| `defenseclaw.agent.execution.id` | string | one start/resume execution attempt within the stable lifecycle |
+| `defenseclaw.agent.parent.id` | string | parent logical agent for a child agent |
+| `defenseclaw.session.parent.id` | string | parent conversation when the child has its own session |
+| `defenseclaw.agent.depth` | int | root `0`, direct child `1` |
+| `defenseclaw.agent.lifecycle.event` | string | normalized session/turn/tool/subagent/compaction event |
+| `defenseclaw.agent.lifecycle.state` | string | `active`, `completed`, `failed`, `interrupted`, or `observed` |
+| `defenseclaw.agent.phase` | string | canonical execution phase: session, planning, model, tool, approval, waiting, responding, maintenance, or terminal state |
+| `defenseclaw.agent.phase.previous` | string | previous canonical phase, used to build a directed execution graph |
+| `defenseclaw.agent.phase.code` | int | stable 0–12 numeric phase vocabulary for state-timeline panels |
+| `defenseclaw.agent.sequence` | int | monotonically increasing event sequence within one agent execution |
+| `defenseclaw.operation.id` | string | stable join key for the hook operation represented by the log/span |
+| `defenseclaw.session.source` | string | upstream session start/resume source |
+| `defenseclaw.session.resumed` | bool | whether the upstream session was resumed |
+| `user.id` | string | upstream user identity, with a local-user fallback when unavailable |
 
 ---
 
@@ -570,75 +585,82 @@ Add to `~/.defenseclaw/config.yaml` under the `otel` key:
 
 ```yaml
 otel:
-  enabled: false
-  protocol: "grpc"                                      # "grpc" or "http"
-  endpoint: "https://ingest.us1.signalfx.com"           # Splunk Observability Cloud OTLP endpoint
-  headers:
-    "X-SF-TOKEN": "${SPLUNK_ACCESS_TOKEN}"              # env var substitution
-  tls:
-    insecure: false
-    ca_cert: ""
+  enabled: true
   traces:
-    enabled: true
     sampler: "always_on"                                # or "parentbased_traceidratio"
     sampler_arg: "1.0"
   logs:
-    enabled: true
     emit_individual_findings: false                     # one LogRecord per finding
   metrics:
-    enabled: true
     export_interval_s: 60
-  batch:
-    max_export_batch_size: 512
-    scheduled_delay_ms: 5000
-    max_queue_size: 2048
   resource:
     attributes:                                         # additional resource attrs
       deployment.environment: "production"
+  destinations:
+    - name: splunk-o11y
+      preset: splunk-o11y
+      enabled: true
+      protocol: grpc
+      endpoint: https://ingest.us1.signalfx.com
+      headers:
+        X-SF-TOKEN: ${SPLUNK_ACCESS_TOKEN}
+      tls: { insecure: false, ca_cert: "" }
+      traces: { enabled: true }
+      logs: { enabled: true }
+      metrics: { enabled: true }
+      batch:
+        max_export_batch_size: 512
+        scheduled_delay_ms: 5000
+        max_queue_size: 2048
 ```
 
 ### Environment Variables
 
-| Variable | Purpose |
-|---|---|
-| `SPLUNK_ACCESS_TOKEN` | Splunk Observability Cloud ingest token |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Override `otel.endpoint` |
-| `OTEL_EXPORTER_OTLP_HEADERS` | Override `otel.headers` |
-| `OTEL_RESOURCE_ATTRIBUTES` | Additional resource attributes |
+Outbound routes should be configured explicitly in `otel.destinations[]`:
+endpoint, protocol, TLS policy, signal set, and `${ENV_REFERENCE}` headers all
+belong on the named route. For upgrade compatibility, a pre-existing flat
+exporter in `otel.*` or `DEFENSECLAW_OTEL_*`/standard OTLP endpoint variables
+is translated into one `generic-otlp` destination before validation. Standard
+OTLP variables remain available to connector processes that emit OTLP into
+DefenseClaw; new setups should not rely on them to create gateway export
+routes.
 
 ### Go Config Struct
 
 ```go
 type OTelConfig struct {
-    Enabled  bool              `mapstructure:"enabled"  yaml:"enabled"`
-    Protocol string            `mapstructure:"protocol" yaml:"protocol"`
-    Endpoint string            `mapstructure:"endpoint" yaml:"endpoint"`
-    Headers  map[string]string `mapstructure:"headers"  yaml:"headers"`
-    TLS      struct {
-        Insecure bool   `mapstructure:"insecure" yaml:"insecure"`
-        CACert   string `mapstructure:"ca_cert"  yaml:"ca_cert"`
-    } `mapstructure:"tls" yaml:"tls"`
+    Enabled      bool                    `mapstructure:"enabled" yaml:"enabled"`
+    Destinations []OTelDestinationConfig `mapstructure:"destinations" yaml:"destinations"`
     Traces struct {
-        Enabled    bool   `mapstructure:"enabled"     yaml:"enabled"`
         Sampler    string `mapstructure:"sampler"      yaml:"sampler"`
         SamplerArg string `mapstructure:"sampler_arg"  yaml:"sampler_arg"`
     } `mapstructure:"traces" yaml:"traces"`
     Logs struct {
-        Enabled                bool `mapstructure:"enabled"                  yaml:"enabled"`
         EmitIndividualFindings bool `mapstructure:"emit_individual_findings" yaml:"emit_individual_findings"`
     } `mapstructure:"logs" yaml:"logs"`
     Metrics struct {
-        Enabled         bool `mapstructure:"enabled"            yaml:"enabled"`
         ExportIntervalS int  `mapstructure:"export_interval_s"  yaml:"export_interval_s"`
     } `mapstructure:"metrics" yaml:"metrics"`
-    Batch struct {
-        MaxExportBatchSize int `mapstructure:"max_export_batch_size" yaml:"max_export_batch_size"`
-        ScheduledDelayMs   int `mapstructure:"scheduled_delay_ms"    yaml:"scheduled_delay_ms"`
-        MaxQueueSize       int `mapstructure:"max_queue_size"         yaml:"max_queue_size"`
-    } `mapstructure:"batch" yaml:"batch"`
     Resource struct {
         Attributes map[string]string `mapstructure:"attributes" yaml:"attributes"`
     } `mapstructure:"resource" yaml:"resource"`
+}
+
+type OTelDestinationConfig struct {
+    // Endpoint, protocol, headers, TLS, per-signal settings, and batching are
+    // destination-owned so each fan-out route can be tuned independently.
+    Name       string               `mapstructure:"name"        yaml:"name"`
+    Preset     string               `mapstructure:"preset"      yaml:"preset,omitempty"`
+    Enabled    bool                 `mapstructure:"enabled"     yaml:"enabled"`
+    Protocol   string               `mapstructure:"protocol"    yaml:"protocol"`
+    Endpoint   string               `mapstructure:"endpoint"    yaml:"endpoint"`
+    Headers    map[string]string    `mapstructure:"headers"     yaml:"headers,omitempty"`
+    TLS        OTelTLSConfig        `mapstructure:"tls"         yaml:"tls"`
+    Traces     OTelTracesConfig     `mapstructure:"traces"      yaml:"traces"`
+    Logs       OTelLogsConfig       `mapstructure:"logs"        yaml:"logs"`
+    Metrics    OTelMetricsConfig    `mapstructure:"metrics"     yaml:"metrics"`
+    Batch      OTelBatchConfig      `mapstructure:"batch"       yaml:"batch"`
+    SpanFilter OTelSpanFilterConfig `mapstructure:"span_filter" yaml:"span_filter,omitempty"`
 }
 ```
 
@@ -797,20 +819,31 @@ Machine-readable JSON Schemas for each event category are available in:
 ```
 schemas/otel/
   resource.schema.json
+  agent-lifecycle-event.schema.json
   asset-lifecycle-event.schema.json
   scan-result-event.schema.json
   scan-finding-event.schema.json
+  runtime-agent-span.schema.json
   runtime-tool-span.schema.json
   runtime-llm-span.schema.json
   runtime-approval-span.schema.json
   runtime-alert-event.schema.json
   connector-telemetry-event.schema.json
+  galileo-export-profile.schema.json
   metrics.schema.json
 ```
 
 These schemas define the exact attribute names, types, enumerations, and
 required fields for each telemetry payload. Use them for validation,
 code generation, and Splunk field extraction configuration.
+
+The four runtime span schemas are CI conformance contracts: tests emit real
+spans from `internal/telemetry` and compare the complete emitted attribute set
+to each schema. They are not selected or evaluated on the runtime hot path.
+`galileo-export-profile.schema.json` documents and pins Galileo's trace filter;
+it is a routing profile, not a second LLM event schema. See
+[`schemas/README.md`](../schemas/README.md) for the ownership and enforcement
+map, including the small set of intentional `go:embed` copies.
 
 ---
 

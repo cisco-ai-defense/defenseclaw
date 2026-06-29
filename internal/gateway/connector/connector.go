@@ -592,6 +592,16 @@ type HookScriptProvider interface {
 	HookScripts(opts SetupOpts) []string
 }
 
+// HookRuntimeArtifactProvider is implemented by connectors whose installed
+// hook runtime is not made up of the generic shell scripts. The returned
+// absolute paths are persisted in the hook-contract lock and hashed for drift
+// detection. This keeps policy modules, import shims, and similar runtime
+// artifacts visible to doctor without asking the generic hook writer to own
+// them.
+type HookRuntimeArtifactProvider interface {
+	HookRuntimeArtifacts(opts SetupOpts) []string
+}
+
 // HookScriptOwner — plan C2 / S2.5: optional, connectors that own a
 // per-vendor hook template implement this to advertise the BASENAMES
 // (not absolute paths) of the scripts they need written into hookDir.
