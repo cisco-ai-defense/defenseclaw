@@ -134,8 +134,8 @@ sidecar.
 
 | Service          | Host port(s)       | Notes                                                       |
 |------------------|--------------------|-------------------------------------------------------------|
-| `otel-collector` | 4317, 4318, 8888, 8889 | OTLP gRPC (4317), OTLP HTTP (4318), self-telemetry (8888), Prometheus scrape (8889) |
-| `prometheus`     | 9090               | Scrapes collector, receives remote-write                    |
+| `otel-collector` | 4317, 4318, 8888 | OTLP gRPC (4317), OTLP HTTP (4318), self-telemetry (8888) |
+| `prometheus`     | 9090             | Scrapes collector self-metrics and receives application metrics by remote write |
 | `loki`           | 3100               | Receives logs via OTLP HTTP                                 |
 | `tempo`          | 3200, 9095         | HTTP query (3200), gRPC (9095). Traces enter via the collector on 4317 |
 | `grafana`        | 3000               | admin / admin; anon Viewer role enabled (loopback only)     |

@@ -379,6 +379,147 @@ func (a *APIServer) finalizeAgentHook(
 	safeSection("audit", func() {
 		a.logConnectorHookAuditEnvelope(ctx, env)
 	})
+
+	// Emit one first-class, agent-scoped hook outcome after the shared audit
+	// envelope is finalized. The guardrail's EventVerdict records the scanner's
+	// decision, but it cannot say whether this connector actually received a
+	// block or whether action/connector capabilities downgraded it to an
+	// observe-mode would-block. This event carries that final answer and shares
+	// the exact execution/lifecycle identity used by the preceding and
+	// subsequent model/tool events, giving Agent360 a durable recovery path.
+	safeSection("hook_decision", func() {
+		a.emitHookDecisionEvent(ctx, req, resp, env)
+	})
+}
+
+// emitHookDecisionEvent materializes the final connector-facing decision as a
+// gatewaylog EventHookDecision. It deliberately does not update lifecycle
+// metrics or the phase cursor: a decision is an observation within the hook
+// operation, not an invented agent transition. The following hook event tells
+// us whether the agent retried, selected another tool, asked the model again,
+// or terminated.
+func (a *APIServer) emitHookDecisionEvent(
+	ctx context.Context,
+	req agentHookRequest,
+	resp agentHookResponse,
+	env HookAuditEnvelope,
+) {
+	source := strings.TrimSpace(req.ConnectorName)
+	if source == "" {
+		return
+	}
+
+	// Use the exact same deterministic normalization as the LLM/lifecycle
+	// emitter. At this point that emitter has already populated the bounded
+	// hook-session snapshot, so mergeHookSessionLifecycle recovers the active
+	// execution identity without advancing the phase sequence a second time.
+	meta := hookLLMEventMeta(
+		source,
+		req.SessionID,
+		req.TurnID,
+		firstString(req.Payload, "model", "model_name", "modelName"),
+		source,
+		req.AgentID,
+		req.AgentName,
+		req.AgentType,
+		req.Payload,
+	)
+	meta.ToolID = firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")
+	meta.ToolName = req.ToolName
+	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
+	meta = a.reconcileHookParent(meta)
+	meta = a.mergeHookSessionLifecycle(meta)
+	if snapshot, ok := a.hookLifecycleSnapshot(meta.Source, meta.SessionID, meta.AgentID); ok {
+		// The lifecycle emitter advanced the execution cursor immediately
+		// before evaluation. Reuse its phase/sequence/operation identifiers
+		// so the decision nests beside that hook transition rather than
+		// looking like a second, synthetic phase change.
+		meta.Phase = firstNonEmpty(snapshot.Phase, meta.Phase)
+		meta.PreviousPhase = firstNonEmpty(snapshot.PreviousPhase, meta.PreviousPhase)
+		meta.OperationID = firstNonEmpty(snapshot.OperationID, meta.OperationID)
+		if snapshot.Sequence > 0 {
+			meta.Sequence = snapshot.Sequence
+		}
+	}
+
+	// A request that did not create an LLM/lifecycle anchor (for example a
+	// malformed early hook) can still carry reliable identity in the context.
+	// Fill only blank fields so an upstream-native agent ID remains canonical.
+	identity := AgentIdentityFromContext(ctx)
+	meta.AgentID = firstNonEmpty(meta.AgentID, identity.AgentID)
+	meta.AgentName = firstNonEmpty(meta.AgentName, identity.AgentName)
+	meta.AgentType = firstNonEmpty(meta.AgentType, identity.AgentType)
+
+	correlation := audit.EnvelopeFromContext(ctx)
+	meta.RunID = firstNonEmpty(meta.RunID, correlation.RunID)
+	meta.RequestID = firstNonEmpty(meta.RequestID, correlation.RequestID)
+	meta.PolicyID = firstNonEmpty(meta.PolicyID, correlation.PolicyID)
+	meta.DestinationApp = firstNonEmpty(
+		meta.DestinationApp,
+		correlation.DestinationApp,
+		hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName),
+	)
+
+	result := strings.TrimSpace(env.Result)
+	if result == "" {
+		result = "ok"
+	}
+	if result != "ok" && result != "panic" {
+		result = "panic"
+	}
+
+	emitEvent(ctx, gatewaylog.Event{
+		EventType:           gatewaylog.EventHookDecision,
+		Severity:            deriveSeverity(resp.Severity),
+		RunID:               meta.RunID,
+		RequestID:           meta.RequestID,
+		SessionID:           meta.SessionID,
+		TurnID:              meta.TurnID,
+		Provider:            meta.Provider,
+		Model:               meta.Model,
+		AgentID:             meta.AgentID,
+		AgentName:           meta.AgentName,
+		AgentType:           meta.AgentType,
+		RootAgentID:         meta.RootAgentID,
+		ParentAgentID:       meta.ParentAgentID,
+		RootSessionID:       meta.RootSessionID,
+		ParentSessionID:     meta.ParentSessionID,
+		AgentLifecycleID:    meta.LifecycleID,
+		AgentExecutionID:    meta.ExecutionID,
+		AgentLifecycleEvent: meta.LifecycleEvent,
+		AgentLifecycleState: meta.LifecycleState,
+		AgentPhase:          meta.Phase,
+		AgentPreviousPhase:  meta.PreviousPhase,
+		AgentPhaseCode:      agentPhaseCodePointer(meta),
+		AgentSequence:       meta.Sequence,
+		AgentOperationID:    meta.OperationID,
+		AgentDepth:          agentDepthPointer(meta),
+		SessionSource:       meta.SessionSource,
+		SessionResumed:      boolPointer(meta.SessionResumed),
+		UserID:              meta.UserID,
+		UserName:            meta.UserName,
+		PolicyID:            meta.PolicyID,
+		DestinationApp:      meta.DestinationApp,
+		ToolName:            meta.ToolName,
+		ToolID:              meta.ToolID,
+		Connector:           source,
+		HookDecision: &gatewaylog.HookDecisionPayload{
+			Connector:    source,
+			Event:        req.HookEventName,
+			Result:       result,
+			Action:       normalizeHookActionLabel(resp.Action),
+			RawAction:    normalizeHookActionLabel(resp.RawAction),
+			Severity:     deriveSeverity(resp.Severity),
+			Mode:         hookLogLabel(resp.Mode),
+			WouldBlock:   resp.WouldBlock,
+			Enforced:     env.Enforced,
+			StepIdx:      env.StepIdx,
+			LatencyMs:    env.ElapsedMs,
+			Reason:       resp.Reason,
+			EvaluationID: resp.EvaluationID,
+			RuleIDs:      append([]string(nil), resp.RuleIDs...),
+		},
+	})
 }
 
 // renderAgentHookResponse projects the unified agentHookResponse
@@ -1062,10 +1203,13 @@ func refreshAuditEnvelopeFromIdentity(ctx context.Context, sessionID string, ide
 func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) AgentIdentity {
 	agentName := firstNonEmpty(req.AgentName, req.AgentType, req.ConnectorName)
 	agentType := firstNonEmpty(req.AgentType, req.ConnectorName)
+	userID, userName := userFromHookPayload(req.Payload)
 	identity := AgentIdentity{
 		AgentID:   strings.TrimSpace(req.AgentID),
 		AgentName: agentName,
 		AgentType: agentType,
+		UserID:    userID,
+		UserName:  userName,
 	}
 	if reg := SharedAgentRegistry(); reg != nil {
 		resolved := reg.Resolve(ctx, req.SessionID, identity.AgentID)
@@ -1120,6 +1264,13 @@ func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHo
 		attrs = append(attrs, attribute.String("gen_ai.operation.id", req.TurnID))
 	}
 	span.SetAttributes(attrs...)
+	meta := hookLLMEventMeta(
+		req.ConnectorName, req.SessionID, req.TurnID,
+		firstString(req.Payload, "model", "model_name", "modelName"),
+		req.ConnectorName, req.AgentID, req.AgentName, req.AgentType, req.Payload,
+	)
+	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
+	applyHookLifecycleSpanAttributes(span, meta)
 }
 
 func normalizeAgentHookRequest(connectorName string, payload map[string]interface{}) agentHookRequest {
@@ -1136,8 +1287,49 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 		event = inferAgentHookEvent(payload)
 	}
 	agentID, agentName, agentType := extractAgentIdentityFromHookPayload(payload)
-	sessionID := firstString(payload, "session_id", "sessionId", "task_id", "conversation_id", "conversationId", "thread_id", "threadId")
-	turnID := firstString(payload, "turn_id", "turnId", "execution_id", "executionId", "generation_id", "generationId", "tool_call_id", "toolCallId")
+	sessionID := firstString(payload,
+		"session_id", "sessionId", "sessionID",
+		"task_id", "conversation_id", "conversationId", "conversationID",
+		"thread_id", "threadId", "trajectory_id", "trajectoryId",
+	)
+	if canonicalEvent(event) == "subagentstart" || canonicalEvent(event) == "subagentstop" {
+		extra := objectAt(payload, "extra")
+		parentSessionID := firstNonEmpty(
+			firstString(payload, "parent_session_id", "parentSessionId", "parentSessionID"),
+			firstString(extra, "parent_session_id", "parentSessionId", "parentSessionID"),
+			sessionID,
+		)
+		childSessionID := firstNonEmpty(
+			firstString(payload, "child_session_id", "childSessionId", "childSessionID"),
+			firstString(extra, "child_session_id", "childSessionId", "childSessionID"),
+		)
+		if childSessionID != "" {
+			payload["parent_session_id"] = parentSessionID
+			sessionID = childSessionID
+		}
+	}
+	if agentID == "" && (canonicalEvent(event) == "subagentstart" || canonicalEvent(event) == "subagentstop") {
+		childIdentity := firstNonEmpty(
+			firstString(payload, "subagent_id", "subagentId", "agent_transcript_path", "agentTranscriptPath", "tool_call_id", "toolCallId"),
+			firstString(payload, "child_role", "agent_name", "agentName", "agent_type", "agentType"),
+			firstString(objectAt(payload, "extra"), "child_role", "agent_name", "agent_type"),
+			"subagent",
+		)
+		agentID = stableLLMEventID("agent", connectorName, sessionID, "subagent", childIdentity)
+		agentName = firstNonEmpty(agentName, childIdentity)
+	}
+	if agentID == "" && canonicalEvent(event) == "teammateidle" {
+		teammate := firstNonEmpty(firstString(payload, "teammate_name", "teammateName"), "teammate")
+		agentID = stableLLMEventID("agent", connectorName, sessionID, "teammate", teammate)
+		agentName = firstNonEmpty(agentName, teammate)
+		payload["parent_agent_id"] = stableLLMEventID("agent", connectorName, sessionID, "root")
+		payload["agent_depth"] = 1
+	}
+	turnID := firstString(payload,
+		"turn_id", "turnId", "turnID",
+		"execution_id", "executionId", "generation_id", "generationId",
+		"tool_call_id", "toolCallId", "message_id", "messageId", "step_id", "stepId",
+	)
 	cwd := firstString(payload, "cwd", "working_dir", "workingDir", "working_directory", "workingDirectory")
 	if cwd == "" {
 		if toolInfo := objectAt(payload, "tool_info"); toolInfo != nil {
@@ -1154,9 +1346,6 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 			}
 		}
 	}
-	if toolName == "" && isPromptLikeEvent(event) {
-		toolName = "message"
-	}
 	if toolName == "" {
 		// Label-only mapping for lifecycle events that carry no tool:
 		// session start/end → "session", subagent stop → "subagent",
@@ -1165,14 +1354,20 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 		// span/log/audit labels (precedent: the antigravity profile
 		// already labels Stop as "session").
 		switch canonicalEvent(event) {
-		case "onsessionstart", "onsessionend", "sessionstart", "sessionend":
+		case "onsessionstart", "onsessionend", "sessionstart", "sessionend",
+			"sessioncreated", "sessionupdated", "sessionstatus", "sessionidle",
+			"sessioncompacted", "sessionerror", "sessiondeleted":
 			toolName = "session"
-		case "subagentstop":
+		case "subagentstart", "subagentstop":
 			toolName = "subagent"
 		case "postllmcall":
 			toolName = "message"
 		default:
-			toolName = "tool"
+			if isPromptLikeEvent(event) {
+				toolName = "message"
+			} else {
+				toolName = "tool"
+			}
 		}
 	}
 
@@ -1195,12 +1390,14 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 		"message",
 		"initial_prompt",
 		"initialPrompt",
+		"task",
+		"description",
 		"custom_instructions",
 		"customInstructions",
 	)
 	if content == "" {
 		if toolInfo := objectAt(payload, "tool_info"); toolInfo != nil {
-			content = firstString(toolInfo, "user_prompt", "content", "command_line", "command", "mcp_result")
+			content = firstString(toolInfo, "user_prompt", "content", "command_line", "command", "mcp_result", "response")
 		}
 	}
 	if content == "" {
@@ -1311,8 +1508,11 @@ func applyContentEnvelopeFallback(content string, payload map[string]interface{}
 }
 
 func extractAgentIdentityFromHookPayload(payload map[string]interface{}) (agentID, agentName, agentType string) {
-	agentID = firstHookIdentityString(payload, "agent_id", "agentId", "assistant_id", "assistantId", "client_agent_id", "clientAgentId")
-	agentName = firstHookIdentityString(payload, "agent_name", "agentName", "assistant_name", "assistantName")
+	agentID = firstHookIdentityString(payload,
+		"agent_id", "agentId", "assistant_id", "assistantId", "client_agent_id", "clientAgentId",
+		"subagent_id", "subagentId", "child_agent_id", "childAgentId",
+	)
+	agentName = firstHookIdentityString(payload, "agent_name", "agentName", "assistant_name", "assistantName", "agentName", "child_role")
 	agentType = firstHookIdentityString(payload, "agent_type", "agentType", "agent_kind", "agentKind", "runtime", "runtime_name")
 	if agentObj := objectAt(payload, "agent"); agentObj != nil {
 		if agentID == "" {
@@ -1323,6 +1523,20 @@ func extractAgentIdentityFromHookPayload(payload map[string]interface{}) (agentI
 		}
 		if agentType == "" {
 			agentType = firstHookIdentityString(agentObj, "type", "agent_type", "agentType", "kind", "runtime", "runtime_name")
+		}
+	}
+	if extra := objectAt(payload, "extra"); extra != nil {
+		if agentID == "" {
+			agentID = firstHookIdentityString(extra,
+				"child_subagent_id", "childSubagentId", "subagent_id", "subagentId",
+				"child_agent_id", "childAgentId", "agent_id", "agentId",
+			)
+		}
+		if agentName == "" {
+			agentName = firstHookIdentityString(extra, "child_role", "agent_name", "agentName")
+		}
+		if agentType == "" {
+			agentType = firstHookIdentityString(extra, "child_role", "agent_type", "agentType")
 		}
 	}
 	if agentName == "" {
@@ -1974,7 +2188,7 @@ func isGenericToolInspectionEvent(event string) bool {
 
 func isPromptLikeEvent(event string) bool {
 	switch canonicalEvent(event) {
-	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt",
+	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt", "subagentstart",
 		"prellmcall", "beforeagent", "beforemodel",
 		// Antigravity 2.0 spec: PreInvocation fires just before the
 		// agent makes an invocation (call) to the LLM. Best used for
@@ -2001,7 +2215,7 @@ func isResultLikeEvent(event string) bool {
 		// it through tool_result inspection like antigravity's
 		// PostInvocation below. It stays non-blockable: it is absent
 		// from hermes BlockEvents, so verdicts demote to would_block.
-		"postllmcall",
+		"postllmcall", "postcascaderesponse", "postcascaderesponsewithtranscript",
 		// opencode plugin hook: tool.execute.after fires after a tool
 		// returns; observe-only telemetry routed as a tool_result.
 		"toolexecuteafter",

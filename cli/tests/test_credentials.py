@@ -36,6 +36,8 @@ from defenseclaw.config import (
     JudgeConfig,
     LLMConfig,
     OpenShellConfig,
+    OTelConfig,
+    OTelDestinationConfig,
     PerConnectorGuardrailConfig,
     ScannersConfig,
     SkillScannerConfig,
@@ -151,9 +153,9 @@ class RequirementPredicateTests(unittest.TestCase):
 
     def test_cisco_key_required_only_for_remote_and_both(self):
         for mode, expected in (
-            ("local",  C.Requirement.NOT_USED),
+            ("local", C.Requirement.NOT_USED),
             ("remote", C.Requirement.REQUIRED),
-            ("both",   C.Requirement.REQUIRED),
+            ("both", C.Requirement.REQUIRED),
         ):
             with self.subTest(mode=mode):
                 cfg = _make_cfg(
@@ -178,6 +180,43 @@ class RequirementPredicateTests(unittest.TestCase):
         self.assertEqual(C._splunk_token(off), C.Requirement.NOT_USED)
         on = _make_cfg("/tmp/dc-test", splunk=SplunkConfig(enabled=True))
         self.assertEqual(C._splunk_token(on), C.Requirement.REQUIRED)
+
+    def test_galileo_key_required_only_for_enabled_destination(self):
+        off = _make_cfg("/tmp/dc-test")
+        self.assertEqual(C._galileo_key(off), C.Requirement.NOT_USED)
+
+        disabled = _make_cfg(
+            "/tmp/dc-test",
+            otel=OTelConfig(
+                enabled=True,
+                destinations=[OTelDestinationConfig(name="galileo", preset="galileo", enabled=False)],
+            ),
+        )
+        self.assertEqual(C._galileo_key(disabled), C.Requirement.NOT_USED)
+
+        enabled = _make_cfg(
+            "/tmp/dc-test",
+            otel=OTelConfig(
+                enabled=True,
+                destinations=[OTelDestinationConfig(name="galileo", preset="galileo", enabled=True)],
+            ),
+        )
+        self.assertEqual(C._galileo_key(enabled), C.Requirement.REQUIRED)
+
+        custom_name = _make_cfg(
+            "/tmp/dc-test",
+            otel=OTelConfig(
+                enabled=True,
+                destinations=[
+                    OTelDestinationConfig(
+                        name="galileo-security",
+                        preset="galileo",
+                        enabled=True,
+                    )
+                ],
+            ),
+        )
+        self.assertEqual(C._galileo_key(custom_name), C.Requirement.REQUIRED)
 
     def test_defenseclaw_llm_key_not_used_when_nothing_uses_llm(self):
         cfg = _make_cfg("/tmp/dc-test")
@@ -277,10 +316,52 @@ class BoundEndpointTests(unittest.TestCase):
         self.assertIsNotNone(spec)
         self.assertEqual(spec.resolve_bound_endpoint(cfg), "")
 
+    def test_galileo_returns_destination_endpoint(self):
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            otel=OTelConfig(
+                enabled=True,
+                destinations=[
+                    OTelDestinationConfig(
+                        name="galileo",
+                        preset="galileo",
+                        endpoint="https://api.example.test/otel/traces",
+                    )
+                ],
+            ),
+        )
+        spec = C.lookup("GALILEO_API_KEY")
+        self.assertIsNotNone(spec)
+        self.assertEqual(
+            spec.resolve_bound_endpoint(cfg),
+            "https://api.example.test/otel/traces",
+        )
+
+        cfg.otel.destinations.insert(
+            0,
+            OTelDestinationConfig(
+                name="galileo-stale",
+                preset="galileo",
+                enabled=False,
+                endpoint="https://stale.example.test/otel/traces",
+            ),
+        )
+        self.assertEqual(
+            spec.resolve_bound_endpoint(cfg),
+            "https://api.example.test/otel/traces",
+        )
+
+        cfg.otel.destinations[1].name = "galileo-security"
+        self.assertEqual(
+            spec.resolve_bound_endpoint(cfg),
+            "https://api.example.test/otel/traces",
+        )
+
     def test_resolve_bound_endpoint_swallows_resolver_errors(self):
         """If a future resolver raises (e.g. config refactor changes
         an attribute name), the UX must still render — the hint is
         advisory, not load-bearing."""
+
         def boom(_cfg):
             raise RuntimeError("synthetic")
 
@@ -360,8 +441,9 @@ class ClassifyTests(unittest.TestCase):
                     scanner_mode="remote",  # triggers CISCO_AI_DEFENSE_API_KEY
                 ),
             )
-            env = {k: v for k, v in os.environ.items()
-                   if k not in ("OPENCLAW_GATEWAY_TOKEN", "CISCO_AI_DEFENSE_API_KEY")}
+            env = {
+                k: v for k, v in os.environ.items() if k not in ("OPENCLAW_GATEWAY_TOKEN", "CISCO_AI_DEFENSE_API_KEY")
+            }
             with patch.dict(os.environ, env, clear=True):
                 missing = {s.spec.env_name for s in C.missing_required(cfg)}
                 self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", missing)

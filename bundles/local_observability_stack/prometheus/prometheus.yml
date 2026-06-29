@@ -17,14 +17,6 @@ scrape_configs:
         labels:
           service: otel-collector
 
-  # Metrics exported by the collector's prometheus exporter (fallback
-  # path when remote_write is disabled).
-  - job_name: otel-collector-export
-    static_configs:
-      - targets: ["otel-collector:8889"]
-        labels:
-          service: defenseclaw-prometheus-export
-
   # Loki self-metrics. Exposes loki_distributor_lines_received_total
   # and loki_discarded_samples_total{reason=...} which the
   # `defenseclaw.observability_pipeline` alert group uses to detect

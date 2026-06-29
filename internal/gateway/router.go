@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -668,6 +669,10 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			)
 			r.otel.SetRawSpanString(span, "defenseclaw.llm.response.content", contentStr)
 			r.otel.SetRawSpanString(span, "defenseclaw.llm.response.raw_content", string(msg.Content))
+			if span != nil {
+				span.SetAttributes(attribute.Bool("defenseclaw.telemetry.input.reported", false))
+			}
+			r.otel.SetGenAIOutput(span, contentStr)
 			r.otel.EndLLMSpan(
 				parentCtx,
 				span, msg.Model,
@@ -1080,7 +1085,8 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 					r.agentNameForStream(""), // agent name (claw mode fallback)
 					r.agentNameForStream(""), // agent type
 					SharedAgentRegistry().AgentID(),
-					"", // provider filled on session.message
+					"",                       // provider filled on session.message
+					r.agentNameForStream(""), // connector / claw mode
 				)
 				r.spanMu.Lock()
 				r.activeAgentSpans[se.RunID] = &activeAgent{
@@ -1417,6 +1423,7 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 
 		if as != nil {
 			r.otel.SetRawSpanString(as.span, "defenseclaw.tool.output", payload.Output)
+			r.otel.SetGenAIToolResult(as.span, payload.Output)
 			r.otel.EndToolSpan(as.span, exitCode, len(payload.Output), as.startTime, as.tool, as.provider)
 		}
 	}

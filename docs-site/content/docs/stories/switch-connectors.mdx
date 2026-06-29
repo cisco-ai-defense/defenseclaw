@@ -82,5 +82,5 @@ Use **Add** for multi-connector hosts. Use **Replace** only for a deliberate one
 ## Caveats
 
 <Callout>
-The audit DB is portable across connectors but not across DefenseClaw versions in some cases. Run `defenseclaw migrations status` after a major version upgrade to see whether any schema migrations are pending; the CLI prompts you when this is needed and applies them automatically on the next command.
+The audit DB is portable across connectors but not across DefenseClaw versions in some cases. Use [`defenseclaw upgrade`](/docs/get-started/upgrade), which applies release-required migrations before reporting success. Run `defenseclaw migrations status` afterward to inspect the durable cursor; pending entries retry on the next upgrade, not on unrelated CLI commands.
 </Callout>

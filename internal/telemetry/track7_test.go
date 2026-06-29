@@ -314,6 +314,52 @@ func TestRecordExporterHealth_LastExport(t *testing.T) {
 	}
 }
 
+func TestRecordDestinationSpanRoute_EmitsMetric(t *testing.T) {
+	t.Parallel()
+	reader := sdkmetric.NewManualReader()
+	p, err := NewProviderForTest(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	p.RecordDestinationSpanRoute(ctx, "galileo", "accepted", "valid_genai_chat")
+	p.RecordDestinationSpanRoute(ctx, "galileo", "dropped", "not_valid_genai_chat")
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatal(err)
+	}
+	counter := findCounter(rm, "defenseclaw.telemetry.destination.spans")
+	if counter == nil {
+		t.Fatal("destination span routing counter missing")
+	}
+	sum, ok := counter.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("unexpected data type %T", counter.Data)
+	}
+	want := map[string]string{
+		"accepted": "valid_genai_chat",
+		"dropped":  "not_valid_genai_chat",
+	}
+	seen := make(map[string]bool, len(want))
+	for _, point := range sum.DataPoints {
+		for outcome, reason := range want {
+			if hasAttribute(point.Attributes, "destination", "galileo") &&
+				hasAttribute(point.Attributes, "outcome", outcome) &&
+				hasAttribute(point.Attributes, "reason", reason) {
+				if point.Value != 1 {
+					t.Fatalf("%s datapoint=%d want 1", outcome, point.Value)
+				}
+				seen[outcome] = true
+			}
+		}
+	}
+	for outcome := range want {
+		if !seen[outcome] {
+			t.Errorf("missing labeled %s datapoint: %+v", outcome, sum.DataPoints)
+		}
+	}
+}
+
 func TestRecordSQLiteBusy_Counter(t *testing.T) {
 	t.Parallel()
 	reader := sdkmetric.NewManualReader()

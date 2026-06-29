@@ -75,6 +75,12 @@ def _openshell_available(cfg) -> bool:
     binary = getattr(getattr(cfg, "openshell", None), "binary", "")
     if binary and shutil.which(str(binary)):
         return True
+    # ``openshell`` is the historical default launcher name. Older installs
+    # may instead provide the companion ``openshell-sandbox`` executable, so
+    # retain that compatibility fallback only for the default/unset value.
+    # A missing operator-supplied path must not silently select another binary.
+    if binary and str(binary) != "openshell":
+        return False
     return bool(shutil.which("openshell-sandbox"))
 
 
@@ -462,8 +468,8 @@ def _print_observability_status(cfg) -> None:
     """Enumerate every observability destination — gateway OTel exporter
     plus every ``audit_sinks`` entry — in a single section.
 
-    The old ``_print_splunk_integration_status`` was hard-coded to the
-    legacy ``cfg.splunk`` hydration and the single ``otel:`` block and
+    The old ``_print_splunk_integration_status`` was hard-coded to Splunk
+    hydration and a single exporter and
     so couldn't see Datadog, Honeycomb, New Relic, or extra Splunk HEC
     sinks configured via ``setup observability``. This walks the YAML
     via the observability writer so whatever ``setup observability add``

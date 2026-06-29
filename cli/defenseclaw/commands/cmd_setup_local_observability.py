@@ -305,10 +305,20 @@ def down_cmd(app: AppContext, disable_config: bool) -> None:
         from defenseclaw.observability import set_destination_enabled
 
         try:
-            set_destination_enabled("otel", False, app.cfg.data_dir)
-            click.echo(f"  {ux.bold('Config updated:')} otel.enabled=false")
+            set_destination_enabled("local-observability", False, app.cfg.data_dir)
+            click.echo(
+                f"  {ux.bold('Config updated:')} "
+                "otel.destinations[local-observability].enabled=false"
+            )
         except ValueError as exc:
-            click.echo(f"  warning: could not disable otel block: {exc}")
+            # Configurations created before named fan-out used the flat
+            # ``otel:`` exporter. Preserve the old ``down`` behavior until
+            # the next setup mutation migrates that exporter automatically.
+            try:
+                set_destination_enabled("otel", False, app.cfg.data_dir)
+                click.echo(f"  {ux.bold('Config updated:')} otel.enabled=false")
+            except ValueError:
+                click.echo(f"  warning: could not disable otel block: {exc}")
 
         # Best-effort: also flip off the matching audit sink we
         # planted in ``up``. We only disable, never delete, so an
@@ -623,9 +633,10 @@ def _apply_local_otlp_config(
             # force http here for SDKs that can't speak grpc locally.
             "protocol": protocol,
             "insecure": "true",
+            "service_name": service_name,
         },
         app.cfg.data_dir,
-        name=service_name,
+        name="local-observability",
         enabled=True,
         signals=signals,  # type: ignore[arg-type]
     )

@@ -53,6 +53,42 @@
       "description": "Per-connector install signals reported by agent discovery."
     },
     {
+      "name": "defenseclaw.agent.last_seen",
+      "type": "gauge",
+      "unit": "s",
+      "description": "Unix seconds when an agent lifecycle transition was last observed."
+    },
+    {
+      "name": "defenseclaw.agent.lifecycle.transitions",
+      "type": "counter",
+      "unit": "{transition}",
+      "description": "Agent lifecycle transitions by stable identity, execution, event, and state."
+    },
+    {
+      "name": "defenseclaw.agent.phase.current",
+      "type": "gauge",
+      "unit": "1",
+      "description": "Current execution phase encoded as a stable integer for state timelines."
+    },
+    {
+      "name": "defenseclaw.agent.phase.transitions",
+      "type": "counter",
+      "unit": "{transition}",
+      "description": "Directed execution phase transitions by stable agent identity and execution."
+    },
+    {
+      "name": "defenseclaw.agent.reported_cost",
+      "type": "gauge",
+      "unit": "USD",
+      "description": "Latest upstream-reported cumulative agent cost in USD; absent when the connector does not report cost."
+    },
+    {
+      "name": "defenseclaw.agent.token.usage",
+      "type": "counter",
+      "unit": "{token}",
+      "description": "Connector-reported input and output tokens attributed to an agent tree."
+    },
+    {
       "name": "defenseclaw.ai.components.installs",
       "type": "gauge",
       "unit": "{install}",
@@ -647,6 +683,18 @@
       "description": "SSE/stream lifecycle transitions (open/close) per route/outcome"
     },
     {
+      "name": "defenseclaw.telemetry.destination.spans",
+      "type": "counter",
+      "unit": "{span}",
+      "description": "Spans accepted or dropped by a named telemetry destination profile"
+    },
+    {
+      "name": "defenseclaw.telemetry.destination.exports",
+      "type": "counter",
+      "unit": "{span}",
+      "description": "Spans attempted, delivered, rejected, or failed by a named OTLP destination"
+    },
+    {
       "name": "defenseclaw.telemetry.exporter.errors",
       "type": "counter",
       "unit": "{error}",
@@ -748,7 +796,9 @@
     "scan_metrics": {
       "type": "array",
       "description": "Metrics related to asset scanning.",
-      "items": { "$ref": "#/$defs/metricDef" },
+      "items": {
+        "$ref": "#/$defs/metricDef"
+      },
       "default": [
         {
           "name": "defenseclaw.scan.count",
@@ -758,16 +808,31 @@
           "attributes": {
             "scanner": {
               "type": "string",
-              "enum": ["skill-scanner", "mcp-scanner", "cisco-aibom", "codeguard"],
+              "enum": [
+                "skill-scanner",
+                "mcp-scanner",
+                "cisco-aibom",
+                "codeguard"
+              ],
               "description": "Scanner that performed the scan."
             },
             "target_type": {
               "type": "string",
-              "enum": ["skill", "mcp", "plugin", "code"]
+              "enum": [
+                "skill",
+                "mcp",
+                "plugin",
+                "code"
+              ]
             },
             "verdict": {
               "type": "string",
-              "enum": ["clean", "warning", "blocked", "rejected"]
+              "enum": [
+                "clean",
+                "warning",
+                "blocked",
+                "rejected"
+              ]
             }
           }
         },
@@ -777,8 +842,18 @@
           "unit": "ms",
           "description": "Scan duration distribution.",
           "attributes": {
-            "scanner": { "type": "string" },
-            "target_type": { "type": "string", "enum": ["skill", "mcp", "plugin", "code"] }
+            "scanner": {
+              "type": "string"
+            },
+            "target_type": {
+              "type": "string",
+              "enum": [
+                "skill",
+                "mcp",
+                "plugin",
+                "code"
+              ]
+            }
           }
         },
         {
@@ -787,9 +862,28 @@
           "unit": "{finding}",
           "description": "Total findings across all scans.",
           "attributes": {
-            "scanner": { "type": "string" },
-            "target_type": { "type": "string", "enum": ["skill", "mcp", "plugin", "code"] },
-            "severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] }
+            "scanner": {
+              "type": "string"
+            },
+            "target_type": {
+              "type": "string",
+              "enum": [
+                "skill",
+                "mcp",
+                "plugin",
+                "code"
+              ]
+            },
+            "severity": {
+              "type": "string",
+              "enum": [
+                "CRITICAL",
+                "HIGH",
+                "MEDIUM",
+                "LOW",
+                "INFO"
+              ]
+            }
           }
         },
         {
@@ -798,8 +892,25 @@
           "unit": "{finding}",
           "description": "Current open finding count (latest state).",
           "attributes": {
-            "target_type": { "type": "string", "enum": ["skill", "mcp", "plugin", "code"] },
-            "severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] }
+            "target_type": {
+              "type": "string",
+              "enum": [
+                "skill",
+                "mcp",
+                "plugin",
+                "code"
+              ]
+            },
+            "severity": {
+              "type": "string",
+              "enum": [
+                "CRITICAL",
+                "HIGH",
+                "MEDIUM",
+                "LOW",
+                "INFO"
+              ]
+            }
           }
         }
       ]
@@ -807,7 +918,9 @@
     "runtime_metrics": {
       "type": "array",
       "description": "Metrics related to runtime tool and LLM calls.",
-      "items": { "$ref": "#/$defs/metricDef" },
+      "items": {
+        "$ref": "#/$defs/metricDef"
+      },
       "default": [
         {
           "name": "defenseclaw.tool.calls",
@@ -815,9 +928,21 @@
           "unit": "{call}",
           "description": "Total tool calls observed.",
           "attributes": {
-            "gen_ai.tool.name": { "type": "string", "description": "Tool name." },
-            "tool.provider": { "type": "string", "enum": ["skill", "builtin", "mcp"] },
-            "dangerous": { "type": "boolean" }
+            "gen_ai.tool.name": {
+              "type": "string",
+              "description": "Tool name."
+            },
+            "tool.provider": {
+              "type": "string",
+              "enum": [
+                "skill",
+                "builtin",
+                "mcp"
+              ]
+            },
+            "dangerous": {
+              "type": "boolean"
+            }
           }
         },
         {
@@ -826,8 +951,17 @@
           "unit": "ms",
           "description": "Tool call duration distribution.",
           "attributes": {
-            "gen_ai.tool.name": { "type": "string" },
-            "tool.provider": { "type": "string", "enum": ["skill", "builtin", "mcp"] }
+            "gen_ai.tool.name": {
+              "type": "string"
+            },
+            "tool.provider": {
+              "type": "string",
+              "enum": [
+                "skill",
+                "builtin",
+                "mcp"
+              ]
+            }
           }
         },
         {
@@ -836,8 +970,12 @@
           "unit": "{error}",
           "description": "Tool calls that returned non-zero exit codes.",
           "attributes": {
-            "gen_ai.tool.name": { "type": "string" },
-            "exit_code": { "type": "integer" }
+            "gen_ai.tool.name": {
+              "type": "string"
+            },
+            "exit_code": {
+              "type": "integer"
+            }
           }
         },
         {
@@ -846,9 +984,20 @@
           "unit": "{request}",
           "description": "Exec approval requests processed.",
           "attributes": {
-            "result": { "type": "string", "enum": ["approved", "denied", "timeout"] },
-            "auto": { "type": "boolean" },
-            "dangerous": { "type": "boolean" }
+            "result": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "denied",
+                "timeout"
+              ]
+            },
+            "auto": {
+              "type": "boolean"
+            },
+            "dangerous": {
+              "type": "boolean"
+            }
           }
         },
         {
@@ -857,8 +1006,12 @@
           "unit": "{call}",
           "description": "Total LLM calls observed.",
           "attributes": {
-            "gen_ai.system": { "type": "string" },
-            "gen_ai.request.model": { "type": "string" }
+            "gen_ai.system": {
+              "type": "string"
+            },
+            "gen_ai.request.model": {
+              "type": "string"
+            }
           }
         },
         {
@@ -867,8 +1020,16 @@
           "unit": "{token}",
           "description": "Total tokens consumed.",
           "attributes": {
-            "gen_ai.system": { "type": "string" },
-            "token.type": { "type": "string", "enum": ["prompt", "completion"] }
+            "gen_ai.system": {
+              "type": "string"
+            },
+            "token.type": {
+              "type": "string",
+              "enum": [
+                "prompt",
+                "completion"
+              ]
+            }
           }
         },
         {
@@ -877,8 +1038,12 @@
           "unit": "ms",
           "description": "LLM call duration distribution.",
           "attributes": {
-            "gen_ai.system": { "type": "string" },
-            "gen_ai.request.model": { "type": "string" }
+            "gen_ai.system": {
+              "type": "string"
+            },
+            "gen_ai.request.model": {
+              "type": "string"
+            }
           }
         }
       ]
@@ -886,7 +1051,9 @@
     "connector_metrics": {
       "type": "array",
       "description": "Metrics related to connector hook requests, native OTLP ingest, and notify bridge traffic.",
-      "items": { "$ref": "#/$defs/metricDef" },
+      "items": {
+        "$ref": "#/$defs/metricDef"
+      },
       "default": [
         {
           "name": "defenseclaw.connector.hook.invocations",
@@ -896,11 +1063,63 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
+              "enum": [
+                "openclaw",
+                "zeptoclaw",
+                "claudecode",
+                "codex",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+                "openhands",
+                "antigravity",
+                "unknown"
+              ]
             },
-            "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
-            "result": { "type": "string", "enum": ["ok", "rejected", "panic", "unknown", "other"] },
-            "reason": { "type": "string", "enum": ["allow", "block", "alert", "confirm", "panic", "would_block", "none", "other", "unknown"] }
+            "event_type": {
+              "type": "string",
+              "enum": [
+                "prompt",
+                "tool_call",
+                "tool_result",
+                "response",
+                "stop",
+                "notification",
+                "session_start",
+                "session_end",
+                "subagent_start",
+                "subagent_stop",
+                "compact",
+                "other",
+                "unknown"
+              ]
+            },
+            "result": {
+              "type": "string",
+              "enum": [
+                "ok",
+                "rejected",
+                "panic",
+                "unknown",
+                "other"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "allow",
+                "block",
+                "alert",
+                "confirm",
+                "panic",
+                "would_block",
+                "none",
+                "other",
+                "unknown"
+              ]
+            }
           }
         },
         {
@@ -911,11 +1130,63 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
+              "enum": [
+                "openclaw",
+                "zeptoclaw",
+                "claudecode",
+                "codex",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+                "openhands",
+                "antigravity",
+                "unknown"
+              ]
             },
-            "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
-            "result": { "type": "string", "enum": ["ok", "rejected", "panic", "unknown", "other"] },
-            "reason": { "type": "string", "enum": ["allow", "block", "alert", "confirm", "panic", "would_block", "none", "other", "unknown"] }
+            "event_type": {
+              "type": "string",
+              "enum": [
+                "prompt",
+                "tool_call",
+                "tool_result",
+                "response",
+                "stop",
+                "notification",
+                "session_start",
+                "session_end",
+                "subagent_start",
+                "subagent_stop",
+                "compact",
+                "other",
+                "unknown"
+              ]
+            },
+            "result": {
+              "type": "string",
+              "enum": [
+                "ok",
+                "rejected",
+                "panic",
+                "unknown",
+                "other"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "allow",
+                "block",
+                "alert",
+                "confirm",
+                "panic",
+                "would_block",
+                "none",
+                "other",
+                "unknown"
+              ]
+            }
           }
         },
         {
@@ -926,10 +1197,32 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
+              "enum": [
+                "openclaw",
+                "zeptoclaw",
+                "claudecode",
+                "codex",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+                "openhands",
+                "antigravity",
+                "unknown"
+              ]
             },
-            "model": { "type": "string" },
-            "kind": { "type": "string", "enum": ["prompt", "completion", "total"] }
+            "model": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "prompt",
+                "completion",
+                "total"
+              ]
+            }
           }
         },
         {
@@ -940,12 +1233,59 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
+              "enum": [
+                "openclaw",
+                "zeptoclaw",
+                "claudecode",
+                "codex",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+                "openhands",
+                "antigravity",
+                "unknown"
+              ]
             },
-            "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
-            "action": { "type": "string", "enum": ["allow", "block", "alert", "confirm", "panic", "would_block", "none", "other", "unknown"] },
-            "severity": { "type": "string" },
-            "would_block": { "type": "boolean" }
+            "event_type": {
+              "type": "string",
+              "enum": [
+                "prompt",
+                "tool_call",
+                "tool_result",
+                "response",
+                "stop",
+                "notification",
+                "session_start",
+                "session_end",
+                "subagent_start",
+                "subagent_stop",
+                "compact",
+                "other",
+                "unknown"
+              ]
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "allow",
+                "block",
+                "alert",
+                "confirm",
+                "panic",
+                "would_block",
+                "none",
+                "other",
+                "unknown"
+              ]
+            },
+            "severity": {
+              "type": "string"
+            },
+            "would_block": {
+              "type": "boolean"
+            }
           }
         },
         {
@@ -956,7 +1296,20 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
+              "enum": [
+                "openclaw",
+                "zeptoclaw",
+                "claudecode",
+                "codex",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+                "openhands",
+                "antigravity",
+                "unknown"
+              ]
             }
           }
         },
@@ -966,12 +1319,39 @@
           "unit": "{request}",
           "description": "Native connector OTLP-HTTP batches received by the gateway.",
           "attributes": {
-            "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
+            "signal": {
+              "type": "string",
+              "enum": [
+                "logs",
+                "metrics",
+                "traces",
+                "unknown"
+              ]
+            },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
+              "enum": [
+                "openclaw",
+                "zeptoclaw",
+                "claudecode",
+                "codex",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+                "openhands",
+                "antigravity",
+                "unknown"
+              ]
             },
-            "result": { "type": "string", "enum": ["ok", "malformed"] }
+            "result": {
+              "type": "string",
+              "enum": [
+                "ok",
+                "malformed"
+              ]
+            }
           }
         },
         {
@@ -980,10 +1360,31 @@
           "unit": "{record}",
           "description": "Native connector OTLP leaf records extracted from accepted batches.",
           "attributes": {
-            "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
+            "signal": {
+              "type": "string",
+              "enum": [
+                "logs",
+                "metrics",
+                "traces",
+                "unknown"
+              ]
+            },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
+              "enum": [
+                "openclaw",
+                "zeptoclaw",
+                "claudecode",
+                "codex",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+                "openhands",
+                "antigravity",
+                "unknown"
+              ]
             }
           }
         },
@@ -993,10 +1394,31 @@
           "unit": "By",
           "description": "Native connector OTLP request-body bytes received by the gateway.",
           "attributes": {
-            "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
+            "signal": {
+              "type": "string",
+              "enum": [
+                "logs",
+                "metrics",
+                "traces",
+                "unknown"
+              ]
+            },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
+              "enum": [
+                "openclaw",
+                "zeptoclaw",
+                "claudecode",
+                "codex",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+                "openhands",
+                "antigravity",
+                "unknown"
+              ]
             }
           }
         },
@@ -1006,10 +1428,31 @@
           "unit": "{request}",
           "description": "Native connector OTLP batches that failed payload normalization or summary parsing.",
           "attributes": {
-            "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
+            "signal": {
+              "type": "string",
+              "enum": [
+                "logs",
+                "metrics",
+                "traces",
+                "unknown"
+              ]
+            },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
+              "enum": [
+                "openclaw",
+                "zeptoclaw",
+                "claudecode",
+                "codex",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+                "openhands",
+                "antigravity",
+                "unknown"
+              ]
             }
           }
         },
@@ -1019,10 +1462,31 @@
           "unit": "s",
           "description": "Unix seconds timestamp of the last native connector OTLP batch.",
           "attributes": {
-            "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
+            "signal": {
+              "type": "string",
+              "enum": [
+                "logs",
+                "metrics",
+                "traces",
+                "unknown"
+              ]
+            },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
+              "enum": [
+                "openclaw",
+                "zeptoclaw",
+                "claudecode",
+                "codex",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+                "openhands",
+                "antigravity",
+                "unknown"
+              ]
             }
           }
         },
@@ -1032,9 +1496,19 @@
           "unit": "{event}",
           "description": "Codex notify bridge events received by the gateway.",
           "attributes": {
-            "type": { "type": "string" },
-            "status": { "type": "string" },
-            "result": { "type": "string", "enum": ["ok", "malformed"] }
+            "type": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string",
+              "enum": [
+                "ok",
+                "malformed"
+              ]
+            }
           }
         },
         {
@@ -1043,7 +1517,12 @@
           "unit": "{event}",
           "description": "Codex notify payloads that failed JSON parsing.",
           "attributes": {
-            "type": { "type": "string", "enum": ["malformed"] }
+            "type": {
+              "type": "string",
+              "enum": [
+                "malformed"
+              ]
+            }
           }
         }
       ]
@@ -1051,7 +1530,9 @@
     "alert_metrics": {
       "type": "array",
       "description": "Metrics related to runtime alerts and guardrail evaluations.",
-      "items": { "$ref": "#/$defs/metricDef" },
+      "items": {
+        "$ref": "#/$defs/metricDef"
+      },
       "default": [
         {
           "name": "defenseclaw.alert.count",
@@ -1061,10 +1542,35 @@
           "attributes": {
             "alert.type": {
               "type": "string",
-              "enum": ["dangerous-command", "guardrail-flag", "guardrail-block", "prompt-injection", "data-exfiltration", "content-violation", "codeguard-finding"]
+              "enum": [
+                "dangerous-command",
+                "guardrail-flag",
+                "guardrail-block",
+                "prompt-injection",
+                "data-exfiltration",
+                "content-violation",
+                "codeguard-finding"
+              ]
             },
-            "alert.severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
-            "alert.source": { "type": "string", "enum": ["local-pattern", "local-guardrail", "ai-defense", "opa-policy", "codeguard"] }
+            "alert.severity": {
+              "type": "string",
+              "enum": [
+                "CRITICAL",
+                "HIGH",
+                "MEDIUM",
+                "LOW"
+              ]
+            },
+            "alert.source": {
+              "type": "string",
+              "enum": [
+                "local-pattern",
+                "local-guardrail",
+                "ai-defense",
+                "opa-policy",
+                "codeguard"
+              ]
+            }
           }
         },
         {
@@ -1073,8 +1579,26 @@
           "unit": "{evaluation}",
           "description": "Total guardrail evaluations performed.",
           "attributes": {
-            "guardrail.scanner": { "type": "string", "enum": ["ai-defense", "skill-scanner", "opa", "codeguard"] },
-            "guardrail.action_taken": { "type": "string", "enum": ["log", "warn", "block", "deny", "allow", "alert"] }
+            "guardrail.scanner": {
+              "type": "string",
+              "enum": [
+                "ai-defense",
+                "skill-scanner",
+                "opa",
+                "codeguard"
+              ]
+            },
+            "guardrail.action_taken": {
+              "type": "string",
+              "enum": [
+                "log",
+                "warn",
+                "block",
+                "deny",
+                "allow",
+                "alert"
+              ]
+            }
           }
         },
         {
@@ -1083,7 +1607,15 @@
           "unit": "ms",
           "description": "Guardrail evaluation latency distribution.",
           "attributes": {
-            "guardrail.scanner": { "type": "string", "enum": ["ai-defense", "skill-scanner", "opa", "codeguard"] }
+            "guardrail.scanner": {
+              "type": "string",
+              "enum": [
+                "ai-defense",
+                "skill-scanner",
+                "opa",
+                "codeguard"
+              ]
+            }
           }
         }
       ]
@@ -1091,7 +1623,9 @@
     "policy_metrics": {
       "type": "array",
       "description": "Metrics related to OPA policy evaluation across all domains.",
-      "items": { "$ref": "#/$defs/metricDef" },
+      "items": {
+        "$ref": "#/$defs/metricDef"
+      },
       "default": [
         {
           "name": "defenseclaw.policy.evaluations",
@@ -1101,12 +1635,32 @@
           "attributes": {
             "policy.domain": {
               "type": "string",
-              "enum": ["admission", "firewall", "sandbox", "audit", "skill-actions", "guardrail"],
+              "enum": [
+                "admission",
+                "firewall",
+                "sandbox",
+                "audit",
+                "skill-actions",
+                "guardrail"
+              ],
               "description": "Policy domain evaluated."
             },
             "policy.verdict": {
               "type": "string",
-              "enum": ["allow", "deny", "block", "blocked", "rejected", "clean", "warning", "retain", "expire", "restrict", "enforce", "scan"],
+              "enum": [
+                "allow",
+                "deny",
+                "block",
+                "blocked",
+                "rejected",
+                "clean",
+                "warning",
+                "retain",
+                "expire",
+                "restrict",
+                "enforce",
+                "scan"
+              ],
               "description": "Verdict returned by the policy evaluation."
             }
           }
@@ -1119,7 +1673,14 @@
           "attributes": {
             "policy.domain": {
               "type": "string",
-              "enum": ["admission", "firewall", "sandbox", "audit", "skill-actions", "guardrail"],
+              "enum": [
+                "admission",
+                "firewall",
+                "sandbox",
+                "audit",
+                "skill-actions",
+                "guardrail"
+              ],
               "description": "Policy domain evaluated."
             }
           }
@@ -1132,7 +1693,10 @@
           "attributes": {
             "policy.status": {
               "type": "string",
-              "enum": ["success", "failed"],
+              "enum": [
+                "success",
+                "failed"
+              ],
               "description": "Outcome of the reload operation."
             }
           }
@@ -1142,7 +1706,9 @@
     "process_metrics": {
       "type": "array",
       "description": "Metrics related to gateway process health and recovered failure paths.",
-      "items": { "$ref": "#/$defs/metricDef" },
+      "items": {
+        "$ref": "#/$defs/metricDef"
+      },
       "default": [
         {
           "name": "defenseclaw.panics.total",
@@ -1150,7 +1716,9 @@
           "unit": "{panic}",
           "description": "Recovered panics by subsystem.",
           "attributes": {
-            "subsystem": { "type": "string" }
+            "subsystem": {
+              "type": "string"
+            }
           }
         }
       ]
@@ -1159,7 +1727,13 @@
   "$defs": {
     "metricDef": {
       "type": "object",
-      "required": ["name", "type", "unit", "description", "attributes"],
+      "required": [
+        "name",
+        "type",
+        "unit",
+        "description",
+        "attributes"
+      ],
       "properties": {
         "name": {
           "type": "string",
@@ -1167,7 +1741,12 @@
         },
         "type": {
           "type": "string",
-          "enum": ["counter", "histogram", "updowncounter", "gauge"],
+          "enum": [
+            "counter",
+            "histogram",
+            "updowncounter",
+            "gauge"
+          ],
           "description": "OTEL instrument type."
         },
         "unit": {
@@ -1183,9 +1762,15 @@
           "additionalProperties": {
             "type": "object",
             "properties": {
-              "type": { "type": "string" },
-              "enum": { "type": "array" },
-              "description": { "type": "string" }
+              "type": {
+                "type": "string"
+              },
+              "enum": {
+                "type": "array"
+              },
+              "description": {
+                "type": "string"
+              }
             }
           }
         }

@@ -449,6 +449,14 @@ def test_f0081_future_schema_cursor_is_preserved(tmp_path):
     }
     with open(cursor_path, "w") as f:
         json.dump(original, f, sort_keys=True)
+    config_path = data_dir / "config.yaml"
+    legacy_config = (
+        "config_version: 6\n"
+        "otel:\n"
+        "  enabled: true\n"
+        "  endpoint: 127.0.0.1:4317\n"
+    )
+    config_path.write_text(legacy_config)
 
     # Detection helpers tell a newer cursor apart from a missing one.
     assert (
@@ -466,6 +474,10 @@ def test_f0081_future_schema_cursor_is_preserved(tmp_path):
     # The newer cursor is byte-for-byte intact.
     with open(cursor_path) as f:
         assert json.load(f) == original
+    # Refusal happens before any configuration-schema write as well. An older
+    # upgrader must not partially mutate a host owned by a newer cursor.
+    assert config_path.read_text() == legacy_config
+    assert not (data_dir / "config.yaml.pre-observability-migration.bak").exists()
 
 
 def test_f0081_missing_cursor_still_bootstraps(tmp_path):

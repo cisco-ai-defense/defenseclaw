@@ -286,13 +286,32 @@ prepare_release_root() {
 
 assert_candidate_assets() {
     local dir="${RELEASE_ROOT}/${TARGET_VERSION}"
+    local wheel="${dir}/defenseclaw-${TARGET_VERSION}-py3-none-any.whl"
     [[ -d "${dir}" ]] || die "release root must contain ${TARGET_VERSION}/: ${RELEASE_ROOT}"
-    [[ -f "${dir}/defenseclaw-${TARGET_VERSION}-py3-none-any.whl" ]] \
+    [[ -f "${wheel}" ]] \
         || die "candidate wheel missing from ${dir}"
     [[ -f "${dir}/defenseclaw_${TARGET_VERSION}_${OS_NAME}_${ARCH_NAME}.tar.gz" ]] \
         || die "candidate gateway archive missing for ${OS_NAME}/${ARCH_NAME} in ${dir}"
     [[ -f "${dir}/upgrade-manifest.json" ]] || die "upgrade-manifest.json missing from ${dir}"
     [[ -f "${dir}/checksums.txt" ]] || die "checksums.txt missing from ${dir}"
+    python3 - "${wheel}" <<'PY'
+from pathlib import Path
+import sys
+import zipfile
+
+wheel = Path(sys.argv[1])
+with zipfile.ZipFile(wheel) as archive:
+    bytecode = [
+        name for name in archive.namelist()
+        if "/__pycache__/" in name or name.endswith((".pyc", ".pyo"))
+    ]
+if bytecode:
+    sample = ", ".join(bytecode[:5])
+    raise SystemExit(
+        f"candidate wheel contains stale Python bytecode ({len(bytecode)} file(s)): {sample}"
+    )
+print("wheel_bytecode=clean")
+PY
 }
 
 start_release_server() {
@@ -389,6 +408,37 @@ install_baseline() {
     seed_baseline_install
 }
 
+seed_legacy_otel_fixture() {
+    log "Seeding legacy flat OTel upgrade fixture"
+    mkdir -p "${SMOKE_HOME}/.defenseclaw"
+    cat >"${SMOKE_HOME}/.defenseclaw/config.yaml" <<'YAML'
+config_version: 6
+otel:
+  enabled: true
+  protocol: grpc
+  endpoint: 127.0.0.1:4317
+  headers:
+    X-Upgrade-Fixture: preserved
+  traces:
+    enabled: true
+    sampler: always_on
+  metrics:
+    enabled: true
+  logs:
+    enabled: true
+    emit_individual_findings: true
+  destinations:
+    - name: existing-otlp
+      preset: generic-otlp
+      enabled: true
+      protocol: grpc
+      endpoint: collector.example.test:4317
+      traces: {enabled: true}
+      metrics: {enabled: false}
+      logs: {enabled: false}
+YAML
+}
+
 patch_installed_upgrade_endpoint() {
     local upgrade_py
     upgrade_py="$(find "${SMOKE_HOME}/.defenseclaw/.venv" \
@@ -483,6 +533,38 @@ if missing:
 print("cursor_applied=" + ",".join(cursor.get("applied", [])))
 PY
 
+    "${venv_python}" - "${SMOKE_HOME}/.defenseclaw" <<'PY'
+from pathlib import Path
+import sys
+
+import yaml
+
+data_dir = Path(sys.argv[1])
+config = yaml.safe_load((data_dir / "config.yaml").read_text(encoding="utf-8")) or {}
+if config.get("config_version") != 7:
+    raise SystemExit(f"config_version={config.get('config_version')!r}; want 7")
+otel = config.get("otel") or {}
+destinations = otel.get("destinations") or []
+names = [item.get("name") for item in destinations if isinstance(item, dict)]
+if names != ["local-observability", "existing-otlp"]:
+    raise SystemExit(f"named OTel migration mismatch: {names!r}")
+migrated = destinations[0]
+if migrated.get("endpoint") != "127.0.0.1:4317":
+    raise SystemExit(f"legacy endpoint was not preserved: {migrated!r}")
+if migrated.get("headers") != {"X-Upgrade-Fixture": "preserved"}:
+    raise SystemExit(f"legacy headers were not preserved: {migrated!r}")
+if any(key in otel for key in ("endpoint", "protocol", "headers")):
+    raise SystemExit(f"flat OTel transport fields remain: {otel!r}")
+if otel.get("traces") != {"sampler": "always_on"}:
+    raise SystemExit(f"process-wide trace policy was not preserved: {otel.get('traces')!r}")
+if otel.get("logs") != {"emit_individual_findings": True}:
+    raise SystemExit(f"process-wide log policy was not preserved: {otel.get('logs')!r}")
+backup = data_dir / "config.yaml.pre-observability-migration.bak"
+if not backup.is_file():
+    raise SystemExit("named OTel migration did not create its one-time backup")
+print("config_v7_named_otel=ok")
+PY
+
     "${venv_python}" - <<'PY'
 import textual
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile
@@ -511,6 +593,7 @@ run_one_upgrade_smoke() {
     mkdir -p "${SMOKE_HOME}"
 
     install_baseline
+    seed_legacy_otel_fixture
     patch_installed_upgrade_endpoint
     run_upgrade
     verify_upgrade

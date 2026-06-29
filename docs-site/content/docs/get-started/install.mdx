@@ -48,7 +48,7 @@ curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/s
 defenseclaw init
 ```
 
-The installer fetches the latest release for your platform, drops the binaries into `~/.local/bin/`, and writes nothing else — it does not configure DefenseClaw. The follow-up [`defenseclaw init`](/docs/get-started/quickstart) does that interactively. Re-running the curl command upgrades in place.
+The installer fetches the latest release for your platform, drops the binaries into `~/.local/bin/`, and writes nothing else — it does not configure DefenseClaw. The follow-up [`defenseclaw init`](/docs/get-started/quickstart) does that interactively. For an existing installation, use [`defenseclaw upgrade`](/docs/get-started/upgrade) so DefenseClaw verifies release artifacts, backs up operator state, applies release-owned schema migrations, restarts the gateway, and checks health. Re-running the curl installer replaces the installed artifacts but does not provide that complete upgrade transaction.
 
 If you'd rather skip the wizard entirely (CI, scripted demos), use the zero-prompt sibling instead:
 
@@ -145,5 +145,6 @@ The default tears down connector integrations (restores `~/.codex/config.toml`, 
 
 <Cards>
   <Card title="Quickstart" href="/docs/get-started/quickstart" description="Zero-prompt setup that gets you a guardrail in two minutes." />
+  <Card title="Upgrade safely" href="/docs/get-started/upgrade" description="Verified artifacts, automatic migrations, backups, health checks, and observability schema compatibility." />
   <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The full configuration surface for the central command." />
 </Cards>
