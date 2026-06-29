@@ -1322,7 +1322,7 @@ func resolveActiveConnector(reg *connector.Registry, name, surface string) (conn
 	}
 	conn, ok := reg.Get(trimmed)
 	if !ok {
-		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw, hermes, cursor, windsurf, geminicli, copilot, scout, openhands, antigravity) or remove the field to default to openclaw", surface, trimmed)
+		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw, hermes, cursor, windsurf, geminicli, copilot, scout, openhands, antigravity, opencode) or remove the field to default to openclaw", surface, trimmed)
 	}
 	return conn, nil
 }
@@ -2067,7 +2067,7 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 	switch configuredConnectorName(cfg) {
 	case "codex", "claudecode":
 		return false
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "scout", "openhands", "antigravity":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "scout", "openhands", "antigravity", "opencode":
 		return false
 	default:
 		return true
@@ -2136,7 +2136,7 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		return true
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "scout", "openhands", "antigravity":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "scout", "openhands", "antigravity", "opencode":
 		return false
 	default:
 		// Empty / unknown connector: prefer DISABLED over reconnect

@@ -378,8 +378,10 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertIn("read-only Scout bundled skill", result.output)
         self.assertTrue(os.path.isdir(word_dir))
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.quarantine_dir, "skills", "word")))
+        self.assertFalse(os.path.exists(os.path.join(self.app.cfg.quarantine_dir, "skills", "scout", "word")))
         pe = PolicyEngine(self.app.store)
         self.assertFalse(pe.is_quarantined("skill", "word"))
+        self.assertFalse(pe.is_quarantined_for_connector("skill", "word", "scout"))
 
     @patch("defenseclaw.commands.cmd_skill._scan_all_remote")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")

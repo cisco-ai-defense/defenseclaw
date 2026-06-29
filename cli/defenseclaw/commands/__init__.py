@@ -35,7 +35,12 @@ def hint(*lines: str) -> None:
         click.echo(click.style(line, dim=True))
 
 
-def resolve_list_connector(app: Any, requested: str | None) -> str:
+def resolve_list_connector(
+    app: Any,
+    requested: str | None,
+    *,
+    allow_surface_only: bool = False,
+) -> str:
     """Resolve and validate a ``--connector`` override for list commands.
 
     Multi-connector installs let ``skill``/``mcp``/``plugin list`` target a
@@ -77,7 +82,7 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     by_norm = {_normalize_alias(name): name for name in configured if name}
     requested_norm = _normalize_alias(requested)
     match = by_norm.get(requested_norm)
-    if match is None and requested_norm in SURFACE_ONLY_CONNECTORS:
+    if match is None and allow_surface_only and requested_norm in SURFACE_ONLY_CONNECTORS:
         return requested_norm
     if match is None:
         allowed = ", ".join(sorted(configured)) or active
@@ -87,7 +92,12 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     return match
 
 
-def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
+def resolve_list_connectors(
+    app: Any,
+    requested: str | None,
+    *,
+    allow_surface_only: bool = False,
+) -> list[str]:
     """Resolve which connector(s) a *list* command should cover.
 
     This is the plural companion to :func:`resolve_list_connector` and
@@ -108,7 +118,7 @@ def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
       silently operating against ``~/.openclaw`` when no connector exists.
     """
     if requested and requested.strip():
-        return [resolve_list_connector(app, requested)]
+        return [resolve_list_connector(app, requested, allow_surface_only=allow_surface_only)]
     cfg = getattr(app, "cfg", None)
     # Zero-config guard. ``active_connectors()`` already returns [] here, but
     # the singular fallback at the bottom would otherwise floor back to
@@ -131,7 +141,7 @@ def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
                 return names
     except Exception:  # noqa: BLE001 — fall back to the singular active connector.
         pass
-    return [resolve_list_connector(app, "")]
+    return [resolve_list_connector(app, "", allow_surface_only=allow_surface_only)]
 
 
 def list_scope_title(label: str, connector: str, detail: str = "") -> str:

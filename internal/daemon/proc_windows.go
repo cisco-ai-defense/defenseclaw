@@ -139,8 +139,16 @@ func (d *Daemon) killStaleProcesses() {
 		pid := int(entry.ProcessID)
 		exeName := strings.TrimRight(windows.UTF16ToString(entry.ExeFile[:]), "\x00")
 		if shouldKillStaleGatewayProcess(pid, myPID, trackedPID, watchdogPID, exeName, binName) {
-			proc, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
+			proc, err := windows.OpenProcess(
+				windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE,
+				false,
+				uint32(pid),
+			)
 			if err == nil {
+				if !processImagePathMatches(proc, self) {
+					_ = windows.CloseHandle(proc)
+					continue
+				}
 				fmt.Fprintf(os.Stderr, "[daemon] killing stale gateway process (PID %d)\n", pid)
 				_ = windows.TerminateProcess(proc, 1)
 				_ = windows.CloseHandle(proc)
@@ -150,4 +158,20 @@ func (d *Daemon) killStaleProcesses() {
 			break
 		}
 	}
+}
+
+func processImagePathMatches(proc windows.Handle, want string) bool {
+	if want == "" {
+		return false
+	}
+	var buf [32768]uint16
+	size := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(proc, 0, &buf[0], &size); err != nil {
+		return false
+	}
+	got := windows.UTF16ToString(buf[:size])
+	if got == "" {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(got), filepath.Clean(want))
 }

@@ -715,7 +715,7 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
     """
     from defenseclaw.commands import resolve_list_connectors
 
-    connectors = resolve_list_connectors(app, connector_flag)
+    connectors = resolve_list_connectors(app, connector_flag, allow_surface_only=True)
 
     scan_map = _build_scan_map(app.store)
     # SK-4: resolve the effective actions per connector (connector-scoped row
@@ -1150,7 +1150,9 @@ def scan(
         # (connector=None ⇒ the active connector).
         from defenseclaw.commands import resolve_list_connector
         if connector_flag:
-            connectors: list[str | None] = [resolve_list_connector(app, connector_flag)]
+            connectors: list[str | None] = [
+                resolve_list_connector(app, connector_flag, allow_surface_only=True)
+            ]
         elif hasattr(app.cfg, "active_connectors") and len(app.cfg.active_connectors()) > 1:
             connectors = list(app.cfg.active_connectors())
         else:
@@ -1311,7 +1313,7 @@ def scan(
 
     # Resolve before policy checks so --connector X reads that connector's
     # scoped allow/block rows instead of the global row only.
-    connector = scan_connector or resolve_list_connector(app, connector_flag)
+    connector = scan_connector or resolve_list_connector(app, connector_flag, allow_surface_only=True)
     _scan_one_local_skill(
         app,
         scanner,
@@ -1914,7 +1916,7 @@ def _skill_search_dirs(app: AppContext, connector: str = "") -> list[str]:
     """
     if connector:
         from defenseclaw.commands import resolve_list_connector
-        return list(app.cfg.skill_dirs(resolve_list_connector(app, connector)))
+        return list(app.cfg.skill_dirs(resolve_list_connector(app, connector, allow_surface_only=True)))
     dirs: list[str] = list(app.cfg.skill_dirs())  # active connector, first
     for d in _all_active_skill_dirs(app):
         if d not in dirs:
@@ -1957,7 +1959,7 @@ def _skill_match_dir_scopes(app: AppContext, target: str, connector: str = "") -
     name = _skill_basename(target)
     if connector:
         from defenseclaw.commands import resolve_list_connector
-        resolved = resolve_list_connector(app, connector)
+        resolved = resolve_list_connector(app, connector, allow_surface_only=True)
         scoped_matches: list[tuple[str, str]] = []
         for d in app.cfg.skill_dirs(resolved):
             candidate = _matched_candidate(d, name)
@@ -2025,7 +2027,7 @@ def _scan_skill_roots(app: AppContext, connector_flag: str) -> list[str]:
     if connector_flag:
         try:
             from defenseclaw.commands import resolve_list_connector
-            return list(cfg.skill_dirs(resolve_list_connector(app, connector_flag)))
+            return list(cfg.skill_dirs(resolve_list_connector(app, connector_flag, allow_surface_only=True)))
         except Exception:  # noqa: BLE001 — fall back to the union below.
             pass
     return _all_active_skill_dirs(app)
@@ -2054,8 +2056,10 @@ def _read_only_skill_roots(app: AppContext, connector: str | None) -> list[str]:
     roots: list[str] = []
     try:
         skill_dirs = app.cfg.skill_dirs("scout")
-    except Exception:
-        return roots
+    except Exception as exc:
+        raise click.ClickException(
+            "could not resolve Scout skill directories; refusing to mutate Scout skills"
+        ) from exc
     for d in skill_dirs:
         if os.path.basename(os.path.normpath(d)) == "bundled-skills":
             roots.append(os.path.realpath(d))
@@ -2807,7 +2811,7 @@ def _resolve_connector_scope(app: AppContext, connector_flag: str) -> str:
     if not connector_flag:
         return ""
     from defenseclaw.commands import resolve_list_connector
-    return resolve_list_connector(app, connector_flag)
+    return resolve_list_connector(app, connector_flag, allow_surface_only=True)
 
 
 def _skill_policy_fanout_connectors(
@@ -3482,7 +3486,7 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
     resolved_connector = ""
     if connector_flag:
         from defenseclaw.commands import resolve_list_connector
-        resolved_connector = resolve_list_connector(app, connector_flag)
+        resolved_connector = resolve_list_connector(app, connector_flag, allow_surface_only=True)
         scope_dirs = _mutable_skill_dirs(app, resolved_connector)
         read_only_roots = _read_only_skill_roots(app, resolved_connector)
     else:
@@ -3705,7 +3709,7 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
 
     skill_name = os.path.basename(name)
     if connector_flag:
-        connector = resolve_list_connector(app, connector_flag)
+        connector = resolve_list_connector(app, connector_flag, allow_surface_only=True)
         info_map = _skill_info_card(
             app,
             skill_name,
@@ -4015,7 +4019,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
         click.echo(f"error: invalid ClawHub skill name {name!r}", err=True)
         raise SystemExit(2)
 
-    connectors = resolve_list_connectors(app, connector_flag)
+    connectors = resolve_list_connectors(app, connector_flag, allow_surface_only=True)
     targets = _skill_install_targets(
         app, connectors, explicit_connector=bool(connector_flag),
     )

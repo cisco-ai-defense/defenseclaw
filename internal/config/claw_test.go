@@ -218,13 +218,22 @@ func TestScoutConnectorPathsDoNotFallBackToOpenClaw(t *testing.T) {
 	}
 
 	dirs := cfg.SkillDirsForConnector("scout")
-	for _, want := range []string{
+	wantDirs := []string{
 		filepath.Join(home, ".copilot", "bundled-skills"),
 		filepath.Join(home, ".copilot", "skills"),
 		filepath.Join(home, ".copilot", "m-skills"),
-	} {
+	}
+	if len(dirs) != len(wantDirs) {
+		t.Fatalf("SkillDirsForConnector(scout) = %v, want exactly %v", dirs, wantDirs)
+	}
+	for _, want := range wantDirs {
 		if !containsPath(dirs, want) {
 			t.Fatalf("SkillDirsForConnector(scout) = %v, want %q", dirs, want)
+		}
+	}
+	for _, got := range dirs {
+		if strings.Contains(got, ".openclaw") {
+			t.Fatalf("SkillDirsForConnector(scout) included OpenClaw fallback dir %q", got)
 		}
 	}
 	if plugins := cfg.PluginDirsForConnector("scout"); len(plugins) != 0 {

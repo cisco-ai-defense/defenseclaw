@@ -5986,32 +5986,18 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 		APIAddr:   "127.0.0.1:18970",
 	}
 
-	type tc struct {
-		name      string
-		ctor      func() Connector
-		allowNoop bool
-	}
-	cases := []tc{
-		{name: "zeptoclaw", ctor: func() Connector { return NewZeptoClawConnector() }},
-		{name: "openclaw", ctor: func() Connector { return NewOpenClawConnector() }},
-		{name: "codex", ctor: func() Connector { return NewCodexConnector() }},
-		{name: "claudecode", ctor: func() Connector { return NewClaudeCodeConnector() }},
-		{name: "hermes", ctor: func() Connector { return NewHermesConnector() }},
-		{name: "cursor", ctor: func() Connector { return NewCursorConnector() }},
-		{name: "windsurf", ctor: func() Connector { return NewWindsurfConnector() }},
-		{name: "geminicli", ctor: func() Connector { return NewGeminiCLIConnector() }},
-		{name: "copilot", ctor: func() Connector { return NewCopilotConnector() }},
-		{name: "scout", ctor: func() Connector { return NewScoutConnector() }, allowNoop: true},
-		{name: "openhands", ctor: func() Connector { return NewOpenHandsConnector() }},
-		{name: "antigravity", ctor: func() Connector { return NewAntigravityConnector() }},
-	}
+	registry := NewDefaultRegistry()
+	allowNoop := map[string]bool{"scout": true}
 
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			conn := c.ctor()
+	for _, name := range registry.Names() {
+		t.Run(name, func(t *testing.T) {
+			conn, ok := registry.Get(name)
+			if !ok {
+				t.Fatalf("default registry name %q did not resolve", name)
+			}
 			ap, ok := conn.(AgentPathProvider)
 			if !ok {
-				t.Fatalf("%s does not implement AgentPathProvider", c.name)
+				t.Fatalf("%s does not implement AgentPathProvider", name)
 			}
 			paths := ap.AgentPaths(opts)
 
@@ -6019,25 +6005,25 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 			// the operator should know about (PatchedFiles or
 			// CreatedDirs). Pure-metadata-only connectors are
 			// not allowed at this layer.
-			if !c.allowNoop && len(paths.PatchedFiles) == 0 && len(paths.CreatedDirs) == 0 {
-				t.Errorf("%s: neither PatchedFiles nor CreatedDirs declared — connector appears to be a no-op", c.name)
+			if !allowNoop[name] && len(paths.PatchedFiles) == 0 && len(paths.CreatedDirs) == 0 {
+				t.Errorf("%s: neither PatchedFiles nor CreatedDirs declared — connector appears to be a no-op", name)
 			}
 
 			// Hook scripts must be absolute paths under DataDir
 			// when present.
 			for _, hs := range paths.HookScripts {
 				if !filepath.IsAbs(hs) {
-					t.Errorf("%s: hook script %q is not absolute", c.name, hs)
+					t.Errorf("%s: hook script %q is not absolute", name, hs)
 				}
 				if !strings.HasPrefix(hs, dataDir) {
-					t.Errorf("%s: hook script %q is not under DataDir %q", c.name, hs, dataDir)
+					t.Errorf("%s: hook script %q is not under DataDir %q", name, hs, dataDir)
 				}
 			}
 
 			// Backup files must live under DataDir.
 			for _, bf := range paths.BackupFiles {
 				if !strings.HasPrefix(bf, dataDir) {
-					t.Errorf("%s: backup file %q is not under DataDir %q", c.name, bf, dataDir)
+					t.Errorf("%s: backup file %q is not under DataDir %q", name, bf, dataDir)
 				}
 			}
 		})

@@ -51,7 +51,7 @@ def status_cmd(app: AppContext, connector_flag: str, target: str) -> None:
     from defenseclaw.codeguard_skill import codeguard_status
     from defenseclaw.commands import resolve_list_connectors
 
-    for connector in resolve_list_connectors(app, connector_flag):
+    for connector in resolve_list_connectors(app, connector_flag, allow_surface_only=True):
         status = codeguard_status(app.cfg, connector=connector, target=target)
         click.echo(f"CodeGuard {target} [{status.connector}]: {status.format()}")
 
@@ -78,7 +78,7 @@ def install_cmd(app: AppContext, connector_flag: str, target: str, replace: bool
     from defenseclaw.commands import resolve_list_connectors
 
     failures: list[str] = []
-    for connector in resolve_list_connectors(app, connector_flag):
+    for connector in resolve_list_connectors(app, connector_flag, allow_surface_only=True):
         status = install_codeguard_asset(app.cfg, connector=connector, target=target, replace=replace)
         click.echo(f"CodeGuard {target} [{connector}]: {status}")
         if _is_codeguard_install_error(status):
@@ -112,7 +112,7 @@ def install_skill_cmd(app: AppContext, connector_flag: str) -> None:
     from defenseclaw.commands import resolve_list_connectors
 
     failures: list[str] = []
-    for connector in resolve_list_connectors(app, connector_flag):
+    for connector in resolve_list_connectors(app, connector_flag, allow_surface_only=True):
         status = install_codeguard_skill(app.cfg, connector=connector)
         click.echo(f"CodeGuard skill [{connector}]: {status}")
         if _is_codeguard_install_error(status):

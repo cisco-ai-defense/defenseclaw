@@ -3984,18 +3984,23 @@ def setup_guardrail(
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
         return
 
-    guardrail_connector = gc.connector or "openclaw"
-    if guardrail_connector in _SURFACE_ONLY_CONNECTORS:
-        label = _CONNECTOR_META.get(guardrail_connector, {}).get("label", guardrail_connector)
+    setup_check_connector = target_connector if non_interactive else explicit_connector
+    setup_targets = _guardrail_setup_check_targets(app, gc, setup_check_connector)
+    surface_targets = [c for c in setup_targets if c in _SURFACE_ONLY_CONNECTORS]
+    if surface_targets:
+        labels = [
+            _CONNECTOR_META.get(connector, {}).get("label", connector)
+            for connector in surface_targets
+        ]
         raise click.ClickException(
-            f"{label} is supported for local skill discovery and opt-in CodeGuard skill assets only; "
+            f"{', '.join(labels)} is supported for local skill discovery and opt-in CodeGuard skill assets only; "
             "Microsoft has not published a Scout hook/proxy enforcement surface for DefenseClaw setup."
         )
 
     if not _check_guardrail_setup_connector_versions(
         app,
         gc,
-        explicit_connector=(target_connector if non_interactive else explicit_connector),
+        explicit_connector=setup_check_connector,
         allow_prompt=not non_interactive,
     ):
         return

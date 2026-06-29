@@ -460,6 +460,8 @@ func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
 		{"scout_remote", "scout", "gw.example.com", "", false},
 		{"openhands_loopback", "openhands", "127.0.0.1", "", false},
 		{"openhands_remote", "openhands", "gw.example.com", "", false},
+		{"opencode_loopback", "opencode", "127.0.0.1", "", false},
+		{"opencode_remote", "opencode", "gw.example.com", "", false},
 
 		// Empty / unknown connector with no override → DISABLED.
 		// Reconnect spam against an unconfigured upstream is the
