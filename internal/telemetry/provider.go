@@ -160,11 +160,9 @@ func newProvider(ctx context.Context, fullCfg *config.Config, version string, in
 	if traceCount > 0 {
 		tp := sdktrace.NewTracerProvider(traceOpts...)
 		p.tracerProvider = tp
-		otel.SetTracerProvider(tp)
 		p.tracer = tp.Tracer("defenseclaw")
 	} else {
 		tp := traceNoop.NewTracerProvider()
-		otel.SetTracerProvider(tp)
 		p.tracer = tp.Tracer("defenseclaw")
 	}
 
@@ -184,11 +182,9 @@ func newProvider(ctx context.Context, fullCfg *config.Config, version string, in
 	if logCount > 0 {
 		lp := sdklog.NewLoggerProvider(logOpts...)
 		p.loggerProvider = lp
-		global.SetLoggerProvider(lp)
 		p.logger = lp.Logger("defenseclaw")
 	} else {
 		lp := logNoop.NewLoggerProvider()
-		global.SetLoggerProvider(lp)
 		p.logger = lp.Logger("defenseclaw")
 	}
 
@@ -210,11 +206,9 @@ func newProvider(ctx context.Context, fullCfg *config.Config, version string, in
 	if metricCount > 0 {
 		mp := sdkmetric.NewMeterProvider(meterOpts...)
 		p.meterProvider = mp
-		otel.SetMeterProvider(mp)
 		p.meter = mp.Meter("defenseclaw")
 	} else {
 		mp := metricNoop.NewMeterProvider()
-		otel.SetMeterProvider(mp)
 		p.meter = mp.Meter("defenseclaw")
 	}
 
@@ -223,22 +217,6 @@ func newProvider(ctx context.Context, fullCfg *config.Config, version string, in
 		return nil, fmt.Errorf("telemetry: register metrics: %w", err)
 	}
 	p.metrics = ms
-
-	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-		if err == nil || p.metrics == nil {
-			return
-		}
-		reason := err.Error()
-		if len(reason) > 200 {
-			reason = reason[:200] + "…"
-		}
-		p.metrics.telemetryExporterErrs.Add(context.Background(), 1,
-			metric.WithAttributes(
-				attribute.String("signal", "otel_sdk"),
-				attribute.String("reason", reason),
-			))
-		p.emitExporterFailure(context.Background(), "otel_sdk")
-	}))
 
 	if install {
 		installGlobalHooks(p)
@@ -258,6 +236,7 @@ func ActivateProvider(p *Provider) {
 }
 
 func installGlobalHooks(p *Provider) {
+	installOpenTelemetryGlobals(p)
 	setGlobalTelemetryProvider(p)
 	if p == nil {
 		config.ReportConfigLoadError = nil
@@ -266,6 +245,45 @@ func installGlobalHooks(p *Provider) {
 	config.ReportConfigLoadError = func(ctx context.Context, reason string) {
 		p.RecordConfigLoadError(ctx, reason)
 	}
+}
+
+func installOpenTelemetryGlobals(p *Provider) {
+	if p == nil {
+		otel.SetTracerProvider(traceNoop.NewTracerProvider())
+		global.SetLoggerProvider(logNoop.NewLoggerProvider())
+		otel.SetMeterProvider(metricNoop.NewMeterProvider())
+		return
+	}
+	if p.tracerProvider != nil {
+		otel.SetTracerProvider(p.tracerProvider)
+	} else {
+		otel.SetTracerProvider(traceNoop.NewTracerProvider())
+	}
+	if p.loggerProvider != nil {
+		global.SetLoggerProvider(p.loggerProvider)
+	} else {
+		global.SetLoggerProvider(logNoop.NewLoggerProvider())
+	}
+	if p.meterProvider != nil {
+		otel.SetMeterProvider(p.meterProvider)
+	} else {
+		otel.SetMeterProvider(metricNoop.NewMeterProvider())
+	}
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		if err == nil || p.metrics == nil {
+			return
+		}
+		reason := err.Error()
+		if len(reason) > 200 {
+			reason = reason[:200] + "…"
+		}
+		p.metrics.telemetryExporterErrs.Add(context.Background(), 1,
+			metric.WithAttributes(
+				attribute.String("signal", "otel_sdk"),
+				attribute.String("reason", reason),
+			))
+		p.emitExporterFailure(context.Background(), "otel_sdk")
+	}))
 }
 
 // Enabled reports whether OTel export is active.

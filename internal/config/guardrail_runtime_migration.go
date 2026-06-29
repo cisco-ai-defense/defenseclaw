@@ -53,6 +53,9 @@ func MigrateGuardrailRuntimeFile(configFile, dataDir string) (bool, error) {
 	if readErr != nil && !os.IsNotExist(readErr) {
 		return false, fmt.Errorf("config: read %s before migration: %w", configFile, readErr)
 	}
+	if len(updates) > 0 && !originalExisted {
+		return false, fmt.Errorf("config: cannot migrate legacy %s: primary config %s does not exist", runtimeFile, configFile)
+	}
 
 	if len(updates) > 0 {
 		if err := PatchYAMLFile(configFile, updates); err != nil {

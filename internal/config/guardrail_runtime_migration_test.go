@@ -111,6 +111,25 @@ func TestLoadFromFileWithRuntimeMigration_InvalidGuardrailRuntimeFailsWithoutDel
 	}
 }
 
+func TestLoadFromFileWithRuntimeMigration_MissingPrimaryConfigPreservesRuntime(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, DefaultConfigName)
+	runtimePath := filepath.Join(dir, GuardrailRuntimeFileName)
+	if err := os.WriteFile(runtimePath, []byte(`{"mode":"action"}`), 0o600); err != nil {
+		t.Fatalf("write runtime: %v", err)
+	}
+
+	if _, err := LoadFromFileWithRuntimeMigration(configPath); err == nil {
+		t.Fatal("LoadFromFileWithRuntimeMigration succeeded without primary config")
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("primary config should remain absent: %v", err)
+	}
+	if _, err := os.Stat(runtimePath); err != nil {
+		t.Fatalf("runtime file should remain after failed migration: %v", err)
+	}
+}
+
 func TestLoadFromFile_IgnoresGuardrailRuntime(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, DefaultConfigName)

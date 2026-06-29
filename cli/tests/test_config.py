@@ -550,6 +550,41 @@ class TestConfigLoadSave(unittest.TestCase):
                 reloaded = load()
             self.assertEqual(reloaded.gateway.config_reload.mode, "restart")
 
+    def test_gateway_config_reload_mode_is_normalized(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                gateway=GatewayConfig(
+                    config_reload=GatewayConfigReloadConfig(mode=" Restart "),
+                ),
+            )
+            cfg.save()
+
+            import yaml
+
+            with open(os.path.join(tmpdir, "config.yaml")) as handle:
+                raw = yaml.safe_load(handle)
+            self.assertEqual(raw["gateway"]["config_reload"]["mode"], "restart")
+
+            with patch("defenseclaw.config.default_data_path", return_value=Path(tmpdir)):
+                reloaded = load()
+            self.assertEqual(reloaded.gateway.config_reload.mode, "restart")
+
+    def test_gateway_config_reload_mode_rejects_unknown_value(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = Path(tmpdir) / "config.yaml"
+            config_file.write_text(
+                "gateway:\n  config_reload:\n    mode: reload\n",
+                encoding="utf-8",
+            )
+            with patch("defenseclaw.config.default_data_path", return_value=Path(tmpdir)):
+                with self.assertRaisesRegex(ValueError, "config_reload.mode"):
+                    load()
+
     def test_save_and_reload_preserves_watch_rescan_fields(self):
         import yaml
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -58,6 +59,7 @@ var launchConfigRestartHelper = defaultLaunchConfigRestartHelper
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
 	cfg         *config.Config
+	cfgCurrent  atomic.Pointer[config.Config]
 	client      *Client
 	router      *EventRouter
 	store       *audit.Store
@@ -450,7 +452,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		emitError(context.Background(), "ai_discovery", "init-failed", "continuous AI discovery disabled", err)
 	}
 
-	return &Sidecar{
+	sidecar := &Sidecar{
 		cfg:                cfg,
 		client:             client,
 		router:             router,
@@ -475,7 +477,28 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		judge:              hookJudge,
 		judgeStore:         judgeStore,
 		judgeBodyStore:     judgeBodyStore,
-	}, nil
+	}
+	sidecar.publishConfig(cfg)
+	return sidecar, nil
+}
+
+func (s *Sidecar) currentConfig() *config.Config {
+	if s == nil {
+		return nil
+	}
+	if cfg := s.cfgCurrent.Load(); cfg != nil {
+		return cfg
+	}
+	return s.cfg
+}
+
+func (s *Sidecar) publishConfig(cfg *config.Config) *config.Config {
+	if s == nil || cfg == nil {
+		return nil
+	}
+	snapshot := cloneConfig(cfg)
+	s.cfgCurrent.Store(snapshot)
+	return snapshot
 }
 
 // Run starts all subsystems as independent goroutines. Each subsystem runs
@@ -489,35 +512,35 @@ func (s *Sidecar) Run(ctx context.Context) error {
 
 	runID := gatewaylog.ProcessRunID()
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
-		s.cfg.Gateway.AutoApprove, s.cfg.Gateway.Watcher.Enabled, s.cfg.Gateway.APIPort, s.cfg.Guardrail.Enabled, runID)
+		s.currentConfig().Gateway.AutoApprove, s.currentConfig().Gateway.Watcher.Enabled, s.currentConfig().Gateway.APIPort, s.currentConfig().Guardrail.Enabled, runID)
 	emitLifecycle(runCtx, "sidecar", "start", map[string]string{
 		"run_id":       runID,
-		"auto_approve": fmt.Sprintf("%v", s.cfg.Gateway.AutoApprove),
-		"watcher":      fmt.Sprintf("%v", s.cfg.Gateway.Watcher.Enabled),
-		"api_port":     fmt.Sprintf("%d", s.cfg.Gateway.APIPort),
-		"guardrail":    fmt.Sprintf("%v", s.cfg.Guardrail.Enabled),
+		"auto_approve": fmt.Sprintf("%v", s.currentConfig().Gateway.AutoApprove),
+		"watcher":      fmt.Sprintf("%v", s.currentConfig().Gateway.Watcher.Enabled),
+		"api_port":     fmt.Sprintf("%d", s.currentConfig().Gateway.APIPort),
+		"guardrail":    fmt.Sprintf("%v", s.currentConfig().Guardrail.Enabled),
 	})
 	_ = s.logger.LogAction(string(audit.ActionSidecarStart), "", "starting all subsystems")
 
-	if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.Model == "" &&
-		proxyShouldBindForConfiguredConnector(s.cfg) {
+	if s.currentConfig().Guardrail.Enabled && s.currentConfig().Guardrail.Model == "" &&
+		proxyShouldBindForConfiguredConnector(s.currentConfig()) {
 		fmt.Fprintf(os.Stderr, "[sidecar] WARNING: guardrail.enabled is true but guardrail.model is empty — relying on fetch-interceptor routing.\n")
 		fmt.Fprintf(os.Stderr, "[sidecar]          Set guardrail.model in ~/.defenseclaw/config.yaml only if you need a fixed advertised model name.\n")
 	}
 
-	if strings.EqualFold(s.cfg.Guardrail.Host, "localhost") {
+	if strings.EqualFold(s.currentConfig().Guardrail.Host, "localhost") {
 		fmt.Fprintf(os.Stderr, "[sidecar] WARNING: guardrail.host is set to \"localhost\" which may resolve to IPv6 (::1) on macOS.\n")
 		fmt.Fprintf(os.Stderr, "[sidecar]          The proxy binds 127.0.0.1 only. Set guardrail.host to \"127.0.0.1\" to avoid silent connection failures.\n")
 	}
 
 	// Initialize OPA engine before goroutines so both the watcher and the
 	// API reload handler share the same instance.
-	if s.cfg.PolicyDir != "" {
-		if engine, err := policy.New(s.cfg.PolicyDir); err == nil {
+	if s.currentConfig().PolicyDir != "" {
+		if engine, err := policy.New(s.currentConfig().PolicyDir); err == nil {
 			if compileErr := engine.Compile(); compileErr == nil {
 				s.opa = engine
-				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", s.cfg.PolicyDir)
-				emitLifecycle(runCtx, "opa", "ready", map[string]string{"policy_dir": s.cfg.PolicyDir})
+				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", s.currentConfig().PolicyDir)
+				emitLifecycle(runCtx, "opa", "ready", map[string]string{"policy_dir": s.currentConfig().PolicyDir})
 			} else {
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA compile error (falling back to built-in): %v\n", compileErr)
 				emitError(runCtx, "opa", "compile-failed", "falling back to built-in policies", compileErr)
@@ -559,11 +582,11 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 6)
 
-	configPath := s.cfg.ConfigFilePath
+	configPath := s.currentConfig().ConfigFilePath
 	if strings.TrimSpace(configPath) == "" {
 		configPath = config.ConfigPath()
 	}
-	s.configMgr = NewConfigManager(configPath, s.cfg, s.logger, s.health, s.applyConfigReload)
+	s.configMgr = NewConfigManager(configPath, s.currentConfig(), s.logger, s.health, s.applyConfigReload)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -751,7 +774,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 
 func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
 	runGuardrailFn := s.runGuardrail
-	if len(s.cfg.ActiveConnectors()) > 1 {
+	if len(s.currentConfig().ActiveConnectors()) > 1 {
 		runGuardrailFn = s.runGuardrailMulti
 	}
 	return runGuardrailFn(ctx)
@@ -905,15 +928,15 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) *LLMJudge {
 
 func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff) error {
 	if configReloadMode(newCfg) == "restart" && !onlyConfigReloadModeChanged(oldCfg, newCfg) {
-		if s == nil || s.cfg == nil || newCfg == nil {
+		if s == nil || s.currentConfig() == nil || newCfg == nil {
 			return nil
 		}
+		current := s.currentConfig()
 		next := *newCfg
-		if next.Gateway.Token == "" && s.cfg.Gateway.Token != "" {
-			next.Gateway.Token = s.cfg.Gateway.Token
+		if next.Gateway.Token == "" && current.Gateway.Token != "" {
+			next.Gateway.Token = current.Gateway.Token
 		}
-		*s.cfg = next
-		redaction.SetDisableAll(s.cfg.Privacy.DisableRedaction)
+		redaction.SetDisableAll(next.Privacy.DisableRedaction)
 		fmt.Fprintf(os.Stderr, "[sidecar] config reload mode=restart: validated config change; requesting process restart\n")
 		if launchConfigRestartHelper != nil {
 			if err := launchConfigRestartHelper(); err != nil {
@@ -925,15 +948,17 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 				"changed": diff.Changed,
 			})
 		}
+		s.publishConfig(&next)
 		s.requestProcessRestart()
 		return nil
 	}
 	if len(diff.RestartRequired) > 0 {
 		return fmt.Errorf("config reload requires gateway restart for: %s", strings.Join(diff.RestartRequired, ", "))
 	}
-	if s == nil || s.cfg == nil || newCfg == nil {
+	if s == nil || s.currentConfig() == nil || newCfg == nil {
 		return nil
 	}
+	current := s.currentConfig()
 
 	guardrailRestart := guardrailNeedsRestart(oldCfg, newCfg)
 	apiRestart := apiNeedsRestart(oldCfg, newCfg)
@@ -945,8 +970,8 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	judgeReload := judgeNeedsReload(oldCfg, newCfg)
 
 	next := *newCfg
-	if next.Gateway.Token == "" && s.cfg.Gateway.Token != "" {
-		next.Gateway.Token = s.cfg.Gateway.Token
+	if next.Gateway.Token == "" && current.Gateway.Token != "" {
+		next.Gateway.Token = current.Gateway.Token
 	}
 
 	var nextOTel *telemetry.Provider
@@ -1007,8 +1032,8 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 		nextJudge = buildSharedJudge(&next, nextRulePack)
 	}
 
-	*s.cfg = next
-	redaction.SetDisableAll(s.cfg.Privacy.DisableRedaction)
+	redaction.SetDisableAll(next.Privacy.DisableRedaction)
+	appliedCfg := s.publishConfig(&next)
 
 	if otelReload {
 		oldOTel := s.otel
@@ -1037,9 +1062,9 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 			ApplyRulePackOverrides(nextRulePack)
 			ApplyLocalPatternsOverride(nextRulePack.LocalPatterns)
 		}
-		s.router.SetGuardrailConfig(&s.cfg.Guardrail)
-		s.router.SetDefaultAgentName(string(s.cfg.Claw.Mode))
-		s.router.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
+		s.router.SetGuardrailConfig(&appliedCfg.Guardrail)
+		s.router.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
+		s.router.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
 	}
 
 	if judgeReload {
@@ -1053,7 +1078,7 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if notifierChanged(oldCfg, newCfg) {
-		s.osNotifier = notifier.New(s.cfg.Notifications)
+		s.osNotifier = notifier.New(appliedCfg.Notifications)
 		if s.hilt != nil {
 			s.hilt.SetNotifier(s.osNotifier)
 		}
@@ -1067,7 +1092,7 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 
 	if webhooksChanged(oldCfg, newCfg) {
 		oldWebhooks := s.webhooks
-		s.webhooks = NewWebhookDispatcher(s.cfg.Webhooks, s.cfg.Observability)
+		s.webhooks = NewWebhookDispatcher(appliedCfg.Webhooks, appliedCfg.Observability)
 		if s.webhooks != nil {
 			s.webhooks.BindObservability(s.otel)
 		}
@@ -1081,9 +1106,9 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 
 	if !guardrailRestart {
 		if proxy := s.proxySnapshot(); proxy != nil {
-			proxy.ApplyGuardrailConfig(&s.cfg.Guardrail)
-			proxy.SetDefaultAgentName(string(s.cfg.Claw.Mode))
-			proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
+			proxy.ApplyGuardrailConfig(&appliedCfg.Guardrail)
+			proxy.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
+			proxy.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
 		}
 	}
 
@@ -1205,6 +1230,7 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	}
 	oldG, newG := oldCfg.Guardrail, newCfg.Guardrail
 	if oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
+		oldG.Connector != newG.Connector ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
 		oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
@@ -1303,12 +1329,12 @@ func (s *Sidecar) proxySnapshot() *GuardrailProxy {
 // a real upstream, or set gateway.fleet_mode=enabled — those cases fall
 // through to the dial loop below.
 func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
-	if !gatewayShouldConnectForConfiguredConnector(s.cfg) {
-		connName := configuredConnectorName(s.cfg)
+	if !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
+		connName := configuredConnectorName(s.currentConfig())
 		details := map[string]interface{}{
 			"summary": "no OpenClaw fleet configured (standalone mode)",
-			"host":    s.cfg.Gateway.Host,
-			"port":    s.cfg.Gateway.Port,
+			"host":    s.currentConfig().Gateway.Host,
+			"port":    s.currentConfig().Gateway.Port,
 			"hint":    "telemetry continues via hooks + local audit; point gateway.host at a real OpenClaw upstream and restart to enable fleet integration",
 		}
 		// The fleet uplink is a single process-global WebSocket dial
@@ -1321,15 +1347,15 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 		// never see a "single vs multi" distinction. The authoritative
 		// per-connector roster is the status command's "Agents" section, so
 		// we deliberately do NOT re-enumerate connector names here.
-		details["scope"] = fmt.Sprintf("process-global — fleet uplink is shared across all %d connectors, not per-connector (see Agents)", len(s.cfg.ActiveConnectors()))
+		details["scope"] = fmt.Sprintf("process-global — fleet uplink is shared across all %d connectors, not per-connector (see Agents)", len(s.currentConfig().ActiveConnectors()))
 		s.health.SetGateway(StateDisabled, "", details)
 		fmt.Fprintf(os.Stderr,
 			"[sidecar] gateway client disabled: connector=%q + loopback gateway.host=%q — no OpenClaw fleet to dial. Hooks + local audit continue normally.\n",
-			connName, s.cfg.Gateway.Host)
+			connName, s.currentConfig().Gateway.Host)
 		emitLifecycle(ctx, "gateway", "disabled", map[string]string{
 			"connector": connName,
-			"host":      s.cfg.Gateway.Host,
-			"port":      fmt.Sprintf("%d", s.cfg.Gateway.Port),
+			"host":      s.currentConfig().Gateway.Host,
+			"port":      fmt.Sprintf("%d", s.currentConfig().Gateway.Port),
 			"reason":    "no-fleet-configured",
 		})
 		<-ctx.Done()
@@ -1343,7 +1369,7 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 	firstConnect := true
 	for {
 		s.health.SetGateway(StateReconnecting, "", nil)
-		fmt.Fprintf(os.Stderr, "[sidecar] connecting to %s:%d ...\n", s.cfg.Gateway.Host, s.cfg.Gateway.Port)
+		fmt.Fprintf(os.Stderr, "[sidecar] connecting to %s:%d ...\n", s.currentConfig().Gateway.Host, s.currentConfig().Gateway.Port)
 
 		err := s.client.ConnectWithRetry(ctx)
 		if err != nil {
@@ -1488,7 +1514,7 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 
 // runWatcher starts the skill/MCP install watcher if enabled in config.
 func (s *Sidecar) runWatcher(ctx context.Context) error {
-	wcfg := s.cfg.Gateway.Watcher
+	wcfg := s.currentConfig().Gateway.Watcher
 
 	if !wcfg.Enabled {
 		s.health.SetWatcher(StateDisabled, "", nil)
@@ -1507,12 +1533,12 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	// the watcher useful for the OpenClaw default flow even while a
 	// freshly-broken connector name is being debugged.
 	reg := connector.NewDefaultRegistry()
-	conn, err := resolveActiveConnector(reg, configuredConnectorName(s.cfg), "watcher")
+	conn, err := resolveActiveConnector(reg, configuredConnectorName(s.currentConfig()), "watcher")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector resolution: %v\n", err)
 	}
 
-	skillDirs, pluginDirs, _ := resolveWatcherDirs(s.cfg, conn, wcfg)
+	skillDirs, pluginDirs, _ := resolveWatcherDirs(s.currentConfig(), conn, wcfg)
 
 	if !wcfg.Skill.Enabled {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: skill watching disabled\n")
@@ -1540,7 +1566,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	})
 
-	w := watcher.New(s.cfg, skillDirs, pluginDirs, s.store, s.logger, s.shell, s.opa, s.otel, func(r watcher.AdmissionResult) {
+	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, s.shell, s.opa, s.otel, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
 	if s.otel != nil {
@@ -1592,7 +1618,7 @@ func (s *Sidecar) handleAdmissionResult(r watcher.AdmissionResult) {
 }
 
 func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
-	if !s.cfg.Gateway.Watcher.Skill.TakeAction {
+	if !s.currentConfig().Gateway.Watcher.Skill.TakeAction {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: skill %s verdict=%s (take_action=false, logging only)\n",
 			r.Event.Name, r.Verdict)
 		_ = s.logger.LogAction(string(audit.ActionSidecarWatcherVerdict), r.Event.Name,
@@ -1731,7 +1757,7 @@ func formatEnforcementMessage(subjectType, subjectName, severity string, finding
 }
 
 func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
-	if !s.cfg.Gateway.Watcher.Plugin.TakeAction {
+	if !s.currentConfig().Gateway.Watcher.Plugin.TakeAction {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: plugin %s verdict=%s (take_action=false, logging only)\n",
 			r.Event.Name, r.Verdict)
 		_ = s.logger.LogAction(string(audit.ActionSidecarWatcherVerdict), r.Event.Name,
@@ -1771,7 +1797,7 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 }
 
 func (s *Sidecar) handleMCPAdmission(r watcher.AdmissionResult) {
-	if !s.cfg.Gateway.Watcher.MCP.TakeAction {
+	if !s.currentConfig().Gateway.Watcher.MCP.TakeAction {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: mcp %s verdict=%s (take_action=false, logging only)\n",
 			r.Event.Name, r.Verdict)
 		_ = s.logger.LogAction(string(audit.ActionSidecarWatcherVerdict), r.Event.Name,
@@ -1834,7 +1860,7 @@ func shouldDisableAtGateway(r watcher.AdmissionResult) bool {
 // mode (hook-only connectors, codex/claudecode + loopback host, or
 // `gateway.fleet_mode: disabled`).
 func (s *Sidecar) fleetRPCsEnabled() bool {
-	return gatewayShouldConnectForConfiguredConnector(s.cfg)
+	return gatewayShouldConnectForConfiguredConnector(s.currentConfig())
 }
 
 func (s *Sidecar) activeSessionKeys() []string {
@@ -1885,7 +1911,7 @@ func resolveActiveConnector(reg *connector.Registry, name, surface string) (conn
 
 // runGuardrail starts the Go guardrail proxy when guardrail is enabled.
 func (s *Sidecar) runGuardrail(ctx context.Context) error {
-	if s.cfg == nil || !s.cfg.HasConnectorConfigured() {
+	if s.currentConfig() == nil || !s.currentConfig().HasConnectorConfigured() {
 		return s.waitForConnectorSetup(ctx)
 	}
 
@@ -1893,7 +1919,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// router, avoiding a redundant disk/embed read and potential drift.
 	rp := s.router.rp
 	if rp == nil {
-		rp = guardrail.LoadRulePack(s.cfg.Guardrail.RulePackDir)
+		rp = guardrail.LoadRulePack(s.currentConfig().Guardrail.RulePackDir)
 		rp.Validate()
 		fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded (fallback): %s\n", rp)
 	}
@@ -1915,12 +1941,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	wirePluginAuditEmitter()
 
 	registry := connector.NewDefaultRegistry()
-	if s.cfg.PluginDir != "" {
-		if err := registry.DiscoverPlugins(s.cfg.PluginDir); err != nil {
+	if s.currentConfig().PluginDir != "" {
+		if err := registry.DiscoverPlugins(s.currentConfig().PluginDir); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] plugin discovery: %v\n", err)
 		}
 	}
-	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.cfg), "guardrail")
+	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.currentConfig()), "guardrail")
 	if err != nil {
 		// Fail fast: the operator explicitly set a connector that does
 		// not exist. Returning here aborts sidecar boot so the operator
@@ -1928,7 +1954,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// somehow not blocking anything" sidecar.
 		return err
 	}
-	rp = guardrail.LoadRulePack(s.cfg.Guardrail.EffectiveRulePackDir(conn.Name()))
+	rp = guardrail.LoadRulePack(s.currentConfig().Guardrail.EffectiveRulePackDir(conn.Name()))
 	rp.Validate()
 	fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded for %s: %s\n", conn.Name(), rp)
 	if s.router != nil {
@@ -1937,18 +1963,18 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	ApplyRulePackOverrides(rp)
 	ApplyConnectorRulePackOverrides(conn.Name(), rp)
 	ApplyLocalPatternsOverride(rp.LocalPatterns)
-	proxyAddr := guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host)
+	proxyAddr := guardrailListenAddr(s.currentConfig().Guardrail.Port, s.currentConfig().Guardrail.Host)
 	apiBind := "127.0.0.1"
-	if s.cfg.Gateway.APIBind != "" {
-		apiBind = s.cfg.Gateway.APIBind
+	if s.currentConfig().Gateway.APIBind != "" {
+		apiBind = s.currentConfig().Gateway.APIBind
 	}
-	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.cfg.Gateway.APIPort)
+	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.currentConfig().Gateway.APIPort)
 
 	// Plan B2 / S0.2: synthesize a first-boot gateway token if none is
 	// configured, BEFORE Setup writes hook scripts (which bake the
 	// token into curl headers) and BEFORE the API server starts (which
 	// uses the same token to authenticate inbound hook calls). After
-	// this point, s.cfg.Gateway.Token always has a non-empty value.
+	// this point, s.currentConfig().Gateway.Token always has a non-empty value.
 	//
 	// ensureGatewayTokenSynthesis is idempotent: if Sidecar.Run already
 	// resolved/synthesized the token synchronously (which it does so the
@@ -1971,14 +1997,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// SetCredentials, but that runs *after* the probe — leaving the
 	// connector blind during the gate. NewGuardrailProxy() will call
 	// SetCredentials() again with the same values (idempotent restore).
-	masterKey := deriveMasterKey(s.cfg.DataDir)
+	masterKey := deriveMasterKey(s.currentConfig().DataDir)
 	conn.SetCredentials(apiToken, masterKey)
 
-	workspaceDir := s.cfg.ConnectorWorkspaceDir()
-	agentVersion := connector.LoadCachedAgentVersion(s.cfg.DataDir, conn.Name())
+	workspaceDir := s.currentConfig().ConnectorWorkspaceDir()
+	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	setupOpts := connector.SetupOpts{
-		DataDir:   s.cfg.DataDir,
+		DataDir:   s.currentConfig().DataDir,
 		ProxyAddr: proxyAddr,
 		APIAddr:   apiAddr,
 		// Bake the gateway token into hook scripts so claude-code-hook.sh
@@ -1995,18 +2021,18 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// default "open" is applied uniformly when the field is unset
 		// — matches the user-friendly default in defaultsFor() and
 		// avoids a partial install accidentally going fail-closed.
-		HookFailMode:     s.cfg.Guardrail.EffectiveHookFailMode(),
-		HILTEnabled:      s.cfg.Guardrail.HILT.Enabled,
+		HookFailMode:     s.currentConfig().Guardrail.EffectiveHookFailMode(),
+		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,
 		HookContractID:   contractResolution.Contract.ContractID,
 	}
-	if connector.HookContractNeedsActionOverride(contractResolution) && strings.EqualFold(s.cfg.Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+	if connector.HookContractNeedsActionOverride(contractResolution) && strings.EqualFold(s.currentConfig().Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), agentVersion, contractResolution.Reason)
 	}
-	if previous := connector.LoadHookContractLockEntry(s.cfg.DataDir, conn.Name()); previous.Connector != "" {
+	if previous := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
-		if connector.HookContractLockDrifted(previous, current) && strings.EqualFold(s.cfg.Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		if connector.HookContractLockDrifted(previous, current) && strings.EqualFold(s.currentConfig().Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 			return fmt.Errorf("connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
 		}
 	}
@@ -2017,7 +2043,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// path; any "no active connector" condition is now a hard error.
 	fmt.Fprintf(os.Stderr, "[guardrail] active connector: %s (%s)\n", conn.Name(), conn.Description())
 
-	if !s.cfg.Guardrail.Enabled {
+	if !s.currentConfig().Guardrail.Enabled {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
 		if err := conn.Teardown(ctx, setupOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
@@ -2028,12 +2054,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
 			return teardownErr
 		}
-		if err := connector.ClearHookContractLockEntry(s.cfg.DataDir, conn.Name()); err != nil {
+		if err := connector.ClearHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); err != nil {
 			teardownErr := fmt.Errorf("clear hook contract lock for %s: %w", conn.Name(), err)
 			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
 			return teardownErr
 		}
-		connector.ClearActiveConnector(s.cfg.DataDir)
+		connector.ClearActiveConnector(s.currentConfig().DataDir)
 	} else {
 		if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
@@ -2066,11 +2092,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if err := verifyHookScriptsOrRetry(ctx, setupOpts, conn); err != nil {
 			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "hook verification", err)
 		}
-		if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
+		if err := connector.SaveActiveConnector(s.currentConfig().DataDir, conn.Name()); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 		}
 		lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
-		if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, lockEntry); err != nil {
+		if err := connector.SaveHookContractLockEntry(s.currentConfig().DataDir, lockEntry); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] save hook contract lock: %v\n", err)
 		}
 
@@ -2086,7 +2112,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// directly to its native SSO/API upstream. There is no DefenseClaw
 		// proxy upstream to validate, so probing here would reject valid
 		// SSO-only installs before telemetry can start.
-		if probe, ok := conn.(connector.ProviderProbe); ok && shouldRunProviderProbeForConnector(conn, &s.cfg.Guardrail) {
+		if probe, ok := conn.(connector.ProviderProbe); ok && shouldRunProviderProbeForConnector(conn, &s.currentConfig().Guardrail) {
 			count, err := probe.HasUsableProviders()
 			if err != nil {
 				s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -2103,17 +2129,17 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
 
 	proxy, err := NewGuardrailProxy(
-		&s.cfg.Guardrail,
-		&s.cfg.CiscoAIDefense,
+		&s.currentConfig().Guardrail,
+		&s.currentConfig().CiscoAIDefense,
 		s.logger,
 		s.health,
 		s.otel,
 		s.store,
-		s.cfg.DataDir,
-		s.cfg.PolicyDir,
+		s.currentConfig().DataDir,
+		s.currentConfig().PolicyDir,
 		s.notify,
 		rp,
-		s.cfg.ResolveLLM("guardrail.judge"),
+		s.currentConfig().ResolveLLM("guardrail.judge"),
 		conn,
 	)
 	if err == nil && s.webhooks != nil {
@@ -2122,8 +2148,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	if err == nil && proxy != nil {
 		s.setGuardrailProxy(proxy)
 		defer s.setGuardrailProxy(nil)
-		proxy.SetDefaultAgentName(string(s.cfg.Claw.Mode))
-		proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
+		proxy.SetDefaultAgentName(string(s.currentConfig().Claw.Mode))
+		proxy.SetDefaultPolicyID(s.currentConfig().Guardrail.Mode)
 		proxy.SetConnectorSwitchState(registry, setupOpts)
 		proxy.SetHILTApprovalManager(s.hilt)
 		proxy.SetNotifier(s.osNotifier)
@@ -2132,14 +2158,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// cursor, ...) never reach proxy.Run, so the guard MUST be started
 		// here to cover both the observability and proxy-bound paths. The
 		// guard goroutine stops when ctx is cancelled.
-		if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.HookSelfHeal {
+		if s.currentConfig().Guardrail.Enabled && s.currentConfig().Guardrail.HookSelfHeal {
 			proxy.StartHookConfigGuard(ctx, conn, setupOpts)
 		}
 	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
 		fmt.Fprintf(os.Stderr, "[guardrail] init error: %v\n", err)
-		if !s.cfg.Guardrail.Enabled {
+		if !s.currentConfig().Guardrail.Enabled {
 			s.health.SetGuardrail(StateDisabled, "", nil)
 			<-ctx.Done()
 			return nil
@@ -2168,8 +2194,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// telemetry on the API port. Block on ctx.Done() to keep the
 	// goroutine alive until shutdown, mirroring the existing
 	// !cfg.Guardrail.Enabled path in proxy.go (lines 313-318).
-	if !proxyShouldBindForConnector(conn, &s.cfg.Guardrail) {
-		policyMode := strings.ToLower(strings.TrimSpace(s.cfg.Guardrail.EffectiveMode(conn.Name())))
+	if !proxyShouldBindForConnector(conn, &s.currentConfig().Guardrail) {
+		policyMode := strings.ToLower(strings.TrimSpace(s.currentConfig().Guardrail.EffectiveMode(conn.Name())))
 		if policyMode != "action" {
 			policyMode = "observe"
 		}
@@ -2230,37 +2256,37 @@ func (s *Sidecar) waitForConnectorSetup(ctx context.Context) error {
 // later boot retries it. Successfully cleaned connectors also lose their hook
 // contract lock entries through teardownRemovedConnectors.
 func (s *Sidecar) reconcileUnconfiguredConnectors(ctx context.Context, registry *connector.Registry) error {
-	if s == nil || s.cfg == nil || strings.TrimSpace(s.cfg.DataDir) == "" {
+	if s == nil || s.currentConfig() == nil || strings.TrimSpace(s.currentConfig().DataDir) == "" {
 		return nil
 	}
-	previous := connector.LoadActiveConnectors(s.cfg.DataDir)
+	previous := connector.LoadActiveConnectors(s.currentConfig().DataDir)
 	if len(previous) == 0 {
 		return nil
 	}
 	if registry == nil {
 		registry = connector.NewDefaultRegistry()
-		if s.cfg.PluginDir != "" {
-			if err := registry.DiscoverPlugins(s.cfg.PluginDir); err != nil {
+		if s.currentConfig().PluginDir != "" {
+			if err := registry.DiscoverPlugins(s.currentConfig().PluginDir); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] plugin discovery during teardown: %v\n", err)
 			}
 		}
 	}
 	apiBind := "127.0.0.1"
-	if s.cfg.Gateway.APIBind != "" {
-		apiBind = s.cfg.Gateway.APIBind
+	if s.currentConfig().Gateway.APIBind != "" {
+		apiBind = s.currentConfig().Gateway.APIBind
 	}
 	opts := connector.SetupOpts{
-		DataDir:      s.cfg.DataDir,
-		ProxyAddr:    guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host),
-		APIAddr:      fmt.Sprintf("%s:%d", apiBind, s.cfg.Gateway.APIPort),
-		WorkspaceDir: s.cfg.ConnectorWorkspaceDir(),
+		DataDir:      s.currentConfig().DataDir,
+		ProxyAddr:    guardrailListenAddr(s.currentConfig().Guardrail.Port, s.currentConfig().Guardrail.Host),
+		APIAddr:      fmt.Sprintf("%s:%d", apiBind, s.currentConfig().Gateway.APIPort),
+		WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
 	}
 	failed := teardownRemovedConnectors(registry, previous, nil, opts, ctx)
 	if len(failed) == 0 {
-		connector.ClearActiveConnector(s.cfg.DataDir)
+		connector.ClearActiveConnector(s.currentConfig().DataDir)
 		return nil
 	}
-	if err := connector.SaveActiveConnectors(s.cfg.DataDir, failed); err != nil {
+	if err := connector.SaveActiveConnectors(s.currentConfig().DataDir, failed); err != nil {
 		return fmt.Errorf("persist connectors awaiting teardown retry: %w", err)
 	}
 	return fmt.Errorf("connector teardown incomplete for: %s", strings.Join(failed, ", "))
@@ -2297,7 +2323,7 @@ func (s *Sidecar) reconcileUnconfiguredConnectors(ctx context.Context, registry 
 // hook lane (the only lane active in multi) uses the per-connector rule sets
 // described above.
 func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
-	if s.cfg == nil || !s.cfg.HasConnectorConfigured() {
+	if s.currentConfig() == nil || !s.currentConfig().HasConnectorConfigured() {
 		return s.waitForConnectorSetup(ctx)
 	}
 
@@ -2306,7 +2332,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// are loaded separately via the cache.
 	primaryRP := s.router.rp
 	if primaryRP == nil {
-		primaryRP = guardrail.LoadRulePack(s.cfg.Guardrail.RulePackDir)
+		primaryRP = guardrail.LoadRulePack(s.currentConfig().Guardrail.RulePackDir)
 		primaryRP.Validate()
 	}
 
@@ -2315,8 +2341,8 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	wirePluginAuditEmitter()
 
 	registry := connector.NewDefaultRegistry()
-	if s.cfg.PluginDir != "" {
-		if err := registry.DiscoverPlugins(s.cfg.PluginDir); err != nil {
+	if s.currentConfig().PluginDir != "" {
+		if err := registry.DiscoverPlugins(s.currentConfig().PluginDir); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] plugin discovery: %v\n", err)
 		}
 	}
@@ -2330,10 +2356,10 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// `guardrail disable` teardown, scoped to one connector. EffectiveEnabled
 	// defaults to true, so a connector with no explicit override is
 	// unaffected and single-connector installs never reach this path.
-	configured := s.cfg.ActiveConnectors()
+	configured := s.currentConfig().ActiveConnectors()
 	names := make([]string, 0, len(configured))
 	for _, name := range configured {
-		if s.cfg.Guardrail.EffectiveEnabled(strings.ToLower(strings.TrimSpace(name))) {
+		if s.currentConfig().Guardrail.EffectiveEnabled(strings.ToLower(strings.TrimSpace(name))) {
 			names = append(names, name)
 		} else {
 			fmt.Fprintf(os.Stderr, "[guardrail] connector %s disabled (guardrail.connectors.%s.enabled=false) — excluded from active set; teardown will run\n", name, name)
@@ -2358,7 +2384,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// connector in the set is a configuration error we surface at boot
 	// rather than silently dropping enforcement for it.
 	for _, conn := range conns {
-		if proxyShouldBindForConnector(conn, &s.cfg.Guardrail) {
+		if proxyShouldBindForConnector(conn, &s.currentConfig().Guardrail) {
 			err := fmt.Errorf("multi-connector mode supports hook-only connectors; %q requires a proxy binding and cannot share a process with other connectors", conn.Name())
 			s.health.SetGuardrail(StateError, err.Error(), nil)
 			return err
@@ -2366,39 +2392,41 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	}
 
 	apiBind := "127.0.0.1"
-	if s.cfg.Gateway.APIBind != "" {
-		apiBind = s.cfg.Gateway.APIBind
+	if s.currentConfig().Gateway.APIBind != "" {
+		apiBind = s.currentConfig().Gateway.APIBind
 	}
-	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.cfg.Gateway.APIPort)
-	proxyAddr := guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host)
+	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.currentConfig().Gateway.APIPort)
+	proxyAddr := guardrailListenAddr(s.currentConfig().Guardrail.Port, s.currentConfig().Guardrail.Host)
 
 	// Synthesize a first-boot gateway token once for all connectors — the
 	// token is baked into every connector's hook scripts and is the shared
 	// secret the API server authenticates inbound hooks against.
-	dotenvPath := filepath.Join(s.cfg.DataDir, ".env")
-	apiToken := s.cfg.Gateway.ResolvedToken()
+	dotenvPath := filepath.Join(s.currentConfig().DataDir, ".env")
+	apiToken := s.currentConfig().Gateway.ResolvedToken()
 	if apiToken == "" {
 		tok, err := EnsureGatewayToken(dotenvPath)
 		if err != nil {
 			s.health.SetGuardrail(StateError, err.Error(), nil)
 			return fmt.Errorf("first-boot gateway token: %w", err)
 		}
-		s.cfg.Gateway.Token = tok
+		next := cloneConfig(s.currentConfig())
+		next.Gateway.Token = tok
+		s.publishConfig(next)
 		apiToken = tok
 		_ = os.Setenv("DEFENSECLAW_GATEWAY_TOKEN", tok)
 	}
-	masterKey := deriveMasterKey(s.cfg.DataDir)
+	masterKey := deriveMasterKey(s.currentConfig().DataDir)
 
 	// Set-difference teardown: any connector active on a previous boot but
 	// absent from the current set is torn down once, before setup. Uses a
 	// base opts carrying just the fields Teardown needs.
-	baseOpts := connector.SetupOpts{DataDir: s.cfg.DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr}
-	previous := connector.LoadActiveConnectors(s.cfg.DataDir)
+	baseOpts := connector.SetupOpts{DataDir: s.currentConfig().DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr}
+	previous := connector.LoadActiveConnectors(s.currentConfig().DataDir)
 	failedRemoved := teardownRemovedConnectors(registry, previous, names, baseOpts, ctx)
 
 	// Disabled short-circuit: tear every configured connector down, clear
 	// persisted state, and idle until shutdown.
-	if !s.cfg.Guardrail.Enabled {
+	if !s.currentConfig().Guardrail.Enabled {
 		failedTeardown := append([]string(nil), failedRemoved...)
 		for _, conn := range conns {
 			opts := s.connectorSetupOpts(conn, apiToken, proxyAddr, apiAddr)
@@ -2410,14 +2438,14 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 				failedTeardown = append(failedTeardown, conn.Name())
 				continue
 			}
-			if err := connector.ClearHookContractLockEntry(s.cfg.DataDir, conn.Name()); err != nil {
+			if err := connector.ClearHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: clear hook contract lock for %s: %v\n", conn.Name(), err)
 				failedTeardown = append(failedTeardown, conn.Name())
 			}
 		}
 		if len(failedTeardown) == 0 {
-			connector.ClearActiveConnector(s.cfg.DataDir)
-		} else if err := connector.SaveActiveConnectors(s.cfg.DataDir, failedTeardown); err != nil {
+			connector.ClearActiveConnector(s.currentConfig().DataDir)
+		} else if err := connector.SaveActiveConnectors(s.currentConfig().DataDir, failedTeardown); err != nil {
 			persistErr := fmt.Errorf(
 				"save connectors awaiting teardown retry (%s): %w",
 				strings.Join(failedTeardown, ", "),
@@ -2446,7 +2474,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// failed setup" error below, which would misreport a deliberate
 	// per-connector disable as a boot failure.
 	if len(conns) == 0 {
-		if err := connector.SaveActiveConnectors(s.cfg.DataDir, failedRemoved); err != nil {
+		if err := connector.SaveActiveConnectors(s.currentConfig().DataDir, failedRemoved); err != nil {
 			persistErr := fmt.Errorf(
 				"save connectors awaiting teardown retry (%s): %w",
 				strings.Join(failedRemoved, ", "),
@@ -2475,7 +2503,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// Persist the set that actually came up so the next boot's
 	// set-difference teardown is accurate.
 	persisted := append(append([]string(nil), succeeded...), failedRemoved...)
-	if err := connector.SaveActiveConnectors(s.cfg.DataDir, persisted); err != nil {
+	if err := connector.SaveActiveConnectors(s.currentConfig().DataDir, persisted); err != nil {
 		persistErr := fmt.Errorf("save active connector set: %w", err)
 		if len(failedRemoved) > 0 {
 			persistErr = fmt.Errorf(
@@ -2514,7 +2542,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	connectorModes := make(map[string]string, len(succeeded))
 	anyEnforcement := false
 	for _, name := range succeeded {
-		mode := strings.ToLower(strings.TrimSpace(s.cfg.Guardrail.EffectiveMode(name)))
+		mode := strings.ToLower(strings.TrimSpace(s.currentConfig().Guardrail.EffectiveMode(name)))
 		connectorModes[name] = mode
 		anyEnforcement = anyEnforcement || mode == "action"
 	}
@@ -2537,10 +2565,10 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 // owns its guard through GuardrailProxy; multi-connector mode has no proxy, so
 // the sidecar owns these guards directly.
 func (s *Sidecar) startMultiHookConfigGuards(ctx context.Context, registry *connector.Registry, connectorNames []string, apiToken, proxyAddr, apiAddr string) []*HookConfigGuard {
-	if s == nil || s.cfg == nil || registry == nil || !s.cfg.Guardrail.Enabled || !s.cfg.Guardrail.HookSelfHeal {
+	if s == nil || s.currentConfig() == nil || registry == nil || !s.currentConfig().Guardrail.Enabled || !s.currentConfig().Guardrail.HookSelfHeal {
 		return nil
 	}
-	debounce := time.Duration(s.cfg.Guardrail.HookSelfHealDebounceMs) * time.Millisecond
+	debounce := time.Duration(s.currentConfig().Guardrail.HookSelfHealDebounceMs) * time.Millisecond
 	guards := make([]*HookConfigGuard, 0, len(connectorNames))
 	for _, name := range connectorNames {
 		conn, ok := registry.Get(name)
@@ -2613,16 +2641,16 @@ func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector
 // EffectiveHookFailModeFor so a per-connector hook_fail_mode override is
 // honored.
 func (s *Sidecar) connectorSetupOpts(conn connector.Connector, apiToken, proxyAddr, apiAddr string) connector.SetupOpts {
-	agentVersion := connector.LoadCachedAgentVersion(s.cfg.DataDir, conn.Name())
+	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	return connector.SetupOpts{
-		DataDir:          s.cfg.DataDir,
+		DataDir:          s.currentConfig().DataDir,
 		ProxyAddr:        proxyAddr,
 		APIAddr:          apiAddr,
 		APIToken:         apiToken,
-		WorkspaceDir:     s.cfg.ConnectorWorkspaceDir(),
-		HookFailMode:     s.cfg.Guardrail.EffectiveHookFailModeFor(conn.Name()),
-		HILTEnabled:      s.cfg.Guardrail.EffectiveHILT(conn.Name()).Enabled,
+		WorkspaceDir:     s.currentConfig().ConnectorWorkspaceDir(),
+		HookFailMode:     s.currentConfig().Guardrail.EffectiveHookFailModeFor(conn.Name()),
+		HILTEnabled:      s.currentConfig().Guardrail.EffectiveHILT(conn.Name()).Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,
 		HookContractID:   contractResolution.Contract.ContractID,
@@ -2641,7 +2669,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 
 	// Load + validate this connector's effective rule pack through the
 	// shared cache. Connectors sharing a profile read disk once.
-	rp := cache.Load(s.cfg.Guardrail.EffectiveRulePackDir(conn.Name()))
+	rp := cache.Load(s.currentConfig().Guardrail.EffectiveRulePackDir(conn.Name()))
 	if rp != nil {
 		rp.Validate()
 	}
@@ -2663,14 +2691,14 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	// shipping an unverified enforcing hook.
 	contractResolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)
 	if connector.HookContractNeedsActionOverride(contractResolution) &&
-		strings.EqualFold(s.cfg.Guardrail.Mode, "action") &&
+		strings.EqualFold(s.currentConfig().Guardrail.Mode, "action") &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), opts.AgentVersion, contractResolution.Reason)
 	}
-	if previous := connector.LoadHookContractLockEntry(s.cfg.DataDir, conn.Name()); previous.Connector != "" {
+	if previous := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
 		if connector.HookContractLockDrifted(previous, current) &&
-			strings.EqualFold(s.cfg.Guardrail.Mode, "action") &&
+			strings.EqualFold(s.currentConfig().Guardrail.Mode, "action") &&
 			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 			return fmt.Errorf("connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
 		}
@@ -2688,7 +2716,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		return fmt.Errorf("connector %s hook verification failed: %w", conn.Name(), err)
 	}
 	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
-	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, lockEntry); err != nil {
+	if err := connector.SaveHookContractLockEntry(s.currentConfig().DataDir, lockEntry); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] save hook contract lock for %s: %v\n", conn.Name(), err)
 	}
 	return nil
@@ -3067,11 +3095,11 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 		return ctx.Err()
 	}
 	s.health.SetAIDiscovery(StateStarting, "", map[string]interface{}{
-		"mode":                      s.cfg.AIDiscovery.Mode,
-		"scan_interval_min":         s.cfg.AIDiscovery.ScanIntervalMin,
-		"process_interval_s":        s.cfg.AIDiscovery.ProcessIntervalSec,
-		"include_shell_history":     s.cfg.AIDiscovery.IncludeShellHistory,
-		"include_package_manifests": s.cfg.AIDiscovery.IncludePackageManifests,
+		"mode":                      s.currentConfig().AIDiscovery.Mode,
+		"scan_interval_min":         s.currentConfig().AIDiscovery.ScanIntervalMin,
+		"process_interval_s":        s.currentConfig().AIDiscovery.ProcessIntervalSec,
+		"include_shell_history":     s.currentConfig().AIDiscovery.IncludeShellHistory,
+		"include_package_manifests": s.currentConfig().AIDiscovery.IncludePackageManifests,
 	})
 	errCh := make(chan error, 1)
 	go func() {
@@ -3114,13 +3142,13 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 // runAPI starts the REST API server.
 func (s *Sidecar) runAPI(ctx context.Context) error {
 	bind := "127.0.0.1"
-	if s.cfg.Gateway.APIBind != "" {
-		bind = s.cfg.Gateway.APIBind
-	} else if s.cfg.OpenShell.IsStandalone() && s.cfg.Guardrail.Host != "" && s.cfg.Guardrail.Host != "localhost" {
-		bind = s.cfg.Guardrail.Host
+	if s.currentConfig().Gateway.APIBind != "" {
+		bind = s.currentConfig().Gateway.APIBind
+	} else if s.currentConfig().OpenShell.IsStandalone() && s.currentConfig().Guardrail.Host != "" && s.currentConfig().Guardrail.Host != "localhost" {
+		bind = s.currentConfig().Guardrail.Host
 	}
-	addr := fmt.Sprintf("%s:%d", bind, s.cfg.Gateway.APIPort)
-	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
+	addr := fmt.Sprintf("%s:%d", bind, s.currentConfig().Gateway.APIPort)
+	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
 	api.SetOTelProvider(s.otel)
@@ -3131,7 +3159,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// cisco_ai_defense.api_key_env. NewCiscoInspectClient returns nil
 	// when no key resolves; the hook lane silently skips AID in that
 	// case and falls back to the regex + CodeGuard verdict.
-	if cisco := NewCiscoInspectClient(&s.cfg.CiscoAIDefense, filepath.Join(s.cfg.DataDir, ".env")); cisco != nil {
+	if cisco := NewCiscoInspectClient(&s.currentConfig().CiscoAIDefense, filepath.Join(s.currentConfig().DataDir, ".env")); cisco != nil {
 		cisco.SetTelemetry(s.otel)
 		api.SetCiscoInspector(cisco)
 	}
@@ -3154,14 +3182,14 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// Failure to load is logged but non-fatal: tokenAuth falls back
 	// to the master-bearer comparison so a missing per-source token
 	// only loses the scoped-token path, never breaks /otlp/.
-	if scoped, err := connector.LoadAllOTLPPathTokens(s.cfg.DataDir); err == nil {
+	if scoped, err := connector.LoadAllOTLPPathTokens(s.currentConfig().DataDir); err == nil {
 		api.SetOTLPPathTokens(scoped)
 	} else {
 		fmt.Fprintf(os.Stderr, "[sidecar] load OTLP path-tokens: %v\n", err)
 	}
 	reg := connector.NewDefaultRegistry()
-	if s.cfg.PluginDir != "" {
-		_ = reg.DiscoverPlugins(s.cfg.PluginDir)
+	if s.currentConfig().PluginDir != "" {
+		_ = reg.DiscoverPlugins(s.currentConfig().PluginDir)
 	}
 	api.SetConnectorRegistry(reg)
 	return api.Run(ctx)
@@ -3282,9 +3310,9 @@ func (s *Sidecar) reportTelemetryHealth() {
 	}
 
 	details := map[string]interface{}{}
-	if len(s.cfg.OTel.Destinations) > 0 {
-		destinations := make([]map[string]interface{}, 0, len(s.cfg.OTel.Destinations))
-		for _, destination := range s.cfg.OTel.Destinations {
+	if len(s.currentConfig().OTel.Destinations) > 0 {
+		destinations := make([]map[string]interface{}, 0, len(s.currentConfig().OTel.Destinations))
+		for _, destination := range s.currentConfig().OTel.Destinations {
 			signals := destinationSignalNames(destination)
 			entry := map[string]interface{}{
 				"name":     destination.Name,
@@ -3320,13 +3348,13 @@ func (s *Sidecar) reportTelemetryHealth() {
 // It starts a background goroutine that probes the sandbox endpoint and
 // transitions the state to running once reachable, or error on timeout.
 func (s *Sidecar) reportSandboxHealth(ctx context.Context) {
-	if !s.cfg.OpenShell.IsStandalone() {
+	if !s.currentConfig().OpenShell.IsStandalone() {
 		return
 	}
 
 	details := map[string]interface{}{
-		"sandbox_ip":   s.cfg.Gateway.Host,
-		"gateway_port": s.cfg.Gateway.Port,
+		"sandbox_ip":   s.currentConfig().Gateway.Host,
+		"gateway_port": s.currentConfig().Gateway.Port,
 	}
 	s.health.SetSandbox(StateStarting, "", details)
 
@@ -3337,7 +3365,7 @@ func (s *Sidecar) reportSandboxHealth(ctx context.Context) {
 // On success it transitions sandbox health to running; on context
 // cancellation or too many failures it transitions to error/stopped.
 func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface{}) {
-	addr := net.JoinHostPort(s.cfg.Gateway.Host, fmt.Sprintf("%d", s.cfg.Gateway.Port))
+	addr := net.JoinHostPort(s.currentConfig().Gateway.Host, fmt.Sprintf("%d", s.currentConfig().Gateway.Port))
 	const maxAttempts = 20
 	backoff := 500 * time.Millisecond
 
@@ -3384,10 +3412,10 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 // audit_sinks model is provider-agnostic and operators bring their own
 // collector/SIEM credentials.
 func (s *Sidecar) reportSinksHealth() {
-	connectorNames := s.cfg.Observability.ConnectorNames()
-	total := len(s.cfg.AuditSinks)
+	connectorNames := s.currentConfig().Observability.ConnectorNames()
+	total := len(s.currentConfig().AuditSinks)
 	for _, name := range connectorNames {
-		pc := s.cfg.Observability.Connectors[name]
+		pc := s.currentConfig().Observability.Connectors[name]
 		if pc.AuditSinks == nil {
 			continue
 		}
@@ -3482,11 +3510,11 @@ func (s *Sidecar) reportSinksHealth() {
 		}
 	}
 
-	for _, sink := range s.cfg.AuditSinks {
+	for _, sink := range s.currentConfig().AuditSinks {
 		appendSink(sink, "global")
 	}
 	for _, connectorName := range connectorNames {
-		pc := s.cfg.Observability.Connectors[connectorName]
+		pc := s.currentConfig().Observability.Connectors[connectorName]
 		if pc.AuditSinks == nil {
 			continue // inherits global; no duplicate rows
 		}
@@ -3568,15 +3596,18 @@ func (s *Sidecar) Health() *SidecarHealth {
 // that as fatal because the API server cannot authenticate without a
 // known token.
 func (s *Sidecar) ensureGatewayTokenSynthesis() (string, error) {
-	if tok := s.cfg.Gateway.ResolvedToken(); tok != "" {
+	cfg := s.currentConfig()
+	if tok := cfg.Gateway.ResolvedToken(); tok != "" {
 		return tok, nil
 	}
-	dotenvPath := filepath.Join(s.cfg.DataDir, ".env")
+	dotenvPath := filepath.Join(cfg.DataDir, ".env")
 	tok, err := EnsureGatewayToken(dotenvPath)
 	if err != nil {
 		return "", err
 	}
-	s.cfg.Gateway.Token = tok
+	next := cloneConfig(cfg)
+	next.Gateway.Token = tok
+	s.publishConfig(next)
 	// Mirror into the process env so sub-callers (judge LLM init,
 	// hook generators, OTLP path-token loaders) all observe the
 	// same value through their normal os.Getenv lookup path.

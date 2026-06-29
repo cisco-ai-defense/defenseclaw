@@ -41,6 +41,7 @@ from defenseclaw.migrations import (
     _migrate_config_v7_named_otel_destinations,
     _parse_dotenv,
     _read_active_connector_from_yaml,
+    _yaml_scalar,
     run_migrations,
 )
 
@@ -62,6 +63,13 @@ def _ctx(openclaw_home: str, data_dir: str | None = None) -> MigrationContext:
         openclaw_home=openclaw_home,
         data_dir=data_dir or tempfile.mkdtemp(prefix="dclaw-mig-data-"),
     )
+
+
+class TestYAMLScalarRendering(unittest.TestCase):
+    def test_string_values_that_yaml_would_retype_are_quoted(self):
+        for value in ("true", "false", "yes", "123", "null", "~", "01"):
+            with self.subTest(value=value):
+                self.assertEqual(yaml.safe_load(_yaml_scalar(value)), value)
 
 
 class TestMigrate030PreservesOperatorChanges(unittest.TestCase):

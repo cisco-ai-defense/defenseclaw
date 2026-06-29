@@ -335,7 +335,11 @@ guardrail mode, scanner mode, connector, block message, and HILT settings.
 ```json
 {
   "mode": "observe",
-  "scanner_mode": "local"
+  "scanner_mode": "local",
+  "block_message": "Request blocked by security policy",
+  "connector": "claudecode",
+  "hilt_enabled": true,
+  "hilt_min_severity": "MEDIUM"
 }
 ```
 
@@ -350,7 +354,8 @@ guardrail mode, scanner mode, connector, block message, and HILT settings.
 
 Supported PATCH fields are `mode`, `scanner_mode`, `block_message`,
 `connector`, `hilt_enabled`, and `hilt_min_severity`. The request body is JSON,
-not a raw `config.yaml` upload.
+not a raw `config.yaml` upload. Changing `connector` uses restart semantics so
+listener and hook state are rebuilt rather than silently hot-swapped in place.
 
 With the default `gateway.config_reload.mode: hot`, simple guardrail changes are
 applied without a process restart. If `gateway.config_reload.mode: restart` is

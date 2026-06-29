@@ -28,7 +28,9 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/log/global"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -170,6 +172,29 @@ func TestNewProvider_Disabled(t *testing.T) {
 	}
 	if err := p.Shutdown(context.Background()); err != nil {
 		t.Errorf("shutdown disabled: %v", err)
+	}
+}
+
+func TestNewProviderInactiveDoesNotInstallGlobals(t *testing.T) {
+	tracerBefore := otel.GetTracerProvider()
+	loggerBefore := global.GetLoggerProvider()
+	meterBefore := otel.GetMeterProvider()
+	cfg := disabledCfg()
+	cfg.OTel.Enabled = true
+
+	p, err := NewProviderInactive(context.Background(), cfg, "test")
+	if err != nil {
+		t.Fatalf("NewProviderInactive: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
+	if otel.GetTracerProvider() != tracerBefore {
+		t.Fatal("inactive provider replaced the global tracer provider")
+	}
+	if global.GetLoggerProvider() != loggerBefore {
+		t.Fatal("inactive provider replaced the global logger provider")
+	}
+	if otel.GetMeterProvider() != meterBefore {
+		t.Fatal("inactive provider replaced the global meter provider")
 	}
 }
 

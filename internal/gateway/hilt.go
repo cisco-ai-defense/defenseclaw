@@ -50,8 +50,9 @@ type pendingHILTApproval struct {
 type HILTApprovalManager struct {
 	client   *Client
 	logger   *audit.Logger
-	otel     *telemetry.Provider
 	notifier *notifier.Dispatcher
+	otelMu   sync.RWMutex
+	otel     *telemetry.Provider
 
 	mu             sync.Mutex
 	pending        map[string]*pendingHILTApproval
@@ -83,7 +84,18 @@ func (m *HILTApprovalManager) SetOTelProvider(p *telemetry.Provider) {
 	if m == nil {
 		return
 	}
+	m.otelMu.Lock()
 	m.otel = p
+	m.otelMu.Unlock()
+}
+
+func (m *HILTApprovalManager) otelProvider() *telemetry.Provider {
+	if m == nil {
+		return nil
+	}
+	m.otelMu.RLock()
+	defer m.otelMu.RUnlock()
+	return m.otel
 }
 
 // HILTApprovalContext carries the optional correlation IDs that
@@ -312,8 +324,8 @@ func (m *HILTApprovalManager) record(ctx context.Context, action, subject, sever
 		}
 		_ = m.logger.LogActionCtx(ctx, action, subject, body)
 	}
-	if m.otel != nil {
-		m.otel.RecordGuardrailEvaluation(ctx, "openclaw:hilt", action)
+	if otel := m.otelProvider(); otel != nil {
+		otel.RecordGuardrailEvaluation(ctx, "openclaw:hilt", action)
 	}
 }
 
