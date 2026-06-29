@@ -10552,7 +10552,7 @@ def _enforcement_label(cfg: OverviewConfig | None) -> str:
     # instead; the per-connector modes live in the roster below.
     if len(cfg.connector_modes) > 1:
         n = len(cfg.connector_modes)
-        return f"{n} connectors (per-connector policy modes)"
+        return f"{n} connectors (per-connector modes)"
     connector = cfg.guardrail_connector or cfg.claw_mode
     mode = cfg.guardrail_mode or "observe"
     if not connector:

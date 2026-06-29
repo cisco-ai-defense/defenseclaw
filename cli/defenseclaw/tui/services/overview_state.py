@@ -1155,7 +1155,12 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
                 f"{name} connector has seen 0 hook events after {formatted} - "
                 "normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
             )
-        case "hermes" | "cursor" | "windsurf" | "geminicli" | "copilot" | "openhands" | "antigravity" | "opencode" | "omnigent":
+        case "omnigent":
+            return (
+                f"{name} connector has seen 0 policy events after {formatted} - "
+                "normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
+            )
+        case "hermes" | "cursor" | "windsurf" | "geminicli" | "copilot" | "openhands" | "antigravity" | "opencode":
             return (
                 f"{name} connector has seen 0 hook events after {formatted} - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"

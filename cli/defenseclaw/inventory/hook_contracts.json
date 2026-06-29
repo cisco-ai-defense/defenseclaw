@@ -661,6 +661,7 @@
           "hook_script_version": "v1",
           "hook_script": "omnigent-policy.py",
           "hook_config_path_templates": [
+            "$OMNIGENT_CONFIG_HOME/config.yaml",
             "~/.omnigent/config.yaml"
           ],
           "response_field": "",
@@ -675,7 +676,8 @@
           "aid_surfaces": [
             "prompt",
             "tool_call",
-            "tool_result"
+            "tool_result",
+            "event_content"
           ],
           "supports_traceparent": true,
           "native_otlp": true,

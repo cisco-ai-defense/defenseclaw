@@ -112,6 +112,15 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertIn("~/.openhands/hooks.json", compat.contract.hook_config_path_templates)
         self.assertIn("event_content", compat.contract.aid_surfaces)
 
+    def test_omnigent_contract_advertises_config_home_override(self) -> None:
+        compat = resolve_connector_contract("omnigent", "")
+
+        self.assertIn(
+            "$OMNIGENT_CONFIG_HOME/config.yaml",
+            compat.contract.hook_config_path_templates,
+        )
+        self.assertIn("~/.omnigent/config.yaml", compat.contract.hook_config_path_templates)
+
     def test_manifest_loader_preserves_unversioned_default_marker(self) -> None:
         _, contracts = _load_contracts_from_manifest(
             {

@@ -586,7 +586,7 @@ class TestCheckHookHealth(unittest.TestCase):
             config = os.path.join(tmp, "config.yaml")
             module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
             with open(config, "w", encoding="utf-8") as fh:
-                fh.write("defenseclaw_omnigent_policy: defenseclaw_guardrail\n")
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
             with open(module, "w", encoding="utf-8") as fh:
                 fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
             cfg = MagicMock()
@@ -604,6 +604,34 @@ class TestCheckHookHealth(unittest.TestCase):
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn(".pth", r.checks[-1]["detail"])
 
+    def test_omnigent_missing_policy_entry_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.yaml")
+            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
+            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
+            with open(pth, "w", encoding="utf-8") as fh:
+                fh.write(tmp + "\n")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"connectors": {"omnigent": {"locations": {
+                        "hook_config_paths": [config],
+                        "hook_script_paths": [module, pth],
+                    }}}},
+                    fh,
+                )
+            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": tmp}):
+                r = _DoctorResult()
+                _check_omnigent_policy_health(cfg, r)
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("policy registration", r.checks[-1]["detail"])
+
     def test_omnigent_uses_managed_backups_when_lock_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_home = os.path.join(tmp, "omnigent-config")
@@ -616,7 +644,7 @@ class TestCheckHookHealth(unittest.TestCase):
             os.makedirs(site_packages)
             pth = os.path.join(site_packages, "defenseclaw_omnigent.pth")
             with open(config, "w", encoding="utf-8") as fh:
-                fh.write("defenseclaw_omnigent_policy: defenseclaw_guardrail\n")
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
             with open(module, "w", encoding="utf-8") as fh:
                 fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
             with open(pth, "w", encoding="utf-8") as fh:
@@ -636,6 +664,52 @@ class TestCheckHookHealth(unittest.TestCase):
                 _check_omnigent_policy_health(cfg, r)
 
         self.assertEqual(r.checks[-1]["status"], "pass")
+
+    def test_omnigent_malformed_utf8_metadata_fails_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "config.yaml"), "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "wb") as fh:
+                fh.write(b"\xff\xfe\x00")
+            backup_dir = os.path.join(tmp, "connector_backups", "omnigent")
+            os.makedirs(backup_dir)
+            with open(os.path.join(backup_dir, "module.json"), "wb") as fh:
+                fh.write(b"\xff\xfe\x00")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": tmp}):
+                r = _DoctorResult()
+                _check_omnigent_policy_health(cfg, r)
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("policy module and .pth", r.checks[-1]["detail"])
+
+    def test_omnigent_malformed_utf8_import_shim_fails_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.yaml")
+            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
+            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
+            with open(pth, "wb") as fh:
+                fh.write(b"\xff\xfe\x00")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"connectors": {"omnigent": {"locations": {
+                        "hook_config_paths": [config],
+                        "hook_script_paths": [module, pth],
+                    }}}},
+                    fh,
+                )
+            r = _DoctorResult()
+            _check_omnigent_policy_health(cfg, r)
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn(".pth import shim", r.checks[-1]["detail"])
 
     def test_dispatch_routes_all_five_connectors(self) -> None:
         """``_check_connector_hooks`` must dispatch each generic connector

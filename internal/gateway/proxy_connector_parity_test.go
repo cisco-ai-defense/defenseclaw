@@ -143,6 +143,14 @@ func TestApplyHermeticConnectorHomes_RedirectsHOME(t *testing.T) {
 		t.Errorf("CodexConfigPathOverride = %q does not live under tmp HOME %q",
 			connector.CodexConfigPathOverride, got)
 	}
+	if !strings.HasPrefix(connector.OmnigentConfigPathOverride, got) {
+		t.Errorf("OmnigentConfigPathOverride = %q does not live under tmp HOME %q",
+			connector.OmnigentConfigPathOverride, got)
+	}
+	if !strings.HasPrefix(connector.OmnigentSitePackagesPathOverride, got) {
+		t.Errorf("OmnigentSitePackagesPathOverride = %q does not live under tmp HOME %q",
+			connector.OmnigentSitePackagesPathOverride, got)
+	}
 }
 
 // TestProxy_PerConnectorPrefixStrip is the connector-matrix variant of

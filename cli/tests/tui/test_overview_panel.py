@@ -34,7 +34,10 @@ from defenseclaw.tui.panels.overview import (
     sort_ai_discovery_signals_for_overview,
     string_detail,
 )
-from defenseclaw.tui.services.overview_state import format_scanner_overrides_summary
+from defenseclaw.tui.services.overview_state import (
+    format_scanner_overrides_summary,
+    zero_connector_requests_notice,
+)
 
 
 def _model() -> OverviewPanelModel:
@@ -107,6 +110,14 @@ def test_overview_service_cards_agent_detail_and_zero_request_guidance() -> None
     notices = model.build_notices()
     assert any("0 hook events" in notice.message for notice in notices)
     assert not any("gateway port" in notice.message for notice in notices)
+
+
+def test_omnigent_zero_traffic_notice_uses_policy_wording() -> None:
+    notice = zero_connector_requests_notice("omnigent", timedelta(minutes=2))
+
+    assert "0 policy events" in notice
+    assert "policy setup" in notice
+    assert "hook setup" not in notice
 
 
 def test_overview_telemetry_detail_lists_named_destinations() -> None:

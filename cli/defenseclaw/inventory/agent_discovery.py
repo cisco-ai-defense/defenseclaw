@@ -278,7 +278,8 @@ def _scan_agent(name: str) -> AgentSignal:
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_candidates = spec.config_candidates
     if name == "omnigent":
-        config_candidates = (omnigent_config_path(), *config_candidates)
+        config_path = omnigent_config_path()
+        config_candidates = (config_path, os.path.dirname(config_path))
     config_path = _first_existing_path(config_candidates)
     binary_path = _which(spec.binary_name) if spec.binary_name else ""
     version = ""

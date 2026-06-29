@@ -222,7 +222,8 @@ def _guardrail_proxy_uses_llm(cfg: Config) -> bool:
             if getattr(override, "enabled", None) is False:
                 continue
             active.append(_connector_name(name))
-        return any(name not in _HOOK_POLICY_ONLY_CONNECTORS for name in active)
+        if active:
+            return any(name not in _HOOK_POLICY_ONLY_CONNECTORS for name in active)
 
     connector = _connector_name(getattr(gc, "connector", "") if gc is not None else "")
     if not connector:

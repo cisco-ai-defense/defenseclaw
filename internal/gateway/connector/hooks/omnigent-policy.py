@@ -48,7 +48,7 @@ _EVENT_NAMES = {
 def _safe(value: Any) -> Any:
     """Return a JSON-compatible copy without leaking Python objects."""
     try:
-        json.dumps(value)
+        json.dumps(value, allow_nan=False)
         return value
     except (TypeError, ValueError, RecursionError):
         return str(value)
@@ -95,7 +95,7 @@ def _payload(event: dict[str, Any]) -> dict[str, Any]:
         "omnigent_event_type": event_type,
         "agent_name": "OmniGent",
         "agent_type": "omnigent",
-        "agent_id": str(actor.get("client_id") or actor.get("run_as") or ""),
+        "agent_id": str(actor.get("client_id") or ""),
         "model": str(context.get("model") or ""),
         "tool_name": tool_name,
         "tool_input": _safe(tool_input),
@@ -127,7 +127,11 @@ def _trace_headers() -> dict[str, str]:
 
 def defenseclaw_policy(event: dict[str, Any]) -> dict[str, str]:
     """Evaluate one OmniGent policy event through DefenseClaw."""
-    body = json.dumps(_payload(event), separators=(",", ":")).encode("utf-8")
+    body = json.dumps(
+        _payload(event),
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
     headers = _trace_headers()
     headers.update({
         "Content-Type": "application/json",

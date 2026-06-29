@@ -222,10 +222,21 @@ func TestPrintConnectorModes_ListsAll(t *testing.T) {
 			t.Errorf("connector %q missing from Connector Mode section:\n%s", name, out)
 		}
 	}
-	// Both differing data paths and policy modes must be explicit.
-	for _, want := range []string{"direct-to-upstream", "DefenseClaw proxy", "Policy mode:", "action", "observe"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("expected %q in per-connector status, got:\n%s", want, out)
+	codexStart := strings.Index(out, "Codex (codex)")
+	openClawStart := strings.Index(out, "OpenClaw (openclaw)")
+	if codexStart < 0 || openClawStart < 0 || codexStart >= openClawStart {
+		t.Fatalf("connector blocks missing or out of order:\n%s", out)
+	}
+	codexBlock := out[codexStart:openClawStart]
+	openClawBlock := out[openClawStart:]
+	for _, want := range []string{"direct-to-upstream", "Policy mode:", "action"} {
+		if !strings.Contains(codexBlock, want) {
+			t.Errorf("expected %q in Codex status block, got:\n%s", want, codexBlock)
+		}
+	}
+	for _, want := range []string{"DefenseClaw proxy", "Policy mode:", "observe"} {
+		if !strings.Contains(openClawBlock, want) {
+			t.Errorf("expected %q in OpenClaw status block, got:\n%s", want, openClawBlock)
 		}
 	}
 }

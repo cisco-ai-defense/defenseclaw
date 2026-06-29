@@ -19,9 +19,9 @@ keywords:
 
 Each connector has a top-level alias that wraps `defenseclaw setup guardrail --connector <name>` with the right defaults. Use them for fast subsequent runs and CI scripts.
 
-## Observability-only aliases (no enforcement)
+## Direct-to-upstream aliases (hook or policy enforcement)
 
-These connectors talk directly to their native upstream. DefenseClaw collects telemetry (hooks, native OTel, optional notify bridge) without sitting in the LLM data path.
+These connectors talk directly to their native upstream, so DefenseClaw never sits in the LLM data path. Observe mode records telemetry; action mode returns supported agent-native hook verdicts or, for OmniGent, native `ALLOW` / `ASK` / `DENY` policy decisions.
 
 <Cards>
   <Card title="Codex" href="/docs/connectors/codex" description="defenseclaw setup codex" />
@@ -34,7 +34,7 @@ These connectors talk directly to their native upstream. DefenseClaw collects te
   <Card title="Antigravity" href="/docs/connectors/antigravity" description="defenseclaw setup antigravity" />
   <Card title="Hermes" href="/docs/connectors/hermes" description="defenseclaw setup hermes" />
   <Card title="OpenCode" href="/docs/connectors/opencode" description="defenseclaw setup opencode" />
-  <Card title="OmniGent" href="/docs/connectors/omnigent" description="defenseclaw setup omnigent" />
+  <Card title="OmniGent" href="/docs/connectors/omnigent" description="defenseclaw setup omnigent — custom policy bridge with native ALLOW / ASK / DENY" />
 </Cards>
 
 ```bash
@@ -44,10 +44,10 @@ defenseclaw setup cursor --no-restart        # apply config without bouncing the
 ```
 
 <Callout>
-The observability-only aliases are the shorthand for `setup guardrail --connector <name>`. On a single-connector host that connector is the active posture. On a host with another hook connector already active, choose **Add** to keep both connectors wired under `guardrail.connectors` and let `claw.mode` become `multi`.
+These aliases are shorthand for `setup guardrail --connector <name>` with connector-specific options. On a single-connector host that connector is the active posture. On a host with another hook or policy connector already active, choose **Add** to keep both connectors wired under `guardrail.connectors` and let `claw.mode` become `multi`.
 </Callout>
 
-### What an observability-only alias does
+### What a direct-to-upstream alias does
 
 <Steps>
 
@@ -56,11 +56,11 @@ Selects the target connector exactly as if you had passed `defenseclaw setup gua
 </Step>
 
 <Step>
-Wires the hook scripts under `~/.defenseclaw/hooks/` and patches `~/.codex/config.toml` / `~/.claude/settings.json` with the hook references and native OTel env block. No proxy listener binds; the agent talks directly to its native upstream.
+Wires the connector's documented hook surface or OmniGent policy bridge and, where supported, native OTel exporter settings. No proxy listener binds; the agent talks directly to its native upstream.
 </Step>
 
 <Step>
-Wires the connector's hook scripts and (where supported) native OTel exporter against the running gateway.
+Uses observe mode by default. With `--mode action`, supported lifecycle callbacks return native block/approval decisions; OmniGent maps all six policy phases to `ALLOW`, `ASK`, or `DENY`.
 </Step>
 
 <Step>
@@ -85,6 +85,11 @@ Restarts the gateway (unless `--no-restart`).
       type: "flag",
       description: "Restart defenseclaw-gateway after applying changes.",
       default: "--restart",
+    },
+    "--mode observe / action": {
+      type: "option",
+      description: "Choose record-only behavior or connector-native enforcement on supported callbacks.",
+      default: "observe",
     },
     "--with-local-stack / --no-local-stack": {
       type: "flag",
@@ -114,12 +119,12 @@ Use `defenseclaw setup <connector>` to add or reconfigure that connector. On hos
 
 ## Why aliases at all?
 
-Operators who only want telemetry (no traffic interception, no enforcement) used to walk through the full `setup guardrail` wizard, answer "yes" to a single confirm, and trust that the wizard did the right thing under the hood. The aliases shortcut that:
+Operators previously walked through the full `setup guardrail` wizard just to configure one connector. The aliases expose the common observe/action path directly:
 
 ```bash
-defenseclaw setup codex          # observability-only for Codex
-defenseclaw setup claude-code    # observability-only for Claude Code
-defenseclaw setup cursor         # observability-only for Cursor
+defenseclaw setup codex                         # observe by default
+defenseclaw setup claude-code --mode action    # native lifecycle verdicts
+defenseclaw setup omnigent --mode action       # native ALLOW / ASK / DENY policy
 defenseclaw setup openclaw       # full guardrail for OpenClaw
 ```
 

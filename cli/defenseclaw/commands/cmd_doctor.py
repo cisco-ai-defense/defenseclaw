@@ -1284,7 +1284,7 @@ def _hook_health_paths_from_lock(cfg, connector: str) -> list[str]:
     try:
         with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as fh:
             lock = json.load(fh)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return []
     entry = (lock.get("connectors") or {}).get(connector) or {}
     locations = entry.get("locations") or {}
@@ -1301,7 +1301,7 @@ def _hook_runtime_paths_from_lock(cfg, connector: str) -> list[str]:
     try:
         with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as fh:
             lock = json.load(fh)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return []
     entry = (lock.get("connectors") or {}).get(connector) or {}
     locations = entry.get("locations") or {}
@@ -1326,7 +1326,7 @@ def _omnigent_runtime_paths_from_backups(cfg) -> list[str]:
         try:
             with open(backup_path, encoding="utf-8") as fh:
                 record = json.load(fh)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeError, json.JSONDecodeError):
             continue
         if record.get("connector") != "omnigent" or record.get("logical_name") != logical:
             continue
@@ -1342,9 +1342,11 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
         omnigent_config_path()
     ]
     config_path = next((p for p in config_paths if os.path.isfile(p)), "")
-    if not config_path or not _file_references_marker(
-        config_path, ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
-    ):
+    config_ok = bool(config_path) and all(
+        _file_references_marker(config_path, (marker,))
+        for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
+    )
+    if not config_ok:
         _emit("fail", "OmniGent policy", "config is missing the DefenseClaw policy registration", r=r)
         return
 
@@ -1371,7 +1373,7 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
     try:
         with open(pth_path, encoding="utf-8") as fh:
             import_path = fh.read().strip()
-    except OSError:
+    except (OSError, UnicodeError):
         import_path = ""
     if not import_path or os.path.realpath(import_path) != os.path.realpath(os.path.dirname(module_path)):
         _emit("fail", "OmniGent policy", f".pth import shim is missing or points elsewhere: {pth_path}", r=r)
@@ -1763,13 +1765,17 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
         if mode == "action":
             return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
         return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
-    if all(mode == "action" for mode in modes.values()):
+    if "omnigent" not in modes and all(mode == "action" for mode in modes.values()):
         return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
-    if all(mode != "action" for mode in modes.values()):
+    if "omnigent" not in modes and all(mode != "action" for mode in modes.values()):
         return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
     parts = []
     for connector, mode in modes.items():
-        if mode == "action":
+        if connector == "omnigent" and mode == "action":
+            parts.append("omnigent (mode=action via ALLOW/ASK/DENY)")
+        elif connector == "omnigent":
+            parts.append("omnigent (mode=observe via custom policy API)")
+        elif mode == "action":
             parts.append(f"{connector} (mode=action via PreToolUse deny)")
         else:
             parts.append(f"{connector} (mode=observe)")

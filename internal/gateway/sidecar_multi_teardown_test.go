@@ -171,6 +171,9 @@ func TestReconcileUnconfiguredConnectors_RetainsFailedConnectorForRetry(t *testi
 	if err := connector.SaveActiveConnectors(dir, []string{"omnigent"}); err != nil {
 		t.Fatalf("save active connectors: %v", err)
 	}
+	if err := connector.SaveHookContractLockEntry(dir, connector.HookContractLockEntry{Connector: "omnigent"}); err != nil {
+		t.Fatalf("save hook contract lock: %v", err)
+	}
 	s := &Sidecar{cfg: &config.Config{DataDir: dir}}
 
 	if err := s.reconcileUnconfiguredConnectors(context.Background(), reg); err == nil {
@@ -179,5 +182,8 @@ func TestReconcileUnconfiguredConnectors_RetainsFailedConnectorForRetry(t *testi
 	got := connector.LoadActiveConnectors(dir)
 	if len(got) != 1 || got[0] != "omnigent" {
 		t.Fatalf("connectors awaiting teardown retry = %v, want [omnigent]", got)
+	}
+	if got := connector.LoadHookContractLockEntry(dir, "omnigent"); got.Connector != "omnigent" {
+		t.Fatalf("hook contract lock should survive failed cleanup: %+v", got)
 	}
 }

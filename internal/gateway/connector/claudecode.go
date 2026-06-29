@@ -237,6 +237,13 @@ func (c *ClaudeCodeConnector) HookScripts(opts SetupOpts) []string {
 	return c.AgentPaths(opts).HookScripts
 }
 
+func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
+	return []EnvRequirement{{
+		Scope:       EnvScopeNone,
+		Description: "Hooks and native OpenTelemetry are written to Claude Code settings; no shell environment variables are required.",
+	}}
+}
+
 // HookCapabilities declares the Claude Code hook surface for the
 // unified collector and the verdict mapper. The shape mirrors the
 // events handled in evaluateClaudeCodeHook + claudeCodeOutput.

@@ -625,6 +625,8 @@
         "omni"
       ],
       "config_paths": [
+        "$OMNIGENT_CONFIG_HOME/config.yaml",
+        "$OMNIGENT_CONFIG_HOME",
         "~/.omnigent/config.yaml",
         "~/.omnigent"
       ],

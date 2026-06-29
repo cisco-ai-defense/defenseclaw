@@ -1901,6 +1901,24 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 f"must not restart openclaw when a different connector is selected; got {commands}",
             )
 
+    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
+    def test_multi_connector_omnigent_hint_names_custom_policy_api(
+        self, _mock_restart, mock_subhead,
+    ):
+        from defenseclaw.commands.cmd_setup import _restart_services
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _restart_services(
+                tmpdir,
+                connector=None,
+                connectors=["codex", "omnigent"],
+            )
+
+        detail = mock_subhead.call_args.args[0]
+        self.assertIn("custom policy API", detail)
+        self.assertNotIn("via the hook bus", detail)
+
 
 class TestCheckOpenclawGateway(unittest.TestCase):
     def _fast_monotonic(self, step=5):

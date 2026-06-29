@@ -558,7 +558,7 @@ var builtinHookContracts = map[string][]HookContract{
 		MinAgentVersion:         "0.0.0",
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v1",
-		HookConfigPathTemplates: []string{"~/.omnigent/config.yaml"},
+		HookConfigPathTemplates: []string{"$OMNIGENT_CONFIG_HOME/config.yaml", "~/.omnigent/config.yaml"},
 		ResponseFieldName:       "",
 		Events: []string{
 			"UserPromptSubmit",
@@ -568,7 +568,7 @@ var builtinHookContracts = map[string][]HookContract{
 			"BeforeModel",
 			"AfterModel",
 		},
-		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
 		Capabilities: HookCapability{
 			CanBlock:           true,
 			CanAskNative:       true,

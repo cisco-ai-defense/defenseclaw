@@ -229,6 +229,13 @@ def _workspace_path(workspace_dir: str | None, *parts: str) -> str:
     return os.path.join(root, *parts)
 
 
+def _omnigent_config_home() -> str:
+    config_home = (os.environ.get("OMNIGENT_CONFIG_HOME") or "").strip()
+    if config_home:
+        return os.path.abspath(_expand(config_home))
+    return os.path.join(str(Path.home()), ".omnigent")
+
+
 def omnigent_config_path() -> str:
     """Return OmniGent's effective user-level ``config.yaml`` path.
 
@@ -237,10 +244,7 @@ def omnigent_config_path() -> str:
     discovery, bootstrap, doctor, inventory, and setup all inspect the file
     that OmniGent itself loads.
     """
-    config_home = (os.environ.get("OMNIGENT_CONFIG_HOME") or "").strip()
-    if config_home:
-        return os.path.join(os.path.abspath(os.path.expanduser(config_home)), "config.yaml")
-    return os.path.join(str(Path.home()), ".omnigent", "config.yaml")
+    return os.path.join(_omnigent_config_home(), "config.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -311,8 +315,7 @@ def connector_home(
         # than an empty string or — worse — OpenClaw's path.
         return os.path.join(home, ".config", "opencode")
     if name == "omnigent":
-        config_home = (os.environ.get("OMNIGENT_CONFIG_HOME") or "").strip()
-        return _expand(config_home) if config_home else os.path.join(home, ".omnigent")
+        return _omnigent_config_home()
     if name == "openclaw":
         if openclaw_home:
             return _expand(openclaw_home)

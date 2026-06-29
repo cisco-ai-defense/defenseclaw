@@ -121,7 +121,7 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | Prompt (default) | Flag equivalent | Note |
 | --- | --- | --- |
 | **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Explicitly selects the connector being configured. Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `omnigent`, `openclaw`, `zeptoclaw`. |
-| **Hook connector quick setup** *(default: observe)* | `defenseclaw setup <hook-connector> --mode observe\|action` | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Copilot CLI, Hermes, OpenHands, Antigravity, OpenCode, and OmniGent all have one-line hook setup aliases. |
+| **Direct-to-upstream quick setup** *(default: observe)* | `defenseclaw setup <connector> --mode observe\|action` | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Copilot CLI, Hermes, OpenHands, Antigravity, OpenCode, and OmniGent all have one-line hook or policy setup aliases. |
 | **Enable guardrail?** *(default: Y)* | implicit when `--connector` is set | Pass `--disable` to roll the guardrail back. |
 | **Select mode** *(default: observe)* | `--mode observe\|action` | `observe` logs; `action` enforces. |
 | **Select hook fail mode** *(default: open)* | **interactive-only here** | Change later with `defenseclaw guardrail fail-mode <open\|closed>`. Only asked on first setup or when `--mode` changes. |
@@ -447,9 +447,9 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 | [`defenseclaw init`](/docs/get-started/quickstart#path-a--interactive-defenseclaw-init) | ✓ default on a TTY | ✓ `--non-interactive --yes` + per-knob flags | Identical to the wizard mode of `quickstart` once choices are made; both call `bootstrap.run_first_run()`. |
 | [`defenseclaw quickstart`](/docs/get-started/quickstart#path-b--zero-prompts-defenseclaw-quickstart) | ✗ never prompts | ✓ always | Zero-prompt by design. There is no wizard variant — use `init` for that. |
 | `defenseclaw setup guardrail` | ✓ default | ✓ `--non-interactive` + flags | Two prompts have **no flag** — see callout above. |
-| [`defenseclaw setup claude-code`](/docs/connectors/claudecode) | ✓ confirm prompt | ✓ `--yes` | Light wrapper that only configures observability. Full guardrail still goes through `setup guardrail`. |
-| [`defenseclaw setup codex`](/docs/connectors/codex) | ✓ confirm prompt | ✓ `--yes` | Same shape as `setup claude-code`. |
-| `defenseclaw setup cursor` / `setup windsurf` / `setup geminicli` / `setup copilot` / `setup openhands` / `setup antigravity` / `setup hermes` / `setup opencode` / `setup omnigent` | ✓ confirm prompt | ✓ `--yes` | Generated wrappers — confirmation only, then delegate. |
+| [`defenseclaw setup claude-code`](/docs/connectors/claudecode) | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, policy flags | Direct-to-upstream wrapper; observe by default, action returns supported lifecycle verdicts. |
+| [`defenseclaw setup codex`](/docs/connectors/codex) | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, policy flags | Same shape as `setup claude-code`. |
+| `defenseclaw setup cursor` / `setup windsurf` / `setup geminicli` / `setup copilot` / `setup openhands` / `setup antigravity` / `setup hermes` / `setup opencode` / `setup omnigent` | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, connector policy flags | Generated wrappers; observe by default, action uses the connector's native hook or policy decision surface. |
 | `defenseclaw setup openclaw` / `setup zeptoclaw` | ✓ confirm prompt | ✓ `--yes` | Confirm is skippable; the **full** guardrail wizard is **not** available here — pass `setup guardrail` flags after the confirm. |
 | [`defenseclaw setup splunk`](/docs/observability/splunk) | ✓ wizard when no mode flag | ✓ `--non-interactive` + `--logs` / `--enterprise` / `--o11y` | |
 | [`defenseclaw setup local-observability`](/docs/observability/local-observability) | ✗ no prompts | ✓ flags only | Compose-style up/down/logs subcommands; never asks. |

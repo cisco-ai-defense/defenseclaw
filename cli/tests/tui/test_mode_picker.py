@@ -62,6 +62,7 @@ def test_mode_picker_choices_cover_go_connectors() -> None:
     assert choice_for_hotkey("m").wire == "omnigent"
     assert "refresh hooks" in preview_for_switch("codex", "codex")
     assert "ALLOW/ASK/DENY" in preview_for_switch("openclaw", "omnigent")
+    assert "Python policy runtime" in preview_for_switch("omnigent", "omnigent")
 
 
 @pytest.mark.asyncio

@@ -75,7 +75,7 @@
     },
     "defenseclaw.claw.home_dir": {
       "type": "string",
-      "description": "Resolved home directory of the active claw framework. Path layout is connector-specific: openclaw uses ~/.openclaw, zeptoclaw uses ~/.zeptoclaw, claudecode uses ~/.claude (or $CLAUDE_HOME), codex uses ~/.codex, hermes uses ~/.hermes, cursor uses ~/.cursor, windsurf uses ~/.codeium/windsurf, geminicli uses ~/.gemini, copilot uses ~/.copilot while workspace assets may live under .github/, openhands uses workspace .openhands plus ~/.openhands for MCP, opencode uses ~/.config/opencode, and omnigent uses ~/.omnigent.",
+      "description": "Resolved home directory of the active claw framework. Path layout is connector-specific: openclaw uses ~/.openclaw, zeptoclaw uses ~/.zeptoclaw, claudecode uses ~/.claude (or $CLAUDE_HOME), codex uses ~/.codex, hermes uses ~/.hermes, cursor uses ~/.cursor, windsurf uses ~/.codeium/windsurf, geminicli uses ~/.gemini, copilot uses ~/.copilot while workspace assets may live under .github/, openhands uses workspace .openhands plus ~/.openhands for MCP, opencode uses ~/.config/opencode, and omnigent uses $OMNIGENT_CONFIG_HOME when set or ~/.omnigent otherwise.",
       "examples": [
         "/home/user/.openclaw",
         "/home/user/.zeptoclaw",

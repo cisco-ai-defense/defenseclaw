@@ -60,7 +60,7 @@ X-DefenseClaw-Client: cli
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/health` | exempt | Liveness + uptime + version. Used by k8s probes and `defenseclaw doctor`. |
-| `GET` | `/status` | required | Active connector roster + enforcement flags + legacy `connector_mode` + `connector_modes` (one entry per active connector: `connector`, `mode`, `telemetry`, `proxy_intercept`) + provenance. Used by `defenseclaw status` and the TUI. |
+| `GET` | `/status` | required | Active connector roster + enforcement flags + legacy `connector_mode` + `connector_modes` (one entry per active connector: `connector`, `mode`, `policy_mode`, `enforcement_surface`, `telemetry`, `proxy_intercept`) + provenance. Used by `defenseclaw status` and the TUI. |
 | `GET` | `/v1/connectors` | required | Lists every connector registered in the gateway (name, description, source, hook capabilities, tool inspection mode). |
 
 `GET /status` carries both a singular and a plural connector field so old and new clients keep working on a multi-connector install:
@@ -71,13 +71,17 @@ X-DefenseClaw-Client: cli
   "connector_modes": [
     {
       "connector": "codex",
-      "mode": "action",
+      "mode": "observability",
+      "policy_mode": "action",
+      "enforcement_surface": "agent_lifecycle_hooks",
       "telemetry": ["hook", "otel"],
       "proxy_intercept": false
     },
     {
       "connector": "claudecode",
-      "mode": "observe",
+      "mode": "observability",
+      "policy_mode": "observe",
+      "enforcement_surface": "agent_lifecycle_hooks",
       "telemetry": ["hook"],
       "proxy_intercept": false
     }

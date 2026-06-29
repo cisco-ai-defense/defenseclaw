@@ -345,7 +345,11 @@ class DoctorGuardrailTests(unittest.TestCase):
         _check_guardrail_proxy(cfg, result)
 
         mock_probe.assert_not_called()
+        self.assertEqual(len(result.checks), 1, result.checks)
+        self.assertEqual(result.checks[0]["status"], "pass")
         self.assertEqual(result.failed, 0, result.checks)
+        self.assertEqual(result.warned, 0, result.checks)
+        self.assertEqual(result.passed, 1, result.checks)
         detail = result.checks[0]["detail"]
         self.assertIn("policy-enforced for omnigent", detail)
         self.assertIn("mode=action via ALLOW/ASK/DENY", detail)
@@ -372,7 +376,9 @@ class DoctorGuardrailTests(unittest.TestCase):
 
         _check_llm_api_key(cfg, result)
 
+        self.assertEqual(len(result.checks), 1, result.checks)
         self.assertEqual(result.failed, 0, result.checks)
+        self.assertEqual(result.warned, 0, result.checks)
         self.assertEqual(result.checks[0]["status"], "skip")
         self.assertIn("not required by hook/policy enforcement", result.checks[0]["detail"])
 
@@ -1971,6 +1977,19 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
 
         self.assertIn("hook-enforced for codex, hermes", detail)
         self.assertIn("mode=action via PreToolUse deny", detail)
+        self.assertIn("proxy port intentionally closed", detail)
+
+    def test_multi_hook_action_mode_preserves_omnigent_policy_semantics(self):
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
+        )
+
+        detail = _guardrail_proxy_intentionally_closed(
+            self._cfg(["codex", "omnigent"], mode="action")
+        )
+
+        self.assertIn("codex (mode=action via PreToolUse deny)", detail)
+        self.assertIn("omnigent (mode=action via ALLOW/ASK/DENY)", detail)
         self.assertIn("proxy port intentionally closed", detail)
 
     def test_proxy_peer_forces_real_probe(self):

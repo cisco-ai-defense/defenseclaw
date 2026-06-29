@@ -38,6 +38,7 @@ CONNECTORS = (
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
     "omnigent",
 )
 

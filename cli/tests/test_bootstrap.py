@@ -114,12 +114,38 @@ class BootstrapEnvTests(unittest.TestCase):
         config_home = os.path.join(self._tmp.name, "omnigent-config")
         os.makedirs(config_home)
         with open(os.path.join(config_home, "config.yaml"), "w", encoding="utf-8") as fh:
-            fh.write("policy_modules: [defenseclaw_omnigent_policy]\n")
+            fh.write(
+                "policy_modules: [defenseclaw_omnigent_policy]\n"
+                "policies: {defenseclaw_guardrail: {}}\n"
+            )
         with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
             result = _connector_readiness(cfg, "omnigent")
 
         self.assertEqual(result.status, "pass")
         self.assertIn("custom policy", result.detail)
+        self.assertIn(config_home, result.detail)
+
+    def test_omnigent_readiness_rejects_partial_registration(self):
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        config_home = os.path.join(self._tmp.name, "partial-omnigent-config")
+        os.makedirs(config_home)
+        with open(os.path.join(config_home, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("policy_modules: [defenseclaw_omnigent_policy]\n")
+        with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
+            result = _connector_readiness(cfg, "omnigent")
+
+        self.assertEqual(result.status, "warn")
+
+    def test_omnigent_readiness_treats_malformed_utf8_as_unconfigured(self):
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        config_home = os.path.join(self._tmp.name, "malformed-omnigent-config")
+        os.makedirs(config_home)
+        with open(os.path.join(config_home, "config.yaml"), "wb") as fh:
+            fh.write(b"\xff\xfe\x00")
+        with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
+            result = _connector_readiness(cfg, "omnigent")
+
+        self.assertEqual(result.status, "warn")
 
 
 # ---------------------------------------------------------------------------

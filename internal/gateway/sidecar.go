@@ -1611,8 +1611,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// goroutine alive until shutdown, mirroring the existing
 	// !cfg.Guardrail.Enabled path in proxy.go (lines 313-318).
 	if !proxyShouldBindForConnector(conn, &s.cfg.Guardrail) {
-		mode := strings.ToLower(strings.TrimSpace(s.cfg.Guardrail.EffectiveMode(conn.Name())))
-		enforcementEnabled := mode == "action"
+		policyMode := strings.ToLower(strings.TrimSpace(s.cfg.Guardrail.EffectiveMode(conn.Name())))
+		if policyMode != "action" {
+			policyMode = "observe"
+		}
+		enforcementEnabled := policyMode == "action"
 		summary := "observability-only (no proxy binding)"
 		surface := "agent_lifecycle_hooks"
 		if enforcementEnabled {
@@ -1627,13 +1630,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
 			"summary":             summary,
 			"connector":           conn.Name(),
-			"mode":                mode,
+			"mode":                "observability",
+			"policy_mode":         policyMode,
 			"enforcement_enabled": enforcementEnabled,
 			"enforcement_surface": surface,
 			"proxy_port":          "closed",
 			"hint":                "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path",
 		})
-		fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s mode=%s enforcement=%t — proxy port intentionally not bound\n", conn.Name(), mode, enforcementEnabled)
+		fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — proxy port intentionally not bound\n", conn.Name(), policyMode, enforcementEnabled)
 		<-ctx.Done()
 		return nil
 	}
@@ -1856,7 +1860,13 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		if len(failedTeardown) == 0 {
 			connector.ClearActiveConnector(s.cfg.DataDir)
 		} else if err := connector.SaveActiveConnectors(s.cfg.DataDir, failedTeardown); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] save connectors awaiting teardown retry: %v\n", err)
+			persistErr := fmt.Errorf(
+				"save connectors awaiting teardown retry (%s): %w",
+				strings.Join(failedTeardown, ", "),
+				err,
+			)
+			s.health.SetGuardrail(StateError, persistErr.Error(), nil)
+			return persistErr
 		}
 		if len(failedTeardown) > 0 {
 			teardownErr := fmt.Errorf("connector teardown incomplete for: %s", strings.Join(failedTeardown, ", "))

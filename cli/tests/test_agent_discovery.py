@@ -222,6 +222,20 @@ def test_omnigent_discovery_honors_config_home(monkeypatch, tmp_path):
     assert signal.config_path == str(config_path)
 
 
+def test_omnigent_discovery_does_not_fall_back_when_config_home_is_set(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    default_home = tmp_path / ".omnigent"
+    default_home.mkdir()
+    (default_home / "config.yaml").write_text("policies: {}\n", encoding="utf-8")
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "missing-custom-home"))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("omnigent")
+
+    assert signal.installed is False
+    assert signal.config_path == ""
+
+
 # M-4 regression coverage: the version probe MUST refuse to exec a
 # binary that lives outside the canonical install prefixes (an attacker
 # who can prepend a hostile directory to PATH could otherwise have us

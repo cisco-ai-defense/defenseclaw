@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -135,6 +136,9 @@ func TestOmnigentSetupAndTeardown(t *testing.T) {
 }
 
 func TestOmnigentSitePackagesIgnoresInterpreterStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell stubs")
+	}
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
 	purelib := filepath.Join(root, "Python Env", "lib", "python", "site-packages")
@@ -167,6 +171,9 @@ func TestOmnigentSitePackagesIgnoresInterpreterStderr(t *testing.T) {
 }
 
 func TestOmnigentSitePackagesRejectsUntrustedInterpreter(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell stubs")
+	}
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
@@ -186,6 +193,97 @@ func TestOmnigentSitePackagesRejectsUntrustedInterpreter(t *testing.T) {
 	_, err := omnigentSitePackages(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "trusted install prefix") {
 		t.Fatalf("error = %v, want trusted-prefix refusal", err)
+	}
+}
+
+func TestOmnigentSitePackagesRejectsShebangArguments(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shebang semantics")
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(binDir, "omnigent"),
+		[]byte("#!/usr/bin/env python3 -I\n"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	previous := OmnigentSitePackagesPathOverride
+	OmnigentSitePackagesPathOverride = ""
+	t.Cleanup(func() { OmnigentSitePackagesPathOverride = previous })
+
+	_, err := omnigentSitePackages(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "unsupported interpreter arguments") {
+		t.Fatalf("error = %v, want unsupported shebang arguments", err)
+	}
+}
+
+func TestOmnigentSetupRefreshesBackupsWhenTargetsMove(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "defenseclaw")
+	oldConfig := filepath.Join(root, "old-config", "config.yaml")
+	newConfig := filepath.Join(root, "new-config", "config.yaml")
+	oldSitePackages := filepath.Join(root, "old-python", "site-packages")
+	newSitePackages := filepath.Join(root, "new-python", "site-packages")
+	oldConfigBytes := []byte("policies:\n  operator_policy: {}\n")
+	newConfigBytes := []byte("policies:\n  new_operator_policy: {}\n")
+	if err := os.MkdirAll(filepath.Dir(oldConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(newConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldConfig, oldConfigBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newConfig, newConfigBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	previousConfig := OmnigentConfigPathOverride
+	previousSite := OmnigentSitePackagesPathOverride
+	t.Cleanup(func() {
+		OmnigentConfigPathOverride = previousConfig
+		OmnigentSitePackagesPathOverride = previousSite
+	})
+	OmnigentConfigPathOverride = oldConfig
+	OmnigentSitePackagesPathOverride = oldSitePackages
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
+	conn := NewOmnigentConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("first Setup: %v", err)
+	}
+
+	OmnigentConfigPathOverride = newConfig
+	OmnigentSitePackagesPathOverride = newSitePackages
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup after target move: %v", err)
+	}
+	if got, err := os.ReadFile(oldConfig); err != nil || string(got) != string(oldConfigBytes) {
+		t.Fatalf("old config after target move = %q, %v; want pristine %q", got, err, oldConfigBytes)
+	}
+	if _, err := os.Stat(filepath.Join(oldSitePackages, "defenseclaw_omnigent.pth")); !os.IsNotExist(err) {
+		t.Fatalf("old import shim survived target move: %v", err)
+	}
+	for logical, want := range map[string]string{
+		"config": newConfig,
+		"pth":    filepath.Join(newSitePackages, "defenseclaw_omnigent.pth"),
+	} {
+		backup, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, conn.Name(), logical))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if backup.Path != want {
+			t.Fatalf("%s backup path = %q, want %q", logical, backup.Path, want)
+		}
+	}
+
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if got, err := os.ReadFile(newConfig); err != nil || string(got) != string(newConfigBytes) {
+		t.Fatalf("new config after teardown = %q, %v; want pristine %q", got, err, newConfigBytes)
 	}
 }
 
@@ -219,6 +317,43 @@ print(json.dumps(module.defenseclaw_policy({"type": "request", "data": "hello"})
 	}
 	if verdict["result"] != "ALLOW" {
 		t.Fatalf("raw template verdict = %v, want fail-open ALLOW", verdict)
+	}
+}
+
+func TestOmnigentPolicyPayloadRejectsNonFiniteNumbers(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is required for the policy payload test")
+	}
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "omnigent-policy.py")
+	if err := os.WriteFile(path, templateBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("raw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+payload = module._payload({
+    "type": "tool_call",
+    "data": {"name": "score", "arguments": {"nan": float("nan"), "inf": float("inf")}},
+})
+print(json.dumps(payload, allow_nan=False))
+`
+	output, err := exec.Command(python, "-c", script, path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("normalize non-finite payload: %v\n%s", err, output)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(output, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload["tool_input"].(string); !ok {
+		t.Fatalf("tool_input = %#v, want safe string fallback", payload["tool_input"])
 	}
 }
 
@@ -301,6 +436,9 @@ print(json.dumps(module.defenseclaw_policy({
 	}
 	if received["hook_event_name"] != "PreToolUse" || received["tool_name"] != "shell" || received["model"] != "test-model" {
 		t.Fatalf("normalized request = %#v", received)
+	}
+	if received["agent_id"] != "" {
+		t.Fatalf("agent_id leaked actor.run_as: %#v", received["agent_id"])
 	}
 }
 

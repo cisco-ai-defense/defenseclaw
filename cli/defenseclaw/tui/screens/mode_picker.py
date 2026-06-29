@@ -231,6 +231,11 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
     current = normalize_connector(current_wire)
     dest = normalize_connector(dest_wire)
     label = choice_for_wire(dest).label
+    if current == dest and dest == "omnigent":
+        return (
+            "OmniGent: setup will re-run to refresh the custom Python policy runtime, "
+            "config, and runtime files."
+        )
     if current == dest:
         return f"{label}: setup will re-run to refresh hooks, config, and runtime files."
     if choice_for_wire(dest).guardrail_ok:

@@ -2674,6 +2674,12 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			if first["mode"] != c.wantMode {
 				t.Errorf("connector_modes[0].mode = %v, want %s", first["mode"], c.wantMode)
 			}
+			if first["policy_mode"] != cm["policy_mode"] {
+				t.Errorf("connector_modes[0].policy_mode = %v, want %v", first["policy_mode"], cm["policy_mode"])
+			}
+			if first["enforcement_surface"] != cm["enforcement_surface"] {
+				t.Errorf("connector_modes[0].enforcement_surface = %v, want %v", first["enforcement_surface"], cm["enforcement_surface"])
+			}
 		})
 	}
 }

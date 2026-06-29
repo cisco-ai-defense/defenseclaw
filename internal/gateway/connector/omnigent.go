@@ -162,7 +162,15 @@ func (c *OmnigentConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 	snapshots := make([]omnigentFileSnapshot, 0, len(managedPaths)*2)
 	for _, managed := range managedPaths {
-		for _, path := range []string{managed.path, managedFileBackupPath(opts.DataDir, c.Name(), managed.logical)} {
+		backupPath := managedFileBackupPath(opts.DataDir, c.Name(), managed.logical)
+		snapshotPaths := []string{managed.path, backupPath}
+		backup, backupErr := loadManagedFileBackupPath(backupPath)
+		if backupErr == nil && strings.TrimSpace(backup.Path) != "" && filepath.Clean(backup.Path) != filepath.Clean(managed.path) {
+			snapshotPaths = append(snapshotPaths, backup.Path)
+		} else if backupErr != nil && !os.IsNotExist(backupErr) {
+			return fmt.Errorf("omnigent read %s backup: %w", managed.logical, backupErr)
+		}
+		for _, path := range snapshotPaths {
 			snapshot, snapshotErr := captureOmnigentFileSnapshot(path)
 			if snapshotErr != nil {
 				return fmt.Errorf("omnigent snapshot setup state: %w", snapshotErr)
@@ -181,7 +189,7 @@ func (c *OmnigentConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 	for _, managed := range managedPaths {
 		logical, path := managed.logical, managed.path
-		if err := captureManagedFileBackup(opts.DataDir, c.Name(), logical, path); err != nil {
+		if err := prepareOmnigentManagedBackup(opts.DataDir, c.Name(), logical, path); err != nil {
 			return rollback(fmt.Errorf("omnigent capture %s backup: %w", logical, err))
 		}
 	}
@@ -211,6 +219,39 @@ func (c *OmnigentConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return rollback(fmt.Errorf("omnigent update config backup: %w", err))
 	}
 	return nil
+}
+
+func prepareOmnigentManagedBackup(dataDir, connectorName, logicalName, targetPath string) error {
+	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
+	backup, err := loadManagedFileBackupPath(backupPath)
+	if os.IsNotExist(err) {
+		return captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath)
+	}
+	if err != nil {
+		return err
+	}
+	previousPath := strings.TrimSpace(backup.Path)
+	if previousPath == "" {
+		return fmt.Errorf("managed backup has an empty target path")
+	}
+	if filepath.Clean(previousPath) == filepath.Clean(targetPath) {
+		return nil
+	}
+
+	restored, err := restoreManagedFileBackupIfUnchanged(dataDir, connectorName, logicalName, previousPath)
+	if err != nil {
+		return fmt.Errorf("restore previous target %s: %w", previousPath, err)
+	}
+	if !restored {
+		if logicalName != "config" {
+			return fmt.Errorf("previous managed %s at %s was modified; clean it before switching OmniGent targets", logicalName, previousPath)
+		}
+		if err := removeOmnigentConfigEntries(previousPath); err != nil {
+			return fmt.Errorf("remove policy entries from previous config %s: %w", previousPath, err)
+		}
+		discardManagedFileBackup(dataDir, connectorName, logicalName)
+	}
+	return captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath)
 }
 
 type omnigentFileSnapshot struct {
@@ -252,11 +293,15 @@ func restoreOmnigentFileSnapshot(snapshot omnigentFileSnapshot) error {
 }
 
 func (c *OmnigentConnector) Teardown(ctx context.Context, opts SetupOpts) error {
-	_ = ctx
 	paths := map[string]string{
 		"config": managedFileBackupTargetPath(opts.DataDir, c.Name(), "config", omnigentConfigPath()),
 		"module": managedFileBackupTargetPath(opts.DataDir, c.Name(), "module", omnigentPolicyModulePath(opts)),
 		"pth":    managedFileBackupTargetPath(opts.DataDir, c.Name(), "pth", ""),
+	}
+	currentConfigPath := omnigentConfigPath()
+	currentPthPath := ""
+	if sitePackages, err := omnigentSitePackages(ctx); err == nil {
+		currentPthPath = filepath.Join(sitePackages, "defenseclaw_omnigent.pth")
 	}
 	var errs []error
 	for _, logical := range []string{"config", "module", "pth"} {
@@ -274,6 +319,21 @@ func (c *OmnigentConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 				errs = append(errs, fmt.Errorf("remove config entries: %w", err))
 			} else {
 				discardManagedFileBackup(opts.DataDir, c.Name(), logical)
+			}
+		}
+	}
+	if filepath.Clean(currentConfigPath) != filepath.Clean(paths["config"]) {
+		if err := removeOmnigentConfigEntries(currentConfigPath); err != nil {
+			errs = append(errs, fmt.Errorf("remove config entries from current target: %w", err))
+		}
+	}
+	if currentPthPath != "" && filepath.Clean(currentPthPath) != filepath.Clean(paths["pth"]) {
+		data, info, err := readManagedTarget(currentPthPath)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("inspect current import path: %w", err))
+		} else if info != nil && strings.TrimSpace(string(data)) == filepath.Dir(omnigentPolicyModulePath(opts)) {
+			if err := os.Remove(currentPthPath); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("remove current import path: %w", err))
 			}
 		}
 	}
@@ -382,44 +442,48 @@ func omnigentSitePackages(ctx context.Context) (string, error) {
 	if executable == "" {
 		return "", fmt.Errorf("omnigent connector: neither 'omnigent' nor 'omni' is on PATH")
 	}
-	pythonCommand := []string{}
+	pythonPath := ""
 	for _, name := range []string{"python", "python3", "python.exe", "python3.exe"} {
 		candidate := filepath.Join(filepath.Dir(executable), name)
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			pythonCommand = []string{candidate}
+			pythonPath = candidate
 			break
 		}
 	}
-	if len(pythonCommand) == 0 {
+	if pythonPath == "" {
 		file, openErr := os.Open(executable)
 		if openErr == nil {
 			line, _ := bufio.NewReader(file).ReadString('\n')
 			_ = file.Close()
 			if strings.HasPrefix(line, "#!") {
-				pythonCommand = strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "#!")))
+				fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "#!")))
+				switch {
+				case len(fields) == 1:
+					pythonPath = fields[0]
+				case len(fields) == 2 && filepath.Base(fields[0]) == "env":
+					resolved, err := exec.LookPath(fields[1])
+					if err != nil {
+						return "", fmt.Errorf("omnigent connector: resolve Python from env shebang: %w", err)
+					}
+					pythonPath = resolved
+				case len(fields) > 0:
+					return "", fmt.Errorf("omnigent connector: unsupported interpreter arguments in shebang for %s", executable)
+				}
 			}
 		}
 	}
-	if len(pythonCommand) == 0 {
+	if pythonPath == "" {
 		return "", fmt.Errorf("omnigent connector: could not locate the Python interpreter beside %s", executable)
 	}
-	if filepath.Base(pythonCommand[0]) == "env" && len(pythonCommand) > 1 {
-		resolved, err := exec.LookPath(pythonCommand[1])
-		if err != nil {
-			return "", fmt.Errorf("omnigent connector: resolve Python from env shebang: %w", err)
-		}
-		pythonCommand = append([]string{resolved}, pythonCommand[2:]...)
-	}
-	if err := validateOmnigentInterpreter(pythonCommand[0]); err != nil {
+	if err := validateOmnigentInterpreter(pythonPath); err != nil {
 		return "", err
 	}
-	args := append(append([]string{}, pythonCommand[1:]...), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-	cmd := exec.CommandContext(ctx, pythonCommand[0], args...)
+	cmd := exec.CommandContext(ctx, pythonPath, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("omnigent connector: resolve Python site-packages with %s: %w (%s)", strings.Join(pythonCommand, " "), err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("omnigent connector: resolve Python site-packages with %s: %w (%s)", pythonPath, err, strings.TrimSpace(stderr.String()))
 	}
 	path := ""
 	lines := strings.Split(strings.ReplaceAll(string(output), "\r\n", "\n"), "\n")

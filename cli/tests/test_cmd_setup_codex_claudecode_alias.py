@@ -48,6 +48,18 @@ from defenseclaw.commands.cmd_setup import setup as setup_group
 
 from tests.helpers import cleanup_app, make_app_context
 
+HOOK_ALIAS_CONNECTORS = (
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+    "openhands",
+    "antigravity",
+    "opencode",
+    "omnigent",
+)
+
 
 def _invoke(args: list[str], app):
     """Run a `defenseclaw setup ...` subcommand against *app* via CliRunner.
@@ -260,10 +272,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def test_new_aliases_pin_observability_connector(self):
-        for connector in [
-            "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands",
-            "antigravity", "opencode", "omnigent",
-        ]:
+        for connector in HOOK_ALIAS_CONNECTORS:
             with (
                 self.subTest(connector=connector),
                 patch(
@@ -308,10 +317,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                     self.assertEqual(fh.read().strip(), connector)
 
     def test_new_aliases_support_hook_action_mode(self):
-        for connector in [
-            "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands",
-            "antigravity", "opencode", "omnigent",
-        ]:
+        for connector in HOOK_ALIAS_CONNECTORS:
             with (
                 self.subTest(connector=connector),
                 patch(
@@ -425,10 +431,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
     def test_setup_help_lists_new_alias_commands(self):
         result = _invoke(["--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        for connector in [
-            "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands",
-            "antigravity", "opencode", "omnigent",
-        ]:
+        for connector in HOOK_ALIAS_CONNECTORS:
             self.assertIn(connector, result.output)
         self.assertIn("codex, claudecode", result.output)
         self.assertIn("hermes, antigravity", result.output)
@@ -437,7 +440,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         self.assertNotIn("openclaw) tracked under guardrail.connectors", result.output)
 
     def test_hook_help_uses_connector_set_wording(self):
-        for connector in ["codex", "claude-code", "hermes", "opencode", "omnigent"]:
+        for connector in ("codex", "claude-code", *HOOK_ALIAS_CONNECTORS):
             with self.subTest(connector=connector):
                 result = _invoke([connector, "--help"], self.app)
                 self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -457,7 +460,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
     def test_guardrail_help_mentions_new_connector_choices(self):
         result = _invoke(["guardrail", "--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
+        for connector in HOOK_ALIAS_CONNECTORS:
             self.assertIn(connector, result.output)
         self.assertNotIn("openclaw, claudecode, codex, zeptoclaw", result.output)
 

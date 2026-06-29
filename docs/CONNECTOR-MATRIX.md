@@ -36,12 +36,25 @@ telemetry capability rows where the vendor has documented local surfaces.
 ### OmniGent custom-policy setup
 
 OmniGent integrates through its documented custom Python policy API rather
-than a command hook. Run:
+than a command hook. On POSIX shells, run:
 
 ```bash
 defenseclaw setup omnigent --mode action --yes
-omnigent server --config ~/.omnigent/config.yaml
+omnigent server --config "${OMNIGENT_CONFIG_HOME:-$HOME/.omnigent}/config.yaml"
 ```
+
+On Windows PowerShell, run:
+
+```powershell
+defenseclaw setup omnigent --mode action --yes
+$configHome = if ($env:OMNIGENT_CONFIG_HOME) { $env:OMNIGENT_CONFIG_HOME } else { Join-Path $HOME ".omnigent" }
+omnigent server --config (Join-Path $configHome "config.yaml")
+```
+
+`~/.omnigent/config.yaml` is the default. When `OMNIGENT_CONFIG_HOME` is set,
+both OmniGent and DefenseClaw use `OMNIGENT_CONFIG_HOME/config.yaml` instead
+(`$OMNIGENT_CONFIG_HOME/config.yaml` on POSIX or
+`$env:OMNIGENT_CONFIG_HOME\config.yaml` in PowerShell).
 
 Setup installs an owner-only policy module under
 `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`, adds its directory to
@@ -150,7 +163,7 @@ with a warning. Action mode fails closed unless
 | Copilot CLI | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | OpenHands | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | OpenCode | hook contract | unversioned / stable plugin API | `opencode-hooks-v1` / `v6` (JS bridge plugin) | tool_call, tool_result |
-| OmniGent | hook contract | unversioned / documented custom-policy API | `omnigent-custom-policy-v1` / `v1` (Python policy bridge) | prompt, tool_call, tool_result |
+| OmniGent | hook contract | unversioned / documented custom-policy API | `omnigent-custom-policy-v1` / `v1` (Python policy bridge) | prompt, tool_call, tool_result, event_content |
 
 No hook contract currently has a `max_exclusive` ceiling. We only add an upper
 bound when an upstream release publishes a breaking hook change; otherwise,
@@ -182,7 +195,7 @@ Claude Code is pinned to the current documented hook surface captured at
 | Copilot CLI | yes | yes | `preToolUse` / `PreToolUse` | `PreToolUse`, `PermissionRequest`, stop/failure hooks | no | user,workspace | `~/.copilot/hooks/defenseclaw.json` or `<workspace>/.github/hooks/defenseclaw.json` |
 | OpenHands | yes | no | none | `pre_tool_use`, `user_prompt_submit`, `stop` | yes | user,workspace | `~/.openhands/hooks.json` or `<workspace>/.openhands/hooks.json` |
 | OpenCode | yes | no | none | `tool.execute.before` | yes | user | `~/.config/opencode/plugins/defenseclaw.js` (JS bridge plugin) |
-| OmniGent | yes | yes | `UserPromptSubmit`, `PreToolUse`, `BeforeModel` | all six mapped policy phases | yes | user | `~/.omnigent/config.yaml` + installed Python policy |
+| OmniGent | yes | yes | `UserPromptSubmit`, `PreToolUse`, `BeforeModel` | all six mapped policy phases | yes | user | `$OMNIGENT_CONFIG_HOME/config.yaml` when set, otherwise `~/.omnigent/config.yaml`, plus installed Python policy |
 
 `confirm` verdicts are rendered as native ask only when the event is listed in
 `ask_events`. Unsupported `confirm` decisions are downgraded explicitly while

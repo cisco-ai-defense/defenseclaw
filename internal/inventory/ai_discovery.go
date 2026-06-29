@@ -1938,6 +1938,17 @@ func (s *ContinuousDiscoveryService) expandCandidatePath(candidate string) []str
 	if candidate == "" {
 		return nil
 	}
+	missingEnv := false
+	candidate = os.Expand(candidate, func(name string) string {
+		value, ok := os.LookupEnv(name)
+		if !ok || strings.TrimSpace(value) == "" {
+			missingEnv = true
+		}
+		return value
+	})
+	if missingEnv {
+		return nil
+	}
 	if strings.HasPrefix(candidate, "~") {
 		return []string{filepath.Clean(filepath.Join(s.opts.HomeDir, strings.TrimPrefix(candidate, "~")))}
 	}

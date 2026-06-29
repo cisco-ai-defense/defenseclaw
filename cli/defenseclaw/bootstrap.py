@@ -1117,15 +1117,19 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "omnigent":
         path = omnigent_config_path()
         try:
-            configured = "defenseclaw_omnigent_policy" in Path(path).read_text(encoding="utf-8")
-        except OSError:
+            config_text = Path(path).read_text(encoding="utf-8")
+            configured = all(
+                marker in config_text
+                for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
+            )
+        except (OSError, UnicodeError):
             configured = False
         if configured:
-            return StepResult("Connector", "pass", "OmniGent custom policy found")
+            return StepResult("Connector", "pass", f"OmniGent custom policy found at {path}")
         return StepResult(
             "Connector",
             "warn",
-            "OmniGent custom policy not found yet",
+            f"OmniGent custom policy not found at {path}",
             "defenseclaw setup omnigent",
         )
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
