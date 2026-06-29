@@ -164,6 +164,8 @@ For a multi-connector gateway, start on **Connectors (Overview)** to compare con
 
 ### Agent Directory and Agent360
 
+![Agent360 overview showing automatic agent discovery and per-agent lifecycle analytics](/images/grafana/agent360-overview.jpg)
+
 Open **Agent identity → Runtime Agent Directory**. Every hook lifecycle
 transition updates the stable `defenseclaw.agent.last_seen` inventory metric,
 so a newly observed root agent or subagent appears automatically. Click its
@@ -191,6 +193,10 @@ display values explicitly reported by the connector. Input tokens include the
 prompt/context usage reported by the provider and may be much larger than
 output for long-context agents. Missing values remain **Not reported** and are
 never estimated.
+
+See the [Agent360 dashboard guide](/docs/observability/agent360) for a visual
+tour of every section, the agent/model/tool topology, trace drill-down, and the
+difference between **0**, **No data**, and **Not reported**.
 
 They're auto-provisioned via `bundles/local_observability_stack/grafana/provisioning/`. The folder is named "DefenseClaw" inside Grafana so they're easy to find. Edits you make in the UI are not persisted back to disk by default — copy them out with `Dashboard → JSON Model` if you want to keep them.
 

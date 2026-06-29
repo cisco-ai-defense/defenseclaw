@@ -183,6 +183,66 @@ Headers and credential values are never displayed. The compact Services row
 remains as a roll-up. `defenseclaw status` shows each destination, while
 `defenseclaw doctor` probes every enabled endpoint independently.
 
+## What you see in Galileo
+
+DefenseClaw exports completed GenAI operations as Galileo-compatible chat,
+agent, and tool spans. Stable conversation, root-agent, lifecycle, and
+execution attributes let Galileo group the real-time short traces into one
+coherent session.
+
+### Agent graph: understand delegation and dependencies
+
+![Galileo Agent graph showing root agents, delegated agents, models, MCP calls, and native tools](/images/galileo/agent-graph.png)
+
+The Agent graph turns span relationships into an execution map. Agent nodes
+show roots and delegated subagents, chat nodes show model calls, and tool nodes
+show native tools or MCP operations. Select an edge to inspect traffic volume
+and relative frequency.
+
+This view is useful when an apparently simple task fans out: it makes delegated
+researchers, repeated model calls, patch operations, file reads, and MCP
+dependencies visible without reading every message. Unexpected edges often
+identify a tool or subagent that policy should constrain more tightly.
+
+### Session messages: reconstruct the lifecycle
+
+![Galileo session Messages view with invoke-agent lifecycle spans and tool calls](/images/galileo/session-lifecycle.png)
+
+The session view reconstructs the conversation from correlated spans. The
+outer Session groups all activity with the same conversation identity;
+`invoke_agent` rows mark lifecycle boundaries, while nested chat and tool rows
+carry the model input/output or tool arguments/results.
+
+Lifecycle envelopes can legitimately show sub-millisecond duration: they
+record a hook transition, not the time the long-running agent remained alive.
+Completed chat and tool operations carry their measured duration and are sent
+as soon as the connector exposes completion, so operators do not need to wait
+for a final Stop event to see a multi-hour agent's progress.
+
+### Model detail: inspect input, output, latency, and reported usage
+
+![Galileo model span detail showing rendered input and assistant output inside a long-running agent session](/images/galileo/model-input-output.png)
+
+Open a chat row to compare the exact rendered input and assistant output,
+provider/model identity, latency, token usage, and cost when the connector
+reports them. Tool rows expose their structured call arguments and results.
+DefenseClaw applies the same persistent-sink redaction policy before this data
+leaves the gateway, so shared deployments should keep redaction enabled.
+
+Galileo and Agent360 are complementary rather than competing views:
+
+| Use | Galileo | Local Agent360 |
+| --- | --- | --- |
+| Session reconstruction | Rich message-centric GenAI session view. | Lifecycle/model/tool summaries correlated from Loki. |
+| Agent relationships | Galileo Agent graph and edge analytics. | Cross-trace root/parent tree plus aggregate model/tool topology. |
+| Individual request | Trace graph, latency, inputs, and outputs. | Tempo waterfall, ordered sequence, phase graph, and raw event stream. |
+| Fleet operations | Galileo projects, log streams, metrics, controls, and alerts. | Local Prometheus/Loki/Tempo health, policy, reliability, and connector dashboards. |
+| Non-GenAI gateway spans | Excluded by the Galileo destination profile. | Retained in the local OTLP destination. |
+
+The last row is why multi-destination routing matters: Galileo receives the
+GenAI operations it can index cleanly, while local observability keeps the full
+DefenseClaw operational and security trace set.
+
 ## DefenseClaw and GenAI semantic conventions
 
 DefenseClaw keeps its `defenseclaw.*` security attributes as the authoritative

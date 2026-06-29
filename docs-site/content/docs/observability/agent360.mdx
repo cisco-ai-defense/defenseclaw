@@ -1,0 +1,145 @@
+---
+title: Agent360 dashboard
+description: Drill from any observed agent into lifecycle, executions, model and tool activity, tokens, cost, security decisions, traces, and agent topology.
+keywords:
+  - DefenseClaw Agent360
+  - agent lifecycle dashboard
+  - Grafana agent observability
+  - Tempo agent traces
+  - agent topology
+---
+
+Agent360 is the per-agent drill-down in the bundled Grafana stack. It answers
+three questions from one stable identity: **what is this agent doing now, what
+did it call, and where did time, tokens, cost, or failures accumulate?** New
+root agents and subagents appear automatically as hook events arrive; no
+dashboard file is generated per agent.
+
+## Open an agent
+
+1. Start the [local observability stack](/docs/observability/local-observability).
+2. Open Grafana at [http://localhost:3000](http://localhost:3000).
+3. Open **DefenseClaw → Agent identity** and select an **Agent ID** in
+   **Runtime Agent Directory**.
+4. The link opens **DefenseClaw → Agent360** with the connector, stable agent
+   identity, and time range carried into the dashboard.
+
+You can also open Agent360 directly and use its variables:
+
+| Variable | Use |
+| --- | --- |
+| **Connector** | Separate Codex, Claude Code, and other hook connectors. |
+| **Agent** | Select the durable root or delegated agent identity. |
+| **Scope** | **This agent** isolates one agent; **Agent tree** includes every correlated descendant. |
+| **Lifecycle** | Restrict the view to one resumed-session lifecycle. |
+| **Execution** | Restrict the view to one concrete attempt within a lifecycle. |
+| **Trace ID** | Pivot the lower section to one Tempo execution trace. |
+
+## Read the overview
+
+![Agent360 overview with agent directory, KPI strip, lifecycle timeline, throughput, latency, and executions](/images/grafana/agent360-overview.jpg)
+
+The top of the dashboard is deliberately ordered from identity to health to
+execution detail:
+
+| Panel | What it means | Why it is useful |
+| --- | --- | --- |
+| **Agent Directory** | Agents observed for the selected connector and time range, including root/parent relationships and last-seen time. | Confirms discovery and provides a one-click drill-down to another agent. |
+| **Last seen** | Age of the newest correlated signal. | Finds silent, disconnected, or unexpectedly idle agents. |
+| **Turns** | De-duplicated completed conversational turns. | Compares useful interaction volume without counting every hook delivery. |
+| **Model calls** | Completed chat/model operations. | Separates model work from lifecycle envelopes and tool calls. |
+| **Tool calls** | De-duplicated completed tool operations. | Reveals automation intensity and tool-heavy executions. |
+| **Descendants** | Correlated child agents under the selected root. | Detects delegation and unexpected fan-out. |
+| **Input/output tokens** | Connector- or provider-reported usage only. | Tracks context growth and response volume without inventing estimates. |
+| **Reported cost** | Cost reported by the connector, normalized for cumulative and per-call semantics. | Supports cost investigation while preserving the source's meaning. |
+| **Terminal success** | Successful terminal events divided by all terminal outcomes. | Measures completed versus failed/interrupted lifecycles; notification-only events do not inflate it. |
+
+The **Execution phase timeline** preserves sub-second ordering for lifecycle,
+model, and tool phases. Throughput and p95 latency show whether activity is
+increasing and which operation class is slow. **Executions and last activity**
+keeps the lifecycle and execution IDs visible so a resumed long-running agent
+does not look like an unrelated process.
+
+## Follow models, tools, destinations, and cost
+
+The analytics row breaks the selected agent or tree down by:
+
+- model calls and execution-lifetime p95 latency by provider/model;
+- top tools, tool p95 latency, and website/network destinations;
+- reported input/output tokens and reported cost by model and over time;
+- lifecycle funnel, span error rate, latency heatmap, and active agents.
+
+Use these panels together. A high tool count with a normal tool p95 usually
+means expected automation; a low call count with a high p95 points to a single
+blocking tool. A rising model-call count without turns completing points to a
+retry loop or an agent that is still active.
+
+## Inspect the dependency graph
+
+![Agent360 aggregate dependency map connecting the selected agent to models and tools](/images/grafana/agent360-topology.jpg)
+
+The aggregate dependency map uses directed edges from agents to their observed
+dependencies:
+
+- `agent:*` nodes are stable root or delegated agent identities;
+- `model:*` nodes come from `gen_ai.provider.name` and
+  `gen_ai.request.model`;
+- `tool:*` nodes come from `gen_ai.tool.name`;
+- agent-to-agent edges use the stable root/parent relationship.
+
+The map is aggregated across the dashboard time range, so it answers **what
+does this agent depend on?** The per-trace Tempo graph answers a different
+question: **what happened, in what order, for this one request?** Use the
+aggregate map to find unexpected dependencies, then choose a trace to inspect
+the exact execution path.
+
+## Drill into logs and traces
+
+The lower dashboard correlates all three local backends:
+
+| Backend | Agent360 uses it for |
+| --- | --- |
+| **Prometheus** | Directory, counts, state, throughput, latency, token/cost totals, and aggregate topology. |
+| **Loki** | Lifecycle, model, tool, network, error, verdict, judge, finding, and approval-stage event details. |
+| **Tempo** | Completed-operation trace list, waterfall, ordered execution sequence, phase durations, directed phase edges, and per-trace node graph. |
+
+Select a **Trace ID** in **Completed operation traces**. The data link sets the
+dashboard's `Trace ID` variable, which populates the selected-trace waterfall,
+ordered execution sequence, directed phase graph, and raw correlated event
+stream. If the trace is outside the current dashboard time range, widen the
+time picker before selecting it.
+
+## Interpret missing values correctly
+
+Agent360 does not fabricate telemetry:
+
+| Display | Meaning |
+| --- | --- |
+| **0** | The signal is supported and no matching event was observed in the selected scope and time range. |
+| **No data** | No matching series/log/trace exists for that panel, often because the selected operation never occurred. |
+| **Not reported** | The connector did not provide that optional value, such as tokens or cost. |
+
+For example, Claude Code can expose completed model operations without
+reporting token or price fields for that hook. Agent360 shows model calls while
+leaving tokens and cost as **Not reported**. This is more accurate than
+estimating usage from message length. Older data collected before a schema or
+dashboard upgrade is not backfilled; generate a new turn after upgrading to
+validate newly supported fields.
+
+## Common investigation paths
+
+| Question | Start here | Then drill into |
+| --- | --- | --- |
+| Why is an agent still running? | Last seen + execution phase timeline | Lifecycle logs and the newest Tempo trace. |
+| Which tool made the execution slow? | Top tools + tool p95 | Selected trace waterfall and ordered sequence. |
+| Did a subagent cause the failure? | Agent tree + dependency map | Child agent ID, errors/decisions, then its trace. |
+| Why did tokens or cost spike? | Tokens/cost over time | Provider/model breakdown and LLM turn details. |
+| Was the action blocked or approved? | Errors, blocks, approvals, and guardrail decisions | Verdict/judge event details and matching trace ID. |
+| Why is a panel empty? | Scope and time-range variables | Use the table above, then confirm the connector reported the field. |
+
+<Callout type="warn" title="Prompts and outputs are persistent telemetry">
+Agent360's Loki and Tempo panels follow DefenseClaw's persistent-sink
+redaction policy. Keep redaction enabled in shared or multi-tenant deployments.
+Only operators who have explicitly disabled redaction should expect raw prompt,
+completion, tool argument, or tool result bodies in these panels.
+</Callout>
