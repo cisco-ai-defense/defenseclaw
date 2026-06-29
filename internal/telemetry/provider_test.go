@@ -197,6 +197,29 @@ func TestNewProvider_Disabled(t *testing.T) {
 	}
 }
 
+func TestNewProviderInactiveDoesNotInstallGlobals(t *testing.T) {
+	tracerBefore := otel.GetTracerProvider()
+	loggerBefore := global.GetLoggerProvider()
+	meterBefore := otel.GetMeterProvider()
+	cfg := disabledCfg()
+	cfg.OTel.Enabled = true
+
+	p, err := NewProviderInactive(context.Background(), cfg, "test")
+	if err != nil {
+		t.Fatalf("NewProviderInactive: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
+	if otel.GetTracerProvider() != tracerBefore {
+		t.Fatal("inactive provider replaced the global tracer provider")
+	}
+	if global.GetLoggerProvider() != loggerBefore {
+		t.Fatal("inactive provider replaced the global logger provider")
+	}
+	if otel.GetMeterProvider() != meterBefore {
+		t.Fatal("inactive provider replaced the global meter provider")
+	}
+}
+
 func TestNewProvider_NilSafe(t *testing.T) {
 	var p *Provider
 

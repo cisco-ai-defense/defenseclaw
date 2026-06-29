@@ -141,6 +141,10 @@ class InstallSmokeMatrixTests(unittest.TestCase):
                 os.path.exists(cfg_path),
                 f"{connector_name}: config.yaml missing under tmp DEFENSECLAW_HOME",
             )
+            self.assertFalse(
+                os.path.exists(os.path.join(home, ".defenseclaw", "guardrail_runtime.json")),
+                f"{connector_name}: legacy guardrail_runtime.json should not be recreated",
+            )
 
             with open(cfg_path) as fh:
                 cfg_doc = yaml.safe_load(fh)

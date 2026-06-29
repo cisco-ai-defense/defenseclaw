@@ -201,3 +201,8 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	return nil
 }
+
+// WriteFileAtomic replaces path with data through a same-directory temporary file.
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return writeFileAtomic(path, data, perm)
+}

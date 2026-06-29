@@ -175,6 +175,8 @@ The `/api/v1/inspect/*` family is the hot path that connector hooks and the Open
 | `GET` | `/v1/guardrail/config` | Return the active guardrail config snapshot. |
 | `PATCH` | `/v1/guardrail/config` | Patch supported guardrail runtime fields into `~/.defenseclaw/config.yaml`, validate the full YAML file, and let the config watcher/reconciler apply the latest config. Body is JSON, not raw YAML. Supported fields: `mode`, `scanner_mode`, `block_message`, `connector`, `hilt_enabled`, `hilt_min_severity`. |
 
+Changing `connector` uses restart semantics so listener and hook state are rebuilt; it is not accepted as an in-place connector swap.
+
 ### Enforcement logging
 
 These endpoints are write-only "I just blocked / allowed something" telemetry endpoints used by the OpenClaw plugin to keep the gateway's audit DB authoritative when the plugin makes the decision out-of-band.

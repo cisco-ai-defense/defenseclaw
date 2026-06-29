@@ -2264,6 +2264,7 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 		}
 	}
 
+	cfg.Gateway.ConfigReload.Mode = normalizeGatewayConfigReloadMode(cfg.Gateway.ConfigReload.Mode)
 	if err := validateGatewayConfigReloadMode(cfg.Gateway.ConfigReload.Mode); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "gateway_config_reload_invalid")
@@ -3013,11 +3014,19 @@ func validateDeploymentMode(mode string) error {
 }
 
 func validateGatewayConfigReloadMode(mode string) error {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
+	switch normalizeGatewayConfigReloadMode(mode) {
 	case "", "hot", "restart":
 		return nil
 	}
 	return fmt.Errorf("config: gateway.config_reload.mode=%q is invalid (allowed: hot, restart)", mode)
+}
+
+func normalizeGatewayConfigReloadMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return "hot"
+	}
+	return mode
 }
 
 func normalizeDeploymentMode(mode string) string {

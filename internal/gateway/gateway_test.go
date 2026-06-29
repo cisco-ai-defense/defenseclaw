@@ -5215,6 +5215,27 @@ func TestHandleGuardrailConfig_PatchRollbackOnWriteFailure(t *testing.T) {
 	}
 }
 
+func TestPatchGuardrailConfigFile_RestoresInvalidPatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	original := []byte("config_version: 6\ndata_dir: " + dir + "\ndeployment_mode: standalone\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	api := &APIServer{}
+	if err := api.patchGuardrailConfigFile(path, map[string]any{"deployment_mode": "invalid"}); err == nil {
+		t.Fatal("patchGuardrailConfigFile succeeded with invalid deployment mode")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read restored config: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("restored config = %q, want %q", got, original)
+	}
+}
+
 func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	tmpDir := t.TempDir()
@@ -5233,9 +5254,11 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 		},
 	}
 
-	body, _ := json.Marshal(map[string]string{
-		"mode":         "action",
-		"scanner_mode": "both",
+	body, _ := json.Marshal(map[string]any{
+		"mode":              "action",
+		"scanner_mode":      "both",
+		"hilt_enabled":      true,
+		"hilt_min_severity": "medium",
 	})
 	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -5255,6 +5278,16 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 	}
 	if api.scannerCfg.Guardrail.ScannerMode != "both" {
 		t.Errorf("scanner_mode = %q, want both", api.scannerCfg.Guardrail.ScannerMode)
+	}
+	var response map[string]any
+	if err := json.NewDecoder(w.Result().Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["hilt_enabled"] != true {
+		t.Fatalf("hilt_enabled = %#v, want true", response["hilt_enabled"])
+	}
+	if response["hilt_min_severity"] != "MEDIUM" {
+		t.Fatalf("hilt_min_severity = %#v, want MEDIUM", response["hilt_min_severity"])
 	}
 }
 
@@ -6696,6 +6729,44 @@ func TestHookScopedTokenOnlyAuthenticatesHookRoutes(t *testing.T) {
 	allowed.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("claudecode hook with codex scoped token status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHookScopedTokenRevalidatesDeletionAndRotation(t *testing.T) {
+	dataDir := t.TempDir()
+	oldToken, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken: %v", err)
+	}
+	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
+	api.SetHookAPITokens(map[string]string{"codex": oldToken})
+	if !api.hookAPITokenMatches("codex", oldToken) {
+		t.Fatal("provisioned hook token was rejected")
+	}
+
+	tokenPath, err := connector.HookAPITokenFilePath(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("HookAPITokenFilePath: %v", err)
+	}
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatalf("remove hook token: %v", err)
+	}
+	if api.hookAPITokenMatches("codex", oldToken) {
+		t.Fatal("deleted hook token remained valid from cache")
+	}
+
+	newToken, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("rotate hook token: %v", err)
+	}
+	if newToken == oldToken {
+		t.Fatal("rotated hook token unexpectedly reused old value")
+	}
+	if api.hookAPITokenMatches("codex", oldToken) {
+		t.Fatal("old hook token remained valid after rotation")
+	}
+	if !api.hookAPITokenMatches("codex", newToken) {
+		t.Fatal("rotated hook token was rejected")
 	}
 }
 

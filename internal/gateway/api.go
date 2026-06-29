@@ -475,22 +475,24 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	if name == "" || presented == "" {
 		return false
 	}
-	a.hookAPITokenMu.RLock()
-	cached := ""
-	if a.hookAPITokens != nil {
-		cached = a.hookAPITokens[name]
-	}
-	a.hookAPITokenMu.RUnlock()
-	if cached != "" && constantTimeStringMatch(presented, cached) {
-		return true
-	}
 
 	dataDir := a.configDataDir()
 	if dataDir == "" {
-		return false
+		a.hookAPITokenMu.RLock()
+		cached := ""
+		if a.hookAPITokens != nil {
+			cached = a.hookAPITokens[name]
+		}
+		a.hookAPITokenMu.RUnlock()
+		return cached != "" && constantTimeStringMatch(presented, cached)
 	}
 	tok, err := connector.LoadHookAPIToken(dataDir, name)
 	if err != nil || tok == "" {
+		a.hookAPITokenMu.Lock()
+		if a.hookAPITokens != nil {
+			delete(a.hookAPITokens, name)
+		}
+		a.hookAPITokenMu.Unlock()
 		return false
 	}
 	a.hookAPITokenMu.Lock()
@@ -2647,12 +2649,14 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.applyGuardrailPatchLocked(updates)
 
 		resp := map[string]interface{}{
-			"status":        "updated",
-			"changed":       changed,
-			"mode":          a.scannerCfg.Guardrail.Mode,
-			"scanner_mode":  a.scannerCfg.Guardrail.ScannerMode,
-			"block_message": a.scannerCfg.Guardrail.BlockMessage,
-			"connector":     a.scannerCfg.Guardrail.Connector,
+			"status":            "updated",
+			"changed":           changed,
+			"mode":              a.scannerCfg.Guardrail.Mode,
+			"scanner_mode":      a.scannerCfg.Guardrail.ScannerMode,
+			"block_message":     a.scannerCfg.Guardrail.BlockMessage,
+			"connector":         a.scannerCfg.Guardrail.Connector,
+			"hilt_enabled":      a.scannerCfg.Guardrail.HILT.Enabled,
+			"hilt_min_severity": a.scannerCfg.Guardrail.HILT.MinSeverity,
 		}
 
 		a.cfgMu.Unlock()
@@ -2691,7 +2695,7 @@ func (a *APIServer) patchGuardrailConfigFile(path string, updates map[string]any
 	}
 	if _, err := config.LoadFromFile(path); err != nil {
 		if originalExisted {
-			if restoreErr := os.WriteFile(path, original, 0o600); restoreErr != nil {
+			if restoreErr := config.WriteFileAtomic(path, original, 0o600); restoreErr != nil {
 				return fmt.Errorf("api: patched config invalid: %w; restore failed: %v", err, restoreErr)
 			}
 		} else if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
