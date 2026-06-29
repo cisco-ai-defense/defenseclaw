@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Proxy-mode traffic surface: HTTP requests, SSE streams, tool calls, admission decisions, LLM bridge, Cisco Inspect, and the LLM judge + verdict cache. These panels only show data when DefenseClaw runs in proxy/router mode (openclaw, zeptoclaw). NOTE: this board is intentionally GLOBAL and deliberately has no $connector template variable \u2014 the HTTP / tool / judge / admission metrics here are emitted per proxy process and are not tagged with a hook connector / source / tool=<connector>:<event> dimension. For per-connector breakdowns use the Hook Connectors and Connector Detail dashboards.",
+  "description": "Proxy-mode traffic surface: HTTP requests, SSE streams, tool calls, admission decisions, LLM bridge, Cisco Inspect, and the LLM judge + verdict cache. These panels only show data when DefenseClaw runs in proxy/router mode (openclaw, zeptoclaw). NOTE: this board is intentionally GLOBAL and deliberately has no $connector template variable — the HTTP / tool / judge / admission metrics here are emitted per proxy process and are not tagged with a hook connector / source / tool=<connector>:<event> dimension. For per-connector breakdowns use the Hook Connectors and Connector Detail dashboards.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -58,14 +58,7 @@
       "targetBlank": false
     },
     {
-      "title": "Reliability",
-      "type": "link",
-      "url": "/d/defenseclaw-reliability?${__url_time_range}",
-      "icon": "external link",
-      "targetBlank": false
-    },
-    {
-      "title": "Runtime",
+      "title": "Runtime & Reliability",
       "type": "link",
       "url": "/d/defenseclaw-runtime?${__url_time_range}",
       "icon": "external link",
@@ -99,10 +92,11 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_http_request_count_total[5m])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "stat",
@@ -120,7 +114,8 @@
       "targets": [
         {
           "expr": "(sum(rate(defenseclaw_http_request_count_total{http_status_code=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(defenseclaw_http_request_count_total[5m])), 0.0001)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -145,7 +140,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "stat",
@@ -163,10 +158,11 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_http_auth_failures_total[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
-      "description": "Authentication failures rejected by the sidecar, per minute.\n\ncovered_by:\n  - defenseclaw_http_auth_failures \u2192 internal/gateway/router.go"
+      "description": "Authentication failures rejected by the sidecar, per minute.\n\ncovered_by:\n  - defenseclaw_http_auth_failures → internal/gateway/router.go"
     },
     {
       "type": "row",
@@ -203,7 +199,7 @@
           "unit": "reqps"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "timeseries",
@@ -230,7 +226,7 @@
           "unit": "ms"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds \u2192 internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds → internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "timeseries",
@@ -261,7 +257,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_count \u2192 internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "table",
@@ -301,17 +297,7 @@
           }
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds \u2192 internal/gateway/router.go (otelhttp middleware)"
-    },
-    {
-      "type": "row",
-      "title": "SSE streams",
-      "gridPos": {
-        "x": 0,
-        "y": 22,
-        "w": 24,
-        "h": 1
-      }
+      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds → internal/gateway/router.go (otelhttp middleware)"
     },
     {
       "type": "row",
@@ -374,7 +360,7 @@
           "unit": "ms"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_connector_hook_latency_milliseconds \u2192 internal/gateway/hook_telemetry.go"
+      "description": "covered_by:\n  - defenseclaw_connector_hook_latency_milliseconds → internal/gateway/hook_telemetry.go"
     },
     {
       "type": "timeseries",
@@ -396,7 +382,7 @@
           "refId": "A"
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_gateway_errors \u2192 internal/telemetry/gateway_events.go (EventError)"
+      "description": "covered_by:\n  - defenseclaw_gateway_errors → internal/telemetry/gateway_events.go (EventError)"
     },
     {
       "type": "timeseries",
@@ -418,7 +404,7 @@
           "refId": "A"
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "row",
@@ -446,7 +432,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -458,7 +445,7 @@
         "colorMode": "value",
         "graphMode": "area"
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "timeseries",
@@ -495,7 +482,7 @@
           "unit": "ms"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_latency_milliseconds \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_latency_milliseconds → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "timeseries",
@@ -522,27 +509,7 @@
           "unit": "ops"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
-    },
-    {
-      "type": "row",
-      "title": "Verdict cache (proxy mode)",
-      "gridPos": {
-        "x": 0,
-        "y": 77,
-        "w": 24,
-        "h": 1
-      }
-    },
-    {
-      "type": "row",
-      "title": "External integrations (LLM bridge, Cisco)",
-      "gridPos": {
-        "x": 0,
-        "y": 86,
-        "w": 24,
-        "h": 1
-      }
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "row",
@@ -579,7 +546,7 @@
           "unit": "ops"
         }
       },
-      "description": "covered_by:\n  - gen_ai_client_token_usage \u2192 OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)"
+      "description": "covered_by:\n  - gen_ai_client_token_usage → OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)"
     },
     {
       "type": "timeseries",
@@ -616,7 +583,7 @@
           "unit": "s"
         }
       },
-      "description": "covered_by:\n  - gen_ai_client_operation_duration_seconds \u2192 OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)"
+      "description": "covered_by:\n  - gen_ai_client_operation_duration_seconds → OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)"
     },
     {
       "type": "row",
@@ -697,7 +664,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw \u2014 Proxy & LLM Guard",
+  "title": "DefenseClaw — Proxy & LLM Guard",
   "uid": "defenseclaw-traffic",
   "version": 5,
   "weekStart": ""

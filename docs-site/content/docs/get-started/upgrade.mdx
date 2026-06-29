@@ -119,7 +119,9 @@ defenseclaw setup local-observability up
 
 This refresh is the default. Use `--no-refresh-config` only when you
 intentionally maintain a local fork of the Compose, collector, or dashboard
-files. Historical events are not backfilled with newly introduced schema
+files. The refresh overwrites current bundled dashboards and removes only
+explicitly retired DefenseClaw dashboard files; destination-only team and
+operator dashboards are preserved. Historical events are not backfilled with newly introduced schema
 attributes; generate a new agent turn when validating Agent360 after an
 upgrade.
 

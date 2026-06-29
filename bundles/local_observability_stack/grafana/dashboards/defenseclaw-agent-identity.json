@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "v7 correlation surface: agent.id \u00d7 agent.instance_id \u00d7 sidecar.instance_id, identity churn, on-demand agent discovery confidence, continuous AI inventory rollups, and per-connector header-presence rate.",
+  "description": "v7 correlation surface: agent.id × agent.instance_id × sidecar.instance_id, identity churn, on-demand agent discovery confidence, continuous AI inventory rollups, and per-connector header-presence rate.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -134,7 +134,7 @@
     {
       "type": "stat",
       "title": "Active agent.id (5m)",
-      "description": "Distinct gen_ai_agent_id values that emitted a token in the last 5 minutes. Should match the number of installed connectors that are actively receiving traffic.",
+      "description": "Distinct connector + gen_ai_agent_id identities with lifecycle activity in the last 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -147,15 +147,16 @@
       },
       "targets": [
         {
-          "expr": "count(count by (gen_ai_request_model) (gen_ai_client_token_usage_sum)) or vector(0)",
-          "refId": "A"
+          "expr": "count(count by (connector, gen_ai_agent_id) (max_over_time(defenseclaw_agent_last_seen_seconds[5m]))) or vector(0)",
+          "refId": "A",
+          "instant": true
         }
       ]
     },
     {
       "type": "stat",
       "title": "Active agent_instance_id (5m, Loki)",
-      "description": "Distinct defenseclaw_agent_instance_id values seen on gateway events in the last 5 minutes. agent_instance_id lives on log attributes (not on metric labels \u2014 keeps Prometheus cardinality bounded) so we read it from Loki. A single connector running multiple shells will show >1 here.",
+      "description": "Distinct defenseclaw_agent_instance_id values seen on gateway events in the last 5 minutes. agent_instance_id lives on log attributes (not on metric labels — keeps Prometheus cardinality bounded) so we read it from Loki. A single connector running multiple shells will show >1 here.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -216,7 +217,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_ai_discovery_runs_total[$__range])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ]
     },
@@ -237,7 +239,8 @@
       "targets": [
         {
           "expr": "max(max_over_time(defenseclaw_ai_discovery_active_signals[$__range])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ]
     },
@@ -258,7 +261,8 @@
       "targets": [
         {
           "expr": "count(sum by (ai_product) (max_over_time(defenseclaw_ai_discovery_signals_total[$__range]))) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ]
     },
@@ -284,7 +288,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "Identity health is a function of *traffic*. The two left panels populate as soon as any connector posts OTLP or fires a hook. The two right panels populate once an LLM call flows through the sidecar \u2014 they're sourced from Loki because `gen_ai.agent.id` is a log/event attribute (kept off Prometheus labels to bound cardinality)."
+        "content": "Identity health is a function of *traffic*. The two left panels populate as soon as any connector posts OTLP or fires a hook. The two right panels populate once an LLM call flows through the sidecar — they're sourced from Loki because `gen_ai.agent.id` is a log/event attribute (kept off Prometheus labels to bound cardinality)."
       }
     },
     {
@@ -318,7 +322,7 @@
     {
       "type": "timeseries",
       "title": "Hook invocations by connector",
-      "description": "Connector hook fires (`defenseclaw_connector_hook_invocations_total`) \u2014 `connector` label is the canonical name. Populates as soon as a hook script (Codex, Claude Code, Hermes, Cursor, Windsurf, GeminiCLI, Copilot) fires.",
+      "description": "Connector hook fires (`defenseclaw_connector_hook_invocations_total`) — `connector` label is the canonical name. Populates as soon as a hook script (Codex, Claude Code, Hermes, Cursor, Windsurf, GeminiCLI, Copilot) fires.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -346,7 +350,7 @@
     {
       "type": "timeseries",
       "title": "Distinct agent.id observed (Loki, by gen_ai.agent.name)",
-      "description": "Loki-derived count of distinct `gen_ai_agent_id` values per connector observed in event logs. Populates only when LLM events flow through the sidecar. Sustained growth on the same `gen_ai_agent_name` = the connector is rotating its agent.id (instability \u2014 should be stable per install).",
+      "description": "Loki-derived count of distinct `gen_ai_agent_id` values per connector observed in event logs. Populates only when LLM events flow through the sidecar. Sustained growth on the same `gen_ai_agent_name` = the connector is rotating its agent.id (instability — should be stable per install).",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -376,7 +380,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Header-presence rate (Loki) \u2014 events with gen_ai.agent.id set",
+      "title": "Header-presence rate (Loki) — events with gen_ai.agent.id set",
       "description": "Loki-derived: fraction of gateway log events (per connector via `gen_ai_agent_name`) that also carry `gen_ai_agent_id` (i.e. the `X-DefenseClaw-Agent-Id` header was honored end-to-end). 1.0 = healthy, below 1.0 = the connector is dropping identity on some calls.",
       "datasource": {
         "type": "loki",
@@ -452,7 +456,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Discovery runs by source \u00d7 cache_hit \u00d7 result",
+      "title": "Discovery runs by source × cache_hit × result",
       "description": "Per-minute rate of accepted on-demand discovery reports, broken down by report `source` (cli/api), whether the CLI hit its local cache, and the gateway's accept verdict (`ok`/`malformed`/`rejected`).",
       "datasource": {
         "type": "prometheus",
@@ -467,21 +471,21 @@
       "targets": [
         {
           "expr": "sum by (result) (rate(defenseclaw_ai_discovery_runs_total[$__rate_interval]))",
-          "legendFormat": "{{source}} \u00b7 cache={{cache_hit}} \u00b7 {{result}}",
+          "legendFormat": "{{source}} · cache={{cache_hit}} · {{result}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "cps",
-          "noValue": "no on-demand discoveries yet \u2014 run `defenseclaw agent discover`"
+          "noValue": "no on-demand discoveries yet — run `defenseclaw agent discover`"
         }
       }
     },
     {
       "type": "timeseries",
       "title": "Discovery duration p50/p95",
-      "description": "Wall-clock time per on-demand discovery scan, sourced from `defenseclaw_agent_discovery_duration_milliseconds`. Sustained p95 > 1s usually means a connector probe is timing out \u2014 cross-reference the errors table.",
+      "description": "Wall-clock time per on-demand discovery scan, sourced from `defenseclaw_agent_discovery_duration_milliseconds`. Sustained p95 > 1s usually means a connector probe is timing out — cross-reference the errors table.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -604,7 +608,7 @@
     },
     {
       "type": "table",
-      "title": "Discovery errors by connector \u00d7 reason (1h)",
+      "title": "Discovery errors by connector × reason (1h)",
       "description": "Bounded error reasons emitted by `defenseclaw.agent.discovery.errors` (e.g. version-probe timeout, parse failure). Empty == clean discovery runs.",
       "datasource": {
         "type": "prometheus",
@@ -618,7 +622,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (source) (increase(defenseclaw_ai_discovery_errors_total[$__range]))",
+          "expr": "sum by (connector, reason) (increase(defenseclaw_agent_discovery_errors_total[1h]))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -661,7 +665,7 @@
     {
       "type": "timeseries",
       "title": "AI signals by category",
-      "description": "supported_connector / ai_cli / ai_lib / ai_extension / etc. \u2014 the bounded taxonomy continuous AI discovery emits.",
+      "description": "supported_connector / ai_cli / ai_lib / ai_extension / etc. — the bounded taxonomy continuous AI discovery emits.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -727,7 +731,7 @@
     {
       "type": "histogram",
       "title": "Identity confidence distribution",
-      "description": "Two-axis Bayesian engine identity_score [0,1] across all components. Cluster near 1.0 = strong identity (we're sure what this is). Cluster near 0 = ambiguous components \u2014 usually means the detector saw a signal that overlaps with multiple known products.",
+      "description": "Two-axis Bayesian engine identity_score [0,1] across all components. Cluster near 1.0 = strong identity (we're sure what this is). Cluster near 0 = ambiguous components — usually means the detector saw a signal that overlaps with multiple known products.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -749,7 +753,7 @@
     {
       "type": "histogram",
       "title": "Presence confidence distribution",
-      "description": "presence_score [0,1] \u2014 how confident the engine is that the component is currently installed. very_low presence with high identity is the 'SDK was removed but manifest still around' signature.",
+      "description": "presence_score [0,1] — how confident the engine is that the component is currently installed. very_low presence with high identity is the 'SDK was removed but manifest still around' signature.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -814,30 +818,154 @@
       "type": "row",
       "title": "Runtime Agent Directory",
       "description": "Automatically populated by lifecycle telemetry. Click Agent ID to open the reusable Agent360 drill-down.",
-      "gridPos": {"x": 0, "y": 73, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 73,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
       "type": "table",
       "title": "Observed agents — click Agent ID for Agent360",
       "description": "One row per stable agent identity and current lifecycle state. New agents appear without dashboard provisioning changes.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 74, "w": 24, "h": 12},
-      "targets": [{
-        "expr": "topk by (gen_ai_agent_id) (1, max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}[$__range]))",
-        "format": "table",
-        "instant": true,
-        "refId": "A"
-      }],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 74,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "expr": "topk by (connector, gen_ai_agent_id) (1, max_over_time(defenseclaw_agent_last_seen_seconds{connector=~\"$connector\"}[$__range]))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
       "transformations": [
-        {"id": "labelsToFields", "options": {"mode": "columns"}},
-        {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "defenseclaw_agent_execution_id": true, "defenseclaw_agent_lifecycle_event": true, "defenseclaw_agent_lifecycle_id": true, "defenseclaw_claw_mode": true, "defenseclaw_device_id": true, "defenseclaw_gateway_host": true, "defenseclaw_gateway_port": true, "defenseclaw_instance_id": true, "defenseclaw_session_root_id": true, "deployment_environment": true, "host_arch": true, "host_name": true, "instance": true, "job": true, "os_type": true, "service": true, "service_name": true, "service_namespace": true, "service_version": true, "exported_job": true}, "renameByName": {"Value": "Last Seen (Unix s)", "connector": "Connector", "gen_ai_agent_id": "Agent ID", "gen_ai_agent_name": "Name", "gen_ai_agent_type": "Type", "defenseclaw_agent_root_id": "Root Agent", "defenseclaw_agent_parent_id": "Parent Agent", "defenseclaw_agent_lifecycle_state": "State", "defenseclaw_agent_depth": "Depth"}}}
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "defenseclaw_agent_execution_id": true,
+              "defenseclaw_agent_lifecycle_event": true,
+              "defenseclaw_agent_lifecycle_id": true,
+              "defenseclaw_claw_mode": true,
+              "defenseclaw_device_id": true,
+              "defenseclaw_gateway_host": true,
+              "defenseclaw_gateway_port": true,
+              "defenseclaw_instance_id": true,
+              "defenseclaw_session_root_id": true,
+              "deployment_environment": true,
+              "host_arch": true,
+              "host_name": true,
+              "instance": true,
+              "job": true,
+              "os_type": true,
+              "service": true,
+              "service_name": true,
+              "service_namespace": true,
+              "service_version": true,
+              "exported_job": true
+            },
+            "renameByName": {
+              "Value": "Last Seen (Unix s)",
+              "connector": "Connector",
+              "gen_ai_agent_id": "Agent ID",
+              "gen_ai_agent_name": "Name",
+              "gen_ai_agent_type": "Type",
+              "defenseclaw_agent_root_id": "Root Agent",
+              "defenseclaw_agent_parent_id": "Parent Agent",
+              "defenseclaw_agent_lifecycle_state": "State",
+              "defenseclaw_agent_depth": "Depth"
+            }
+          }
+        }
       ],
       "fieldConfig": {
-        "defaults": {"custom": {"align": "auto", "cellOptions": {"type": "auto"}}},
-        "overrides": [{"matcher": {"id": "byName", "options": "Agent ID"}, "properties": [{"id": "links", "value": [{"title": "Open selected agent", "url": "/d/defenseclaw-agent-360/agent360?var-connector=${__data.fields.Connector}&var-agent=${__value.raw}&var-scope_label=gen_ai_agent_id", "targetBlank": false}, {"title": "Open full agent tree", "url": "/d/defenseclaw-agent-360/agent360?var-connector=${__data.fields.Connector}&var-agent=${__data.fields[\"Root Agent\"]}&var-scope_label=defenseclaw_agent_root_id", "targetBlank": false}]}]}]
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Agent ID"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "${__value.text}",
+                    "url": "/d/defenseclaw-agent-360/agent360?var-connector=${__data.fields.Connector}&var-agent=${__value.raw}&var-scope_label=gen_ai_agent_id",
+                    "targetBlank": false
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "data-links"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Root Agent"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "${__value.text}",
+                    "url": "/d/defenseclaw-agent-360/agent360?var-connector=${__data.fields.Connector}&var-agent=${__value.raw}&var-scope_label=defenseclaw_agent_root_id",
+                    "targetBlank": false
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "data-links"
+                }
+              }
+            ]
+          }
+        ]
       },
-      "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Last Seen (Unix s)", "desc": true}]}
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Last Seen (Unix s)",
+            "desc": true
+          }
+        ]
+      }
     }
   ],
   "preload": false,
@@ -855,7 +983,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw \u2014 Agent identity",
+  "title": "DefenseClaw — Agent identity",
   "uid": "defenseclaw-agent-identity",
   "version": 2,
   "weekStart": ""

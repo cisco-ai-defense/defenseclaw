@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "local-observability",
+    "grafana-dashboards",
     "agent360",
     "galileo",
     "splunk"

@@ -34,7 +34,7 @@ endif
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
+        check check-audit-actions check-error-codes check-schemas check-grafana-dashboards check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
         upgrade-smoke upgrade-smoke-matrix \
         set-version \
         _bundle-data \
@@ -556,7 +556,7 @@ test-file:
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-provider-coverage check-llm-catalog check-upgrade-manifest
+check: check-v7 check-grafana-dashboards check-provider-coverage check-llm-catalog check-upgrade-manifest
 
 check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
@@ -572,6 +572,9 @@ check-error-codes:
 
 check-schemas:
 	@$(VENV)/bin/python scripts/check_schemas.py
+
+check-grafana-dashboards: _bundle-data
+	@$(VENV)/bin/python scripts/check_grafana_dashboards.py
 
 # check-provider-coverage runs the shared test/testdata/llm-endpoints.json
 # corpus through both the Go shape detector (provider_coverage_test.go)

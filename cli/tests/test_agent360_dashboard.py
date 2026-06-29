@@ -127,11 +127,17 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
     )
     assert links == [
         {
-            "title": "Select trace in Agent360",
+            "title": "${__value.text}",
             "url": "/d/defenseclaw-agent-360/agent360?orgId=1&${connector:queryparam}&${agent:queryparam}&${scope_label:queryparam}&${lifecycle:queryparam}&${execution:queryparam}&var-trace=${__value.raw}&from=${__from}&to=${__to}",
             "targetBlank": False,
         }
     ]
+    cell_options = next(
+        prop["value"]
+        for prop in trace_override["properties"]
+        if prop["id"] == "custom.cellOptions"
+    )
+    assert cell_options == {"type": "data-links"}
 
     waterfall = _panel_by_title(
         dashboard, "Selected trace waterfall — choose a Trace ID on the left"
@@ -208,6 +214,26 @@ def test_agent360_presents_human_readable_usage_lifecycle_and_logs() -> None:
         override["matcher"].get("options") == "Last Seen"
         and any(prop.get("value") == "dateTimeFromNow" for prop in override["properties"])
         for override in directory["fieldConfig"]["overrides"]
+    )
+    agent_id_override = next(
+        override
+        for override in directory["fieldConfig"]["overrides"]
+        if override["matcher"].get("options") == "Agent ID"
+    )
+    assert any(
+        prop.get("id") == "custom.cellOptions"
+        and prop.get("value") == {"type": "data-links"}
+        for prop in agent_id_override["properties"]
+    )
+    root_id_override = next(
+        override
+        for override in directory["fieldConfig"]["overrides"]
+        if override["matcher"].get("options") == "Root Agent"
+    )
+    assert any(
+        prop.get("id") == "custom.cellOptions"
+        and prop.get("value") == {"type": "data-links"}
+        for prop in root_id_override["properties"]
     )
 
     last_seen = _panel_by_title(dashboard, "Last seen")
@@ -339,6 +365,7 @@ def test_agent_directory_links_to_reusable_agent360_dashboard() -> None:
     assert "/d/defenseclaw-agent-360/agent360" in identity
     assert "${__value.raw}" in identity
     assert "var-scope_label=gen_ai_agent_id" in identity
+    assert '"type": "data-links"' in identity
 
 
 def test_agent360_span_metrics_are_connector_scoped() -> None:

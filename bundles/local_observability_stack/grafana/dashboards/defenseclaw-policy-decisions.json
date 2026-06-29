@@ -35,13 +35,6 @@
       "url": "/d/defenseclaw-findings?${__url_time_range}",
       "icon": "external link",
       "targetBlank": false
-    },
-    {
-      "title": "Reliability",
-      "type": "link",
-      "url": "/d/defenseclaw-reliability?${__url_time_range}",
-      "icon": "external link",
-      "targetBlank": false
     }
   ],
   "templating": {
@@ -196,7 +189,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
-          }
+          },
+          "instant": true
         }
       ],
       "description": "Inspect pipeline evaluations per minute across selected connectors."
@@ -222,7 +216,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
-          }
+          },
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -261,7 +256,7 @@
     {
       "type": "stat",
       "title": "Shadow block rate (observe)",
-      "description": "would_block=true outcomes / all hook outcomes \u2014 policies that would block in action mode.",
+      "description": "would_block=true outcomes / all hook outcomes — policies that would block in action mode.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -279,7 +274,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
-          }
+          },
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -309,7 +305,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
-          }
+          },
+          "instant": true
         }
       ]
     },
@@ -334,7 +331,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
-          }
+          },
+          "instant": true
         }
       ],
       "options": {
@@ -524,7 +522,7 @@
     {
       "type": "timeseries",
       "title": "URL references by host (live)",
-      "description": "branch \u2208 {known, shape, passthrough}; decision \u2208 {allow, block}. passthrough+allow indicates a destination DefenseClaw cannot classify \u2014 review for silent bypass.",
+      "description": "branch ∈ {known, shape, passthrough}; decision ∈ {allow, block}. passthrough+allow indicates a destination DefenseClaw cannot classify — review for silent bypass.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -561,7 +559,7 @@
     {
       "type": "timeseries",
       "title": "Shadow blocks / sec by connector",
-      "description": "source \u2208 {go, ts}: which tier of the gateway emitted the egress decision.",
+      "description": "source ∈ {go, ts}: which tier of the gateway emitted the egress decision.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -591,7 +589,7 @@
     },
     {
       "type": "row",
-      "title": "Block-list + multi-turn injection",
+      "title": "Hook evaluation action and severity",
       "gridPos": {
         "x": 0,
         "y": 31,
@@ -602,7 +600,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Block-list verdicts over time",
+      "title": "Evaluation actions over time",
+      "description": "Hook evaluation outcomes by action. This metric does not carry a detector-stage label, so the panel intentionally makes no block-list or multi-turn attribution.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -634,8 +633,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Multi-turn injection trips over time",
-      "description": "verdict_stage=multi_turn \u2014 the multi-turn injection detector tripping on a session. Severity escalation here usually means an adversarial session is unfolding.",
+      "title": "Evaluations with classified severity",
+      "description": "Hook evaluations with a non-NONE severity, grouped by action and severity. An allow action can still carry a classified severity; detector-stage attribution is available only where the emitted event carries it.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -649,7 +648,7 @@
       "targets": [
         {
           "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{severity!=\"NONE\", tool=~\"$connector:.*\"}[$__rate_interval]))",
-          "legendFormat": "{{action}} \u00b7 {{severity}}",
+          "legendFormat": "{{action}} · {{severity}}",
           "refId": "A"
         }
       ],
@@ -661,8 +660,8 @@
     },
     {
       "type": "table",
-      "title": "Top blocked categories on block-list / multi-turn (Loki, 1h)",
-      "description": "EventVerdict records have defenseclaw.verdict.categories \u2014 this panel ranks them for the block-list and multi-turn stages.",
+      "title": "Top tools involved in evaluated actions (Loki, range)",
+      "description": "Ranks tool-invocation events for the selected connector over the dashboard time range. Use the raw verdict stream for detector categories and decisions.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -699,7 +698,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Schema violations by event_type \u00d7 code",
+      "title": "Schema violations by event_type × code",
       "description": "Each (event_type, code) is a stable enum so no cardinality blow-up.",
       "datasource": {
         "type": "prometheus",
@@ -714,7 +713,7 @@
       "targets": [
         {
           "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval])) or vector(0)",
-          "legendFormat": "{{error_subsystem}} \u00b7 {{error_code}}",
+          "legendFormat": "{{error_subsystem}} · {{error_code}}",
           "refId": "A"
         }
       ],
@@ -771,7 +770,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw \u2014 Policy decisions",
+  "title": "DefenseClaw — Policy decisions",
   "uid": "defenseclaw-policy-decisions",
   "version": 1,
   "weekStart": ""

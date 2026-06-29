@@ -69,7 +69,7 @@
       {
         "name": "connector",
         "label": "Connector",
-        "description": "Filter panels by connector name. Sourced from defenseclaw_connector_hook_invocations_total{connector} so hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) show up too \u2014 defenseclaw_otel_ingest_records_total only carries connectors that push native OTLP and would silently exclude every hook-only connector.",
+        "description": "Filter panels by connector name. Sourced from defenseclaw_connector_hook_invocations_total{connector} so hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) show up too — defenseclaw_otel_ingest_records_total only carries connectors that push native OTLP and would silently exclude every hook-only connector.",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -289,7 +289,8 @@
       "targets": [
         {
           "expr": "count(group by (source) (rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[5m]) > 0)) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -319,7 +320,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -349,7 +351,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -379,7 +382,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_inspect_evaluations_total[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -409,7 +413,8 @@
       "targets": [
         {
           "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\"}[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -460,7 +465,8 @@
       "targets": [
         {
           "expr": "sum(rate(gen_ai_client_token_usage_sum[5m])) * 60 or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -1254,7 +1260,8 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw \u2014 Hook Connectors",
+  "title": "DefenseClaw — Hook Connectors",
+  "description": "Cross-connector operations view for hook traffic, OTLP ingest, latency, guardrail outcomes, event flow, and connector health, with drill-down into a selected connector.",
   "uid": "defenseclaw-connectors",
   "version": 3,
   "weekStart": ""

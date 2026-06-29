@@ -48,6 +48,7 @@ and a `Prometheus-Alerts` Alertmanager-shim that surfaces the rules in
 | Dashboard                            | Audience              | What to watch for |
 |--------------------------------------|-----------------------|-------------------|
 | **Overview**                         | on-call landing       | `ALERTS` table, SLO gauges, health stats, Loki tail |
+| **Agent Activity (Live)**            | developers / IR       | cross-agent prompts, model usage, tools, destinations, session correlation |
 | **Security**                         | security eng / IR     | verdict mix, judge latency + errors, redactions, GenAI tokens |
 | **Scanners**                         | platform / scanner devs | scan rate + p95 latency per scanner, findings by severity/rule, quarantine, queue |
 | **Findings detail**                  | security eng / IR     | per-rule incidence, top blocked rules, CVSS distribution, latest finding logs |
@@ -57,8 +58,7 @@ and a `Prometheus-Alerts` Alertmanager-shim that surfaces the rules in
 | **Connectors (detail)**              | platform / connector dev | drill-down into one connector: latency, hook outcomes, OTLP ingest health |
 | **Agent identity**                   | governance / IR       | agent registry size, sticky `gen_ai.agent.id`, mismatch + churn ratios |
 | **AI Discovery & Confidence engine** | security / governance | active AI signals, scan throughput + latency, signals by category/state/vendor, two-axis Bayesian identity & presence quantiles, component fan-out, detector errors, scan traces (Tempo) and per-signal logs (Loki) |
-| **Reliability**                      | SRE / reliability     | gateway errors by code, sink health + circuit state, webhooks, panics, config errors |
-| **Runtime & SLO**                    | SRE                   | goroutines, heap, GC, SQLite size/WAL/busy, block-<2s + TUI-<5s SLO compliance, exporter freshness |
+| **Runtime & Reliability**            | SRE                   | goroutines, heap, GC, SQLite, hook SLOs, exporter freshness/errors, audit-sink delivery, gateway errors |
 | **Traffic & Traces**                 | perf / integration    | HTTP RPS + 5xx ratio per route, SSE lifecycle, tool calls, LLM bridge / Cisco Inspect latency, Tempo search |
 
 All dashboards cross-link via the "Dashboards" dropdown on the Overview,

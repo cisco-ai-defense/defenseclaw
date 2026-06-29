@@ -129,7 +129,7 @@
   "panels": [
     {
       "type": "row",
-      "title": "Funnel: confirm verdict \u2192 HITL outcome",
+      "title": "Funnel: confirm verdict → HITL outcome",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -141,7 +141,7 @@
     {
       "type": "stat",
       "title": "Confirms (1h)",
-      "description": "verdict_action=confirm: the verdict that asks DefenseClaw to step up to a human. Sum of all stages.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "verdict_action=confirm: the verdict that asks DefenseClaw to step up to a human. Sum of all stages.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -155,7 +155,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[$__range])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -171,7 +172,7 @@
     {
       "type": "stat",
       "title": "Shadow blocks (observe, 1h)",
-      "description": "Hook outcomes where would_block=true \u2014 actions that would require human approval in action mode.",
+      "description": "Hook outcomes where would_block=true — actions that would require human approval in action mode.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -185,7 +186,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\"}[$__range])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -213,7 +215,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"allow\", tool=~\"$connector:.*\"}[$__range])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -232,7 +235,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "stat",
@@ -250,7 +253,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[$__range])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -269,12 +273,12 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "stat",
       "title": "Hook errors (1h)",
-      "description": "Gateway errors during the selected range. OpenClaw HILT timeout metrics appear when that connector runs in action mode.\n\ncovered_by:\n  - defenseclaw_gateway_errors \u2192 internal/telemetry/gateway_events.go (EventError)",
+      "description": "Gateway errors during the selected range. OpenClaw HILT timeout metrics appear when that connector runs in action mode.\n\ncovered_by:\n  - defenseclaw_gateway_errors → internal/telemetry/gateway_events.go (EventError)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -288,7 +292,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_gateway_errors_total[$__range])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -324,7 +329,7 @@
     {
       "type": "stat",
       "title": "HILT unsupported (1h)",
-      "description": "hilt_unsupported \u2014 the connector accepted the prompt but the operator surface (chat client) cannot render an approval UI. Often indicates a misconfigured connector.\n\ncovered_by:\n  - defenseclaw_connector_hook_invocations \u2192 internal/gateway/hook_telemetry.go",
+      "description": "hilt_unsupported — the connector accepted the prompt but the operator surface (chat client) cannot render an approval UI. Often indicates a misconfigured connector.\n\ncovered_by:\n  - defenseclaw_connector_hook_invocations → internal/gateway/hook_telemetry.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -338,7 +343,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\", result=\"rejected\"}[$__range])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "options": {
@@ -370,7 +376,7 @@
     {
       "type": "bargauge",
       "title": "Hook-mode approval funnel ($__range)",
-      "description": "Approval funnel using hook telemetry. confirm/block/allow from inspect evaluations; shadow blocks from would_block outcomes. OpenClaw HILT-specific counters populate when that connector runs in action mode.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "Approval funnel using hook telemetry. confirm/block/allow from inspect evaluations; shadow blocks from would_block outcomes. OpenClaw HILT-specific counters populate when that connector runs in action mode.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -428,7 +434,7 @@
     {
       "type": "timeseries",
       "title": "Chat HILT status mix over time",
-      "description": "Status counters from RecordGuardrailEvaluation(\"openclaw:hilt\", action). Stack shows requested vs approved/denied/timeout/unsupported simultaneously so you can see the operator-response funnel.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "Status counters from RecordGuardrailEvaluation(\"openclaw:hilt\", action). Stack shows requested vs approved/denied/timeout/unsupported simultaneously so you can see the operator-response funnel.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -461,7 +467,7 @@
     {
       "type": "timeseries",
       "title": "Chat HILT approval-vs-denial rate (1h rolling)",
-      "description": "approved / (approved + denied + timeout). Slow drift toward 0 means operators are denying more often \u2014 investigate via the verdict-categories panel on Security.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "approved / (approved + denied + timeout). Slow drift toward 0 means operators are denying more often — investigate via the verdict-categories panel on Security.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -490,7 +496,7 @@
     {
       "type": "stat",
       "title": "HITL backlog delta (5m)",
-      "description": "Five-minute request/completion delta, not a live in-flight gauge. Positive means more approval requests than terminal decisions arrived during the window; zero does not prove an older request is no longer pending.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "Five-minute request/completion delta, not a live in-flight gauge. Positive means more approval requests than terminal decisions arrived during the window; zero does not prove an older request is no longer pending.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -504,7 +510,8 @@
       "targets": [
         {
           "expr": "clamp_min((sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_connector=~\"$connector\",guardrail_action_taken=\"approval_requested\"}[5m])) or vector(0)) - (sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_connector=~\"$connector\",guardrail_action_taken=~\"approval_approved|approval_denied|approval_timeout\"}[5m])) or vector(0)), 0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -560,7 +567,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"allow\", tool=~\"$connector:.*\"}[$__range])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -571,7 +579,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "stat",
@@ -589,7 +597,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[$__range])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -600,12 +609,12 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
     },
     {
       "type": "stat",
       "title": "Exec approvals pending (1h)",
-      "description": "result=pending \u2014 request sent to the operator but not yet decided.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "result=pending — request sent to the operator but not yet decided.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -619,14 +628,15 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[1h])) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ]
     },
     {
       "type": "stat",
       "title": "Auto-approval ratio (1h)",
-      "description": "auto=\"true\" share \u2014 fraction of approvals granted by policy without operator interaction. Watch for unexpected spikes.\n\ncovered_by:\n  - defenseclaw_approval_count \u2192 internal/telemetry/metrics.go:1146 (RecordApproval) \u2014 code-emitted, will populate once exec approvals run",
+      "description": "auto=\"true\" share — fraction of approvals granted by policy without operator interaction. Watch for unexpected spikes.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/telemetry/metrics.go:1146 (RecordApproval) — code-emitted, will populate once exec approvals run",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -640,7 +650,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", would_block=\"true\", result=\"ok\"}[1h])) / clamp_min(sum(increase(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\"}[1h])), 0.0001) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -652,7 +663,7 @@
     {
       "type": "stat",
       "title": "Dangerous-command share (1h)",
-      "description": "dangerous=\"true\" share \u2014 fraction of approval requests flagged dangerous by the inspector.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "dangerous=\"true\" share — fraction of approval requests flagged dangerous by the inspector.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -666,7 +677,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", severity=~\"HIGH|CRITICAL\"}[1h])) / clamp_min(sum(increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -695,7 +707,7 @@
     {
       "type": "stat",
       "title": "Block rate (HIGH+ severity, 1h)",
-      "description": "Among dangerous=\"true\" approvals, what fraction were denied. Should track upward \u2014 operators should reject most dangerous commands.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "Among dangerous=\"true\" approvals, what fraction were denied. Should track upward — operators should reject most dangerous commands.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -709,7 +721,8 @@
       "targets": [
         {
           "expr": "sum(increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", severity=~\"HIGH|CRITICAL\", action=\"block\"}[1h])) / clamp_min(sum(increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", severity=~\"HIGH|CRITICAL\"}[1h])), 0.0001) or vector(0)",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -721,7 +734,7 @@
     {
       "type": "timeseries",
       "title": "Exec approval result mix over time",
-      "description": "Stacked counters for result \u2208 {approved, denied, pending, timeout}. The pending bar should drain to zero quickly; sustained pending means operators are not responding.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations \u2192 internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "Stacked counters for result ∈ {approved, denied, pending, timeout}. The pending bar should drain to zero quickly; sustained pending means operators are not responding.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -754,7 +767,7 @@
     {
       "type": "timeseries",
       "title": "Shadow block vs allow outcomes",
-      "description": "auto=true (policy automatic) vs auto=false (operator). Big surges in auto without dangerous commands usually mean the policy is too permissive.\n\ncovered_by:\n  - defenseclaw_approval_count \u2192 internal/telemetry/metrics.go:1146 (RecordApproval) \u2014 code-emitted, will populate once exec approvals run",
+      "description": "auto=true (policy automatic) vs auto=false (operator). Big surges in auto without dangerous commands usually mean the policy is too permissive.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/telemetry/metrics.go:1146 (RecordApproval) — code-emitted, will populate once exec approvals run",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -873,7 +886,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw \u2014 HITL (Human-in-the-Loop)",
+  "title": "DefenseClaw — HITL (Human-in-the-Loop)",
   "uid": "defenseclaw-hitl",
   "version": 4,
   "weekStart": ""
