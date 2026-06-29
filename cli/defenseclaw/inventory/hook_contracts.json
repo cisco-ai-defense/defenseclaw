@@ -46,6 +46,10 @@
             "PreToolUse",
             "PermissionRequest",
             "PostToolUse",
+            "SubagentStart",
+            "SubagentStop",
+            "PreCompact",
+            "PostCompact",
             "Stop"
           ],
           "aid_surfaces": [
@@ -98,6 +102,7 @@
             "SessionStart",
             "UserPromptSubmit",
             "UserPromptExpansion",
+            "MessageDisplay",
             "PreToolUse",
             "PermissionRequest",
             "PermissionDenied",
@@ -105,11 +110,15 @@
             "PostToolUseFailure",
             "PostToolBatch",
             "Stop",
+            "StopFailure",
+            "SubagentStart",
             "SubagentStop",
             "SessionEnd",
             "InstructionsLoaded",
             "ConfigChange",
+            "CwdChanged",
             "FileChanged",
+            "WorktreeRemove",
             "TaskCreated",
             "TaskCompleted",
             "TeammateIdle",
@@ -184,6 +193,9 @@
             "post_llm_call",
             "on_session_start",
             "on_session_end",
+            "on_session_finalize",
+            "on_session_reset",
+            "subagent_start",
             "subagent_stop"
           ],
           "aid_surfaces": [
@@ -206,7 +218,7 @@
             "scope": "user"
           },
           "notes": [
-            "Covers the full shell-hook lifecycle: pre_llm_call (context injection), pre_tool_call (block), post_tool_call/post_llm_call (observe), and on_session_start/on_session_end/subagent_stop (telemetry). Hermes nests prompt/result content under the per-event extra envelope; the generic decoder's content_envelope_key fallback lifts it so prompt and tool_result rules inspect Hermes payloads.",
+            "Covers the documented shell-hook lifecycle including session start/end/finalize/reset and subagent start/stop telemetry. Hermes nests prompt/result and delegation identity under the per-event extra envelope; the generic decoder lifts those fields into the canonical lifecycle.",
             "pre_tool_call is the only blockable event; pre_llm_call injects context; confirm verdicts downgrade to a systemMessage alert (no native ask surface); Hermes never blocks on exit code or hook timeout so there is no fail-closed surface.",
             "Multi-event registration requires hooks_auto_accept in cli-config.yaml on non-TTY/gateway runs; Setup writes it and the managed-backup heals it."
           ]
@@ -232,13 +244,27 @@
           ],
           "response_field": "hook_output",
           "events": [
+            "sessionStart",
+            "sessionEnd",
             "preToolUse",
+            "postToolUse",
+            "postToolUseFailure",
+            "subagentStart",
+            "subagentStop",
             "beforeShellExecution",
+            "afterShellExecution",
             "beforeMCPExecution",
+            "afterMCPExecution",
             "beforeReadFile",
+            "afterFileEdit",
             "beforeTabFileRead",
+            "afterTabFileEdit",
             "beforeSubmitPrompt",
-            "stop"
+            "preCompact",
+            "stop",
+            "afterAgentResponse",
+            "afterAgentThought",
+            "workspaceOpen"
           ],
           "aid_surfaces": [
             "prompt",
@@ -294,9 +320,16 @@
           "events": [
             "pre_user_prompt",
             "pre_read_code",
+            "post_read_code",
             "pre_write_code",
+            "post_write_code",
             "pre_run_command",
-            "pre_mcp_tool_use"
+            "post_run_command",
+            "pre_mcp_tool_use",
+            "post_mcp_tool_use",
+            "post_cascade_response",
+            "post_cascade_response_with_transcript",
+            "post_setup_worktree"
           ],
           "aid_surfaces": [
             "prompt",
@@ -344,11 +377,17 @@
           ],
           "response_field": "hook_output",
           "events": [
+            "SessionStart",
             "BeforeAgent",
             "BeforeModel",
+            "BeforeToolSelection",
             "BeforeTool",
             "AfterTool",
-            "AfterAgent"
+            "AfterModel",
+            "AfterAgent",
+            "PreCompress",
+            "Notification",
+            "SessionEnd"
           ],
           "aid_surfaces": [
             "prompt",
@@ -397,18 +436,19 @@
           ],
           "response_field": "hook_output",
           "events": [
+            "sessionStart",
+            "sessionEnd",
+            "userPromptSubmitted",
             "preToolUse",
-            "PreToolUse",
+            "postToolUse",
             "permissionRequest",
-            "PermissionRequest",
             "agentStop",
-            "Stop",
+            "subagentStart",
             "subagentStop",
-            "SubagentStop",
             "postToolUseFailure",
-            "PostToolUseFailure",
-            "notification",
-            "Notification"
+            "errorOccurred",
+            "preCompact",
+            "notification"
           ],
           "aid_surfaces": [
             "prompt",
@@ -421,20 +461,14 @@
             "can_block": true,
             "can_ask_native": true,
             "ask_events": [
-              "preToolUse",
-              "PreToolUse"
+              "preToolUse"
             ],
             "block_events": [
               "preToolUse",
-              "PreToolUse",
               "permissionRequest",
-              "PermissionRequest",
               "agentStop",
-              "Stop",
               "subagentStop",
-              "SubagentStop",
-              "postToolUseFailure",
-              "PostToolUseFailure"
+              "postToolUseFailure"
             ],
             "supports_fail_closed": false,
             "scope": "user,workspace"
@@ -577,6 +611,13 @@
           ],
           "response_field": "hook_output",
           "events": [
+            "session.created",
+            "session.updated",
+            "session.status",
+            "session.idle",
+            "session.compacted",
+            "session.error",
+            "session.deleted",
             "tool.execute.before",
             "tool.execute.after"
           ],

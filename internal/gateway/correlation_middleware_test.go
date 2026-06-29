@@ -180,6 +180,35 @@ func TestCorrelationMiddleware_PopulatesContext(t *testing.T) {
 	}
 }
 
+func TestCorrelationMiddlewareTrustsUserHeadersOnlyFromLoopback(t *testing.T) {
+	reg := NewAgentRegistry("agent-ci", "CI Agent")
+	mw := CorrelationMiddleware(reg)
+	for _, tc := range []struct {
+		name       string
+		remoteAddr string
+		wantUserID string
+	}{
+		{name: "remote ignored", remoteAddr: "203.0.113.8:443", wantUserID: ""},
+		{name: "loopback accepted", remoteAddr: "127.0.0.1:54321", wantUserID: "spoof-attempt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got AgentIdentity
+			handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = AgentIdentityFromContext(r.Context())
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", nil)
+			req.RemoteAddr = tc.remoteAddr
+			req.Header.Set(SessionIDHeader, "identity-session")
+			req.Header.Set(llmEventUserIDHeader, "spoof-attempt")
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			if got.UserID != tc.wantUserID {
+				t.Fatalf("user_id=%q want %q", got.UserID, tc.wantUserID)
+			}
+		})
+	}
+}
+
 // TestCorrelationMiddleware_StampsAuditEnvelope closes the v7 loop:
 // the middleware snapshots the resolved correlation + agent identity
 // into an audit.CorrelationEnvelope so any downstream call to

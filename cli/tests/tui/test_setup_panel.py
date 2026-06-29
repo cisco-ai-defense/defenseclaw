@@ -163,7 +163,6 @@ def test_config_validation_matches_go_setup_state_rules() -> None:
         validate_config_field(ConfigField("Base URL", "llm.base_url", "string", "https://u:p@example.com")).severity
         == "error"
     )
-    assert validate_config_field(ConfigField("Endpoint", "otel.endpoint", "string", "localhost:4317")).severity == "ok"
     assert validate_config_field(ConfigField("Dedup", "notifications.dedup_window", "string", "1\u00b5s")).severity == (
         "ok"
     )
@@ -707,6 +706,7 @@ def test_observability_and_webhook_wizards_pass_positionals_and_defaults() -> No
     obs = observability_wizard_fields("splunk-o11y")
     assert missing_required_fields(SetupWizard.OBSERVABILITY, obs) == ()
     assert missing_required_fields(SetupWizard.OBSERVABILITY, observability_wizard_fields("otlp")) == ("Endpoint",)
+    assert missing_required_fields(SetupWizard.OBSERVABILITY, observability_wizard_fields("galileo")) == ("Project",)
 
     obs = _with_field(obs, "Access Token", "token-123")
     assert build_wizard_args(SetupWizard.OBSERVABILITY, obs) == (
@@ -986,7 +986,7 @@ def test_setup_section_tabs_wrap_hit_test_and_field_actions() -> None:
         ConfigSection("General", (ConfigField("Mode", "claw.mode", "choice", "codex", "codex", CONNECTORS),), ""),
         ConfigSection("Agent", (ConfigField("Enabled", "agent.enabled", "bool", "true", "true"),), ""),
         ConfigSection("Connector Hooks", (ConfigField("Header", kind="header"), ConfigField("Path", "x.y")), ""),
-        ConfigSection("OpenTelemetry", (ConfigField("Endpoint", "otel.endpoint"),), ""),
+        ConfigSection("OpenTelemetry", (ConfigField("Sampler", "otel.traces.sampler"),), ""),
     )
 
     rows = model.section_tab_rows(width=28)

@@ -53,9 +53,16 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |
 | `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
 | `defenseclaw setup local-observability up\|down` | Bring up the bundled Prom/Loki/Tempo/Grafana stack. |
-| `defenseclaw setup splunk` | Configure the Splunk audit sink. |
+| `defenseclaw setup galileo [status\|test\|enable\|disable\|remove]` | Configure and verify Galileo Cloud or self-hosted OTLP traces. |
+| `defenseclaw setup splunk` | Configure local Splunk in Docker, Splunk Enterprise HEC, or Splunk Observability Cloud. |
 | `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
-| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage audit-log fan-out destinations (OTLP logs, Splunk HEC, generic HTTP JSONL). Distinct from `setup webhook`, which manages notifier webhooks. |
+| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test\|migrate-otel` | Manage named OTLP telemetry destinations and audit-log sinks. `migrate-otel` previews the upgrade-time configuration migration by default and `--apply` repairs/persists it manually. Distinct from `setup webhook`, which manages notifier webhooks. |
+
+For observability destinations, `name` is the stable identity: a new name adds,
+and an existing name updates only that destination. Run `list --json` for the
+complete target/kind/signal inventory and `add ... --dry-run` for a safe preview.
+The TUI mirrors the runtime-loaded inventory in **Overview → Observability
+Destinations** and exposes the wizard at **0 Setup → Observability / Galileo**.
 | `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and persists to `~/.defenseclaw/.env`; `remove` only touches operator-added entries. All verbs accept `--json`. |
 
 <Callout title="Safety gates are intentional">
@@ -164,7 +171,10 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw upgrade [--version X] [--yes]` | Upgrade the Python CLI and Go gateway from GitHub release artifacts without a source checkout. The command downloads the release checksum manifest, verifies Sigstore provenance when local `cosign` is available, validates gateway/wheel checksums, and loads the upgrade manifest before stopping the gateway. macOS/Linux use the release tarball; Windows uses the release ZIP and installs `defenseclaw-gateway.exe`. Signed releases still upgrade without `cosign` by warning and continuing with checksum validation only; `--allow-unverified` is an explicit unsafe override when a release manifest is missing, unsigned, incomplete, or otherwise unverifiable. |
+| `defenseclaw upgrade [--version X] [--yes]` | Upgrade the Python CLI and Go gateway from GitHub release artifacts without a source checkout. The command verifies release provenance/checksums, backs up managed state, installs both artifacts, runs the release migration manifest, restarts services, and checks gateway health. macOS/Linux use the release tarball; Windows uses the release ZIP and installs `defenseclaw-gateway.exe`. Signed releases still upgrade without local `cosign` by warning and continuing with checksum validation only; `--allow-unverified` is an explicit unsafe override when a release manifest is missing, unsigned, incomplete, or otherwise unverifiable. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
+| `defenseclaw migrations status [--json-output]` | Show the durable migration cursor and any drift between applied and release-required migrations. |
+| `defenseclaw migrations unmark VERSION` | Mark one migration for retry on the next upgrade. Use only as a targeted recovery action. |
+| `defenseclaw migrations reset` | Remove the migration cursor so the next upgrade bootstraps it again. This does not roll back configuration files. |
 
 `0.7.x` clients do not support `--allow-unverified`; upgrade them directly to the latest fixed release with plain `defenseclaw upgrade --yes` or `defenseclaw upgrade --version VERSION --yes`.
 

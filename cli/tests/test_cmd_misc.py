@@ -97,6 +97,56 @@ class TestStatusCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("running", result.output)
 
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    @patch("defenseclaw.commands.cmd_status.shutil.which")
+    def test_status_accepts_openshell_sandbox_binary(self, mock_which, mock_client_cls):
+        from defenseclaw.commands.cmd_status import status
+
+        def fake_which(binary):
+            if binary == "openshell-sandbox":
+                return "/usr/local/bin/openshell-sandbox"
+            return None
+
+        mock_which.side_effect = fake_which
+        mock_client = MagicMock()
+        mock_client.is_running.return_value = False
+        mock_client_cls.return_value = mock_client
+
+        result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Sandbox:", result.output)
+        self.assertIn("available", result.output)
+
+        result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["sandbox"]["available"])
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    @patch("defenseclaw.commands.cmd_status.shutil.which")
+    def test_status_does_not_replace_explicit_missing_sandbox_binary(
+        self, mock_which, mock_client_cls
+    ):
+        from defenseclaw.commands.cmd_status import status
+
+        self.app.cfg.openshell.binary = "/opt/operator/openshell"
+
+        def fake_which(binary):
+            if binary == "openshell-sandbox":
+                return "/usr/local/bin/openshell-sandbox"
+            return None
+
+        mock_which.side_effect = fake_which
+        mock_client = MagicMock()
+        mock_client.is_running.return_value = False
+        mock_client_cls.return_value = mock_client
+
+        result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertFalse(payload["sandbox"]["available"])
+        self.assertNotIn("openshell-sandbox", [call.args[0] for call in mock_which.call_args_list])
+
 
 # ---------------------------------------------------------------------------
 # Alerts command
@@ -945,12 +995,12 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         otel = self.app.cfg.otel
         self.assertTrue(otel.enabled)
-        self.assertEqual(otel.traces.endpoint, "ingest.eu0.observability.splunkcloud.com")
-        self.assertEqual(otel.traces.protocol, "http")
-        self.assertEqual(otel.traces.url_path, "/v2/trace/otlp")
-        self.assertEqual(otel.metrics.endpoint, "ingest.eu0.observability.splunkcloud.com")
-        self.assertEqual(otel.metrics.url_path, "/v2/datapoint/otlp")
-        self.assertEqual(otel.headers.get("X-SF-Token"), "${SPLUNK_ACCESS_TOKEN}")
+        destination = next(d for d in otel.destinations if d.preset == "splunk-o11y")
+        self.assertEqual(destination.endpoint, "ingest.eu0.observability.splunkcloud.com")
+        self.assertEqual(destination.protocol, "http")
+        self.assertEqual(destination.traces.url_path, "/v2/trace/otlp")
+        self.assertEqual(destination.metrics.url_path, "/v2/datapoint/otlp")
+        self.assertEqual(destination.headers.get("X-SF-Token"), "${SPLUNK_ACCESS_TOKEN}")
 
         dotenv_path = os.path.join(self.tmp_dir, ".env")
         self.assertTrue(os.path.exists(dotenv_path))
@@ -1632,8 +1682,11 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0)
         self.assertTrue(self.app.cfg.otel.enabled)
-        self.assertEqual(self.app.cfg.otel.traces.endpoint, "ingest.us1.observability.splunkcloud.com")
-        self.assertFalse(self.app.cfg.otel.logs.enabled)
+        destination = next(
+            d for d in self.app.cfg.otel.destinations if d.preset == "splunk-o11y"
+        )
+        self.assertEqual(destination.endpoint, "ingest.us1.observability.splunkcloud.com")
+        self.assertFalse(destination.logs.enabled)
         mock_apply_dashboards.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup.apply_dashboards")

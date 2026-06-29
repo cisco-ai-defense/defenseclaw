@@ -808,7 +808,7 @@ if [[ "${INSTALL_SANDBOX}" == true ]]; then
             step "Installing openshell-sandbox"
             info "Downloading installer..."
             curl -fsSL \
-                "https://raw.githubusercontent.com/${REPO}/main/scripts/install-openshell-sandbox.sh" \
+                "https://raw.githubusercontent.com/${REPO}/${RELEASE_VERSION}/scripts/install-openshell-sandbox.sh" \
                 | bash
         fi
     fi

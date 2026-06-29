@@ -105,6 +105,12 @@ func decodeClaudeCodeRequestFromBytes(rawBody []byte, payload map[string]interfa
 	var req claudeCodeHookRequest
 	_ = json.Unmarshal(rawBody, &req)
 	req.Payload = payload
+	agentID, agentName, agentType := extractAgentIdentityFromHookPayload(payload)
+	req.AgentID = firstNonEmpty(req.AgentID, agentID)
+	if payloadString(req.Payload, "agent_name") == "" && agentName != "" {
+		req.Payload["agent_name"] = agentName
+	}
+	req.AgentType = firstNonEmpty(req.AgentType, agentType)
 	req.CWD = sanitizeHookCWD(req.CWD)
 	req.NewCWD = sanitizeHookCWD(req.NewCWD)
 	req.OldCWD = sanitizeHookCWD(req.OldCWD)

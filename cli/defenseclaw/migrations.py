@@ -42,6 +42,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1786,6 +1787,81 @@ def _migrate_0_8_0(ctx: MigrationContext) -> None:
     _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx)
 
 
+def _migrate_config_v7_named_otel_destinations(ctx: MigrationContext) -> bool:
+    """Persist the v6 flat OTel exporter as one v7 named destination.
+
+    ``internal/config.Load`` deliberately performs a write-free, in-memory
+    conversion so the gateway can always start, including when a release
+    migration was interrupted. This migration is keyed to the configuration
+    shape rather than the release cursor: 0.8.x releases already exist, so a
+    host may have marked the 0.8.0 release migration before named destinations
+    shipped. Checking the idempotent config shape on every compatible upgrade
+    covers those hosts without replaying any release-owned migration.
+
+    Upgrade is the correct write boundary: it has already snapshotted the data
+    directory, and the shared observability writer adds its own one-time config
+    backup before atomically replacing the file. Reusing that writer keeps
+    explicit ``migrate-otel --apply``, setup commands, and release upgrades on
+    exactly the same lossless conversion.
+    """
+    # Pre-0.8 upgraders install the target wheel while the old CLI process is
+    # still running, then import the new migrations module in-process. Their
+    # ``sys.modules`` can therefore contain old transitive dependencies even
+    # though this function came from the new wheel. In particular, 0.6.6 keeps
+    # ``defenseclaw.config`` cached without ``locked_config_yaml``.
+    #
+    # Do not repair that mixed graph with importlib.reload(): reloading shared
+    # modules replaces exception classes and function globals underneath the
+    # still-running legacy CLI. That can make an exception raised by the new
+    # safety module impossible for callers holding the old class object to
+    # catch, and can invalidate connector-path monkeypatches. Instead, perform
+    # the atomic writer operation in an isolated child interpreter. ``-I``
+    # prevents the current directory or PYTHONPATH from shadowing the wheel
+    # that was just installed, while the normal process environment (including
+    # documented OTel endpoint variables) remains available to the writer.
+    script = (
+        "import json, sys\n"
+        "from defenseclaw.observability.writer import migrate_flat_otel\n"
+        "result = migrate_flat_otel(sys.argv[1], dry_run=False)\n"
+        "print(json.dumps({'name': result.name, "
+        "'yaml_changes': result.yaml_changes}))\n"
+    )
+    proc = subprocess.run(  # noqa: S603 - trusted interpreter and static script
+        [sys.executable, "-I", "-c", script, ctx.data_dir],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        detail = next(
+            (line.strip() for line in reversed(proc.stderr.splitlines()) if line.strip()),
+            f"child interpreter exited {proc.returncode}",
+        )
+        raise RuntimeError(f"isolated observability migration failed: {detail}")
+
+    payload_line = next(
+        (line.strip() for line in reversed(proc.stdout.splitlines()) if line.strip()),
+        "",
+    )
+    try:
+        payload = json.loads(payload_line)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "isolated observability migration returned an invalid result"
+        ) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("yaml_changes"), list):
+        raise RuntimeError("isolated observability migration returned an invalid result")
+    if not payload["yaml_changes"]:
+        return False
+    name = str(payload.get("name") or "generic-otlp")
+    ctx.changes.append(
+        "migrated the legacy flat OTel exporter to named "
+        f"otel.destinations[{name}] and saved a pre-migration backup"
+    )
+    return True
+
+
 def _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx: MigrationContext) -> None:
     """Map legacy sink ``verify_tls: false`` to ``insecure_skip_verify: true``.
 
@@ -2047,6 +2123,7 @@ def run_migrations(
     from_t = _ver_tuple(from_version)
     to_t = _ver_tuple(to_version)
     same_version_reapply = from_t == to_t
+    applied_count = 0
 
     # Load the cursor; treat "missing" / "unparseable" / "future
     # schema" as "first upgrade on this host" and bootstrap from
@@ -2089,7 +2166,35 @@ def run_migrations(
         except OSError as exc:
             ux.warn(f"could not persist migration cursor: {exc}", indent="    ")
 
-    applied_count = 0
+    # Configuration-schema migrations are intentionally separate from the
+    # release cursor. A host may already carry an applied 0.8.0 cursor from a
+    # published build that predates named OTel destinations. The flat/v6
+    # shape itself is the durable applicability check, and the shared writer
+    # is atomic + idempotent. This runs only after validating the cursor so a
+    # downgrade facing newer cursor state refuses before mutating config.
+    # Gate on the target so tests/downgrades to older releases never receive a
+    # schema they do not understand.
+    if to_t >= _ver_tuple("0.8.0"):
+        schema_ctx = MigrationContext(
+            openclaw_home=openclaw_home,
+            data_dir=data_dir,
+            from_version=from_version,
+            to_version=to_version,
+        )
+        try:
+            if _migrate_config_v7_named_otel_destinations(schema_ctx):
+                ux.ok("Configuration schema v7 OTel migration applied.", indent="    ")
+                applied_count += 1
+        except Exception as exc:  # noqa: BLE001 - runtime fallback keeps startup safe
+            ux.warn(
+                f"configuration schema v7 OTel migration deferred: {exc}",
+                indent="    ",
+            )
+            ux.subhead(
+                "the gateway will use its in-memory compatibility route; "
+                "repair with 'defenseclaw setup observability migrate-otel --apply'",
+                indent="    ",
+            )
 
     for ver, desc, fn in MIGRATIONS:
         ver_t = _ver_tuple(ver)

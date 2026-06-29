@@ -106,6 +106,14 @@ func writePretty(w io.Writer, e Event) {
 		fmt.Fprintf(w, "%s [tool:%s] phase=%s call_id=%s session=%s\n",
 			ts, t.Tool, t.Phase, t.ToolCallID, e.SessionID)
 
+	case EventHookDecision:
+		if e.HookDecision == nil {
+			return
+		}
+		h := e.HookDecision
+		fmt.Fprintf(w, "%s [hook:%s] event=%s action=%s raw_action=%s enforced=%t would_block=%t step=%d\n",
+			ts, h.Connector, h.Event, h.Action, h.RawAction, h.Enforced, h.WouldBlock, h.StepIdx)
+
 	case EventAIDiscovery:
 		if e.AIDiscovery == nil {
 			return

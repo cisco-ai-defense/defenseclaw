@@ -57,7 +57,7 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		//	post_tool_call   → inspect tool output (observe)
 		//	post_llm_call    → inspect model output (observe)
 		//	on_session_*     → lifecycle telemetry (observe)
-		//	subagent_stop    → delegate-task telemetry (observe)
+		//	subagent_start/stop → delegate-task telemetry (observe)
 		//
 		// Hermes reads a blocking stdout response only for
 		// pre_tool_call and a {"context":...} injection for

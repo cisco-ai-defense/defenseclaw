@@ -71,6 +71,19 @@ def _status_row(key: str, value: str) -> None:
     click.echo(f"  {ux._style(label_padded, fg='bright_black', bold=True)}{rendered_value}")
 
 
+def _openshell_available(cfg) -> bool:
+    binary = getattr(getattr(cfg, "openshell", None), "binary", "")
+    if binary and shutil.which(str(binary)):
+        return True
+    # ``openshell`` is the historical default launcher name. Older installs
+    # may instead provide the companion ``openshell-sandbox`` executable, so
+    # retain that compatibility fallback only for the default/unset value.
+    # A missing operator-supplied path must not silently select another binary.
+    if binary and str(binary) != "openshell":
+        return False
+    return bool(shutil.which("openshell-sandbox"))
+
+
 @click.command()
 @click.option(
     "--json",
@@ -117,7 +130,7 @@ def status(app: AppContext, as_json: bool) -> None:
     click.echo()
 
     # Sandbox
-    if shutil.which(cfg.openshell.binary):
+    if _openshell_available(cfg):
         _status_row("Sandbox", ux._style("available", fg="green"))
     else:
         _status_row(
@@ -456,8 +469,8 @@ def _print_observability_status(cfg) -> None:
     """Enumerate every observability destination — gateway OTel exporter
     plus every ``audit_sinks`` entry — in a single section.
 
-    The old ``_print_splunk_integration_status`` was hard-coded to the
-    legacy ``cfg.splunk`` hydration and the single ``otel:`` block and
+    The old ``_print_splunk_integration_status`` was hard-coded to Splunk
+    hydration and a single exporter and
     so couldn't see Datadog, Honeycomb, New Relic, or extra Splunk HEC
     sinks configured via ``setup observability``. This walks the YAML
     via the observability writer so whatever ``setup observability add``
@@ -607,7 +620,7 @@ def _status_payload(app) -> dict:
         "config": f"{cfg.data_dir}/config.yaml",
         "audit_db": cfg.audit_db,
         "scope": _connector_scope_text(cfg),
-        "sandbox": {"available": bool(shutil.which(cfg.openshell.binary))},
+        "sandbox": {"available": _openshell_available(cfg)},
         "scanners": _scanner_status_map(cfg),
         "connectors": _connector_roster(cfg),
     }

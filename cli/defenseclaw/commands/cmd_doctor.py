@@ -2984,7 +2984,7 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
 
     Why this matters: the codebase has ~70 ``DEFENSECLAW_*`` env vars
     and several of them (``DEFENSECLAW_DISABLE_REDACTION``,
-    ``DEFENSECLAW_OTEL_TLS_INSECURE``, ``DEFENSECLAW_CODEX_LOOPBACK_TRUST``,
+    ``DEFENSECLAW_CODEX_LOOPBACK_TRUST``,
     ...) materially weaken security defaults. Without this check an
     operator has no way to spot a forgotten override left over from a
     debugging session.

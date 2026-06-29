@@ -3,6 +3,8 @@
   "pages": [
     "index",
     "local-observability",
+    "agent360",
+    "galileo",
     "splunk"
   ]
 }

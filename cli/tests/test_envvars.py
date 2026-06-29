@@ -9,20 +9,16 @@ truthy-value semantics).
 
 from __future__ import annotations
 
-import json
 import os
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from defenseclaw.envvars import (
     ALLOWED_CATEGORIES,
     ALLOWED_SECURITY_IMPACT,
-    CATEGORY_CREDENTIAL,
     CATEGORY_SECURITY_OPT_OUT,
-    EnvVar,
-    Registry,
     active_security_overrides,
-    iter_entries,
     load_registry,
 )
 
@@ -67,6 +63,12 @@ class RegistryStructureTests(unittest.TestCase):
     def test_no_duplicate_names(self) -> None:
         names = [e.name for e in self.registry.entries]
         self.assertEqual(len(names), len(set(names)))
+
+    def test_bundled_registry_matches_source_registry(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        source = root / "internal" / "envvars" / "registry.json"
+        bundled = root / "cli" / "defenseclaw" / "_data" / "envvars" / "registry.json"
+        self.assertEqual(json.loads(bundled.read_text()), json.loads(source.read_text()))
 
     def test_names_use_canonical_prefix(self) -> None:
         for e in self.registry.entries:
@@ -171,10 +173,9 @@ class ActiveSecurityOverridesTests(unittest.TestCase):
         names = [e.name for e in active_security_overrides(env)]
         self.assertIn("DEFENSECLAW_DISABLE_REDACTION", names)
 
-    def test_three_overrides_returns_three(self) -> None:
+    def test_two_overrides_returns_two(self) -> None:
         env = {
             "DEFENSECLAW_DISABLE_REDACTION": "1",
-            "DEFENSECLAW_OTEL_TLS_INSECURE": "true",
             "DEFENSECLAW_CODEX_LOOPBACK_TRUST": "1",
         }
         names = [e.name for e in active_security_overrides(env)]
@@ -183,7 +184,6 @@ class ActiveSecurityOverridesTests(unittest.TestCase):
             sorted(
                 [
                     "DEFENSECLAW_DISABLE_REDACTION",
-                    "DEFENSECLAW_OTEL_TLS_INSECURE",
                     "DEFENSECLAW_CODEX_LOOPBACK_TRUST",
                 ]
             ),

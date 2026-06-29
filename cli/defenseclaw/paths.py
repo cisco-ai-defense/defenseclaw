@@ -92,9 +92,14 @@ def bundled_local_observability_dir() -> Path:
     directory by ``defenseclaw init`` so operators can customize
     dashboards / alert rules in place without editing the Python wheel.
     """
+    # In a source checkout the maintained bundle is authoritative. The
+    # ignored ``_data`` tree is build staging and can be stale between
+    # ``make _bundle-data`` runs; preferring it made local setup silently miss
+    # newly added dashboards and collector configuration. Installed wheels do
+    # not contain ``bundles/``, so they continue to resolve packaged data.
     return _first_existing(
-        _DATA_DIR / "local_observability_stack",
         _REPO_ROOT / "bundles" / "local_observability_stack",
+        _DATA_DIR / "local_observability_stack",
     )
 
 

@@ -31,7 +31,6 @@ import re
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schemas"
 
@@ -39,7 +38,7 @@ EXPECTED_ENVELOPE_EVENT_TYPES = {
     "verdict", "judge", "lifecycle", "error", "diagnostic",
     "scan", "scan_finding", "activity", "egress",
     "llm_prompt", "llm_response", "tool_invocation",
-    "ai_discovery",
+    "hook_decision", "ai_discovery",
 }
 
 EXPECTED_PROVENANCE_FIELDS = {
@@ -83,6 +82,13 @@ OTEL_METRIC_INSTRUMENT_TYPES = {
     "Int64Gauge": "gauge",
     "Float64Gauge": "gauge",
 }
+
+RUNTIME_SPAN_SCHEMA_NAMES = (
+    "runtime-agent-span.schema.json",
+    "runtime-approval-span.schema.json",
+    "runtime-llm-span.schema.json",
+    "runtime-tool-span.schema.json",
+)
 
 
 def load_json(path: Path) -> dict:
@@ -138,10 +144,18 @@ def check_audit_event(doc: dict) -> bool:
         print("check_schemas: audit-event.json: missing schema_version property", file=sys.stderr)
         return False
     if sv.get("type") != "integer":
-        print(f"check_schemas: audit-event.json: schema_version.type={sv.get('type')!r}, want 'integer'", file=sys.stderr)
+        print(
+            "check_schemas: audit-event.json: "
+            f"schema_version.type={sv.get('type')!r}, want 'integer'",
+            file=sys.stderr,
+        )
         return False
     if (sv.get("minimum") or 0) < 7:
-        print(f"check_schemas: audit-event.json: schema_version.minimum={sv.get('minimum')}, want >= 7", file=sys.stderr)
+        print(
+            "check_schemas: audit-event.json: "
+            f"schema_version.minimum={sv.get('minimum')}, want >= 7",
+            file=sys.stderr,
+        )
         return False
     required = set(doc.get("required", []))
     if "schema_version" not in required:
@@ -213,7 +227,11 @@ def check_envelope(doc: dict) -> bool:
     missing = EXPECTED_ENVELOPE_EVENT_TYPES - enum
     extra = enum - EXPECTED_ENVELOPE_EVENT_TYPES
     if missing or extra:
-        print(f"check_schemas: gateway-event-envelope.json: event_type drift missing={sorted(missing)} extra={sorted(extra)}", file=sys.stderr)
+        print(
+            "check_schemas: gateway-event-envelope.json: event_type drift "
+            f"missing={sorted(missing)} extra={sorted(extra)}",
+            file=sys.stderr,
+        )
         ok = False
     return ok
 
@@ -242,6 +260,70 @@ def check_resource(doc: dict) -> bool:
         )
         return False
     return True
+
+
+def check_runtime_span_schema(doc: dict, name: str) -> bool:
+    """Require machine-readable attribute contracts on every runtime span."""
+    ok = True
+    required = doc.get("x-required-attribute-keys")
+    if not isinstance(required, list) or not required:
+        print(
+            f"check_schemas: otel/{name}: missing x-required-attribute-keys",
+            file=sys.stderr,
+        )
+        return False
+    definitions = (
+        ((doc.get("$defs") or {}).get("attributeDefinitions") or {}).get("properties")
+    )
+    if not isinstance(definitions, dict) or not definitions:
+        print(
+            f"check_schemas: otel/{name}: missing attributeDefinitions.properties",
+            file=sys.stderr,
+        )
+        return False
+    missing = sorted(set(required) - set(definitions))
+    if missing:
+        print(
+            f"check_schemas: otel/{name}: required attributes are undeclared: {missing}",
+            file=sys.stderr,
+        )
+        ok = False
+    return ok
+
+
+def check_galileo_export_profile(doc: dict, runtime_docs: dict[str, dict]) -> bool:
+    """Keep each Galileo filter branch aligned with its runtime span schema."""
+    props = doc.get("properties") or {}
+    signals = (props.get("signals") or {}).get("const")
+    operations = (props.get("operations") or {}).get("const")
+    expected = [
+        {
+            "name": operation,
+            "required_attributes": runtime_docs[schema_name].get(
+                "x-required-attribute-keys"
+            ),
+        }
+        for operation, schema_name in (
+            ("chat", "runtime-llm-span.schema.json"),
+            ("invoke_agent", "runtime-agent-span.schema.json"),
+            ("execute_tool", "runtime-tool-span.schema.json"),
+        )
+    ]
+    ok = True
+    if signals != ["traces"]:
+        print(
+            f"check_schemas: otel/galileo-export-profile: signals={signals!r}, want ['traces']",
+            file=sys.stderr,
+        )
+        ok = False
+    if operations != expected:
+        print(
+            "check_schemas: otel/galileo-export-profile operations drift from "
+            f"runtime span schemas: got={operations!r} want={expected!r}",
+            file=sys.stderr,
+        )
+        ok = False
+    return ok
 
 
 def discover_otel_metric_instruments() -> dict[str, dict[str, str]]:
@@ -356,22 +438,17 @@ def check_metrics_catalog(doc: dict) -> bool:
 
 GATEWAYLOG_SCHEMA_DIR = ROOT / "internal" / "gatewaylog" / "schemas"
 CLI_EMBED_SCHEMA_DIR = ROOT / "internal" / "cli" / "embed"
-
-# Schemas the CLI embeds (go:embed) and must keep byte-identical to the
-# canonical copies under schemas/. The embed dir also holds CLI-only
-# assets, so we gate an explicit allow-list rather than the whole dir.
-CLI_EMBED_MIRRORED = ("audit-event.json", "hook-audit-envelope.json")
+CLI_GO_DIR = ROOT / "internal" / "cli"
 
 
 def check_cli_embed_mirrors() -> bool:
     """Verify the CLI-embedded schema copies match schemas/ byte-for-byte.
 
-    The Go CLI embeds audit-event.json / hook-audit-envelope.json via
-    go:embed for offline validation. If these drift from the canonical
-    schemas/ copies the CLI validates against a stale contract while the
-    gateway and docs use another — exactly the kind of multi-connector
-    field drift (connector/step_idx/enforced/rule_pack_dir) this gate
-    exists to catch. Mirrors the gatewaylog check below.
+    Discover the actual ``//go:embed embed/*.json`` directives rather than
+    maintaining a second allow-list. Every JSON file in the embed directory
+    must be referenced by Go code, have a canonical copy under schemas/, and
+    be byte-identical to that canonical copy. This both catches drift and
+    prevents unexplained duplicate schema files from accumulating.
     """
     if not CLI_EMBED_SCHEMA_DIR.is_dir():
         print(
@@ -380,13 +457,37 @@ def check_cli_embed_mirrors() -> bool:
         )
         return True
 
+    embedded = set()
+    pattern = re.compile(r"//go:embed\s+embed/([^\s]+\.json)")
+    for go_path in CLI_GO_DIR.glob("*.go"):
+        embedded.update(pattern.findall(go_path.read_text(encoding="utf-8")))
+
+    present = {path.name for path in CLI_EMBED_SCHEMA_DIR.glob("*.json")}
+    orphaned = sorted(present - embedded)
+    missing = sorted(embedded - present)
     ok = True
-    for name in CLI_EMBED_MIRRORED:
+    if orphaned:
+        print(
+            "check_schemas: unreferenced CLI embed schema copies "
+            f"{orphaned}; remove them or add an explicit //go:embed consumer",
+            file=sys.stderr,
+        )
+        ok = False
+    if missing:
+        print(
+            f"check_schemas: CLI go:embed schemas missing from disk {missing}",
+            file=sys.stderr,
+        )
+        ok = False
+
+    for name in sorted(embedded):
         embed_path = CLI_EMBED_SCHEMA_DIR / name
         canonical_path = SCHEMA_DIR / name
-        if not embed_path.exists() or not canonical_path.exists():
+        if not embed_path.exists():
+            continue
+        if not canonical_path.exists():
             print(
-                f"check_schemas: CLI embed mirror missing for {name}",
+                f"check_schemas: canonical schemas/{name} missing for CLI embed",
                 file=sys.stderr,
             )
             ok = False
@@ -498,6 +599,32 @@ def main() -> int:
             ok = False
     else:
         print("check_schemas: schemas/otel/metrics.schema.json missing", file=sys.stderr)
+        ok = False
+
+    for name in RUNTIME_SPAN_SCHEMA_NAMES:
+        span_path = SCHEMA_DIR / "otel" / name
+        if not span_path.exists():
+            print(f"check_schemas: schemas/otel/{name} missing", file=sys.stderr)
+            ok = False
+            continue
+        if not check_runtime_span_schema(load_json(span_path), name):
+            ok = False
+
+    galileo_path = SCHEMA_DIR / "otel" / "galileo-export-profile.schema.json"
+    runtime_paths = {
+        name: SCHEMA_DIR / "otel" / name
+        for name in (
+            "runtime-llm-span.schema.json",
+            "runtime-agent-span.schema.json",
+            "runtime-tool-span.schema.json",
+        )
+    }
+    if galileo_path.exists() and all(path.exists() for path in runtime_paths.values()):
+        runtime_docs = {name: load_json(path) for name, path in runtime_paths.items()}
+        if not check_galileo_export_profile(load_json(galileo_path), runtime_docs):
+            ok = False
+    else:
+        print("check_schemas: Galileo export profile or runtime span schema missing", file=sys.stderr)
         ok = False
 
     if not check_schema_mirrors():
