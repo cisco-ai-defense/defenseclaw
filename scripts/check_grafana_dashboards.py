@@ -108,8 +108,13 @@ def tempo_target_query(target: dict[str, Any]) -> str | None:
     """Return executable TraceQL for raw and structured Grafana Tempo targets."""
 
     raw_query = target.get("query")
-    if raw_query:
-        return str(raw_query)
+    if raw_query is not None:
+        if not isinstance(raw_query, str):
+            raise AuditError("Tempo raw queries must be strings")
+        raw_query = raw_query.strip()
+        if not raw_query:
+            raise AuditError("Tempo raw queries must not be blank")
+        return raw_query
     if target.get("queryType") != "traceqlSearch":
         raise AuditError(
             f"unsupported Tempo target queryType {target.get('queryType')!r}; "

@@ -338,3 +338,11 @@ def test_tempo_target_query_uses_operator_correct_multi_value_join() -> None:
         '{ (resource.service.name = "gateway" || resource.service.name = "worker") }'
     )
     assert negative == '{ (name != "health" && name != "ready") }'
+
+
+@pytest.mark.parametrize("query", [{}, [], "   "])
+def test_tempo_target_query_rejects_invalid_raw_queries(query: object) -> None:
+    audit = _load_audit_module()
+
+    with pytest.raises(audit.AuditError):
+        audit.tempo_target_query({"query": query})
