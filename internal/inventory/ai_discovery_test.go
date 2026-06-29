@@ -59,7 +59,17 @@ func TestExpandCandidatePath_ExpandsConfiguredEnvironment(t *testing.T) {
 }
 
 func TestExpandCandidatePath_SkipsUnsetEnvironment(t *testing.T) {
-	t.Setenv("OMNIGENT_CONFIG_HOME", "")
+	previous, wasSet := os.LookupEnv("OMNIGENT_CONFIG_HOME")
+	if err := os.Unsetenv("OMNIGENT_CONFIG_HOME"); err != nil {
+		t.Fatalf("unset OMNIGENT_CONFIG_HOME: %v", err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("OMNIGENT_CONFIG_HOME", previous)
+		} else {
+			_ = os.Unsetenv("OMNIGENT_CONFIG_HOME")
+		}
+	})
 	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
 
 	if got := service.expandCandidatePath("$OMNIGENT_CONFIG_HOME/config.yaml"); got != nil {

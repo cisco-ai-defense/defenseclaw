@@ -179,6 +179,9 @@ func TestReconcileUnconfiguredConnectors_RetainsFailedConnectorForRetry(t *testi
 	if err := s.reconcileUnconfiguredConnectors(context.Background(), reg); err == nil {
 		t.Fatal("reconcile final connector succeeded despite stale state")
 	}
+	if removed.teardownCalls != 1 || removed.verifyCalls != 1 {
+		t.Fatalf("cleanup calls = teardown:%d verify:%d, want 1 each", removed.teardownCalls, removed.verifyCalls)
+	}
 	got := connector.LoadActiveConnectors(dir)
 	if len(got) != 1 || got[0] != "omnigent" {
 		t.Fatalf("connectors awaiting teardown retry = %v, want [omnigent]", got)

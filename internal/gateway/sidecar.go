@@ -1889,7 +1889,18 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// per-connector disable as a boot failure.
 	if len(conns) == 0 {
 		if err := connector.SaveActiveConnectors(s.cfg.DataDir, failedRemoved); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] save active connector set: %v\n", err)
+			persistErr := fmt.Errorf(
+				"save connectors awaiting teardown retry (%s): %w",
+				strings.Join(failedRemoved, ", "),
+				err,
+			)
+			s.health.SetGuardrail(StateError, persistErr.Error(), nil)
+			return persistErr
+		}
+		if len(failedRemoved) > 0 {
+			teardownErr := fmt.Errorf("connector teardown incomplete for: %s", strings.Join(failedRemoved, ", "))
+			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
+			return teardownErr
 		}
 		s.health.SetGuardrail(StateDisabled, "all configured connectors are individually disabled", nil)
 		fmt.Fprintf(os.Stderr, "[guardrail] all %d configured connector(s) disabled per-connector — none active; idle until shutdown\n", len(configured))
@@ -1907,7 +1918,16 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// set-difference teardown is accurate.
 	persisted := append(append([]string(nil), succeeded...), failedRemoved...)
 	if err := connector.SaveActiveConnectors(s.cfg.DataDir, persisted); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] save active connector set: %v\n", err)
+		persistErr := fmt.Errorf("save active connector set: %w", err)
+		if len(failedRemoved) > 0 {
+			persistErr = fmt.Errorf(
+				"save active connector set with teardown retry state (%s): %w",
+				strings.Join(failedRemoved, ", "),
+				err,
+			)
+		}
+		s.health.SetGuardrail(StateError, persistErr.Error(), nil)
+		return persistErr
 	}
 
 	// Every connector failing is a real boot failure — surface it loudly

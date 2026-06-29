@@ -1779,7 +1779,8 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
             parts.append(f"{connector} (mode=action via PreToolUse deny)")
         else:
             parts.append(f"{connector} (mode=observe)")
-    return f"hook-driven for {', '.join(parts)} — proxy port intentionally closed"
+    prefix = "enforced" if all(mode == "action" for mode in modes.values()) else "native-driven"
+    return f"{prefix} for {', '.join(parts)} — proxy port intentionally closed"
 
 
 def _doctor_effective_guardrail_mode(gc, connector: str) -> str:

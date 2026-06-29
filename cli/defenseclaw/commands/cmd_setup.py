@@ -8151,10 +8151,9 @@ def _restart_services(
     ]
     if connector != "openclaw" and len(hook_multi) > 1:
         names = ", ".join(sorted(hook_multi))
-        surface = "custom policy API" if "omnigent" in hook_multi else "hook bus"
         ux.subhead(
-            f"{len(hook_multi)} hook connectors ({names}): enforcement via the {surface} "
-            f"on the sidecar API port. No proxy listener — each talks directly "
+            f"{len(hook_multi)} hook connectors ({names}): enforcement via native "
+            f"lifecycle surfaces on the sidecar API port. No proxy listener — each talks directly "
             f"to its native upstream."
         )
         click.echo()

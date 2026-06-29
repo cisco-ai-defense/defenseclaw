@@ -711,6 +711,17 @@ class TestCheckHookHealth(unittest.TestCase):
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn(".pth import shim", r.checks[-1]["detail"])
 
+    def test_dispatch_routes_omnigent_policy_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": tmp}):
+                r = _DoctorResult()
+                _check_connector_hooks(cfg, "omnigent", r)
+
+        self.assertTrue(r.checks)
+        self.assertEqual(r.checks[-1]["label"], "OmniGent policy")
+
     def test_dispatch_routes_all_five_connectors(self) -> None:
         """``_check_connector_hooks`` must dispatch each generic connector
         unhandled connectors to the generic hook-health row."""

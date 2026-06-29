@@ -1871,6 +1871,7 @@ func TestCodex_Authenticate_LoopbackWarnOnce(t *testing.T) {
 		}
 	}
 
+	os.Stderr = origStderr
 	if err := pipeW.Close(); err != nil {
 		t.Fatalf("close pipe writer: %v", err)
 	}
@@ -1907,6 +1908,7 @@ func TestAuthenticateHookBridgeRequest_MasterKeyOnlyWarnsOnLoopbackBypass(t *tes
 		t.Fatal("loopback bridge request should be accepted")
 	}
 
+	os.Stderr = origStderr
 	if err := pipeW.Close(); err != nil {
 		t.Fatalf("close pipe writer: %v", err)
 	}

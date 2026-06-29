@@ -1988,6 +1988,7 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             self._cfg(["codex", "omnigent"], mode="action")
         )
 
+        self.assertTrue(detail.startswith("enforced for"), detail)
         self.assertIn("codex (mode=action via PreToolUse deny)", detail)
         self.assertIn("omnigent (mode=action via ALLOW/ASK/DENY)", detail)
         self.assertIn("proxy port intentionally closed", detail)
