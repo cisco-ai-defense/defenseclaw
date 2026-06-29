@@ -311,7 +311,9 @@ class TestAIDiscoveryConfig(unittest.TestCase):
         self.assertNotIn("ai_discovery", data)
 
     def test_merge_preserves_confidence_policy_path(self):
-        cfg = config_mod._merge_ai_discovery({"enabled": True, "confidence_policy_path": "/tmp/custom-confidence.yaml"})
+        cfg = config_mod._merge_ai_discovery(
+            {"enabled": True, "confidence_policy_path": "/tmp/custom-confidence.yaml"}
+        )
         self.assertEqual(cfg.confidence_policy_path, "/tmp/custom-confidence.yaml")
 
     def test_merge_trusted_binary_policy(self):
@@ -584,7 +586,8 @@ class TestConfigLoadSave(unittest.TestCase):
             data_dir = Path(tmpdir) / ".defenseclaw"
             data_dir.mkdir()
             (data_dir / "config.yaml").write_text(
-                "claw:\n  mode: codex\nguardrail:\n  enabled: true\n  port: 4000\n",
+                "claw:\n  mode: codex\n"
+                "guardrail:\n  enabled: true\n  port: 4000\n",
                 encoding="utf-8",
             )
             with patch("defenseclaw.config.default_data_path", return_value=data_dir):
@@ -606,7 +609,6 @@ class TestConfigLoadSave(unittest.TestCase):
             cfg.save()
 
             import yaml
-
             config_file = os.path.join(tmpdir, "config.yaml")
             self.assertTrue(os.path.exists(config_file))
 
@@ -632,7 +634,6 @@ class TestConfigLoadSave(unittest.TestCase):
             cfg.save()
 
             import yaml
-
             config_file = os.path.join(tmpdir, "config.yaml")
             with open(config_file) as f:
                 raw = yaml.safe_load(f)
@@ -644,7 +645,6 @@ class TestConfigLoadSave(unittest.TestCase):
 
     def test_save_and_reload_preserves_watch_rescan_fields(self):
         import yaml
-
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Config(
                 data_dir=tmpdir,
@@ -679,7 +679,6 @@ class TestConfigLoadSave(unittest.TestCase):
 
     def test_asset_policy_roundtrip(self):
         import yaml
-
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Config(
                 data_dir=tmpdir,
@@ -719,7 +718,6 @@ class TestConfigLoadSave(unittest.TestCase):
         # OTHER-7: per-connector overrides survive a save/load cycle, and the
         # serialized YAML drops None per-type blocks + inherited scalars.
         import yaml
-
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Config(
                 data_dir=tmpdir,
@@ -734,8 +732,7 @@ class TestConfigLoadSave(unittest.TestCase):
                 "codex": PerConnectorAssetPolicy(
                     mode="action",
                     mcp=PerConnectorAssetTypePolicy(
-                        registry_required=True,
-                        registry_empty_action="deny",
+                        registry_required=True, registry_empty_action="deny",
                     ),
                 ),
                 "hermes": PerConnectorAssetPolicy(mode="observe"),
@@ -772,7 +769,6 @@ class TestConfigLoadSave(unittest.TestCase):
         # An enabled-but-global-only config must NOT emit `connectors:` so it
         # stays byte-identical to a pre-OTHER-7 config (omitempty mirror).
         import yaml
-
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Config(
                 data_dir=tmpdir,
@@ -830,7 +826,6 @@ class TestClawPaths(unittest.TestCase):
 
     def test_mcp_servers_from_file(self):
         from defenseclaw.config import _read_mcp_servers_from_file
-
         with tempfile.TemporaryDirectory() as tmpdir:
             oc_data = {
                 "mcp": {
@@ -853,7 +848,6 @@ class TestClawPaths(unittest.TestCase):
 
     def test_mcp_servers_no_mcp_block(self):
         from defenseclaw.config import _read_mcp_servers_from_file
-
         with tempfile.TemporaryDirectory() as tmpdir:
             oc_data = {"agents": {"defaults": {}}}
             oc_json = os.path.join(tmpdir, "openclaw.json")
@@ -865,30 +859,24 @@ class TestClawPaths(unittest.TestCase):
 
     def test_mcp_servers_missing_file(self):
         from defenseclaw.config import _read_mcp_servers_from_file
-
         servers = _read_mcp_servers_from_file("/tmp/nonexistent/openclaw.json")
         self.assertEqual(servers, [])
 
     def test_parse_mcp_servers_dict(self):
         from defenseclaw.config import _parse_mcp_servers_dict
-
-        servers = _parse_mcp_servers_dict(
-            {
-                "srv-a": {"command": "npx", "args": ["-y", "srv"]},
-                "srv-b": {"url": "https://example.com", "transport": "sse"},
-            }
-        )
+        servers = _parse_mcp_servers_dict({
+            "srv-a": {"command": "npx", "args": ["-y", "srv"]},
+            "srv-b": {"url": "https://example.com", "transport": "sse"},
+        })
         self.assertEqual(len(servers), 2)
         by_name = {s.name: s for s in servers}
         self.assertEqual(by_name["srv-b"].transport, "sse")
 
     def test_skill_dirs_no_openclaw_json(self):
-        cfg = Config(
-            claw=ClawConfig(
-                home_dir="/tmp/nonexistent-oc",
-                config_file="/tmp/nonexistent-oc/openclaw.json",
-            )
-        )
+        cfg = Config(claw=ClawConfig(
+            home_dir="/tmp/nonexistent-oc",
+            config_file="/tmp/nonexistent-oc/openclaw.json",
+        ))
         dirs = cfg.skill_dirs()
         workspace = os.path.join("/tmp/nonexistent-oc", "workspace", "skills")
         expected = os.path.join("/tmp/nonexistent-oc", "skills")
@@ -906,12 +894,10 @@ class TestClawPaths(unittest.TestCase):
             with open(oc_json, "w") as f:
                 json.dump(oc_data, f)
 
-            cfg = Config(
-                claw=ClawConfig(
-                    home_dir=tmpdir,
-                    config_file=oc_json,
-                )
-            )
+            cfg = Config(claw=ClawConfig(
+                home_dir=tmpdir,
+                config_file=oc_json,
+            ))
             dirs = cfg.skill_dirs()
             self.assertIn(os.path.join(workspace, "skills"), dirs)
             self.assertIn(os.path.join(tmpdir, "skills"), dirs)
@@ -924,22 +910,18 @@ class TestClawPaths(unittest.TestCase):
         self.assertEqual(dirs[0], os.path.join("/tmp/test-oc", "extensions"))
 
     def test_installed_skill_candidates(self):
-        cfg = Config(
-            claw=ClawConfig(
-                home_dir="/tmp/test-oc",
-                config_file="/tmp/nonexistent/openclaw.json",
-            )
-        )
+        cfg = Config(claw=ClawConfig(
+            home_dir="/tmp/test-oc",
+            config_file="/tmp/nonexistent/openclaw.json",
+        ))
         candidates = cfg.installed_skill_candidates("my-skill")
         self.assertTrue(all(c.endswith("my-skill") for c in candidates))
 
     def test_installed_skill_candidates_strips_prefix(self):
-        cfg = Config(
-            claw=ClawConfig(
-                home_dir="/tmp/test-oc",
-                config_file="/tmp/nonexistent/openclaw.json",
-            )
-        )
+        cfg = Config(claw=ClawConfig(
+            home_dir="/tmp/test-oc",
+            config_file="/tmp/nonexistent/openclaw.json",
+        ))
         candidates = cfg.installed_skill_candidates("@org/my-skill")
         self.assertTrue(all(c.endswith("my-skill") for c in candidates))
 
@@ -1000,13 +982,11 @@ class TestConfigResolveLLM(unittest.TestCase):
 
     def setUp(self):
         from defenseclaw.config import LLMConfig
-
         self.LLMConfig = LLMConfig
 
     def _make_cfg(self):
         """Build a minimal Config without touching disk."""
         from defenseclaw.config import Config
-
         return Config(data_dir=tempfile.mkdtemp())
 
     def tearDown(self):
@@ -1134,17 +1114,15 @@ class TestMergeInspectLLM(unittest.TestCase):
         self.assertEqual(llm.timeout, 30)
 
     def test_full_override(self):
-        llm = _merge_inspect_llm(
-            {
-                "provider": "anthropic",
-                "model": "claude-sonnet-4-20250514",
-                "api_key": "sk-123",
-                "api_key_env": "MY_KEY",
-                "base_url": "https://custom.api",
-                "timeout": 60,
-                "max_retries": 5,
-            }
-        )
+        llm = _merge_inspect_llm({
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-20250514",
+            "api_key": "sk-123",
+            "api_key_env": "MY_KEY",
+            "base_url": "https://custom.api",
+            "timeout": 60,
+            "max_retries": 5,
+        })
         self.assertEqual(llm.provider, "anthropic")
         self.assertEqual(llm.api_key, "sk-123")
         self.assertEqual(llm.timeout, 60)
@@ -1159,14 +1137,12 @@ class TestMergeCiscoAIDefense(unittest.TestCase):
         self.assertEqual(aid.timeout_ms, 3000)
 
     def test_override(self):
-        aid = _merge_cisco_ai_defense(
-            {
-                "endpoint": "https://eu.api.example.com",
-                "api_key": "aid-key-123",
-                "timeout_ms": 5000,
-                "enabled_rules": ["rule1", "rule2"],
-            }
-        )
+        aid = _merge_cisco_ai_defense({
+            "endpoint": "https://eu.api.example.com",
+            "api_key": "aid-key-123",
+            "timeout_ms": 5000,
+            "enabled_rules": ["rule1", "rule2"],
+        })
         self.assertEqual(aid.endpoint, "https://eu.api.example.com")
         self.assertEqual(aid.api_key, "aid-key-123")
         self.assertEqual(aid.timeout_ms, 5000)
@@ -1185,14 +1161,12 @@ class TestMergeMCPScannerClean(unittest.TestCase):
         self.assertFalse(hasattr(cfg, "endpoint_url"))
 
     def test_merge_mcp_scanner_ignores_old_fields(self):
-        cfg = _merge_mcp_scanner(
-            {
-                "binary": "mcp-scanner",
-                "analyzers": "yara",
-                "llm_provider": "openai",
-                "api_key": "stale-key",
-            }
-        )
+        cfg = _merge_mcp_scanner({
+            "binary": "mcp-scanner",
+            "analyzers": "yara",
+            "llm_provider": "openai",
+            "api_key": "stale-key",
+        })
         self.assertEqual(cfg.binary, "mcp-scanner")
         self.assertEqual(cfg.analyzers, "yara")
         self.assertFalse(hasattr(cfg, "llm_provider"))
@@ -1211,10 +1185,8 @@ class TestSkillScannerConfigClean(unittest.TestCase):
 
     def test_scanner_specific_fields_remain(self):
         cfg = SkillScannerConfig(
-            use_llm=True,
-            use_behavioral=True,
-            llm_consensus_runs=3,
-            policy="strict",
+            use_llm=True, use_behavioral=True,
+            llm_consensus_runs=3, policy="strict",
             virustotal_api_key="vt-key",
         )
         self.assertTrue(cfg.use_llm)
@@ -1237,7 +1209,6 @@ class TestConfigTopLevelSections(unittest.TestCase):
 
     def test_save_and_reload_preserves_new_sections(self):
         import yaml
-
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Config(
                 data_dir=tmpdir,
@@ -1274,7 +1245,6 @@ class TestConfigTopLevelSections(unittest.TestCase):
 
     def test_save_and_reload_guardrail_openshell(self):
         import yaml
-
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Config(
                 data_dir=tmpdir,
@@ -1296,7 +1266,6 @@ class TestConfigTopLevelSections(unittest.TestCase):
 
     def test_load_reads_new_sections(self):
         import yaml
-
         with tempfile.TemporaryDirectory() as tmpdir:
             config_data = {
                 "data_dir": tmpdir,
@@ -1332,7 +1301,6 @@ class TestConfigTopLevelSections(unittest.TestCase):
 
     def test_load_without_new_sections_uses_defaults(self):
         import yaml
-
         with tempfile.TemporaryDirectory() as tmpdir:
             config_data = {"data_dir": tmpdir, "environment": "linux"}
             with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
@@ -1404,7 +1372,6 @@ class TestConfigTopLevelSections(unittest.TestCase):
     def test_guardrail_config_has_no_cisco_ai_defense(self):
         """GuardrailConfig no longer nests CiscoAIDefenseConfig."""
         from defenseclaw.config import GuardrailConfig
-
         gc = GuardrailConfig()
         self.assertFalse(hasattr(gc, "cisco_ai_defense"))
 
@@ -1527,7 +1494,6 @@ class TestOpenShellModeField(unittest.TestCase):
     def test_mode_from_load(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             import yaml
-
             cfg_data = {
                 "openshell": {"mode": "standalone"},
             }
@@ -1584,14 +1550,12 @@ class TestOpenShellSandboxFields(unittest.TestCase):
         self.assertIsNone(oc.auto_pair)
 
     def test_merge_openshell_with_data(self):
-        oc = _merge_openshell(
-            {
-                "mode": "standalone",
-                "version": "0.7.0",
-                "sandbox_home": "/opt/sandbox",
-                "auto_pair": False,
-            }
-        )
+        oc = _merge_openshell({
+            "mode": "standalone",
+            "version": "0.7.0",
+            "sandbox_home": "/opt/sandbox",
+            "auto_pair": False,
+        })
         self.assertEqual(oc.mode, "standalone")
         self.assertEqual(oc.version, "0.7.0")
         self.assertEqual(oc.sandbox_home, "/opt/sandbox")
@@ -1599,7 +1563,6 @@ class TestOpenShellSandboxFields(unittest.TestCase):
 
     def test_load_openshell_sandbox_fields(self):
         import yaml
-
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_data = {
                 "openshell": {
@@ -1676,16 +1639,14 @@ class TestWebhookConfig(unittest.TestCase):
 
     def test_merge_preserves_cooldown_tristate(self):
         """nil / 0 / >0 for cooldown_seconds must survive round-trip."""
-        result = _merge_webhooks(
-            [
-                {},  # key absent -> None
-                {"cooldown_seconds": 0},  # explicit zero -> 0
-                {"cooldown_seconds": 45},  # explicit positive -> 45
-                {"cooldown_seconds": None},  # explicit null -> None
-                {"cooldown_seconds": "bad"},  # invalid -> None
-                {"cooldown_seconds": -1},  # negative -> None (rejected)
-            ]
-        )
+        result = _merge_webhooks([
+            {},                              # key absent -> None
+            {"cooldown_seconds": 0},         # explicit zero -> 0
+            {"cooldown_seconds": 45},        # explicit positive -> 45
+            {"cooldown_seconds": None},      # explicit null -> None
+            {"cooldown_seconds": "bad"},     # invalid -> None
+            {"cooldown_seconds": -1},        # negative -> None (rejected)
+        ])
         self.assertEqual(len(result), 6)
         self.assertIsNone(result[0].cooldown_seconds)
         self.assertEqual(result[1].cooldown_seconds, 0)
