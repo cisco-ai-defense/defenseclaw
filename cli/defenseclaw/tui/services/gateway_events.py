@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -137,6 +138,21 @@ def load_gateway_egress(path: Path | str) -> tuple[EgressEvent, ...]:
     fresh install the file may not exist yet, in which case we return
     an empty tuple instead of raising.
     """
+
+    p = Path(path)
+    try:
+        signature = _gateway_file_signature(p)
+    except OSError:
+        return ()
+    return _load_gateway_egress_cached(str(p), signature)
+
+
+@lru_cache(maxsize=16)
+def _load_gateway_egress_cached(
+    path: str,
+    _signature: tuple[int, int, int, int],
+) -> tuple[EgressEvent, ...]:
+    """Parse egress rows once per immutable file snapshot."""
 
     p = Path(path)
     try:
@@ -271,8 +287,22 @@ def render_verdict_line(event: GatewayEvent) -> str:
 def load_gateway_activity(path: Path) -> tuple[ActivityMutation, ...]:
     """Load activity events from a gateway JSONL file."""
 
+    try:
+        signature = _gateway_file_signature(path)
+    except OSError:
+        return ()
+    return _load_gateway_activity_cached(str(path), signature)
+
+
+@lru_cache(maxsize=16)
+def _load_gateway_activity_cached(
+    path: str,
+    _signature: tuple[int, int, int, int],
+) -> tuple[ActivityMutation, ...]:
+    """Parse activity mutations once per immutable file snapshot."""
+
     rows: list[ActivityMutation] = []
-    for line in _tail_event_lines(path):
+    for line in _tail_event_lines(Path(path)):
         if not line.strip():
             continue
         try:
@@ -300,8 +330,22 @@ def load_gateway_activity(path: Path) -> tuple[ActivityMutation, ...]:
 def load_gateway_scan_blocks(path: Path) -> tuple[ScanBlock, ...]:
     """Load scan summary blocks and attached findings from gateway JSONL."""
 
+    try:
+        signature = _gateway_file_signature(path)
+    except OSError:
+        return ()
+    return _load_gateway_scan_blocks_cached(str(path), signature)
+
+
+@lru_cache(maxsize=16)
+def _load_gateway_scan_blocks_cached(
+    path: str,
+    _signature: tuple[int, int, int, int],
+) -> tuple[ScanBlock, ...]:
+    """Parse scan blocks once per immutable file snapshot."""
+
     blocks: dict[str, dict[str, Any]] = {}
-    for line in _tail_event_lines(path):
+    for line in _tail_event_lines(Path(path)):
         if not line.strip():
             continue
         # A single malformed gateway row must never break the Alerts
@@ -397,6 +441,13 @@ def _tail_event_lines(
     if len(lines) > max_lines:
         lines = lines[-max_lines:]
     return tuple(lines)
+
+
+def _gateway_file_signature(path: Path) -> tuple[int, int, int, int]:
+    """Return a file identity that changes on append, rewrite, or rotation."""
+
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
 
 def _mapping(raw: object) -> dict[str, Any]:

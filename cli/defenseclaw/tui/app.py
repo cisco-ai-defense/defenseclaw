@@ -759,9 +759,14 @@ class DefenseClawTUI(App[None]):
         # their scroll + cursor twice a second, so operators couldn't read or
         # scroll a row before it jumped back to the top (and the constant
         # ``table.focus()`` stole focus, which read as the UI "jumping"). We
-        # now skip the rebuild when the panel, columns, rows, and cursor are
-        # all unchanged. ``None`` forces a repaint.
+        # now skip the rebuild when the panel, columns, and rows are
+        # unchanged. Cursor-only changes are applied with ``move_cursor``;
+        # rebuilding thousands of unchanged log rows on every Up/Down press
+        # was one of the TUI's largest interactive latency sources. ``None``
+        # forces a repaint.
         self._last_table_signature: tuple[object, ...] | None = None
+        self._rendered_table_row_keys: list[Any] = []
+        self._next_table_row_key = 0
         # Overview renders ask for the same recent hook-event window several
         # times (header metrics, Enforcement, CONNECTORS rows). Cache it for a
         # single frame so keypresses don't wait behind repeated SQLite reads.
@@ -7396,15 +7401,15 @@ class DefenseClawTUI(App[None]):
         if not self._table_columns:
             table.add_class("hidden")
             table.clear(columns=True)
+            self._rendered_table_row_keys.clear()
             self._last_table_signature = None
             return
 
-        # Idempotence guard: only tear down and rebuild the DataTable when the
-        # panel, columns, rows, or target cursor actually changed. Without this
-        # the 2 s refresh ticker cleared every row, reset the cursor, and
-        # re-stole focus twice a second — so the Logs/Audit feeds were
-        # unreadable (scroll + cursor jumped to the top continuously) and the
-        # constant table.focus() read as the UI spontaneously jumping around.
+        # Idempotence guard: cursor-only changes and small streaming deltas
+        # stay on fast paths below; a full teardown is the fallback for a new
+        # panel/shape or a large content rewrite. Without this the 2 s refresh
+        # ticker cleared every row, reset the cursor, and re-stole focus — so
+        # the Logs/Audit feeds jumped while operators tried to read them.
         cursor_row = self._active_table_cursor() if self._table_rows else -1
         signature = (
             self.active_panel,
@@ -7416,38 +7421,156 @@ class DefenseClawTUI(App[None]):
         if signature == self._last_table_signature:
             return
 
+        # A cursor move does not change table content. Keep Textual's
+        # existing row/cell caches intact and move only the cursor instead of
+        # clearing and re-adding every row. This matters most for Logs (up to
+        # 5,000 rows), but also keeps Audit/Alerts navigation consistently
+        # responsive as their histories grow.
+        previous = self._last_table_signature
+        if previous is not None and (
+            signature[0],
+            signature[1],
+            signature[2],
+            signature[4],
+        ) == (
+            previous[0],
+            previous[1],
+            previous[2],
+            previous[4],
+        ):
+            self._position_panel_table_cursor(table, cursor_row)
+            self._last_table_signature = signature
+            return
+
+        # Streaming tails usually change by only a handful of rows. Reuse
+        # the retained middle of the DataTable and apply that small delta;
+        # clearing/re-adding the full 5,000-row tail caused a visible hitch
+        # on every two-second log refresh.
+        if previous is not None and (
+            signature[0],
+            signature[1],
+            signature[4],
+        ) == (
+            previous[0],
+            previous[1],
+            previous[4],
+        ) and self._update_panel_table_delta(table, previous[2], self._table_rows):
+            table.remove_class("hidden")
+            self._position_panel_table_cursor(table, cursor_row)
+            self._last_table_signature = signature
+            return
+
         table.remove_class("hidden")
         table.clear(columns=True)
+        self._rendered_table_row_keys.clear()
         table.add_columns(*self._table_columns)
-        for index, row in enumerate(self._table_rows):
-            cells = (
-                _styled_cell(column, value)
-                for column, value in zip(self._table_columns, row, strict=True)
-            )
-            table.add_row(*cells, key=str(index))
+        for row in self._table_rows:
+            self._append_panel_table_row(table, row)
 
         if self._table_rows:
-            # move_cursor fires RowHighlighted; suppress the handler's model
-            # write so restoring the cursor here can't pause the Logs stream.
-            self._restoring_table_cursor = True
-            try:
-                table.move_cursor(row=cursor_row, column=0, animate=False)
-            finally:
-                self._restoring_table_cursor = False
-            # Textual's DataTable binds left/right/enter to its own cursor
-            # actions, which silently swallows the keys the setup wizard
-            # form relies on (cycle choice, toggle bool, Ctrl+R submit).
-            # When the wizard form is open we keep the row cursor visible
-            # via the CSS rule on `.datatable--cursor` (no focus required)
-            # but defocus the table so the app-level key handler — and
-            # therefore `_handle_setup_form_key` — actually receives the
-            # arrow keys.
-            if self.active_panel == "setup" and self.setup_model.form_active:
-                if self.focused is table:
-                    self.set_focus(None)
-            else:
-                table.focus()
+            self._position_panel_table_cursor(table, cursor_row)
         self._last_table_signature = signature
+
+    def _position_panel_table_cursor(self, table: DataTable[Any], cursor_row: int) -> None:
+        """Move/focus the shared table without feeding the move back to models."""
+
+        if not self._table_rows:
+            return
+        # move_cursor fires RowHighlighted; suppress the handler's model
+        # write so restoring the cursor here can't pause the Logs stream.
+        self._restoring_table_cursor = True
+        try:
+            table.move_cursor(row=cursor_row, column=0, animate=False)
+        finally:
+            self._restoring_table_cursor = False
+        # Textual's DataTable binds left/right/enter to its own cursor
+        # actions, which silently swallows the keys the setup wizard form
+        # relies on. Keep its visual cursor but relinquish focus in that mode.
+        if self.active_panel == "setup" and self.setup_model.form_active:
+            if self.focused is table:
+                self.set_focus(None)
+        elif self.focused is not table:
+            table.focus()
+
+    def _append_panel_table_row(self, table: DataTable[Any], row: tuple[str, ...]) -> None:
+        cells = (
+            _styled_cell(column, value)
+            for column, value in zip(self._table_columns, row, strict=True)
+        )
+        key = f"panel-row-{self._next_table_row_key}"
+        self._next_table_row_key += 1
+        self._rendered_table_row_keys.append(table.add_row(*cells, key=key))
+
+    def _update_panel_table_delta(
+        self,
+        table: DataTable[Any],
+        previous_rows: object,
+        next_rows: tuple[tuple[str, ...], ...],
+    ) -> bool:
+        """Apply a small append/sliding-tail delta, or request a full rebuild."""
+
+        if not isinstance(previous_rows, tuple):
+            return False
+        old_rows = previous_rows
+        if len(self._rendered_table_row_keys) != len(old_rows) or table.row_count != len(old_rows):
+            return False
+        if not old_rows:
+            return False
+
+        max_delta = 256
+        remove_front = 0
+        keep = 0
+
+        # Growing file below the tail cap: retain everything and append.
+        if len(next_rows) >= len(old_rows) and next_rows[: len(old_rows)] == old_rows:
+            keep = len(old_rows)
+        elif next_rows:
+            # Sliding capped tail: find the old suffix that became the new
+            # prefix. Limit the search to a small batch; larger rewrites are
+            # cheaper and safer through DataTable.clear().
+            search_limit = min(len(old_rows), max_delta)
+            first = next_rows[0]
+            for candidate in range(1, search_limit + 1):
+                if candidate >= len(old_rows) or old_rows[candidate] != first:
+                    continue
+                candidate_keep = min(len(old_rows) - candidate, len(next_rows))
+                additions = len(next_rows) - candidate_keep
+                trailing_removals = len(old_rows) - candidate - candidate_keep
+                if candidate + trailing_removals + additions > max_delta:
+                    continue
+                if old_rows[candidate : candidate + candidate_keep] == next_rows[:candidate_keep]:
+                    remove_front = candidate
+                    keep = candidate_keep
+                    break
+
+        # A small changed suffix (for example a final partial log line that
+        # was completed) is also safe to patch without rebuilding columns.
+        if keep == 0:
+            prefix = 0
+            for old_row, new_row in zip(old_rows, next_rows):
+                if old_row != new_row:
+                    break
+                prefix += 1
+            if (len(old_rows) - prefix) + (len(next_rows) - prefix) <= max_delta:
+                keep = prefix
+            else:
+                return False
+
+        remove_back = len(old_rows) - remove_front - keep
+        additions = len(next_rows) - keep
+        if remove_front + remove_back + additions > max_delta:
+            return False
+
+        old_keys = self._rendered_table_row_keys
+        for key in old_keys[:remove_front]:
+            table.remove_row(key)
+        if remove_back:
+            for key in old_keys[len(old_keys) - remove_back :]:
+                table.remove_row(key)
+        self._rendered_table_row_keys = old_keys[remove_front : len(old_keys) - remove_back if remove_back else None]
+        for row in next_rows[keep:]:
+            self._append_panel_table_row(table, row)
+        return True
 
     def _render_detail_panel(self) -> None:
         panel = self.query_one("#detail-panel", VerticalScroll)
