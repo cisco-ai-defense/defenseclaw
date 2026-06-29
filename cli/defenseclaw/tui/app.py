@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -7399,9 +7399,10 @@ class DefenseClawTUI(App[None]):
     def _render_panel_table(self) -> None:
         table = self.query_one("#panel-table", DataTable)
         if not self._table_columns:
-            table.add_class("hidden")
-            table.clear(columns=True)
-            self._rendered_table_row_keys.clear()
+            with self._programmatic_table_update():
+                table.add_class("hidden")
+                table.clear(columns=True)
+                self._rendered_table_row_keys.clear()
             self._last_table_signature = None
             return
 
@@ -7438,7 +7439,8 @@ class DefenseClawTUI(App[None]):
             previous[2],
             previous[4],
         ):
-            self._position_panel_table_cursor(table, cursor_row)
+            with self._programmatic_table_update():
+                self._position_panel_table_cursor(table, cursor_row)
             self._last_table_signature = signature
             return
 
@@ -7446,7 +7448,7 @@ class DefenseClawTUI(App[None]):
         # the retained middle of the DataTable and apply that small delta;
         # clearing/re-adding the full 5,000-row tail caused a visible hitch
         # on every two-second log refresh.
-        if previous is not None and (
+        same_table_shape = previous is not None and (
             signature[0],
             signature[1],
             signature[4],
@@ -7454,22 +7456,39 @@ class DefenseClawTUI(App[None]):
             previous[0],
             previous[1],
             previous[4],
-        ) and self._update_panel_table_delta(table, previous[2], self._table_rows):
-            table.remove_class("hidden")
-            self._position_panel_table_cursor(table, cursor_row)
+        )
+        delta_applied = False
+        if same_table_shape:
+            with self._programmatic_table_update():
+                delta_applied = self._update_panel_table_delta(table, previous[2], self._table_rows)
+                if delta_applied:
+                    table.remove_class("hidden")
+                    self._position_panel_table_cursor(table, cursor_row)
+        if delta_applied:
             self._last_table_signature = signature
             return
 
-        table.remove_class("hidden")
-        table.clear(columns=True)
-        self._rendered_table_row_keys.clear()
-        table.add_columns(*self._table_columns)
-        for row in self._table_rows:
-            self._append_panel_table_row(table, row)
-
-        if self._table_rows:
-            self._position_panel_table_cursor(table, cursor_row)
+        with self._programmatic_table_update():
+            table.remove_class("hidden")
+            table.clear(columns=True)
+            self._rendered_table_row_keys.clear()
+            table.add_columns(*self._table_columns)
+            for row in self._table_rows:
+                self._append_panel_table_row(table, row)
+            if self._table_rows:
+                self._position_panel_table_cursor(table, cursor_row)
         self._last_table_signature = signature
+
+    @contextmanager
+    def _programmatic_table_update(self) -> Iterator[None]:
+        """Suppress model cursor writes during passive table mutations."""
+
+        was_restoring = self._restoring_table_cursor
+        self._restoring_table_cursor = True
+        try:
+            yield
+        finally:
+            self._restoring_table_cursor = was_restoring
 
     def _position_panel_table_cursor(self, table: DataTable[Any], cursor_row: int) -> None:
         """Move/focus the shared table without feeding the move back to models."""
@@ -7478,11 +7497,7 @@ class DefenseClawTUI(App[None]):
             return
         # move_cursor fires RowHighlighted; suppress the handler's model
         # write so restoring the cursor here can't pause the Logs stream.
-        self._restoring_table_cursor = True
-        try:
-            table.move_cursor(row=cursor_row, column=0, animate=False)
-        finally:
-            self._restoring_table_cursor = False
+        table.move_cursor(row=cursor_row, column=0, animate=False)
         # Textual's DataTable binds left/right/enter to its own cursor
         # actions, which silently swallows the keys the setup wizard form
         # relies on. Keep its visual cursor but relinquish focus in that mode.

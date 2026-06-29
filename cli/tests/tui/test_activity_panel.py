@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from defenseclaw.tui.panels.activity import ActivityPanelModel
+from defenseclaw.tui.services import gateway_events
 from defenseclaw.tui.services.gateway_events import parse_gateway_event, render_verdict_line
 
 
@@ -75,6 +76,40 @@ def test_activity_panel_mutation_diff_toggle(tmp_path) -> None:
     assert "alice" in rendered
     assert "config-update" in rendered
     assert "replace /guardrail/enabled" in rendered
+
+
+def test_gateway_event_loaders_retry_after_transient_read_failure(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "gateway.jsonl"
+    path.write_text(
+        (
+            '{"ts":"2026-04-20T12:00:00Z","event_type":"egress","egress":'
+            '{"branch":"shape","decision":"allow","looks_like_llm":true}}\n'
+            '{"ts":"2026-04-20T12:00:01Z","event_type":"activity","activity":'
+            '{"actor":"alice","action":"config-update","target_id":"cfg"}}\n'
+            '{"ts":"2026-04-20T12:00:02Z","event_type":"scan","severity":"HIGH","scan":'
+            '{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py"}}\n'
+        ),
+        encoding="utf-8",
+    )
+    original = gateway_events._read_tail_event_lines
+    fail_next = False
+
+    def flaky_read(*args, **kwargs):
+        nonlocal fail_next
+        if fail_next:
+            fail_next = False
+            raise OSError("transient read failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(gateway_events, "_read_tail_event_lines", flaky_read)
+    for loader in (
+        gateway_events.load_gateway_egress,
+        gateway_events.load_gateway_activity,
+        gateway_events.load_gateway_scan_blocks,
+    ):
+        fail_next = True
+        assert loader(path) == ()
+        assert loader(path)
 
 
 def test_gateway_event_scan_rendering_matches_go_smoke() -> None:

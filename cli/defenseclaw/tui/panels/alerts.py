@@ -258,7 +258,7 @@ class AlertsPanelModel:
         self.store = store
 
     def set_events(self, events: list[AlertEvent]) -> None:
-        self.audit_events = events
+        self.audit_events = list(events)
         self._invalidate_row_caches()
         self.apply_filter()
         self.selected_ids.intersection_update(event.id for event in events)

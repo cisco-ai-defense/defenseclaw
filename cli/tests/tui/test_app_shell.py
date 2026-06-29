@@ -1387,10 +1387,19 @@ async def test_logs_stream_refresh_applies_sliding_tail_delta() -> None:
         await pilot.pause()
         table = app.query_one("#panel-table", DataTable)
         previous_second_row = list(table.rows.values())[1]
+        restore_flags: list[bool] = []
+        update_delta = app._update_panel_table_delta  # noqa: SLF001
+
+        def tracked_update_delta(*args: object) -> bool:
+            restore_flags.append(app._restoring_table_cursor)  # noqa: SLF001
+            return update_delta(*args)  # type: ignore[arg-type]
+
+        app._update_panel_table_delta = tracked_update_delta  # type: ignore[method-assign]  # noqa: SLF001
 
         logs.lines["gateway"] = logs.lines["gateway"][1:] + ["error row=new"]
         app._render_chrome()  # noqa: SLF001 - deterministic stream refresh.
 
+        assert restore_flags == [True]
         assert table.row_count == 200
         assert list(table.rows.values())[0] is previous_second_row
         assert str(table.get_cell_at((199, 0))) == "error row=new"

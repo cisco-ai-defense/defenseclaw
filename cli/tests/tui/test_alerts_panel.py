@@ -60,6 +60,17 @@ def test_alerts_filter_selection_and_counts() -> None:
     assert action.filter_change.new == "CRITICAL"
 
 
+def test_alerts_set_events_owns_the_input_list() -> None:
+    events = [AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one")]
+    model = AlertsPanelModel()
+
+    model.set_events(events)
+    events.clear()
+
+    assert [event.id for event in model.audit_events] == ["a1"]
+    assert [row.event.id for row in model.filtered] == ["a1"]
+
+
 def test_alerts_default_hides_low_signal_rows_until_all_opt_in() -> None:
     model = AlertsPanelModel()
     model.set_events(
@@ -236,6 +247,7 @@ def test_alerts_refresh_clears_gateway_rows_when_data_dir_is_removed(tmp_path) -
     )
     model = AlertsPanelModel(tmp_path)
     model.show_all_severities = True
+    model.set_events([AlertEvent(id="audit-1", severity="HIGH", action="proxy", target="gateway")])
     model.refresh()
     assert model.scan_blocks
 
@@ -244,6 +256,7 @@ def test_alerts_refresh_clears_gateway_rows_when_data_dir_is_removed(tmp_path) -
 
     assert model.scan_blocks == []
     assert model.egress_events == []
+    assert model.filtered
     assert all(row.kind == "audit" for row in model.filtered)
 
 

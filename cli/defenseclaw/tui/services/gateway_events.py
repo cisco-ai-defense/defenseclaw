@@ -142,9 +142,9 @@ def load_gateway_egress(path: Path | str) -> tuple[EgressEvent, ...]:
     p = Path(path)
     try:
         signature = _gateway_file_signature(p)
+        return _load_gateway_egress_cached(str(p), signature)
     except OSError:
         return ()
-    return _load_gateway_egress_cached(str(p), signature)
 
 
 @lru_cache(maxsize=16)
@@ -154,30 +154,8 @@ def _load_gateway_egress_cached(
 ) -> tuple[EgressEvent, ...]:
     """Parse egress rows once per immutable file snapshot."""
 
-    p = Path(path)
-    try:
-        size = p.stat().st_size
-    except (OSError, FileNotFoundError):
-        return ()
-    max_bytes = 512 * 1024
-    read_size = min(size, max_bytes)
-    offset = size - read_size
-    try:
-        with p.open("rb") as fh:
-            if offset > 0:
-                fh.seek(offset)
-            chunk = fh.read(read_size)
-    except OSError:
-        return ()
-    text = chunk.decode("utf-8", errors="replace")
-    if offset > 0:
-        # The first line is almost certainly a half-record; drop it so
-        # ``json.loads`` doesn't reject it.
-        nl = text.find("\n")
-        if nl >= 0:
-            text = text[nl + 1 :]
     out: list[EgressEvent] = []
-    for raw in text.splitlines():
+    for raw in _read_tail_event_lines(Path(path), max_lines=None):
         line = raw.strip()
         if not line:
             continue
@@ -289,9 +267,9 @@ def load_gateway_activity(path: Path) -> tuple[ActivityMutation, ...]:
 
     try:
         signature = _gateway_file_signature(path)
+        return _load_gateway_activity_cached(str(path), signature)
     except OSError:
         return ()
-    return _load_gateway_activity_cached(str(path), signature)
 
 
 @lru_cache(maxsize=16)
@@ -302,7 +280,7 @@ def _load_gateway_activity_cached(
     """Parse activity mutations once per immutable file snapshot."""
 
     rows: list[ActivityMutation] = []
-    for line in _tail_event_lines(Path(path)):
+    for line in _read_tail_event_lines(Path(path)):
         if not line.strip():
             continue
         try:
@@ -332,9 +310,9 @@ def load_gateway_scan_blocks(path: Path) -> tuple[ScanBlock, ...]:
 
     try:
         signature = _gateway_file_signature(path)
+        return _load_gateway_scan_blocks_cached(str(path), signature)
     except OSError:
         return ()
-    return _load_gateway_scan_blocks_cached(str(path), signature)
 
 
 @lru_cache(maxsize=16)
@@ -345,7 +323,7 @@ def _load_gateway_scan_blocks_cached(
     """Parse scan blocks once per immutable file snapshot."""
 
     blocks: dict[str, dict[str, Any]] = {}
-    for line in _tail_event_lines(Path(path)):
+    for line in _read_tail_event_lines(Path(path)):
         if not line.strip():
             continue
         # A single malformed gateway row must never break the Alerts
@@ -414,31 +392,25 @@ def _load_gateway_scan_blocks_cached(
     )
 
 
-def _tail_event_lines(
+def _read_tail_event_lines(
     path: Path,
     *,
     max_bytes: int = 512 * 1024,
-    max_lines: int = 2000,
+    max_lines: int | None = 2000,
 ) -> tuple[str, ...]:
-    """Return a bounded tail of a JSONL event file."""
+    """Return a bounded tail, raising so transient failures are not cached."""
 
-    try:
-        size = path.stat().st_size
-    except (OSError, FileNotFoundError):
-        return ()
+    size = path.stat().st_size
     read_size = min(size, max_bytes)
     offset = size - read_size
-    try:
-        with path.open("rb") as fh:
-            if offset > 0:
-                fh.seek(offset)
-            data = fh.read(read_size)
-    except OSError:
-        return ()
+    with path.open("rb") as fh:
+        if offset > 0:
+            fh.seek(offset)
+        data = fh.read(read_size)
     if offset > 0:
         _, _, data = data.partition(b"\n")
     lines = data.decode("utf-8", errors="replace").splitlines()
-    if len(lines) > max_lines:
+    if max_lines is not None and len(lines) > max_lines:
         lines = lines[-max_lines:]
     return tuple(lines)
 
