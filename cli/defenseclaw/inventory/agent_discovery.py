@@ -49,7 +49,9 @@ from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand, omnigent_conf
 # sides — if the wording ever changes, the consumer can't silently drift.
 UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 
-CACHE_SCHEMA_VERSION = 1
+# Version 2 invalidates cached signals produced before config evidence became
+# file-only and Windows binaries gained narrow out-of-PATH discovery.
+CACHE_SCHEMA_VERSION = 2
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0
@@ -125,6 +127,8 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
         candidates.extend(
             (
                 os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin"),
+                os.path.join(local_app_data, "agy", "bin"),
+                os.path.join(local_app_data, "Programs", "antigravity"),
                 os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"),
                 os.path.join(local_app_data, "Programs", "Windsurf", "bin"),
                 os.path.join(local_app_data, "Microsoft", "WinGet", "Links"),
@@ -202,7 +206,16 @@ class _AgentSpec(NamedTuple):
 
 _SPECS: dict[str, _AgentSpec] = {
     "codex": _AgentSpec(("~/.codex/config.toml",), "codex", ("--version",)),
-    "claudecode": _AgentSpec(("~/.claude/settings.json", "~/.claude"), "claude", ("--version",)),
+    "claudecode": _AgentSpec(
+        (
+            "~/.claude/settings.json",
+            "~/.claude.json",
+            ".claude/settings.json",
+            ".claude/settings.local.json",
+        ),
+        "claude",
+        ("--version",),
+    ),
     "openclaw": _AgentSpec(("~/.openclaw/openclaw.json",), "openclaw", ("--version",)),
     "zeptoclaw": _AgentSpec(("~/.zeptoclaw/config.json",), "zeptoclaw", ("--version",)),
     "hermes": _AgentSpec(("~/.hermes/config.yaml",), "hermes", ("--version",)),
@@ -228,19 +241,26 @@ _SPECS: dict[str, _AgentSpec] = {
         ("version",),
     ),
     "openhands": _AgentSpec(
-        (".openhands/hooks.json", ".openhands", "~/.openhands/mcp.json"), "openhands", ("--version",)
+        (
+            ".openhands/hooks.json",
+            "~/.openhands/hooks.json",
+            "~/.openhands/mcp.json",
+            "~/.openhands/settings.json",
+            "~/.openhands/agent_settings.json",
+            "~/.openhands/cli_config.json",
+        ),
+        "openhands",
+        ("--version",),
     ),
     "antigravity": _AgentSpec(
         # agy v1.0.x reads PreToolUse hooks from ~/.gemini/config/
         # hooks.json (the canonical runtime path). The legacy
-        # ~/.gemini/antigravity-cli/ directory is still listed
-        # because `agy --help` advertises it and pre-v0.5.0
-        # installs put files there — discovery should pick up
-        # either signal.
+        # ~/.gemini/antigravity-cli/hooks.json file remains a legacy
+        # signal, but the parent directory alone is not installation
+        # evidence: other tools can create empty plugin/skill folders.
         (
             "~/.gemini/config/hooks.json",
             "~/.gemini/antigravity-cli/hooks.json",
-            "~/.gemini/antigravity-cli",
         ),
         "agy",
         ("--version",),
@@ -248,18 +268,23 @@ _SPECS: dict[str, _AgentSpec] = {
     "opencode": _AgentSpec(
         # opencode auto-loads plugins from ~/.config/opencode/plugins/;
         # DefenseClaw installs its bridge there. opencode.json / the
-        # .opencode project dir are also signals the agent is present.
+        # documented JSON/JSONC files are also signals the agent is present.
+        # Bare config directories are deliberately not evidence.
         (
             "~/.config/opencode/plugins/defenseclaw.js",
             "~/.config/opencode/opencode.json",
-            "~/.config/opencode",
-            ".opencode",
+            "~/.config/opencode/opencode.jsonc",
+            "~/.config/opencode/tui.json",
+            "~/.config/opencode/tui.jsonc",
+            "opencode.json",
+            "opencode.jsonc",
+            ".opencode/plugins/defenseclaw.js",
         ),
         "opencode",
         ("--version",),
     ),
     "omnigent": _AgentSpec(
-        ("~/.omnigent/config.yaml", "~/.omnigent"),
+        ("~/.omnigent/config.yaml",),
         "omnigent",
         ("--version",),
     ),
@@ -340,15 +365,15 @@ def _scan_agent(name: str) -> AgentSignal:
     config_candidates = spec.config_candidates
     if name == "omnigent":
         config_path = omnigent_config_path()
-        config_candidates = (config_path, os.path.dirname(config_path))
-    config_path = _first_existing_path(config_candidates)
-    binary_path = _which(spec.binary_name) if spec.binary_name else ""
+        config_candidates = (config_path,)
+    config_path = _first_existing_file(config_candidates)
+    binary_path = _binary_path_for_agent(name, spec)
     version = ""
     error = ""
     version_ok = False
 
     if binary_path:
-        version, error = _version_for_binary(binary_path, spec.version_args)
+        version, error = _version_for_agent_binary(name, binary_path, spec.version_args)
         version_ok = bool(version) and not error
 
     installed = bool(config_path) or (bool(binary_path) and version_ok)
@@ -883,6 +908,94 @@ def _version_for_binary(binary_path: str, version_args: tuple[str, ...]) -> tupl
     return _version_line_for_binary(binary_path, stdout), ""
 
 
+def _version_for_agent_binary(
+    name: str,
+    binary_path: str,
+    version_args: tuple[str, ...],
+) -> tuple[str, str]:
+    """Probe a CLI, or read metadata for a GUI that must not be launched."""
+
+    if name == "antigravity" and _binary_command_name(binary_path) == "antigravity":
+        return _windows_file_version_for_binary(binary_path)
+    return _version_for_binary(binary_path, version_args)
+
+
+def _windows_file_version_for_binary(binary_path: str) -> tuple[str, str]:
+    """Read trusted Windows executable version metadata without launching it."""
+
+    if not _is_trusted_binary_path(binary_path):
+        return "", UNTRUSTED_PREFIX_ERROR
+    if os.name != "nt":
+        return "", "Windows file-version metadata is unavailable on this host"
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _VSFixedFileInfo(ctypes.Structure):
+            _fields_ = [
+                ("signature", wintypes.DWORD),
+                ("struct_version", wintypes.DWORD),
+                ("file_version_ms", wintypes.DWORD),
+                ("file_version_ls", wintypes.DWORD),
+                ("product_version_ms", wintypes.DWORD),
+                ("product_version_ls", wintypes.DWORD),
+                ("file_flags_mask", wintypes.DWORD),
+                ("file_flags", wintypes.DWORD),
+                ("file_os", wintypes.DWORD),
+                ("file_type", wintypes.DWORD),
+                ("file_subtype", wintypes.DWORD),
+                ("file_date_ms", wintypes.DWORD),
+                ("file_date_ls", wintypes.DWORD),
+            ]
+
+        version_dll = ctypes.WinDLL("version", use_last_error=True)
+        get_size = version_dll.GetFileVersionInfoSizeW
+        get_size.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+        get_size.restype = wintypes.DWORD
+        get_info = version_dll.GetFileVersionInfoW
+        get_info.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID]
+        get_info.restype = wintypes.BOOL
+        query_value = version_dll.VerQueryValueW
+        query_value.argtypes = [
+            wintypes.LPCVOID,
+            wintypes.LPCWSTR,
+            ctypes.POINTER(wintypes.LPVOID),
+            ctypes.POINTER(wintypes.UINT),
+        ]
+        query_value.restype = wintypes.BOOL
+
+        ignored = wintypes.DWORD()
+        size = int(get_size(binary_path, ctypes.byref(ignored)))
+        if size <= 0:
+            return "", "version metadata is unavailable"
+        payload = ctypes.create_string_buffer(size)
+        if not get_info(binary_path, 0, size, payload):
+            return "", "version metadata could not be read"
+
+        value = wintypes.LPVOID()
+        value_size = wintypes.UINT()
+        if not query_value(payload, "\\", ctypes.byref(value), ctypes.byref(value_size)):
+            return "", "version metadata has no fixed version block"
+        if value_size.value < ctypes.sizeof(_VSFixedFileInfo):
+            return "", "version metadata fixed block is truncated"
+
+        info = ctypes.cast(value, ctypes.POINTER(_VSFixedFileInfo)).contents
+        if info.signature != 0xFEEF04BD:
+            return "", "version metadata fixed block is invalid"
+        parts = [
+            info.file_version_ms >> 16,
+            info.file_version_ms & 0xFFFF,
+            info.file_version_ls >> 16,
+            info.file_version_ls & 0xFFFF,
+        ]
+        while len(parts) > 3 and parts[-1] == 0:
+            parts.pop()
+        return ".".join(str(part) for part in parts), ""
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        return "", f"version metadata probe failed: {exc}"
+
+
 def _version_line_for_binary(binary_path: str, stdout: str) -> str:
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
     if not lines:
@@ -895,10 +1008,12 @@ def _version_line_for_binary(binary_path: str, stdout: str) -> str:
     return lines[0]
 
 
-def _first_existing_path(candidates: tuple[str, ...]) -> str:
+def _first_existing_file(candidates: tuple[str, ...]) -> str:
+    """Return the first real config file; parent directories are not evidence."""
+
     for candidate in candidates:
         path = os.path.abspath(_expand(candidate))
-        if os.path.isfile(path) or os.path.isdir(path):
+        if os.path.isfile(path):
             return path
     return ""
 
@@ -910,6 +1025,89 @@ def _which(binary_name: str) -> str:
     if not path:
         return ""
     return os.path.abspath(path)
+
+
+def _binary_path_for_agent(name: str, spec: _AgentSpec) -> str:
+    """Resolve PATH first, then narrow documented connector locations."""
+
+    if not spec.binary_name:
+        return ""
+    path = _which(spec.binary_name)
+    if path or os.name != "nt":
+        return path
+
+    for candidate in _windows_binary_candidates(name, spec.binary_name):
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+
+    if name != "antigravity":
+        return ""
+
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if not local_app_data:
+        return ""
+    for candidate in (
+        os.path.join(local_app_data, "agy", "bin", "agy.exe"),
+        os.path.join(local_app_data, "Programs", "antigravity", "Antigravity.exe"),
+    ):
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return ""
+
+
+def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, ...]:
+    """Return exact-name candidates under this connector's Windows bin roots."""
+
+    if not binary_name:
+        return ()
+    suffix = os.path.splitext(binary_name)[1]
+    names = [binary_name] if suffix else [binary_name + ext for ext in (".exe", ".cmd", ".bat", ".com")]
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    roaming_app_data = os.environ.get("APPDATA", "")
+    home = os.path.expanduser("~")
+    program_roots = [
+        root
+        for root in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", ""))
+        if root
+    ]
+
+    prefixes: list[str] = []
+    if local_app_data:
+        prefixes.extend(
+            (
+                os.path.join(local_app_data, "Microsoft", "WinGet", "Links"),
+                os.path.join(local_app_data, "pnpm"),
+            )
+        )
+    if roaming_app_data:
+        prefixes.append(os.path.join(roaming_app_data, "npm"))
+    if home:
+        prefixes.extend((os.path.join(home, ".local", "bin"), os.path.join(home, "scoop", "shims")))
+
+    if connector == "codex" and local_app_data:
+        prefixes.insert(0, os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin"))
+    elif connector == "cursor" and local_app_data:
+        prefixes.insert(0, os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"))
+    elif connector == "windsurf" and local_app_data:
+        prefixes.insert(0, os.path.join(local_app_data, "Programs", "Windsurf", "bin"))
+    elif connector == "antigravity" and local_app_data:
+        prefixes.insert(0, os.path.join(local_app_data, "agy", "bin"))
+    elif connector == "opencode" and home:
+        prefixes.insert(0, os.path.join(home, ".opencode", "bin"))
+
+    for root in program_roots:
+        if connector == "codex":
+            prefixes.append(os.path.join(root, "OpenAI", "Codex", "bin"))
+        elif connector == "cursor":
+            prefixes.append(os.path.join(root, "cursor", "resources", "app", "bin"))
+        elif connector == "windsurf":
+            prefixes.append(os.path.join(root, "Windsurf", "bin"))
+
+    candidates: list[str] = []
+    for prefix in prefixes:
+        for name in names:
+            candidates.append(os.path.join(prefix, name))
+    return tuple(candidates)
 
 
 def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDiscovery | None:

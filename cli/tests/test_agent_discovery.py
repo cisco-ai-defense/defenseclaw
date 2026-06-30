@@ -115,6 +115,231 @@ def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
     assert disc.agents["openclaw"].installed is True
 
 
+def test_empty_connector_home_does_not_detect_opencode(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".config" / "opencode" / "plugins").mkdir(parents=True)
+    (tmp_path / ".opencode").mkdir()
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("opencode")
+
+    assert signal.installed is False
+    assert signal.config_path == ""
+    assert signal.binary_path == ""
+
+
+def test_config_evidence_helper_rejects_directories(tmp_path):
+    directory = tmp_path / "config-parent"
+    directory.mkdir()
+
+    assert ad._first_existing_file((str(directory),)) == ""
+
+
+@pytest.mark.parametrize(
+    ("connector", "empty_dir"),
+    [
+        ("claudecode", (".claude",)),
+        ("openhands", (".openhands",)),
+        ("antigravity", (".gemini", "antigravity-cli")),
+        ("omnigent", (".omnigent",)),
+    ],
+)
+def test_empty_connector_directories_are_not_install_evidence(
+    monkeypatch,
+    tmp_path,
+    connector,
+    empty_dir,
+):
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    tmp_path.joinpath(*empty_dir).mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent(connector)
+
+    assert signal.installed is False
+    assert signal.config_path == ""
+    assert signal.binary_path == ""
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        (".config", "opencode", "opencode.json"),
+        (".config", "opencode", "opencode.jsonc"),
+        (".config", "opencode", "plugins", "defenseclaw.js"),
+        ("opencode.json",),
+        ("opencode.jsonc",),
+    ],
+)
+def test_meaningful_opencode_files_are_discovery_evidence(monkeypatch, tmp_path, relative_path):
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path.joinpath(*relative_path)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("opencode")
+
+    assert signal.installed is True
+    assert signal.config_path == str(config)
+
+
+def test_empty_home_has_no_config_only_false_positives(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming-app-data"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "program-files"))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "program-files-x86"))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signals = {name: ad._scan_agent(name) for name in KNOWN_CONNECTORS}
+
+    assert {name for name, signal in signals.items() if signal.installed} == set()
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_config"),
+    [
+        ("codex", (".codex", "config.toml")),
+        ("claudecode", (".claude", "settings.json")),
+        ("openclaw", (".openclaw", "openclaw.json")),
+        ("zeptoclaw", (".zeptoclaw", "config.json")),
+        ("hermes", (".hermes", "config.yaml")),
+        ("cursor", (".cursor", "hooks.json")),
+        ("windsurf", (".codeium", "windsurf", "hooks.json")),
+        ("geminicli", (".gemini", "settings.json")),
+        ("copilot", (".copilot", "mcp-config.json")),
+        ("openhands", (".openhands", "hooks.json")),
+        ("antigravity", (".gemini", "config", "hooks.json")),
+        ("opencode", (".config", "opencode", "opencode.json")),
+        ("omnigent", (".omnigent", "config.yaml")),
+    ],
+)
+def test_each_connector_accepts_a_meaningful_config_file(
+    monkeypatch,
+    tmp_path,
+    connector,
+    relative_config,
+):
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path.joinpath(*relative_config)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent(connector)
+
+    assert signal.installed is True
+    assert ad._path_key(signal.config_path) == ad._path_key(str(config))
+
+
+def test_antigravity_windows_cli_fallback_is_detected(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    local_app_data = tmp_path / "local-app-data"
+    agy = local_app_data / "agy" / "bin" / "agy.exe"
+    agy.parent.mkdir(parents=True)
+    agy.write_bytes(b"test executable")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ad.os, "name", "nt")
+    monkeypatch.setattr(
+        ad,
+        "_version_for_agent_binary",
+        lambda name, path, _args: ("1.0.13", "") if name == "antigravity" and path == str(agy) else ("", "bad"),
+    )
+
+    signal = ad._scan_agent("antigravity")
+
+    assert signal.installed is True
+    assert signal.binary_path == str(agy)
+    assert signal.config_path == ""
+    assert signal.version == "1.0.13"
+
+
+def test_antigravity_gui_fallback_reads_metadata_without_launch(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    local_app_data = tmp_path / "local-app-data"
+    gui = local_app_data / "Programs" / "antigravity" / "Antigravity.exe"
+    gui.parent.mkdir(parents=True)
+    gui.write_bytes(b"test executable")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ad.os, "name", "nt")
+    monkeypatch.setattr(ad, "_windows_file_version_for_binary", lambda path: ("2.2.1", ""))
+    monkeypatch.setattr(
+        ad.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("GUI executable was launched")),
+    )
+
+    signal = ad._scan_agent("antigravity")
+
+    assert signal.installed is True
+    assert signal.binary_path == str(gui)
+    assert signal.config_path == ""
+    assert signal.version == "2.2.1"
+
+
+def test_antigravity_windows_roots_are_narrow_trusted_prefixes(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+
+    assert ad._path_key(str(local_app_data / "agy" / "bin")) in prefixes
+    assert ad._path_key(str(local_app_data / "Programs" / "antigravity")) in prefixes
+    assert ad._path_key(str(local_app_data)) not in prefixes
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_binary"),
+    [
+        ("codex", ("local", "Programs", "OpenAI", "Codex", "bin", "codex.exe")),
+        ("claudecode", ("home", ".local", "bin", "claude.exe")),
+        ("openclaw", ("home", ".local", "bin", "openclaw.exe")),
+        ("zeptoclaw", ("home", ".local", "bin", "zeptoclaw.exe")),
+        ("hermes", ("home", ".local", "bin", "hermes.exe")),
+        ("cursor", ("local", "Programs", "cursor", "resources", "app", "bin", "cursor.cmd")),
+        ("windsurf", ("local", "Programs", "Windsurf", "bin", "windsurf.exe")),
+        ("geminicli", ("roaming", "npm", "gemini.cmd")),
+        ("copilot", ("roaming", "npm", "copilot.cmd")),
+        ("openhands", ("home", ".local", "bin", "openhands.exe")),
+        ("antigravity", ("local", "agy", "bin", "agy.exe")),
+        ("opencode", ("home", ".opencode", "bin", "opencode.exe")),
+        ("omnigent", ("home", ".local", "bin", "omnigent.exe")),
+    ],
+)
+def test_windows_discovery_finds_known_binary_outside_path(
+    monkeypatch,
+    tmp_path,
+    connector,
+    relative_binary,
+):
+    home = tmp_path / "home"
+    local = tmp_path / "local-app-data"
+    roaming = tmp_path / "roaming-app-data"
+    roots = {"home": home, "local": local, "roaming": roaming}
+    binary = roots[relative_binary[0]].joinpath(*relative_binary[1:])
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"test executable")
+    _pin_home(monkeypatch, home)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ad.os, "name", "nt")
+
+    resolved = ad._binary_path_for_agent(connector, ad._SPECS[connector])
+
+    assert ad._path_key(resolved) == ad._path_key(str(binary))
+
+
 def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     monkeypatch.setattr(ad.shutil, "which", lambda name: "/usr/local/bin/codex")
