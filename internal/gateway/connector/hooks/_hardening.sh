@@ -258,12 +258,85 @@ defenseclaw_json_escape() {
 defenseclaw_json_string_field() {
   local json="${1:-}"
   local field="${2:-}"
-  if [ -z "$field" ]; then
-    return 1
+  local extracted status
+  case "$field" in
+    ""|*[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  if ! command -v awk >/dev/null 2>&1; then
+    return 2
   fi
-  printf '%s' "$json" | tr '\n\r' '  ' | sed -nE \
-    's/.*"'"$field"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' |
-    sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
+  if extracted="$(printf '%s' "$json" | awk -v wanted="$field" '
+    { text = text $0 "\n" }
+    END {
+      depth = 0
+      started = 0
+      found = 0
+      n = length(text)
+      for (i = 1; i <= n; i++) {
+        c = substr(text, i, 1)
+        if (!started) {
+          if (c ~ /[[:space:]]/) continue
+          if (c != "{") exit 2
+          started = 1
+          depth = 1
+          continue
+        }
+        if (c == "\"") {
+          start = i + 1
+          escaped = 0
+          for (j = start; j <= n; j++) {
+            ch = substr(text, j, 1)
+            if (escaped) { escaped = 0; continue }
+            if (ch == "\\") { escaped = 1; continue }
+            if (ch == "\"") break
+          }
+          if (j > n) exit 2
+          token = substr(text, start, j - start)
+          if (depth == 1) {
+            k = j + 1
+            while (k <= n && substr(text, k, 1) ~ /[[:space:]]/) k++
+            if (substr(text, k, 1) == ":" && token == wanted) {
+              if (found) exit 2
+              v = k + 1
+              while (v <= n && substr(text, v, 1) ~ /[[:space:]]/) v++
+              if (substr(text, v, 1) != "\"") exit 2
+              value_start = v + 1
+              escaped = 0
+              for (value_end = value_start; value_end <= n; value_end++) {
+                ch = substr(text, value_end, 1)
+                if (escaped) { escaped = 0; continue }
+                if (ch == "\\") { escaped = 1; continue }
+                if (ch == "\"") break
+              }
+              if (value_end > n) exit 2
+              result = substr(text, value_start, value_end - value_start)
+              found = 1
+              i = value_end
+              continue
+            }
+          }
+          i = j
+          continue
+        }
+        if (c == "{" || c == "[") depth++
+        else if (c == "}" || c == "]") {
+          depth--
+          if (depth < 0) exit 2
+          if (depth == 0) {
+            if (found) { print result; exit 0 }
+            exit 1
+          }
+        }
+      }
+      exit 2
+    }
+  ')"; then
+    printf '%s' "$extracted" | sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
+    return 0
+  else
+    status=$?
+    return "$status"
+  fi
 }
 
 # _dc_jq is a drop-in shim for jq covering the small subset of filters
@@ -350,15 +423,47 @@ else:
   # String-only last resort: covers action / reason / block_reason. Object
   # fields cannot be decoded safely without jq or python3, so fail instead of
   # returning an empty value that could turn a structured deny into allow.
-  local _dcjq_field
+  local _dcjq_field _dcjq_default _dcjq_default_kind _dcjq_value _dcjq_json _dcjq_status
   case "$_dcjq_filter" in
     .|"") cat >/dev/null; return 1 ;;
   esac
   _dcjq_field="${_dcjq_filter#.}"
+  _dcjq_field="${_dcjq_field%%//*}"
   _dcjq_field="${_dcjq_field%%[[:space:]]*}"
+  _dcjq_default="null"
+  _dcjq_default_kind="value"
+  case "$_dcjq_filter" in
+    *"//"*)
+      _dcjq_default="${_dcjq_filter#*//}"
+      _dcjq_default="${_dcjq_default#"${_dcjq_default%%[![:space:]]*}"}"
+      _dcjq_default="${_dcjq_default%"${_dcjq_default##*[![:space:]]}"}"
+      case "$_dcjq_default" in
+        empty) _dcjq_default=""; _dcjq_default_kind="empty" ;;
+        "") cat >/dev/null; return 1 ;;
+        null) _dcjq_default="null" ;;
+        \"*\")
+          _dcjq_default="${_dcjq_default#\"}"
+          _dcjq_default="${_dcjq_default%\"}"
+          ;;
+        *) cat >/dev/null; return 1 ;;
+      esac
+      ;;
+  esac
   case "$_dcjq_field" in
     action|reason|block_reason|decision|permissionDecision|permissionDecisionReason)
-      defenseclaw_json_string_field "$(cat)" "$_dcjq_field"
+      _dcjq_json="$(cat)"
+      if _dcjq_value="$(defenseclaw_json_string_field "$_dcjq_json" "$_dcjq_field")"; then
+        printf '%s\n' "$_dcjq_value"
+      else
+        _dcjq_status=$?
+        if [ "$_dcjq_status" -eq 1 ]; then
+          if [ "$_dcjq_default_kind" != "empty" ]; then
+            printf '%s\n' "$_dcjq_default"
+          fi
+        else
+          return 1
+        fi
+      fi
       ;;
     *)
       cat >/dev/null

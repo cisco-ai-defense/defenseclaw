@@ -687,6 +687,18 @@ class WriterOTelPresetTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertEqual(_read_dotenv(tmp), {})
 
+    def test_dry_run_does_not_take_config_write_lock(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        with patch("defenseclaw.observability.writer.locked_config_yaml", side_effect=AssertionError("locked")):
+            result = apply_preset(
+                "honeycomb",
+                {"dataset": "defenseclaw"},
+                tmp,
+                secret_value="hc-key",
+                dry_run=True,
+            )
+        self.assertTrue(result.dry_run)
+
 
 class WriterAuditSinksPresetTests(unittest.TestCase):
     """apply_preset() for target=audit_sinks presets."""

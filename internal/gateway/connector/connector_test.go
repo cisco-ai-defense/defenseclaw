@@ -6059,6 +6059,11 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 				t.Fatalf("%s does not implement AgentPathProvider", c.name)
 			}
 			paths := ap.AgentPaths(opts)
+			isUnderDataDir := func(path string) bool {
+				rel, err := filepath.Rel(dataDir, path)
+				return err == nil && rel != "." && rel != ".." &&
+					!strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel)
+			}
 
 			// Every built-in connector touches at least one file
 			// the operator should know about (PatchedFiles or
@@ -6074,14 +6079,14 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 				if !filepath.IsAbs(hs) {
 					t.Errorf("%s: hook script %q is not absolute", c.name, hs)
 				}
-				if !strings.HasPrefix(hs, dataDir) {
+				if !isUnderDataDir(hs) {
 					t.Errorf("%s: hook script %q is not under DataDir %q", c.name, hs, dataDir)
 				}
 			}
 
 			// Backup files must live under DataDir.
 			for _, bf := range paths.BackupFiles {
-				if !strings.HasPrefix(bf, dataDir) {
+				if !isUnderDataDir(bf) {
 					t.Errorf("%s: backup file %q is not under DataDir %q", c.name, bf, dataDir)
 				}
 			}
@@ -6089,7 +6094,7 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 				if !filepath.IsAbs(gf) {
 					t.Errorf("%s: generated file %q is not absolute", c.name, gf)
 				}
-				if !strings.HasPrefix(gf, dataDir) {
+				if !isUnderDataDir(gf) {
 					t.Errorf("%s: generated file %q is not under DataDir %q", c.name, gf, dataDir)
 				}
 			}
@@ -6097,7 +6102,7 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 				if !filepath.IsAbs(gf) {
 					t.Errorf("%s: generated executable %q is not absolute", c.name, gf)
 				}
-				if !strings.HasPrefix(gf, dataDir) {
+				if !isUnderDataDir(gf) {
 					t.Errorf("%s: generated executable %q is not under DataDir %q", c.name, gf, dataDir)
 				}
 			}

@@ -210,6 +210,16 @@ class TestPaths(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
 
+    def test_secure_write_honors_managed_enterprise_env_pin(self):
+        path = Path(tempfile.mkdtemp()) / "config.yaml"
+        path.write_text("config_version: 6\n", encoding="utf-8")
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_DEPLOYMENT_MODE": "managed_enterprise"}),
+            patch("defenseclaw.config._is_admin_process", return_value=False),
+        ):
+            with self.assertRaises(PermissionError):
+                config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
+
     def test_secure_write_preserves_group_read_without_write(self):
         path = Path(tempfile.mkdtemp()) / "config.yaml"
         path.write_text("config_version: 6\n")

@@ -252,6 +252,41 @@ func TestPrintHookGuardianStatusHealthy(t *testing.T) {
 	}
 }
 
+func TestIsLocalStatusTarget(t *testing.T) {
+	for _, host := range []string{"localhost", "127.0.0.1", "[::1]", " [::1] ", "0.0.0.0", "::"} {
+		if !isLocalStatusTarget(host) {
+			t.Errorf("isLocalStatusTarget(%q) = false, want true", host)
+		}
+	}
+	for _, host := range []string{"gateway.example.test", "192.0.2.20", "2001:db8::20"} {
+		if isLocalStatusTarget(host) {
+			t.Errorf("isLocalStatusTarget(%q) = true, want false", host)
+		}
+	}
+	if hostname, err := os.Hostname(); err == nil && !isLocalStatusTarget(hostname) {
+		t.Errorf("machine hostname %q was not recognized as local", hostname)
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatalf("InterfaceAddrs: %v", err)
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch local := addr.(type) {
+		case *net.IPNet:
+			ip = local.IP
+		case *net.IPAddr:
+			ip = local.IP
+		}
+		if ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+			if !isLocalStatusTarget(ip.String()) {
+				t.Fatalf("local interface IP %s was not recognized as local", ip)
+			}
+			return
+		}
+	}
+}
+
 // TestPrintConnectorModes_ListsAll pins the "Connector Mode" fan-out: every
 // active connector's mode/telemetry must render under one section header,
 // not just the primary connector's.

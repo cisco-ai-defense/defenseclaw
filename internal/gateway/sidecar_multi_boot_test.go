@@ -56,6 +56,12 @@ func (b *bootStubConnector) Teardown(context.Context, connector.SetupOpts) error
 
 func (b *bootStubConnector) SetCredentials(string, string) { b.credsSet = true }
 
+type hookBootStubConnector struct{ bootStubConnector }
+
+func (*hookBootStubConnector) HookScriptNames(connector.SetupOpts) []string {
+	return []string{"codex-hook.sh"}
+}
+
 func multiBootSidecar(t *testing.T) *Sidecar {
 	t.Helper()
 	return &Sidecar{
@@ -66,6 +72,24 @@ func multiBootSidecar(t *testing.T) *Sidecar {
 	}
 }
 
+func failingHookTokenDataDir(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+		t.Fatalf("write failing hook-token fixture: %v", err)
+	}
+	return path
+}
+
+func mustConnectorSetupOpts(t *testing.T, s *Sidecar, conn connector.Connector, apiToken, proxyAddr, apiAddr string) connector.SetupOpts {
+	t.Helper()
+	opts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
+	if err != nil {
+		t.Fatalf("connectorSetupOptsChecked: %v", err)
+	}
+	return opts
+}
+
 // TestSetupOneConnector_SetupErrorReturnsWithoutRollback verifies that a
 // Setup() failure surfaces as an error and does NOT trigger a teardown: there
 // is nothing to roll back because Setup never reached a verified state.
@@ -74,7 +98,7 @@ func TestSetupOneConnector_SetupErrorReturnsWithoutRollback(t *testing.T) {
 	conn := &bootStubConnector{stubConnector: stubConnector{name: "codex"}, setupErr: errors.New("boom")}
 	cache := guardrail.NewRulePackCache()
 
-	opts := s.connectorSetupOpts(conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
 	err := s.setupOneConnector(context.Background(), conn, opts, "master", cache)
 	if err == nil {
 		t.Fatal("expected error from failing Setup, got nil")
@@ -97,7 +121,7 @@ func TestSetupOneConnector_SuccessNoTeardown(t *testing.T) {
 	conn := &bootStubConnector{stubConnector: stubConnector{name: "cursor"}}
 	cache := guardrail.NewRulePackCache()
 
-	opts := s.connectorSetupOpts(conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
 	if err := s.setupOneConnector(context.Background(), conn, opts, "master", cache); err != nil {
 		t.Fatalf("expected nil error on clean setup, got %v", err)
 	}
@@ -120,7 +144,7 @@ func TestSetupOneConnector_ActionModeUnverifiedContractSkips(t *testing.T) {
 	conn := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 	cache := guardrail.NewRulePackCache()
 
-	opts := s.connectorSetupOpts(conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
 	err := s.setupOneConnector(context.Background(), conn, opts, "master", cache)
 	if err == nil {
 		t.Fatal("expected action-mode unverified contract to be refused, got nil")
@@ -143,7 +167,7 @@ func TestSetupOneConnector_ActionModeContractDriftOverride(t *testing.T) {
 	conn := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 	cache := guardrail.NewRulePackCache()
 
-	opts := s.connectorSetupOpts(conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
 	if err := s.setupOneConnector(context.Background(), conn, opts, "master", cache); err != nil {
 		t.Fatalf("drift override must allow setup, got %v", err)
 	}
@@ -160,7 +184,10 @@ func TestSetupConnectorsIsolated_AllSucceed(t *testing.T) {
 		&bootStubConnector{stubConnector: stubConnector{name: "codex"}},
 		&bootStubConnector{stubConnector: stubConnector{name: "cursor"}},
 	}
-	got := s.setupConnectorsIsolated(context.Background(), conns, "tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache())
+	got, err := s.setupConnectorsIsolated(context.Background(), conns, "tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache())
+	if err != nil {
+		t.Fatalf("setupConnectorsIsolated: %v", err)
+	}
 	want := []string{"codex", "cursor"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("succeeded=%v, want %v", got, want)
@@ -177,12 +204,15 @@ func TestSetupConnectorsIsolated_DN1_MiddleFailsOthersSurvive(t *testing.T) {
 	middle := &bootStubConnector{stubConnector: stubConnector{name: "cursor"}, setupErr: errors.New("middle boom")}
 	last := &bootStubConnector{stubConnector: stubConnector{name: "windsurf"}}
 
-	got := s.setupConnectorsIsolated(
+	got, err := s.setupConnectorsIsolated(
 		context.Background(),
 		[]connector.Connector{first, middle, last},
 		"tok", "127.0.0.1:0", "127.0.0.1:0", "master",
 		guardrail.NewRulePackCache(),
 	)
+	if err != nil {
+		t.Fatalf("setupConnectorsIsolated: %v", err)
+	}
 
 	want := []string{"codex", "windsurf"}
 	if !reflect.DeepEqual(got, want) {
@@ -208,9 +238,35 @@ func TestSetupConnectorsIsolated_AllFailReturnsEmpty(t *testing.T) {
 		&bootStubConnector{stubConnector: stubConnector{name: "codex"}, setupErr: errors.New("x")},
 		&bootStubConnector{stubConnector: stubConnector{name: "cursor"}, setupErr: errors.New("y")},
 	}
-	got := s.setupConnectorsIsolated(context.Background(), conns, "tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache())
+	got, err := s.setupConnectorsIsolated(context.Background(), conns, "tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache())
+	if err != nil {
+		t.Fatalf("setupConnectorsIsolated: %v", err)
+	}
 	if len(got) != 0 {
 		t.Errorf("all-fail must yield empty survivor set, got %v", got)
+	}
+}
+
+func TestSetupConnectorsIsolatedPreflightsAllScopedTokens(t *testing.T) {
+	s := multiBootSidecar(t)
+	s.cfg.DataDir = failingHookTokenDataDir(t)
+	first := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+	second := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "cursor"}}}
+
+	got, err := s.setupConnectorsIsolated(
+		context.Background(), []connector.Connector{first, second}, "gateway-token", "a", "b", "master", guardrail.NewRulePackCache(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "scoped hook token") {
+		t.Fatalf("setupConnectorsIsolated error = %v, want scoped-token failure", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("succeeded = %v, want none after preflight failure", got)
+	}
+	if first.setupCalls != 0 || second.setupCalls != 0 {
+		t.Fatalf("setup calls = %d/%d, want none before every scoped token passes", first.setupCalls, second.setupCalls)
+	}
+	if first.credsSet || second.credsSet {
+		t.Fatal("credentials were installed before every scoped token passed preflight")
 	}
 }
 
@@ -225,11 +281,11 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 		"cursor": {HookFailMode: "closed"},
 	}
 
-	codexOpts := s.connectorSetupOpts(&bootStubConnector{stubConnector: stubConnector{name: "codex"}}, "tok", "a", "b")
+	codexOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "codex"}}, "tok", "a", "b")
 	if codexOpts.HookFailMode != "open" {
 		t.Errorf("codex HookFailMode=%q, want global %q", codexOpts.HookFailMode, "open")
 	}
-	cursorOpts := s.connectorSetupOpts(&bootStubConnector{stubConnector: stubConnector{name: "cursor"}}, "tok", "a", "b")
+	cursorOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "cursor"}}, "tok", "a", "b")
 	if cursorOpts.HookFailMode != "closed" {
 		t.Errorf("cursor HookFailMode=%q, want override %q", cursorOpts.HookFailMode, "closed")
 	}
@@ -246,7 +302,10 @@ func TestStartMultiHookConfigGuards_StartsOnePerSuccessfulConnector(t *testing.T
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	guards := s.startMultiHookConfigGuards(ctx, reg, []string{"codex", "cursor"}, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	guards, err := s.startMultiHookConfigGuards(ctx, reg, []string{"codex", "cursor"}, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("startMultiHookConfigGuards: %v", err)
+	}
 	defer stopHookConfigGuards(guards)
 
 	if len(guards) != 2 {
@@ -266,9 +325,128 @@ func TestStartMultiHookConfigGuards_DisabledSelfHealStartsNone(t *testing.T) {
 	reg := connector.NewRegistry()
 	reg.RegisterBuiltin(&bootStubConnector{stubConnector: stubConnector{name: "codex"}})
 
-	guards := s.startMultiHookConfigGuards(context.Background(), reg, []string{"codex"}, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	guards, err := s.startMultiHookConfigGuards(context.Background(), reg, []string{"codex"}, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("startMultiHookConfigGuards: %v", err)
+	}
 	if len(guards) != 0 {
 		t.Fatalf("guards=%d, want 0", len(guards))
+	}
+}
+
+func TestManagedMultiHookGuardrailFailsClosedWhenScopedTokenFails(t *testing.T) {
+	conn := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "codex"}}}
+	reg := connector.NewRegistry()
+	reg.RegisterBuiltin(conn)
+	s := &Sidecar{
+		cfg: &config.Config{
+			DataDir:        failingHookTokenDataDir(t),
+			DeploymentMode: string(config.DeploymentModeManagedEnterprise),
+			Guardrail:      config.GuardrailConfig{Enabled: true},
+		},
+		health: NewSidecarHealth(),
+	}
+
+	err := s.runManagedEnterpriseMultiHookGuardrail(context.Background(), reg, []connector.Connector{conn}, "gateway-token", "a", "b", "master")
+	if err == nil || !strings.Contains(err.Error(), "scoped hook token") {
+		t.Fatalf("runManagedEnterpriseMultiHookGuardrail error = %v, want scoped-token failure", err)
+	}
+	if conn.credsSet {
+		t.Fatal("connector credentials were installed after scoped-token setup failed")
+	}
+	if state := s.health.Snapshot().Guardrail.State; state != StateError {
+		t.Fatalf("guardrail health state = %s, want %s", state, StateError)
+	}
+}
+
+func TestManagedMultiHookGuardrailPreflightsAllScopedTokens(t *testing.T) {
+	first := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+	second := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "cursor"}}}
+	reg := connector.NewRegistry()
+	reg.RegisterBuiltin(first)
+	reg.RegisterBuiltin(second)
+	s := &Sidecar{
+		cfg: &config.Config{
+			DataDir:        failingHookTokenDataDir(t),
+			DeploymentMode: string(config.DeploymentModeManagedEnterprise),
+			Guardrail:      config.GuardrailConfig{Enabled: true},
+		},
+		health: NewSidecarHealth(),
+	}
+
+	err := s.runManagedEnterpriseMultiHookGuardrail(
+		context.Background(), reg, []connector.Connector{first, second}, "gateway-token", "a", "b", "master",
+	)
+	if err == nil || !strings.Contains(err.Error(), "scoped hook token") {
+		t.Fatalf("runManagedEnterpriseMultiHookGuardrail error = %v, want scoped-token failure", err)
+	}
+	if first.credsSet || second.credsSet {
+		t.Fatal("connector credentials were installed before every scoped token passed preflight")
+	}
+	if state := s.health.Snapshot().Guardrail.State; state != StateError {
+		t.Fatalf("guardrail health state = %s, want %s", state, StateError)
+	}
+}
+
+func TestStartMultiHookConfigGuardsFailsClosedWhenScopedTokenFails(t *testing.T) {
+	conn := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "codex"}}}
+	reg := connector.NewRegistry()
+	reg.RegisterBuiltin(conn)
+	s := &Sidecar{
+		cfg: &config.Config{
+			DataDir:   failingHookTokenDataDir(t),
+			Guardrail: config.GuardrailConfig{Enabled: true, HookSelfHeal: true},
+		},
+	}
+
+	guards, err := s.startMultiHookConfigGuards(context.Background(), reg, []string{"codex"}, "gateway-token", "a", "b")
+	defer stopHookConfigGuards(guards)
+	if err == nil || !strings.Contains(err.Error(), "scoped hook token") {
+		t.Fatalf("startMultiHookConfigGuards error = %v, want scoped-token failure", err)
+	}
+	if len(guards) != 0 {
+		t.Fatalf("guards = %d, want none after scoped-token failure", len(guards))
+	}
+}
+
+func TestStartMultiHookConfigGuardsStopsEarlierGuardsOnLaterTokenFailure(t *testing.T) {
+	first := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+	second := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "cursor"}}}
+	reg := connector.NewRegistry()
+	reg.RegisterBuiltin(first)
+	reg.RegisterBuiltin(second)
+	s := &Sidecar{
+		cfg: &config.Config{
+			DataDir:   failingHookTokenDataDir(t),
+			Guardrail: config.GuardrailConfig{Enabled: true, HookSelfHeal: true},
+		},
+	}
+	originalFactory := newSidecarHookConfigGuard
+	var created []*HookConfigGuard
+	newSidecarHookConfigGuard = func(sidecar *Sidecar, debounce time.Duration) *HookConfigGuard {
+		guard := originalFactory(sidecar, debounce)
+		created = append(created, guard)
+		return guard
+	}
+	t.Cleanup(func() {
+		newSidecarHookConfigGuard = originalFactory
+		stopHookConfigGuards(created)
+	})
+
+	guards, err := s.startMultiHookConfigGuards(
+		context.Background(), reg, []string{"codex", "cursor"}, "gateway-token", "a", "b",
+	)
+	if err == nil || !strings.Contains(err.Error(), "scoped hook token") {
+		t.Fatalf("startMultiHookConfigGuards error = %v, want scoped-token failure", err)
+	}
+	if len(guards) != 0 || len(created) != 1 {
+		t.Fatalf("returned guards = %d, created guards = %d; want 0 returned and 1 rolled back", len(guards), len(created))
+	}
+	created[0].mu.Lock()
+	started := created[0].started
+	created[0].mu.Unlock()
+	if started {
+		t.Fatal("earlier hook guard remained started after a later scoped-token failure")
 	}
 }
 

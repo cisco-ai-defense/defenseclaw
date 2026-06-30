@@ -8,7 +8,7 @@ import stat
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from defenseclaw.commands import cmd_init_sandbox
 from defenseclaw.commands.cmd_setup_sandbox import (
@@ -892,6 +892,146 @@ class TestTrustedPrivilegedCommands(unittest.TestCase):
                 patch.object(cmd_init_sandbox.os, "stat", return_value=fake_stat),
             ):
                 self.assertIsNone(cmd_init_sandbox._trusted_system_command("setfacl"))
+
+    def test_privileged_argv_resolves_sudo_and_helper(self):
+        resolved = {"sudo": "/usr/bin/sudo", "chown": "/usr/sbin/chown"}
+        with (
+            patch.object(cmd_init_sandbox, "_needs_sudo", return_value=True),
+            patch.object(cmd_init_sandbox, "_trusted_system_command", side_effect=resolved.get) as trusted_command,
+            patch.object(
+                cmd_init_sandbox,
+                "_trusted_root_owned_file",
+                side_effect=lambda path, **_kwargs: path,
+            ),
+            patch.object(cmd_init_sandbox.os, "access", return_value=True),
+        ):
+            argv = cmd_init_sandbox._trusted_privileged_argv("chown", "-R", "sandbox:sandbox", "/srv/sandbox")
+        self.assertEqual(argv, ["/usr/bin/sudo", "/usr/sbin/chown", "-R", "sandbox:sandbox", "/srv/sandbox"])
+        self.assertEqual(trusted_command.call_args_list, [call("chown"), call("sudo")])
+
+    def test_missing_trusted_apt_get_falls_back_without_executing(self):
+        with (
+            patch.object(cmd_init_sandbox, "_trusted_system_command", return_value=None) as trusted_command,
+            patch.object(cmd_init_sandbox.subprocess, "run") as run,
+        ):
+            cmd_init_sandbox._ensure_iptables()
+        self.assertEqual(trusted_command.call_args_list, [call("iptables"), call("apt-get")])
+        run.assert_not_called()
+
+    def test_sudo_validation_failure_aborts(self):
+        with (
+            patch.object(cmd_init_sandbox, "_needs_sudo", return_value=True),
+            patch.object(cmd_init_sandbox, "_trusted_system_command", return_value="/usr/bin/sudo"),
+            patch.object(
+                cmd_init_sandbox.subprocess,
+                "run",
+                side_effect=[SimpleNamespace(returncode=1), SimpleNamespace(returncode=1)],
+            ) as run,
+        ):
+            with self.assertRaisesRegex(cmd_init_sandbox.click.ClickException, "sudo authentication failed"):
+                cmd_init_sandbox._ensure_sudo_cache()
+        self.assertEqual(
+            run.call_args_list,
+            [call(["/usr/bin/sudo", "-n", "true"], capture_output=True), call(["/usr/bin/sudo", "-v"], check=False)],
+        )
+
+    def test_sudo_write_propagates_chmod_failure(self):
+        with (
+            patch.object(cmd_init_sandbox, "_needs_sudo", return_value=True),
+            patch.object(cmd_init_sandbox, "_trusted_privileged_argv", return_value=["trusted"]) as trusted_argv,
+            patch.object(
+                cmd_init_sandbox.subprocess,
+                "run",
+                side_effect=[SimpleNamespace(returncode=0), SimpleNamespace(returncode=1)],
+            ),
+        ):
+            self.assertFalse(cmd_init_sandbox._sudo_write("content", "/etc/example", 0o600))
+        self.assertEqual(
+            trusted_argv.call_args_list,
+            [call("tee", "--", "/etc/example"), call("chmod", "600", "--", "/etc/example")],
+        )
+
+    def test_privileged_script_requires_trusted_ancestors(self):
+        script = "/opt/defenseclaw/install.sh"
+        trusted_file = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)
+        trusted_dir = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+        trusted_paths = {
+            script: trusted_file,
+            "/opt/defenseclaw": trusted_dir,
+            "/opt": trusted_dir,
+            "/": trusted_dir,
+        }
+        with (
+            patch.object(cmd_init_sandbox.os.path, "realpath", return_value=script),
+            patch.object(cmd_init_sandbox.os, "lstat", side_effect=lambda path: trusted_paths[path]),
+        ):
+            self.assertEqual(cmd_init_sandbox._trusted_root_owned_file(script), script)
+
+        writable_dir = SimpleNamespace(st_mode=stat.S_IFDIR | 0o775, st_uid=0)
+        writable_paths = {**trusted_paths, "/opt/defenseclaw": writable_dir}
+        with (
+            patch.object(cmd_init_sandbox.os.path, "realpath", return_value=script),
+            patch.object(cmd_init_sandbox.os, "lstat", side_effect=lambda path: writable_paths[path]),
+        ):
+            self.assertIsNone(cmd_init_sandbox._trusted_root_owned_file(script))
+
+    def test_trusted_system_command_accepts_root_owned_alternatives_chain(self):
+        link = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0)
+        executable = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)
+        directory = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+        metadata = {
+            "/usr/sbin/iptables": link,
+            "/etc/alternatives/iptables": link,
+            "/usr/sbin/iptables-nft": executable,
+            "/usr/sbin": directory,
+            "/usr": directory,
+            "/etc/alternatives": directory,
+            "/etc": directory,
+            "/": directory,
+        }
+        targets = {
+            "/usr/sbin/iptables": "/etc/alternatives/iptables",
+            "/etc/alternatives/iptables": "/usr/sbin/iptables-nft",
+        }
+        with (
+            patch.object(cmd_init_sandbox, "_TRUSTED_SYSTEM_DIRS", ("/usr/sbin",)),
+            patch.object(cmd_init_sandbox.os, "lstat", side_effect=lambda path: metadata[path]),
+            patch.object(cmd_init_sandbox.os, "readlink", side_effect=lambda path: targets[path]),
+            patch.object(cmd_init_sandbox.os.path, "realpath", side_effect=lambda path: path),
+            patch.object(cmd_init_sandbox.os, "access", return_value=True),
+        ):
+            self.assertEqual(cmd_init_sandbox._trusted_system_command("iptables"), "/usr/sbin/iptables-nft")
+
+    def test_existing_openclaw_integration_requires_pin(self):
+        with tempfile.TemporaryDirectory() as data_dir, tempfile.TemporaryDirectory() as sandbox_home:
+            target = os.path.join(data_dir, "openclaw")
+            os.makedirs(target)
+            with open(os.path.join(data_dir, cmd_init_sandbox.OPENCLAW_OWNERSHIP_BACKUP), "w") as handle:
+                handle.write("{}")
+            os.symlink(target, os.path.join(sandbox_home, ".openclaw"))
+            cfg = SimpleNamespace(data_dir=data_dir, claw=SimpleNamespace(openclaw_home_original=""))
+            with (
+                patch.object(cmd_init_sandbox, "_ensure_parent_traversal") as traversal,
+                patch.object(cmd_init_sandbox, "_ensure_sandbox_acls") as acls,
+            ):
+                self.assertFalse(cmd_init_sandbox._integrate_openclaw_home(cfg, sandbox_home))
+            traversal.assert_not_called()
+            acls.assert_not_called()
+
+    def test_install_preserves_openshell_version_across_sudo(self):
+        cfg = SimpleNamespace(openshell=SimpleNamespace(sandbox_version="1.2.3"))
+        command = ["/usr/bin/sudo", "/bin/bash", "/trusted/install", "--install-dir", "/usr/local/bin"]
+        with (
+            patch.object(cmd_init_sandbox, "_find_installer_script", return_value="/trusted/install"),
+            patch.object(cmd_init_sandbox, "_trusted_privileged_argv", return_value=command.copy()),
+            patch.object(cmd_init_sandbox, "_needs_sudo", return_value=True),
+            patch.object(cmd_init_sandbox.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run,
+            patch.object(cmd_init_sandbox.shutil, "which", return_value="/usr/local/bin/openshell-sandbox"),
+        ):
+            self.assertTrue(cmd_init_sandbox._install_openshell_sandbox(cfg))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[1], "--preserve-env=OPENSHELL_VERSION")
+        self.assertEqual(run.call_args.kwargs["env"]["OPENSHELL_VERSION"], "1.2.3")
 
 
 if __name__ == "__main__":

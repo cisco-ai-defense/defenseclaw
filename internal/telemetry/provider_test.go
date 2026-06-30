@@ -101,6 +101,19 @@ func TestNewProviderInactiveDoesNotReplaceOpenTelemetryGlobals(t *testing.T) {
 	}
 }
 
+func TestActivateProviderNilClearsErrorHandler(t *testing.T) {
+	called := false
+	previous := otel.GetErrorHandler()
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) { called = true }))
+	t.Cleanup(func() { otel.SetErrorHandler(previous) })
+
+	ActivateProvider(nil)
+	otel.Handle(errors.New("after shutdown"))
+	if called {
+		t.Fatal("ActivateProvider(nil) left the previous OpenTelemetry error handler installed")
+	}
+}
+
 func TestDestinationSpanExporterRecordsAcknowledgementFailureAndPartialSuccess(t *testing.T) {
 	tests := []struct {
 		name                                    string

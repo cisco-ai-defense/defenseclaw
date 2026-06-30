@@ -92,6 +92,130 @@ func TestHardeningJQFallbackRejectsStructuredOutputWithoutParser(t *testing.T) {
 	}
 }
 
+func TestHardeningJQFallbackPreservesStringDefault(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	helperPath := filepath.Join(t.TempDir(), "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && { [ "$2" = "jq" ] || [ "$2" = "python3" ]; }; then
+    return 1
+  fi
+  builtin command "$@"
+}
+printf '{}' | _dc_jq -r '.action//"allow"'
+value="$(printf '{"reason":""}' | _dc_jq -r '.reason // "fallback"')"
+printf '<%s>\n' "$value"
+printf '{}' | _dc_jq -r '.reason // null'
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run shell fallback: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "allow\n<>\nnull" {
+		t.Fatalf("fallback output = %q, want no-space default plus preserved empty string", got)
+	}
+}
+
+func TestHardeningJQFallbackRejectsExplicitNonStringField(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	helperPath := filepath.Join(t.TempDir(), "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && { [ "$2" = "jq" ] || [ "$2" = "python3" ]; }; then
+    return 1
+  fi
+  builtin command "$@"
+}
+printf '{"action":null}' | _dc_jq -r '.action // "allow"'
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("explicit non-string action used the allow default: %q", out)
+	}
+}
+
+func TestHardeningJQFallbackEmptyProducesNoOutput(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	helperPath := filepath.Join(t.TempDir(), "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && { [ "$2" = "jq" ] || [ "$2" = "python3" ]; }; then
+    return 1
+  fi
+  builtin command "$@"
+}
+printf '{}' | _dc_jq -r '.action // empty'
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run shell fallback: %v: %s", err, out)
+	}
+	if len(out) != 0 {
+		t.Fatalf("empty fallback output = %q, want zero bytes", out)
+	}
+}
+
+func TestHardeningJQFallbackOnlyReadsTopLevelFields(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	helperPath := filepath.Join(t.TempDir(), "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && { [ "$2" = "jq" ] || [ "$2" = "python3" ]; }; then
+    return 1
+  fi
+  builtin command "$@"
+}
+printf '{"nested":{"action":"allow"},"action":"deny"}' | _dc_jq -r '.action // "allow"'
+printf '{"nested":{"action":"deny"}}' | _dc_jq -r '.action // "allow"'
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run shell fallback: %v: %s", err, out)
+	}
+	if got := string(out); got != "deny\nallow\n" {
+		t.Fatalf("top-level fallback output = %q, want deny then absent-field default", got)
+	}
+}
+
 func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: t.TempDir(), APIAddr: "127.0.0.1:18970"}
 	cases := []struct {

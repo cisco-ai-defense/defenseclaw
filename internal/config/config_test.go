@@ -190,6 +190,11 @@ func TestLoadFromFile_ConfigOverrideKeepsRuntimeDataInDefenseClawHome(t *testing
 
 func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) {
 	dir := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatalf("chmod untrusted config dir: %v", err)
+		}
+	}
 	path := filepath.Join(dir, DefaultConfigName)
 	data := []byte("config_version: 6\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\n")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -206,6 +211,11 @@ func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) 
 
 func TestLoadFromFile_ManagedEnterpriseEnvPinRejectsUntrustedUnmanagedFile(t *testing.T) {
 	dir := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatalf("chmod untrusted config dir: %v", err)
+		}
+	}
 	path := filepath.Join(dir, DefaultConfigName)
 	if err := os.WriteFile(path, []byte("config_version: 6\ndeployment_mode: unmanaged_byod\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)

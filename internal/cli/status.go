@@ -16,6 +16,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -135,9 +136,46 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	printConnectors(&snap)
-	printHookGuardianStatus()
+	if isLocalStatusTarget(bind) {
+		printHookGuardianStatus()
+	}
 
 	return nil
+}
+
+func isLocalStatusTarget(host string) bool {
+	host = strings.TrimSpace(host)
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if hostname, err := os.Hostname(); err == nil && strings.EqualFold(host, hostname) {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsUnspecified() {
+		return true
+	}
+	for _, addr := range addrs {
+		switch local := addr.(type) {
+		case *net.IPNet:
+			if local.IP.Equal(ip) {
+				return true
+			}
+		case *net.IPAddr:
+			if local.IP.Equal(ip) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // printConnectors renders the active-connector roster. The HealthSnapshot

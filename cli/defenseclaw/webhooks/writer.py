@@ -140,6 +140,8 @@ def _locked_webhook_mutation(func):
     @wraps(func)
     def wrapped(*args, **kwargs):
         bound = signature.bind(*args, **kwargs)
+        if bound.arguments.get("dry_run", False):
+            return func(*args, **kwargs)
         cfg_path = str(config_path_for_data_dir(bound.arguments["data_dir"]))
         with locked_config_yaml(cfg_path):
             return func(*args, **kwargs)

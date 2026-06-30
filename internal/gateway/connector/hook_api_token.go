@@ -13,6 +13,7 @@ package connector
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -58,13 +59,19 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
 	if existing, err := readSecureHookAPITokenFile(dataDir, tokenPath); err == nil && existing != "" {
 		return existing, nil
-	} else if err != nil && !os.IsNotExist(err) {
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("read hook API token %s: %w", tokenPath, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
 		return "", fmt.Errorf("create hook API token dir: %w", err)
+	}
+	if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil {
+		return "", err
 	}
 
 	buf := make([]byte, otlpTokenLen)
@@ -113,7 +120,7 @@ func LoadHookAPIToken(dataDir, connectorName string) (string, error) {
 	}
 	tok, err := readSecureHookAPITokenFile(dataDir, tokenPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return "", nil
 		}
 		return "", err
@@ -150,7 +157,7 @@ func normalizeHookAPITokenScope(connectorName string) (string, error) {
 }
 
 func readSecureHookAPITokenFile(dataDir, path string) (string, error) {
-	if err := validateOTLPPathTokenLocation(dataDir, path); err != nil {
+	if err := validateHookAPITokenLocation(dataDir, path); err != nil {
 		return "", err
 	}
 	info, err := os.Lstat(path)
@@ -187,4 +194,18 @@ func readSecureHookAPITokenFile(dataDir, path string) (string, error) {
 		return "", fmt.Errorf("hook API token %s is not a 64-character lowercase hex token", path)
 	}
 	return tok, nil
+}
+
+func validateHookAPITokenLocation(dataDir, tokenPath string) error {
+	if err := validateOTLPPathTokenLocation(dataDir, tokenPath); err != nil {
+		return err
+	}
+	if err := hookAPIValidateDirectory(dataDir); err != nil {
+		return fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
+	}
+	hooksDir := filepath.Dir(tokenPath)
+	if err := hookAPIValidateDirectory(hooksDir); err != nil {
+		return fmt.Errorf("hook API token directory %s is not trusted: %w", hooksDir, err)
+	}
+	return nil
 }

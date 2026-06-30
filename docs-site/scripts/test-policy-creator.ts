@@ -563,6 +563,27 @@ test('emit: rejects command-injection characters in custom Rego names', () => {
   assert.throws(() => emit(policy), /custom Rego name must contain only/);
 });
 
+test('emit: rejects surrounding whitespace in names used by install-script comments', () => {
+  assert.throws(
+    () => emit(makePolicy({ name: 'safe-policy\n' })),
+    /policy name must not have leading or trailing whitespace/,
+  );
+  const policy = makePolicy({
+    judges: [
+      {
+        name: 'safe-judge\n',
+        enabled: true,
+        system_prompt: 'Inspect the request.',
+        categories: {},
+      },
+    ] as unknown as Policy['judges'],
+  });
+  assert.throws(
+    () => emit(policy),
+    /judge name must not have leading or trailing whitespace/,
+  );
+});
+
 test('emit: empty custom_rego source is skipped', () => {
   const policy = makePolicy({
     custom_rego: [{ name: 'no-op', package: 'defenseclaw.custom.no_op', description: 'placeholder', source: '   \n  \n' }],

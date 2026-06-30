@@ -22,7 +22,7 @@ Set `deployment_mode: managed_enterprise` when DefenseClaw is installed as an op
 | --- | --- | --- | --- |
 | Binaries | `/opt/defenseclaw/bin` | `/Library/DefenseClaw/bin` | root/admin |
 | Config | `/etc/defenseclaw/config.yaml` | `/Library/Application Support/DefenseClaw/config.yaml` | root/admin |
-| Runtime state | `/var/lib/defenseclaw` | `/Library/Application Support/DefenseClaw` | service identity |
+| Runtime state | `/var/lib/defenseclaw` | `/Library/Application Support/DefenseClaw/runtime` | `defenseclaw` service identity |
 | Logs | `/var/log/defenseclaw` | `/Library/Logs/DefenseClaw` | service identity |
 | Linux service | `/etc/systemd/system/defenseclaw-gateway.service` | n/a | root |
 | macOS service | n/a | `/Library/LaunchDaemons/com.defenseclaw.gateway.plist` | root |
@@ -131,7 +131,7 @@ Then run the template unit:
 sudo systemctl start defenseclaw-hook-guardian@ubuntu.service
 ```
 
-Run one guardian invocation per user and connector. The template intentionally has narrower scope than a full root shell: it runs as root so it can repair user-owned files, sets `UMask=0077`, and limits its capability bounding set to ownership and DAC file access (`CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`). It needs write access to user homes so it can repair hook files and to `/var/lib/defenseclaw` so the shared CLI startup can open the audit DB and write guardian state. Do not remove `ProtectHome=true` from the always-on gateway service to solve per-user hooks.
+Run one guardian invocation per user and connector. The template intentionally has narrower scope than a full root shell: it runs as root so it can repair user-owned files, sets `UMask=0077`, and limits its capability bounding set to ownership, DAC file access, and the credential drop used for per-user setup (`CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_SETGID`, `CAP_SETUID`). It needs write access to user homes so it can repair hook files and to `/var/lib/defenseclaw` so the shared CLI startup can open the audit DB and write guardian state. Do not remove `ProtectHome=true` from the always-on gateway service to solve per-user hooks.
 
 For periodic multi-user repair, create an explicit allow-list at `/etc/defenseclaw/hook-guardian/targets.yaml`:
 
@@ -165,19 +165,27 @@ Each reconcile run writes `/var/lib/defenseclaw/hook_guardian_state.json`. `defe
 
 ## macOS LaunchDaemon layout
 
-Install the binary under `/Library/DefenseClaw/bin`, create `/Library/Application Support/DefenseClaw/config.yaml`, then install `packaging/launchd/com.defenseclaw.gateway.plist` into `/Library/LaunchDaemons/`.
+Install the binary under `/Library/DefenseClaw/bin`, create the managed config and guardian manifest under `/Library/Application Support/DefenseClaw`, then install both packaged LaunchDaemons. Create the `defenseclaw` service account and group before running these commands. The managed config must set `data_dir: "/Library/Application Support/DefenseClaw/runtime"` so mutable service state stays separate from the administrator-owned config.
 
 ```bash
 sudo install -d -o root -g wheel -m 0755 /Library/DefenseClaw/bin
-sudo install -d -o root -g wheel -m 0750 "/Library/Application Support/DefenseClaw"
-sudo install -d -o root -g wheel -m 0750 /Library/Logs/DefenseClaw
+sudo install -d -o root -g defenseclaw -m 0750 "/Library/Application Support/DefenseClaw"
+sudo install -d -o defenseclaw -g defenseclaw -m 0750 "/Library/Application Support/DefenseClaw/runtime"
+sudo install -d -o root -g defenseclaw -m 0750 "/Library/Application Support/DefenseClaw/hook-guardian"
+sudo install -d -o root -g defenseclaw -m 0750 "/Library/Application Support/DefenseClaw/hook-guardian-state"
+sudo install -d -o defenseclaw -g defenseclaw -m 0750 /Library/Logs/DefenseClaw
 sudo install -o root -g wheel -m 0755 defenseclaw-gateway /Library/DefenseClaw/bin/defenseclaw-gateway
+sudo install -o root -g defenseclaw -m 0640 config.yaml "/Library/Application Support/DefenseClaw/config.yaml"
+sudo install -o root -g defenseclaw -m 0640 packaging/systemd/hook-guardian-targets.example.yaml "/Library/Application Support/DefenseClaw/hook-guardian/targets.yaml"
 sudo install -o root -g wheel -m 0644 packaging/launchd/com.defenseclaw.gateway.plist /Library/LaunchDaemons/com.defenseclaw.gateway.plist
+sudo install -o root -g wheel -m 0644 packaging/launchd/com.defenseclaw.hook-guardian.plist /Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.defenseclaw.gateway.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist
 sudo launchctl enable system/com.defenseclaw.gateway
+sudo launchctl enable system/com.defenseclaw.hook-guardian
 ```
 
-The LaunchDaemon pins `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, `WorkingDirectory`, and `Umask=077`. It should be installed in the system domain from an administrator shell so standard users cannot unload it or replace its plist.
+The gateway LaunchDaemon runs as `defenseclaw:defenseclaw`; the root-owned base directory and config are group-readable, while runtime and log directories are service-owned. `/Library/Application Support/DefenseClaw/hook-guardian-state` is the root-owned authorization-record directory selected by `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`; it is distinct from `hook_guardian_state.json`, which the guardian writes under the configured `data_dir`. The hook guardian remains a separate privileged job so it can drop credentials and repair explicitly allow-listed user hooks. Both jobs pin `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, `WorkingDirectory`, and `Umask=077`, and both should be installed in the system domain from an administrator shell.
 
 ## Security behavior
 
@@ -185,7 +193,7 @@ Managed mode changes the runtime contract:
 
 - `config.yaml` is the only live configuration source.
 - The gateway validates managed config ownership and permissions before loading.
-- `/v1/guardrail/config` PATCH is rejected in managed mode; administrators edit the managed config file and let hot reload apply it.
+- `/v1/guardrail/config` PATCH is rejected in managed mode; administrators edit the managed config file. Hot reload applies the explicitly reloadable observability, sink, webhook, notification, and identity-metadata fields. Connector topology, gateway listeners, deployment/storage identity, scanners, policies, and other substantive runtime changes require a service restart; `gateway.config_reload.mode: restart` makes that the default for managed edits.
 - Standard users cannot stop a system service, edit root-owned binaries, or write to administrator-owned config and policy files.
 - Hook credentials written into user-space agent configs must be scoped to hook submission only; never use a machine admin token in user-readable hook files.
 - The gateway service sandbox intentionally prevents broad host mutation. Per-user hook installation and repair belong to the guardian, MDM, or endpoint-management layer.

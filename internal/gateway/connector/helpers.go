@@ -28,15 +28,19 @@ import (
 	"sync"
 )
 
-var userHomeOverrideMu sync.Mutex
+var userHomeOverrideSessionMu sync.Mutex
+var userHomeOverrideMu sync.RWMutex
 var userHomeOverride string
 
 // userHomeDir returns the current user's home directory in a cross-platform
 // way. It prefers os.UserHomeDir() (which uses USERPROFILE on Windows,
 // HOME on Unix) and falls back to os.Getenv("HOME") for legacy compatibility.
 func userHomeDir() string {
-	if strings.TrimSpace(userHomeOverride) != "" {
-		return userHomeOverride
+	userHomeOverrideMu.RLock()
+	override := strings.TrimSpace(userHomeOverride)
+	userHomeOverrideMu.RUnlock()
+	if override != "" {
+		return override
 	}
 	if h, err := os.UserHomeDir(); err == nil && h != "" {
 		return h
@@ -53,11 +57,18 @@ func WithUserHomeDir(home string, fn func() error) error {
 	if home == "" {
 		return fmt.Errorf("connector: user home override is empty")
 	}
+	userHomeOverrideSessionMu.Lock()
+	defer userHomeOverrideSessionMu.Unlock()
+
 	userHomeOverrideMu.Lock()
-	defer userHomeOverrideMu.Unlock()
 	prev := userHomeOverride
 	userHomeOverride = home
-	defer func() { userHomeOverride = prev }()
+	userHomeOverrideMu.Unlock()
+	defer func() {
+		userHomeOverrideMu.Lock()
+		userHomeOverride = prev
+		userHomeOverrideMu.Unlock()
+	}()
 	return fn()
 }
 

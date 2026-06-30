@@ -5,7 +5,9 @@
 package enterprisehooks
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -37,8 +39,20 @@ func LoadManifest(path string) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("enterprise hooks: read manifest %s: %w", path, err)
 	}
 	var manifest Manifest
-	if err := yaml.Unmarshal(data, &manifest); err != nil {
-		return Manifest{}, fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, err)
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	decodeErr := decoder.Decode(&manifest)
+	if decodeErr != nil && decodeErr != io.EOF {
+		return Manifest{}, fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, decodeErr)
+	}
+	if decodeErr == nil {
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			if err == nil {
+				err = fmt.Errorf("multiple YAML documents are not allowed")
+			}
+			return Manifest{}, fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, err)
+		}
 	}
 	if manifest.Version == 0 {
 		manifest.Version = 1

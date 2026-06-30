@@ -423,6 +423,100 @@ class TrustedPathsCliTests(unittest.TestCase):
             dotenv = cmd_setup._load_dotenv(os.path.join(tmp, ".env"))
             self.assertNotIn(newdir, dotenv.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", ""))
 
+    def test_remove_validates_legacy_dotenv_before_config_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            newdir = os.path.join(tmp, "tools")
+            os.makedirs(newdir)
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
+                self.runner.invoke(cmd_setup.trusted_paths, ["add", newdir], obj=app)
+                with open(os.path.join(tmp, ".env"), "wb") as handle:
+                    handle.write(b"\xff")
+                result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", newdir], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            body = yaml.safe_load(open(os.path.join(tmp, "config.yaml"), encoding="utf-8")) or {}
+            self.assertIn(os.path.realpath(newdir), body.get("ai_discovery", {}).get("trusted_binary_prefixes", []))
+
+    def test_remove_restores_exact_dotenv_when_config_save_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            newdir = os.path.join(tmp, "tools")
+            os.makedirs(newdir)
+            resolved = os.path.realpath(newdir)
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
+                self.runner.invoke(cmd_setup.trusted_paths, ["add", newdir], obj=app)
+                dotenv_path = os.path.join(tmp, ".env")
+                original = f"# preserve me\nOTHER='quoted value'\nDEFENSECLAW_TRUSTED_BIN_PREFIXES={resolved}\n".encode()
+                with open(dotenv_path, "wb") as handle:
+                    handle.write(original)
+                os.chmod(dotenv_path, 0o640)
+                config_path = os.path.join(tmp, "config.yaml")
+                with open(config_path, "rb") as handle:
+                    config_before = handle.read()
+                with patch.object(app.cfg, "save", side_effect=OSError("config save failed")):
+                    result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", newdir], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            with open(dotenv_path, "rb") as handle:
+                self.assertEqual(handle.read(), original)
+            if os.name != "nt":
+                self.assertEqual(os.stat(dotenv_path).st_mode & 0o777, 0o640)
+            self.assertIn(resolved, app.cfg.ai_discovery.trusted_binary_prefixes)
+            with open(config_path, "rb") as handle:
+                self.assertEqual(handle.read(), config_before)
+            body = yaml.safe_load(open(os.path.join(tmp, "config.yaml"), encoding="utf-8")) or {}
+            self.assertIn(resolved, body.get("ai_discovery", {}).get("trusted_binary_prefixes", []))
+
+    def test_remove_restores_exact_dotenv_when_dotenv_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            newdir = os.path.join(tmp, "tools")
+            os.makedirs(newdir)
+            resolved = os.path.realpath(newdir)
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
+                self.runner.invoke(cmd_setup.trusted_paths, ["add", newdir], obj=app)
+                dotenv_path = os.path.join(tmp, ".env")
+                original = f"# preserve me\nDEFENSECLAW_TRUSTED_BIN_PREFIXES={resolved}\n".encode()
+                with open(dotenv_path, "wb") as handle:
+                    handle.write(original)
+                os.chmod(dotenv_path, 0o640)
+                config_path = os.path.join(tmp, "config.yaml")
+                with open(config_path, "rb") as handle:
+                    config_before = handle.read()
+
+                def partial_write(path, _entries):
+                    with open(path, "wb") as handle:
+                        handle.write(b"partial")
+                    raise OSError("dotenv write failed")
+
+                with patch.object(cmd_setup, "_write_dotenv", side_effect=partial_write):
+                    result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", newdir], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            with open(dotenv_path, "rb") as handle:
+                self.assertEqual(handle.read(), original)
+            if os.name != "nt":
+                self.assertEqual(os.stat(dotenv_path).st_mode & 0o777, 0o640)
+            self.assertIn(resolved, app.cfg.ai_discovery.trusted_binary_prefixes)
+            with open(config_path, "rb") as handle:
+                self.assertEqual(handle.read(), config_before)
+
+    def test_restore_dotenv_preserves_zero_mode(self):
+        if os.name == "nt":
+            self.skipTest("Windows does not preserve POSIX mode bits")
+        with tempfile.TemporaryDirectory() as tmp:
+            dotenv_path = os.path.join(tmp, ".env")
+            cmd_setup._restore_dotenv_snapshot(dotenv_path, b"SECRET=value\n", 0)
+            self.assertEqual(os.stat(dotenv_path).st_mode & 0o777, 0)
+
+    @unittest.skipIf(os.name == "nt", "mkfifo is unavailable on Windows")
+    def test_dotenv_snapshot_and_restore_reject_fifo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dotenv_path = os.path.join(tmp, ".env")
+            os.mkfifo(dotenv_path)
+            with self.assertRaisesRegex(OSError, "not a regular file"):
+                cmd_setup._snapshot_dotenv(dotenv_path)
+            with self.assertRaisesRegex(OSError, "not a regular file"):
+                cmd_setup._restore_dotenv_snapshot(dotenv_path, b"SECRET=value\n", 0o600)
+
     def test_remove_builtin_default_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)

@@ -1,0 +1,157 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package connector
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"golang.org/x/sys/windows"
+)
+
+func TestHookAPITokenWindowsRejectsUntrustedDirectoryACL(t *testing.T) {
+	assertHookAPITokenRejectedByEnsureAndLoad(t, "untrusted Windows principal", func(t *testing.T) string {
+		dataDir := t.TempDir()
+		if _, err := EnsureHookAPIToken(dataDir, "codex"); err != nil {
+			t.Fatalf("seed token: %v", err)
+		}
+		currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+		if err != nil {
+			t.Fatalf("current token user: %v", err)
+		}
+		everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+		if err != nil {
+			t.Fatalf("Everyone SID: %v", err)
+		}
+		entries := []windows.EXPLICIT_ACCESS{
+			{
+				AccessPermissions: windows.GENERIC_ALL,
+				AccessMode:        windows.GRANT_ACCESS,
+				Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+				Trustee: windows.TRUSTEE{
+					TrusteeForm:  windows.TRUSTEE_IS_SID,
+					TrusteeType:  windows.TRUSTEE_IS_USER,
+					TrusteeValue: windows.TrusteeValueFromSID(currentUser.User.Sid),
+				},
+			},
+			{
+				AccessPermissions: windows.GENERIC_WRITE,
+				AccessMode:        windows.GRANT_ACCESS,
+				Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+				Trustee: windows.TRUSTEE{
+					TrusteeForm:  windows.TRUSTEE_IS_SID,
+					TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+					TrusteeValue: windows.TrusteeValueFromSID(everyone),
+				},
+			},
+		}
+		acl, err := windows.ACLFromEntries(entries, nil)
+		if err != nil {
+			t.Fatalf("build DACL: %v", err)
+		}
+		hooksDir := filepath.Join(dataDir, "hooks")
+		if err := windows.SetNamedSecurityInfo(
+			hooksDir,
+			windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil,
+			nil,
+			acl,
+			nil,
+		); err != nil {
+			t.Fatalf("set untrusted DACL: %v", err)
+		}
+		return dataDir
+	})
+}
+
+func TestHookAPITokenWindowsAllowsReadOnlyUnsupportedAllowACE(t *testing.T) {
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatalf("Everyone SID: %v", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_READ,
+		AccessMode:        windows.GRANT_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(everyone),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("build DACL: %v", err)
+	}
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(acl, 0, &ace); err != nil {
+		t.Fatalf("get ACE: %v", err)
+	}
+	ace.Header.AceType = 0x5
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, false, true); err != nil {
+		t.Fatalf("read-only unsupported allow ACE was rejected: %v", err)
+	}
+}
+
+func TestHookAPITokenWindowsAllowsInheritOnlyCreatorOwnerTemplate(t *testing.T) {
+	creatorOwner, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerSid)
+	if err != nil {
+		t.Fatalf("Creator Owner SID: %v", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_WRITE,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT | windows.INHERIT_ONLY,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(creatorOwner),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("build DACL: %v", err)
+	}
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, true, true); err != nil {
+		t.Fatalf("inherit-only Creator Owner template was rejected: %v", err)
+	}
+}
+
+func TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor(t *testing.T) {
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatalf("Everyone SID: %v", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.FILE_WRITE_DATA,
+		AccessMode:        windows.GRANT_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(everyone),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("build DACL: %v", err)
+	}
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err != nil {
+		t.Fatalf("shared ancestor create-child permission was rejected: %v", err)
+	}
+}
+
+func TestHookAPITokenWindowsRejectsReparsePointDirectory(t *testing.T) {
+	assertHookAPITokenRejectedByEnsureAndLoad(t, "reparse points are not allowed", func(t *testing.T) string {
+		dataDir := t.TempDir()
+		targetDataDir := t.TempDir()
+		if _, err := EnsureHookAPIToken(targetDataDir, "codex"); err != nil {
+			t.Fatalf("seed target token: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(targetDataDir, "hooks"), filepath.Join(dataDir, "hooks")); err != nil {
+			t.Skipf("Windows symlink privilege unavailable: %v", err)
+		}
+		return dataDir
+	})
+}

@@ -2548,11 +2548,10 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	if !s.currentConfig().Guardrail.Enabled {
 		failedTeardown := append([]string(nil), failedRemoved...)
 		for _, conn := range conns {
-			opts := s.connectorSetupOpts(conn, apiToken, proxyAddr, apiAddr)
-			if err := conn.Teardown(ctx, opts); err != nil {
+			if err := conn.Teardown(ctx, baseOpts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] connector %s teardown: %v\n", conn.Name(), err)
 			}
-			if err := conn.VerifyClean(opts); err != nil {
+			if err := conn.VerifyClean(baseOpts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
 				failedTeardown = append(failedTeardown, conn.Name())
 				continue
@@ -2617,7 +2616,11 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// rule pack is loaded/validated through the shared cache so connectors
 	// sharing a profile read disk once.
 	cache := guardrail.NewRulePackCache()
-	succeeded := s.setupConnectorsIsolated(ctx, conns, apiToken, proxyAddr, apiAddr, masterKey, cache)
+	succeeded, setupErr := s.setupConnectorsIsolated(ctx, conns, apiToken, proxyAddr, apiAddr, masterKey, cache)
+	if setupErr != nil {
+		s.health.SetGuardrail(StateError, setupErr.Error(), nil)
+		return setupErr
+	}
 
 	// Persist the set that actually came up so the next boot's
 	// set-difference teardown is accurate.
@@ -2644,7 +2647,11 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		return err
 	}
 
-	hookGuards := s.startMultiHookConfigGuards(ctx, registry, succeeded, apiToken, proxyAddr, apiAddr)
+	hookGuards, err := s.startMultiHookConfigGuards(ctx, registry, succeeded, apiToken, proxyAddr, apiAddr)
+	if err != nil {
+		s.health.SetGuardrail(StateError, err.Error(), nil)
+		return err
+	}
 	defer stopHookConfigGuards(hookGuards)
 
 	// Health: register every connector that came up so each appears in the
@@ -2705,18 +2712,32 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 		return nil
 	}
 
-	cache := guardrail.NewRulePackCache()
-	succeeded := make([]string, 0, len(conns))
+	type managedConnectorRegistration struct {
+		conn connector.Connector
+		opts connector.SetupOpts
+	}
+	registrations := make([]managedConnectorRegistration, 0, len(conns))
 	for _, conn := range conns {
-		opts := s.connectorSetupOpts(conn, apiToken, proxyAddr, apiAddr)
-		conn.SetCredentials(opts.APIToken, masterKey)
-		rp := cache.Load(s.currentConfig().EffectiveRulePackDirForConnector(conn.Name()))
+		opts, setupErr := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
+		if setupErr != nil {
+			err := fmt.Errorf("connector %s scoped hook token: %w", conn.Name(), setupErr)
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return err
+		}
+		registrations = append(registrations, managedConnectorRegistration{conn: conn, opts: opts})
+	}
+
+	cache := guardrail.NewRulePackCache()
+	succeeded := make([]string, 0, len(registrations))
+	for _, registration := range registrations {
+		registration.conn.SetCredentials(registration.opts.APIToken, masterKey)
+		rp := cache.Load(s.currentConfig().EffectiveRulePackDirForConnector(registration.conn.Name()))
 		if rp != nil {
 			rp.Validate()
 		}
-		ApplyConnectorRulePackOverrides(conn.Name(), rp)
-		succeeded = append(succeeded, conn.Name())
-		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: registered %s for hook evaluation; lifecycle is owned by enterprise hook guardian\n", conn.Name())
+		ApplyConnectorRulePackOverrides(registration.conn.Name(), rp)
+		succeeded = append(succeeded, registration.conn.Name())
+		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: registered %s for hook evaluation; lifecycle is owned by enterprise hook guardian\n", registration.conn.Name())
 	}
 
 	for _, name := range succeeded {
@@ -2817,13 +2838,17 @@ func connectorNames(conns []connector.Connector) []string {
 	return names
 }
 
+var newSidecarHookConfigGuard = func(sidecar *Sidecar, debounce time.Duration) *HookConfigGuard {
+	return NewHookConfigGuard(sidecar.logger, sidecar.otel, debounce)
+}
+
 // startMultiHookConfigGuards starts one hook self-heal guard per connector
 // that successfully came up in multi-connector mode. The single-connector path
 // owns its guard through GuardrailProxy; multi-connector mode has no proxy, so
 // the sidecar owns these guards directly.
-func (s *Sidecar) startMultiHookConfigGuards(ctx context.Context, registry *connector.Registry, connectorNames []string, apiToken, proxyAddr, apiAddr string) []*HookConfigGuard {
+func (s *Sidecar) startMultiHookConfigGuards(ctx context.Context, registry *connector.Registry, connectorNames []string, apiToken, proxyAddr, apiAddr string) ([]*HookConfigGuard, error) {
 	if s == nil || s.currentConfig() == nil || registry == nil || !s.currentConfig().Guardrail.Enabled || !s.currentConfig().Guardrail.HookSelfHeal {
-		return nil
+		return nil, nil
 	}
 	debounce := time.Duration(s.currentConfig().Guardrail.HookSelfHealDebounceMs) * time.Millisecond
 	guards := make([]*HookConfigGuard, 0, len(connectorNames))
@@ -2833,13 +2858,17 @@ func (s *Sidecar) startMultiHookConfigGuards(ctx context.Context, registry *conn
 			fmt.Fprintf(os.Stderr, "[guardrail] hook self-heal: connector %s not found in registry, skipping guard\n", name)
 			continue
 		}
-		opts := s.connectorSetupOpts(conn, apiToken, proxyAddr, apiAddr)
-		guard := NewHookConfigGuard(s.logger, s.otel, debounce)
+		opts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
+		if err != nil {
+			stopHookConfigGuards(guards)
+			return nil, fmt.Errorf("hook self-heal connector %s scoped hook token: %w", conn.Name(), err)
+		}
+		guard := newSidecarHookConfigGuard(s, debounce)
 		guard.SetHealNotifier(s.notifyHookHealed)
 		guard.Start(ctx, conn, opts)
 		guards = append(guards, guard)
 	}
-	return guards
+	return guards, nil
 }
 
 func stopHookConfigGuards(guards []*HookConfigGuard) {
@@ -2871,39 +2900,37 @@ func (s *Sidecar) notifyHookHealed(connectorName string, paths []string) {
 
 // setupConnectorsIsolated runs setupOneConnector for each connector in turn
 // and returns the names that came up cleanly. It is the heart of the DN1
-// failure-isolation guarantee: a connector whose setup fails is logged and
-// skipped, and the remaining connectors are set up regardless, so one
-// connector's failure can never cascade and take the others down. The order
+// failure-isolation guarantee: scoped tokens are preflighted for every
+// connector before setup mutates state; after that, a connector whose setup
+// fails is logged and skipped while remaining connectors continue. The order
 // of the returned slice matches the input order (sorted by the caller).
-func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector.Connector, apiToken, proxyAddr, apiAddr, masterKey string, cache *guardrail.RulePackCache) []string {
-	succeeded := make([]string, 0, len(conns))
+func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector.Connector, apiToken, proxyAddr, apiAddr, masterKey string, cache *guardrail.RulePackCache) ([]string, error) {
+	type connectorRegistration struct {
+		conn connector.Connector
+		opts connector.SetupOpts
+	}
+	registrations := make([]connectorRegistration, 0, len(conns))
 	for _, conn := range conns {
 		opts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s scoped hook token failed, skipping: %v\n", conn.Name(), err)
-			continue
+			return nil, fmt.Errorf("connector %s scoped hook token: %w", conn.Name(), err)
 		}
-		if err := s.setupOneConnector(ctx, conn, opts, masterKey, cache); err != nil {
+		registrations = append(registrations, connectorRegistration{conn: conn, opts: opts})
+	}
+
+	succeeded := make([]string, 0, len(registrations))
+	for _, registration := range registrations {
+		if err := s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache); err != nil {
 			// Isolate: roll back this connector's partial state, log, leave
 			// the other connectors untouched, continue.
-			recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
-			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", conn.Name(), err)
+			recordAndRollbackFailedConnectorSetup(registration.conn, registration.opts, ctx)
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", registration.conn.Name(), err)
 			continue
 		}
-		succeeded = append(succeeded, conn.Name())
-		fmt.Fprintf(os.Stderr, "[guardrail] connector ready: %s (%s)\n", conn.Name(), conn.Description())
+		succeeded = append(succeeded, registration.conn.Name())
+		fmt.Fprintf(os.Stderr, "[guardrail] connector ready: %s (%s)\n", registration.conn.Name(), registration.conn.Description())
 	}
-	return succeeded
-}
-
-// connectorSetupOpts builds the per-connector SetupOpts for the
-// multi-connector boot loop. It mirrors the single-connector setupOpts
-// construction in runGuardrail but resolves the fail mode per connector via
-// EffectiveHookFailModeFor so a per-connector hook_fail_mode override is
-// honored.
-func (s *Sidecar) connectorSetupOpts(conn connector.Connector, apiToken, proxyAddr, apiAddr string) connector.SetupOpts {
-	opts, _ := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
-	return opts
+	return succeeded, nil
 }
 
 func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, proxyAddr, apiAddr string) (connector.SetupOpts, error) {

@@ -74,6 +74,7 @@ DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
 CONFIG_FILE_NAME = "config.yaml"
 CONFIG_PATH_ENV = "DEFENSECLAW_CONFIG"
+DEPLOYMENT_MODE_ENV = "DEFENSECLAW_DEPLOYMENT_MODE"
 VALID_DEPLOYMENT_MODES = {
     "managed_enterprise",
     "unmanaged_byod",
@@ -281,8 +282,15 @@ def _is_managed_enterprise_doc(data: dict[str, Any] | None) -> bool:
         return False
 
 
+def _is_managed_enterprise_mode(value: str | None) -> bool:
+    try:
+        return _validate_deployment_mode(str(value or "")) == "managed_enterprise"
+    except ValueError:
+        return False
+
+
 def _assert_config_write_allowed(path: str, data: dict[str, Any] | None = None) -> None:
-    managed = _is_managed_enterprise_doc(data)
+    managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_doc(data)
     if not managed:
         try:
             managed = _is_managed_enterprise_doc(_load_existing_config_yaml(path))
@@ -2611,7 +2619,10 @@ def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
     except OSError:
         return
     try:
-        os.fsync(dir_fd)
+        try:
+            os.fsync(dir_fd)
+        except OSError as exc:
+            _log.warning("config.save: directory fsync failed after atomic replace of %s: %s", path, exc)
     finally:
         os.close(dir_fd)
 

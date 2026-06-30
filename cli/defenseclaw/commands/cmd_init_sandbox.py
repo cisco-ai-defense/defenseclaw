@@ -28,19 +28,20 @@ def _trusted_system_command(name: str) -> str | None:
         return None
     for directory in _TRUSTED_SYSTEM_DIRS:
         candidate = os.path.join(directory, name)
-        try:
-            resolved = os.path.realpath(candidate)
-            info = os.stat(resolved)
-        except OSError:
-            continue
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0:
-            continue
-        if stat.S_IMODE(info.st_mode) & 0o022:
-            continue
-        if not os.access(resolved, os.X_OK):
+        resolved = _trusted_root_owned_file(candidate, allow_symlinks=True)
+        if not resolved or not os.access(resolved, os.X_OK):
             continue
         return resolved
     return None
+
+
+def _trusted_privileged_argv(name: str, *args: str) -> list[str]:
+    """Build a privileged argv with every executable resolved securely."""
+    helper = _trusted_system_command(name)
+    trusted_helper = _trusted_root_owned_file(helper, allow_symlinks=True) if helper else None
+    if not trusted_helper or trusted_helper != helper or not os.access(trusted_helper, os.X_OK):
+        raise click.ClickException(f"trusted system {name} binary not found")
+    return [*_sudo_prefix(), trusted_helper, *args]
 
 
 def _needs_sudo() -> bool:
@@ -69,10 +70,15 @@ def _ensure_sudo_cache() -> None:
     """
     if not _needs_sudo():
         return
-    result = subprocess.run(["sudo", "-n", "true"], capture_output=True)
+    sudo = _trusted_system_command("sudo")
+    if not sudo:
+        raise click.ClickException("trusted system sudo binary not found")
+    result = subprocess.run([sudo, "-n", "true"], capture_output=True)
     if result.returncode == 0:
         return
-    subprocess.run(["sudo", "-v"], check=False)
+    result = subprocess.run([sudo, "-v"], check=False)
+    if result.returncode != 0:
+        raise click.ClickException("sudo authentication failed")
 
 
 def _sudo_write(content: str, path: str, mode: int = 0o644) -> bool:
@@ -84,13 +90,19 @@ def _sudo_write(content: str, path: str, mode: int = 0o644) -> bool:
         os.chmod(path, mode)
         return True
     result = subprocess.run(
-        ["sudo", "tee", path],
+        _trusted_privileged_argv("tee", "--", path),
         input=content,
         capture_output=True,
         text=True,
     )
-    if result.returncode == 0 and mode != 0o644:
-        subprocess.run(["sudo", "chmod", oct(mode)[-3:], path], capture_output=True, check=False)
+    if result.returncode == 0:
+        chmod_result = subprocess.run(
+            _trusted_privileged_argv("chmod", f"{mode & 0o7777:o}", "--", path),
+            capture_output=True,
+            check=False,
+        )
+        if chmod_result.returncode != 0:
+            return False
     return result.returncode == 0
 
 
@@ -110,7 +122,7 @@ def _fix_data_dir_ownership(data_dir: str) -> None:
 
         pw = pwd.getpwnam(sudo_user)
         subprocess.run(
-            ["chown", "-R", f"{pw.pw_uid}:{pw.pw_gid}", data_dir],
+            _trusted_privileged_argv("chown", "-R", f"{pw.pw_uid}:{pw.pw_gid}", "--", data_dir),
             capture_output=True,
             check=False,
         )
@@ -236,22 +248,26 @@ def sandbox_init_cmd(app: AppContext) -> None:
 
 def _ensure_iptables() -> None:
     """Install iptables if not present. Required by openshell-sandbox for bypass detection."""
-    if shutil.which("iptables"):
+    if _trusted_system_command("iptables"):
         return
     click.echo("  iptables:      not found, installing...", nl=False)
+    if not _trusted_system_command("apt-get"):
+        click.echo(" failed")
+        click.echo("                 install manually: sudo apt-get install -y iptables")
+        return
     try:
         result = subprocess.run(
-            [*_sudo_prefix(), "apt-get", "install", "-y", "-qq", "iptables"],
+            _trusted_privileged_argv("apt-get", "install", "-y", "-qq", "iptables"),
             capture_output=True,
             text=True,
             timeout=60,
         )
-        if result.returncode == 0 and shutil.which("iptables"):
+        if result.returncode == 0 and _trusted_system_command("iptables"):
             click.echo(" done")
         else:
             click.echo(" failed")
             click.echo("                 install manually: sudo apt-get install -y iptables")
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (click.ClickException, FileNotFoundError, subprocess.TimeoutExpired):
         click.echo(" failed")
         click.echo("                 install manually: sudo apt-get install -y iptables")
 
@@ -298,7 +314,7 @@ def _init_sandbox(cfg, logger) -> bool:
     sandbox_dirs = [os.path.join(sandbox_home, ".defenseclaw")]
     all_exist = all(os.path.isdir(d) for d in sandbox_dirs)
     for d in sandbox_dirs:
-        subprocess.run([*_sudo_prefix(), "mkdir", "-p", d], capture_output=True, check=False)
+        subprocess.run(_trusted_privileged_argv("mkdir", "-p", "--", d), capture_output=True, check=False)
     if all_exist:
         click.echo(f"  Sandbox dirs:  exist at {sandbox_home}")
     else:
@@ -345,7 +361,7 @@ def _init_sandbox(cfg, logger) -> bool:
         return False
     try:
         subprocess.run(
-            [*_sudo_prefix(), "chown", "-R", "sandbox:sandbox", oc_target],
+            _trusted_privileged_argv("chown", "-R", "sandbox:sandbox", "--", oc_target),
             capture_output=True,
             check=False,
         )
@@ -455,7 +471,7 @@ def _ensure_parent_traversal(target_path: str) -> None:
             if not (mode & _stat.S_IXOTH):
                 new_mode = mode | _stat.S_IXOTH
                 result = subprocess.run(
-                    [*_sudo_prefix(), "chmod", oct(new_mode)[-4:], parent],
+                    _trusted_privileged_argv("chmod", f"{new_mode:o}", "--", parent),
                     capture_output=True,
                     check=False,
                 )
@@ -588,7 +604,8 @@ def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
 
     if os.path.isfile(backup_path) and os.path.islink(symlink_path):
         target = os.readlink(symlink_path)
-        real_target = os.path.realpath(target)
+        target_path = target if os.path.isabs(target) else os.path.join(os.path.dirname(symlink_path), target)
+        real_target = os.path.realpath(target_path)
         # F-0162: the idempotency fast-path used to trust whatever
         # $SANDBOX_HOME/.openclaw pointed at. That symlink is
         # attacker-writable, so a local user could repoint it and have the
@@ -596,7 +613,13 @@ def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
         # tree. Pin against the operator-confirmed original home recorded
         # at first integration; refuse (fail closed) on any divergence.
         pinned = _pinned_openclaw_home(cfg)
-        if pinned and real_target != pinned:
+        if not pinned:
+            click.echo(
+                "  OpenClaw:      refusing existing .openclaw integration without a pinned original home.\n"
+                "                 Re-run setup after restoring the trusted configuration backup.",
+            )
+            return False
+        if real_target != pinned:
             click.echo(
                 "  OpenClaw:      refusing to trust existing .openclaw symlink.\n"
                 f"                 {symlink_path} -> {real_target}\n"
@@ -630,12 +653,13 @@ def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
         type=str,
     )
     confirmed_path = os.path.expanduser(confirmed_path.strip())
+    canonical_path = os.path.realpath(confirmed_path)
 
-    if not os.path.isdir(confirmed_path):
+    if not os.path.isdir(canonical_path):
         click.echo(f"  OpenClaw:      path does not exist: {confirmed_path}")
         return False
 
-    if not os.path.isfile(os.path.join(confirmed_path, "openclaw.json")):
+    if not os.path.isfile(os.path.join(canonical_path, "openclaw.json")):
         click.echo(f"  OpenClaw:      no openclaw.json found in {confirmed_path}")
         return False
 
@@ -644,7 +668,7 @@ def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
         return False
 
     try:
-        _save_ownership_backup(confirmed_path, cfg.data_dir)
+        _save_ownership_backup(canonical_path, cfg.data_dir)
         click.echo(f"  Backup:        ownership saved to {backup_path}")
     except OSError as exc:
         click.echo(f"  Backup:        failed ({exc})")
@@ -653,7 +677,9 @@ def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
     try:
         sandbox_pw = _pwd.getpwnam("sandbox")
         result = subprocess.run(
-            [*_sudo_prefix(), "chown", "-R", f"{sandbox_pw.pw_uid}:{sandbox_pw.pw_gid}", confirmed_path],
+            _trusted_privileged_argv(
+                "chown", "-R", f"{sandbox_pw.pw_uid}:{sandbox_pw.pw_gid}", "--", canonical_path
+            ),
             capture_output=True,
             text=True,
         )
@@ -665,27 +691,37 @@ def _integrate_openclaw_home(cfg, sandbox_home: str) -> bool:
         click.echo(f"  Ownership:     failed ({exc})")
         return False
 
-    _ensure_sandbox_acls(confirmed_path)
+    _ensure_sandbox_acls(canonical_path)
 
-    sudo = _sudo_prefix()
+    remove_result = None
     if os.path.isdir(symlink_path) and not os.path.islink(symlink_path):
-        subprocess.run([*sudo, "rm", "-rf", symlink_path], capture_output=True, check=False)
+        remove_result = subprocess.run(
+            _trusted_privileged_argv("rm", "-rf", "--", symlink_path), capture_output=True, text=True, check=False
+        )
     elif os.path.islink(symlink_path):
-        subprocess.run([*sudo, "rm", "-f", symlink_path], capture_output=True, check=False)
+        remove_result = subprocess.run(
+            _trusted_privileged_argv("rm", "-f", "--", symlink_path), capture_output=True, text=True, check=False
+        )
+    if remove_result is not None and remove_result.returncode != 0:
+        click.echo(f"  Symlink:       cleanup failed ({remove_result.stderr.strip()})")
+        return False
 
     result = subprocess.run(
-        [*sudo, "ln", "-sf", os.path.realpath(confirmed_path), symlink_path],
+        _trusted_privileged_argv("ln", "-sf", "--", canonical_path, symlink_path),
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         click.echo(f"  Symlink:       failed ({result.stderr.strip()})")
         return False
+    if not os.path.islink(symlink_path) or os.path.realpath(symlink_path) != canonical_path:
+        click.echo("  Symlink:       failed to create trusted .openclaw link")
+        return False
     click.echo(f"  Symlink:       {symlink_path} -> {confirmed_path}")
 
-    _ensure_parent_traversal(os.path.realpath(confirmed_path))
+    _ensure_parent_traversal(canonical_path)
 
-    cfg.claw.openclaw_home_original = os.path.realpath(confirmed_path)
+    cfg.claw.openclaw_home_original = canonical_path
 
     return True
 
@@ -703,12 +739,14 @@ def _create_sandbox_user(sandbox_home: str) -> None:
 
     try:
         subprocess.run(
-            [*_sudo_prefix(), "groupadd", "-r", "sandbox"],
+            _trusted_privileged_argv("groupadd", "-r", "sandbox"),
             capture_output=True,
             check=False,
         )
         result = subprocess.run(
-            [*_sudo_prefix(), "useradd", "-r", "-g", "sandbox", "-d", sandbox_home, "-m", "-s", "/bin/bash", "sandbox"],
+            _trusted_privileged_argv(
+                "useradd", "-r", "-g", "sandbox", "-d", sandbox_home, "-m", "-s", "/bin/bash", "sandbox"
+            ),
             capture_output=True,
             text=True,
         )
@@ -759,12 +797,19 @@ def _install_plugin_to_sandbox(cfg, sandbox_home: str) -> None:
         click.echo("  Plugin:        not built (run 'make plugin-install' first)")
         return
 
-    sudo = _sudo_prefix()
     try:
         if os.path.isdir(target_dir):
-            subprocess.run([*sudo, "rm", "-rf", target_dir], capture_output=True, check=False)
+            remove_result = subprocess.run(
+                _trusted_privileged_argv("rm", "-rf", "--", target_dir),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if remove_result.returncode != 0:
+                click.echo(f"  Plugin:        failed to remove existing install ({remove_result.stderr.strip()})")
+                return
         result = subprocess.run(
-            [*sudo, "cp", "-r", source_dir, target_dir],
+            _trusted_privileged_argv("cp", "-r", "--", source_dir, target_dir),
             capture_output=True,
             text=True,
         )
@@ -806,19 +851,72 @@ def _copy_openshell_policies(data_dir: str) -> None:
 def _find_installer_script() -> str | None:
     """Locate install-openshell-sandbox.sh.
 
-    Checks: system PATH, then bundled/repo-relative via paths.py.
+    Only the bundled/repo-relative installer is eligible for privileged use;
+    an executable planted on PATH must never become a root-run script.
     """
     from defenseclaw.paths import bundled_install_openshell_script
 
-    on_path = shutil.which("install-openshell-sandbox")
-    if on_path:
-        return on_path
-
     bundled = bundled_install_openshell_script()
     if bundled:
-        return str(bundled)
+        return _trusted_root_owned_file(str(bundled))
 
     return None
+
+
+def _trusted_root_owned_file(path: str, *, allow_symlinks: bool = False) -> str | None:
+    """Accept a privileged file only through a root-owned immutable path."""
+    if not path:
+        return None
+    candidate = os.path.abspath(path)
+    current = candidate
+    for _ in range(40):
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return None
+        if not stat.S_ISLNK(info.st_mode):
+            break
+        if (
+            not allow_symlinks
+            or info.st_uid != 0
+            or not _trusted_root_owned_directory_chain(os.path.dirname(current))
+        ):
+            return None
+        try:
+            target = os.readlink(current)
+        except OSError:
+            return None
+        current = os.path.abspath(
+            target if os.path.isabs(target) else os.path.join(os.path.dirname(current), target)
+        )
+    else:
+        return None
+    if os.path.realpath(current) != current or not _trusted_root_owned_directory_chain(os.path.dirname(current)):
+        return None
+    try:
+        info = os.lstat(current)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
+        return None
+    return current
+
+
+def _trusted_root_owned_directory_chain(path: str) -> bool:
+    current = os.path.abspath(path)
+    while True:
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return False
+        if not stat.S_ISDIR(info.st_mode):
+            return False
+        if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
+            return False
+        parent = os.path.dirname(current)
+        if parent == current:
+            return True
+        current = parent
 
 
 def _install_openshell_sandbox(cfg) -> bool:
@@ -838,7 +936,9 @@ def _install_openshell_sandbox(cfg) -> bool:
     if sandbox_version:
         env["OPENSHELL_VERSION"] = sandbox_version
 
-    cmd = [*_sudo_prefix(), "bash", script, "--install-dir", "/usr/local/bin"]
+    cmd = _trusted_privileged_argv("bash", script, "--install-dir", "/usr/local/bin")
+    if sandbox_version and _needs_sudo():
+        cmd.insert(1, "--preserve-env=OPENSHELL_VERSION")
 
     try:
         result = subprocess.run(

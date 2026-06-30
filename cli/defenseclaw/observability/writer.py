@@ -39,6 +39,7 @@ from __future__ import annotations
 import copy
 import os
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -187,7 +188,8 @@ def apply_preset(
         raise ValueError(f"destination name {dest_name!r} must match {_NAME_RE.pattern}")
 
     cfg_path = str(config_path_for_data_dir(data_dir))
-    with locked_config_yaml(cfg_path):
+    lock = nullcontext() if dry_run else locked_config_yaml(cfg_path)
+    with lock:
         raw = _load_yaml(cfg_path)
         before = copy.deepcopy(raw)
 

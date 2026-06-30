@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -141,14 +142,13 @@ func configFileReferencesHook(path string, needles []string) (bool, error) {
 		if err := yaml.Unmarshal(data, &decoded); err != nil {
 			return false, fmt.Errorf("parse hook config %s: %w", path, err)
 		}
+	case ".toml":
+		if err := toml.Unmarshal(data, &decoded); err != nil {
+			return false, fmt.Errorf("parse hook config %s: %w", path, err)
+		}
 	}
 	if decoded != nil {
 		return structuredHookCommandReferences(decoded, needles), nil
-	}
-	for _, needle := range needles {
-		if needle != "" && bytes.Contains(data, []byte(needle)) {
-			return true, nil
-		}
 	}
 	return false, nil
 }
@@ -164,9 +164,10 @@ func structuredHookCommandReferences(raw interface{}, needles []string) bool {
 	case map[string]interface{}:
 		for key, item := range value {
 			if key == "command" || key == "bash" {
-				command, _ := item.(string)
+				command := strings.TrimSpace(stringValue(item))
 				for _, needle := range needles {
-					if needle != "" && strings.Contains(command, needle) {
+					needle = strings.TrimSpace(needle)
+					if needle != "" && hookCommandMatches(command, needle) {
 						return true
 					}
 				}
@@ -177,4 +178,17 @@ func structuredHookCommandReferences(raw interface{}, needles []string) bool {
 		}
 	}
 	return false
+}
+
+func stringValue(value interface{}) string {
+	text, _ := value.(string)
+	return text
+}
+
+func hookCommandMatches(command, needle string) bool {
+	if strings.HasPrefix(needle, nativeHookFlag) {
+		connectorName := strings.TrimSpace(strings.TrimPrefix(needle, nativeHookFlag))
+		return connectorName != "" && command == hookInvocationCommandFor("windows", connectorName, "")
+	}
+	return command == needle || command == shellWord(needle)
 }

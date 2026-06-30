@@ -382,10 +382,6 @@ func validateUserPathPrefix(home, path string, uid int, label string, includeLea
 	return nil
 }
 
-func validateOptionalExistingUserFile(home, path string, uid int, label string) error {
-	return validateOptionalExistingUserFileRepair(home, path, uid, label, false)
-}
-
 func validateOptionalExistingUserFileRepair(home, path string, uid int, label string, allowRepairSymlink bool) error {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if path == "" {

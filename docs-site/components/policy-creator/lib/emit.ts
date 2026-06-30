@@ -40,7 +40,10 @@ function dump(value: unknown): string {
 }
 
 function safePathComponent(value: string, label: string): string {
-  const normalized = String(value ?? '').trim();
+  const normalized = String(value ?? '');
+  if (normalized.trim() !== normalized) {
+    throw new Error(`${label} must not have leading or trailing whitespace`);
+  }
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(normalized)) {
     throw new Error(`${label} must contain only letters, numbers, underscore, or dash`);
   }
@@ -116,7 +119,7 @@ export function emit(policy: Policy): EmittedFile[] {
     files.push({
       path: `~/.defenseclaw/policies/guardrail/${packName}/rules/${filename}.yaml`,
       contents: dump({ version: 1, category: rf.category, rules: rf.rules }),
-      description: `Rule pack: ${rf.filename}.yaml (${rf.rules.length} rule${rf.rules.length === 1 ? '' : 's'})`,
+      description: `Rule pack: ${filename}.yaml (${rf.rules.length} rule${rf.rules.length === 1 ? '' : 's'})`,
     });
   }
 
@@ -171,7 +174,7 @@ export function emit(policy: Policy): EmittedFile[] {
           : {}),
         categories: judge.categories,
       }),
-      description: `Judge config: ${judge.name}`,
+      description: `Judge config: ${judgeName}`,
     });
   }
 

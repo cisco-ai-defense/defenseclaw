@@ -7,7 +7,30 @@ set -euo pipefail
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
 
-HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
+HOOK_LINK_DEPTH=0
+while [ -L "$HOOK_SOURCE" ]; do
+  HOOK_LINK_DEPTH=$((HOOK_LINK_DEPTH + 1))
+  [ "$HOOK_LINK_DEPTH" -le 40 ] || exit 2
+  HOOK_PARENT="${HOOK_SOURCE%/*}"
+  [ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
+  HOOK_BASE="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
+  if [ -x /usr/bin/readlink ]; then
+    HOOK_TARGET="$(/usr/bin/readlink -- "$HOOK_SOURCE")" || exit 2
+  elif [ -x /bin/readlink ]; then
+    HOOK_TARGET="$(/bin/readlink -- "$HOOK_SOURCE")" || exit 2
+  else
+    exit 2
+  fi
+  case "$HOOK_TARGET" in
+    /*) HOOK_SOURCE="$HOOK_TARGET" ;;
+    *) HOOK_SOURCE="$HOOK_BASE/$HOOK_TARGET" ;;
+  esac
+done
+HOOK_PARENT="${HOOK_SOURCE%/*}"
+[ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
+HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
+unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 {{if .Managed}}
 DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME

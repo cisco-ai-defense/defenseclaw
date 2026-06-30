@@ -26,6 +26,7 @@ import os
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import uuid
@@ -1632,26 +1633,113 @@ def _mask(key: str) -> str:
     return key[:4] + "..." + key[-4:]
 
 
+def _parse_dotenv_lines(lines) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+            v = v[1:-1]
+        if k:
+            result[k] = v
+    return result
+
+
+def _parse_dotenv_snapshot(payload: bytes | None) -> dict[str, str]:
+    if payload is None:
+        return {}
+    return _parse_dotenv_lines(payload.decode().splitlines())
+
+
 def _load_dotenv(path: str) -> dict[str, str]:
     """Read a KEY=VALUE .env file into a dict."""
-    result: dict[str, str] = {}
     try:
         with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k, v = k.strip(), v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
-                    v = v[1:-1]
-                if k:
-                    result[k] = v
+            return _parse_dotenv_lines(f)
+    except FileNotFoundError:
+        return {}
+
+
+def _snapshot_regular_file(path: str, *, what: str) -> tuple[bytes | None, int | None]:
+    reject_symlink(path, what=what)
+    try:
+        _ensure_regular_file(os.lstat(path).st_mode, path)
+    except FileNotFoundError:
+        return None, None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None, None
+    with os.fdopen(fd, "rb") as handle:
+        file_stat = os.fstat(handle.fileno())
+        _ensure_regular_file(file_stat.st_mode, path)
+        mode = file_stat.st_mode & 0o777
+        return handle.read(), mode
+
+
+def _restore_regular_file_snapshot(
+    path: str, payload: bytes | None, mode: int | None, *, what: str
+) -> None:
+    if payload is None:
+        try:
+            _ensure_regular_file(os.lstat(path).st_mode, path)
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        return
+    reject_symlink(path, what=what)
+    try:
+        _ensure_regular_file(os.lstat(path).st_mode, path)
     except FileNotFoundError:
         pass
-    return result
+    restored_mode = mode if mode is not None else 0o600
+    directory = os.path.dirname(path) or "."
+    temp_path = os.path.join(directory, f".{os.path.basename(path)}.restore-{uuid.uuid4().hex}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor_chmod = getattr(os, "fchmod", None)
+    try:
+        fd = os.open(temp_path, flags, restored_mode)
+        with os.fdopen(fd, "wb") as handle:
+            _ensure_regular_file(os.fstat(handle.fileno()).st_mode, temp_path)
+            if descriptor_chmod is not None:
+                descriptor_chmod(handle.fileno(), restored_mode)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if descriptor_chmod is None:
+            os.chmod(temp_path, restored_mode)
+        reject_symlink(path, what=what)
+        try:
+            _ensure_regular_file(os.lstat(path).st_mode, path)
+        except FileNotFoundError:
+            pass
+        os.replace(temp_path, path)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+
+
+def _ensure_regular_file(mode: int, path: str) -> None:
+    if not stat.S_ISREG(mode):
+        raise OSError(f"file is not a regular file: {path}")
+
+
+def _snapshot_dotenv(path: str) -> tuple[bytes | None, int | None]:
+    """Capture exact dotenv bytes and mode for transactional rollback."""
+    return _snapshot_regular_file(path, what="dotenv file")
+
+
+def _restore_dotenv_snapshot(path: str, payload: bytes | None, mode: int | None) -> None:
+    """Restore a dotenv snapshot without normalizing comments or quoting."""
+    _restore_regular_file_snapshot(path, payload, mode, what="dotenv file")
 
 
 def _write_dotenv(path: str, entries: dict[str, str]) -> None:
@@ -1898,24 +1986,42 @@ def trusted_paths_remove(app: AppContext, directory: str, as_json: bool) -> None
     kept_config = [
         e for e in config_entries if e != target and agent_discovery.validate_trusted_prefix(e)[0] != resolved
     ]
-    removed = False
-    if len(kept_config) != len(config_entries):
-        _set_config_trusted_bin_prefixes(app.cfg, kept_config)
-        removed = True
-
     dotenv_path = os.path.join(data_dir, ".env")
-    existing = _load_dotenv(dotenv_path)
+    dotenv_snapshot, dotenv_mode = _snapshot_dotenv(dotenv_path)
+    existing = _parse_dotenv_snapshot(dotenv_snapshot)
     current = existing.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
     entries = [p.strip() for p in current.split(os.pathsep) if p.strip()]
     kept = [e for e in entries if e != target and agent_discovery.validate_trusted_prefix(e)[0] != resolved]
-    if len(kept) != len(entries):
+    config_changed = len(kept_config) != len(config_entries)
+    dotenv_changed = len(kept) != len(entries)
+    if dotenv_changed:
         new_val = os.pathsep.join(kept)
         if new_val:
             existing["DEFENSECLAW_TRUSTED_BIN_PREFIXES"] = new_val
         else:
             existing.pop("DEFENSECLAW_TRUSTED_BIN_PREFIXES", None)
-        _write_dotenv(dotenv_path, existing)
-        removed = True
+
+    removed = config_changed or dotenv_changed
+    try:
+        if dotenv_changed:
+            _write_dotenv(dotenv_path, existing)
+        if config_changed:
+            _set_config_trusted_bin_prefixes(app.cfg, kept_config)
+    except BaseException:
+        rollback_error = None
+        if dotenv_changed:
+            try:
+                _restore_dotenv_snapshot(dotenv_path, dotenv_snapshot, dotenv_mode)
+            except BaseException as exc:
+                if rollback_error is None:
+                    rollback_error = exc
+        if config_changed:
+            ai = getattr(app.cfg, "ai_discovery", None)
+            if ai is not None:
+                ai.trusted_binary_prefixes = config_entries
+        if rollback_error is not None:
+            raise rollback_error
+        raise
 
     process_entries = [
         value.strip()

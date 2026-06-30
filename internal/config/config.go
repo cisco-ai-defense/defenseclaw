@@ -2249,12 +2249,14 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 		}
 		return nil, err
 	}
-	if managed.IsManagedEnterprise(cfg.DeploymentMode) && !managed.IsManagedEnterprise(pinnedDeploymentMode) {
-		if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if !managed.IsManagedEnterprise(pinnedDeploymentMode) {
+			if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
+				if ReportConfigLoadError != nil {
+					ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+				}
+				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
 			}
-			return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
 		}
 		if err := managed.ValidateTrustedRuntimeDir(cfg.DataDir, "managed data_dir"); err != nil {
 			if ReportConfigLoadError != nil {
