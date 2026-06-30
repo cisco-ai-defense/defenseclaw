@@ -29,6 +29,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -4859,6 +4860,7 @@ def _apply_hook_connector_setup(
             cfg.gateway.host,
             cfg.gateway.port,
             connector=connector,
+            wait_for_connector_ready=True,
         )
         click.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
 
@@ -8158,6 +8160,7 @@ def _restart_services(
     oc_port: int = 18789,
     connector: str = "openclaw",
     connectors: list[str] | None = None,
+    wait_for_connector_ready: bool = False,
 ) -> None:
     """Restart defenseclaw-gateway and, when OpenClaw is the selected
     connector, restart the OpenClaw gateway too so it picks up the
@@ -8181,8 +8184,28 @@ def _restart_services(
     # Names of services whose restart failed; non-empty ⇒ fail the command.
     failed: list[str] = []
 
-    if not _restart_defense_gateway(data_dir):
+    hook_targets = sorted(
+        {
+            normalize_connector(name)
+            for name in ((connectors or []) if connectors else [connector])
+            if name and normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
+        }
+    )
+    connector_state_before = (
+        _active_connector_state_marker(data_dir) if wait_for_connector_ready and hook_targets else None
+    )
+
+    gateway_restarted = _restart_defense_gateway(data_dir)
+    if not gateway_restarted:
         failed.append("defenseclaw-gateway")
+
+    if wait_for_connector_ready and hook_targets and gateway_restarted:
+        click.echo("  connector runtime: waiting for verified setup...", nl=False)
+        if _wait_for_connector_runtime(data_dir, hook_targets, connector_state_before):
+            click.echo(" ✓")
+        else:
+            click.echo(" ✗")
+            failed.append("connector runtime readiness")
 
     # Multi-connector global change: every active hook connector is affected
     # by the gateway bounce, so enumerate them rather than naming the primary.
@@ -8228,10 +8251,75 @@ def _fail_if_restart_failed(failed: list[str]) -> None:
     if not failed:
         return
     raise click.ClickException(
-        "gateway restart failed for: " + ", ".join(failed) + ". Config was saved, but services are NOT running the new "
+        "gateway restart/readiness failed for: "
+        + ", ".join(failed)
+        + ". Config was saved, but services are NOT running the new "
         "configuration. Fix the error above and re-run, or start the "
         "gateway manually before relying on enforcement."
     )
+
+
+def _active_connector_state_marker(data_dir: str) -> int | None:
+    state_path = os.path.join(data_dir, "active_connector.json")
+    try:
+        info = os.lstat(state_path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return info.st_mtime_ns
+
+
+def _wait_for_connector_runtime(
+    data_dir: str,
+    connectors: list[str],
+    previous_marker: int | None,
+    timeout: float = 30.0,
+) -> bool:
+    expected = {normalize_connector(name) for name in connectors if name}
+    if not expected:
+        return True
+    state_path = os.path.join(data_dir, "active_connector.json")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        fd: int | None = None
+        try:
+            info = os.lstat(state_path)
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("connector state is not a regular file")
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(state_path, flags)
+            opened_info = os.fstat(fd)
+            if not stat.S_ISREG(opened_info.st_mode):
+                raise OSError("opened connector state is not a regular file")
+            if not os.path.samestat(info, opened_info):
+                raise OSError("connector state changed while opening")
+            state_file = os.fdopen(fd, encoding="utf-8")
+            fd = None
+            with state_file:
+                state = _json.load(state_file)
+        except (OSError, ValueError):
+            time.sleep(0.2)
+            continue
+        finally:
+            if fd is not None:
+                os.close(fd)
+        marker = opened_info.st_mtime_ns
+        raw_names = state.get("names") if isinstance(state, dict) else None
+        if isinstance(raw_names, list):
+            active = {
+                normalize_connector(name)
+                for name in raw_names
+                if isinstance(name, str) and name.strip()
+            }
+        else:
+            name = state.get("name") if isinstance(state, dict) else None
+            active = {normalize_connector(name)} if isinstance(name, str) and name.strip() else set()
+        if expected.issubset(active) and (previous_marker is None or marker != previous_marker):
+            return True
+        time.sleep(0.2)
+    return False
 
 
 def _restart_openclaw_gateway() -> bool:
