@@ -2281,6 +2281,47 @@ function Test-InstallMarker {
     }
 }
 
+function Invoke-Uv {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [switch]$ShowFailureOutput
+    )
+
+    # Windows PowerShell 5.1 turns any native stderr text into an ErrorRecord.
+    # With the installer's global ErrorActionPreference=Stop, harmless uv
+    # progress/status output would therefore abort even when uv exits zero.
+    # Capture both streams under Continue and make the native exit status the
+    # only success criterion. PowerShell 7 does not need the workaround, but
+    # follows the same explicit status contract here.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $output = @()
+    $exitCode = 1
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & uv @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($ShowFailureOutput -and $exitCode -ne 0) {
+        foreach ($line in $output) {
+            Write-Host "    $line" -ForegroundColor DarkGray
+        }
+    }
+    return [int]$exitCode
+}
+
+function Confirm-YesNo {
+    param([string]$Prompt, [string]$Default = "y")
+    if ($Yes) { return $true }
+    $suffix = if ($Default -eq "y") { "[Y/n]" } else { "[y/N]" }
+    $answer = Read-Host "  $Prompt $suffix"
+    if ([string]::IsNullOrWhiteSpace($answer)) { $answer = $Default }
+    return $answer -match '^[Yy]'
+}
+
 function Add-FreshInstallClaim {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -2786,20 +2827,14 @@ function Ensure-Python {
     Write-Step "Checking Python"
     # uv manages an interpreter for the private venv. Do not publish a global
     # executable or Windows registry registration for this internal runtime.
-    $pythonInstallOutput = (& uv python install 3.12 --no-bin --no-registry --quiet 2>&1 |
-        Select-Object -Last 20 | Out-String).Trim()
-    $pythonInstallExitCode = $LASTEXITCODE
+    $pythonInstallExitCode = Invoke-Uv -Arguments @(
+        "python", "install", "3.12", "--no-bin", "--no-registry", "--quiet"
+    ) -ShowFailureOutput
     if ($pythonInstallExitCode -ne 0) {
-        $pythonInstallDetail = if ($pythonInstallOutput) {
-            "`nuv output:`n$pythonInstallOutput"
-        } else {
-            ""
-        }
         Die (
             "Failed to install the managed Python 3.12 runtime. A current uv release " +
             "with --no-bin and --no-registry support is required. Install or update uv " +
-            "from https://docs.astral.sh/uv/getting-started/installation/ and retry." +
-            $pythonInstallDetail
+            "from https://docs.astral.sh/uv/getting-started/installation/ and retry."
         )
     }
     Write-Ok "Python 3.12 (managed by uv)"
@@ -3041,10 +3076,10 @@ function Install-Gateway {
 function Install-Cli {
     Write-Step "Installing DefenseClaw CLI"
     Write-Info "Creating Python environment..."
-    & uv venv $Venv --python 3.12 --quiet 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        & uv venv $Venv --quiet
-        if ($LASTEXITCODE -ne 0) { Die "Failed to create Python virtual environment" }
+    $venvExit = Invoke-Uv -Arguments @("venv", $Venv, "--python", "3.12", "--quiet")
+    if ($venvExit -ne 0) {
+        $venvExit = Invoke-Uv -Arguments @("venv", $Venv, "--quiet") -ShowFailureOutput
+        if ($venvExit -ne 0) { Die "Failed to create Python virtual environment" }
     }
     $venvPython = Join-Path $Venv "Scripts\python.exe"
 
@@ -3066,8 +3101,11 @@ function Install-Cli {
         if($script:ModernRelease){
             Assert-ExactPrivateArtifactDigest -Path $whlPath -ExpectedSha256 $script:WheelInnerSha256 -Label "protected wheel"
         }
-        & uv pip install --python $venvPython --quiet --only-binary litellm $whlPath
-        if ($LASTEXITCODE -ne 0) { Die "Failed to install CLI from wheel" }
+        $pipExit = Invoke-Uv -Arguments @(
+            "pip", "install", "--python", $venvPython, "--quiet",
+            "--only-binary", "litellm", $whlPath
+        ) -ShowFailureOutput
+        if ($pipExit -ne 0) { Die "Failed to install CLI from wheel" }
     } finally {
         Remove-PrivateDirectory -Path $tmp
     }
