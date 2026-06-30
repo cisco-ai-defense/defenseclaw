@@ -233,6 +233,13 @@ class AlertsPanelModel:
         # count; single-connector installs keep defaults (no filter/column).
         self.connector_filter = ""
         self.show_connector_column = False
+        # ``flat_rows`` sorts and expands all three alert sources. The app
+        # asks for that same projection repeatedly in one render (tab badge,
+        # status strip, hint bar, Overview counts), so retain it until a
+        # source or expansion state actually changes.
+        self._flat_rows_cache: tuple[AlertRow, ...] | None = None
+        self._flat_rows_expanded: frozenset[str] = frozenset()
+        self._severity_counts_cache: dict[str, int] | None = None
 
     def set_data_dir(self, data_dir: Path | str | None) -> None:
         """Late-bind the gateway.jsonl source after a config reload."""
@@ -251,7 +258,8 @@ class AlertsPanelModel:
         self.store = store
 
     def set_events(self, events: list[AlertEvent]) -> None:
-        self.audit_events = events
+        self.audit_events = list(events)
+        self._invalidate_row_caches()
         self.apply_filter()
         self.selected_ids.intersection_update(event.id for event in events)
 
@@ -259,8 +267,16 @@ class AlertsPanelModel:
         if self.data_dir is None:
             return
         gateway_path = self.data_dir / "gateway.jsonl"
-        self.scan_blocks = list(load_gateway_scan_blocks(gateway_path))
-        self.egress_events = list(load_gateway_egress(gateway_path))
+        try:
+            scan_blocks = load_gateway_scan_blocks(gateway_path, raise_errors=True)
+            egress_events = load_gateway_egress(gateway_path, raise_errors=True)
+        except OSError:
+            self.apply_filter()
+            return
+        if tuple(self.scan_blocks) != scan_blocks or tuple(self.egress_events) != egress_events:
+            self.scan_blocks = list(scan_blocks)
+            self.egress_events = list(egress_events)
+            self._invalidate_row_caches()
         self.apply_filter()
 
     def refresh(self) -> None:
@@ -269,18 +285,28 @@ class AlertsPanelModel:
         if self.store is not None and hasattr(self.store, "list_alerts"):
             reader = self._store_alert_reader()
             try:
-                self.audit_events = [
+                audit_events = [
                     _coerce_alert_event(event)
                     for event in reader(500)  # type: ignore[misc]
                 ]
             except Exception:  # noqa: BLE001 - missing/partial audit DBs render empty alerts.
-                self.audit_events = []
+                audit_events = []
+            if self.audit_events != audit_events:
+                self.audit_events = audit_events
+                self._invalidate_row_caches()
         if self.data_dir is None:
+            if self.scan_blocks or self.egress_events:
+                self.scan_blocks = []
+                self.egress_events = []
+                self._invalidate_row_caches()
             self.apply_filter()
         else:
             self.refresh_gateway_scans()
 
     def flat_rows(self) -> list[AlertRow]:
+        expanded = frozenset(self.expanded)
+        if self._flat_rows_cache is not None and self._flat_rows_expanded == expanded:
+            return list(self._flat_rows_cache)
         groups: list[tuple[datetime, list[AlertRow]]] = [
             (event.timestamp, [AlertRow("audit", event)]) for event in self.audit_events
         ]
@@ -302,7 +328,15 @@ class AlertsPanelModel:
             event = synthetic_egress_event(egress)
             groups.append((event.timestamp, [AlertRow("egress", event)]))
         groups.sort(key=lambda group: group[0], reverse=True)
-        return [row for _timestamp, rows in groups for row in rows]
+        self._flat_rows_cache = tuple(row for _timestamp, rows in groups for row in rows)
+        self._flat_rows_expanded = expanded
+        self._severity_counts_cache = None
+        return list(self._flat_rows_cache)
+
+    def _invalidate_row_caches(self) -> None:
+        self._flat_rows_cache = None
+        self._flat_rows_expanded = frozenset()
+        self._severity_counts_cache = None
 
     def apply_filter(self) -> None:
         query = self.filter_text.lower()
@@ -397,6 +431,7 @@ class AlertsPanelModel:
                 self.expanded.remove(row.scan_id)
             else:
                 self.expanded.add(row.scan_id)
+            self._invalidate_row_caches()
             self.apply_filter()
             return
         self.detail_open = not self.detail_open
@@ -422,6 +457,8 @@ class AlertsPanelModel:
         return [row.event.id for row in self.filtered if not row.event.id.startswith("gw:")]
 
     def severity_counts(self) -> dict[str, int]:
+        if self._severity_counts_cache is not None:
+            return dict(self._severity_counts_cache)
         counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
         for row in self.flat_rows():
             if row.kind == "scan_finding":
@@ -429,7 +466,8 @@ class AlertsPanelModel:
             bucket = _event_severity_bucket(row.event)
             if bucket in counts:
                 counts[bucket] += 1
-        return counts
+        self._severity_counts_cache = counts
+        return dict(counts)
 
     def alert_count(self) -> int:
         """Return the number of top-level rows represented in Alerts."""

@@ -671,7 +671,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_connector_hook_latency_milliseconds_bucket{le=\"2500.0\"}[5m])) / sum(rate(defenseclaw_connector_hook_latency_milliseconds_bucket{le=\"+Inf\"}[5m])) or vector(0)",
+          "expr": "sum(rate(defenseclaw_connector_hook_latency_milliseconds_bucket{le=\"2500\"}[5m])) / clamp_min(sum(rate(defenseclaw_connector_hook_latency_milliseconds_bucket{le=\"+Inf\"}[5m])), 0.0001) or vector(0)",
           "refId": "A"
         }
       ],
@@ -716,7 +716,7 @@
       },
       "targets": [
         {
-          "expr": "count(group by (connector) (rate(defenseclaw_connector_hook_invocations_total[5m]) > 0)) or count(group by (source) (rate(defenseclaw_otel_ingest_records_total[5m]) > 0)) or vector(0)",
+          "expr": "count((sum by (connector) (rate(defenseclaw_connector_hook_invocations_total[5m])) > 0) or sum by (connector) (label_replace((sum by (source) (rate(defenseclaw_otel_ingest_records_total[5m])) > 0), \"connector\", \"$1\", \"source\", \"(.+)\"))) or vector(0)",
           "refId": "A"
         }
       ],
@@ -1032,7 +1032,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=~\"tool_invocation|llm_prompt|scan_finding|error\"",
+          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type!=\"\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1132,7 +1132,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=~\"tool_invocation|llm_prompt|scan_finding|error\"",
+          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=~\"tool_invocation|llm_prompt|llm_response\"",
           "refId": "A",
           "datasource": {
             "type": "loki",

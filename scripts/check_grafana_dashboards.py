@@ -25,6 +25,64 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIR = ROOT / "bundles/local_observability_stack/grafana/dashboards"
 PACKAGED_DIR = ROOT / "cli/defenseclaw/_data/local_observability_stack/grafana/dashboards"
+SOURCE_DATASOURCES = (
+    ROOT / "bundles/local_observability_stack/grafana/provisioning/datasources/datasources.yml"
+)
+PACKAGED_DATASOURCES = (
+    ROOT
+    / "cli/defenseclaw/_data/local_observability_stack/grafana/provisioning/datasources/datasources.yml"
+)
+DEFAULT_METRIC_EXPORT_INTERVAL_SECONDS = 60
+
+# Prometheus label contracts for the security-sensitive metrics most likely to
+# produce plausible-looking zeroes when a dashboard filters on a nonexistent
+# label. Resource labels are shared across all application metrics and remain
+# legal selectors in addition to the instrument-specific labels below.
+COMMON_PROMETHEUS_RESOURCE_LABELS = {
+    "deployment_environment",
+    "host_arch",
+    "host_name",
+    "job",
+    "os_type",
+    "otel_scope_name",
+    "service_name",
+    "service_namespace",
+    "service_version",
+}
+PROMETHEUS_METRIC_LABELS = {
+    "defenseclaw_approval_count_total": {"result", "auto", "dangerous"},
+    "defenseclaw_connector_hook_outcome_total": {
+        "action",
+        "connector",
+        "event_type",
+        "severity",
+        "would_block",
+    },
+    "defenseclaw_guardrail_evaluations_total": {
+        "guardrail_action_taken",
+        "guardrail_connector",
+        "guardrail_scanner",
+    },
+    "defenseclaw_schema_violations_total": {"code", "event_type"},
+}
+PROMETHEUS_EXACT_LABEL_VALUES = {
+    ("defenseclaw_connector_hook_latency_milliseconds_bucket", "le"): {
+        "1",
+        "2",
+        "5",
+        "10",
+        "25",
+        "50",
+        "100",
+        "250",
+        "500",
+        "1000",
+        "2500",
+        "5000",
+        "10000",
+        "+Inf",
+    },
+}
 
 DATASOURCES = {
     "prometheus": "defenseclaw-prometheus",
@@ -79,6 +137,21 @@ def load_dashboards(path: Path) -> list[tuple[Path, dict[str, Any]]]:
     for dashboard_path in sorted(path.glob("*.json")):
         dashboards.append((dashboard_path, json.loads(dashboard_path.read_text(encoding="utf-8"))))
     return dashboards
+
+
+def prometheus_time_interval_seconds(path: Path) -> float:
+    """Read Grafana's advertised Prometheus sample interval without a YAML dependency."""
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise AuditError(f"cannot read Grafana datasource config {path}: {exc}") from exc
+    match = re.search(r"^\s*timeInterval:\s*([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)\s*$", text, re.MULTILINE)
+    if match is None:
+        raise AuditError(f"{path}: Prometheus jsonData.timeInterval is required")
+    value = float(match.group(1))
+    multiplier = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}[match.group(2)]
+    return value * multiplier
 
 
 def panels(dashboard: dict[str, Any]) -> Iterable[dict[str, Any]]:
@@ -174,6 +247,17 @@ def static_audit(
     if not dashboards:
         return dashboards, [f"no dashboards found under {SOURCE_DIR}"]
 
+    try:
+        datasource_interval = prometheus_time_interval_seconds(SOURCE_DATASOURCES)
+        if datasource_interval < DEFAULT_METRIC_EXPORT_INTERVAL_SECONDS:
+            errors.append(
+                "Grafana Prometheus timeInterval must be at least the default "
+                f"{DEFAULT_METRIC_EXPORT_INTERVAL_SECONDS}s OTel metric export interval; "
+                f"got {datasource_interval:g}s",
+            )
+    except AuditError as exc:
+        errors.append(str(exc))
+
     for path, dashboard in dashboards:
         if not dashboard.get("uid"):
             errors.append(f"{path.name}: dashboard UID is required")
@@ -247,6 +331,86 @@ def static_audit(
                     errors.append(f"{uid}/{title}: {datasource} must use {DATASOURCES[datasource]!r}")
 
                 expression = target.get("expr", "")
+                legend = target.get("legendFormat", "")
+                if datasource == "prometheus" and expression:
+                    for metric_name, selector in re.findall(
+                        r"\b([A-Za-z_:][A-Za-z0-9_:]*)\s*\{([^{}]*)\}",
+                        expression,
+                    ):
+                        selector_pairs = re.findall(
+                            r"([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!~|=|!=)\s*\"([^\"]*)\"",
+                            selector,
+                        )
+                        if metric_name in PROMETHEUS_METRIC_LABELS:
+                            allowed_labels = (
+                                PROMETHEUS_METRIC_LABELS[metric_name]
+                                | COMMON_PROMETHEUS_RESOURCE_LABELS
+                            )
+                            unknown_labels = {
+                                label for label, _operator, _value in selector_pairs
+                            } - allowed_labels
+                            if unknown_labels:
+                                errors.append(
+                                    f"{uid}/{title}: {metric_name} filters on unknown labels: "
+                                    f"{', '.join(sorted(unknown_labels))}",
+                                )
+                        for label, operator, value in selector_pairs:
+                            allowed_values = PROMETHEUS_EXACT_LABEL_VALUES.get(
+                                (metric_name, label),
+                            )
+                            if allowed_values is None or operator != "=":
+                                continue
+                            if value not in allowed_values:
+                                errors.append(
+                                    f"{uid}/{title}: {metric_name} uses unknown exact "
+                                    f"{label} value {value!r}",
+                                )
+                if datasource == "prometheus" and expression and legend:
+                    legend_labels = set(
+                        re.findall(r"{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}", legend),
+                    )
+                    grouped_labels: set[str] = set()
+                    for group in re.findall(r"\bby\s*\(([^)]*)\)", expression):
+                        grouped_labels.update(label.strip() for label in group.split(","))
+                    removed_labels: set[str] = set()
+                    for group in re.findall(r"\bwithout\s*\(([^)]*)\)", expression):
+                        removed_labels.update(label.strip() for label in group.split(","))
+                    selector_labels = set(
+                        re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:=~|!~|=|!=)", expression),
+                    )
+                    if grouped_labels:
+                        # A `by(...)` aggregation drops every source label that is
+                        # not named in the grouping, even when that label appears
+                        # in a selector. Treat only grouped labels as available.
+                        missing_legend_labels = legend_labels - grouped_labels
+                    elif removed_labels:
+                        # `without(...)` preserves an open-ended set of source
+                        # labels, so the only labels we can prove absent are the
+                        # labels explicitly removed by the aggregation.
+                        missing_legend_labels = legend_labels & removed_labels
+                    else:
+                        missing_legend_labels = legend_labels - selector_labels
+                    if missing_legend_labels:
+                        errors.append(
+                            f"{uid}/{title}: legend references labels absent from the query: "
+                            f"{', '.join(sorted(missing_legend_labels))}",
+                        )
+
+                quantile = re.search(r"histogram_quantile\(\s*(0(?:\.\d+)?|1(?:\.0+)?)", expression)
+                percentile_labels = {
+                    int(value)
+                    for value in re.findall(
+                        r"\bp(\d{1,3})\b",
+                        f"{target.get('refId', '')} {legend}".lower(),
+                    )
+                }
+                if quantile and percentile_labels:
+                    actual_percentile = round(float(quantile.group(1)) * 100)
+                    if percentile_labels != {actual_percentile}:
+                        errors.append(
+                            f"{uid}/{title}: target {target.get('refId', '?')} is labelled "
+                            f"{sorted(percentile_labels)} but queries p{actual_percentile}",
+                        )
                 if datasource == "tempo":
                     try:
                         tempo_target_query(target)
@@ -292,6 +456,12 @@ def static_audit(
         packaged_by_name = {path.name: dashboard for path, dashboard in packaged}
         if source_by_name != packaged_by_name:
             errors.append("CLI packaged Grafana dashboards do not match bundle sources")
+
+    if require_packaged and not PACKAGED_DATASOURCES.is_file():
+        errors.append(f"CLI packaged Grafana datasource config is missing: {PACKAGED_DATASOURCES}")
+    elif SOURCE_DATASOURCES.is_file() and PACKAGED_DATASOURCES.is_file():
+        if SOURCE_DATASOURCES.read_bytes() != PACKAGED_DATASOURCES.read_bytes():
+            errors.append("CLI packaged Grafana datasource config does not match bundle source")
 
     return dashboards, errors
 
@@ -342,8 +512,8 @@ def _inventory_variables(range_seconds: int) -> dict[str, str]:
     return variables
 
 
-def tempo_readiness_error(*, attempts: int = 6, retry_delay_seconds: float = 2) -> str | None:
-    """Wait up to ten seconds for transient Tempo startup/compaction readiness."""
+def tempo_readiness_error(*, attempts: int = 9, retry_delay_seconds: float = 2) -> str | None:
+    """Wait through Tempo's 15-second single-binary ingester startup delay."""
 
     tempo_error: OSError | None = None
     for attempt in range(attempts):
@@ -381,7 +551,11 @@ def live_inventory(
     now_ns = int(now_seconds * 1_000_000_000)
     start_ns = int(start_seconds * 1_000_000_000)
     variables = _inventory_variables(range_seconds)
-    step_seconds = max(60, min(900, range_seconds // 200))
+    # A long inventory range still needs a fine enough step to catch sparse
+    # counters that were exported for only a few minutes before an instance
+    # restarted. Fifteen-minute steps can skip those windows entirely and
+    # misclassify a working historical panel as empty.
+    step_seconds = max(60, min(300, range_seconds // 200))
     has_tempo_search = any(
         (query := tempo_target_query(target))
         and not any(variable in query for variable in ("$trace", "$agent", "$scope_label"))

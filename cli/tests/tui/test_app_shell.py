@@ -1348,6 +1348,68 @@ async def test_logs_and_audit_panels_render_worker_models() -> None:
 
 
 @pytest.mark.asyncio
+async def test_logs_cursor_only_render_reuses_existing_table_rows() -> None:
+    """Cursor movement must not reconstruct a large unchanged log table."""
+
+    logs = LogsPanelModel()
+    logs.filter_mode = ""
+    logs.lines["gateway"] = [f"error row={index}" for index in range(200)]
+    app = DefenseClawTUI(logs_model=logs)
+
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.press("8")
+        await pilot.pause()
+        table = app.query_one("#panel-table", DataTable)
+        row_objects = tuple(table.rows.values())
+
+        logs.cursor["gateway"] = 1
+        app._render_chrome()  # noqa: SLF001 - exercise the render fast path directly.
+
+        assert tuple(table.rows.values()) == row_objects
+        assert all(
+            current is previous
+            for current, previous in zip(table.rows.values(), row_objects, strict=True)
+        )
+        assert table.cursor_row == 1
+
+
+@pytest.mark.asyncio
+async def test_logs_stream_refresh_applies_sliding_tail_delta() -> None:
+    """A new tail line should retain existing DataTable row objects."""
+
+    logs = LogsPanelModel()
+    logs.filter_mode = ""
+    logs.lines["gateway"] = [f"error row={index}" for index in range(200)]
+    app = DefenseClawTUI(logs_model=logs)
+
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.press("8")
+        await pilot.pause()
+        table = app.query_one("#panel-table", DataTable)
+        previous_second_row = list(table.rows.values())[1]
+        logs.set_cursor(50)
+        app._render_chrome()  # noqa: SLF001 - establish a non-default cursor.
+        assert table.cursor_row == 50
+        restore_flags: list[bool] = []
+        update_delta = app._update_panel_table_delta  # noqa: SLF001
+
+        def tracked_update_delta(*args: object) -> bool:
+            restore_flags.append(app._restoring_table_cursor)  # noqa: SLF001
+            return update_delta(*args)  # type: ignore[arg-type]
+
+        app._update_panel_table_delta = tracked_update_delta  # type: ignore[method-assign]  # noqa: SLF001
+
+        logs.lines["gateway"] = logs.lines["gateway"][1:] + ["error row=new"]
+        app._render_chrome()  # noqa: SLF001 - deterministic stream refresh.
+
+        assert restore_flags == [True]
+        assert table.cursor_row == 50
+        assert table.row_count == 200
+        assert list(table.rows.values())[0] is previous_second_row
+        assert str(table.get_cell_at((199, 0))) == "error row=new"
+
+
+@pytest.mark.asyncio
 async def test_logs_notification_judge_history_and_enter_detail_modals(tmp_path) -> None:
     audit_db = tmp_path / "audit.db"
     with sqlite3.connect(audit_db) as db:

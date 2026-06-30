@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from defenseclaw.tui.panels import logs as logs_module
 from defenseclaw.tui.panels.logs import (
     FILTER_ERRORS,
     FILTER_HOOKS,
@@ -30,6 +31,7 @@ from defenseclaw.tui.panels.logs import (
 from defenseclaw.tui.services.gateway_log_views import (
     EVENT_TYPE_FILTERS,
     GatewayLogRow,
+    GatewayLogViews,
     detail_pairs,
     load_gateway_log_views,
     parse_gateway_log_row,
@@ -183,6 +185,20 @@ def test_logs_selected_structured_row_respects_search_and_preset_filters() -> No
     panel.search_text = "no-such-token"
     assert panel.selected_verdict() is None
 
+    # The structured detail row must use the same connector-filtered index
+    # as the visible table, not the unfiltered structured list.
+    panel.search_text = ""
+    panel.filter_mode = FILTER_NONE
+    panel.lines["verdicts"] = [
+        "VERDICT ALLOW connector=codex clean",
+        "VERDICT ALERT connector=cursor suspicious",
+        "VERDICT BLOCK connector=codex error injection",
+    ]
+    panel.set_connector_filter("cursor")
+    selected = panel.selected_verdict()
+    assert selected is not None
+    assert selected.action == "alert"
+
 
 def test_logs_error_empty_and_cursor_scrolling_states(tmp_path) -> None:
     panel = LogsPanelModel(tmp_path)
@@ -197,7 +213,6 @@ def test_logs_error_empty_and_cursor_scrolling_states(tmp_path) -> None:
     panel.lines["gateway"] = [f"line {index}" for index in range(30)]
 
     assert panel.selected_raw_line() == "line 29"
-
     panel.move_cursor(-5, height=10)
     assert panel.selected_raw_line() == "line 24"
     assert panel.paused is True
@@ -210,6 +225,65 @@ def test_logs_error_empty_and_cursor_scrolling_states(tmp_path) -> None:
     panel.lines["gateway"] = []
     panel.error_messages["gateway"] = ""
     assert "Log file is empty or not yet created" in panel.render_text()
+
+
+def test_logs_refresh_retries_transient_raw_and_structured_reads(tmp_path, monkeypatch) -> None:
+    (tmp_path / "gateway.log").write_text("gateway ready\n", encoding="utf-8")
+    (tmp_path / "gateway.jsonl").write_text("{}\n", encoding="utf-8")
+    panel = LogsPanelModel(tmp_path)
+
+    raw_reader = logs_module._tail_text_file
+    raw_calls = 0
+
+    def flaky_raw_reader(*args, **kwargs):
+        nonlocal raw_calls
+        if args[0].name == "gateway.log":
+            raw_calls += 1
+            if raw_calls == 1:
+                raise OSError("transient raw read")
+        return raw_reader(*args, **kwargs)
+
+    view_loader = logs_module.load_gateway_log_views
+    view_calls = 0
+
+    def flaky_view_loader(*args, **kwargs):
+        nonlocal view_calls
+        view_calls += 1
+        if view_calls == 1:
+            return GatewayLogViews(error="transient structured read")
+        return view_loader(*args, **kwargs)
+
+    monkeypatch.setattr(logs_module, "_tail_text_file", flaky_raw_reader)
+    monkeypatch.setattr(logs_module, "load_gateway_log_views", flaky_view_loader)
+
+    panel.refresh()
+    assert panel.lines["gateway"] == []
+    assert panel.error_messages["gateway"].startswith("Cannot open:")
+    assert panel.error_messages["verdicts"] == "transient structured read"
+
+    panel.refresh()
+    assert panel.lines["gateway"] == ["gateway ready"]
+    assert panel.error_messages["gateway"] == ""
+    assert panel.error_messages["verdicts"] == ""
+    assert raw_calls == 2
+    assert view_calls == 2
+
+
+def test_logs_set_data_dir_none_clears_loaded_state(tmp_path) -> None:
+    panel = LogsPanelModel(tmp_path)
+    panel.lines["gateway"] = ["gateway ready"]
+    panel.lines["verdicts"] = ["VERDICT ALLOW"]
+    panel.verdict_rows = [GatewayLogRow(raw="{}", event_type="verdict", action="allow")]
+    panel.otel_rows = [GatewayLogRow(raw="{}", event_type="lifecycle")]
+    panel.filtered_lines()
+
+    panel.set_data_dir(None)
+
+    assert all(not lines for lines in panel.lines.values())
+    assert all(not error for error in panel.error_messages.values())
+    assert panel.verdict_rows == []
+    assert panel.otel_rows == []
+    assert panel.filtered_lines() == []
 
 
 def test_logs_no_noise_default_hides_low_signal_severities() -> None:
@@ -460,6 +534,7 @@ def test_logs_connector_column_and_shared_filter() -> None:
     panel.show_connector_column = True
     assert panel.data_table_columns() == ("Connector", "Line")
     rows = panel.data_table_rows()
+    assert all(len(row.cells) == 2 for row in panel.data_table_row_models())
     # First cell is the parsed connector; untagged lines show the em dash.
     connectors = {row[0] for row in rows}
     assert "codex" in connectors and "cursor" in connectors and "—" in connectors
