@@ -43,6 +43,7 @@ from defenseclaw.connector_paths import omnigent_config_path
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener
+from defenseclaw.scanner_binary import resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
 # Doctor status markers, recomputed per emission so the per-call
@@ -599,11 +600,16 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
         ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
     ]
     for name, binary in bins:
-        path = shutil.which(binary)
+        path = resolve_scanner_binary(binary)
         if path:
             _emit("pass", f"Scanner: {name}", path, r=r)
         else:
-            _emit("fail", f"Scanner: {name}", f"'{binary}' not on PATH", r=r)
+            _emit(
+                "fail",
+                f"Scanner: {name}",
+                f"'{binary}' not found in the managed environment or on PATH",
+                r=r,
+            )
 
 
 def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
