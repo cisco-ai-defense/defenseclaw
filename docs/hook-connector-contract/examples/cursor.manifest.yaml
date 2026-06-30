@@ -1,0 +1,209 @@
+# Parity re-expression of the built-in `cursor` connector as a declarative
+# manifest. The acceptance bar for the manifest engine is that this file
+# produces byte-identical installed config, the same wire verdicts, and the
+# same exit codes as the native cursor connector.
+#
+# Native sources this mirrors:
+#   - wiring:   internal/gateway/connector/hook_only.go  (patchCursorHooks)
+#   - render:   internal/gateway/connector/hook_only_profile.go (case "cursor")
+#   - exit:     internal/gateway/connector/hookexec/spec.go (specs["cursor"])
+#   - contract: cli/defenseclaw/inventory/hook_contracts.json (connectors.cursor)
+#
+# Authored in YAML for readability; the on-disk/embedded form is JSON validated
+# by schemas/hook-connector-manifest.json.
+
+schema_version: 1
+name: cursor
+display_name: Cursor
+description: Cursor IDE agent-loop hooks (1.7+) forwarded to the DefenseClaw gateway.
+kind: hook
+homepage: https://cursor.com
+
+discovery:
+  version_probe: cursor --version
+  binary_names: [cursor]
+  config_globs:
+    - "~/.cursor/hooks.json"
+
+contract:
+  contract_id: cursor-hooks-v1
+  agent_version:
+    min_inclusive: "1.7.0"
+    max_exclusive: ""
+  default_for_unversioned: true
+  hook_script_version: v6
+  supports_traceparent: true
+  native_otlp: false
+  events:
+    - preToolUse
+    - beforeShellExecution
+    - beforeMCPExecution
+    - beforeReadFile
+    - beforeTabFileRead
+    - beforeSubmitPrompt
+    - stop
+  aid_surfaces: [prompt, tool_call, tool_result]
+  notes:
+    - "Cursor 1.7 introduced beta hooks for the agent loop."
+    - "Cursor native ask is limited to beforeShellExecution and beforeMCPExecution."
+
+capabilities:
+  can_block: true
+  can_ask_native: true
+  ask_events:
+    - beforeShellExecution
+    - beforeMCPExecution
+  block_events:
+    - preToolUse
+    - beforeShellExecution
+    - beforeMCPExecution
+    - beforeReadFile
+    - beforeTabFileRead
+    - beforeSubmitPrompt
+    - stop
+  supports_fail_closed: true
+  scope: user
+
+wiring:
+  targets:
+    - path_template: "~/.cursor/hooks.json"
+      format: json
+      scope: user
+  # Superset of contract.events: setup wires every event Cursor can emit so a
+  # future contract bump needs no re-install. Matches patchCursorHooks().
+  install_events:
+    - preToolUse
+    - postToolUse
+    - postToolUseFailure
+    - beforeShellExecution
+    - beforeMCPExecution
+    - afterShellExecution
+    - afterMCPExecution
+    - beforeReadFile
+    - beforeTabFileRead
+    - afterFileEdit
+    - afterTabFileEdit
+    - beforeSubmitPrompt
+    - afterAgentResponse
+    - afterAgentThought
+    - stop
+    - sessionStart
+    - sessionEnd
+    - preCompact
+  layout: flat_map
+  command_invocation: shell
+  container_key: hooks
+  entry_template:
+    type: command
+    command: "${hook_command}"
+    timeout: 30000
+    failClosed: "${fail_closed}"   # single-token value -> emitted as JSON boolean
+  ownership:
+    match: "${hook_command}"
+  extra_keys:
+    version: 1
+
+response:
+  response_field: hook_output
+  exit_style: hook_echo
+  templates:
+    - when: { actions: [block] }
+      output:
+        continue: true
+        permission: deny
+        user_message: "${reason}"
+        agent_message: "${reason}"
+    - when: { actions: [confirm] }
+      output:
+        continue: true
+        permission: ask
+        user_message: "${reason}"
+        agent_message: "${reason}"
+    - when: { actions: [alert] }
+      output:
+        continue: true
+        permission: allow
+        agent_message: "${additional_context}"
+  failure:
+    oversized_closed:
+      stdout:
+        continue: true
+        permission: deny
+        user_message: "DefenseClaw hook payload too large"
+        agent_message: "DefenseClaw hook payload too large"
+      exit_code: 2
+    unavailable_strict:
+      stdout:
+        continue: true
+        permission: deny
+        user_message: "DefenseClaw hook failed closed"
+        agent_message: "DefenseClaw hook failed closed"
+      exit_code: 2
+    response_closed:
+      stdout:
+        continue: true
+        permission: deny
+        user_message: "DefenseClaw hook failed closed"
+        agent_message: "DefenseClaw hook failed closed"
+      exit_code: 0
+
+surfaces:
+  mcp:
+    supported: true
+    scope: "workspace,user"
+    config_paths:
+      - "<workspace>/.cursor/mcp.json"
+      - "~/.cursor/mcp.json"
+    write_paths:
+      - "<workspace>/.cursor/mcp.json"
+    supports_backup: true
+    supports_restore: true
+  skills:
+    supported: true
+    scope: "workspace,user"
+    read_paths:
+      - "~/.cursor/skills"
+      - "~/.agents/skills"
+      - "<workspace>/.cursor/skills"
+      - "<workspace>/.agents/skills"
+    write_paths:
+      - "<workspace>/.cursor/skills"
+    install_targets: [skill]
+    requires_opt_in: true
+  rules:
+    supported: true
+    scope: workspace
+    read_paths:
+      - "<workspace>/.cursor/rules"
+      - "<workspace>/AGENTS.md"
+    write_paths:
+      - "<workspace>/.cursor/rules"
+    install_targets: [rule]
+    requires_opt_in: true
+  plugins:
+    supported: false
+    notes:
+      - "DefenseClaw plugins are an OpenClaw-only concept; this connector ships no plugin install surface."
+  agents:
+    supported: false
+    notes:
+      - "Cursor subagent installation is not a documented local surface for this connector."
+  codeguard:
+    supported: true
+    install_targets: [skill, rule]
+    opt_in_only: true
+    auto_install: false
+    idempotent: true
+    conflict_safe: true
+  telemetry:
+    native_otlp: false
+    hook_signals: [logs, metrics, traces]
+    auth_mode: header-token
+    source_modes: [hook]
+    notes:
+      - "Hook-generated telemetry is emitted by DefenseClaw for every hook invocation."
+
+notes:
+  - "Cursor payloads are flat ({hook_event_name, tool_name, tool_input, prompt}), so no decode block is needed."
+  - "exit_style hook_echo: the gateway encodes the decision inside hook_output; the hook echoes it and exits 0."
+  - "failure responses mirror hookexec/spec.go for cursor so manifest parity includes fail-closed and strict-availability behavior."
