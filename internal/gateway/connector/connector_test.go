@@ -2009,7 +2009,7 @@ func TestCodex_Setup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hook script not created: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Error("hook script not executable")
 	}
 	data, _ := os.ReadFile(hookPath)
@@ -2151,8 +2151,12 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(content, "codex-hook.sh") {
-		t.Errorf("config.toml [hooks] missing codex-hook.sh reference\nfile:\n%s", content)
+	wantHookNeedle := "codex-hook.sh"
+	if runtime.GOOS == "windows" {
+		wantHookNeedle = nativeHookFlag + "codex"
+	}
+	if !strings.Contains(content, wantHookNeedle) {
+		t.Errorf("config.toml [hooks] missing %q reference\nfile:\n%s", wantHookNeedle, content)
 	}
 
 	// Re-parse to ensure it's valid TOML and codex's expected shape
@@ -2173,6 +2177,7 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 		t.Fatalf("hooks.state missing — Codex would ask the user to review DefenseClaw hooks")
 	}
 	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	hookCommand := hookInvocationCommand("codex", filepath.ToSlash(hookPath))
 	for _, tc := range []struct {
 		eventType string
 		eventKey  string
@@ -2192,7 +2197,7 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 			t.Fatalf("hooks.state missing trusted entry for %s (%s); state=%v", tc.eventType, key, state)
 		}
 		gotHash, _ := entry["trusted_hash"].(string)
-		wantHash := codexCommandHookHash(tc.eventKey, tc.matcher, hookPath, tc.timeout)
+		wantHash := codexCommandHookHash(tc.eventKey, tc.matcher, hookCommand, tc.timeout)
 		if gotHash != wantHash {
 			t.Errorf("trusted_hash for %s = %q, want %q", tc.eventType, gotHash, wantHash)
 		}
@@ -2630,24 +2635,19 @@ log_user_prompt = false
 	}
 }
 
-// TestCodex_Setup_WiresNotifyBridge pins the agent-turn-complete
-// telemetry path. Codex shells out to `notify` with a JSON arg
-// describing each completed turn (per https://developers.openai.com
-// /codex/config-advanced). Our Setup writes a per-instance bash
-// bridge that POSTs the JSON to /api/v1/codex/notify. Without
-// this wiring, the third independent observability channel (after
-// hooks + OTel) would be dark.
+// TestCodex_Setup_WiresNotifyBridge pins the agent-turn-complete telemetry
+// path. Codex appends a JSON arg to the configured notify argv array. Windows
+// invokes the gateway's native notify subcommand; Unix keeps the per-instance
+// Bash bridge that POSTs to /api/v1/codex/notify.
 //
-// Asserts:
-//   - notify-bridge.sh exists at DataDir, mode 0o700 (operator-only)
-//   - bridge body baked the operator-supplied APIToken AND the
-//     gateway notify endpoint (no env-var indirection — codex's
-//     subshell can scrub env)
-//   - config.toml emits notify = ["bash", "<DataDir>/notify-bridge.sh"]
-//     in the canonical TOML array form (codex parses this; a
-//     non-array would silently disable the bridge with no log).
+// Asserts the platform-specific artifact plus the canonical TOML argv array:
+// Windows writes ["<gateway.exe>", "notify"] with no shell bridge; Unix writes
+// ["bash", "<DataDir>/notify-bridge.sh"] and keeps the operator-only bridge.
 func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`)
+	}
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte(`model = "gpt-5"
 `), 0o600); err != nil {
@@ -2668,22 +2668,28 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 	}
 
 	bridgePath := filepath.Join(dir, "notify-bridge.sh")
-	info, err := os.Stat(bridgePath)
-	if err != nil {
-		t.Fatalf("notify-bridge.sh missing — agent-turn-complete telemetry won't fire: %v", err)
-	}
-	if info.Mode().Perm() != 0o700 {
-		t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only — token is baked in)", info.Mode().Perm())
-	}
-	bridge, err := os.ReadFile(bridgePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(bridge), "test-token-codex-notify") {
-		t.Error("bridge missing baked-in APIToken — receiver would reject every call as unauthenticated")
-	}
-	if !strings.Contains(string(bridge), "127.0.0.1:18970/api/v1/codex/notify") {
-		t.Errorf("bridge missing gateway notify endpoint URL; body:\n%s", bridge)
+	if runtime.GOOS == "windows" {
+		if _, err := os.Stat(bridgePath); !os.IsNotExist(err) {
+			t.Fatalf("Windows setup left Bash notify bridge behind: %v", err)
+		}
+	} else {
+		info, err := os.Stat(bridgePath)
+		if err != nil {
+			t.Fatalf("notify-bridge.sh missing — agent-turn-complete telemetry won't fire: %v", err)
+		}
+		if info.Mode().Perm() != 0o700 {
+			t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only — token is baked in)", info.Mode().Perm())
+		}
+		bridge, err := os.ReadFile(bridgePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(bridge), "test-token-codex-notify") {
+			t.Error("bridge missing baked-in APIToken — receiver would reject every call as unauthenticated")
+		}
+		if !strings.Contains(string(bridge), "127.0.0.1:18970/api/v1/codex/notify") {
+			t.Errorf("bridge missing gateway notify endpoint URL; body:\n%s", bridge)
+		}
 	}
 
 	// config.toml notify entry must be the array shape codex parses.
@@ -2697,13 +2703,27 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 		t.Fatalf("notify entry not an array (got %T) — codex would silently disable the bridge", parsed["notify"])
 	}
 	if len(notify) != 2 {
-		t.Errorf("notify array has %d entries, want 2 ([bash, bridge.sh]); got %v", len(notify), notify)
+		t.Fatalf("notify array has %d entries, want 2; got %v", len(notify), notify)
 	}
-	if first, _ := notify[0].(string); first != "bash" {
-		t.Errorf("notify[0] = %q, want \"bash\"", first)
-	}
-	if second, _ := notify[1].(string); !strings.HasSuffix(second, "/notify-bridge.sh") {
-		t.Errorf("notify[1] = %q, want path ending in /notify-bridge.sh", second)
+	if runtime.GOOS == "windows" {
+		if first, _ := notify[0].(string); first != `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe` {
+			t.Errorf("notify[0] = %q, want native gateway path", first)
+		}
+		if second, _ := notify[1].(string); second != "notify" {
+			t.Errorf("notify[1] = %q, want native notify subcommand", second)
+		}
+		if strings.Contains(strings.ToLower(string(raw)), "bash") ||
+			strings.Contains(strings.ToLower(string(raw)), "curl") ||
+			strings.Contains(strings.ToLower(string(raw)), "jq") {
+			t.Errorf("Windows config contains a Unix notify dependency:\n%s", raw)
+		}
+	} else {
+		if first, _ := notify[0].(string); first != "bash" {
+			t.Errorf("notify[0] = %q, want \"bash\"", first)
+		}
+		if second, _ := notify[1].(string); !strings.HasSuffix(second, "/notify-bridge.sh") {
+			t.Errorf("notify[1] = %q, want path ending in /notify-bridge.sh", second)
+		}
 	}
 }
 
