@@ -52,6 +52,8 @@ from defenseclaw.connector_contracts import (
 from defenseclaw.context import AppContext
 from defenseclaw.inventory import agent_discovery as ad
 
+from tests.permissions import assert_owner_only_file
+
 
 def _make_app_context(data_dir: str) -> AppContext:
     cfg = Config(
@@ -114,10 +116,7 @@ class AddTrustedBinPrefixTests(unittest.TestCase):
                 self.assertIn("/opt/more", parts)
             dotenv = os.path.join(tmp, ".env")
             self.assertTrue(os.path.isfile(dotenv))
-            if os.name == "nt":
-                self.assertIsNone(ad._windows_acl_write_error(dotenv))
-            else:
-                self.assertEqual(os.stat(dotenv).st_mode & 0o777, 0o600)
+            assert_owner_only_file(dotenv)
             body = open(dotenv, encoding="utf-8").read()
             self.assertIn("/opt/tools", body)
             self.assertIn("/opt/more", body)
