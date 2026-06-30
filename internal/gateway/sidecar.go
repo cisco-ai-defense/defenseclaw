@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1479,6 +1480,15 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 		connector.ClearActiveConnector(s.cfg.DataDir)
 	} else {
+		support := connector.ConnectorSupportOnHostOS(conn.Name())
+		if support.Status == connector.PlatformUnsupported {
+			err := fmt.Errorf("connector %q is not supported on %s: %s", conn.Name(), runtime.GOOS, support.Reason)
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return err
+		}
+		if support.Status == connector.PlatformPreview {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
+		}
 		if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
 		}
@@ -2078,6 +2088,13 @@ func (s *Sidecar) connectorSetupOpts(conn connector.Connector, apiToken, proxyAd
 // back just this connector's Setup before returning so a half-installed
 // connector never lingers.
 func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connector, opts connector.SetupOpts, masterKey string, cache *guardrail.RulePackCache) error {
+	support := connector.ConnectorSupportOnHostOS(conn.Name())
+	if support.Status == connector.PlatformUnsupported {
+		return fmt.Errorf("connector %q is not supported on %s: %s", conn.Name(), runtime.GOOS, support.Reason)
+	}
+	if support.Status == connector.PlatformPreview {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
+	}
 	// Inject credentials before Setup so probes keyed off them succeed.
 	conn.SetCredentials(opts.APIToken, masterKey)
 

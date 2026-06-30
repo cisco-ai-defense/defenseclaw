@@ -43,13 +43,10 @@ defenseclaw setup omnigent --mode action --yes
 omnigent server --config "${OMNIGENT_CONFIG_HOME:-$HOME/.omnigent}/config.yaml"
 ```
 
-On Windows PowerShell, run:
-
-```powershell
-defenseclaw setup omnigent --mode action --yes
-$configHome = if ($env:OMNIGENT_CONFIG_HOME) { $env:OMNIGENT_CONFIG_HOME } else { Join-Path $HOME ".omnigent" }
-omnigent server --config (Join-Path $configHome "config.yaml")
-```
+OmniGent connector setup is not supported on native Windows. Its terminal
+runner requires `tmux`, its documented OS-sandbox backends are Linux/macOS,
+and its Windows desktop application is not yet available. DefenseClaw does not
+add a WSL implementation; use this connector on macOS/Linux.
 
 `~/.omnigent/config.yaml` is the default. When `OMNIGENT_CONFIG_HOME` is set,
 both OmniGent and DefenseClaw use `OMNIGENT_CONFIG_HOME/config.yaml` instead
@@ -115,21 +112,49 @@ to a hook connector believing it changes the agent's model.
 
 ## Platform support
 
-| Connector | macOS | Linux | Windows |
-| --------- | ----- | ----- | ------- |
-| OpenClaw, ZeptoClaw (proxy) | OK | OK | not supported |
-| Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, OpenCode, OmniGent (hook-based) | OK | OK | OK |
+Support status is about the complete DefenseClaw integration on the named host,
+not merely whether the upstream agent has some Windows build. `preview` remains
+selectable with an explicit warning; `unsupported` is hidden from pickers and
+rejected by scripted/direct setup with the reason below.
 
-Windows is **hook-only**: the shell-hook connectors run their hook
-decisions natively in the `defenseclaw` binary (the agent invokes
-`defenseclaw hook --connector <name> --event <event>`), so no Git Bash, `jq`,
-or shell shims are required. OpenCode is cross-platform without shims by a
-different route — its bridge plugin is JavaScript and calls the gateway over
-HTTP directly, so it never needs the native hook binary. The proxy connectors (OpenClaw, ZeptoClaw) need
-the local guardrail proxy, which DefenseClaw does not host on Windows; they are
-hidden from the connector pickers and rejected by setup there. The Go registry
-(`connectorSupportedOnOS`) and the Python `platform_support` module are the two
-sources of truth for this gating, kept in sync by a parity test.
+| Connector | macOS | Linux | Native Windows | Windows reason |
+| --------- | ----- | ----- | -------------- | -------------- |
+| Codex | supported | supported | supported | Current Codex releases provide a native PowerShell installer; DefenseClaw uses its native hook entrypoint. |
+| Claude Code | supported | supported | supported | Native Windows with Git for Windows is documented and supports command hooks. |
+| Cursor | supported | supported | supported (IDE hooks) | Cursor IDE hooks are native. **Cursor CLI remains WSL-only** and native DefenseClaw setup does not install or configure it. |
+| Windsurf | supported | supported | supported | Cascade documents Windows hook locations and PowerShell/command execution. |
+| Gemini CLI | supported | supported | supported | Hook reference and best practices document Windows/PowerShell execution. |
+| Copilot CLI | supported | supported | supported | GitHub documents Windows Copilot CLI hooks using PowerShell 7+. |
+| Antigravity | supported | supported | supported | Antigravity runs natively on Windows and exposes local JSON hooks. |
+| OpenCode | supported | supported | supported | OpenCode runs directly on Windows; the DefenseClaw bridge is an auto-loaded JavaScript plugin. |
+| Hermes | supported | supported | **preview** | Upstream calls native Windows support **Early Beta** and recommends WSL2 for the most battle-tested path. |
+| OpenHands | supported | supported | unsupported | OpenHands CLI explicitly requires WSL; DefenseClaw has no WSL connector implementation. |
+| OmniGent | supported | supported | unsupported | The terminal path requires `tmux`, the OS sandbox documents Linux/macOS backends, and the Windows desktop app is still pending. |
+| OpenClaw | supported | supported | unsupported | OpenClaw itself has a native path, but DefenseClaw's connector requires the local guardrail-proxy lifecycle, which DefenseClaw does not host on Windows. |
+| ZeptoClaw | supported | supported | unsupported | Upstream publishes macOS/Linux support, and the DefenseClaw connector also requires the unavailable Windows guardrail proxy. |
+
+Evidence checked 2026-06-30 against the current upstream documentation:
+[Codex install](https://github.com/openai/codex#quickstart),
+[Claude Code Windows setup](https://docs.anthropic.com/en/docs/claude-code/getting-started),
+[Cursor CLI installation](https://docs.cursor.com/en/cli/installation),
+[Cursor hooks](https://cursor.com/docs/hooks),
+[Windsurf Cascade hooks](https://docs.windsurf.com/windsurf/cascade/hooks),
+[Gemini CLI hooks](https://geminicli.com/docs/hooks/reference/),
+[Copilot CLI hooks](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/use-hooks),
+[Antigravity hooks](https://antigravity.google/docs/hooks),
+[OpenCode Windows](https://opencode.ai/docs/windows-wsl/),
+[OpenCode plugins](https://opencode.ai/docs/plugins/),
+[Hermes native Windows beta](https://github.com/NousResearch/hermes-agent#quick-install),
+[OpenHands CLI quick start](https://docs.openhands.dev/openhands/usage/cli/quick-start),
+[OmniGent terminal](https://omnigent.ai/docs/interact/terminal),
+[OmniGent sandbox](https://omnigent.ai/docs/policies/os-sandbox), and
+[ZeptoClaw installation](https://zeptoclaw.com/docs/getting-started/installation/).
+
+Windows DefenseClaw is **hook-only**. Supported command-hook connectors invoke
+`defenseclaw hook --connector <name> --event <event>` natively, without Git
+Bash, `jq`, shell shims, or WSL. OpenCode uses its JavaScript bridge directly.
+The Go registry and Python `platform_support` module mirror the same
+supported/preview/unsupported taxonomy and reasons, pinned by parity tests.
 
 ## Versioned Hook Contracts
 
@@ -275,10 +300,10 @@ harmless (permission denied) if a regression ever lets it through.
 | Copilot CLI | live\* | live\* | live\* | `copilot -p` | user-level hooks only; entitled token |
 | OpenHands | live | — | — | `openhands --headless --json` | Docker runtime, Linux-only |
 | OpenCode | contract-only | contract-only | contract-only | — | JS bridge plugin (tool.execute.before blocks); live smoke pending |
-| Hermes | contract-only | contract-only | contract-only | — | full lifecycle mapped (`hermes-hooks-v1`): `pre_tool_call` blocks, `pre_llm_call` injects context, `post_tool_call`/`post_llm_call`/session/subagent observe; live smoke pending |
+| Hermes | contract-only | contract-only | contract-only (preview) | — | Native Windows is upstream Early Beta; full lifecycle mapped (`hermes-hooks-v1`): `pre_tool_call` blocks, `pre_llm_call` injects context, `post_tool_call`/`post_llm_call`/session/subagent observe; live smoke pending |
 | Windsurf | contract-only | contract-only | contract-only | — | no headless CLI/SDK |
 | Antigravity | contract-only | contract-only | contract-only | — | headless auth is OAuth, no API key |
-| OmniGent | contract-only | contract-only | contract-only | — | Python custom-policy bridge covered by local integration tests; live smoke pending |
+| OmniGent | contract-only | contract-only | — | — | Native Windows connector unsupported; Python custom-policy bridge covered by local integration tests on supported hosts; live smoke pending |
 
 `\*` = advisory cell (`continue-on-error`) until it goes consistently green.
 All Windows live cells and every Copilot cell start advisory; they are promoted

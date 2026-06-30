@@ -617,7 +617,10 @@ class TestBareSetupBatch(_BaseSetup):
         with _stub_side_effects():
             res = _invoke(["--all", "--no-restart"], self.app)
         self.assertEqual(res.exit_code, 0, msg=res.output)
-        self.assertEqual(set(self.app.cfg.guardrail.connectors), set(cmd_setup._HOOK_ENFORCED_CONNECTORS))
+        expected = cmd_setup.platform_support.supported_connectors(
+            cmd_setup._HOOK_ENFORCED_CONNECTORS
+        )
+        self.assertEqual(set(self.app.cfg.guardrail.connectors), set(expected))
 
     def test_invalid_connector_flag_errors(self):
         with _stub_side_effects():

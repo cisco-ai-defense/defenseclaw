@@ -2511,6 +2511,30 @@ def _fetch_connector_names(cfg=None) -> list[str]:
 _CONNECTOR_NAMES = platform_support.supported_connectors(_CONNECTOR_NAMES_FALLBACK)
 _HILT_MIN_SEVERITIES = ["HIGH", "MEDIUM", "LOW", "CRITICAL"]
 
+
+class _PlatformConnectorChoice(click.Choice):
+    """Hide unsupported choices while returning their reason on explicit use."""
+
+    def convert(
+        self,
+        value: Any,
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> Any:
+        if isinstance(value, str):
+            connector = normalize_connector(value)
+            if connector in _CONNECTOR_NAMES_FALLBACK:
+                support = platform_support.connector_platform_support(connector)
+                if not support.available:
+                    self.fail(
+                        f"connector {connector!r} is {support.status} on "
+                        f"{platform_support.host_os()}: {support.reason}",
+                        param,
+                        ctx,
+                    )
+        return super().convert(value, param, ctx)
+
+
 _CONNECTOR_META: dict[str, dict[str, str]] = {
     "openclaw": {
         "label": "OpenClaw",
@@ -2597,6 +2621,24 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "subprocess_policy": "none",
     },
 }
+
+
+def _connector_presentation_label(connector: str) -> str:
+    """Return the connector label with an explicit preview marker."""
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    if platform_support.connector_preview_on_os(connector):
+        return f"{label} (preview)"
+    return label
+
+
+def _ensure_connector_available(connector: str) -> None:
+    """Reject an unsupported host/connector pair with its recorded reason."""
+    support = platform_support.connector_platform_support(connector)
+    if not support.available:
+        raise click.ClickException(
+            f"connector {connector!r} is {support.status} on "
+            f"{platform_support.host_os()}: {support.reason}"
+        )
 
 _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     "openclaw": (
@@ -2781,7 +2823,7 @@ def _detect_installed_connectors() -> list[str]:
         or os.path.isfile(os.path.join(home, ".gemini", "antigravity-cli", "hooks.json"))
         or os.path.isdir(os.path.join(home, ".gemini", "antigravity-cli")),
     )
-    return found
+    return platform_support.supported_connectors(found)
 
 
 def _detect_connector(data_dir: str | None = None) -> str | None:
@@ -2825,7 +2867,8 @@ def _select_connector_interactive(current: str, data_dir: str | None = None) -> 
     for i, name in enumerate(_CONNECTOR_NAMES, 1):
         meta = _CONNECTOR_META[name]
         marker = " *" if name == default else ""
-        click.echo(f"    {i}. {meta['label']:<14s} — {meta['description']}{marker}")
+        label = _connector_presentation_label(name)
+        click.echo(f"    {i}. {label:<22s} — {meta['description']}{marker}")
     click.echo()
     default_idx = _CONNECTOR_NAMES.index(default) + 1 if default in _CONNECTOR_NAMES else None
     raw = click.prompt(
@@ -2846,7 +2889,11 @@ def _print_connector_info(name: str) -> None:
         tool_display = "pre-execution + response-scan"
     else:
         tool_display = tool_mode
-    click.echo(f"    Connector:         {meta['label']} ({name})")
+    support = platform_support.connector_platform_support(name)
+    click.echo(f"    Connector:         {_connector_presentation_label(name)} ({name})")
+    # Keep the status visible even for stable connectors when this detail view
+    # is explicitly requested; it makes preview classification auditable.
+    click.echo(f"    Platform support:  {support.status} — {support.reason}")
     click.echo(f"    Tool inspection:   {tool_display}")
     click.echo(f"    Subprocess policy: {meta['subprocess_policy']}")
     click.echo()
@@ -3422,7 +3469,7 @@ def _resolve_judge_hook_gate(
     "--connector",
     "--agent",
     "agent_name",
-    type=click.Choice(_CONNECTOR_NAMES, case_sensitive=False),
+    type=_PlatformConnectorChoice(_CONNECTOR_NAMES, case_sensitive=False),
     default=None,
     help=(
         "Agent framework connector. Alias: --agent. Defaults to "
@@ -3725,6 +3772,11 @@ def setup_guardrail(
         _disable_guardrail(app, gc, restart=True)
         return
 
+    # Validate explicit operator input before mutating the in-memory config.
+    # Stored/picked fallback values are checked after resolution below.
+    if explicit_connector:
+        _ensure_connector_available(explicit_connector)
+
     aid = app.cfg.cisco_ai_defense
 
     if non_interactive:
@@ -3754,8 +3806,11 @@ def setup_guardrail(
         elif not gc.connector or gc.connector == "openclaw":
             picked = _read_picked_connector(getattr(app.cfg, "data_dir", None))
             if picked:
+                _ensure_connector_available(normalize_connector(picked))
                 gc.connector = picked
         target_connector = target_connector or gc.connector
+        if target_connector:
+            _ensure_connector_available(normalize_connector(target_connector))
         per_connector_target = bool(
             explicit_connector
             and target_connector
@@ -5060,6 +5115,7 @@ def _setup_observability_alias(
     """
     if connector not in _HOOK_ENFORCED_CONNECTORS:
         raise click.ClickException(f"unsupported connector for hook alias: {connector!r}")
+    _ensure_connector_available(connector)
 
     # Antigravity is global-only by design. agy v1.0.x merges every
     # hooks file it discovers (~/.gemini/config/hooks.json,
@@ -5228,7 +5284,7 @@ def _run_setup_picker(app: AppContext) -> list[str]:
     nothing. Only called on an interactive TTY (the caller falls back to help
     on a non-interactive stream).
     """
-    candidates = sorted(_HOOK_ENFORCED_CONNECTORS)
+    candidates = platform_support.supported_connectors(sorted(_HOOK_ENFORCED_CONNECTORS))
     detected = {c for c in _detect_installed_connectors() if c in _HOOK_ENFORCED_CONNECTORS}
     configured = {
         c for c in _configured_connector_set(app.cfg.guardrail) if c in _HOOK_ENFORCED_CONNECTORS
@@ -5243,7 +5299,7 @@ def _run_setup_picker(app: AppContext) -> list[str]:
         if c in configured:
             tags.append("configured")
         suffix = f"  {ux.dim('(' + ', '.join(tags) + ')')}" if tags else ""
-        display_by_connector[c] = f"{_CONNECTOR_META[c]['label']}{suffix}"
+        display_by_connector[c] = f"{_connector_presentation_label(c)}{suffix}"
     connector_by_display = {label: c for c, label in display_by_connector.items()}
 
     ux.section("Select active connectors")
@@ -5260,7 +5316,7 @@ def _run_setup_picker(app: AppContext) -> list[str]:
 
 def _connector_display_options(connectors: list[str]) -> tuple[list[str], dict[str, str], dict[str, str]]:
     """Return checkbox labels plus connector/display lookup maps."""
-    display_by_connector = {c: _CONNECTOR_META[c]["label"] for c in connectors}
+    display_by_connector = {c: _connector_presentation_label(c) for c in connectors}
     connector_by_display = {label: c for c, label in display_by_connector.items()}
     return [display_by_connector[c] for c in connectors], display_by_connector, connector_by_display
 
@@ -5751,6 +5807,12 @@ def _dispatch_bare_setup(
                 f"{sorted(_HOOK_ENFORCED_CONNECTORS)}. (OpenClaw/ZeptoClaw use "
                 "`defenseclaw setup openclaw` — they cannot be batch peers.)"
             )
+        support = platform_support.connector_platform_support(c)
+        if not support.available:
+            raise click.UsageError(
+                f"connector {c!r} is {support.status} on {platform_support.host_os()}: "
+                f"{support.reason}"
+            )
         if c not in targets:
             targets.append(c)
 
@@ -5758,10 +5820,10 @@ def _dispatch_bare_setup(
         _add(raw)
     if detected:
         for c in _detect_installed_connectors():
-            if c in _HOOK_ENFORCED_CONNECTORS:
+            if c in _HOOK_ENFORCED_CONNECTORS and platform_support.connector_supported_on_os(c):
                 _add(c)
     if all_connectors:
-        for c in sorted(_HOOK_ENFORCED_CONNECTORS):
+        for c in platform_support.supported_connectors(sorted(_HOOK_ENFORCED_CONNECTORS)):
             _add(c)
 
     if not targets:
@@ -6389,6 +6451,18 @@ def _make_observability_setup_command(connector: str) -> click.Command:
     """Create a ``defenseclaw setup <connector>`` hook-driven alias."""
     label = _CONNECTOR_META[connector]["label"]
     surface_name = "custom policy API" if connector == "omnigent" else "agent lifecycle hooks"
+    platform = platform_support.connector_platform_support(connector)
+    platform_note = (
+        ""
+        if platform.status == platform_support.SUPPORTED
+        else (
+            f"\n\nPlatform status on {platform_support.host_os()}: "
+            f"{platform.status} — {platform.reason}"
+        )
+    )
+    short_help = f"Configure DefenseClaw for {label}."
+    if platform.status != platform_support.SUPPORTED:
+        short_help = f"{label}: {platform.status} on {platform_support.host_os()}."
 
     @click.command(
         connector,
@@ -6399,8 +6473,9 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             "mode is observe; pass "
             "--mode action to enable agent-native blocking/approval verdicts "
             "on supported events. No proxy is involved in either mode."
+            f"{platform_note}"
         ),
-        short_help=f"Configure DefenseClaw for {label}.",
+        short_help=short_help,
         epilog=(
             "Hook and policy connectors enforce through agent-native lifecycle "
             "verdicts (no LLM proxy). The judge/HILT/block-message options here write "
@@ -6672,6 +6747,7 @@ def _setup_guardrail_connector_alias(
     """Run the full guardrail setup backend for a specific connector."""
     if connector not in _GUARDRAIL_SUPPORTING_CONNECTORS:
         raise click.ClickException(f"{connector!r} is not a guardrail-capable connector")
+    _ensure_connector_available(connector)
 
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
     click.echo()
@@ -6746,6 +6822,18 @@ def _setup_guardrail_connector_alias(
 def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
     """Create ``defenseclaw setup openclaw|zeptoclaw`` aliases."""
     label = _CONNECTOR_META[connector]["label"]
+    platform = platform_support.connector_platform_support(connector)
+    platform_note = (
+        ""
+        if platform.status == platform_support.SUPPORTED
+        else (
+            f"\n\nPlatform status on {platform_support.host_os()}: "
+            f"{platform.status} — {platform.reason}"
+        )
+    )
+    short_help = f"Configure {label} guardrail setup."
+    if platform.status != platform_support.SUPPORTED:
+        short_help = f"{label}: {platform.status} on {platform_support.host_os()}."
 
     @click.command(
         connector,
@@ -6753,8 +6841,9 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
             f"Configure DefenseClaw guardrail for {label}.\n\n"
             "Configures the proxy-backed connector selection, then runs the "
             "same backend as `defenseclaw setup guardrail --connector ...`."
+            f"{platform_note}"
         ),
-        short_help=f"Configure {label} guardrail setup.",
+        short_help=short_help,
     )
     @click.option("--yes", "-y", "yes", is_flag=True, help="Skip confirmation prompt.")
     @click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Alias for --yes.")
