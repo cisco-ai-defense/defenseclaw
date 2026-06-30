@@ -117,6 +117,19 @@ class ApplyWebhookRoundTripTests(unittest.TestCase):
         self.assertIsNone(v.cooldown_seconds)
         self.assertTrue(v.enabled)
 
+    def test_dry_run_does_not_take_config_write_lock(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_cfg(td)
+            with patch("defenseclaw.webhooks.writer.locked_config_yaml", side_effect=AssertionError("locked")):
+                result = apply_webhook(
+                    data_dir=td,
+                    name=None,
+                    type_="generic",
+                    url="https://example.com/hook",
+                    dry_run=True,
+                )
+            self.assertTrue(result.dry_run)
+
     def test_pagerduty_requires_secret_env(self):
         with tempfile.TemporaryDirectory() as td:
             _write_cfg(td)

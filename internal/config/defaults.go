@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 type Environment string
@@ -78,6 +80,9 @@ func DefaultDataPath() string {
 }
 
 func ConfigPath() string {
+	if v := os.Getenv(managed.ConfigPathEnv); v != "" {
+		return v
+	}
 	return filepath.Join(DefaultDataPath(), DefaultConfigName)
 }
 
@@ -162,24 +167,27 @@ func DefaultConfig() *Config {
 			RescanContentGated:  true,
 		},
 		AIDiscovery: AIDiscoveryConfig{
-			Enabled:                  true,
-			Mode:                     "enhanced",
-			ScanIntervalMin:          5,
-			ProcessIntervalSec:       60,
-			ScanRoots:                []string{"~"},
-			SignaturePacks:           []string{},
-			AllowWorkspaceSignatures: false,
-			DisabledSignatureIDs:     []string{},
-			IncludeShellHistory:      true,
-			IncludePackageManifests:  true,
-			IncludeEnvVarNames:       true,
-			IncludeNetworkDomains:    true,
-			MaxFilesPerScan:          1000,
-			MaxFileBytes:             512 * 1024,
-			EmitOTel:                 true,
-			StoreRawLocalPaths:       false,
-			ConfidencePolicyPath:     filepath.Join(dataDir, "confidence.yaml"),
+			Enabled:                   true,
+			Mode:                      "enhanced",
+			ScanIntervalMin:           5,
+			ProcessIntervalSec:        60,
+			ScanRoots:                 []string{"~"},
+			SignaturePacks:            []string{},
+			AllowWorkspaceSignatures:  false,
+			DisabledSignatureIDs:      []string{},
+			IncludeShellHistory:       true,
+			IncludePackageManifests:   true,
+			IncludeEnvVarNames:        true,
+			IncludeNetworkDomains:     true,
+			MaxFilesPerScan:           1000,
+			MaxFileBytes:              512 * 1024,
+			EmitOTel:                  true,
+			StoreRawLocalPaths:        false,
+			ConfidencePolicyPath:      filepath.Join(dataDir, "confidence.yaml"),
+			RequireTrustedBinaryPaths: false,
+			TrustedBinaryPrefixes:     []string{},
 		},
+		ApplicationProtection: DefaultApplicationProtectionConfig(),
 		Firewall: FirewallConfig{
 			ConfigFile: filepath.Join(dataDir, "firewall.yaml"),
 			RulesFile:  filepath.Join(dataDir, "firewall.pf.conf"),

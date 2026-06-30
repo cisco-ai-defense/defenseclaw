@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // TestEvaluateClaudeCodeHook_ActiveConnectorImpliesEnabled documents the
@@ -57,6 +58,22 @@ func TestEvaluateClaudeCodeHook_ActiveConnectorImpliesEnabled(t *testing.T) {
 	}
 	if resp.Severity != "CRITICAL" {
 		t.Errorf("Severity = %q, want CRITICAL", resp.Severity)
+	}
+}
+
+func TestClaudeCodeEnabled_AutomaticSourceNotLazyHealthCounter(t *testing.T) {
+	cfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
+	health := NewSidecarHealth()
+	health.RecordConnectorRequestFor("claudecode")
+	api := &APIServer{scannerCfg: cfg, health: health}
+
+	if api.claudeCodeEnabled() {
+		t.Fatal("lazy health counter enabled claudecode without automatic activation")
+	}
+
+	health.RegisterConnectorWithSource("claudecode", connector.ToolModeBoth, connector.SubprocessNone, "automatic")
+	if !api.claudeCodeEnabled() {
+		t.Fatal("source=automatic registration should enable Claude Code inspection")
 	}
 }
 

@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -224,10 +225,11 @@ type Config struct {
 	// goes through the ObservabilityConfig.Effective* resolvers. Mirrors the
 	// Python `observability:` block written by `defenseclaw setup
 	// observability/webhook --connector`.
-	Observability ObservabilityConfig `mapstructure:"observability"    yaml:"observability,omitempty"`
-	Privacy       PrivacyConfig       `mapstructure:"privacy"          yaml:"privacy,omitempty"`
-	AIDiscovery   AIDiscoveryConfig   `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
-	Notifications NotificationsConfig `mapstructure:"notifications"    yaml:"notifications,omitempty"`
+	Observability         ObservabilityConfig         `mapstructure:"observability"    yaml:"observability,omitempty"`
+	Privacy               PrivacyConfig               `mapstructure:"privacy"          yaml:"privacy,omitempty"`
+	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
+	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
+	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
 }
 
 // PrivacyConfig groups privacy/redaction toggles. Today it carries
@@ -263,23 +265,25 @@ type PrivacyConfig struct {
 // telemetry is sanitized by the inventory service; this config only controls
 // which local metadata sources are inspected.
 type AIDiscoveryConfig struct {
-	Enabled                  bool     `mapstructure:"enabled"                   yaml:"enabled"`
-	Mode                     string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
-	ScanIntervalMin          int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
-	ProcessIntervalSec       int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
-	ScanRoots                []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
-	SignaturePacks           []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
-	AllowWorkspaceSignatures bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
-	DisabledSignatureIDs     []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
-	IncludeShellHistory      bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
-	IncludePackageManifests  bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
-	IncludeEnvVarNames       bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
-	IncludeNetworkDomains    bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
-	MaxFilesPerScan          int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
-	MaxFileBytes             int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
-	EmitOTel                 bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
-	StoreRawLocalPaths       bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
-	ConfidencePolicyPath     string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
+	Enabled                   bool     `mapstructure:"enabled"                   yaml:"enabled"`
+	Mode                      string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
+	ScanIntervalMin           int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
+	ProcessIntervalSec        int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
+	ScanRoots                 []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
+	SignaturePacks            []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
+	AllowWorkspaceSignatures  bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
+	DisabledSignatureIDs      []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
+	IncludeShellHistory       bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
+	IncludePackageManifests   bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
+	IncludeEnvVarNames        bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
+	IncludeNetworkDomains     bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	MaxFilesPerScan           int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
+	MaxFileBytes              int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
+	EmitOTel                  bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
+	StoreRawLocalPaths        bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
+	ConfidencePolicyPath      string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
+	RequireTrustedBinaryPaths bool     `mapstructure:"require_trusted_binary_paths" yaml:"require_trusted_binary_paths"`
+	TrustedBinaryPrefixes     []string `mapstructure:"trusted_binary_prefixes" yaml:"trusted_binary_prefixes,omitempty"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -2131,6 +2135,22 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	}
 	configFile = filepath.Clean(configFile)
 	dataDir := filepath.Dir(configFile)
+	if configuredPath := strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)); configuredPath != "" &&
+		filepath.Clean(configuredPath) == configFile {
+		dataDir = DefaultDataPath()
+	}
+	pinnedDeploymentMode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
+	if err := validateDeploymentMode(pinnedDeploymentMode); err != nil {
+		return nil, fmt.Errorf("config: %s: %w", managed.DeploymentModeEnv, err)
+	}
+	if managed.IsManagedEnterprise(pinnedDeploymentMode) {
+		if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+			}
+			return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
+		}
+	}
 
 	viper.SetConfigFile(configFile)
 	viper.SetConfigType("yaml")
@@ -2216,12 +2236,34 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	migrateFlatOTelConfigFromViper(&cfg)
 	warnDisableRedactionConfig(&cfg)
 	cfg.DeploymentMode = normalizeDeploymentMode(cfg.DeploymentMode)
+	if pinnedDeploymentMode != "" {
+		if cfg.DeploymentMode != "" && cfg.DeploymentMode != pinnedDeploymentMode {
+			return nil, fmt.Errorf("config: deployment_mode=%q conflicts with immutable %s=%q", cfg.DeploymentMode, managed.DeploymentModeEnv, pinnedDeploymentMode)
+		}
+		cfg.DeploymentMode = pinnedDeploymentMode
+	}
 
 	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
 		}
 		return nil, err
+	}
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if !managed.IsManagedEnterprise(pinnedDeploymentMode) {
+			if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
+				if ReportConfigLoadError != nil {
+					ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+				}
+				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
+			}
+		}
+		if err := managed.ValidateTrustedRuntimeDir(cfg.DataDir, "managed data_dir"); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
+			}
+			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
+		}
 	}
 
 	cfg.Gateway.ConfigReload.Mode = normalizeGatewayConfigReloadMode(cfg.Gateway.ConfigReload.Mode)
@@ -2300,6 +2342,12 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.ApplicationProtection.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "application_protection_invalid")
+		}
+		return nil, fmt.Errorf("config: application_protection: %w", err)
 	}
 
 	// Validate registry source kind/content shapes. The Python CLI
@@ -3183,6 +3231,18 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("ai_discovery.emit_otel", true)
 	viper.SetDefault("ai_discovery.store_raw_local_paths", false)
 	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
+	viper.SetDefault("ai_discovery.require_trusted_binary_paths", false)
+	viper.SetDefault("ai_discovery.trusted_binary_prefixes", []string{})
+
+	viper.SetDefault("application_protection.enabled", true)
+	viper.SetDefault("application_protection.min_confidence", DefaultApplicationProtectionMinConfidence)
+	viper.SetDefault("application_protection.remove_when_gone", false)
+	viper.SetDefault("application_protection.gone_after_min", DefaultApplicationProtectionGoneAfterMin)
+	viper.SetDefault("application_protection.include_connectors", []string{})
+	viper.SetDefault("application_protection.exclude_connectors", []string{})
+	viper.SetDefault("application_protection.guardrail.mode", "observe")
+	viper.SetDefault("application_protection.asset_policy.mode", AssetPolicyModeObserve)
+	viper.SetDefault("application_protection.connectors", map[string]any{})
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")

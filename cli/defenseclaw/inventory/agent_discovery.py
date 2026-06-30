@@ -30,6 +30,8 @@ from io import StringIO
 from pathlib import Path
 from typing import NamedTuple
 
+import yaml
+
 # `grp` is POSIX-only. We import it lazily-but-at-module-load so the
 # group-ownership check below can run without an inline import,
 # while still keeping Windows hosts importable.
@@ -38,7 +40,7 @@ try:  # pragma: no cover - Windows path
 except ImportError:  # pragma: no cover - non-POSIX
     _grp = None  # type: ignore[assignment]
 
-from defenseclaw.config import default_data_path
+from defenseclaw.config import config_path_for_data_dir, default_data_path
 from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand, omnigent_config_path
 
 # Sentinel error returned by ``_version_for_binary`` when a connector
@@ -218,8 +220,18 @@ def discover_agents(
             return cached
 
     scanned_at = _format_rfc3339(_now_utc())
+    require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
     with ThreadPoolExecutor(max_workers=4) as pool:
-        signals = list(pool.map(_scan_agent, KNOWN_CONNECTORS))
+        signals = list(
+            pool.map(
+                lambda name: _scan_agent(
+                    name,
+                    data_dir=data_dir,
+                    require_trusted_binary_paths=require_trusted,
+                ),
+                KNOWN_CONNECTORS,
+            )
+        )
     agents = {signal.name: signal for signal in signals}
     discovery = AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=False)
     _write_cache(discovery, data_dir=data_dir)
@@ -274,7 +286,12 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
     return stream.getvalue()
 
 
-def _scan_agent(name: str) -> AgentSignal:
+def _scan_agent(
+    name: str,
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+    require_trusted_binary_paths: bool = False,
+) -> AgentSignal:
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_candidates = spec.config_candidates
     if name == "omnigent":
@@ -287,7 +304,12 @@ def _scan_agent(name: str) -> AgentSignal:
     version_ok = False
 
     if binary_path:
-        version, error = _version_for_binary(binary_path, spec.version_args)
+        version, error = _version_for_binary(
+            binary_path,
+            spec.version_args,
+            require_trusted_binary_paths=require_trusted_binary_paths,
+            data_dir=data_dir,
+        )
         version_ok = bool(version) and not error
 
     installed = bool(config_path) or (bool(binary_path) and version_ok)
@@ -301,7 +323,28 @@ def _scan_agent(name: str) -> AgentSignal:
     )
 
 
-def _trusted_bin_prefixes() -> tuple[str, ...]:
+def _ai_discovery_trust_config(
+    data_dir: str | os.PathLike[str] | None = None,
+) -> tuple[bool, tuple[str, ...]]:
+    """Return ``(require_trusted_paths, config_prefixes)`` from config.yaml."""
+    path = config_path_for_data_dir(data_dir)
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except OSError:
+        raw = {}
+    if not isinstance(raw, dict):
+        return False, ()
+    block = raw.get("ai_discovery")
+    if not isinstance(block, dict):
+        return False, ()
+    prefixes = tuple(str(v).strip() for v in (block.get("trusted_binary_prefixes", []) or []) if str(v).strip())
+    return bool(block.get("require_trusted_binary_paths", False)), prefixes
+
+
+def _trusted_bin_prefixes(
+    data_dir: str | os.PathLike[str] | None = None,
+) -> tuple[str, ...]:
     """Return the allow-list of canonical install prefixes.
 
     The defaults cover platform-package, Homebrew, MacPorts, and common
@@ -311,6 +354,8 @@ def _trusted_bin_prefixes() -> tuple[str, ...]:
     before comparison.
     """
     extras: list[str] = []
+    _require, config_prefixes = _ai_discovery_trust_config(data_dir)
+    extras.extend(config_prefixes)
     raw = os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
     # Split on os.pathsep (':' POSIX, ';' Windows) so a Windows
     # drive-qualified path like 'C:\\Tools' survives unmangled.
@@ -459,7 +504,10 @@ def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
     return resolved, None
 
 
-def _is_trusted_binary_path(binary_path: str) -> bool:
+def _is_trusted_binary_path(
+    binary_path: str,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> bool:
     """M-4: refuse to exec a binary that lives outside the allow-list.
 
     The check follows symlinks (``os.path.realpath``) so an attacker
@@ -513,7 +561,7 @@ def _is_trusted_binary_path(binary_path: str) -> bool:
         return False
     if bin_st.st_mode & 0o022:
         return False
-    prefixes = _trusted_bin_prefixes()
+    prefixes = _trusted_bin_prefixes(data_dir)
     default_prefixes = _default_trusted_bin_prefixes()
     for prefix in prefixes:
         # Both the resolved binary and the candidate need to share a
@@ -528,18 +576,28 @@ def _is_trusted_binary_path(binary_path: str) -> bool:
             # during passive discovery. Operator opt-in prefixes
             # (DEFENSECLAW_TRUSTED_BIN_PREFIXES) keep the looser checks.
             if prefix in default_prefixes and not _bin_chain_is_system_owned(resolved, prefix):
+                # A user-owned Homebrew tree can fail the default-prefix
+                # ownership gate while a narrower operator opt-in prefix
+                # (DEFENSECLAW_TRUSTED_BIN_PREFIXES) still matches — keep
+                # scanning instead of rejecting early.
                 continue
             return True
     return False
 
 
-def _version_for_binary(binary_path: str, version_args: tuple[str, ...]) -> tuple[str, str]:
+def _version_for_binary(
+    binary_path: str,
+    version_args: tuple[str, ...],
+    *,
+    require_trusted_binary_paths: bool = True,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> tuple[str, str]:
     # M-4: the value of ``binary_path`` is sourced from
     # ``shutil.which(binary_name)`` which honours $PATH — an attacker
     # who can prepend a hostile directory to PATH can otherwise have us
     # exec their binary as part of a passive discovery scan. Refuse
     # anything outside the canonical install prefixes.
-    if not _is_trusted_binary_path(binary_path):
+    if require_trusted_binary_paths and not _is_trusted_binary_path(binary_path, data_dir=data_dir):
         return "", UNTRUSTED_PREFIX_ERROR
     binary_name = os.path.basename(binary_path).lower()
     env = None

@@ -36,6 +36,14 @@ from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 
+def _trusted_prefixes_from_config(data_dir: str) -> list[str]:
+    import yaml
+
+    with open(os.path.join(data_dir, "config.yaml"), encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+    return list((raw.get("ai_discovery") or {}).get("trusted_binary_prefixes") or [])
+
+
 class TestInitCommand(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-test-")
@@ -2246,11 +2254,9 @@ class TestMultiConnectorInit(unittest.TestCase):
 
         self.assertEqual(got, ["hermes"])
         self.assertEqual(discover.call_count, 2)
-        dotenv = os.path.join(self.tmp_dir, ".env")
-        with open(dotenv, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn(os.path.realpath(hermes_dir), text)
-        self.assertNotIn(os.path.realpath(codex_dir), text)
+        prefixes = _trusted_prefixes_from_config(self.tmp_dir)
+        self.assertIn(os.path.realpath(hermes_dir), prefixes)
+        self.assertNotIn(os.path.realpath(codex_dir), prefixes)
 
     def test_prompt_first_run_explicit_action_declined_trust_downgrades_with_remediation(self):
         from defenseclaw.commands import cmd_init
@@ -2345,9 +2351,7 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertEqual(settings[0]["profile"], "action")
         self.assertIsNone(settings[0]["mode_warning"])
 
-        dotenv = os.path.join(self.tmp_dir, ".env")
-        with open(dotenv, encoding="utf-8") as fh:
-            self.assertIn(os.path.realpath(bin_dir), fh.read())
+        self.assertIn(os.path.realpath(bin_dir), _trusted_prefixes_from_config(self.tmp_dir))
 
     def test_checkbox_selector_toggles_with_keys(self):
         from defenseclaw.commands import cmd_init
@@ -2403,10 +2407,7 @@ class TestMultiConnectorInit(unittest.TestCase):
 
         self.assertEqual(got, ["codex"])
         self.assertEqual(discover.call_count, 2)
-        dotenv = os.path.join(self.tmp_dir, ".env")
-        self.assertTrue(os.path.isfile(dotenv))
-        with open(dotenv, encoding="utf-8") as fh:
-            self.assertIn(os.path.realpath(bin_dir), fh.read())
+        self.assertIn(os.path.realpath(bin_dir), _trusted_prefixes_from_config(self.tmp_dir))
 
 
 class TestInitObserveAllActionConnectors(unittest.TestCase):

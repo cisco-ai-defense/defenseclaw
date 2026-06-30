@@ -3810,6 +3810,48 @@ func TestWriteHookScriptsWithToken_EnvVarOverridesBakedToken(t *testing.T) {
 	}
 }
 
+func TestConnectorScopedHookTokenOverridesGenericEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteHookScriptsForConnectorObject(dir, "127.0.0.1:18970", "scoped-token", NewCodexConnector()); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
+	}
+
+	out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "codex-hook.sh"),
+		map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
+	if !containsAuthBearer(out, "scoped-token") {
+		t.Errorf("connector-scoped token should override inherited generic env token; got curl args:\n%s", out)
+	}
+	if containsAuthBearer(out, "generic-env") {
+		t.Errorf("hook leaked inherited generic env token instead of scoped token; got curl args:\n%s", out)
+	}
+}
+
+func TestConnectorScopedHookReadFailureClearsGenericEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(string) error
+	}{
+		{name: "empty", mutate: func(path string) error { return os.WriteFile(path, nil, 0o600) }},
+		{name: "missing", mutate: os.Remove},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := WriteHookScriptsForConnectorObject(dir, "127.0.0.1:18970", "scoped-token", NewCodexConnector()); err != nil {
+				t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
+			}
+			if err := tc.mutate(filepath.Join(dir, ".hook-codex.token")); err != nil {
+				t.Fatalf("mutate scoped token: %v", err)
+			}
+
+			out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "codex-hook.sh"),
+				map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
+			if containsAuthBearer(out, "") {
+				t.Errorf("hook retained an inherited generic token after scoped read failure; got curl args:\n%s", out)
+			}
+		})
+	}
+}
+
 // runHookAndReturnCurlArgs executes the given hook script with `curl`
 // replaced by a stub that writes its argv, one per line, to a file. The
 // hook script pipes curl's stderr to /dev/null, so stdout/stderr capture
@@ -5472,6 +5514,32 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 	}
 }
 
+func TestManagedEnterpriseHookIgnoresUserControlledHomeAndDisableSentinel(t *testing.T) {
+	dir := t.TempDir()
+	opts := SetupOpts{
+		APIAddr:           "127.0.0.1:18970",
+		APIToken:          "scoped-token",
+		ManagedEnterprise: true,
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "codex-hook.sh"))
+	if err != nil {
+		t.Fatalf("read managed hook: %v", err)
+	}
+	rendered := string(body)
+	if strings.Contains(rendered, `${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}`) {
+		t.Fatal("managed hook retained user-controlled DEFENSECLAW_HOME fallback")
+	}
+	if strings.Contains(rendered, `${DEFENSECLAW_HOME}/.disabled`) {
+		t.Fatal("managed hook retained user-controlled disable sentinel")
+	}
+	if !strings.Contains(rendered, `DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"`) {
+		t.Fatal("managed hook does not derive its data directory from the verified hook path")
+	}
+}
+
 func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -6033,6 +6101,11 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 				t.Fatalf("%s does not implement AgentPathProvider", c.name)
 			}
 			paths := ap.AgentPaths(opts)
+			isUnderDataDir := func(path string) bool {
+				rel, err := filepath.Rel(dataDir, path)
+				return err == nil && rel != "." && rel != ".." &&
+					!strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel)
+			}
 
 			// Every built-in connector touches at least one file
 			// the operator should know about (PatchedFiles or
@@ -6048,15 +6121,31 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 				if !filepath.IsAbs(hs) {
 					t.Errorf("%s: hook script %q is not absolute", c.name, hs)
 				}
-				if !strings.HasPrefix(hs, dataDir) {
+				if !isUnderDataDir(hs) {
 					t.Errorf("%s: hook script %q is not under DataDir %q", c.name, hs, dataDir)
 				}
 			}
 
 			// Backup files must live under DataDir.
 			for _, bf := range paths.BackupFiles {
-				if !strings.HasPrefix(bf, dataDir) {
+				if !isUnderDataDir(bf) {
 					t.Errorf("%s: backup file %q is not under DataDir %q", c.name, bf, dataDir)
+				}
+			}
+			for _, gf := range paths.GeneratedFiles {
+				if !filepath.IsAbs(gf) {
+					t.Errorf("%s: generated file %q is not absolute", c.name, gf)
+				}
+				if !isUnderDataDir(gf) {
+					t.Errorf("%s: generated file %q is not under DataDir %q", c.name, gf, dataDir)
+				}
+			}
+			for _, gf := range paths.GeneratedExecutables {
+				if !filepath.IsAbs(gf) {
+					t.Errorf("%s: generated executable %q is not absolute", c.name, gf)
+				}
+				if !isUnderDataDir(gf) {
+					t.Errorf("%s: generated executable %q is not under DataDir %q", c.name, gf, dataDir)
 				}
 			}
 		})
@@ -6319,6 +6408,9 @@ func TestCodex_AgentPaths_Specifics(t *testing.T) {
 			}
 		}
 	}
+	if !slices.Contains(paths.GeneratedExecutables, filepath.Join(dataDir, "notify-bridge.sh")) {
+		t.Errorf("GeneratedExecutables = %v, missing notify bridge", paths.GeneratedExecutables)
+	}
 }
 
 // TestClaudeCode_AgentPaths_Specifics pins the Claude Code footprint:
@@ -6373,6 +6465,12 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("CreatedDirs = %v, missing %q", paths.CreatedDirs, wantDir)
+	}
+	if !slices.Contains(paths.GeneratedFiles, filepath.Join(dataDir, "shims", ".token")) {
+		t.Errorf("GeneratedFiles = %v, missing shim token", paths.GeneratedFiles)
+	}
+	if !slices.Contains(paths.GeneratedExecutables, filepath.Join(dataDir, "shims", "curl")) {
+		t.Errorf("GeneratedExecutables = %v, missing curl shim", paths.GeneratedExecutables)
 	}
 }
 

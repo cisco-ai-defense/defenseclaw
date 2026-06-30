@@ -416,7 +416,7 @@ func assetMCPModeFor(a *APIServer, decision config.AssetPolicyDecision) (string,
 	// Resolve mode + MCP.Default per-connector (OTHER-7) so a connector with
 	// an override gets its own posture rather than the global one. The
 	// connector travels on the decision (set from AssetPolicyInput.Connector).
-	mode := strings.TrimSpace(a.scannerCfg.AssetPolicy.EffectiveMode(decision.Connector))
+	mode := strings.TrimSpace(a.scannerCfg.EffectiveAssetPolicyModeForConnector(decision.Connector))
 	if mode == "" {
 		mode = decision.Mode
 	}

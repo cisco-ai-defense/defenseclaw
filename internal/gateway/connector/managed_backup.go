@@ -99,11 +99,14 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	if err != nil {
 		return err
 	}
+	nextHash := managedBackupMissingHash
 	if info != nil {
-		b.PostSHA256 = sha256Hex(data)
-	} else {
-		b.PostSHA256 = managedBackupMissingHash
+		nextHash = sha256Hex(data)
 	}
+	if b.PostSHA256 == nextHash {
+		return nil
+	}
+	b.PostSHA256 = nextHash
 	b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return writeManagedFileBackup(backupPath, b)
 }

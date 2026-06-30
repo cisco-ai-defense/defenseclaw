@@ -39,13 +39,14 @@ from __future__ import annotations
 import copy
 import os
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 import yaml
 
-from defenseclaw.config import locked_config_yaml, write_config_yaml_secure
+from defenseclaw.config import config_path_for_data_dir, locked_config_yaml, write_config_yaml_secure
 from defenseclaw.observability.presets import Preset, Signal, resolve_preset
 from defenseclaw.safety import sanitize_dotenv_value
 
@@ -186,8 +187,9 @@ def apply_preset(
     if effective_target in {"audit_sinks", "otel"} and not _NAME_RE.match(dest_name):
         raise ValueError(f"destination name {dest_name!r} must match {_NAME_RE.pattern}")
 
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
-    with locked_config_yaml(cfg_path):
+    cfg_path = str(config_path_for_data_dir(data_dir))
+    lock = nullcontext() if dry_run else locked_config_yaml(cfg_path)
+    with lock:
         raw = _load_yaml(cfg_path)
         before = copy.deepcopy(raw)
 
@@ -253,7 +255,7 @@ def list_destinations(data_dir: str) -> list[Destination]:
     Includes every named ``otel.destinations[]`` route and every entry in
     ``audit_sinks:`` in file order.
     """
-    raw = _load_yaml(os.path.join(data_dir, CONFIG_FILE_NAME))
+    raw = _load_yaml(str(config_path_for_data_dir(data_dir)))
     out: list[Destination] = []
 
     otel = raw.get("otel") or {}
@@ -351,7 +353,7 @@ def set_destination_enabled(
 
     Named OTel destinations are matched before audit sinks.
     """
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     with locked_config_yaml(cfg_path):
         raw = _load_yaml(cfg_path)
         changes: list[str] = []
@@ -398,7 +400,7 @@ def set_destination_enabled(
 
 def remove_destination(name: str, data_dir: str) -> WriteResult:
     """Delete one named OTel destination or audit sink."""
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     with locked_config_yaml(cfg_path):
         raw = _load_yaml(cfg_path)
         changes: list[str] = []

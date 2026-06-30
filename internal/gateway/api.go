@@ -48,6 +48,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -108,6 +109,9 @@ type APIServer struct {
 	otlpPathTokens          map[connector.OTLPPathTokenScope]otlpPathTokenEntry
 	otlpPathTokenReloadAt   map[connector.OTLPPathTokenScope]time.Time
 	otlpPathTokenLastStatAt map[connector.OTLPPathTokenScope]time.Time
+
+	hookAPITokenMu sync.RWMutex
+	hookAPITokens  map[string]string
 
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
@@ -259,6 +263,27 @@ func (a *APIServer) SetOTLPPathTokens(tokens map[connector.OTLPPathTokenScope]st
 		cp[k] = entry
 	}
 	a.otlpPathTokens = cp
+}
+
+// SetHookAPITokens replaces the in-memory snapshot of connector-scoped hook
+// API tokens. These tokens are narrower than gateway.token: tokenAuth accepts
+// them only for the matching connector hook/notify routes.
+func (a *APIServer) SetHookAPITokens(tokens map[string]string) {
+	a.hookAPITokenMu.Lock()
+	defer a.hookAPITokenMu.Unlock()
+	if tokens == nil {
+		a.hookAPITokens = nil
+		return
+	}
+	cp := make(map[string]string, len(tokens))
+	for k, v := range tokens {
+		name := strings.ToLower(strings.TrimSpace(k))
+		tok := strings.TrimSpace(v)
+		if name != "" && tok != "" {
+			cp[name] = tok
+		}
+	}
+	a.hookAPITokens = cp
 }
 
 // otlpPathTokenReloadMinInterval bounds disk I/O on the loopback OTLP auth
@@ -442,6 +467,67 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	}
 	a.otlpPathTokens[scope] = otlpPathTokenEntry{token: tok, mtime: info.ModTime()}
 	return tok
+}
+
+func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	presented = strings.TrimSpace(presented)
+	if name == "" || presented == "" {
+		return false
+	}
+
+	dataDir := a.configDataDir()
+	if dataDir == "" {
+		a.hookAPITokenMu.RLock()
+		cached := ""
+		if a.hookAPITokens != nil {
+			cached = a.hookAPITokens[name]
+		}
+		a.hookAPITokenMu.RUnlock()
+		return cached != "" && constantTimeStringMatch(presented, cached)
+	}
+	tok, err := connector.LoadHookAPIToken(dataDir, name)
+	if err != nil || tok == "" {
+		a.hookAPITokenMu.Lock()
+		if a.hookAPITokens != nil {
+			delete(a.hookAPITokens, name)
+		}
+		a.hookAPITokenMu.Unlock()
+		return false
+	}
+	a.hookAPITokenMu.Lock()
+	if a.hookAPITokens == nil {
+		a.hookAPITokens = map[string]string{}
+	}
+	a.hookAPITokens[name] = tok
+	a.hookAPITokenMu.Unlock()
+	return constantTimeStringMatch(presented, tok)
+}
+
+func (a *APIServer) hookTokenScopeForPath(path string) (string, bool) {
+	if path == "/api/v1/codex/notify" {
+		return "codex", true
+	}
+	if a.connectorRegistry != nil {
+		for _, name := range a.connectorRegistry.Names() {
+			conn, ok := a.connectorRegistry.Get(name)
+			if !ok {
+				continue
+			}
+			he, ok := conn.(connector.HookEndpoint)
+			if ok && he.HookAPIPath() == path {
+				return strings.ToLower(name), true
+			}
+		}
+		return "", false
+	}
+	switch path {
+	case "/api/v1/codex/hook":
+		return "codex", true
+	case "/api/v1/claude-code/hook":
+		return "claudecode", true
+	}
+	return "", false
 }
 
 func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
@@ -756,7 +842,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// API never comes up, and every connector hook posting to this port fails.
 	// Retrying for a few seconds lets the OS reclaim the port so the restarted
 	// gateway binds the same address the agent's hooks call.
-	ln, lnErr := listenWithRetry(ctx, a.addr, 6*time.Second)
+	ln, lnErr := listenWithRetry(ctx, a.addr, 30*time.Second)
 	if lnErr != nil {
 		a.health.SetAPI(StateError, lnErr.Error(), nil)
 		return fmt.Errorf("api: listen %s: %w", a.addr, lnErr)
@@ -988,12 +1074,7 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 			"proxy_intercept":     false,
 		}
 	}
-	name := a.connectorName()
-	policyMode := "observe"
-	if a.scannerCfg != nil {
-		policyMode = a.scannerCfg.Guardrail.EffectiveMode(name)
-	}
-	return connectorModeFor(name, policyMode)
+	return connectorModeForConfig(a.scannerCfg, a.connectorName())
 }
 
 // connectorModesSummary returns one connectorModeFor entry per active
@@ -1016,12 +1097,7 @@ func (a *APIServer) connectorModesSummary() []map[string]interface{} {
 	}
 	out := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
-		name = strings.ToLower(strings.TrimSpace(name))
-		policyMode := "observe"
-		if a.scannerCfg != nil {
-			policyMode = a.scannerCfg.Guardrail.EffectiveMode(name)
-		}
-		out = append(out, connectorModeFor(name, policyMode))
+		out = append(out, connectorModeForConfig(a.scannerCfg, strings.ToLower(strings.TrimSpace(name))))
 	}
 	return out
 }
@@ -1083,6 +1159,20 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		"telemetry":           telemetry,
 		"proxy_intercept":     intercept,
 	}
+}
+
+func connectorModeForConfig(cfg *config.Config, name string) map[string]interface{} {
+	guardrailMode := "observe"
+	if cfg != nil {
+		guardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
+	}
+	out := connectorModeFor(name, guardrailMode)
+	if guardrailMode != "" {
+		out["guardrail_mode"] = guardrailMode
+	}
+	proxyIntercept, _ := out["proxy_intercept"].(bool)
+	out["hook_enforcement"] = !proxyIntercept && strings.EqualFold(guardrailMode, "action")
+	return out
 }
 
 type skillActionRequest struct {
@@ -2443,6 +2533,12 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusOK, cfg)
 
 	case http.MethodPatch:
+		if a.scannerCfg != nil && managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) {
+			a.writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "managed_enterprise config changes require operating-system administrator privileges; edit the managed config file or use the enterprise guardian",
+			})
+			return
+		}
 		// PR #141 audit C1: defense-in-depth gate. tokenAuth already
 		// fail-closes when no gateway token is configured, but mode
 		// changes are too security-sensitive to depend on a single
@@ -2810,6 +2906,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			// would turn a single connector settings-file leak into
 			// full gateway authority.
 			if token == "" && constantTimeStringMatch(pathToken, expected) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
+			if a.hookAPITokenMatches(hookScope, token) {
 				next.ServeHTTP(w, r)
 				return
 			}

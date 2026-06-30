@@ -660,6 +660,35 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 	}
 }
 
+func TestIngestExternalReport_DoesNotNotifyAutomationObservers(t *testing.T) {
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true,
+		Mode:    "enhanced",
+		DataDir: t.TempDir(),
+		HomeDir: t.TempDir(),
+	}, []AISignature{testAISignature()}, nil, nil)
+	called := make(chan struct{}, 1)
+	svc.AddReportObserver(func(context.Context, AIDiscoveryReport) { called <- struct{}{} })
+	report := AIDiscoveryReport{
+		Summary: AIDiscoverySummary{ScanID: "external-scan"},
+		Signals: []AISignal{{
+			Fingerprint: "fp-1",
+			SignatureID: "shadowai",
+			Category:    SignalAICLI,
+			State:       AIStateSeen,
+			Detector:    "config_path",
+		}},
+	}
+	if err := svc.IngestExternalReport(context.Background(), &report); err != nil {
+		t.Fatalf("IngestExternalReport: %v", err)
+	}
+	select {
+	case <-called:
+		t.Fatal("external report reached application-protection observer")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 // TestRunScan_NonFullTickShipsFullInventoryConsistentWithSummary
 // pins the Bug A fix: on a process-only ticker tick, the API
 // payload must still expose every active fingerprint (so the

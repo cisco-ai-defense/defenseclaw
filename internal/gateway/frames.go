@@ -208,7 +208,8 @@ type ConfigPatchParams struct {
 // ConfigPatchRawParams is the params for config.patch RPC using the raw
 // merge format. OpenClaw expects { raw: "<JSON string>", baseHash: "<sha256>" }.
 // Unlike config.set (which replaces the entire config), config.patch performs
-// a deep merge into the existing config.
+// a deep merge into the existing config. replacePaths explicitly authorizes
+// array replacement/removal for paths such as plugins.allow.
 type ConfigPatchRawParams struct {
 	Raw          string   `json:"raw"`
 	BaseHash     string   `json:"baseHash,omitempty"`

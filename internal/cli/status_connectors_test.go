@@ -11,11 +11,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
@@ -200,6 +202,88 @@ func TestPrintConnectors_NoConnector(t *testing.T) {
 	out := captureStdout(t, func() { printConnectors(&gateway.HealthSnapshot{}) })
 	if !strings.Contains(out, "no active connector") {
 		t.Errorf("expected '(no active connector)', got:\n%s", out)
+	}
+}
+
+func TestPrintHookGuardianStatusManagedMissingState(t *testing.T) {
+	old := cfg
+	t.Cleanup(func() { cfg = old })
+	cfg = &config.Config{
+		DataDir:        t.TempDir(),
+		DeploymentMode: "managed_enterprise",
+	}
+
+	out := captureStdout(t, printHookGuardianStatus)
+	if !strings.Contains(out, "Hook guardian") || !strings.Contains(out, "not reconciled") {
+		t.Fatalf("managed enterprise missing-state output should show not reconciled, got:\n%s", out)
+	}
+}
+
+func TestPrintHookGuardianStatusHealthy(t *testing.T) {
+	old := cfg
+	t.Cleanup(func() { cfg = old })
+	dir := t.TempDir()
+	cfg = &config.Config{
+		DataDir:        dir,
+		DeploymentMode: "managed_enterprise",
+	}
+	state := `{
+  "version": 1,
+  "updated_at": "2026-06-24T01:00:00Z",
+  "manifest": "/etc/defenseclaw/hook-guardian/targets.yaml",
+  "ok": true,
+  "target_count": 1,
+  "success_count": 1,
+  "failure_count": 0,
+  "results": [
+    {"user": "alice", "connector": "codex", "ok": true}
+  ]
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "hook_guardian_state.json"), []byte(state), 0o600); err != nil {
+		t.Fatalf("write hook guardian state: %v", err)
+	}
+
+	out := captureStdout(t, printHookGuardianStatus)
+	for _, want := range []string{"Hook guardian", "healthy", "1/1 targets ok", "Codex (codex) for alice", "ok"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q from hook guardian output:\n%s", want, out)
+		}
+	}
+}
+
+func TestIsLocalStatusTarget(t *testing.T) {
+	for _, host := range []string{"localhost", "127.0.0.1", "[::1]", " [::1] ", "0.0.0.0", "::"} {
+		if !isLocalStatusTarget(host) {
+			t.Errorf("isLocalStatusTarget(%q) = false, want true", host)
+		}
+	}
+	for _, host := range []string{"gateway.example.test", "192.0.2.20", "2001:db8::20"} {
+		if isLocalStatusTarget(host) {
+			t.Errorf("isLocalStatusTarget(%q) = true, want false", host)
+		}
+	}
+	if hostname, err := os.Hostname(); err == nil && !isLocalStatusTarget(hostname) {
+		t.Errorf("machine hostname %q was not recognized as local", hostname)
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatalf("InterfaceAddrs: %v", err)
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch local := addr.(type) {
+		case *net.IPNet:
+			ip = local.IP
+		case *net.IPAddr:
+			ip = local.IP
+		}
+		if ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+			if !isLocalStatusTarget(ip.String()) {
+				t.Fatalf("local interface IP %s was not recognized as local", ip)
+			}
+			return
+		}
 	}
 }
 

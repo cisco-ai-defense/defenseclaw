@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -190,6 +191,18 @@ func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) erro
 	if lock.Connectors == nil {
 		lock.Connectors = map[string]HookContractLockEntry{}
 	}
+	if previous, ok := lock.Connectors[entry.Connector]; ok {
+		previousComparison := previous
+		entryComparison := entry
+		previousComparison.UpdatedAt = ""
+		entryComparison.UpdatedAt = ""
+		if reflect.DeepEqual(previousComparison, entryComparison) {
+			return nil
+		}
+	}
+	if entry.UpdatedAt == "" {
+		entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 	lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	lock.Connectors[entry.Connector] = entry
 	data, err := json.MarshalIndent(lock, "", "  ")
@@ -306,13 +319,9 @@ func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
 	if previous.ContractID != "" && current.ContractID != "" && previous.ContractID != current.ContractID {
 		return true
 	}
-	if len(previous.HookScriptDigests) > 0 && len(current.HookScriptDigests) > 0 {
-		for name, digest := range previous.HookScriptDigests {
-			if current.HookScriptDigests[name] != "" && current.HookScriptDigests[name] != digest {
-				return true
-			}
-		}
-	}
+	// Hook script digests are intentionally not a boot/reconcile drift gate:
+	// changed script bytes are the thing setup/guardian repair is supposed to
+	// overwrite. Treat only agent/contract identity changes as contract drift.
 	return false
 }
 

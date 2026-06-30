@@ -66,6 +66,11 @@ type SetupOpts struct {
 	APIAddr     string // 127.0.0.1:18970 (API server — inspection endpoints)
 	APIToken    string // gateway bearer token; baked into hook curl -H
 	Interactive bool
+	// ManagedEnterprise marks hook scripts installed by the privileged
+	// enterprise guardian. Managed scripts ignore user-controlled home and
+	// disable-sentinel overrides and derive their data directory from the
+	// verified script location instead.
+	ManagedEnterprise bool
 	// WorkspaceDir is the project/workspace root for connectors whose
 	// hook configuration is intentionally repository-scoped (for
 	// example Copilot CLI's .github/hooks/*.json files). When empty,
@@ -518,6 +523,19 @@ type AgentPaths struct {
 	// runtime (PreToolUse, PostToolUse, etc.). Path semantics match
 	// PatchedFiles.
 	HookScripts []string
+
+	// GeneratedFiles are DefenseClaw-owned non-executable files written
+	// under opts.DataDir at Setup time that are not backups. They are
+	// declared separately so privileged enterprise repair can preflight
+	// an existing file before writing through it.
+	GeneratedFiles []string
+
+	// GeneratedExecutables are DefenseClaw-owned executable files written
+	// under opts.DataDir at Setup time that are not native hook scripts
+	// under hooks/. For example Codex's notify bridge is invoked by
+	// Codex's notify integration, not by the hook event bus, but still
+	// carries hook credentials and must be preflighted/hardened.
+	GeneratedExecutables []string
 
 	// CreatedDirs are directories the connector creates and owns
 	// (e.g. ~/.openclaw/extensions/defenseclaw/). Distinct from
