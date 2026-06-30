@@ -38,12 +38,29 @@ On **macOS**, OpenShell is not available. DefenseClaw still works for scanning, 
 
 ### Windows support
 
-On **Windows**, DefenseClaw is **hook-only**. The hook-based connectors —
-Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, and
-OpenHands — are fully supported. Their hook decisions run **natively in the
-`defenseclaw` binary** (the agent invokes `defenseclaw hook --connector <name>
---event <event>`), so Windows needs **no Git Bash, no `jq`, and no shell
-shims** — there are zero external prerequisites beyond the binary itself.
+On **native Windows**, DefenseClaw is **hook-only**. The current Windows
+connector scope deliberately excludes WSL and requires both the upstream agent
+and the complete DefenseClaw hook path to run directly on Windows.
+
+- **Supported:** Codex, Claude Code, Cursor IDE hooks, Windsurf, Gemini CLI,
+  Copilot CLI, Antigravity, and OpenCode.
+- **Preview:** Hermes, because upstream labels native Windows support Early
+  Beta.
+- **Unsupported:** OpenHands and OmniGent. OpenHands CLI requires WSL;
+  OmniGent has no supported native Windows terminal/sandbox path.
+
+Supported command-hook connectors invoke `defenseclaw hook --connector <name>
+--event <event>` through the native `defenseclaw-gateway.exe`; OpenCode loads
+the native JavaScript bridge plugin. DefenseClaw's hook entrypoint does not add
+a WSL, Git Bash, `jq`, or POSIX-shell dependency; upstream agent prerequisites
+still apply (for example, Claude Code's native Windows setup requires Git for
+Windows). Cursor support here means the Windows IDE hook surface; Cursor's
+separate CLI remains WSL-only.
+
+WSL availability is tracked for upstream research in
+[`CONNECTOR-MATRIX.md`](CONNECTOR-MATRIX.md), but it is not part of the current
+DefenseClaw Windows support or release-certification scope. A connector that
+only works through WSL does not qualify as Windows-supported.
 
 The proxy connectors **OpenClaw** and **ZeptoClaw** are **not supported on
 Windows**: they require the local guardrail proxy, which DefenseClaw does not
