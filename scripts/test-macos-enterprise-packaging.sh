@@ -9,7 +9,7 @@ fail() {
 
 [ "$(uname -s)" = Darwin ] || fail "this smoke test requires macOS"
 [ "$(id -u)" -ne 0 ] || fail "run as a non-root CI user"
-[ "${DEFENSECLAW_PACKAGING_SMOKE:-}" = 1 ] || fail "set DEFENSECLAW_PACKAGING_SMOKE=1 on a disposable host"
+[ "${MACOS_ENTERPRISE_PACKAGING_SMOKE:-}" = 1 ] || fail "set MACOS_ENTERPRISE_PACKAGING_SMOKE=1 on a disposable host"
 [ "$#" -eq 1 ] || fail "usage: $0 <defenseclaw-gateway-binary>"
 
 binary="$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"

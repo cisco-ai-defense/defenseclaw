@@ -232,7 +232,7 @@ jobs:
       - name: Test managed package ownership enforcement
         shell: bash
         env:
-          DEFENSECLAW_PACKAGING_SMOKE: "1"
+          MACOS_ENTERPRISE_PACKAGING_SMOKE: "1"
         run: ./scripts/test-macos-enterprise-packaging.sh "$RUNNER_TEMP/defenseclaw-gateway"
 
   python-audit:
