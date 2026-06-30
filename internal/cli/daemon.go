@@ -17,9 +17,7 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,9 +28,15 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
-const defaultStopTimeout = 10 * time.Second
+const (
+	defaultStopTimeout           = 10 * time.Second
+	defaultStartReadinessTimeout = 10 * time.Second
+	defaultReadinessPollInterval = 100 * time.Millisecond
+	defaultReadinessHTTPTimeout  = time.Second
+)
 
 var startCmd = &cobra.Command{
 	Use:   "start",
@@ -99,7 +103,26 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("start daemon: %w", err)
 	}
 
-	fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
+	cfg, cfgErr := config.Load()
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	snap, ready, err := waitForGatewayReadiness(
+		&http.Client{Timeout: defaultReadinessHTTPTimeout},
+		sidecarHealthURL(cfg),
+		defaultStartReadinessTimeout,
+		defaultReadinessPollInterval,
+		func() bool {
+			running, currentPID := d.IsRunning()
+			return running && currentPID == pid
+		},
+	)
+	if err != nil {
+		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		return fmt.Errorf("start daemon readiness: %w (check %s for errors)", err, d.LogFile())
+	}
+
+	printDaemonStartResult(pid, snap, ready)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
@@ -109,7 +132,6 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	printSplunkLocalHint()
 
 	// Auto-start watchdog if enabled in config.
-	cfg, cfgErr := config.Load()
 	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
 		if err := runWatchdogStart(nil, nil); err != nil {
 			fmt.Printf("  Watchdog: auto-start failed: %v\n", err)
@@ -171,15 +193,32 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("start daemon: %w", err)
 	}
 
-	fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
+	cfg, cfgErr := config.Load()
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	snap, ready, err := waitForGatewayReadiness(
+		&http.Client{Timeout: defaultReadinessHTTPTimeout},
+		sidecarHealthURL(cfg),
+		defaultStartReadinessTimeout,
+		defaultReadinessPollInterval,
+		func() bool {
+			running, currentPID := d.IsRunning()
+			return running && currentPID == pid
+		},
+	)
+	if err != nil {
+		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)", err, d.LogFile())
+	}
+
+	printDaemonStartResult(pid, snap, ready)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Println()
-	printCompactHealthSummary(cfg)
 	printSplunkLocalHint()
 
 	// Re-start watchdog if enabled in config.
-	cfg, cfgErr := config.Load()
 	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
 		if err := runWatchdogStart(nil, nil); err != nil {
 			fmt.Printf("  Warning: watchdog auto-start failed: %v\n", err)
@@ -245,64 +284,112 @@ func readDotEnv(path string) map[string]string {
 	return env
 }
 
-// printCompactHealthSummary polls /health and prints a one-line status.
-func printCompactHealthSummary(cfg *config.Config) {
-	if cfg == nil {
-		return
+// waitForGatewayReadiness waits for the health endpoint to publish a running
+// API state. The endpoint being reachable is not enough: it can briefly serve
+// the initial "starting" snapshot before APIServer marks itself running.
+// A live process that does not become ready by the deadline is returned as a
+// truthful STARTING state; a process exit or explicit API error fails fast.
+func waitForGatewayReadiness(
+	client *http.Client,
+	healthURL string,
+	timeout time.Duration,
+	pollInterval time.Duration,
+	processRunning func() bool,
+) (gateway.HealthSnapshot, bool, error) {
+	if pollInterval <= 0 {
+		pollInterval = defaultReadinessPollInterval
 	}
-	apiPort := cfg.Gateway.APIPort
-	if apiPort == 0 {
-		apiPort = 18790
-	}
-	url := fmt.Sprintf("http://127.0.0.1:%d/health", apiPort)
+	deadline := time.Now().Add(timeout)
+	var lastSnap gateway.HealthSnapshot
+	var lastProbeErr error
 
-	client := &http.Client{Timeout: 3 * time.Second}
-	for i := 0; i < 5; i++ {
-		time.Sleep(time.Second)
-		resp, err := client.Get(url)
-		if err != nil {
-			continue
+	for {
+		if processRunning != nil && !processRunning() {
+			if lastProbeErr != nil {
+				return lastSnap, false, fmt.Errorf(
+					"gateway process exited before readiness (last health probe: %v)",
+					lastProbeErr,
+				)
+			}
+			return lastSnap, false, fmt.Errorf("gateway process exited before readiness")
 		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		resp.Body.Close()
-		if resp.StatusCode == 200 {
-			fmt.Printf("  Health: %s\n", summarizeHealth(body))
-			return
+
+		snap, err := fetchSidecarHealth(client, healthURL)
+		if err == nil {
+			lastSnap = snap
+			lastProbeErr = nil
+			switch snap.API.State {
+			case gateway.StateRunning:
+				return snap, true, nil
+			case gateway.StateError:
+				detail := strings.TrimSpace(snap.API.LastError)
+				if detail == "" {
+					detail = "API reported an error state"
+				}
+				return snap, false, fmt.Errorf("gateway API failed during startup: %s", detail)
+			}
+		} else {
+			lastProbeErr = err
 		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return lastSnap, false, nil
+		}
+		delay := pollInterval
+		if remaining < delay {
+			delay = remaining
+		}
+		timer := time.NewTimer(delay)
+		<-timer.C
 	}
-	fmt.Println("  Health: not responding yet (use 'defenseclaw-gateway status')")
 }
 
-func summarizeHealth(body []byte) string {
-	var health map[string]json.RawMessage
-	if err := json.Unmarshal(body, &health); err != nil {
-		return "ok"
+func printDaemonStartResult(pid int, snap gateway.HealthSnapshot, ready bool) {
+	if ready {
+		fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
+		fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
+		return
 	}
-	subsystems := []string{"gateway", "watcher", "guardrail", "api", "telemetry", "splunk", "sandbox"}
+
+	fmt.Printf("%s (PID %d)\n", Style("STARTING", "fg=yellow", "bold"), pid)
+	fmt.Printf(
+		"  Health: still starting after %s (use 'defenseclaw-gateway status')\n",
+		defaultStartReadinessTimeout,
+	)
+}
+
+func summarizeHealthSnapshot(snap gateway.HealthSnapshot) string {
+	subsystems := []struct {
+		name   string
+		health gateway.SubsystemHealth
+	}{
+		{name: "gateway", health: snap.Gateway},
+		{name: "watcher", health: snap.Watcher},
+		{name: "guardrail", health: snap.Guardrail},
+		{name: "api", health: snap.API},
+		{name: "telemetry", health: snap.Telemetry},
+		{name: "sinks", health: snap.Sinks},
+	}
+	if snap.Sandbox != nil {
+		subsystems = append(subsystems, struct {
+			name   string
+			health gateway.SubsystemHealth
+		}{name: "sandbox", health: *snap.Sandbox})
+	}
+
 	var parts []string
 	for _, sub := range subsystems {
-		raw, ok := health[sub]
-		if !ok {
-			continue
-		}
-		var info struct {
-			State  string `json:"state"`
-			Status string `json:"status"`
-		}
-		if json.Unmarshal(raw, &info) != nil {
-			continue
-		}
-		state := info.State
-		if state == "" {
-			state = info.Status
-		}
+		state := string(sub.health.State)
 		switch strings.ToLower(state) {
 		case "running", "healthy":
-			parts = append(parts, sub+":ok")
+			parts = append(parts, sub.name+":ok")
 		case "disabled", "stopped":
-			parts = append(parts, sub+":off")
+			parts = append(parts, sub.name+":off")
+		case "":
+			continue
 		default:
-			parts = append(parts, sub+":"+state)
+			parts = append(parts, sub.name+":"+state)
 		}
 	}
 	if len(parts) == 0 {

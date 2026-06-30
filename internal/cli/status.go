@@ -15,8 +15,11 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -24,10 +27,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
-const gatewayStatusLabelWidth = 14
+const (
+	gatewayStatusLabelWidth       = 14
+	gatewayHealthDocumentMaxBytes = 1 << 20
+)
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
@@ -85,29 +92,64 @@ func styledConnectorStateVerb(state string) string {
 	}
 }
 
-func runSidecarStatus(_ *cobra.Command, _ []string) error {
-	bind := "127.0.0.1"
-	if cfg.Gateway.APIBind != "" {
-		bind = cfg.Gateway.APIBind
-	} else if cfg.OpenShell.IsStandalone() && cfg.Guardrail.Host != "" && cfg.Guardrail.Host != "localhost" {
-		bind = cfg.Guardrail.Host
+func sidecarHealthURL(c *config.Config) string {
+	if c == nil {
+		c = config.DefaultConfig()
 	}
-	addr := fmt.Sprintf("http://%s:%d/health", bind, cfg.Gateway.APIPort)
+	bind := "127.0.0.1"
+	if c.Gateway.APIBind != "" {
+		bind = c.Gateway.APIBind
+	} else if c.OpenShell.IsStandalone() && c.Guardrail.Host != "" && c.Guardrail.Host != "localhost" {
+		bind = c.Guardrail.Host
+	}
+	return fmt.Sprintf("http://%s:%d/health", bind, c.Gateway.APIPort)
+}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+// fetchSidecarHealth reads one complete, bounded health document. Keeping the
+// byte bound here protects both status and daemon-readiness callers from an
+// unbounded local response without truncating valid multi-connector JSON before
+// it is parsed.
+func fetchSidecarHealth(client *http.Client, addr string) (gateway.HealthSnapshot, error) {
+	var snap gateway.HealthSnapshot
 	resp, err := client.Get(addr)
 	if err != nil {
-		fmt.Println()
-		Warn("Sidecar Status: NOT RUNNING")
-		printGatewayKV("Endpoint", addr)
-		Subhead("Start the sidecar with: defenseclaw-gateway start")
-		return fmt.Errorf("sidecar unreachable")
+		return snap, err
 	}
 	defer resp.Body.Close()
 
-	var snap gateway.HealthSnapshot
-	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
-		return fmt.Errorf("sidecar status: parse response: %w", err)
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return snap, fmt.Errorf("health endpoint returned %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, gatewayHealthDocumentMaxBytes+1))
+	if err != nil {
+		return snap, fmt.Errorf("read response: %w", err)
+	}
+	if len(body) > gatewayHealthDocumentMaxBytes {
+		return snap, fmt.Errorf("health response exceeds %d bytes", gatewayHealthDocumentMaxBytes)
+	}
+	if err := json.Unmarshal(body, &snap); err != nil {
+		return snap, fmt.Errorf("parse response: %w", err)
+	}
+	return snap, nil
+}
+
+func runSidecarStatus(_ *cobra.Command, _ []string) error {
+	addr := sidecarHealthURL(cfg)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	snap, err := fetchSidecarHealth(client, addr)
+	if err != nil {
+		var requestErr *url.Error
+		if errors.As(err, &requestErr) {
+			fmt.Println()
+			Warn("Sidecar Status: NOT RUNNING")
+			printGatewayKV("Endpoint", addr)
+			Subhead("Start the sidecar with: defenseclaw-gateway start")
+			return fmt.Errorf("sidecar unreachable")
+		}
+		return fmt.Errorf("sidecar status: %w", err)
 	}
 
 	uptime := time.Duration(snap.UptimeMs) * time.Millisecond
@@ -117,6 +159,12 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printGatewayKV("Uptime", formatDuration(uptime))
 	fmt.Println()
 
+	bind := "127.0.0.1"
+	if cfg.Gateway.APIBind != "" {
+		bind = cfg.Gateway.APIBind
+	} else if cfg.OpenShell.IsStandalone() && cfg.Guardrail.Host != "" && cfg.Guardrail.Host != "localhost" {
+		bind = cfg.Guardrail.Host
+	}
 	if modes := fetchConnectorModes(client, bind, cfg.Gateway.APIPort); len(modes) > 0 {
 		printConnectorModes(modes)
 	}
