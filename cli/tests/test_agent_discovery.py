@@ -23,6 +23,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.inventory import agent_discovery as ad
 
@@ -49,6 +50,7 @@ def _discovery(*installed: str, cache_hit: bool = False) -> ad.AgentDiscovery:
 def _pin_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / ".defenseclaw"))
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
 
 def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
@@ -70,7 +72,10 @@ def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
 
     cache_file = Path(os.environ["DEFENSECLAW_HOME"]) / ad.CACHE_FILENAME
     assert cache_file.is_file()
-    assert stat.S_IMODE(cache_file.stat().st_mode) == 0o600
+    if os.name == "nt":
+        assert ad._windows_acl_write_error(str(cache_file)) is None
+    else:
+        assert stat.S_IMODE(cache_file.stat().st_mode) == 0o600
 
     calls.clear()
     monkeypatch.setattr(ad, "_scan_agent", lambda name: (_ for _ in ()).throw(AssertionError(name)))
@@ -125,7 +130,7 @@ def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, t
 
     signal = ad._scan_agent("codex")
 
-    assert signal.binary_path == "/usr/local/bin/codex"
+    assert signal.binary_path == os.path.abspath("/usr/local/bin/codex")
     assert signal.config_path == ""
     assert signal.installed is False
     assert "timed out" in signal.error
@@ -151,7 +156,7 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
     assert signal.installed is True
     assert signal.version == "codex 1.2.3"
     args, kwargs = calls[0]
-    assert args == ["/opt/bin/codex", "--version"]
+    assert args == [os.path.abspath("/opt/bin/codex"), "--version"]
     assert kwargs["shell"] is False
     assert kwargs["timeout"] == 2.0
     assert kwargs["capture_output"] is True
@@ -182,7 +187,7 @@ OpenHands CLI 1.16.0
     assert signal.installed is True
     assert signal.version == "OpenHands CLI 1.16.0"
     args, kwargs = calls[0]
-    assert args == ["/opt/bin/openhands", "--version"]
+    assert args == [os.path.abspath("/opt/bin/openhands"), "--version"]
     assert kwargs["timeout"] == 8.0
     assert kwargs["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
 
@@ -205,6 +210,56 @@ def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
     assert signal.version == "Hermes Agent v0.13.0"
     _, kwargs = calls[0]
     assert kwargs["timeout"] == 8.0
+
+
+def test_windows_executable_suffixes_preserve_agent_specific_probe_rules(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path: True)
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="SDK banner\nOpenHands CLI 1.16.0\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+
+    version, error = ad._version_for_binary(r"C:\Tools\openhands.EXE", ("--version",))
+
+    assert error == ""
+    assert version == "OpenHands CLI 1.16.0"
+    assert calls[0][1]["timeout"] == 8.0
+    assert calls[0][1]["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
+
+
+def test_claude_version_probe_gets_longer_timeout_with_exe_suffix(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path: True)
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="2.1.196 (Claude Code)\n", stderr="")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+
+    version, error = ad._version_for_binary(r"C:\Tools\claude.EXE", ("--version",))
+
+    assert error == ""
+    assert version == "2.1.196 (Claude Code)"
+    assert calls[0][1]["timeout"] == 8.0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PATHEXT regression")
+def test_which_discovers_cmd_wrapper(monkeypatch, tmp_path):
+    wrapper = tmp_path / "cursor.CMD"
+    wrapper.write_text("@echo 3.9.16\r\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+
+    assert ad._path_key(ad._which("cursor")) == ad._path_key(str(wrapper))
 
 
 def test_omnigent_discovery_honors_config_home(monkeypatch, tmp_path):
@@ -267,7 +322,7 @@ def test_version_probe_refuses_binary_outside_trusted_prefix(monkeypatch, tmp_pa
 def test_trust_check_accepts_canonical_prefix(monkeypatch, tmp_path):
     # Add tmp_path as a trusted prefix and place a real, non-world-writable
     # binary inside it.
-    binary = tmp_path / "bin" / "codex"
+    binary = tmp_path / "bin" / ("codex.exe" if os.name == "nt" else "codex")
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("#!/bin/sh\nexit 0\n")
     binary.chmod(0o755)
@@ -276,6 +331,49 @@ def test_trust_check_accepts_canonical_prefix(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(binary)) is True
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL regression")
+def test_windows_acl_distinguishes_owner_control_from_everyone_write(tmp_path):
+    safe = tmp_path / "safe"
+    unsafe = tmp_path / "everyone-write"
+    safe.mkdir()
+    unsafe.mkdir()
+    subprocess.run(
+        ["icacls", str(unsafe), "/grant", "*S-1-1-0:(OI)(CI)F"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    _safe_path, safe_error = ad.validate_trusted_prefix(str(safe))
+    _unsafe_path, unsafe_error = ad.validate_trusted_prefix(str(unsafe))
+
+    assert safe_error is None
+    assert unsafe_error is not None
+    assert "Everyone" in unsafe_error
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path comparison regression")
+def test_windows_trust_check_is_case_insensitive(monkeypatch, tmp_path):
+    binary = tmp_path / "bin" / "codex.EXE"
+    binary.parent.mkdir()
+    binary.write_bytes(b"MZ")
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(tmp_path).swapcase())
+
+    assert ad._is_trusted_binary_path(str(binary)) is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows prefix policy")
+def test_windows_defaults_are_narrow_and_reject_drive_root():
+    local_app_data = os.environ["LOCALAPPDATA"]
+    expected = os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin")
+    default_keys = {ad._path_key(path) for path in ad._TRUSTED_BIN_PREFIXES_DEFAULT}
+
+    assert ad._path_key(expected) in default_keys
+    assert ad._path_key(local_app_data) not in default_keys
+    assert ad._expand_bin_prefixes((Path(local_app_data).anchor,)) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires unprivileged POSIX symlinks")
 def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path):
     real_root = tmp_path / "real-tools"
     binary = real_root / "bin" / "omnigent"
@@ -291,6 +389,7 @@ def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path
     assert ad._is_trusted_binary_path(str(alias / "bin" / "omnigent")) is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX Homebrew layout")
 def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
     homebrew = tmp_path / "homebrew"
     real = homebrew / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
@@ -317,6 +416,7 @@ def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(link)) is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership semantics")
 def test_operator_prefix_still_applies_after_default_prefix_ownership_failure(
     monkeypatch,
     tmp_path,
@@ -352,6 +452,7 @@ def test_operator_prefix_still_applies_after_default_prefix_ownership_failure(
     assert ad._is_trusted_binary_path(str(binary)) is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires unprivileged POSIX symlinks")
 def test_trust_check_accepts_claude_local_share_target(monkeypatch, tmp_path):
     real = tmp_path / ".local" / "share" / "claude" / "versions" / "2.1.139"
     real.parent.mkdir(parents=True, exist_ok=True)
@@ -374,6 +475,7 @@ def test_trust_check_accepts_claude_local_share_target(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(link)) is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode-bit policy")
 def test_trust_check_rejects_world_writable_parent(monkeypatch, tmp_path):
     binary = tmp_path / "bin" / "codex"
     binary.parent.mkdir(parents=True, exist_ok=True)
@@ -386,6 +488,7 @@ def test_trust_check_rejects_world_writable_parent(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(binary)) is False
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires unprivileged POSIX symlinks")
 def test_trust_check_follows_symlinks(monkeypatch, tmp_path):
     real = tmp_path / "untrusted" / "real-bin"
     real.parent.mkdir(parents=True, exist_ok=True)
@@ -401,6 +504,7 @@ def test_trust_check_follows_symlinks(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(link)) is False
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX default-prefix policy")
 def test_default_trusted_prefixes_excludes_user_writable_roots():
     # Regression guard for the secure default: user-writable tool roots
     # are intentionally NOT auto-trusted. A local agent running as the
@@ -423,6 +527,7 @@ def test_default_trusted_prefixes_excludes_user_writable_roots():
     assert "/usr/local/bin" in ad._TRUSTED_BIN_PREFIXES_DEFAULT
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX standalone symlink layout")
 def test_trust_check_codex_standalone_symlink_requires_opt_in(monkeypatch, tmp_path):
     # Reproduce the Codex standalone layout under a fake HOME and assert
     # the secure-default behavior plus the documented opt-in escape
