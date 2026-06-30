@@ -433,3 +433,5 @@ go build -o /tmp/defenseclaw-gateway ./cmd/defenseclaw
 ```
 
 The script installs no service and removes its isolated root-owned and user-owned fixtures on exit. It complements, rather than replaces, the systemd/LaunchDaemon packaging tests and the Linux watcher-latency exercise in this runbook.
+
+The separate `macOS Enterprise Packaging` CI job executes the shipped `packaging/launchd/install-enterprise.sh` on a disposable macOS runner. It creates a non-login `defenseclaw` identity, verifies that a permissive source config is installed as `root:defenseclaw` mode `0640`, widens and changes the installed config owner to prove a second install repairs drift, and confirms that a symlink destination is rejected without modifying its decoy target.

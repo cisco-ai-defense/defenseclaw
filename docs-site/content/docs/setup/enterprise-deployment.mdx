@@ -412,29 +412,33 @@ Each reconcile run writes `/var/lib/defenseclaw/hook_guardian_state.json`. `defe
 
 ## macOS LaunchDaemon layout
 
-Install the binary under `/Library/DefenseClaw/bin`, create the managed config and guardian manifest under `/Library/Application Support/DefenseClaw`, then install both packaged LaunchDaemons. Create the `defenseclaw` service account and group before running these commands. The managed config must set `data_dir: "/Library/Application Support/DefenseClaw/runtime"` so mutable service state stays separate from the administrator-owned config.
+Install the binary under `/Library/DefenseClaw/bin`, create the managed config and guardian manifest under `/Library/Application Support/DefenseClaw`, then install both packaged LaunchDaemons. Create the `defenseclaw` service account and group before running the packaged installer. The managed config must set `data_dir: "/Library/Application Support/DefenseClaw/runtime"` so mutable service state stays separate from the administrator-owned config.
 
 Create the non-login service identity through your MDM, directory service, or endpoint bootstrap package. Use a stable UID/GID that does not collide with local users, hide it from the login UI, and do not grant interactive login or administrator membership. Account creation differs across enterprise macOS management products, so the packaged plist intentionally assumes the identity already exists.
 
+Prepare the administrator-approved config and guardian manifest outside the managed destination. From the extracted DefenseClaw release archive, run:
+
 ```bash
-sudo install -d -o root -g wheel -m 0755 /Library/DefenseClaw/bin
-sudo install -d -o root -g defenseclaw -m 0750 "/Library/Application Support/DefenseClaw"
-sudo install -d -o defenseclaw -g defenseclaw -m 0750 "/Library/Application Support/DefenseClaw/runtime"
-sudo install -d -o root -g defenseclaw -m 0750 "/Library/Application Support/DefenseClaw/hook-guardian"
-sudo install -d -o root -g defenseclaw -m 0750 "/Library/Application Support/DefenseClaw/hook-guardian-state"
-sudo install -d -o defenseclaw -g defenseclaw -m 0750 /Library/Logs/DefenseClaw
-sudo install -o root -g wheel -m 0755 defenseclaw-gateway /Library/DefenseClaw/bin/defenseclaw-gateway
-sudo install -o root -g defenseclaw -m 0640 config.yaml "/Library/Application Support/DefenseClaw/config.yaml"
-sudo install -o root -g defenseclaw -m 0640 packaging/systemd/hook-guardian-targets.example.yaml "/Library/Application Support/DefenseClaw/hook-guardian/targets.yaml"
-sudo install -o root -g wheel -m 0644 packaging/launchd/com.defenseclaw.gateway.plist /Library/LaunchDaemons/com.defenseclaw.gateway.plist
-sudo install -o root -g wheel -m 0644 packaging/launchd/com.defenseclaw.hook-guardian.plist /Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.defenseclaw.gateway.plist
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist
-sudo launchctl enable system/com.defenseclaw.gateway
-sudo launchctl enable system/com.defenseclaw.hook-guardian
+sudo ./packaging/launchd/install-enterprise.sh \
+  --binary ./defenseclaw \
+  --config /path/to/approved-config.yaml \
+  --manifest /path/to/approved-targets.yaml
 ```
 
-The gateway LaunchDaemon runs as `defenseclaw:defenseclaw`; the root-owned base directory and config are group-readable, while runtime and log directories are service-owned. `/Library/Application Support/DefenseClaw/hook-guardian-state` is the root-owned authorization-record directory selected by `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`; it is distinct from `hook_guardian_state.json`, which the guardian writes under the configured `data_dir`. The hook guardian remains a separate privileged job so it can drop credentials and repair explicitly allow-listed user hooks. Both jobs pin `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, `WorkingDirectory`, and `Umask=077`, and both should be installed in the system domain from an administrator shell.
+The installer refuses symlinked sources or managed destinations, verifies the root-owned macOS system path chain, unloads any existing DefenseClaw jobs, and installs through same-directory temporary files. Before launchd is allowed to start either job, it verifies these postconditions:
+
+| Path | Owner | Mode |
+| --- | --- | --- |
+| `/Library/DefenseClaw/bin/defenseclaw-gateway` | `root:wheel` | `0755` |
+| `/Library/Application Support/DefenseClaw` | `root:defenseclaw` | `0750` |
+| `/Library/Application Support/DefenseClaw/config.yaml` | `root:defenseclaw` | `0640` |
+| `/Library/Application Support/DefenseClaw/hook-guardian/targets.yaml` | `root:defenseclaw` | `0640` |
+| `/Library/Application Support/DefenseClaw/runtime` | `defenseclaw:defenseclaw` | `0750` |
+| `/Library/LaunchDaemons/com.defenseclaw.*.plist` | `root:wheel` | `0644` |
+
+Use `--no-start` when MDM or a package transaction must install and verify the files before a separate orchestration step loads the jobs. Even in that mode, an already loaded DefenseClaw job is unloaded before replacement and remains stopped until the administrator starts it.
+
+The gateway LaunchDaemon runs as `defenseclaw:defenseclaw`; the installer keeps the base directory and config root-owned and group-readable, while runtime and log directories are service-owned. `/Library/Application Support/DefenseClaw/hook-guardian-state` is the root-owned authorization-record directory selected by `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`; it is distinct from `hook_guardian_state.json`, which the guardian writes under the configured `data_dir`. The hook guardian remains a separate privileged job so it can drop credentials and repair explicitly allow-listed user hooks. Both jobs pin `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, `WorkingDirectory`, and `Umask=077`, and the installer loads both jobs in the system domain unless `--no-start` is selected.
 
 The packaged macOS guardian runs a reconcile every 300 seconds. It is a periodic repair backstop, not the Linux `fsnotify` watcher. For a shorter repair window or prevention, deploy an MDM/EDR policy that monitors or locks the native agent config and DefenseClaw hook footprint.
 

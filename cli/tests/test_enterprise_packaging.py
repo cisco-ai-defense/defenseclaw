@@ -3,9 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import plistlib
+import stat
+import subprocess
 from pathlib import Path
 
 import yaml
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_systemd_enterprise_unit_pins_hardening_contract():
@@ -161,10 +166,42 @@ def test_launchd_hook_guardian_is_separate_privileged_job():
 
 
 def test_release_archives_ship_enterprise_packaging_assets():
-    root = Path(__file__).resolve().parents[2]
-    config = yaml.safe_load((root / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
     archive_files = config["archives"][0]["files"]
 
     assert "packaging/**/*" in archive_files
     assert "LICENSE*" in archive_files
     assert "README*" in archive_files
+
+
+def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
+    installer = ROOT / "packaging" / "launchd" / "install-enterprise.sh"
+
+    assert installer.is_file()
+    assert installer.stat().st_mode & stat.S_IXUSR
+    subprocess.run(["bash", "-n", str(installer)], check=True)
+    help_result = subprocess.run(
+        [str(installer), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--config" in help_result.stdout
+    assert "root:defenseclaw" in help_result.stdout
+    assert "0640" in help_result.stdout
+
+    text = installer.read_text(encoding="utf-8")
+    required = {
+        'CONFIG_DEST="${MANAGED_ROOT}/config.yaml"',
+        'install_file_atomic "$CONFIG_SOURCE" "$CONFIG_DEST" root "$SERVICE_GROUP" 0640',
+        'assert_path_metadata "$CONFIG_DEST" file 0 "$SERVICE_GID" 640',
+        'refuse_symlink "$CONFIG_DEST"',
+        'EnvironmentVariables',
+        'DEFENSECLAW_DEPLOYMENT_MODE',
+    }
+    missing = sorted(value for value in required if value not in text)
+    assert not missing
+
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "macos-enterprise-packaging:" in workflow
+    assert "./scripts/test-macos-enterprise-packaging.sh" in workflow
