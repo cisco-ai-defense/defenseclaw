@@ -842,7 +842,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// API never comes up, and every connector hook posting to this port fails.
 	// Retrying for a few seconds lets the OS reclaim the port so the restarted
 	// gateway binds the same address the agent's hooks call.
-	ln, lnErr := listenWithRetry(ctx, a.addr, 6*time.Second)
+	ln, lnErr := listenWithRetry(ctx, a.addr, 30*time.Second)
 	if lnErr != nil {
 		a.health.SetAPI(StateError, lnErr.Error(), nil)
 		return fmt.Errorf("api: listen %s: %w", a.addr, lnErr)
