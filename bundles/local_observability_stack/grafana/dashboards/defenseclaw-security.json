@@ -604,7 +604,7 @@
     {
       "type": "timeseries",
       "title": "Non-allow evaluations by hook event",
-      "description": "Evaluations that resulted in alert/block/confirm, broken by which hook event triggered them.",
+      "description": "Evaluations that resulted in warn/alert/block/confirm, broken by which hook event triggered them.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"

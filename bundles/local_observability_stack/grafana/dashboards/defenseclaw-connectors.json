@@ -275,7 +275,7 @@
     {
       "type": "stat",
       "title": "Active connectors (5m)",
-      "description": "Distinct sources that have emitted any OTLP record in the last 5 minutes.",
+      "description": "Distinct connectors that have emitted hook invocations or OTLP records in the last 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -288,7 +288,7 @@
       },
       "targets": [
         {
-          "expr": "count((sum by (connector) (rate(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[5m])) > 0) or label_replace((sum by (source) (rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[5m])) > 0), \"connector\", \"$1\", \"source\", \"(.+)\")) or vector(0)",
+          "expr": "count((sum by (connector) (rate(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[5m])) > 0) or sum by (connector) (label_replace((sum by (source) (rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[5m])) > 0), \"connector\", \"$1\", \"source\", \"(.+)\"))) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -906,8 +906,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (tool) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[$__rate_interval]))",
-          "legendFormat": "{{tool}}",
+          "expr": "sum by (hook_event) (label_replace(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[$__rate_interval]), \"hook_event\", \"$1\", \"tool\", \"^[^:]+:(.*)$\"))",
+          "legendFormat": "{{hook_event}}",
           "refId": "A"
         }
       ],

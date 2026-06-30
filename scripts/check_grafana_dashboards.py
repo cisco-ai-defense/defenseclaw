@@ -370,12 +370,26 @@ def static_audit(
                         re.findall(r"{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}", legend),
                     )
                     grouped_labels: set[str] = set()
-                    for group in re.findall(r"\b(?:by|without)\s*\(([^)]*)\)", expression):
+                    for group in re.findall(r"\bby\s*\(([^)]*)\)", expression):
                         grouped_labels.update(label.strip() for label in group.split(","))
+                    removed_labels: set[str] = set()
+                    for group in re.findall(r"\bwithout\s*\(([^)]*)\)", expression):
+                        removed_labels.update(label.strip() for label in group.split(","))
                     selector_labels = set(
                         re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:=~|!~|=|!=)", expression),
                     )
-                    missing_legend_labels = legend_labels - grouped_labels - selector_labels
+                    if grouped_labels:
+                        # A `by(...)` aggregation drops every source label that is
+                        # not named in the grouping, even when that label appears
+                        # in a selector. Treat only grouped labels as available.
+                        missing_legend_labels = legend_labels - grouped_labels
+                    elif removed_labels:
+                        # `without(...)` preserves an open-ended set of source
+                        # labels, so the only labels we can prove absent are the
+                        # labels explicitly removed by the aggregation.
+                        missing_legend_labels = legend_labels & removed_labels
+                    else:
+                        missing_legend_labels = legend_labels - selector_labels
                     if missing_legend_labels:
                         errors.append(
                             f"{uid}/{title}: legend references labels absent from the query: "

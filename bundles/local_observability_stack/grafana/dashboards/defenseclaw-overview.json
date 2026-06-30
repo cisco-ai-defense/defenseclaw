@@ -716,7 +716,7 @@
       },
       "targets": [
         {
-          "expr": "count((sum by (connector) (rate(defenseclaw_connector_hook_invocations_total[5m])) > 0) or label_replace((sum by (source) (rate(defenseclaw_otel_ingest_records_total[5m])) > 0), \"connector\", \"$1\", \"source\", \"(.+)\")) or vector(0)",
+          "expr": "count((sum by (connector) (rate(defenseclaw_connector_hook_invocations_total[5m])) > 0) or sum by (connector) (label_replace((sum by (source) (rate(defenseclaw_otel_ingest_records_total[5m])) > 0), \"connector\", \"$1\", \"source\", \"(.+)\"))) or vector(0)",
           "refId": "A"
         }
       ],

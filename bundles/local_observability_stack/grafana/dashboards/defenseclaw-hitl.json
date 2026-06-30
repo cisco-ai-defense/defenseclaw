@@ -467,7 +467,7 @@
     {
       "type": "timeseries",
       "title": "Chat HILT approval-vs-denial rate (1h rolling)",
-      "description": "approved / (approved + denied + timeout). Slow drift toward 0 means operators are denying more often — investigate via the verdict-categories panel on Security.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "approved / (approved + denied + timeout). Slow drift toward 0 means operators are denying more often — investigate via the verdict-categories panel on Security.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"

@@ -384,7 +384,7 @@ def test_static_audit_rejects_short_rate_windows_and_mislabelled_series(
                 "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
                 "targets": [
                     {
-                        "expr": "sum by (action) (rate(example_total[5m]))",
+                        "expr": "sum by (action) (rate(example_total{severity=\"HIGH\"}[5m]))",
                         "legendFormat": "{{severity}}",
                         "refId": "A",
                     },
@@ -474,7 +474,8 @@ def test_connector_dashboard_queries_the_metric_named_by_each_panel() -> None:
         ),
         "Evaluations / sec by hook event": (
             "defenseclaw_inspect_evaluations_total",
-            "sum by (tool)",
+            "sum by (hook_event)",
+            "label_replace",
         ),
         "Codex notify by type + status (5m)": ("defenseclaw_codex_notify_total",),
         "Quietest connectors (silence sec)": (
@@ -493,7 +494,7 @@ def test_connector_dashboard_queries_the_metric_named_by_each_panel() -> None:
 def test_identity_dashboard_queries_identity_and_discovery_instruments() -> None:
     dashboard = _dashboard("defenseclaw-agent-identity.json")
     expected_metrics = {
-        "Discovery runs / hour": "defenseclaw_agent_discovery_runs_total",
+        "Discovery runs (range)": "defenseclaw_agent_discovery_runs_total",
         "Components observed": "defenseclaw_ai_components_installs",
         "OTLP records by connector (source)": "defenseclaw_otel_ingest_records_total",
         "Per-connector install state (latest)": "defenseclaw_agent_discovery_installed_ratio",
@@ -575,6 +576,12 @@ def test_cross_dashboard_semantic_regressions() -> None:
     llm_stream = _panel(overview, "LLM prompt/response/tool event stream")["targets"][0]["expr"]
     assert "llm_response" in llm_stream
     assert "scan_finding" not in llm_stream
+    overview_active = _panel(overview, "Active connectors (5m)")["targets"][0]["expr"]
+    assert "sum by (connector) (label_replace" in overview_active
+
+    connectors = _dashboard("defenseclaw-connectors.json")
+    connector_active = _panel(connectors, "Active connectors (5m)")["targets"][0]["expr"]
+    assert "sum by (connector) (label_replace" in connector_active
 
     detail = _dashboard("defenseclaw-connector-detail.json")
     would_block = _panel(detail, "Would-block / min (observe shadow blocks)")["targets"][0][
@@ -600,3 +607,7 @@ def test_cross_dashboard_semantic_regressions() -> None:
         findings,
         "First-seen per rule_id (24h)",
     )["targets"][0]["expr"]
+    verdict_panel = _panel(findings, "Verdicts in selected connector/severity window")
+    assert verdict_panel["transformations"][0]["options"]["renameByName"]["Value"] == (
+        "verdicts/range"
+    )

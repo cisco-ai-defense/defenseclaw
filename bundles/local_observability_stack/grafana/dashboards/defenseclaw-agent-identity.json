@@ -203,7 +203,7 @@
     },
     {
       "type": "stat",
-      "title": "Discovery runs / hour",
+      "title": "Discovery runs (range)",
       "description": "On-demand connector discovery reports accepted during the selected range.",
       "datasource": {
         "type": "prometheus",

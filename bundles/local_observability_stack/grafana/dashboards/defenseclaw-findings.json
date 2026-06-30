@@ -806,7 +806,7 @@
               "service_namespace": true
             },
             "renameByName": {
-              "Value": "verdicts/1h"
+              "Value": "verdicts/range"
             }
           }
         }
