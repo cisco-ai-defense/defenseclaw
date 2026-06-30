@@ -40,7 +40,11 @@ from defenseclaw.tui.command_line import (
     parse_command_line,
     suggested_next_action,
 )
-from defenseclaw.tui.executor import CommandAlreadyRunningError, CommandExecutor
+from defenseclaw.tui.executor import (
+    CommandAlreadyRunningError,
+    CommandExecutor,
+    resolve_subprocess_argv,
+)
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
 from defenseclaw.tui.panels.activity import ActivityPanelModel
 from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel, AIUsageSnapshot
@@ -3833,8 +3837,7 @@ class DefenseClawTUI(App[None]):
         try:
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "defenseclaw",
-                    "doctor",
+                    *resolve_subprocess_argv("defenseclaw", ("doctor",)),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                 )
@@ -8868,10 +8871,10 @@ class DefenseClawTUI(App[None]):
     async def _load_setup_credentials(self) -> None:
         try:
             process = await asyncio.create_subprocess_exec(
-                "defenseclaw",
-                "keys",
-                "list",
-                "--json",
+                *resolve_subprocess_argv(
+                    "defenseclaw",
+                    ("keys", "list", "--json"),
+                ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -8909,8 +8912,7 @@ class DefenseClawTUI(App[None]):
         self._set_status(intent.hint or "Loading inventory...")
         try:
             process = await asyncio.create_subprocess_exec(
-                intent.binary,
-                *intent.args,
+                *resolve_subprocess_argv(intent.binary, intent.args),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -8947,8 +8949,7 @@ class DefenseClawTUI(App[None]):
             intent = self.inventory_model.load_intent_for(name)
             try:
                 process = await asyncio.create_subprocess_exec(
-                    intent.binary,
-                    *intent.args,
+                    *resolve_subprocess_argv(intent.binary, intent.args),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -9180,8 +9181,7 @@ class DefenseClawTUI(App[None]):
         self._set_status(intent.hint or f"Loading {panel}...")
         try:
             process = await asyncio.create_subprocess_exec(
-                intent.binary,
-                *intent.args,
+                *resolve_subprocess_argv(intent.binary, intent.args),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -9217,8 +9217,7 @@ class DefenseClawTUI(App[None]):
             intent = model.load_intent_for(name)
             try:
                 process = await asyncio.create_subprocess_exec(
-                    intent.binary,
-                    *intent.args,
+                    *resolve_subprocess_argv(intent.binary, intent.args),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )

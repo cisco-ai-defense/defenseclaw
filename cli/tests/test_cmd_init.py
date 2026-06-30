@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -2355,7 +2356,7 @@ class TestMultiConnectorInit(unittest.TestCase):
 
         keys = iter([" ", "j", " ", "\r"])
         with patch.object(cmd_init.click, "getchar", side_effect=lambda: next(keys)), \
-                patch.object(cmd_init, "_stdout_is_tty", return_value=False):
+                patch.object(cmd_init, "_supports_terminal_redraw", return_value=True):
             got = cmd_init._prompt_checkbox_selection(
                 ["codex", "claudecode"],
                 default_selected=["codex"],
@@ -2363,6 +2364,102 @@ class TestMultiConnectorInit(unittest.TestCase):
                 empty_ok=False,
             )
         self.assertEqual(got, ["claudecode"])
+
+    def test_checkbox_key_names_cover_windows_ansi_and_vi_navigation(self):
+        from defenseclaw.commands import cmd_init
+
+        cases = {
+            "\x1b[A": "up",
+            "\x1b[B": "down",
+            "\x00H": "up",
+            "\xe0H": "up",
+            "\x00P": "down",
+            "\xe0P": "down",
+            "k": "up",
+            "j": "down",
+        }
+        for key, expected in cases.items():
+            with self.subTest(key=list(map(ord, key))):
+                self.assertEqual(cmd_init._checkbox_key_name(key), expected)
+
+    def test_checkbox_selector_accepts_windows_extended_arrow(self):
+        from defenseclaw.commands import cmd_init
+
+        keys = iter(["\xe0P", " ", "\r"])
+        with patch.object(cmd_init.click, "getchar", side_effect=lambda: next(keys)), \
+                patch.object(cmd_init, "_supports_terminal_redraw", return_value=True):
+            got = cmd_init._prompt_checkbox_selection(
+                ["codex", "claudecode"],
+                default_selected=["codex"],
+                title="Select connectors",
+                empty_ok=False,
+            )
+        self.assertEqual(got, ["codex", "claudecode"])
+
+    def test_checkbox_no_vt_fallback_renders_once_and_uses_numbered_input(self):
+        from defenseclaw.commands import cmd_init
+
+        emitted: list[str] = []
+        with patch.object(cmd_init, "_supports_terminal_redraw", return_value=False), \
+                patch.object(cmd_init.click, "prompt", return_value="2"), \
+                patch.object(cmd_init.click, "echo", side_effect=lambda text="", **_kwargs: emitted.append(text)):
+            got = cmd_init._prompt_checkbox_selection(
+                ["codex", "claudecode"],
+                default_selected=["codex"],
+                title="Select connectors",
+                empty_ok=False,
+            )
+
+        self.assertEqual(got, ["claudecode"])
+        self.assertEqual(sum("codex" in line and "claudecode" not in line for line in emitted), 1)
+        self.assertEqual(sum("claudecode" in line for line in emitted), 1)
+
+    def test_checkbox_windows_console_enables_vt_before_redraw(self):
+        import ctypes
+
+        from defenseclaw.commands import cmd_init
+
+        set_modes: list[int] = []
+
+        def get_console_mode(_handle, mode_ptr):
+            mode_ptr._obj.value = 0  # noqa: SLF001 - ctypes byref test double.
+            return 1
+
+        def set_console_mode(_handle, mode):
+            set_modes.append(mode)
+            return 1
+
+        fake_msvcrt = SimpleNamespace(get_osfhandle=lambda _fd: 42)
+        fake_windll = SimpleNamespace(
+            kernel32=SimpleNamespace(
+                GetConsoleMode=get_console_mode,
+                SetConsoleMode=set_console_mode,
+            )
+        )
+        fake_stream = SimpleNamespace(fileno=lambda: 1)
+        with patch.object(cmd_init, "_stdout_is_tty", return_value=True), \
+                patch.object(cmd_init.os, "name", "nt"), \
+                patch.object(cmd_init.click, "get_text_stream", return_value=fake_stream), \
+                patch.dict(sys.modules, {"msvcrt": fake_msvcrt}), \
+                patch.object(ctypes, "windll", fake_windll, create=True):
+            self.assertTrue(cmd_init._supports_terminal_redraw())
+
+        self.assertEqual(set_modes, [0x0004])
+
+    def test_checkbox_redraw_uses_ansi_cursor_and_line_controls(self):
+        from defenseclaw.commands import cmd_init
+
+        with patch.object(cmd_init.click, "echo") as echo:
+            cmd_init._render_checkbox_menu(
+                ["codex", "claudecode"],
+                {"codex"},
+                1,
+                redraw=True,
+            )
+
+        emitted = "".join(call.args[0] for call in echo.call_args_list)
+        self.assertIn("\x1b[2F", emitted)
+        self.assertEqual(emitted.count("\x1b[2K"), 2)
 
     def test_connector_selection_uses_checkbox_menu(self):
         from defenseclaw.commands import cmd_init
