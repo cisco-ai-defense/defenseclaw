@@ -62,6 +62,8 @@ from defenseclaw.migrations import run_migrations
 from defenseclaw.observability import resolve_preset
 from defenseclaw.observability.v8_presets import apply_secret
 
+from tests.permissions import assert_owner_only_file
+
 # ---------------------------------------------------------------------------
 # F-0022 / F-0023 / F-0024 — robust TLS boolean coercion
 # ---------------------------------------------------------------------------
@@ -527,10 +529,9 @@ def test_f0442_existing_loose_dotenv_is_tightened(tmp_path):
     secret = "dd-secret-from-f0442"
     apply_secret(data_dir, resolve_preset("datadog"), secret, dry_run=False)
 
-    mode = stat.S_IMODE(os.stat(dotenv_path).st_mode)
     content = Path(dotenv_path).read_text(encoding="utf-8")
     # The pre-existing world/group-readable dotenv is tightened to 0600...
-    assert mode == 0o600, oct(mode)
+    assert_owner_only_file(dotenv_path)
     # ...and still carries the freshly written secret.
     assert f"DD_API_KEY={secret}" in content
 
@@ -544,6 +545,5 @@ def test_f0442_fresh_dotenv_is_owner_only(tmp_path):
     apply_secret(data_dir, resolve_preset("datadog"), secret, dry_run=False)
 
     dotenv_path = os.path.join(data_dir, ".env")
-    mode = stat.S_IMODE(os.stat(dotenv_path).st_mode)
-    assert mode == 0o600, oct(mode)
+    assert_owner_only_file(dotenv_path)
     assert f"DD_API_KEY={secret}" in Path(dotenv_path).read_text(encoding="utf-8")
