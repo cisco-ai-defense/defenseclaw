@@ -11,6 +11,7 @@ t_install_help() {
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
   assert_contains "${out}" "--mode {observe|action}" "mode flag in help"
   assert_contains "${out}" "--connector LIST"        "connector flag in help"
+  assert_contains "${out}" "--disable-redaction"     "disable redaction flag in help"
   assert_contains "${out}" "comma-separated"         "comma-separated note in help"
   assert_contains "${out}" "Per-user hook wiring"    "per-user section header"
 }
