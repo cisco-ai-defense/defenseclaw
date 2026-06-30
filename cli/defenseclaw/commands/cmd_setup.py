@@ -4494,9 +4494,9 @@ def _checkbox_key_name(ch: str) -> str:
         return "enter"
     if ch in (" ", "\t"):
         return "toggle"
-    if ch in ("\x1b[A", "k", "K"):
+    if ch in ("\x1b[A", "\x00H", "\xe0H", "k", "K"):
         return "up"
-    if ch in ("\x1b[B", "j", "J"):
+    if ch in ("\x1b[B", "\x00P", "\xe0P", "j", "J"):
         return "down"
     if ch == "a":
         return "all"
@@ -4509,6 +4509,40 @@ def _stdout_is_tty() -> bool:
     try:
         return click.get_text_stream("stdout").isatty()
     except Exception:
+        return False
+
+
+def _supports_terminal_redraw() -> bool:
+    """Return whether stdout can safely process ANSI cursor movement."""
+
+    if not _stdout_is_tty():
+        return False
+    if os.name != "nt":
+        return True
+
+    try:
+        import ctypes
+        import msvcrt
+
+        stream = click.get_text_stream("stdout")
+        handle_value = msvcrt.get_osfhandle(stream.fileno())
+        if handle_value == -1:
+            return False
+        handle = ctypes.c_void_p(handle_value)
+        mode = ctypes.c_ulong()
+        kernel32 = ctypes.windll.kernel32
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        enable_virtual_terminal_processing = 0x0004
+        if mode.value & enable_virtual_terminal_processing:
+            return True
+        return bool(
+            kernel32.SetConsoleMode(
+                handle,
+                mode.value | enable_virtual_terminal_processing,
+            )
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
         return False
 
 
@@ -4529,6 +4563,52 @@ def _render_checkbox_menu(
         click.echo(f"  {pointer} [{mark}] {name}")
 
 
+def _prompt_checkbox_selection_no_redraw(
+    options: list[str],
+    selected: set[str],
+    *,
+    empty_ok: bool,
+) -> list[str]:
+    """Line-oriented checkbox fallback for Windows consoles without VT."""
+
+    for idx, name in enumerate(options, start=1):
+        mark = "x" if name in selected else " "
+        click.echo(f"    {idx}. [{mark}] {name}")
+    ux.subhead("  Enter comma-separated numbers; use 'all' or 'none'.")
+
+    default = ",".join(
+        str(idx)
+        for idx, name in enumerate(options, start=1)
+        if name in selected
+    ) or "none"
+    while True:
+        raw = click.prompt("  Selection", default=default, show_default=True).strip()
+        normalized = raw.lower()
+        if normalized in {"a", "all"}:
+            chosen = set(options)
+        elif normalized in {"n", "none"}:
+            chosen = set()
+        else:
+            chosen: set[str] = set()
+            invalid: list[str] = []
+            for token in (part.strip() for part in raw.split(",")):
+                if token.isdecimal() and 1 <= int(token) <= len(options):
+                    chosen.add(options[int(token) - 1])
+                elif token in options:
+                    chosen.add(token)
+                else:
+                    invalid.append(token or "(empty)")
+            if invalid:
+                ux.warn(
+                    f"Unknown selection: {', '.join(invalid)}.",
+                    indent="  ",
+                )
+                continue
+        if chosen or empty_ok:
+            return [name for name in options if name in chosen]
+        ux.warn("Select at least one connector.", indent="  ")
+
+
 def _prompt_checkbox_selection(
     options: list[str],
     *,
@@ -4547,9 +4627,16 @@ def _prompt_checkbox_selection(
     selected = {name for name in default_selected if name in options}
     cursor = 0
     ux.subhead(title)
-    ux.subhead("  Space toggles, j/k moves, a selects all, n clears, Enter continues.")
 
-    redraw = _stdout_is_tty()
+    redraw = _supports_terminal_redraw()
+    if not redraw:
+        return _prompt_checkbox_selection_no_redraw(
+            options,
+            selected,
+            empty_ok=empty_ok,
+        )
+
+    ux.subhead("  Space toggles, j/k moves, a selects all, n clears, Enter continues.")
     rendered = False
     while True:
         _render_checkbox_menu(options, selected, cursor, redraw=redraw and rendered)

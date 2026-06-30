@@ -12,12 +12,18 @@
 
 from __future__ import annotations
 
+import ast
+import asyncio
+import inspect
+import os
 import sys
 
+import defenseclaw.tui.app as app_module
 import pytest
-from defenseclaw.tui.executor import CommandExecutor
+from defenseclaw.tui.executor import CommandExecutor, resolve_subprocess_argv
 
 
+@pytest.mark.skipif(os.name != "posix", reason="stdlib PTYs are POSIX-only")
 @pytest.mark.asyncio
 async def test_executor_pty_forwards_interactive_stdin() -> None:
     executor = CommandExecutor(use_pty=True)
@@ -52,3 +58,128 @@ async def test_executor_pty_forwards_interactive_stdin() -> None:
     assert "Name?" in output
     assert "hello Ada" in output
     assert exit_codes == [0]
+
+
+def test_executor_default_pty_mode_matches_platform() -> None:
+    assert CommandExecutor().use_pty is (os.name == "posix")
+
+
+@pytest.mark.skipif(os.name == "posix", reason="non-POSIX platform behavior")
+def test_executor_rejects_forced_pty_on_windows() -> None:
+    with pytest.raises(ValueError, match="only supported on POSIX"):
+        CommandExecutor(use_pty=True)
+
+
+def test_self_cli_resolves_via_current_python_not_path_shim() -> None:
+    argv = resolve_subprocess_argv("defenseclaw", ("keys", "list", "--json"))
+
+    assert argv == (
+        os.path.abspath(sys.executable),
+        "-m",
+        "defenseclaw.main",
+        "keys",
+        "list",
+        "--json",
+    )
+    assert not argv[0].lower().endswith((".cmd", ".bat"))
+
+    shim_argv = resolve_subprocess_argv(
+        r"C:\Users\test\.local\bin\defenseclaw.cmd",
+        ("doctor",),
+    )
+    assert shim_argv[:3] == argv[:3]
+    assert shim_argv[3:] == ("doctor",)
+
+
+@pytest.mark.asyncio
+async def test_executor_launches_self_cli_with_resolved_argv(monkeypatch) -> None:
+    seen: list[tuple[str, ...]] = []
+
+    class EmptyStdout:
+        @staticmethod
+        async def readline() -> bytes:
+            return b""
+
+    class Process:
+        stdin = None
+        stdout = EmptyStdout()
+        returncode = 0
+
+        @staticmethod
+        async def wait() -> int:
+            return 0
+
+    async def fake_exec(*argv: str, **_kwargs) -> Process:
+        seen.append(argv)
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    events = [
+        event
+        async for event in CommandExecutor(use_pty=False).run(
+            "defenseclaw",
+            ("doctor",),
+        )
+    ]
+
+    assert seen == [
+        (
+            os.path.abspath(sys.executable),
+            "-m",
+            "defenseclaw.main",
+            "doctor",
+        )
+    ]
+    assert events[-1].exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_credentials_loader_uses_resolved_self_cli(monkeypatch, tmp_path) -> None:
+    seen: list[tuple[str, ...]] = []
+
+    class Process:
+        returncode = 0
+
+        @staticmethod
+        async def communicate() -> tuple[bytes, bytes]:
+            return b"[]", b""
+
+    async def fake_exec(*argv: str, **_kwargs) -> Process:
+        seen.append(argv)
+        return Process()
+
+    app = app_module.DefenseClawTUI(data_dir=tmp_path)
+    monkeypatch.setattr(app_module.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(app, "_render_chrome", lambda: None)
+
+    await app._load_setup_credentials()  # noqa: SLF001 - focused subprocess wiring.
+
+    assert seen == [
+        (
+            os.path.abspath(sys.executable),
+            "-m",
+            "defenseclaw.main",
+            "keys",
+            "list",
+            "--json",
+        )
+    ]
+
+
+def test_every_direct_app_subprocess_uses_central_argv_resolution() -> None:
+    tree = ast.parse(inspect.getsource(app_module))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "create_subprocess_exec"
+    ]
+
+    assert calls, "expected direct TUI subprocess call sites"
+    for call in calls:
+        assert call.args and isinstance(call.args[0], ast.Starred)
+        resolver_call = call.args[0].value
+        assert isinstance(resolver_call, ast.Call)
+        assert isinstance(resolver_call.func, ast.Name)
+        assert resolver_call.func.id == "resolve_subprocess_argv"
