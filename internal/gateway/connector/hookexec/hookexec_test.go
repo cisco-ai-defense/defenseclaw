@@ -101,12 +101,13 @@ func ok(body string) *stubRT { return &stubRT{status: 200, body: body} }
 
 func TestRunPrefersConnectorScopedToken(t *testing.T) {
 	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+		opts.Token = "generic-env"
 		legacyPath := filepath.Join(opts.HookDir, ".token")
 		if err := os.WriteFile(legacyPath, []byte("DEFENSECLAW_GATEWAY_TOKEN=\"legacy\"\n"), 0o600); err != nil {
 			t.Fatalf("write legacy token: %v", err)
 		}
 		path := filepath.Join(opts.HookDir, ".hook-codex.token")
-		if err := os.WriteFile(path, []byte("DEFENSECLAW_GATEWAY_TOKEN=\"scoped\"\n"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("scoped\n"), 0o600); err != nil {
 			t.Fatalf("write scoped token: %v", err)
 		}
 	})
@@ -115,6 +116,20 @@ func TestRunPrefersConnectorScopedToken(t *testing.T) {
 	}
 	if got := result.rt.gotReq.Header.Get("Authorization"); got != "Bearer scoped" {
 		t.Fatalf("Authorization = %q, want connector-scoped token", got)
+	}
+}
+
+func TestMalformedLegacyTokenIsNotAcceptedAsRaw(t *testing.T) {
+	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+		if err := os.WriteFile(filepath.Join(opts.HookDir, ".token"), []byte("malformed-legacy-token\n"), 0o600); err != nil {
+			t.Fatalf("write malformed legacy token: %v", err)
+		}
+	})
+	if result.code != 0 {
+		t.Fatalf("Run code = %d, want 0; stderr=%s", result.code, result.stderr)
+	}
+	if got := result.rt.gotReq.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want malformed legacy token rejected", got)
 	}
 }
 
@@ -541,8 +556,14 @@ func TestReadTokenFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`DEFENSECLAW_GATEWAY_TOKEN="abc123"`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := readTokenFile(path); got != "abc123" {
+	if got := readTokenFile(path, false); got != "abc123" {
 		t.Errorf("token = %q, want abc123", got)
+	}
+	if err := os.WriteFile(path, []byte(" opaque-token \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTokenFile(path, true); got != " opaque-token " {
+		t.Errorf("raw token = %q, want opaque surrounding spaces preserved", got)
 	}
 }
 

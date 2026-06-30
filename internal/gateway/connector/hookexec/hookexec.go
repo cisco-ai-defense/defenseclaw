@@ -73,8 +73,9 @@ type Options struct {
 	// HookDir holds connector-scoped and legacy token sidecars (default Home/hooks).
 	HookDir string
 	// Token, when set, is the resolved gateway token (e.g. from the
-	// DEFENSECLAW_GATEWAY_TOKEN env var); it takes precedence over the scoped
-	// token file and legacy .token fallback.
+	// DEFENSECLAW_GATEWAY_TOKEN env var). A connector-scoped token file takes
+	// precedence so an inherited generic gateway token cannot shadow the
+	// narrower credential; Token still precedes the legacy .token fallback.
 	Token string
 
 	// StrictAvailability mirrors DEFENSECLAW_STRICT_AVAILABILITY: when true,
@@ -131,7 +132,7 @@ func Run(ctx context.Context, opts Options) int {
 	// the resolved token sidecar is absent. (An empty token inside an existing
 	// file is intentionally NOT a missing token — it selects the loopback
 	// no-auth path, same as the .sh.)
-	tokenFile := hookTokenFile(opts.HookDir, opts.Connector)
+	tokenFile, scopedTokenFile := hookTokenFile(opts.HookDir, opts.Connector)
 	if opts.Token == "" && !fileExists(tokenFile) {
 		return handleMissingToken(opts, sp, failMode)
 	}
@@ -146,8 +147,8 @@ func Run(ctx context.Context, opts Options) int {
 	}
 
 	token := opts.Token
-	if token == "" {
-		token = readTokenFile(tokenFile)
+	if scopedTokenFile || token == "" {
+		token = readTokenFile(tokenFile, scopedTokenFile)
 	}
 
 	return doRequest(ctx, opts, sp, failMode, payload, token)
@@ -396,18 +397,18 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func hookTokenFile(hookDir, connector string) string {
+func hookTokenFile(hookDir, connector string) (string, bool) {
 	scoped := filepath.Join(hookDir, ".hook-"+strings.ToLower(strings.TrimSpace(connector))+".token")
 	if fileExists(scoped) {
-		return scoped
+		return scoped, true
 	}
-	return filepath.Join(hookDir, ".token")
+	return filepath.Join(hookDir, ".token"), false
 }
 
 // readTokenFile parses DEFENSECLAW_GATEWAY_TOKEN out of a token sidecar,
 // which setup writes as `DEFENSECLAW_GATEWAY_TOKEN="<token>"` (Go-quoted). An
 // unreadable/empty file yields an empty token (loopback no-auth path).
-func readTokenFile(path string) string {
+func readTokenFile(path string, allowRaw bool) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -425,7 +426,14 @@ func readTokenFile(path string) string {
 		}
 		return strings.Trim(val, `"'`)
 	}
-	return ""
+	if !allowRaw {
+		return ""
+	}
+	raw := strings.TrimSuffix(string(data), "\n")
+	if strings.ContainsAny(raw, "\r\n") {
+		return ""
+	}
+	return raw
 }
 
 // rawStringOr returns the JSON string value at key, or def when the key is

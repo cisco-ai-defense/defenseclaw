@@ -155,3 +155,25 @@ func TestLoadHookAPITokensValidatesExistingFiles(t *testing.T) {
 		t.Fatalf("LoadHookAPITokens existing file error = %v, want trust rejection", err)
 	}
 }
+
+func TestConnectorHookWriterPreservesScopedAPITokenFormat(t *testing.T) {
+	dataDir := t.TempDir()
+	token, err := EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken: %v", err)
+	}
+	if err := WriteHookScriptsForConnectorObject(filepath.Join(dataDir, "hooks"), "127.0.0.1:18970", token, NewCodexConnector()); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
+	}
+	scopedPath, err := HookAPITokenFilePath(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("HookAPITokenFilePath: %v", err)
+	}
+	raw, err := os.ReadFile(scopedPath)
+	if err != nil {
+		t.Fatalf("read scoped token after hook write: %v", err)
+	}
+	if got, want := string(raw), token+"\n"; got != want {
+		t.Fatalf("scoped token file contents = %q, want exact raw content %q", got, want)
+	}
+}

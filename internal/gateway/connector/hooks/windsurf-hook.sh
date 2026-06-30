@@ -68,7 +68,13 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   exit 0
 }
 API_ADDR="{{.APIAddr}}"
-if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
+if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
+  DEFENSECLAW_GATEWAY_TOKEN=
+  if [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
+    IFS= read -r DEFENSECLAW_GATEWAY_TOKEN < "${HOOK_DIR}/{{.TokenFile}}" || true
+  fi
+  export DEFENSECLAW_GATEWAY_TOKEN
+elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/{{.TokenFile}}"
 fi

@@ -124,7 +124,7 @@ func TestInstallMultipleConnectorsKeepsScopedHookTokens(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s token: %v", tc.connector, err)
 		}
-		wantToken := "DEFENSECLAW_GATEWAY_TOKEN=\"" + tc.token + "\""
+		wantToken := tc.token
 		if got := strings.TrimSpace(string(tokenData)); got != wantToken {
 			t.Fatalf("%s token sidecar = %q, want %q", tc.connector, got, wantToken)
 		}

@@ -85,8 +85,15 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
 API_ADDR="{{.APIAddr}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
-# into this script). The env var takes precedence if already set.
-if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
+# into this script). Connector-scoped sidecars override an inherited generic
+# gateway token; legacy .token files retain the explicit env override.
+if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
+  DEFENSECLAW_GATEWAY_TOKEN=
+  if [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
+    IFS= read -r DEFENSECLAW_GATEWAY_TOKEN < "${HOOK_DIR}/{{.TokenFile}}" || true
+  fi
+  export DEFENSECLAW_GATEWAY_TOKEN
+elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/{{.TokenFile}}"
 fi

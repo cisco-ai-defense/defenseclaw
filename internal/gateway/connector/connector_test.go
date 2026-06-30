@@ -3810,6 +3810,48 @@ func TestWriteHookScriptsWithToken_EnvVarOverridesBakedToken(t *testing.T) {
 	}
 }
 
+func TestConnectorScopedHookTokenOverridesGenericEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteHookScriptsForConnectorObject(dir, "127.0.0.1:18970", "scoped-token", NewCodexConnector()); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
+	}
+
+	out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "codex-hook.sh"),
+		map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
+	if !containsAuthBearer(out, "scoped-token") {
+		t.Errorf("connector-scoped token should override inherited generic env token; got curl args:\n%s", out)
+	}
+	if containsAuthBearer(out, "generic-env") {
+		t.Errorf("hook leaked inherited generic env token instead of scoped token; got curl args:\n%s", out)
+	}
+}
+
+func TestConnectorScopedHookReadFailureClearsGenericEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(string) error
+	}{
+		{name: "empty", mutate: func(path string) error { return os.WriteFile(path, nil, 0o600) }},
+		{name: "missing", mutate: os.Remove},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := WriteHookScriptsForConnectorObject(dir, "127.0.0.1:18970", "scoped-token", NewCodexConnector()); err != nil {
+				t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
+			}
+			if err := tc.mutate(filepath.Join(dir, ".hook-codex.token")); err != nil {
+				t.Fatalf("mutate scoped token: %v", err)
+			}
+
+			out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "codex-hook.sh"),
+				map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
+			if containsAuthBearer(out, "") {
+				t.Errorf("hook retained an inherited generic token after scoped read failure; got curl args:\n%s", out)
+			}
+		})
+	}
+}
+
 // runHookAndReturnCurlArgs executes the given hook script with `curl`
 // replaced by a stub that writes its argv, one per line, to a file. The
 // hook script pipes curl's stderr to /dev/null, so stdout/stderr capture

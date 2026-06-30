@@ -43,11 +43,12 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 
 // templateData holds the values injected into hook and shim templates.
 type templateData struct {
-	APIAddr   string
-	APIToken  string // gateway bearer token; empty when unconfigured (loopback-allow)
-	FailMode  string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
-	Managed   bool
-	TokenFile string
+	APIAddr     string
+	APIToken    string // gateway bearer token; empty when unconfigured (loopback-allow)
+	FailMode    string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	Managed     bool
+	TokenFile   string
+	ScopedToken bool
 }
 
 // defaultHookFailMode is the fail mode injected into the response-
@@ -452,7 +453,14 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		return err
 	}
 
-	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: normalizeHookFailMode(failMode), Managed: managed, TokenFile: tokenFile}
+	data := templateData{
+		APIAddr:     apiAddr,
+		APIToken:    "",
+		FailMode:    normalizeHookFailMode(failMode),
+		Managed:     managed,
+		TokenFile:   tokenFile,
+		ScopedToken: strings.TrimSpace(connectorName) != "",
+	}
 
 	scripts := hookScriptNamesFromExtras(extras)
 
@@ -477,9 +485,9 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 }
 
 func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
-	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
 	legacyPath := filepath.Join(hookDir, ".token")
 	if strings.TrimSpace(connectorName) == "" {
+		tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
 		if err := atomicWriteFile(legacyPath, []byte(tokenContent), 0o600); err != nil {
 			return "", fmt.Errorf("write hook token file: %w", err)
 		}
@@ -496,7 +504,10 @@ func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve connector-scoped hook token file: %w", err)
 	}
-	if err := atomicWriteFile(scopedPath, []byte(tokenContent), 0o600); err != nil {
+	if strings.ContainsAny(token, "\r\n") {
+		return "", fmt.Errorf("write connector-scoped hook token file: token contains a line break")
+	}
+	if err := atomicWriteFile(scopedPath, []byte(token+"\n"), 0o600); err != nil {
 		return "", fmt.Errorf("write connector-scoped hook token file: %w", err)
 	}
 	return filepath.Base(scopedPath), nil
