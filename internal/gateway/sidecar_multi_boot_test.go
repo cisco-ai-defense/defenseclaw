@@ -81,6 +81,34 @@ func failingHookTokenDataDir(t *testing.T) string {
 	return path
 }
 
+func TestRunActiveGuardrailPublishesScopedTokenFailure(t *testing.T) {
+	s := &Sidecar{
+		cfg: &config.Config{
+			DataDir: failingHookTokenDataDir(t),
+			Gateway: config.GatewayConfig{Token: "gateway-token"},
+			Guardrail: config.GuardrailConfig{
+				Enabled:   true,
+				Connector: "codex",
+				Mode:      "action",
+			},
+		},
+		health: NewSidecarHealth(),
+		router: NewEventRouter(nil, nil, nil, false, nil),
+	}
+
+	err := s.runActiveGuardrail(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "scoped hook token") {
+		t.Fatalf("runActiveGuardrail error = %v, want scoped-token failure", err)
+	}
+	snapshot := s.health.Snapshot()
+	if snapshot.Guardrail.State != StateError {
+		t.Fatalf("guardrail health state = %s, want %s", snapshot.Guardrail.State, StateError)
+	}
+	if !strings.Contains(snapshot.Guardrail.LastError, "scoped hook token") {
+		t.Fatalf("guardrail health error = %q, want scoped-token failure", snapshot.Guardrail.LastError)
+	}
+}
+
 func mustConnectorSetupOpts(t *testing.T, s *Sidecar, conn connector.Connector, apiToken, proxyAddr, apiAddr string) connector.SetupOpts {
 	t.Helper()
 	opts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)

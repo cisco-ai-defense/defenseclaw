@@ -833,7 +833,11 @@ func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
 	if len(s.currentConfig().ActiveConnectors()) > 1 {
 		runGuardrailFn = s.runGuardrailMulti
 	}
-	return runGuardrailFn(ctx)
+	err := runGuardrailFn(ctx)
+	if err != nil && ctx.Err() == nil {
+		s.health.SetGuardrail(StateError, err.Error(), nil)
+	}
+	return err
 }
 
 func (s *Sidecar) runRestartable(ctx context.Context, name string, restart <-chan struct{}, run func(context.Context) error) error {
