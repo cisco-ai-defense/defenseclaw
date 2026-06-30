@@ -124,9 +124,9 @@ sudo -n "$installer" \
     --no-start
 
 service_gid="$(id -g defenseclaw)"
-[ "$(stat -f '%u' "$config_dest")" = 0 ] || fail "managed config is not root-owned"
-[ "$(stat -f '%g' "$config_dest")" = "$service_gid" ] || fail "managed config group is not defenseclaw"
-[ "$(stat -f '%Lp' "$config_dest")" = 640 ] || fail "managed config mode is not 0640"
+[ "$(sudo -n stat -f '%u' "$config_dest")" = 0 ] || fail "managed config is not root-owned"
+[ "$(sudo -n stat -f '%g' "$config_dest")" = "$service_gid" ] || fail "managed config group is not defenseclaw"
+[ "$(sudo -n stat -f '%Lp' "$config_dest")" = 640 ] || fail "managed config mode is not 0640"
 [ ! -w "$config_dest" ] || fail "standard user can write managed config"
 
 sudo -n chown "$(id -u):$(id -g)" "$config_dest"
@@ -136,7 +136,7 @@ sudo -n "$installer" \
     --config "$config_source" \
     --manifest "$manifest_source" \
     --no-start
-[ "$(stat -f '%u:%g:%Lp' "$config_dest")" = "0:${service_gid}:640" ] || fail "installer did not repair config metadata"
+[ "$(sudo -n stat -f '%u:%g:%Lp' "$config_dest")" = "0:${service_gid}:640" ] || fail "installer did not repair config metadata"
 
 decoy="${fixture}/decoy.yaml"
 printf 'decoy must remain unchanged\n' >"$decoy"
