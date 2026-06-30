@@ -105,7 +105,7 @@ func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, want
 		}
 		inheritOnly := ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0
 		inheritsToChildren := ace.Header.AceFlags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE) != 0
-		if inheritOnly && (!wantDir || !inheritsToChildren) {
+		if inheritOnly && (!protectChildren || !wantDir || !inheritsToChildren) {
 			continue
 		}
 		if !hookAPIWindowsWriteLikeAccess(ace.Mask, protectChildren) {

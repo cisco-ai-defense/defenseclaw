@@ -210,13 +210,43 @@ func TestHookAPITokenWindowsAllowsGenericWriteOnSharedAncestor(t *testing.T) {
 	}
 }
 
+func TestHookAPITokenWindowsAllowsInheritOnlyTemplateOnSharedAncestor(t *testing.T) {
+	const inheritedModifyMask windows.ACCESS_MASK = 0xe0010000
+
+	authenticatedUsers, err := windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid)
+	if err != nil {
+		t.Fatalf("Authenticated Users SID: %v", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: inheritedModifyMask,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT | windows.INHERIT_ONLY,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(authenticatedUsers),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("build DACL: %v", err)
+	}
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err != nil {
+		t.Fatalf("shared ancestor inherit-only template was rejected: %v", err)
+	}
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("protected", acl, true, true); err == nil {
+		t.Fatal("protected directory inherit-only template was accepted")
+	}
+}
+
 func TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor(t *testing.T) {
+	const fileDeleteChild windows.ACCESS_MASK = 0x00000040
+
 	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
 		t.Fatalf("Everyone SID: %v", err)
 	}
 	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
-		AccessPermissions: 0x00000040,
+		AccessPermissions: fileDeleteChild,
 		AccessMode:        windows.GRANT_ACCESS,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm:  windows.TRUSTEE_IS_SID,
