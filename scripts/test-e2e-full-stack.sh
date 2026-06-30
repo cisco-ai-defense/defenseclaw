@@ -4030,6 +4030,20 @@ phase_teardown() {
 
     defenseclaw-gateway stop 2>/dev/null || true
     openclaw gateway stop 2>/dev/null || true
+    if [ -n "$OPENCLAW_PID" ] && kill -0 "$OPENCLAW_PID" 2>/dev/null; then
+        kill -TERM "$OPENCLAW_PID" 2>/dev/null || true
+        for _ in $(seq 1 30); do
+            kill -0 "$OPENCLAW_PID" 2>/dev/null || break
+            sleep 0.2
+        done
+    fi
+    if [ -n "$OPENCLAW_PID" ]; then
+        if kill -0 "$OPENCLAW_PID" 2>/dev/null; then
+            kill -KILL "$OPENCLAW_PID" 2>/dev/null || true
+        fi
+        wait "$OPENCLAW_PID" 2>/dev/null || true
+        OPENCLAW_PID=""
+    fi
 
     # Verify connector teardown cleaned up stale artifacts.
     local shims_dir="$HOME/.defenseclaw/shims"
