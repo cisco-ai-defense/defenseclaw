@@ -23,7 +23,7 @@ for full details.
 ### Install DefenseClaw
 
 ```bash
-VERSION=0.8.2
+VERSION=0.8.3
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 defenseclaw init --enable-guardrail

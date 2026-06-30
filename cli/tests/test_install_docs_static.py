@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-CURRENT_RELEASE = "0.8.2"
+CURRENT_RELEASE = "0.8.3"
 STALE_RELEASES = ("0.8.0", "0.8.1")
 
 BASH_INSTALL_LINES = (
