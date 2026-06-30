@@ -80,6 +80,7 @@ func TestHookInvocationCommand(t *testing.T) {
 // corrupt the native Windows command (which is already a complete command line)
 // while still quoting Unix script paths for the agent's shell.
 func TestShellWordPassesNativeCommandThrough(t *testing.T) {
+	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`)
 	native := `"C:\Program Files\DefenseClaw\defenseclaw-gateway.exe" hook --connector cursor`
 	if got := shellWord(native); got != native {
 		t.Errorf("shellWord(native) = %q, want unchanged", got)
@@ -138,6 +139,7 @@ func TestBuildCodexHooksTableHashesTheCommand(t *testing.T) {
 // hooks dir and carries no on-disk marker.
 func TestIsOwnedHookRecognizesNativeCommand(t *testing.T) {
 	const hooksDir = "/home/u/.defenseclaw/hooks"
+	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`)
 
 	owned := map[string]interface{}{
 		"hooks": []interface{}{
@@ -171,9 +173,22 @@ func TestIsOwnedHookRecognizesNativeCommand(t *testing.T) {
 	if isOwnedHook(spoofed, hooksDir) {
 		t.Error("foreign executable with native-hook arguments wrongly recognized as owned")
 	}
+
+	foreignSameBasename := map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{
+				"type":    "command",
+				"command": `"C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode`,
+			},
+		},
+	}
+	if isOwnedHook(foreignSameBasename, hooksDir) {
+		t.Error("different absolute gateway path was incorrectly recognized as owned")
+	}
 }
 
 func TestCodexNativeNotifyOwnership(t *testing.T) {
+	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`)
 	opts := SetupOpts{DataDir: `C:\Users\me\.defenseclaw`}
 	owned := []interface{}{`C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`, "notify"}
 	if !codexNotifyLooksManaged(owned, opts) {
@@ -182,6 +197,10 @@ func TestCodexNativeNotifyOwnership(t *testing.T) {
 	foreign := []interface{}{`C:\Tools\desktop-notifier.exe`, "notify"}
 	if codexNotifyLooksManaged(foreign, opts) {
 		t.Fatal("foreign notifier was incorrectly recognized as managed")
+	}
+	foreignSameBasename := []interface{}{`C:\Tools\defenseclaw-gateway.exe`, "notify"}
+	if codexNotifyLooksManaged(foreignSameBasename, opts) {
+		t.Fatal("different absolute gateway notifier was incorrectly recognized as managed")
 	}
 }
 

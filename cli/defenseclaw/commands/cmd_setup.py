@@ -79,6 +79,7 @@ from defenseclaw.connector_contracts import (
     resolve_connector_contract,
 )
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
@@ -1782,26 +1783,29 @@ def _write_dotenv(path: str, entries: dict[str, str]) -> None:
 
 
 def _write_dotenv_locked(path: str, entries: dict[str, str]) -> None:
-    """Write entries to a .env file with mode 0600.
+    """Write entries to a .env file with owner-only access.
 
     Note: ``O_CREAT`` only applies the ``0o600`` mode on *initial*
-    creation. When the file already exists (common on repeat runs),
-    the previous permission bits survive. We chmod() after the write
-    so that repeated invocations keep converging on 0600, even if a
-    stray ``chmod 644`` happened out-of-band.
+    creation. Tighten the open descriptor before writing so repeat runs also
+    converge on POSIX 0600 or the equivalent protected Windows DACL.
     """
     lines = [f"{k}={sanitize_dotenv_value(v, key=k)}\n" for k, v in sorted(entries.items())]
     reject_symlink(path, what="dotenv file")
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.writelines(lines)
+    fd = -1
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        # Best-effort: on some filesystems chmod is a no-op. We've
-        # already written the data, so don't fail the caller here.
-        pass
+        fd = os.open(path, flags, 0o600)
+        set_file_mode(fd, path, 0o600)
+        stream = os.fdopen(fd, "w")
+        fd = -1  # ownership transferred; stream closes on every with-path
+        with stream as f:
+            f.writelines(lines)
+    finally:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _load_config_for_data_dir(data_dir: str):

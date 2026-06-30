@@ -13,11 +13,16 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from defenseclaw.platform_support import (
+    WINDOWS_PREVIEW_CONNECTORS,
+    WINDOWS_SUPPORTED_CONNECTORS,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
@@ -33,6 +38,18 @@ def test_all_uv_calls_use_explicit_exit_status_wrapper() -> None:
     assert 'Invoke-Uv -Arguments @("python", "install", "3.12")' in text
     assert 'Invoke-Uv -Arguments @("venv", $Venv' in text
     assert 'Invoke-Uv -Arguments @("pip", "install"' in text
+
+
+def test_windows_installer_offers_only_native_connector_surface() -> None:
+    text = INSTALL_PS1.read_text()
+
+    choices_block = text.split("$ConnectorChoices = @(", 1)[1].split(")", 1)[0]
+    choices = set(re.findall(r'"([a-z]+)"', choices_block))
+    assert choices == WINDOWS_SUPPORTED_CONNECTORS | WINDOWS_PREVIEW_CONNECTORS | {"none"}
+
+    assert "Hermes native hooks (preview)" in text
+    assert "Cursor IDE native hooks (CLI remains WSL-only)" in text
+    assert "function Install-OpenClaw" not in text
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell native stderr semantics")
