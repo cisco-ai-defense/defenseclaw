@@ -608,7 +608,7 @@
     {
       "type": "table",
       "title": "Last-seen per rule_id (24h)",
-      "description": "Approximation: scrape timestamp of the latest sample for each rule_id series. A rule that hasn't fired in 24h shows as no-data.",
+      "description": "Approximate latest firing time per rule, evaluated in five-minute windows across the last 24 hours. A rule that did not increase in the window shows no series.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -621,7 +621,7 @@
       },
       "targets": [
         {
-          "expr": "1000 * topk(20, max by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[24h]) > 0)))",
+          "expr": "1000 * topk(20, max by (rule_id, scanner, severity) (max_over_time((timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[5m]) > 0))[24h:5m])))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -664,7 +664,7 @@
     {
       "type": "table",
       "title": "First-seen per rule_id (24h)",
-      "description": "First-sample-with-increase timestamp per rule_id series in the window. Brand-new rules show their first appearance time.",
+      "description": "Approximate first firing time per rule, evaluated in five-minute windows across the last 24 hours. A rule that did not increase in the window shows no series.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -677,7 +677,7 @@
       },
       "targets": [
         {
-          "expr": "1000 * topk(20, min by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[24h]) > 0)))",
+          "expr": "1000 * topk(20, min by (rule_id, scanner, severity) (min_over_time((timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\", connector=~\"$connector\"}[5m]) > 0))[24h:5m])))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -774,8 +774,8 @@
     },
     {
       "type": "table",
-      "title": "Finding → verdict correlation (1h)",
-      "description": "When this $rule_id (or any rule with rule_id=All) fires, what verdict_action does the surrounding traffic see in the same 1h window? Coarse correlation — joins on time only, not on scan_id.",
+      "title": "Verdicts in selected connector/severity window",
+      "description": "Guardrail evaluation counts for the selected connector, severity, and dashboard range. This is supporting context rather than a direct rule_id or scan_id join.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"

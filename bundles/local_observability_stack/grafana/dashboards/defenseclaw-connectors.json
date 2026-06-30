@@ -288,7 +288,7 @@
       },
       "targets": [
         {
-          "expr": "count(group by (source) (rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[5m]) > 0)) or vector(0)",
+          "expr": "count((sum by (connector) (rate(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[5m])) > 0) or label_replace((sum by (source) (rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[5m])) > 0), \"connector\", \"$1\", \"source\", \"(.+)\")) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -381,7 +381,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -412,7 +412,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\"}[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -464,7 +464,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(gen_ai_client_token_usage_sum[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(gen_ai_client_token_usage_sum{gen_ai_agent_name=~\"$connector\"}[5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -521,7 +521,7 @@
           "refId": "TOKENS",
           "instant": true,
           "format": "table",
-          "expr": "sum by (gen_ai_agent_name) (rate(gen_ai_client_token_usage_sum[5m])) * 60"
+          "expr": "sum by (gen_ai_agent_name) (rate(gen_ai_client_token_usage_sum{gen_ai_agent_name=~\"$connector\"}[5m])) * 60"
         }
       ],
       "transformations": [
@@ -645,7 +645,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (connector, event_type) (rate(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[$__rate_interval]))",
+          "expr": "sum by (source, signal) (rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[$__rate_interval]))",
           "legendFormat": "{{source}} / {{signal}}",
           "refId": "A"
         }
@@ -672,7 +672,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (connector) (rate(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[$__rate_interval]))",
+          "expr": "sum by (source, signal) (rate(defenseclaw_otel_ingest_bytes_total{source=~\"$connector\"}[$__rate_interval]))",
           "legendFormat": "{{source}} / {{signal}}",
           "refId": "A"
         }
@@ -775,7 +775,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (connector, event_type) (rate(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[$__rate_interval]))",
+          "expr": "sum by (gen_ai_agent_name, gen_ai_token_type) (rate(gen_ai_client_token_usage_sum{gen_ai_agent_name=~\"$connector\"}[$__rate_interval]))",
           "legendFormat": "{{gen_ai_agent_name}} / {{gen_ai_token_type}}",
           "refId": "A"
         }
@@ -802,7 +802,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, connector) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, gen_ai_agent_name) (rate(gen_ai_client_operation_duration_seconds_bucket{gen_ai_agent_name=~\"$connector\"}[$__rate_interval])))",
           "legendFormat": "{{gen_ai_agent_name}}",
           "refId": "A"
         }
@@ -840,7 +840,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total[$__rate_interval]))",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[$__rate_interval]))",
           "legendFormat": "{{action}}",
           "refId": "A"
         }
@@ -873,7 +873,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (severity) (rate(defenseclaw_inspect_evaluations_total{severity!=\"NONE\"}[$__rate_interval]))",
+          "expr": "sum by (severity) (rate(defenseclaw_inspect_evaluations_total{severity!=\"NONE\", tool=~\"$connector:.*\"}[$__rate_interval]))",
           "legendFormat": "{{severity}}",
           "refId": "A"
         }
@@ -906,7 +906,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_type) (rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", severity!=\"NONE\"}[$__rate_interval]))",
+          "expr": "sum by (tool) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[$__rate_interval]))",
           "legendFormat": "{{tool}}",
           "refId": "A"
         }
@@ -1027,7 +1027,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_type, result) (increase(defenseclaw_connector_hook_invocations_total{connector=\"codex\"}[$__range])) or on() vector(0)",
+          "expr": "sort_desc(sum by (type, status, result) (increase(defenseclaw_codex_notify_total[5m])))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -1070,7 +1070,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(time() - max by (connector) (timestamp(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"})))",
+          "expr": "sort_desc(time() - max by (source) (defenseclaw_otel_ingest_last_seen_ts_seconds{source=~\"$connector\"}))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -1194,7 +1194,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, connector) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, event_type) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
           "legendFormat": "{{event_type}}",
           "refId": "A"
         }

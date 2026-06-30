@@ -382,7 +382,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[5m])) by (le)) or vector(0)",
+          "expr": "histogram_quantile(0.95, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket{connector=~\"$connector\"}[5m])) by (le)) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -617,8 +617,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_type, severity) (rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\", severity!=\"NONE\"}[$__rate_interval]))",
-          "legendFormat": "{{tool}} -> {{action}}",
+          "expr": "sum by (tool, action, severity) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action!~\"allow|none\", severity=~\"$severity\"}[$__rate_interval])) or on() vector(0)",
+          "legendFormat": "{{tool}} -> {{action}} [{{severity}}]",
           "refId": "A"
         }
       ],
@@ -691,17 +691,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le, tool) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
           "legendFormat": "{{tool}} p50",
           "refId": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le, tool) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
           "legendFormat": "{{tool}} p95",
           "refId": "p95"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le, tool) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{connector=~\"$connector\"}[$__rate_interval])))",
           "legendFormat": "{{tool}} p99",
           "refId": "p99"
         }
@@ -726,7 +726,7 @@
     {
       "type": "timeseries",
       "title": "Evaluations / sec by connector",
-      "description": "Guardrail evaluations split by connector. The inspect metric only carries the hook-event label `tool` (shaped `<connector>:<event>`, e.g. claudecode:PreToolUse), so the connector dimension is derived with label_replace to strip the `:<event>` suffix and re-aggregate. Filtered by $connector.",
+      "description": "Guardrail evaluations split by the canonical connector label and filtered by $connector.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -739,7 +739,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (connector) (rate(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\"}[$__rate_interval]))",
+          "expr": "sum by (connector) (rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\"}[$__rate_interval]))",
           "legendFormat": "{{connector}}",
           "refId": "A"
         }
@@ -759,7 +759,7 @@
     {
       "type": "table",
       "title": "Per-connector verdict summary (1h)",
-      "description": "Snapshot: total verdicts, blocks, would-blocks, alerts, and confirm per connector in the last hour. The inspect metric only carries the hook-event label `tool` (shaped `<connector>:<event>`), so the connector is derived with label_replace and re-aggregated so each row is a real connector, not a hook event. would-block/1h counts observe-mode shadow blocks (would_block=true on defenseclaw_connector_hook_outcome_total) — the rules that would have blocked had the connector been enforcing. Filtered by $connector.",
+      "description": "Snapshot: total verdicts, blocks, would-blocks, alerts, and confirms per connector in the last hour. would-block/1h counts observe-mode shadow blocks (would_block=true on defenseclaw_connector_hook_outcome_total). Filtered by $connector.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -775,13 +775,13 @@
           "refId": "TOTAL",
           "instant": true,
           "format": "table",
-          "expr": "sum by (connector) (label_replace(increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h]), \"connector\", \"$1\", \"tool\", \"([^:]+):.*\"))"
+          "expr": "sum by (connector) (increase(defenseclaw_inspect_evaluations_total{connector=~\"$connector\"}[1h]))"
         },
         {
           "refId": "BLOCKS",
           "instant": true,
           "format": "table",
-          "expr": "sum by (connector) (label_replace(increase(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[1h]), \"connector\", \"$1\", \"tool\", \"([^:]+):.*\"))"
+          "expr": "sum by (connector) (increase(defenseclaw_inspect_evaluations_total{action=\"block\", connector=~\"$connector\"}[1h]))"
         },
         {
           "refId": "WOULDBLOCK",
@@ -793,13 +793,13 @@
           "refId": "ALERTS",
           "instant": true,
           "format": "table",
-          "expr": "sum by (connector) (label_replace(increase(defenseclaw_inspect_evaluations_total{action=\"alert\", tool=~\"$connector:.*\"}[1h]), \"connector\", \"$1\", \"tool\", \"([^:]+):.*\"))"
+          "expr": "sum by (connector) (increase(defenseclaw_inspect_evaluations_total{action=\"alert\", connector=~\"$connector\"}[1h]))"
         },
         {
           "refId": "CONFIRM",
           "instant": true,
           "format": "table",
-          "expr": "sum by (connector) (label_replace(increase(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[1h]), \"connector\", \"$1\", \"tool\", \"([^:]+):.*\"))"
+          "expr": "sum by (connector) (increase(defenseclaw_inspect_evaluations_total{action=\"confirm\", connector=~\"$connector\"}[1h]))"
         }
       ],
       "transformations": [
