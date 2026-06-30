@@ -3013,45 +3013,21 @@ def _read_picked_connector(data_dir: str | None) -> str | None:
 
 
 def _detect_installed_connectors() -> list[str]:
-    """Return every agent framework with on-disk install markers, in priority order.
+    """Return verified installed applications in discovery precedence order.
 
-    Pure filesystem detection over each agent's own state directories — no
-    ``picked_connector`` install hint, so callers can layer the hint on top
-    (``_detect_connector``) or reason about *all* installed agents
-    (``quickstart``'s ambiguity check, SU-12). Order matches the historical
-    first-match precedence of ``_detect_connector`` so its contract is
-    unchanged.
+    A connector config file is configuration evidence, not installation
+    evidence.  Reuse the shared discovery model so setup, quickstart, and
+    ``agent discover`` cannot disagree about that distinction.
     """
-    home = os.path.expanduser("~")
-    found: list[str] = []
-
-    def _mark(name: str, present: bool) -> None:
-        if present and name not in found:
-            found.append(name)
-
-    _mark("claudecode", os.path.isdir(os.path.join(home, ".claude")))
-    _mark("codex", os.path.isdir(os.path.join(home, ".codex")))
-    _mark("zeptoclaw", os.path.isfile(os.path.join(home, ".zeptoclaw", "config.json")))
-    _mark("hermes", os.path.isfile(os.path.join(home, ".hermes", "config.yaml")))
-    _mark("cursor", os.path.isfile(os.path.join(home, ".cursor", "hooks.json")))
-    _mark("windsurf", os.path.isfile(os.path.join(home, ".codeium", "windsurf", "hooks.json")))
-    _mark("geminicli", os.path.isfile(os.path.join(home, ".gemini", "settings.json")))
-    _mark(
-        "openhands",
-        os.path.isfile(os.path.join(home, ".openhands", "hooks.json"))
-        or os.path.isdir(os.path.join(home, ".openhands")),
-    )
-    # Antigravity auto-detection: agy v1.0.x evaluates hooks from
-    # ~/.gemini/config/hooks.json (the empirical path), but the legacy
-    # ~/.gemini/antigravity-cli/ dir may still exist on machines installed
-    # via pre-v0.5.0 DefenseClaw or simply created by `agy --help`. Either
-    # signal counts as "agy is installed on this host".
-    _mark(
-        "antigravity",
-        os.path.isfile(os.path.join(home, ".gemini", "config", "hooks.json"))
-        or os.path.isfile(os.path.join(home, ".gemini", "antigravity-cli", "hooks.json"))
-        or os.path.isdir(os.path.join(home, ".gemini", "antigravity-cli")),
-    )
+    # Setup/quickstart must reflect applications installed since the last
+    # inventory cache was written, so always perform a fresh shared scan.
+    disc = agent_discovery.discover_agents(use_cache=False)
+    order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", ()) or tuple(disc.agents)
+    found = [
+        name
+        for name in order
+        if name in disc.agents and disc.agents[name].installed
+    ]
     return platform_support.supported_connectors(found)
 
 
@@ -3062,9 +3038,8 @@ def _detect_connector(data_dir: str | None = None) -> str | None:
       1. ``<data_dir>/picked_connector`` (written by ``scripts/install.sh
          --connector ...``) — the operator's explicit choice at install
          time.
-      2. Filesystem heuristics over the agent's own state directories
-         (``~/.claude``, ``~/.codex``, ``~/.zeptoclaw/config.json`` …) — the
-         highest-priority installed agent (see ``_detect_installed_connectors``).
+      2. Shared verified application discovery — the highest-priority
+         installed agent (see ``_detect_installed_connectors``).
 
     Returns ``None`` when neither source is conclusive so the caller
     can fall back to ``"openclaw"``.
@@ -5400,16 +5375,22 @@ def _run_setup_picker(app: AppContext) -> list[str]:
     """SU-11: interactive multi-connector picker for bare ``setup``.
 
     Lists every supported hook connector with detected/configured tags,
-    pre-selects the detected + already-configured ones, and returns the active
-    operator's chosen set (batch mode/judge pickers happen later in
+    pre-selects the already-active set (or detected applications on a fresh
+    install), and returns the operator's chosen active set (batch mode/judge
+    pickers happen later in
     ``_dispatch_bare_setup``). Returns an empty list when the operator selects
     nothing. Only called on an interactive TTY (the caller falls back to help
     on a non-interactive stream).
     """
     candidates = platform_support.supported_connectors(sorted(_HOOK_ENFORCED_CONNECTORS))
     detected = {c for c in _detect_installed_connectors() if c in _HOOK_ENFORCED_CONNECTORS}
-    configured = {c for c in _configured_connector_set(app.cfg.guardrail) if c in _HOOK_ENFORCED_CONNECTORS}
-    preselect = detected | configured
+    configured = {
+        c for c in _configured_connector_set(app.cfg.guardrail) if c in _HOOK_ENFORCED_CONNECTORS
+    }
+    # Once a connector set exists, it is the source of truth for defaults:
+    # discovering another installed application must not silently activate it.
+    # First-time setup still preselects detected applications for convenience.
+    preselect = configured if configured else detected
 
     display_by_connector: dict[str, str] = {}
     for c in candidates:
@@ -5423,7 +5404,10 @@ def _run_setup_picker(app: AppContext) -> list[str]:
     connector_by_display = {label: c for c, label in display_by_connector.items()}
 
     ux.section("Select active connectors")
-    ux.subhead("Detected and already-configured connectors are pre-selected.")
+    if configured:
+        ux.subhead("Active connectors are pre-selected. Detected inactive connectors remain unchecked.")
+    else:
+        ux.subhead("No connectors are active yet. Detected connectors are pre-selected for initial setup.")
     ux.subhead("Unchecked connectors will not remain active after this setup run.")
     selected = _prompt_checkbox_selection(
         [display_by_connector[c] for c in candidates],

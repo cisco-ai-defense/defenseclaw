@@ -631,6 +631,19 @@ class TestHelpParity(unittest.TestCase):
 # SU-11 — bare `setup` picker + scripting flags
 # ---------------------------------------------------------------------------
 class TestBareSetupBatch(_BaseSetup):
+    def test_detected_connectors_require_installed_application_signal(self):
+        disc = SimpleNamespace(
+            agents={
+                "hermes": SimpleNamespace(installed=False, configured=True),
+                "cursor": SimpleNamespace(installed=True, configured=False),
+            }
+        )
+        with patch.object(cmd_setup.agent_discovery, "discover_agents", return_value=disc) as discover:
+            detected = cmd_setup._detect_installed_connectors()
+
+        self.assertEqual(detected, ["cursor"])
+        discover.assert_called_once_with(use_cache=False)
+
     def test_scripting_flags_configure_multiple(self):
         with _stub_side_effects():
             res = _invoke(["-c", "hermes", "-c", "codex", "--mode", "action", "--no-restart"], self.app)
@@ -694,6 +707,31 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertNotIn("comma-separated", res.output)
         self.assertEqual(len(self.app.cfg.guardrail.connectors), 1)
         self.assertIn("hermes", self.app.cfg.guardrail.connectors)
+
+    def test_picker_preselects_active_not_detected_inactive_connectors(self):
+        self._seed_map("hermes", "windsurf")
+        captured = {}
+
+        def choose(options, *, default_selected, title, empty_ok):
+            captured["options"] = options
+            captured["default_selected"] = default_selected
+            return default_selected
+
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["cursor"],
+        ), patch(
+            "defenseclaw.commands.cmd_setup._prompt_checkbox_selection",
+            side_effect=choose,
+        ), patch("defenseclaw.commands.cmd_setup.ux.subhead") as subhead:
+            selected = cmd_setup._run_setup_picker(self.app)
+
+        self.assertEqual(set(selected), {"hermes", "windsurf"})
+        cursor_option = next(option for option in captured["options"] if "Cursor" in option)
+        self.assertNotIn(cursor_option, captured["default_selected"])
+        subhead.assert_any_call(
+            "Active connectors are pre-selected. Detected inactive connectors remain unchecked."
+        )
 
     def test_batch_prompts_trusted_prefix_before_judge_picker(self):
         signal = SimpleNamespace(

@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -51,9 +51,10 @@ from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand, omnigent_conf
 # sides — if the wording ever changes, the consumer can't silently drift.
 UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 
-# Version 2 invalidates cached signals produced before config evidence became
-# file-only and Windows binaries gained narrow out-of-PATH discovery.
-CACHE_SCHEMA_VERSION = 2
+# Version 3 separates a connector's on-disk configuration from a verified
+# application installation.  Version 2 caches treated either signal as
+# ``installed``, which produced false positives for observe-only connectors.
+CACHE_SCHEMA_VERSION = 3
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0
@@ -191,6 +192,9 @@ class AgentSignal:
     binary_path: str
     version: str
     error: str
+    configured: bool = False
+    active: bool = False
+    mode: str = ""
 
 
 @dataclass
@@ -339,6 +343,40 @@ def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
     return fallback if fallback in KNOWN_CONNECTORS else "codex"
 
 
+def apply_config_state(disc: AgentDiscovery, cfg: Any) -> AgentDiscovery:
+    """Add DefenseClaw's active connector state to discovery signals.
+
+    Application discovery and DefenseClaw configuration are intentionally
+    separate sources of truth.  The filesystem scan determines whether an
+    application is installed and whether a meaningful connector config file
+    exists; ``config.yaml`` determines which connectors the operator selected
+    and their effective observe/action modes.
+    """
+    try:
+        active = {
+            _normalize_connector(str(name))
+            for name in cfg.active_connectors()
+            if str(name).strip()
+        }
+    except (AttributeError, TypeError):
+        active = set()
+
+    guardrail = getattr(cfg, "guardrail", None)
+    for name, signal in disc.agents.items():
+        normalized = _normalize_connector(name)
+        signal.active = normalized in active
+        signal.mode = ""
+        if not signal.active or guardrail is None:
+            continue
+        try:
+            mode = guardrail.effective_mode(normalized)
+        except (AttributeError, TypeError):
+            mode = getattr(guardrail, "mode", "")
+        normalized_mode = str(mode or "observe").strip().lower()
+        signal.mode = normalized_mode if normalized_mode in {"observe", "action"} else "observe"
+    return disc
+
+
 def render_discovery_table(disc: AgentDiscovery) -> str:
     """Render discovery as a Rich table string suitable for click.echo."""
     try:
@@ -353,6 +391,8 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
     table = Table(title=title)
     table.add_column("Connector")
     table.add_column("Installed")
+    table.add_column("Configured")
+    table.add_column("Active / Mode")
     table.add_column("Config")
     table.add_column("Binary")
     table.add_column("Version / Error")
@@ -363,6 +403,8 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
         table.add_row(
             signal.name,
             "yes" if signal.installed else "no",
+            "yes" if signal.configured else "no",
+            signal.mode if signal.active else "no",
             _display_path(signal.config_path),
             _display_path(signal.binary_path),
             detail,
@@ -399,7 +441,7 @@ def _scan_agent(
         )
         version_ok = bool(version) and not error
 
-    installed = bool(config_path) or (bool(binary_path) and version_ok)
+    installed = bool(binary_path) and version_ok
     return AgentSignal(
         name=name,
         installed=installed,
@@ -407,6 +449,7 @@ def _scan_agent(
         binary_path=binary_path,
         version=version,
         error=error,
+        configured=bool(config_path),
     )
 
 
@@ -1223,6 +1266,7 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 binary_path=str(raw.get("binary_path") or ""),
                 version=str(raw.get("version") or ""),
                 error=str(raw.get("error") or ""),
+                configured=bool(raw.get("configured")),
             )
     except Exception:
         return None
@@ -1318,7 +1362,9 @@ def _display_path(path: str) -> str:
 
 def _render_plain_table(disc: AgentDiscovery) -> str:
     lines = ["Agent discovery (cached)" if disc.cache_hit else "Agent discovery"]
-    lines.append("connector | installed | config | binary | version/error")
+    lines.append(
+        "connector | installed | configured | active/mode | config | binary | version/error"
+    )
     for name in _ordered_connector_names(disc):
         signal = disc.agents[name]
         lines.append(
@@ -1326,6 +1372,8 @@ def _render_plain_table(disc: AgentDiscovery) -> str:
                 [
                     signal.name,
                     "yes" if signal.installed else "no",
+                    "yes" if signal.configured else "no",
+                    signal.mode if signal.active else "no",
                     _display_path(signal.config_path),
                     _display_path(signal.binary_path),
                     signal.version or signal.error,
