@@ -117,9 +117,15 @@ not merely whether the upstream agent has some Windows build. `preview` remains
 selectable with an explicit warning; `unsupported` is hidden from pickers and
 rejected by scripted/direct setup with the reason below.
 
+The current Windows product scope is **native Windows only**. WSL does not turn
+a connector into a Windows-supported connector: the agent, hook/custom-policy
+surface, DefenseClaw entrypoint, configuration paths, and teardown must all run
+natively. WSL findings are recorded separately below for planning and do not
+represent DefenseClaw Windows support or release certification.
+
 | Connector | macOS | Linux | Native Windows | Windows reason |
 | --------- | ----- | ----- | -------------- | -------------- |
-| Codex | supported | supported | supported | Current Codex releases provide a native PowerShell installer; DefenseClaw uses its native hook entrypoint. |
+| Codex | supported | supported | supported | Current Codex releases run natively on Windows and expose Windows-specific hook commands; DefenseClaw uses its native hook entrypoint. |
 | Claude Code | supported | supported | supported | Native Windows with Git for Windows is documented and supports command hooks. |
 | Cursor | supported | supported | supported (IDE hooks) | Cursor IDE hooks are native. **Cursor CLI remains WSL-only** and native DefenseClaw setup does not install or configure it. |
 | Windsurf | supported | supported | supported | Cascade documents Windows hook locations and PowerShell/command execution. |
@@ -133,8 +139,32 @@ rejected by scripted/direct setup with the reason below.
 | OpenClaw | supported | supported | unsupported | OpenClaw itself has a native path, but DefenseClaw's connector requires the local guardrail-proxy lifecycle, which DefenseClaw does not host on Windows. |
 | ZeptoClaw | supported | supported | unsupported | Upstream publishes macOS/Linux support, and the DefenseClaw connector also requires the unavailable Windows guardrail proxy. |
 
+### WSL research (out of current Windows scope)
+
+This table answers whether upstream explicitly documents or recommends a WSL
+path. It is research input only: DefenseClaw currently tests and ships the
+Windows connector surface against native Windows, not a Windows-to-WSL bridge.
+When upstream documents Linux but does not explicitly document WSL, the result
+is `not separately documented` rather than an inferred support promise.
+
+| Hook connector | Upstream WSL position | Current DefenseClaw Windows decision |
+| -------------- | --------------------- | ------------------------------------ |
+| Codex | WSL2 is documented; WSL1 is no longer supported starting with Codex 0.115. | Native Windows supported; WSL is out of scope. |
+| Claude Code | WSL1 and WSL2 are documented alternatives to native Windows with Git for Windows. | Native Windows supported; WSL is out of scope. |
+| Hermes | WSL2 is upstream's most battle-tested Windows path; native Windows is Early Beta. | Native Windows preview; WSL is out of scope. |
+| Cursor | Cursor CLI is supported on Windows through WSL; Cursor IDE hooks run on native Windows. | Native IDE hooks supported; the WSL-only CLI is not configured. |
+| Windsurf | Hook docs publish Linux/WSL configuration locations as well as native Windows locations. | Native Windows supported; WSL is out of scope. |
+| Gemini CLI | WSL is mentioned as a Unix-compatibility option, but the supported OS matrix already includes native Windows. | Native Windows supported; WSL is out of scope. |
+| Copilot CLI | Hooks are documented for Windows, Linux, and macOS; WSL is not a separate hook target. | Native Windows supported; no WSL claim is needed. |
+| OpenHands | The CLI explicitly requires WSL on Windows; native Windows is not officially supported. | Unsupported on Windows because WSL-only does not meet the native requirement. |
+| Antigravity | Native Windows CLI/app downloads and local hooks are documented; WSL is not a separate hook target. | Native Windows supported; no WSL claim is needed. |
+| OpenCode | Direct Windows execution is available, while upstream recommends WSL for the best experience. | Native Windows supported through the JavaScript bridge; WSL is out of scope. |
+| OmniGent | Linux terminal and sandbox prerequisites are documented; WSL is not explicitly supported as a Windows product path. | Unsupported on native Windows; no WSL connector is implemented or certified. |
+
 Evidence checked 2026-06-30 against the current upstream documentation:
 [Codex install](https://github.com/openai/codex#quickstart),
+[Codex Windows](https://developers.openai.com/codex/windows),
+[Codex hooks](https://developers.openai.com/codex/hooks),
 [Claude Code Windows setup](https://docs.anthropic.com/en/docs/claude-code/getting-started),
 [Cursor CLI installation](https://docs.cursor.com/en/cli/installation),
 [Cursor hooks](https://cursor.com/docs/hooks),
@@ -147,7 +177,8 @@ Evidence checked 2026-06-30 against the current upstream documentation:
 [Hermes native Windows beta](https://github.com/NousResearch/hermes-agent#quick-install),
 [OpenHands CLI quick start](https://docs.openhands.dev/openhands/usage/cli/quick-start),
 [OmniGent terminal](https://omnigent.ai/docs/interact/terminal),
-[OmniGent sandbox](https://omnigent.ai/docs/policies/os-sandbox), and
+[OmniGent sandbox](https://omnigent.ai/docs/policies/os-sandbox),
+[OmniGent desktop](https://omnigent.ai/docs/interact/desktop), and
 [ZeptoClaw installation](https://zeptoclaw.com/docs/getting-started/installation/).
 
 Windows DefenseClaw is **hook-only**. Supported command-hook connectors invoke
