@@ -45,6 +45,7 @@ func hookAPIValidateDirectoryElement(path string) error {
 }
 
 func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren bool) error {
+	hookAPIWindowsPathStage(path, "lstat")
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -53,6 +54,7 @@ func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren boo
 	if err != nil {
 		return fmt.Errorf("encode Windows path %s: %w", path, err)
 	}
+	hookAPIWindowsPathStage(path, "attributes")
 	attributes, err := windows.GetFileAttributes(pathPtr)
 	if err != nil {
 		return fmt.Errorf("inspect Windows attributes for %s: %w", path, err)
@@ -66,6 +68,7 @@ func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren boo
 	if !wantDir && !info.Mode().IsRegular() {
 		return fmt.Errorf("expected regular file: %s", path)
 	}
+	hookAPIWindowsPathStage(path, "security-info")
 	sd, err := windows.GetNamedSecurityInfo(
 		path,
 		windows.SE_FILE_OBJECT,
@@ -78,6 +81,7 @@ func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren boo
 		return fmt.Errorf("missing Windows security descriptor: %s", path)
 	}
 	defer func() { _, _ = windows.LocalFree(windows.Handle(unsafe.Pointer(sd))) }()
+	hookAPIWindowsPathStage(path, "owner")
 	owner, _, err := sd.Owner()
 	if err != nil {
 		return fmt.Errorf("inspect Windows owner for %s: %w", path, err)
@@ -85,6 +89,7 @@ func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren boo
 	if !hookAPIWindowsTrustedPrincipal(owner) {
 		return fmt.Errorf("owner %s is not trusted for hook API token path %s", hookAPIWindowsSIDString(owner), path)
 	}
+	hookAPIWindowsPathStage(path, "dacl")
 	dacl, _, err := sd.DACL()
 	if err != nil {
 		return fmt.Errorf("inspect Windows DACL for %s: %w", path, err)
@@ -92,7 +97,16 @@ func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren boo
 	if dacl == nil {
 		return fmt.Errorf("null Windows DACL is not trusted: %s", path)
 	}
-	return hookAPIRejectUntrustedWindowsWriteACEs(path, dacl, wantDir, protectChildren)
+	hookAPIWindowsPathStage(path, "aces")
+	if err := hookAPIRejectUntrustedWindowsWriteACEs(path, dacl, wantDir, protectChildren); err != nil {
+		return err
+	}
+	hookAPIWindowsPathStage(path, "ready")
+	return nil
+}
+
+func hookAPIWindowsPathStage(path, stage string) {
+	fmt.Fprintf(os.Stderr, "[hook-token] path=%s stage=%s\n", path, stage)
 }
 
 func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, wantDir, protectChildren bool) error {
