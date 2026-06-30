@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -2411,6 +2412,15 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	} else if guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: skipping connector setup/teardown for %s; hooks are installed and repaired by the enterprise hook guardian\n", conn.Name())
 	} else {
+		support := connector.ConnectorSupportOnHostOS(conn.Name())
+		if support.Status == connector.PlatformUnsupported {
+			err := fmt.Errorf("connector %q is not supported on %s: %s", conn.Name(), runtime.GOOS, support.Reason)
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return err
+		}
+		if support.Status == connector.PlatformPreview {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
+		}
 		if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
 		}
@@ -3287,6 +3297,13 @@ func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayTo
 // back just this connector's Setup before returning so a half-installed
 // connector never lingers.
 func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connector, opts connector.SetupOpts, masterKey string, cache *guardrail.RulePackCache) error {
+	support := connector.ConnectorSupportOnHostOS(conn.Name())
+	if support.Status == connector.PlatformUnsupported {
+		return fmt.Errorf("connector %q is not supported on %s: %s", conn.Name(), runtime.GOOS, support.Reason)
+	}
+	if support.Status == connector.PlatformPreview {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
+	}
 	// Inject credentials before Setup so probes keyed off them succeed.
 	conn.SetCredentials(opts.APIToken, masterKey)
 
