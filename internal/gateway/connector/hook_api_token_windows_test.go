@@ -187,6 +187,51 @@ func TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor(t *testing.T) {
 	}
 }
 
+func TestHookAPITokenWindowsAllowsGenericWriteOnSharedAncestor(t *testing.T) {
+	authenticatedUsers, err := windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid)
+	if err != nil {
+		t.Fatalf("Authenticated Users SID: %v", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_READ | windows.GENERIC_WRITE | windows.GENERIC_EXECUTE | windows.SYNCHRONIZE,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(authenticatedUsers),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("build DACL: %v", err)
+	}
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err != nil {
+		t.Fatalf("shared ancestor generic write permission was rejected: %v", err)
+	}
+}
+
+func TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor(t *testing.T) {
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatalf("Everyone SID: %v", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: 0x00000040,
+		AccessMode:        windows.GRANT_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(everyone),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("build DACL: %v", err)
+	}
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err == nil {
+		t.Fatal("shared ancestor delete-child permission was accepted")
+	}
+}
+
 func TestHookAPITokenWindowsRejectsReparsePointDirectory(t *testing.T) {
 	assertHookAPITokenRejectedByEnsureAndLoad(t, "reparse points are not allowed", func(t *testing.T) string {
 		dataDir := t.TempDir()

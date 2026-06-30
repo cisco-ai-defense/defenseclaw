@@ -144,15 +144,16 @@ func hookAPIWindowsWriteLikeAccess(mask windows.ACCESS_MASK, protectChildren boo
 	const fileDeleteChild windows.ACCESS_MASK = 0x00000040
 	unsafe := windows.ACCESS_MASK(
 		windows.GENERIC_ALL |
-			windows.GENERIC_WRITE |
 			windows.DELETE |
 			windows.WRITE_DAC |
-			windows.WRITE_OWNER |
-			windows.FILE_WRITE_EA |
-			windows.FILE_WRITE_ATTRIBUTES,
+			windows.WRITE_OWNER,
 	)
 	if protectChildren {
-		unsafe |= windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA
+		unsafe |= windows.GENERIC_WRITE |
+			windows.FILE_WRITE_DATA |
+			windows.FILE_APPEND_DATA |
+			windows.FILE_WRITE_EA |
+			windows.FILE_WRITE_ATTRIBUTES
 	}
 	return mask&(unsafe|fileDeleteChild) != 0
 }
