@@ -4,6 +4,16 @@
 # extension-fallback path without touching real installs.
 . "${PKG_DIR}/lib/installer_lib.sh"
 
+without_host_claude() {
+  local fakebin; fakebin="$(mktest_tmp)"
+  cat > "${fakebin}/claude" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+  chmod 0700 "${fakebin}/claude"
+  PATH="${fakebin}:${PATH}" "$@"
+}
+
 t_claudecode_via_cursor_extension() {
   local home; home="$(mktest_tmp)"
   local ext="${home}/.cursor/extensions/anthropic.claude-code-2.1.195-darwin-arm64"
@@ -13,7 +23,7 @@ t_claudecode_via_cursor_extension() {
 JSON
 
   local got
-  got="$(discover_agent_version claudecode "${home}")"
+  got="$(without_host_claude discover_agent_version claudecode "${home}")"
   assert_eq "${got}" "2.1.195" "claudecode version from Cursor extension"
 }
 
@@ -26,7 +36,7 @@ t_claudecode_via_vscode_extension() {
 JSON
 
   local got
-  got="$(discover_agent_version claudecode "${home}")"
+  got="$(without_host_claude discover_agent_version claudecode "${home}")"
   assert_eq "${got}" "2.0.99" "claudecode version from VS Code extension"
 }
 
