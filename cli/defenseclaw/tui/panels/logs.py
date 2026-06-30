@@ -142,6 +142,7 @@ LOW_SIGNAL_LOG_PATTERNS: tuple[str, ...] = (
 
 REDACTION_ENV_VAR = "DEFENSECLAW_DISABLE_REDACTION"
 TRUTHY_REDACTION_VALUES = {"1", "true", "yes", "on"}
+_UNSET_SIGNATURE = object()
 
 FILTER_TYPE_ACTION = "action"
 FILTER_TYPE_EVENT_TYPE = "event_type"
@@ -324,6 +325,19 @@ class LogsPanelModel:
         # operator knows whether anything interesting happened while
         # they were reading. ``None`` = not paused for this source.
         self._pause_baseline: dict[LogSource, int | None] = {source: None for source in LOG_SOURCES}
+        # File tails and structured gateway events are polled every two
+        # seconds. Most ticks observe identical files; remember their cheap
+        # stat signatures so those ticks don't reread/reparse up to 1.5 MiB
+        # of logs on Textual's UI thread.
+        self._refresh_signatures: dict[str, object] = {}
+        # A single render asks for the same filtered source several times
+        # (table rows, summary, source tabs, cursor clamping). Cache the pure
+        # filter result so a 5,000-line tail is scanned once per content or
+        # filter change instead of repeatedly in the same keypress/frame.
+        self._filtered_lines_cache: dict[
+            LogSource,
+            tuple[tuple[str, ...], tuple[str, str, str], tuple[str, ...]],
+        ] = {}
 
     def set_data_dir(self, data_dir: str | Path | None) -> None:
         """Late-bind the data dir so a setup-driven config reload can
@@ -336,7 +350,17 @@ class LogsPanelModel:
         preserved across the swap.
         """
 
-        self.data_dir = Path(data_dir) if data_dir else None
+        next_data_dir = Path(data_dir) if data_dir else None
+        if next_data_dir != self.data_dir:
+            self._refresh_signatures.clear()
+            if next_data_dir is None:
+                self.lines = {source: [] for source in LOG_SOURCES}
+                self.error_messages = {source: "" for source in LOG_SOURCES}
+                self.verdict_rows = []
+                self.otel_rows = []
+                self._filtered_lines_cache.clear()
+                self._clamp_cursor()
+        self.data_dir = next_data_dir
 
     @property
     def paused(self) -> bool:
@@ -555,12 +579,19 @@ class LogsPanelModel:
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
         """Return active filtered rows in the table shape consumed by Textual."""
 
+        # The shell only needs cell text here. Building ``LogTableRow``
+        # metadata for every line also hashes each row and classifies its
+        # style; doing that for a cursor-only repaint cost ~25-30 ms at the
+        # 5,000-line tail limit even though the table contents were unchanged.
+        lines = self.filtered_lines()
+        return tuple(self._table_cells(line) for line in lines)
+
+    def _table_cells(self, line: str) -> tuple[str, ...]:
+        """Return the shared row shape for shell and metadata consumers."""
+
         if self.show_connector_column:
-            return tuple(
-                (_line_connector(row.cells[0]) or "—", *row.cells)
-                for row in self.data_table_row_models()
-            )
-        return tuple(row.cells for row in self.data_table_row_models())
+            return (_line_connector(line) or "—", line)
+        return (line,)
 
     def data_table_row_models(self) -> tuple[LogTableRow, ...]:
         """Return active rows with stable row keys and cursor indexes."""
@@ -577,7 +608,7 @@ class LogsPanelModel:
                 key=_log_row_key(self.source, index, structured.get(index), line),
                 cursor_index=index,
                 source=self.source,
-                cells=(line,),
+                cells=self._table_cells(line),
                 selected=index == selected,
                 style_key=self.line_style_key(line),
                 detail_title=self._detail_title_for_row(structured.get(index)),
@@ -592,21 +623,49 @@ class LogsPanelModel:
 
         if self.data_dir is None:
             return
-        self._load_file("gateway", self.data_dir / "gateway.log")
-        self._load_file("watchdog", self.data_dir / "watchdog.log")
-        views = load_gateway_log_views(
-            self.data_dir / "gateway.jsonl",
-            action_filter=self.verdict_action,
-            event_type_filter=self.verdict_event_type,
-            severity_filter=self.verdict_severity,
+        changed_sources: set[LogSource] = set()
+        for source, filename in (("gateway", "gateway.log"), ("watchdog", "watchdog.log")):
+            path = self.data_dir / filename
+            signature = _file_signature(path)
+            if self._refresh_signatures.get(source, _UNSET_SIGNATURE) == signature:
+                continue
+            if self._load_file(source, path):
+                self._refresh_signatures[source] = signature
+                changed_sources.add(source)
+            elif signature is None:
+                # A missing file is a stable snapshot; creation changes the
+                # signature and naturally retries. Existing-but-unreadable
+                # files keep the old signature so transient failures retry.
+                self._refresh_signatures[source] = signature
+
+        gateway_events_path = self.data_dir / "gateway.jsonl"
+        structured_signature = (
+            _file_signature(gateway_events_path),
+            self.verdict_action,
+            self.verdict_event_type,
+            self.verdict_severity,
         )
-        self.error_messages["verdicts"] = views.error
-        self.error_messages["otel"] = views.error
-        self.verdict_rows = list(views.verdict_rows)
-        self.otel_rows = list(views.otel_rows)
-        self.lines["verdicts"] = list(views.verdict_lines)
-        self.lines["otel"] = list(views.otel_lines)
-        self._clamp_cursor()
+        if self._refresh_signatures.get("structured", _UNSET_SIGNATURE) != structured_signature:
+            views = load_gateway_log_views(
+                gateway_events_path,
+                action_filter=self.verdict_action,
+                event_type_filter=self.verdict_event_type,
+                severity_filter=self.verdict_severity,
+            )
+            self.error_messages["verdicts"] = views.error
+            self.error_messages["otel"] = views.error
+            if not views.error:
+                self._refresh_signatures["structured"] = structured_signature
+                self.verdict_rows = list(views.verdict_rows)
+                self.otel_rows = list(views.otel_rows)
+                self.lines["verdicts"] = list(views.verdict_lines)
+                self.lines["otel"] = list(views.otel_lines)
+                changed_sources.update(("verdicts", "otel"))
+            elif structured_signature[0] is None:
+                self._refresh_signatures["structured"] = structured_signature
+
+        if self.source in changed_sources:
+            self._clamp_cursor()
 
     def set_source(self, source: LogSource) -> None:
         self.source = source
@@ -666,9 +725,17 @@ class LogsPanelModel:
     def filtered_lines(self, source: LogSource | None = None) -> list[str]:
         active = source or self.source
         rows = self.lines[active]
+        rows_snapshot = tuple(rows)
+        filter_signature = (self.filter_mode, self.search_text, self.connector_filter)
+        cached = self._filtered_lines_cache.get(active)
+        if cached is not None and cached[0] == rows_snapshot and cached[1] == filter_signature:
+            return list(cached[2])
         if self.filter_mode == FILTER_NONE and not self.search_text and not self.connector_filter:
-            return list(rows)
-        return [line for line in rows if self.line_matches_current_filter(line.lower())]
+            filtered = rows_snapshot
+        else:
+            filtered = tuple(line for line in rows if self.line_matches_current_filter(line.lower()))
+        self._filtered_lines_cache[active] = (rows_snapshot, filter_signature, filtered)
+        return list(filtered)
 
     def filtered_verdicts(self) -> list[GatewayLogRow]:
         if self.source != "verdicts":
@@ -941,7 +1008,7 @@ class LogsPanelModel:
         rendered = self.lines[source]
         if len(rendered) != len(rows):
             return []
-        if self.filter_mode == FILTER_NONE and not self.search_text:
+        if self.filter_mode == FILTER_NONE and not self.search_text and not self.connector_filter:
             return list(rows)
         return [row for row, line in zip(rows, rendered, strict=True) if self.line_matches_current_filter(line.lower())]
 
@@ -987,13 +1054,15 @@ class LogsPanelModel:
         else:
             self._clamp_cursor()
 
-    def _load_file(self, source: LogSource, path: Path) -> None:
+    def _load_file(self, source: LogSource, path: Path) -> bool:
         try:
-            self.lines[source] = list(_tail_text_file(path))
-            self.error_messages[source] = ""
+            lines = list(_tail_text_file(path))
         except OSError as exc:
-            self.lines[source] = []
             self.error_messages[source] = f"Cannot open: {exc}"
+            return False
+        self.lines[source] = lines
+        self.error_messages[source] = ""
+        return True
 
     def _header_text(self) -> str:
         state = "PAUSED" if self.paused else "LIVE"
@@ -1123,6 +1192,21 @@ def _log_row_key(source: LogSource, index: int, row: GatewayLogRow | None, line:
 
 def _short_digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
+def _file_signature(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Return a rotation-safe, nanosecond file identity for polling.
+
+    ``None`` deliberately represents missing/unreadable files. The caller
+    keeps a separate unset sentinel, so the first miss still flows through
+    the normal loader and records its operator-facing error state.
+    """
+
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
 def _tail_text_file(path: Path, *, max_bytes: int = 512 * 1024, max_lines: int = 5000) -> tuple[str, ...]:
