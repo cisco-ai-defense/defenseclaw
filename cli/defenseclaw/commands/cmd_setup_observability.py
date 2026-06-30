@@ -57,6 +57,7 @@ from defenseclaw.audit_actions import ACTION_SETUP_OBSERVABILITY
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.config import locked_config_yaml, write_config_yaml_secure
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.observability import (
     PRESETS,
     Destination,
@@ -1220,16 +1221,25 @@ def _write_atomically(cfg_path: str, raw: dict[str, Any]) -> None:
     # and this config can carry HEC/OTLP tokens (F-0186).
     directory = os.path.dirname(cfg_path) or "."
     os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=directory)
+    fd = -1
+    tmp = ""
     try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as f:
+        fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=directory)
+        set_file_mode(fd, tmp, 0o600)
+        stream = os.fdopen(fd, "w")
+        fd = -1  # ownership transferred; stream closes on every with-path
+        with stream as f:
             yaml.safe_dump(raw, f, default_flow_style=False, sort_keys=False)
         os.replace(tmp, cfg_path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+        tmp = ""
+    finally:
+        if fd != -1:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if tmp:
+            # Close first: an open CRT descriptor prevents unlink on Windows.
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
 
 # ---------------------------------------------------------------------------

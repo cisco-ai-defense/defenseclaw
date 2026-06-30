@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import urllib.error
 import urllib.request
 from email.message import Message
@@ -49,6 +48,8 @@ from defenseclaw.openclaw_guardrail import (
 from defenseclaw.webhooks import WebhookView
 from defenseclaw.webhooks.dispatch import _redact_payload_preview
 from defenseclaw.webhooks.writer import _write_yaml, redact_webhook_url
+
+from tests.permissions import assert_owner_only_file
 
 
 # ---------------------------------------------------------------------------
@@ -145,13 +146,23 @@ def test_f0441_write_yaml_is_0600_and_ignores_tmp_symlink(tmp_path):
     target = tmp_path / "webhooks.yaml"
     sentinel = tmp_path / "sentinel.txt"
     sentinel.write_text("SENTINEL", encoding="utf-8")
-    os.symlink(sentinel, str(target) + ".tmp")
+    predictable_tmp = str(target) + ".tmp"
+    if os.name == "nt":
+        # Creating symlinks requires an optional Windows privilege. A planted
+        # regular file still proves the writer does not use the predictable
+        # name; the symlink form remains covered on POSIX.
+        with open(predictable_tmp, "w", encoding="utf-8") as f:
+            f.write("SENTINEL")
+    else:
+        os.symlink(sentinel, predictable_tmp)
 
     _write_yaml(str(target), {"webhooks": [{"name": "x"}]})
 
-    mode = stat.S_IMODE(os.stat(target).st_mode)
-    assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+    assert_owner_only_file(target)
     assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
+    if os.name == "nt":
+        with open(predictable_tmp, encoding="utf-8") as f:
+            assert f.read() == "SENTINEL"
     assert "name: x" in target.read_text(encoding="utf-8")
 
 
@@ -287,13 +298,20 @@ def test_f0186_write_atomically_is_0600_and_ignores_tmp_symlink(tmp_path):
     cfg_path = tmp_path / "config.yaml"
     sentinel = tmp_path / "sentinel.txt"
     sentinel.write_text("SENTINEL", encoding="utf-8")
-    os.symlink(sentinel, str(cfg_path) + ".tmp")
+    predictable_tmp = str(cfg_path) + ".tmp"
+    if os.name == "nt":
+        with open(predictable_tmp, "w", encoding="utf-8") as f:
+            f.write("SENTINEL")
+    else:
+        os.symlink(sentinel, predictable_tmp)
 
     _write_atomically(str(cfg_path), {"data_dir": str(tmp_path)})
 
-    mode = stat.S_IMODE(os.stat(cfg_path).st_mode)
-    assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+    assert_owner_only_file(cfg_path)
     assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
+    if os.name == "nt":
+        with open(predictable_tmp, encoding="utf-8") as f:
+            assert f.read() == "SENTINEL"
     assert "data_dir:" in cfg_path.read_text(encoding="utf-8")
 
 
