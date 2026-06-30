@@ -154,6 +154,7 @@ jobs:
           uv --no-config venv "$tmp/venv" --python "${{ matrix.python-version }}"
           uv --no-config pip install --python "$tmp/venv/bin/python" "$whl"
           "$tmp/venv/bin/defenseclaw" --help >/dev/null
+          "$tmp/venv/bin/python" -c 'from defenseclaw.envvars import load_registry; assert load_registry().entries'
 
   upgrade-smoke:
     name: Upgrade Smoke

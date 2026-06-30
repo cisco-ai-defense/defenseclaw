@@ -32,6 +32,7 @@ import click
 
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.inventory.plugin_directories import plugin_directory_entries
 
 
 def _api_bind_host(app: AppContext) -> str:
@@ -1639,12 +1640,7 @@ def _enable_plugin_via_gateway(app: AppContext, plugin_name: str) -> bool:
 
 def _list_defenseclaw_plugins(plugin_dir: str) -> list[str]:
     """Return sorted list of DefenseClaw plugin directory names."""
-    if not os.path.isdir(plugin_dir):
-        return []
-    return sorted(
-        e for e in os.listdir(plugin_dir)
-        if os.path.isdir(os.path.join(plugin_dir, e))
-    )
+    return [entry for entry, _path in plugin_directory_entries(plugin_dir)]
 
 
 # _HOST_PLUGIN_MANIFEST_FILES — plan C6 / matrix #3. Each host agent
@@ -1698,24 +1694,8 @@ def _scan_plugin_dir(host_dir: str, connector: str) -> list[dict[str, Any]]:
     picking up unrelated nested package.json files (e.g. a plugin's
     own node_modules tree).
     """
-    if not os.path.isdir(host_dir):
-        return []
     out: list[dict[str, Any]] = []
-    try:
-        entries = sorted(os.listdir(host_dir))
-    except OSError:
-        return []
-    for entry in entries:
-        # N6: host plugin dirs carry non-plugin siblings — a ``cache``
-        # working dir (codex/zeptoclaw register ``…/plugins/cache``) and
-        # dot-prefixed dirs (``.git`` and editor/OS cruft). Skip both so they
-        # never surface as phantom plugin rows. The manifest stays optional
-        # below, so genuinely manifest-less host plugins still list.
-        if entry == "cache" or entry.startswith("."):
-            continue
-        plugin_path = os.path.join(host_dir, entry)
-        if not os.path.isdir(plugin_path):
-            continue
+    for entry, plugin_path in plugin_directory_entries(host_dir):
         manifest = _read_host_plugin_manifest(plugin_path) or {}
         plugin_id = manifest.get("id") or entry
         plugin_name = manifest.get("name") or plugin_id
