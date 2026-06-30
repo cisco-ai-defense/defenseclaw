@@ -227,6 +227,7 @@ jobs:
               json.loads(payload)
           PY
           )
+          "$tmp/venv/bin/python" -c 'from defenseclaw.envvars import load_registry; assert load_registry().entries'
 
   upgrade-smoke:
     name: Upgrade Refusal Contract (unsigned PR candidate)

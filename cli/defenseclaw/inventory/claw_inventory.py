@@ -33,6 +33,7 @@ from typing import Any, NamedTuple
 
 from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
+from defenseclaw.inventory.plugin_directories import plugin_directory_entries
 from defenseclaw.models import ActionEntry, Finding, ScanResult
 
 INVENTORY_VERSION = 3
@@ -2204,20 +2205,7 @@ def _enumerate_plugins_filesystem(
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for plugin_dir in cfg.plugin_dirs(connector):
-        if not os.path.isdir(plugin_dir):
-            continue
-        try:
-            entries = os.listdir(plugin_dir)
-        except OSError:
-            continue
-        for entry in sorted(entries):
-            if entry == "cache":
-                # Codex / ZeptoClaw use a "cache" sibling for transient
-                # downloads; not a plugin in its own right.
-                continue
-            full = os.path.join(plugin_dir, entry)
-            if not os.path.isdir(full):
-                continue
+        for entry, full in plugin_directory_entries(plugin_dir):
             if entry in seen:
                 continue
             seen.add(entry)
