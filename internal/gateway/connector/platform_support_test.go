@@ -18,31 +18,70 @@ package connector
 
 import (
 	"sort"
+	"strings"
 	"testing"
 )
 
-// proxyConnectorNames mirrors the Python
-// platform_support.WINDOWS_UNSUPPORTED_CONNECTORS set. A change on either
-// side must be made on both; these tests fail loudly if they drift.
-var proxyConnectorNames = []string{"openclaw", "zeptoclaw"}
-
-// hookConnectorNames are the hook-based connectors supported on every
-// OS, including Windows.
-var hookConnectorNames = []string{
+var windowsSupportedConnectorNames = []string{
 	"antigravity",
 	"claudecode",
 	"codex",
 	"copilot",
 	"cursor",
 	"geminicli",
-	"hermes",
-	"omnigent",
 	"opencode",
-	"openhands",
 	"windsurf",
 }
 
-func TestProxyConnectorsSetMatchesMirror(t *testing.T) {
+var windowsPreviewConnectorNames = []string{"hermes"}
+
+var windowsUnsupportedConnectorNames = []string{
+	"openclaw",
+	"openhands",
+	"omnigent",
+	"zeptoclaw",
+}
+
+var proxyConnectorNames = []string{"openclaw", "zeptoclaw"}
+
+func allWindowsConnectorNames() []string {
+	out := append([]string(nil), windowsSupportedConnectorNames...)
+	out = append(out, windowsPreviewConnectorNames...)
+	out = append(out, windowsUnsupportedConnectorNames...)
+	return out
+}
+
+func TestWindowsConnectorSupportTaxonomy(t *testing.T) {
+	want := make(map[string]PlatformSupportStatus)
+	for _, name := range windowsSupportedConnectorNames {
+		want[name] = PlatformSupported
+	}
+	for _, name := range windowsPreviewConnectorNames {
+		want[name] = PlatformPreview
+	}
+	for _, name := range windowsUnsupportedConnectorNames {
+		want[name] = PlatformUnsupported
+	}
+
+	if len(windowsConnectorSupport) != len(want) {
+		t.Fatalf("windowsConnectorSupport has %d entries, want %d", len(windowsConnectorSupport), len(want))
+	}
+	for name, wantStatus := range want {
+		support, ok := windowsConnectorSupport[name]
+		if !ok {
+			t.Errorf("windowsConnectorSupport missing %q", name)
+			continue
+		}
+		if support.Status != wantStatus {
+			t.Errorf("%s status=%q, want %q", name, support.Status, wantStatus)
+		}
+		if strings.TrimSpace(support.Reason) == "" {
+			t.Errorf("%s has no support reason", name)
+		}
+	}
+}
+
+func TestProxyConnectorsRemainTopologyOnly(t *testing.T) {
 	got := make([]string, 0, len(proxyConnectors))
 	for name := range proxyConnectors {
 		got = append(got, name)
@@ -50,78 +89,75 @@ func TestProxyConnectorsSetMatchesMirror(t *testing.T) {
 	sort.Strings(got)
 	want := append([]string(nil), proxyConnectorNames...)
 	sort.Strings(want)
-	if len(got) != len(want) {
-		t.Fatalf("proxyConnectors = %v, want %v", got, want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("proxyConnectors=%v, want %v", got, want)
 	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Fatalf("proxyConnectors = %v, want %v", got, want)
-		}
-	}
-}
-
-func TestIsProxyConnector(t *testing.T) {
-	for _, name := range proxyConnectorNames {
-		if !IsProxyConnector(name) {
-			t.Errorf("IsProxyConnector(%q) = false, want true", name)
-		}
-	}
-	for _, name := range hookConnectorNames {
+	for _, name := range []string{"openhands", "omnigent", "hermes"} {
 		if IsProxyConnector(name) {
-			t.Errorf("IsProxyConnector(%q) = true, want false", name)
+			t.Errorf("IsProxyConnector(%q)=true, want false", name)
 		}
 	}
 }
 
-func TestConnectorSupportedOnOS(t *testing.T) {
-	// Windows: proxy connectors unsupported, hook connectors supported.
-	for _, name := range proxyConnectorNames {
-		if connectorSupportedOnOS(name, "windows") {
-			t.Errorf("connectorSupportedOnOS(%q, windows) = true, want false", name)
+func TestConnectorSupportOnOS(t *testing.T) {
+	for _, name := range windowsSupportedConnectorNames {
+		if got := ConnectorSupportOnOS(name, "windows").Status; got != PlatformSupported {
+			t.Errorf("%s status=%q, want supported", name, got)
 		}
 	}
-	for _, name := range hookConnectorNames {
+	for _, name := range windowsPreviewConnectorNames {
+		if got := ConnectorSupportOnOS(name, "windows").Status; got != PlatformPreview {
+			t.Errorf("%s status=%q, want preview", name, got)
+		}
 		if !connectorSupportedOnOS(name, "windows") {
-			t.Errorf("connectorSupportedOnOS(%q, windows) = false, want true", name)
+			t.Errorf("preview connector %s should remain available", name)
 		}
 	}
-	// Unix: everything supported.
+	for _, name := range windowsUnsupportedConnectorNames {
+		if got := ConnectorSupportOnOS(name, "windows").Status; got != PlatformUnsupported {
+			t.Errorf("%s status=%q, want unsupported", name, got)
+		}
+		if connectorSupportedOnOS(name, "windows") {
+			t.Errorf("unsupported connector %s should be unavailable", name)
+		}
+	}
+
 	for _, goos := range []string{"linux", "darwin"} {
-		for _, name := range append(append([]string(nil), proxyConnectorNames...), hookConnectorNames...) {
-			if !connectorSupportedOnOS(name, goos) {
-				t.Errorf("connectorSupportedOnOS(%q, %s) = false, want true", name, goos)
+		for _, name := range allWindowsConnectorNames() {
+			if got := ConnectorSupportOnOS(name, goos).Status; got != PlatformSupported {
+				t.Errorf("%s on %s status=%q, want supported", name, goos, got)
 			}
 		}
 	}
+
+	if got := ConnectorSupportOnOS("plugin-example", "windows").Status; got != PlatformSupported {
+		t.Fatalf("unknown plugin status=%q, want supported", got)
+	}
 }
 
-// TestRegistryNamesFilterToHookConnectorsOnWindows takes the full built-in
-// registry (Available() returns all connectors on this non-Windows host) and
-// asserts that applying the Windows OS filter yields exactly the hook
-// connectors, with both proxy connectors removed.
-func TestRegistryNamesFilterToHookConnectorsOnWindows(t *testing.T) {
+func TestValidateConnectorSupportedOnOS(t *testing.T) {
+	if err := validateConnectorSupportedOnOS("hermes", "windows"); err != nil {
+		t.Fatalf("preview connector should validate: %v", err)
+	}
+	err := validateConnectorSupportedOnOS("openhands", "windows")
+	if err == nil || !strings.Contains(err.Error(), "requires WSL") {
+		t.Fatalf("expected clear OpenHands Windows rejection, got %v", err)
+	}
+}
+
+func TestRegistryWindowsFilterKeepsSupportedAndPreview(t *testing.T) {
 	reg := NewDefaultRegistry()
-	var all []string
-	for _, info := range reg.Available() {
-		all = append(all, info.Name)
-	}
-
-	var onWindows []string
-	for _, name := range all {
+	var got []string
+	for _, name := range reg.Names() {
 		if connectorSupportedOnOS(name, "windows") {
-			onWindows = append(onWindows, name)
+			got = append(got, name)
 		}
 	}
-	sort.Strings(onWindows)
-
-	want := append([]string(nil), hookConnectorNames...)
+	sort.Strings(got)
+	want := append([]string(nil), windowsSupportedConnectorNames...)
+	want = append(want, windowsPreviewConnectorNames...)
 	sort.Strings(want)
-	if len(onWindows) != len(want) {
-		t.Fatalf("windows-filtered connectors = %v, want %v", onWindows, want)
-	}
-	for i := range onWindows {
-		if onWindows[i] != want[i] {
-			t.Fatalf("windows-filtered connectors = %v, want %v", onWindows, want)
-		}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("windows-filtered connectors=%v, want %v", got, want)
 	}
 }

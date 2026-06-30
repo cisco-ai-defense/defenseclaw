@@ -55,6 +55,7 @@ from defenseclaw.tui.panels.setup import (
     wizard_state_summary,
 )
 from defenseclaw.tui.screens.model_picker import filter_models, picker_rows
+from defenseclaw.tui.services.cli_choices import supported_connector_choices
 from defenseclaw.tui.services.setup_state import (
     ConfigDiffEntry,
     ConfigField,
@@ -933,7 +934,7 @@ def test_config_field_catalog_preserves_secret_kind_and_choice_options() -> None
 
     assert _field_by_key(sections, "llm.api_key").kind == "password"
     assert _field_by_key(sections, "openshell.auto_pair").options == ("", "true", "false")
-    assert _field_by_key(sections, "claw.mode").options == CONNECTORS
+    assert _field_by_key(sections, "claw.mode").options == supported_connector_choices()
 
 
 def test_setup_wizard_info_and_form_field_hints_are_complete() -> None:

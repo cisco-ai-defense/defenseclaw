@@ -31,6 +31,8 @@ type ConnectorInfo struct {
 	Source             string // "built-in" or "plugin"
 	ToolInspectionMode ToolInspectionMode
 	SubprocessPolicy   SubprocessPolicy
+	PlatformStatus     PlatformSupportStatus
+	PlatformReason     string
 }
 
 // Registry holds all available connectors (built-in + discovered plugins).
@@ -112,10 +114,11 @@ func (r *Registry) Available() []ConnectorInfo {
 
 	out := make([]ConnectorInfo, 0, len(r.builtins)+len(r.plugins))
 	for _, c := range r.builtins {
-		// Hide connectors unsupported on this OS (proxy connectors on Windows)
-		// so the TUI/CLI and /v1/connectors never surface a path that cannot
-		// run here.
-		if !ConnectorSupportedOnHostOS(c.Name()) {
+		// Hide connectors unsupported on this OS so the TUI/CLI and
+		// /v1/connectors never surface a path that cannot run here. Retain
+		// preview connectors with explicit metadata for presentation consumers.
+		support := ConnectorSupportOnHostOS(c.Name())
+		if support.Status == PlatformUnsupported {
 			continue
 		}
 		out = append(out, ConnectorInfo{
@@ -124,10 +127,13 @@ func (r *Registry) Available() []ConnectorInfo {
 			Source:             "built-in",
 			ToolInspectionMode: c.ToolInspectionMode(),
 			SubprocessPolicy:   c.SubprocessPolicy(),
+			PlatformStatus:     support.Status,
+			PlatformReason:     support.Reason,
 		})
 	}
 	for _, c := range r.plugins {
-		if !ConnectorSupportedOnHostOS(c.Name()) {
+		support := ConnectorSupportOnHostOS(c.Name())
+		if support.Status == PlatformUnsupported {
 			continue
 		}
 		out = append(out, ConnectorInfo{
@@ -136,6 +142,8 @@ func (r *Registry) Available() []ConnectorInfo {
 			Source:             "plugin",
 			ToolInspectionMode: c.ToolInspectionMode(),
 			SubprocessPolicy:   c.SubprocessPolicy(),
+			PlatformStatus:     support.Status,
+			PlatformReason:     support.Reason,
 		})
 	}
 

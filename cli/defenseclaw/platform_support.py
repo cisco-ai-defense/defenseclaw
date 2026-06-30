@@ -10,72 +10,194 @@
 
 """Per-OS connector support — the Python single source of truth.
 
+Windows support is not a boolean derived from connector topology.  A native
+agent/runtime and a DefenseClaw integration that can be wired without WSL are
+both required.  The resulting status is one of ``supported``, ``preview``, or
+``unsupported`` and always carries an operator-facing reason.
+
 DefenseClaw runs hook-only on Windows: agents invoke the native Go hook
 entrypoint (``defenseclaw-gateway hook``) directly, and there is no Windows
 guardrail-proxy lifecycle. The proxy/chat connectors (``openclaw`` and
-``zeptoclaw``) therefore cannot run on Windows, so the TUI/CLI must not
-offer or accept them there.
+``zeptoclaw``) therefore cannot run on Windows, so the TUI/CLI must not offer
+or accept them there.
 
-This module mirrors the Go ``connector.proxyConnectors`` set in
-``internal/gateway/connector/platform_support.go``; a parity test pins the
-two together so the lists cannot drift.
-
-Filtering is a pure no-op on non-Windows hosts, so callers can apply it
-unconditionally at presentation/validation points without changing
-behavior on macOS or Linux.
+This module mirrors ``internal/gateway/connector/platform_support.go``.  Tests
+pin the two taxonomies and all Python presentation lists together.  macOS and
+Linux retain their historical behavior: every built-in and plugin connector is
+offered there.
 """
 
 from __future__ import annotations
 
 import sys
 from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Literal
 
-# Proxy/chat connectors that require the local guardrail proxy. These are
-# the only connectors unsupported on Windows. Keep in sync with the Go
-# ``proxyConnectors`` map.
-WINDOWS_UNSUPPORTED_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
+SupportStatus = Literal["supported", "preview", "unsupported"]
+
+SUPPORTED: SupportStatus = "supported"
+PREVIEW: SupportStatus = "preview"
+UNSUPPORTED: SupportStatus = "unsupported"
+
+PROXY_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
+
+
+@dataclass(frozen=True)
+class ConnectorPlatformSupport:
+    """Support classification for one connector on one operating system."""
+
+    status: SupportStatus
+    reason: str
+
+    @property
+    def available(self) -> bool:
+        """Whether setup/presentation may offer this connector."""
+        return self.status != UNSUPPORTED
+
+
+# Keep in exact parity with the Go ``windowsConnectorSupport`` map.  Cursor is
+# intentionally supported because DefenseClaw configures Cursor IDE hooks; the
+# separate ``cursor-agent`` CLI remains WSL-only and is not installed or wired
+# by native Windows setup.
+WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
+    "codex": ConnectorPlatformSupport(
+        SUPPORTED,
+        "Codex CLI and the DefenseClaw hook entrypoint run natively on Windows.",
+    ),
+    "claudecode": ConnectorPlatformSupport(
+        SUPPORTED,
+        "Claude Code supports native Windows with Git for Windows and native hooks.",
+    ),
+    "cursor": ConnectorPlatformSupport(
+        SUPPORTED,
+        "Cursor IDE hooks run natively on Windows; Cursor CLI remains WSL-only.",
+    ),
+    "windsurf": ConnectorPlatformSupport(
+        SUPPORTED,
+        "Windsurf documents native Windows Cascade hooks.",
+    ),
+    "geminicli": ConnectorPlatformSupport(
+        SUPPORTED,
+        "Gemini CLI documents native Windows command hooks and PowerShell execution.",
+    ),
+    "copilot": ConnectorPlatformSupport(
+        SUPPORTED,
+        "GitHub Copilot CLI documents Windows hook execution through PowerShell.",
+    ),
+    "antigravity": ConnectorPlatformSupport(
+        SUPPORTED,
+        "Antigravity runs natively on Windows and exposes local JSON hooks.",
+    ),
+    "opencode": ConnectorPlatformSupport(
+        SUPPORTED,
+        "OpenCode runs directly on Windows and loads the JavaScript bridge plugin without shell shims.",
+    ),
+    "hermes": ConnectorPlatformSupport(
+        PREVIEW,
+        "Hermes labels native Windows support Early Beta; setup is available as a preview.",
+    ),
+    "openhands": ConnectorPlatformSupport(
+        UNSUPPORTED,
+        "OpenHands CLI requires WSL; DefenseClaw does not implement a WSL connector path.",
+    ),
+    "omnigent": ConnectorPlatformSupport(
+        UNSUPPORTED,
+        "OmniGent has no supported native Windows terminal/sandbox path for this connector.",
+    ),
+    "openclaw": ConnectorPlatformSupport(
+        UNSUPPORTED,
+        "DefenseClaw on Windows is hook-only; OpenClaw integration requires the guardrail proxy.",
+    ),
+    "zeptoclaw": ConnectorPlatformSupport(
+        UNSUPPORTED,
+        "ZeptoClaw publishes macOS/Linux builds and its DefenseClaw integration requires the guardrail proxy.",
+    ),
+}
+
+WINDOWS_SUPPORTED_CONNECTORS: frozenset[str] = frozenset(
+    name for name, support in WINDOWS_CONNECTOR_SUPPORT.items() if support.status == SUPPORTED
+)
+WINDOWS_PREVIEW_CONNECTORS: frozenset[str] = frozenset(
+    name for name, support in WINDOWS_CONNECTOR_SUPPORT.items() if support.status == PREVIEW
+)
+WINDOWS_UNSUPPORTED_CONNECTORS: frozenset[str] = frozenset(
+    name for name, support in WINDOWS_CONNECTOR_SUPPORT.items() if support.status == UNSUPPORTED
+)
 
 
 def host_os() -> str:
-    """Return a Go-``GOOS``-style token for the current host.
+    """Return a Go-``GOOS``-style token for the current host."""
+    return _normalize_os_name(sys.platform)
 
-    Normalizes ``sys.platform`` to ``"windows"`` / ``"darwin"`` / ``"linux"``
-    so the same string compares cleanly against the Go side and against the
-    ``os_name`` arguments below.
-    """
-    plat = sys.platform
-    if plat.startswith("win"):
+
+def _normalize_os_name(os_name: str) -> str:
+    value = (os_name or "").strip().lower()
+    if value.startswith("win"):
         return "windows"
-    if plat == "darwin":
+    if value == "darwin":
         return "darwin"
-    if plat.startswith("linux"):
+    if value.startswith("linux"):
         return "linux"
-    return plat
+    return value
 
 
 def is_proxy_connector(name: str) -> bool:
     """Report whether *name* is a proxy/chat connector."""
-    return name in WINDOWS_UNSUPPORTED_CONNECTORS
+    return name in PROXY_CONNECTORS
+
+
+def connector_platform_support(
+    name: str,
+    os_name: str | None = None,
+) -> ConnectorPlatformSupport:
+    """Return the status and reason for *name* on *os_name*.
+
+    Unknown/plugin connectors preserve the pre-Windows-gate behavior and are
+    treated as supported.  Plugin-specific validation remains the plugin's
+    responsibility.
+    """
+    resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
+    if resolved_os == "windows":
+        return WINDOWS_CONNECTOR_SUPPORT.get(
+            name,
+            ConnectorPlatformSupport(
+                SUPPORTED,
+                "No native Windows restriction is registered for this plugin connector.",
+            ),
+        )
+    return ConnectorPlatformSupport(
+        SUPPORTED,
+        f"Connector setup is supported on {resolved_os or 'this platform'}.",
+    )
+
+
+def connector_support_status(name: str, os_name: str | None = None) -> SupportStatus:
+    """Return only the support status for presentation/serialization."""
+    return connector_platform_support(name, os_name).status
+
+
+def connector_support_reason(name: str, os_name: str | None = None) -> str:
+    """Return the operator-facing reason for the connector's status."""
+    return connector_platform_support(name, os_name).reason
 
 
 def connector_supported_on_os(name: str, os_name: str | None = None) -> bool:
-    """Report whether connector *name* can be offered/used on *os_name*.
+    """Report whether *name* may be offered/used on *os_name*.
 
-    Every hook-based connector is supported on every OS; the proxy
-    connectors are unsupported on Windows. *os_name* defaults to the host
-    OS but is injectable so tests can assert behavior for any platform.
+    Preview connectors are deliberately available; unsupported connectors are
+    hidden from pickers and rejected by explicit setup commands.
     """
-    if os_name is None:
-        os_name = host_os()
-    if os_name == "windows" and name in WINDOWS_UNSUPPORTED_CONNECTORS:
-        return False
-    return True
+    return connector_platform_support(name, os_name).available
+
+
+def connector_preview_on_os(name: str, os_name: str | None = None) -> bool:
+    """Report whether *name* is available as a preview on *os_name*."""
+    return connector_support_status(name, os_name) == PREVIEW
 
 
 def supported_connectors(
     names: Iterable[str], os_name: str | None = None
 ) -> list[str]:
-    """Filter *names* down to those supported on *os_name*, preserving order."""
-    if os_name is None:
-        os_name = host_os()
+    """Filter *names* to supported/preview entries, preserving order."""
     return [n for n in names if connector_supported_on_os(n, os_name)]
