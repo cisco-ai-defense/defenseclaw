@@ -201,6 +201,13 @@ _json_mode = False
 # attributable instead of reading as one primary connector.
 _label_suffix = ""
 
+# Probe bodies are bounded before decoding so an endpoint cannot make doctor
+# buffer an unbounded response. Most probe bodies are rendered only as short
+# diagnostics, but /health is structured input and can legitimately exceed
+# the display limit on multi-connector installs.
+_HTTP_PROBE_DISPLAY_BYTES = 2_000
+_HEALTH_DOCUMENT_MAX_BYTES = 1_048_576
+
 
 @contextlib.contextmanager
 def _capture_stdout_when_json():
@@ -458,6 +465,8 @@ def _http_probe(
     body: bytes | None = None,
     timeout: float = 10.0,
     verify_tls: bool = True,
+    response_limit: int = _HTTP_PROBE_DISPLAY_BYTES,
+    allow_truncation: bool = True,
 ) -> tuple[int, str]:
     """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure.
 
@@ -469,7 +478,22 @@ def _http_probe(
     returning a redirect. We route through ``build_no_redirect_opener`` and
     surface a refused redirect as a non-following ``(0, message)`` result —
     the same shape callers already treat as "could not complete the probe".
+
+    ``response_limit`` is a byte bound, not just a post-read display slice.
+    The default retains the compact diagnostic-body behavior. Structured
+    callers such as the sidecar health check opt into a larger bounded document
+    and disable truncation so an oversized response is rejected rather than
+    parsed as if it were complete.
     """
+    if response_limit <= 0:
+        raise ValueError("response_limit must be positive")
+
+    def _read_response(stream) -> str:
+        raw = stream.read(response_limit + 1)
+        if len(raw) > response_limit and not allow_truncation:
+            return f"response exceeds {response_limit}-byte limit"
+        return raw[:response_limit].decode("utf-8", errors="replace")
+
     req = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
     context = None
     if not verify_tls and url.lower().startswith("https://"):
@@ -479,11 +503,11 @@ def _http_probe(
     opener = build_no_redirect_opener(urllib.request.HTTPSHandler(context=context))
     try:
         with opener.open(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode("utf-8", errors="replace")[:2000]
+            return resp.status, _read_response(resp)
     except urllib.error.HTTPError as exc:
         body_text = ""
         try:
-            body_text = exc.read().decode("utf-8", errors="replace")[:2000]
+            body_text = _read_response(exc)
         except Exception:
             pass
         return exc.code, body_text
@@ -641,7 +665,12 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
     if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
         bind = getattr(cfg.guardrail, "host", None) or bind
     url = f"http://{bind}:{cfg.gateway.api_port}/health"
-    code, body = _http_probe(url, timeout=5.0)
+    code, body = _http_probe(
+        url,
+        timeout=5.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+    )
     if code == 200:
         _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
 
