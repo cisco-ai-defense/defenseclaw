@@ -26,7 +26,7 @@ set -euo pipefail
 DEFAULT_MODE="observe"
 DEFAULT_CONNECTOR="codex"
 DEFAULT_API_PORT="18970"
-DISABLE_REDACTION="true"
+DISABLE_REDACTION="false"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -66,7 +66,7 @@ Gateway options:
                             Examples: --connector cursor
                                       --connector cursor,claudecode
   --port PORT               Loopback API port (default: ${DEFAULT_API_PORT})
-  --redact                  Enable redaction in audit/sinks (default: off)
+  --disable-redaction       Disable redaction in audit/sinks (default: on)
   --binary PATH             Use prebuilt binary instead of 'go build'
   --skip-build              Reuse ./defenseclaw-gateway in the repo (no rebuild)
   --skip-launchd            Install files but don't bootstrap/enable launchd
@@ -92,7 +92,7 @@ while [[ $# -gt 0 ]]; do
     --mode)             MODE="${2:?}"; shift 2;;
     --connector)        CONNECTOR="${2:?}"; shift 2;;
     --port)             API_PORT="${2:?}"; shift 2;;
-    --redact)           DISABLE_REDACTION="false"; shift;;
+    --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
     --skip-build)       SKIP_BUILD="true"; shift;;
     --skip-launchd)     SKIP_LAUNCHD="true"; shift;;
