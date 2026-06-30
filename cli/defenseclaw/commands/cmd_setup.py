@@ -94,6 +94,7 @@ _SETUP_CFG_MTIME_KEY = "defenseclaw._setup_config_mtime_before"
 # ``setup guardrail --restart``); the auto-restart result callback
 # below honors this flag and becomes a no-op to avoid a double bounce.
 _SETUP_RESTART_HANDLED_KEY = "defenseclaw._setup_restart_handled"
+_CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
 
 
 def _config_yaml_path_from_ctx(ctx: click.Context) -> str | None:
@@ -8274,7 +8275,7 @@ def _wait_for_connector_runtime(
     data_dir: str,
     connectors: list[str],
     previous_marker: int | None,
-    timeout: float = 30.0,
+    timeout: float = _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS,
 ) -> bool:
     expected = {normalize_connector(name) for name in connectors if name}
     if not expected:
