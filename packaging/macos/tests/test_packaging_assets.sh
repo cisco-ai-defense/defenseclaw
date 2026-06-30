@@ -55,6 +55,20 @@ t_uninstall_sh_is_executable() {
   fi
 }
 
+t_scrub_py_exists_and_executable() {
+  assert_file_exists "${PKG_DIR}/lib/scrub_agent_configs.py"
+  if [[ ! -x "${PKG_DIR}/lib/scrub_agent_configs.py" ]]; then
+    _fail "scrub_agent_configs.py missing +x"
+    return 1
+  fi
+}
+
+t_scrub_py_syntax() {
+  local rc=0
+  /usr/bin/python3 -c "import ast; ast.parse(open('${PKG_DIR}/lib/scrub_agent_configs.py').read())" 2>&1 || rc=$?
+  assert_status "${rc}" 0 "scrub_agent_configs.py parses"
+}
+
 run_case "plist exists and lints"     t_plist_exists_and_parses
 run_case "plist references managed paths" t_plist_contains_managed_paths
 run_case "installer_lib.sh syntax"    t_install_lib_syntax
@@ -62,3 +76,5 @@ run_case "install.sh syntax"          t_install_sh_syntax
 run_case "uninstall.sh syntax"        t_uninstall_sh_syntax
 run_case "install.sh executable"      t_install_sh_is_executable
 run_case "uninstall.sh executable"    t_uninstall_sh_is_executable
+run_case "scrub_agent_configs.py present and +x" t_scrub_py_exists_and_executable
+run_case "scrub_agent_configs.py syntax"          t_scrub_py_syntax
