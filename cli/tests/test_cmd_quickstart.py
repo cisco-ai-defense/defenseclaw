@@ -229,7 +229,11 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
     def test_no_connector_no_detection_errors_not_codex(self):
         # No --connector, no installer hint, nothing installed (empty HOME):
         # quickstart must error rather than silently configuring codex.
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=[],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertNotEqual(result.exit_code, 0)
         # No connector was configured, so no JSON summary is emitted at all.
         self.assertNotIn('"connector": "codex"', result.output)
@@ -237,17 +241,22 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
 
     def test_single_detected_connector_is_used(self):
         # Exactly one agent installed -> quickstart uses it, no flag needed.
-        os.makedirs(os.path.join(self.home_dir, ".codex"), exist_ok=True)
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["codex"],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
 
     def test_ambiguous_detection_errors(self):
         # Two agents installed -> ambiguous -> explicit error, never a guess.
-        os.makedirs(os.path.join(self.home_dir, ".codex"), exist_ok=True)
-        os.makedirs(os.path.join(self.home_dir, ".claude"), exist_ok=True)
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["claudecode", "codex"],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertNotEqual(result.exit_code, 0)
         output = result.output + (result.stderr or "")
         self.assertIn("Multiple connectors detected/configured", output)
@@ -257,11 +266,13 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
     def test_picked_hint_does_not_mask_ambiguous_detection(self):
         # The installer's picked_connector hint is advisory; it must not hide
         # that a bare quickstart would be choosing among several connectors.
-        os.makedirs(os.path.join(self.home_dir, ".codex"), exist_ok=True)
-        os.makedirs(os.path.join(self.home_dir, ".claude"), exist_ok=True)
         with open(os.path.join(self.tmp_dir, "picked_connector"), "w", encoding="utf-8") as fh:
             fh.write("codex")
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["claudecode", "codex"],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertNotEqual(result.exit_code, 0)
         output = result.output + (result.stderr or "")
         self.assertIn("Multiple connectors detected/configured", output)
@@ -271,7 +282,11 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
     def test_picked_hint_without_detection_is_reported_in_json(self):
         with open(os.path.join(self.tmp_dir, "picked_connector"), "w", encoding="utf-8") as fh:
             fh.write("codex")
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=[],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
@@ -301,7 +316,11 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             )
         with open(os.path.join(self.tmp_dir, "picked_connector"), "w", encoding="utf-8") as fh:
             fh.write("codex")
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=[],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertNotEqual(result.exit_code, 0)
         output = result.output + (result.stderr or "")
         self.assertIn("Multiple connectors detected/configured", output)

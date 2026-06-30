@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from defenseclaw.config import PerConnectorGuardrailConfig, default_config
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.inventory import agent_discovery as ad
 
@@ -36,6 +37,7 @@ def _signal(name: str, installed: bool = False) -> ad.AgentSignal:
         binary_path="",
         version="",
         error="",
+        configured=installed,
     )
 
 
@@ -174,7 +176,7 @@ def test_empty_connector_directories_are_not_install_evidence(
         ("opencode.jsonc",),
     ],
 )
-def test_meaningful_opencode_files_are_discovery_evidence(monkeypatch, tmp_path, relative_path):
+def test_meaningful_opencode_files_are_configuration_evidence(monkeypatch, tmp_path, relative_path):
     _pin_home(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     config = tmp_path.joinpath(*relative_path)
@@ -184,7 +186,8 @@ def test_meaningful_opencode_files_are_discovery_evidence(monkeypatch, tmp_path,
 
     signal = ad._scan_agent("opencode")
 
-    assert signal.installed is True
+    assert signal.installed is False
+    assert signal.configured is True
     assert signal.config_path == str(config)
 
 
@@ -220,7 +223,7 @@ def test_empty_home_has_no_config_only_false_positives(monkeypatch, tmp_path):
         ("omnigent", (".omnigent", "config.yaml")),
     ],
 )
-def test_each_connector_accepts_a_meaningful_config_file(
+def test_each_connector_tracks_meaningful_config_separately_from_installation(
     monkeypatch,
     tmp_path,
     connector,
@@ -236,7 +239,8 @@ def test_each_connector_accepts_a_meaningful_config_file(
 
     signal = ad._scan_agent(connector)
 
-    assert signal.installed is True
+    assert signal.installed is False
+    assert signal.configured is True
     assert ad._path_key(signal.config_path) == ad._path_key(str(config))
 
 
@@ -498,8 +502,44 @@ def test_omnigent_discovery_honors_config_home(monkeypatch, tmp_path):
 
     signal = ad._scan_agent("omnigent")
 
-    assert signal.installed is True
+    assert signal.installed is False
+    assert signal.configured is True
     assert signal.config_path == str(config_path)
+
+
+def test_config_state_marks_selected_observe_connectors_active():
+    disc = _discovery()
+    disc.agents["hermes"] = ad.AgentSignal(
+        name="hermes",
+        installed=False,
+        config_path="/tmp/.hermes/config.yaml",
+        binary_path="",
+        version="",
+        error="",
+        configured=True,
+    )
+    disc.agents["windsurf"] = ad.AgentSignal(
+        name="windsurf",
+        installed=False,
+        config_path="/tmp/.codeium/windsurf/hooks.json",
+        binary_path="",
+        version="",
+        error="",
+        configured=True,
+    )
+    cfg = default_config()
+    cfg.guardrail.connectors = {
+        "hermes": PerConnectorGuardrailConfig(mode="observe"),
+        "windsurf": PerConnectorGuardrailConfig(mode="observe"),
+    }
+
+    ad.apply_config_state(disc, cfg)
+
+    for name in ("hermes", "windsurf"):
+        assert disc.agents[name].installed is False
+        assert disc.agents[name].configured is True
+        assert disc.agents[name].active is True
+        assert disc.agents[name].mode == "observe"
 
 
 def test_omnigent_discovery_does_not_fall_back_when_config_home_is_set(monkeypatch, tmp_path):
