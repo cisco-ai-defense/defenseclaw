@@ -19,7 +19,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 )
@@ -55,14 +54,12 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 	}
 	hookAPITokenMu.Lock()
 	defer hookAPITokenMu.Unlock()
-	hookAPITokenProvisionStage(connectorName, "lock-acquired")
 
 	tokenPath, err := HookAPITokenFilePath(dataDir, connectorName)
 	if err != nil {
 		return "", err
 	}
 	if _, err := os.Lstat(tokenPath); err == nil {
-		hookAPITokenProvisionStage(connectorName, "validate-existing-token")
 		existing, readErr := readSecureHookAPITokenFile(dataDir, tokenPath)
 		if readErr != nil {
 			return "", fmt.Errorf("read hook API token %s: %w", tokenPath, readErr)
@@ -78,11 +75,9 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 		if !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("inspect hook API token dir: %w", err)
 		}
-		hookAPITokenProvisionStage(connectorName, "validate-data-dir")
 		if err := hookAPIValidateDirectory(dataDir); err != nil {
 			return "", fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
 		}
-		hookAPITokenProvisionStage(connectorName, "create-hooks-dir")
 		if err := os.Mkdir(hooksDir, 0o700); err == nil {
 			hooksDirCreated = true
 		} else if !errors.Is(err, os.ErrExist) {
@@ -90,7 +85,6 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 		}
 	}
 	if hooksDirCreated {
-		hookAPITokenProvisionStage(connectorName, "validate-new-hooks-dir")
 		if err := validateOTLPPathTokenLocation(dataDir, tokenPath); err != nil {
 			return "", err
 		}
@@ -98,14 +92,12 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 			return "", fmt.Errorf("hook API token directory %s is not trusted: %w", hooksDir, err)
 		}
 	} else {
-		hookAPITokenProvisionStage(connectorName, "validate-existing-hooks-dir")
 		if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil {
 			return "", err
 		}
 	}
 
 	buf := make([]byte, otlpTokenLen)
-	hookAPITokenProvisionStage(connectorName, "generate-token")
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("EnsureHookAPIToken: csprng read: %w", err)
 	}
@@ -117,13 +109,11 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 	if nofollow := otlpOpenNoFollow(); nofollow != 0 {
 		flags |= nofollow
 	}
-	hookAPITokenProvisionStage(connectorName, "open-temp-token")
 	f, err := os.OpenFile(tmp, flags, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("write hook API token: %w", err)
 	}
 	_, err = f.WriteString(tok + "\n")
-	hookAPITokenProvisionStage(connectorName, "sync-temp-token")
 	if syncErr := f.Sync(); err == nil {
 		err = syncErr
 	}
@@ -134,24 +124,15 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("write hook API token: %w", err)
 	}
-	hookAPITokenProvisionStage(connectorName, "chmod-temp-token")
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("chmod hook API token: %w", err)
 	}
-	hookAPITokenProvisionStage(connectorName, "rename-token")
 	if err := os.Rename(tmp, tokenPath); err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("rename hook API token: %w", err)
 	}
-	hookAPITokenProvisionStage(connectorName, "ready")
 	return tok, nil
-}
-
-func hookAPITokenProvisionStage(scope, stage string) {
-	if runtime.GOOS == "windows" {
-		fmt.Fprintf(os.Stderr, "[hook-token] scope=%s stage=%s\n", scope, stage)
-	}
 }
 
 // LoadHookAPIToken reads the connector-scoped hook API token if present.

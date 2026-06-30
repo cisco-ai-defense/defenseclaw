@@ -368,6 +368,8 @@ jobs:
       # Execute the per-OS connector capability model and hook-wiring tests.
       - name: Go test - connector capability + hook wiring
         run: go test ./internal/gateway/connector/ -run "ProxyConnector|IsProxyConnector|ConnectorSupportedOnOS|RegistryNamesFilter|HookInvocationCommand|ShellWordPassesNativeCommandThrough|BuildCodexHooksTableHashesTheCommand|IsOwnedHookRecognizesNativeCommand"
+      - name: Go test - hook token trust
+        run: go test ./internal/gateway/connector/ -run "HookAPIToken|LoadHookAPITokens" -count=1
       # Execute the native `defenseclaw hook` entrypoint + sidecar resolution.
       - name: Go test - hook entrypoint
         run: go test ./internal/cli/ -run "BuildHookOptions|ReadHookSidecar|HookCommandRegistered"
