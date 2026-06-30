@@ -55,6 +55,7 @@ from defenseclaw.context import AppContext
 from defenseclaw.inventory import agent_discovery as ad
 
 
+
 def _make_app_context(data_dir: str) -> AppContext:
     cfg = Config(
         data_dir=data_dir,

@@ -653,6 +653,7 @@ class TestBareSetupBatch(_BaseSetup):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True), \
                 patch("defenseclaw.commands.cmd_setup._detect_installed_connectors", return_value=["hermes"]), \
+                patch("defenseclaw.commands.cmd_setup._supports_terminal_redraw", return_value=True), \
                 patch("defenseclaw.commands.cmd_setup.click.getchar", return_value="\n"):
             res = _invoke(["--yes"], self.app)
         # --yes => no mode/judge prompts, but bare setup still needs the

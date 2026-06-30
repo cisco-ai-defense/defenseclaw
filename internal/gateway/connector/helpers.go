@@ -180,11 +180,16 @@ func isDefenseClawGatewayExecutable(exe string) bool {
 		strings.EqualFold(filepath.Clean(exe), filepath.Clean(current)) {
 		return true
 	}
-	// filepath.Base follows the host separator, while tests exercise Windows
-	// paths on every OS. Normalize backslashes before taking the basename.
-	base := filepath.Base(strings.ReplaceAll(exe, `\`, `/`))
-	return strings.EqualFold(base, windowsGatewayBinaryName) ||
-		strings.EqualFold(base, "defenseclaw-gateway")
+	// Antigravity intentionally stores a bare PATH-resolved executable name.
+	// Accept that exact form, but never accept an arbitrary absolute path merely
+	// because its basename resembles ours: teardown must not remove a foreign
+	// installation's hook entry.
+	normalized := strings.ReplaceAll(exe, `\`, "/")
+	if strings.Contains(normalized, "/") {
+		return false
+	}
+	return strings.EqualFold(normalized, windowsGatewayBinaryName) ||
+		strings.EqualFold(normalized, "defenseclaw-gateway")
 }
 
 func validNativeHookConnector(connector string) bool {
