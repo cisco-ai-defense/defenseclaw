@@ -5,6 +5,7 @@
 package connector
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -54,6 +55,22 @@ func TestHookAPITokenRejectsWritableHooksDirectory(t *testing.T) {
 		}
 		return dataDir
 	})
+}
+
+func TestEnsureHookAPITokenDoesNotCreateHooksInUntrustedDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory modes are not available on Windows")
+	}
+	dataDir := t.TempDir()
+	if err := os.Chmod(dataDir, 0o777); err != nil {
+		t.Fatalf("chmod data dir: %v", err)
+	}
+	if _, err := EnsureHookAPIToken(dataDir, "codex"); err == nil || !strings.Contains(err.Error(), "not trusted") {
+		t.Fatalf("EnsureHookAPIToken error = %v, want trust rejection", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, "hooks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("hooks directory was created before trust validation: %v", err)
+	}
 }
 
 func TestHookAPITokenRejectsSymlinkHooksDirectory(t *testing.T) {

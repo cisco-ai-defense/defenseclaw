@@ -59,16 +59,27 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	if existing, err := readSecureHookAPITokenFile(dataDir, tokenPath); err == nil && existing != "" {
+	if _, err := os.Lstat(tokenPath); err == nil {
+		existing, readErr := readSecureHookAPITokenFile(dataDir, tokenPath)
+		if readErr != nil {
+			return "", fmt.Errorf("read hook API token %s: %w", tokenPath, readErr)
+		}
 		return existing, nil
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("read hook API token %s: %w", tokenPath, err)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("inspect hook API token %s: %w", tokenPath, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
-		return "", fmt.Errorf("create hook API token dir: %w", err)
+
+	hooksDir := filepath.Dir(tokenPath)
+	if _, err := os.Lstat(hooksDir); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect hook API token dir: %w", err)
+		}
+		if err := hookAPIValidateDirectory(dataDir); err != nil {
+			return "", fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
+		}
+		if err := os.Mkdir(hooksDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("create hook API token dir: %w", err)
+		}
 	}
 	if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil {
 		return "", err
