@@ -62,8 +62,10 @@ t_install_requires_root() {
 t_uninstall_help() {
   local out
   out="$("${UNINSTALL_SH}" --help 2>&1)" || _fail "uninstall --help should exit 0"
-  assert_contains "${out}" "--purge"   "purge flag documented"
-  assert_contains "${out}" "audit DB"  "preservation note"
+  assert_contains "${out}" "--purge"                 "purge flag documented"
+  assert_contains "${out}" "audit DB"                "preservation note"
+  assert_contains "${out}" "--keep-agent-configs"    "scrub opt-out documented"
+  assert_contains "${out}" "scrub DefenseClaw"        "scrub behavior documented"
 }
 
 t_uninstall_unknown_flag() {
