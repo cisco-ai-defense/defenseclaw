@@ -2187,14 +2187,25 @@ class HostPluginEnumerationTests(unittest.TestCase):
         # codex/zeptoclaw seed a sibling ``cache`` dir next to real plugins;
         # version control / OS cruft seeds dot-prefixed dirs.
         os.makedirs(os.path.join(self.tmp_dir, "cache"))
-        os.makedirs(os.path.join(self.tmp_dir, ".git"))
+        os.makedirs(os.path.join(self.tmp_dir, ".plugin-appserver"))
+        os.makedirs(os.path.join(self.tmp_dir, "..plugin-appserver.staging-123"))
         self._seed("real-plugin", {"id": "real-plugin", "name": "Real"})
 
         out = _scan_plugin_dir(self.tmp_dir, "codex")
         ids = sorted(p["id"] for p in out)
         self.assertEqual(ids, ["real-plugin"])
         self.assertNotIn("cache", ids)
-        self.assertNotIn(".git", ids)
+        self.assertNotIn(".plugin-appserver", ids)
+        self.assertNotIn("..plugin-appserver.staging-123", ids)
+
+    def test_defenseclaw_plugin_list_uses_shared_hidden_filter(self):
+        from defenseclaw.commands.cmd_plugin import _list_defenseclaw_plugins
+
+        self._seed(".plugin-appserver", manifest=None)
+        self._seed("..plugin-appserver.staging-123", manifest=None)
+        self._seed("real-plugin", manifest=None)
+
+        self.assertEqual(_list_defenseclaw_plugins(self.tmp_dir), ["real-plugin"])
 
     def test_list_host_plugins_skips_openclaw(self):
         """OpenClaw enumeration goes through the openclaw binary, not us."""

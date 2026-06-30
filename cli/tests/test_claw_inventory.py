@@ -2364,6 +2364,24 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         ids = [p["id"] for p in inv["plugins"]]
         self.assertEqual(ids, ["real"])
 
+    def test_hidden_and_staging_plugin_dirs_are_skipped(self):
+        """Hidden activation state must not surface as enabled plugins."""
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        plugin_root = os.path.join(self.tmp, "plugins")
+        os.makedirs(plugin_root, exist_ok=True)
+        _seed_plugin(plugin_root, ".plugin-appserver", manifest="plugin.json")
+        _seed_plugin(
+            plugin_root,
+            "..plugin-appserver.staging-123",
+            manifest="plugin.json",
+        )
+        _seed_plugin(plugin_root, "real", manifest="plugin.json")
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([plugin_root]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+        self.assertEqual([p["id"] for p in inv["plugins"]], ["real"])
+
     def test_mcp_servers_passed_through(self):
         from defenseclaw.connector_paths import MCPServerEntry
         cfg = _make_cfg_for_connector(self.tmp, "codex")
