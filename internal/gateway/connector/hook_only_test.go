@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -236,8 +237,12 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read config after setup: %v", err)
 			}
-			if !strings.Contains(string(data), conn.scriptName) {
-				t.Fatalf("config after setup does not reference %s:\n%s", conn.scriptName, string(data))
+			wantConfigNeedle := conn.scriptName
+			if runtime.GOOS == "windows" {
+				wantConfigNeedle = nativeHookFlag + conn.Name()
+			}
+			if !strings.Contains(string(data), wantConfigNeedle) {
+				t.Fatalf("config after setup does not reference %s:\n%s", wantConfigNeedle, string(data))
 			}
 			if err := conn.Teardown(context.Background(), opts); err != nil {
 				t.Fatalf("Teardown: %v", err)
@@ -468,14 +473,24 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 			command,
 		)
 	}
-	// Secondary: the path resolves cleanly to a file ending in
-	// antigravity-hook.sh. Defends against accidentally writing a
-	// relative path or a different script name.
-	if !strings.HasSuffix(command, "antigravity-hook.sh") {
-		t.Fatalf("command=%q does not end with antigravity-hook.sh", command)
+	wantCommand := conn.hookCommand(opts)
+	if command != wantCommand {
+		t.Fatalf("command=%q want %q", command, wantCommand)
 	}
-	if !filepath.IsAbs(command) {
-		t.Fatalf("command=%q is not an absolute path", command)
+	// Unix runs the absolute shell hook. Windows uses the stable gateway
+	// basename through PATH because agy's direct-exec tokenizer cannot dequote
+	// an absolute executable path containing spaces.
+	if runtime.GOOS == "windows" {
+		if command != `defenseclaw-gateway.exe hook --connector antigravity` {
+			t.Fatalf("windows command=%q", command)
+		}
+	} else {
+		if !strings.HasSuffix(command, "antigravity-hook.sh") {
+			t.Fatalf("command=%q does not end with antigravity-hook.sh", command)
+		}
+		if !filepath.IsAbs(command) {
+			t.Fatalf("command=%q is not an absolute path", command)
+		}
 	}
 	// Tertiary: no surrounding whitespace either.
 	if command != strings.TrimSpace(command) {
@@ -529,8 +544,8 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 			t.Errorf("%s[%q][0].hooks[0].type=%#v want command", outerKey, event, hookEntry["type"])
 		}
 		eventCommand, ok := hookEntry["command"].(string)
-		if !ok || !strings.HasSuffix(eventCommand, "antigravity-hook.sh") {
-			t.Errorf("%s[%q][0].hooks[0].command=%#v want absolute path ending antigravity-hook.sh", outerKey, event, hookEntry["command"])
+		if !ok || eventCommand != wantCommand {
+			t.Errorf("%s[%q][0].hooks[0].command=%#v want %q", outerKey, event, hookEntry["command"], wantCommand)
 		}
 	}
 }
