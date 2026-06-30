@@ -39,7 +39,7 @@ import click
 # pulled name-by-name so the wizard call sites read like
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
-from defenseclaw import connector_paths, platform_support, ux
+from defenseclaw import connector_paths, platform_support, terminal_checkbox, ux
 from defenseclaw.audit_actions import (
     ACTION_SETUP_GATEWAY,
     ACTION_SETUP_GUARDRAIL,
@@ -75,6 +75,10 @@ from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.safety import reject_symlink, sanitize_dotenv_value
+
+_supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
+_checkbox_key_name = terminal_checkbox.checkbox_key_name
+_render_checkbox_menu = terminal_checkbox.render_checkbox_menu
 
 # Key used to stash the pre-invocation config.yaml mtime in the Click
 # context so the post-invocation hook can tell whether a `setup`
@@ -4308,126 +4312,6 @@ def _configured_connector_set(gc) -> list[str]:
     return [single] if single else []
 
 
-def _checkbox_key_name(ch: str) -> str:
-    if ch in ("\r", "\n"):
-        return "enter"
-    if ch in (" ", "\t"):
-        return "toggle"
-    if ch in ("\x1b[A", "\x00H", "\xe0H", "k", "K"):
-        return "up"
-    if ch in ("\x1b[B", "\x00P", "\xe0P", "j", "J"):
-        return "down"
-    if ch == "a":
-        return "all"
-    if ch == "n":
-        return "none"
-    return ""
-
-
-def _stdout_is_tty() -> bool:
-    try:
-        return click.get_text_stream("stdout").isatty()
-    except Exception:
-        return False
-
-
-def _supports_terminal_redraw() -> bool:
-    """Return whether stdout can safely process ANSI cursor movement."""
-
-    if not _stdout_is_tty():
-        return False
-    if os.name != "nt":
-        return True
-
-    try:
-        import ctypes
-        import msvcrt
-
-        stream = click.get_text_stream("stdout")
-        handle_value = msvcrt.get_osfhandle(stream.fileno())
-        if handle_value == -1:
-            return False
-        handle = ctypes.c_void_p(handle_value)
-        mode = ctypes.c_ulong()
-        kernel32 = ctypes.windll.kernel32
-        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-            return False
-        enable_virtual_terminal_processing = 0x0004
-        if mode.value & enable_virtual_terminal_processing:
-            return True
-        return bool(
-            kernel32.SetConsoleMode(
-                handle,
-                mode.value | enable_virtual_terminal_processing,
-            )
-        )
-    except (AttributeError, OSError, TypeError, ValueError):
-        return False
-
-
-def _render_checkbox_menu(
-    options: list[str],
-    selected: set[str],
-    cursor: int,
-    *,
-    redraw: bool,
-) -> None:
-    if redraw:
-        click.echo(f"\x1b[{len(options)}F", nl=False)
-    for idx, name in enumerate(options):
-        if redraw:
-            click.echo("\r\x1b[2K", nl=False)
-        pointer = ">" if idx == cursor else " "
-        mark = "x" if name in selected else " "
-        click.echo(f"  {pointer} [{mark}] {name}")
-
-
-def _prompt_checkbox_selection_no_redraw(
-    options: list[str],
-    selected: set[str],
-    *,
-    empty_ok: bool,
-) -> list[str]:
-    """Line-oriented checkbox fallback for Windows consoles without VT."""
-
-    for idx, name in enumerate(options, start=1):
-        mark = "x" if name in selected else " "
-        click.echo(f"    {idx}. [{mark}] {name}")
-    ux.subhead("  Enter comma-separated numbers; use 'all' or 'none'.")
-
-    default = ",".join(
-        str(idx)
-        for idx, name in enumerate(options, start=1)
-        if name in selected
-    ) or "none"
-    while True:
-        raw = click.prompt("  Selection", default=default, show_default=True).strip()
-        normalized = raw.lower()
-        if normalized in {"a", "all"}:
-            chosen = set(options)
-        elif normalized in {"n", "none"}:
-            chosen = set()
-        else:
-            chosen: set[str] = set()
-            invalid: list[str] = []
-            for token in (part.strip() for part in raw.split(",")):
-                if token.isdecimal() and 1 <= int(token) <= len(options):
-                    chosen.add(options[int(token) - 1])
-                elif token in options:
-                    chosen.add(token)
-                else:
-                    invalid.append(token or "(empty)")
-            if invalid:
-                ux.warn(
-                    f"Unknown selection: {', '.join(invalid)}.",
-                    indent="  ",
-                )
-                continue
-        if chosen or empty_ok:
-            return [name for name in options if name in chosen]
-        ux.warn("Select at least one connector.", indent="  ")
-
-
 def _prompt_checkbox_selection(
     options: list[str],
     *,
@@ -4435,51 +4319,14 @@ def _prompt_checkbox_selection(
     title: str,
     empty_ok: bool,
 ) -> list[str]:
-    """Small TTY checkbox selector used by setup wizards.
-
-    Mirrors the first-run init picker: j/k moves, Space toggles, a selects all,
-    n clears, Enter accepts.
-    """
-    if not options:
-        return []
-
-    selected = {name for name in default_selected if name in options}
-    cursor = 0
-    ux.subhead(title)
-
-    redraw = _supports_terminal_redraw()
-    if not redraw:
-        return _prompt_checkbox_selection_no_redraw(
-            options,
-            selected,
-            empty_ok=empty_ok,
-        )
-
-    ux.subhead("  Space toggles, j/k moves, a selects all, n clears, Enter continues.")
-    rendered = False
-    while True:
-        _render_checkbox_menu(options, selected, cursor, redraw=redraw and rendered)
-        rendered = True
-        key = _checkbox_key_name(click.getchar())
-        if key == "enter":
-            if selected or empty_ok:
-                return [name for name in options if name in selected]
-            ux.warn("Select at least one connector.", indent="  ")
-            continue
-        if key == "toggle":
-            name = options[cursor]
-            if name in selected:
-                selected.remove(name)
-            else:
-                selected.add(name)
-        elif key == "up":
-            cursor = (cursor - 1) % len(options)
-        elif key == "down":
-            cursor = (cursor + 1) % len(options)
-        elif key == "all":
-            selected = set(options)
-        elif key == "none":
-            selected.clear()
+    return terminal_checkbox.prompt_checkbox_selection(
+        options,
+        default_selected=default_selected,
+        title=title,
+        empty_ok=empty_ok,
+        redraw=_supports_terminal_redraw(),
+        getchar=click.getchar,
+    )
 
 
 def _prompt_add_replace_cancel(connector: str, others: list[str]) -> str | None:

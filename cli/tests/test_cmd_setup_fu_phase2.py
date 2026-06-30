@@ -313,6 +313,38 @@ class TestPerConnectorWriteSurface(_BaseSetup):
 # SU-06 / SU-07 — interactive mode + judge prompts
 # ---------------------------------------------------------------------------
 class TestInteractiveModeJudgePrompts(_BaseSetup):
+    def test_guardrail_multi_selectors_stay_key_driven_without_vt(self):
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "observe"
+        for connector in gc.connectors.values():
+            connector.mode = "observe"
+
+        # Action picker: Windows Down, Space, Enter selects Hermes.
+        # Judge picker: Enter accepts the empty default.
+        keys = iter(["\xe0P", " ", "\r", "\r"])
+        confirms = iter([True, False])  # enable guardrail, advanced options
+        emitted: list[str] = []
+
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup._supports_terminal_redraw", return_value=False), \
+                patch("defenseclaw.commands.cmd_setup.click.getchar", side_effect=lambda: next(keys)), \
+                patch("defenseclaw.commands.cmd_setup.click.echo", side_effect=lambda text="", **_kwargs: emitted.append(text)), \
+                patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=lambda *a, **k: next(confirms)), \
+                patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="1"), \
+                patch("defenseclaw.commands.cmd_setup._prompt_hook_fail_mode", return_value=None), \
+                patch("defenseclaw.commands.cmd_setup._configure_hilt_interactive", return_value=None), \
+                patch("defenseclaw.commands.cmd_setup._prompt_judge_model_config") as model_prompt:
+            cmd_setup._interactive_guardrail_setup(self.app, gc)
+
+        self.assertEqual(gc.connectors["codex"].mode, "observe")
+        self.assertEqual(gc.connectors["hermes"].mode, "action")
+        self.assertFalse(gc.judge.enabled)
+        self.assertNotIn("comma-separated", "".join(emitted))
+        self.assertTrue(any("Current 2/2: [x] Hermes" in line for line in emitted))
+        model_prompt.assert_not_called()
+
     def test_mode_prompt_selects_action(self):
         # Clean config, interactive: "Configure now?" + judge confirms -> True,
         # mode prompt -> "2" (action).
@@ -638,7 +670,7 @@ class TestBareSetupBatch(_BaseSetup):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True), \
                 patch("defenseclaw.commands.cmd_setup._detect_installed_connectors", return_value=["hermes"]), \
-                patch("defenseclaw.commands.cmd_setup._supports_terminal_redraw", return_value=True), \
+                patch("defenseclaw.commands.cmd_setup._supports_terminal_redraw", return_value=False), \
                 patch("defenseclaw.commands.cmd_setup.click.getchar", return_value="\n"):
             res = _invoke(["--yes"], self.app)
         # --yes => no mode/judge prompts, but bare setup still needs the
