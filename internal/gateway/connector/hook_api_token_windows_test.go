@@ -263,7 +263,7 @@ func TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor(t *testing.T) {
 }
 
 func TestHookAPITokenWindowsRejectsReparsePointDirectory(t *testing.T) {
-	assertHookAPITokenRejectedByEnsureAndLoad(t, "reparse points are not allowed", func(t *testing.T) string {
+	assertHookAPITokenRejectedByEnsureAndLoadAny(t, []string{"reparse points are not allowed", "escapes hooks dir"}, func(t *testing.T) string {
 		dataDir := t.TempDir()
 		targetDataDir := t.TempDir()
 		if _, err := EnsureHookAPIToken(targetDataDir, "codex"); err != nil {

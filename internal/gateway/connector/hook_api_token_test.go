@@ -15,6 +15,11 @@ import (
 
 func assertHookAPITokenRejectedByEnsureAndLoad(t *testing.T, want string, fixture func(*testing.T) string) {
 	t.Helper()
+	assertHookAPITokenRejectedByEnsureAndLoadAny(t, []string{want}, fixture)
+}
+
+func assertHookAPITokenRejectedByEnsureAndLoadAny(t *testing.T, wants []string, fixture func(*testing.T) string) {
+	t.Helper()
 	operations := []struct {
 		name string
 		run  func(string) (string, error)
@@ -33,8 +38,15 @@ func assertHookAPITokenRejectedByEnsureAndLoad(t *testing.T, want string, fixtur
 		t.Run(operation.name, func(t *testing.T) {
 			dataDir := fixture(t)
 			_, err := operation.run(dataDir)
-			if err == nil || !strings.Contains(err.Error(), want) {
-				t.Fatalf("hook token %s error = %v, want %q rejection", operation.name, err, want)
+			matched := false
+			for _, want := range wants {
+				if err != nil && strings.Contains(err.Error(), want) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				t.Fatalf("hook token %s error = %v, want one of %q rejections", operation.name, err, wants)
 			}
 		})
 	}
