@@ -55,6 +55,7 @@ import yaml
 from defenseclaw import migration_state as migration_state_helpers
 from defenseclaw import ux
 from defenseclaw.file_lock import locked_file_update
+from defenseclaw.file_permissions import copy_windows_dacl, set_file_mode
 
 
 # These target-wheel dependencies are resolved lazily. Older upgrade clients
@@ -1500,7 +1501,10 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
             suffix=os.path.basename(path) or ".tmp",
             dir=parent,
         )
-        os.fchmod(fd, effective_mode)
+        if os.name == "nt" and mode > 0o600 and os.path.exists(path):
+            copy_windows_dacl(path, tmp_path)
+        else:
+            set_file_mode(fd, tmp_path, effective_mode)
         # newline="" writes ``body`` byte-for-byte (no \n -> os.linesep
         # translation), so a caller that preserved a file's CRLF endings
         # does not get them doubled to \r\r\n on Windows.

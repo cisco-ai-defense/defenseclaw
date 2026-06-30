@@ -28,6 +28,7 @@ import unittest
 from unittest.mock import patch
 
 import yaml
+from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.migrations import (
     _LEGACY_FLAT_REGO_FILENAMES,
     MigrationContext,
@@ -45,6 +46,8 @@ from defenseclaw.migrations import (
     _yaml_scalar,
     run_migrations,
 )
+
+from tests.permissions import assert_owner_only_file
 
 
 def _write_json(path: str, data: dict) -> None:
@@ -2072,12 +2075,16 @@ class TestAtomicWriteTextModePreservation(unittest.TestCase):
         path = os.path.join(self.tmp, "config.yaml")
         with open(path, "w") as f:
             f.write("old\n")
-        os.chmod(path, 0o600)
+        if os.name == "nt":
+            with open(path, "r+") as f:
+                set_file_mode(f.fileno(), path, 0o600)
+        else:
+            os.chmod(path, 0o600)
 
         # Default mode is 0o644, but the existing 0o600 must win.
         self.assertTrue(_atomic_write_text(path, "new\n"))
 
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        assert_owner_only_file(path)
         with open(path) as f:
             self.assertEqual(f.read(), "new\n")
 
@@ -2085,7 +2092,7 @@ class TestAtomicWriteTextModePreservation(unittest.TestCase):
         path = os.path.join(self.tmp, "fresh.json")
         # File does not exist yet → the explicit mode pins the perms.
         self.assertTrue(_atomic_write_text(path, "{}", mode=0o600))
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        assert_owner_only_file(path)
 
     def test_scopes_temp_prefix_to_valid_upgrade_attempt(self):
         path = os.path.join(self.tmp, "config.yaml")
