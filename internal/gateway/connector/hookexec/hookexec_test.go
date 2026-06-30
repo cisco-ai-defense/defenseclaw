@@ -253,6 +253,12 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:   2,
 		},
 		{
+			name:      "codex allow",
+			connector: "codex",
+			respBody:  `{"action":"allow"}`,
+			wantCode:  0,
+		},
+		{
 			name:       "codex block with output exits 0",
 			connector:  "codex",
 			respBody:   `{"action":"block","codex_output":{"hookSpecificOutput":{"permissionDecision":"deny"}}}`,
@@ -274,6 +280,13 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:   0,
 		},
 		{
+			name:       "cursor allow echoes hook_output exit 0",
+			connector:  "cursor",
+			respBody:   `{"hook_output":{"continue":true,"permission":"allow"}}`,
+			wantStdout: `{"continue":true,"permission":"allow"}` + "\n",
+			wantCode:   0,
+		},
+		{
 			name:       "cursor echoes hook_output exit 0",
 			connector:  "cursor",
 			respBody:   `{"hook_output":{"continue":true,"permission":"deny","user_message":"no"}}`,
@@ -281,10 +294,30 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:   0,
 		},
 		{
+			name:       "copilot allow echoes hook_output exit 0",
+			connector:  "copilot",
+			respBody:   `{"hook_output":{"permissionDecision":"allow"}}`,
+			wantStdout: `{"permissionDecision":"allow"}` + "\n",
+			wantCode:   0,
+		},
+		{
 			name:       "copilot echoes hook_output exit 0",
 			connector:  "copilot",
 			respBody:   `{"hook_output":{"permissionDecision":"deny"}}`,
 			wantStdout: `{"permissionDecision":"deny"}` + "\n",
+			wantCode:   0,
+		},
+		{
+			name:      "geminicli allow with no hook_output exit 0",
+			connector: "geminicli",
+			respBody:  `{"action":"allow"}`,
+			wantCode:  0,
+		},
+		{
+			name:       "geminicli echoes hook_output deny exit 0",
+			connector:  "geminicli",
+			respBody:   `{"action":"block","hook_output":{"decision":"deny","reason":"no"}}`,
+			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
 			wantCode:   0,
 		},
 		{
@@ -319,6 +352,13 @@ func TestDecisionGolden(t *testing.T) {
 			connector: "hermes",
 			respBody:  `{"action":"allow"}`,
 			wantCode:  0,
+		},
+		{
+			name:       "hermes block echoes hook_output exit 0",
+			connector:  "hermes",
+			respBody:   `{"action":"block","hook_output":{"action":"block","message":"no"}}`,
+			wantStdout: `{"action":"block","message":"no"}` + "\n",
+			wantCode:   0,
 		},
 		{
 			name:      "antigravity allow with no hook_output exit 0",
@@ -577,6 +617,93 @@ func TestRequestWiring(t *testing.T) {
 	}
 	if string(rt.gotBody) != `{"event":"x"}` {
 		t.Errorf("body = %q", string(rt.gotBody))
+	}
+}
+
+func TestNativeConnectorEndpointMatrix(t *testing.T) {
+	tests := map[string]string{
+		"codex":       "/api/v1/codex/hook",
+		"claudecode":  "/api/v1/claude-code/hook",
+		"cursor":      "/api/v1/cursor/hook",
+		"windsurf":    "/api/v1/windsurf/hook",
+		"geminicli":   "/api/v1/geminicli/hook",
+		"copilot":     "/api/v1/copilot/hook",
+		"antigravity": "/api/v1/antigravity/hook",
+		"hermes":      "/api/v1/hermes/hook",
+	}
+	for connector, endpoint := range tests {
+		t.Run(connector, func(t *testing.T) {
+			rt := ok(`{"action":"allow"}`)
+			r := run(t, connector, rt, nil)
+			if r.code != 0 {
+				t.Fatalf("allow exit = %d, want 0", r.code)
+			}
+			if rt.gotReq == nil {
+				t.Fatal("no request captured")
+			}
+			if got := rt.gotReq.URL.Path; got != endpoint {
+				t.Errorf("endpoint = %q, want %q", got, endpoint)
+			}
+			if got := rt.gotReq.Header.Get("Authorization"); got != "Bearer tkn" {
+				t.Errorf("authorization = %q", got)
+			}
+			if got := string(rt.gotBody); got != `{"event":"x"}` {
+				t.Errorf("JSON stdin body = %q", got)
+			}
+		})
+	}
+}
+
+func TestCodexNotifyRequestWiring(t *testing.T) {
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".token"),
+		[]byte("DEFENSECLAW_GATEWAY_TOKEN=\"notify-token\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rt := ok(`{"status":"ok"}`)
+	payload := []byte(`{"type":"agent-turn-complete","last-assistant-message":"done"}`)
+	code := RunCodexNotify(context.Background(), Options{
+		APIAddr:    "127.0.0.1:8787",
+		Home:       home,
+		HookDir:    hookDir,
+		HTTPClient: &http.Client{Transport: rt},
+		TraceParent: "00-0af7651916cd43dd8448eb211c80319c-" +
+			"b7ad6b7169203331-01",
+	}, payload)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want best-effort 0", code)
+	}
+	if rt.gotReq == nil {
+		t.Fatal("no request captured")
+	}
+	if got := rt.gotReq.URL.String(); got != "http://127.0.0.1:8787/api/v1/codex/notify" {
+		t.Errorf("url = %s", got)
+	}
+	if got := rt.gotReq.Header.Get("Authorization"); got != "Bearer notify-token" {
+		t.Errorf("authorization = %q", got)
+	}
+	if got := rt.gotReq.Header.Get("X-DefenseClaw-Client"); got != "codex-notify/1.0" {
+		t.Errorf("client header = %q", got)
+	}
+	if got := rt.gotReq.Header.Get("x-defenseclaw-source"); got != "codex-notify" {
+		t.Errorf("source header = %q", got)
+	}
+	if !bytes.Equal(rt.gotBody, payload) {
+		t.Errorf("body = %q, want %q", rt.gotBody, payload)
+	}
+
+	// Notify remains telemetry-only: a gateway failure must never fail the
+	// Codex process or turn a completed turn into an agent error.
+	failing := &stubRT{err: errors.New("offline")}
+	if got := RunCodexNotify(context.Background(), Options{
+		APIAddr: "127.0.0.1:8787", Home: home, HookDir: hookDir,
+		HTTPClient: &http.Client{Transport: failing},
+	}, payload); got != 0 {
+		t.Fatalf("transport failure exit = %d, want 0", got)
 	}
 }
 
