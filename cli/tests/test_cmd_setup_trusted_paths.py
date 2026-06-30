@@ -165,6 +165,7 @@ class AddTrustedBinPrefixTests(unittest.TestCase):
 
 
 class CaskroomDefaultTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX Homebrew default")
     def test_caskroom_is_a_builtin_default(self):
         self.assertIn("/opt/homebrew/Caskroom", ad._TRUSTED_BIN_PREFIXES_DEFAULT)
 
@@ -307,6 +308,7 @@ class ValidateTrustedPrefixTests(unittest.TestCase):
         self.assertIsNotNone(err)
         self.assertIn("not absolute", err or "")
 
+    @unittest.skipIf(os.name == "nt", "requires unprivileged POSIX symlinks")
     def test_realpath_canonicalises_symlink_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = os.path.join(tmp, "target")
@@ -317,6 +319,7 @@ class ValidateTrustedPrefixTests(unittest.TestCase):
             self.assertIsNone(err)
             self.assertEqual(resolved, os.path.realpath(target))
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit policy")
     def test_group_writable_directory_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             gdir = os.path.join(tmp, "gtools")
@@ -331,7 +334,7 @@ class TrustedPathsCliTests(unittest.TestCase):
     def setUp(self):
         self.runner = CliRunner()
 
-    def test_list_json_includes_defaults_and_caskroom(self):
+    def test_list_json_includes_platform_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)
             with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
@@ -339,7 +342,8 @@ class TrustedPathsCliTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rows = json.loads(result.output)
             resolved = {r["resolved"] for r in rows}
-            self.assertIn("/opt/homebrew/Caskroom", resolved)
+            expected = set(ad._expand_bin_prefixes(ad._TRUSTED_BIN_PREFIXES_DEFAULT))
+            self.assertTrue(expected <= resolved)
             self.assertTrue(all({"path", "resolved", "source", "status", "removable"} <= set(r) for r in rows))
 
     def test_add_persists_and_shows_removable(self):
@@ -360,6 +364,7 @@ class TrustedPathsCliTests(unittest.TestCase):
             self.assertTrue(rows[resolved]["removable"])
             self.assertEqual(rows[resolved]["source"], "config")
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit policy")
     def test_add_world_writable_refused_without_force(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)
@@ -373,6 +378,7 @@ class TrustedPathsCliTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertIn("world-writable", payload["message"])
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit policy")
     def test_add_world_writable_allowed_with_force(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)
@@ -384,11 +390,34 @@ class TrustedPathsCliTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertTrue(json.loads(result.output)["ok"])
 
+    @unittest.skipUnless(os.name == "nt", "Windows ACL regression")
+    def test_add_everyone_writable_refused_without_force(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            unsafe = os.path.join(tmp, "everyone-write")
+            os.makedirs(unsafe)
+            subprocess.run(
+                ["icacls", unsafe, "/grant", "*S-1-1-0:(OI)(CI)F"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
+                result = self.runner.invoke(cmd_setup.trusted_paths, ["add", unsafe, "--json"], obj=app)
+
+            self.assertNotEqual(result.exit_code, 0)
+            payload = json.loads(result.output)
+            self.assertFalse(payload["ok"])
+            self.assertIn("Everyone", payload["message"])
+
     def test_add_builtin_default_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)
+            default = ad._TRUSTED_BIN_PREFIXES_DEFAULT[0]
             with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
-                result = self.runner.invoke(cmd_setup.trusted_paths, ["add", "/usr/bin", "--json"], obj=app)
+                result = self.runner.invoke(cmd_setup.trusted_paths, ["add", default, "--json"], obj=app)
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn("default", json.loads(result.output)["message"])
 
@@ -579,8 +608,9 @@ class TrustedPathsCliTests(unittest.TestCase):
     def test_remove_builtin_default_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)
+            default = ad._TRUSTED_BIN_PREFIXES_DEFAULT[0]
             with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
-                result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", "/usr/bin", "--json"], obj=app)
+                result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", default, "--json"], obj=app)
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("default", json.loads(result.output)["message"])
 
@@ -635,8 +665,10 @@ class AgentDiscoverHintTests(unittest.TestCase):
                 with patch.object(cmd_agent.agent_discovery, "discover_agents", return_value=disc):
                     result = CliRunner().invoke(cmd_agent.discover, ["--no-emit-otel"], obj=app)
                 hydrated = os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
+                trusted_keys = {ad._path_key(path) for path in ad._trusted_bin_prefixes()}
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn("/opt/demo-trust", hydrated.split(os.pathsep))
+            self.assertIn(ad._path_key(os.path.realpath(os.path.abspath("/opt/demo-trust"))), trusted_keys)
 
 
 class TrustedPathsTuiSectionTests(unittest.TestCase):
@@ -653,7 +685,8 @@ class TrustedPathsTuiSectionTests(unittest.TestCase):
             values = " ".join(f.value for f in fields)
             self.assertIn("Built-in defaults", labels)
             self.assertIn("default prefixes", values)
-            self.assertIn("/opt/acme/bin", values)
+            expected, _error = ad.validate_trusted_prefix("/opt/acme/bin")
+            self.assertIn(expected, values)
             self.assertTrue(any("trusted-paths add" in f.value for f in fields))
 
     def test_section_registered_in_build_setup_sections(self):

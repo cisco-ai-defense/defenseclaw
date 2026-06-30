@@ -1815,7 +1815,6 @@ def _load_config_for_data_dir(data_dir: str):
         else:
             os.environ["DEFENSECLAW_HOME"] = old_home
 
-
 def _config_trusted_bin_prefixes(cfg) -> list[str]:
     ai = getattr(cfg, "ai_discovery", None)
     values = getattr(ai, "trusted_binary_prefixes", []) if ai is not None else []
@@ -1855,7 +1854,11 @@ def _add_trusted_bin_prefix(prefix: str, data_dir: str, cfg=None) -> bool:
     parts = _config_trusted_bin_prefixes(cfg)
     resolved, _err = agent_discovery.validate_trusted_prefix(prefix)
     entry = resolved or prefix
-    added = entry not in parts
+    prefix_key = agent_discovery._path_key(os.path.realpath(os.path.abspath(entry)))
+    added = not any(
+        agent_discovery._path_key(os.path.realpath(os.path.abspath(part))) == prefix_key
+        for part in parts
+    )
     if added:
         parts.append(entry)
         _set_config_trusted_bin_prefixes(cfg, parts)
@@ -1873,15 +1876,15 @@ def _add_trusted_bin_prefix(prefix: str, data_dir: str, cfg=None) -> bool:
 
 
 def _trusted_prefix_status(resolved: str) -> str:
-    """Classify a resolved prefix: ok / missing / not-a-dir / world-writable."""
+    """Classify a resolved prefix for trusted-paths list output."""
     if not os.path.exists(resolved):
         return "missing"
     if not os.path.isdir(resolved):
         return "not-a-dir"
-    try:
-        if os.stat(resolved).st_mode & 0o002:
-            return "world-writable"
-    except OSError:  # pragma: no cover - rare stat failure
+    _path, error = agent_discovery.validate_trusted_prefix(resolved)
+    if error:
+        if "write access" in error or "writable" in error:
+            return "unsafe-permissions"
         return "error"
     return "ok"
 
@@ -1988,7 +1991,7 @@ def trusted_paths_list(app: AppContext, as_json: bool) -> None:
 
 @trusted_paths.command("add")
 @click.argument("directory")
-@click.option("--force", is_flag=True, help="Add even when the directory is world-writable or missing.")
+@click.option("--force", is_flag=True, help="Record the path even when it is missing or has unsafe permissions.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON instead of text.")
 @pass_ctx
 def trusted_paths_add(app: AppContext, directory: str, force: bool, as_json: bool) -> None:
