@@ -33,7 +33,7 @@
 #   curl ... | bash -s -- --no-openclaw              # Skip OpenClaw entirely
 #
 # Options:
-#   --connector <name>  Pick agent connector (openclaw|codex|claudecode|zeptoclaw|none)
+#   --connector <name>  Pick agent connector (see --help for choices)
 #   --no-openclaw       Skip OpenClaw install (alias for --connector none when used alone)
 #   --local <dir>       Install from a local dist directory instead of downloading
 #   --yes, -y           Skip confirmation prompts (for CI/automation)
@@ -53,10 +53,10 @@ readonly INSTALL_DIR="${HOME}/.local/bin"
 readonly REPO="cisco-ai-defense/defenseclaw"
 readonly OPENCLAW_VERSION="2026.3.24"
 
-# Supported connectors. Keep in sync with internal/gateway/connector/registry.go
-# DefaultRegistry. The "none" pseudo-value means "lay binaries only — pick a
-# connector later with `defenseclaw init --connector ...`".
-readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw none)
+# Supported connectors. Keep in sync with cli/defenseclaw/connector_paths.py
+# KNOWN_CONNECTORS. The "none" pseudo-value means "lay binaries only — pick
+# a connector later with `defenseclaw init --connector ...`".
+readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw hermes cursor windsurf geminicli copilot openhands antigravity opencode omnigent none)
 
 # ── Terminal Formatting ───────────────────────────────────────────────────────
 
@@ -161,6 +161,15 @@ pick_connector_interactive() {
             claudecode) printf "    ${BOLD}%d)${NC} claudecode — patch ~/.claude/settings.json hooks (no OpenClaw)\n" "$i" ;;
             zeptoclaw)  printf "    ${BOLD}%d)${NC} zeptoclaw  — patch ~/.zeptoclaw/config.json (no OpenClaw)\n" "$i" ;;
             openclaw)   printf "    ${BOLD}%d)${NC} openclaw   — install OpenClaw runtime + DefenseClaw plugin\n" "$i" ;;
+            hermes)     printf "    ${BOLD}%d)${NC} hermes     — configure Hermes Agent hooks\n" "$i" ;;
+            cursor)     printf "    ${BOLD}%d)${NC} cursor     — configure Cursor hooks\n" "$i" ;;
+            windsurf)   printf "    ${BOLD}%d)${NC} windsurf   — configure Windsurf hooks\n" "$i" ;;
+            geminicli)  printf "    ${BOLD}%d)${NC} geminicli  — configure Gemini CLI hooks\n" "$i" ;;
+            copilot)    printf "    ${BOLD}%d)${NC} copilot    — configure GitHub Copilot CLI hooks\n" "$i" ;;
+            openhands)  printf "    ${BOLD}%d)${NC} openhands  — configure OpenHands hooks\n" "$i" ;;
+            antigravity) printf "    ${BOLD}%d)${NC} antigravity — configure Antigravity hooks\n" "$i" ;;
+            opencode)   printf "    ${BOLD}%d)${NC} opencode   — configure OpenCode hooks\n" "$i" ;;
+            omnigent)   printf "    ${BOLD}%d)${NC} omnigent   — configure OmniGent hooks\n" "$i" ;;
             none)       printf "    ${BOLD}%d)${NC} none       — install gateway/CLI only; pick later\n" "$i" ;;
         esac
         i=$((i + 1))
@@ -661,6 +670,10 @@ print_success() {
             printf "  Get started (ZeptoClaw):\n\n"
             printf "    ${CYAN}defenseclaw init --connector zeptoclaw${NC}\n"
             ;;
+        hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|omnigent)
+            printf "  Get started (%s):\n\n" "${CONNECTOR}"
+            printf "    ${CYAN}defenseclaw init --connector %s${NC}\n" "${CONNECTOR}"
+            ;;
         none|"")
             printf "  Get started (pick a connector later):\n\n"
             printf "    ${CYAN}defenseclaw init${NC}\n"
@@ -696,7 +709,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --yes|-y) YES_MODE=true; shift ;;
         --connector)
-            [[ $# -lt 2 ]] && die "--connector requires a value (openclaw|codex|claudecode|zeptoclaw|none)"
+            [[ $# -lt 2 ]] && die "--connector requires a value (${CONNECTOR_CHOICES[*]})"
             CONNECTOR="$2"
             is_valid_connector "${CONNECTOR}" \
                 || die "Invalid --connector '${CONNECTOR}'. Choices: ${CONNECTOR_CHOICES[*]}"
@@ -728,7 +741,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --sandbox             Also install openshell-sandbox (experimental Linux/OpenClaw path)"
             echo "  --local <dir>         Install from a local dist directory"
             echo "  --yes, -y             Skip all confirmation prompts"
-            echo "  --connector <name>    Pick agent connector (openclaw|codex|claudecode|zeptoclaw|none)"
+            echo "  --connector <name>    Pick agent connector (${CONNECTOR_CHOICES[*]})"
             echo "  --no-openclaw         Skip OpenClaw runtime+plugin install (alias for --connector none)"
             echo "  --quickstart          Run 'defenseclaw quickstart --non-interactive' post-install"
             echo "  --quickstart-mode M   Pass --mode M to quickstart (observe|action; implies --quickstart)"
@@ -774,16 +787,15 @@ install_gateway
 install_python_cli
 
 # Only install the OpenClaw plugin and the OpenClaw runtime when the user
-# actually picked OpenClaw. Other connectors (Codex / Claude Code /
-# ZeptoClaw) integrate via config-file patching and need neither npm nor
-# the plugin tarball. For "none" we skip everything connector-specific
-# and let the user run `defenseclaw init` later.
+# actually picked OpenClaw. Other connectors integrate via CLI setup and need
+# neither npm nor the plugin tarball. For "none" we skip connector-specific
+# work and let the user run `defenseclaw init` later.
 case "${CONNECTOR}" in
     openclaw)
         install_plugin
         handle_openclaw
         ;;
-    codex|claudecode|zeptoclaw)
+    codex|claudecode|zeptoclaw|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|omnigent)
         info "Skipping OpenClaw plugin/runtime install (connector: ${CONNECTOR})"
         ;;
     none|"")

@@ -83,9 +83,14 @@ $Venv = Join-Path $DefenseClawHome ".venv"
 $InstallDir = Join-Path $env:USERPROFILE ".local\bin"
 $OpenClawVersion = "2026.3.24"
 
-# Keep in sync with scripts/install.sh CONNECTOR_CHOICES and
-# internal/gateway/connector/registry.go DefaultRegistry.
-$ConnectorChoices = @("codex", "claudecode", "zeptoclaw", "openclaw", "none")
+# Keep in sync with cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS.
+# PowerShell runs on Windows, where OpenClaw/ZeptoClaw proxy connectors are
+# intentionally hidden because the native Windows path is hook-only.
+$ConnectorChoices = @(
+    "codex", "claudecode", "hermes", "cursor",
+    "windsurf", "geminicli", "copilot", "openhands",
+    "antigravity", "opencode", "omnigent", "none"
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -363,8 +368,15 @@ function Select-Connector {
         switch ($v) {
             "codex"      { Write-Host "    $i) codex      - patch %USERPROFILE%\.codex\config.toml + hooks" }
             "claudecode" { Write-Host "    $i) claudecode - patch %USERPROFILE%\.claude\settings.json hooks" }
-            "zeptoclaw"  { Write-Host "    $i) zeptoclaw  - patch %USERPROFILE%\.zeptoclaw\config.json" }
-            "openclaw"   { Write-Host "    $i) openclaw   - install OpenClaw runtime + DefenseClaw plugin" }
+            "hermes"     { Write-Host "    $i) hermes     - configure Hermes Agent hooks" }
+            "cursor"     { Write-Host "    $i) cursor     - configure Cursor hooks" }
+            "windsurf"   { Write-Host "    $i) windsurf   - configure Windsurf hooks" }
+            "geminicli"  { Write-Host "    $i) geminicli  - configure Gemini CLI hooks" }
+            "copilot"    { Write-Host "    $i) copilot    - configure GitHub Copilot CLI hooks" }
+            "openhands"  { Write-Host "    $i) openhands  - configure OpenHands hooks" }
+            "antigravity" { Write-Host "    $i) antigravity - configure Antigravity hooks" }
+            "opencode"   { Write-Host "    $i) opencode   - configure OpenCode hooks" }
+            "omnigent"   { Write-Host "    $i) omnigent   - configure OmniGent hooks" }
             "none"       { Write-Host "    $i) none       - install gateway/CLI only; pick later" }
         }
         $i++
@@ -457,7 +469,9 @@ function Write-Success {
         "openclaw"   { Write-Host "  Get started:`n`n    defenseclaw init --connector openclaw --profile observe`n" -ForegroundColor Cyan }
         "codex"      { Write-Host "  Get started (Codex):`n`n    defenseclaw init --connector codex`n" -ForegroundColor Cyan }
         "claudecode" { Write-Host "  Get started (Claude Code):`n`n    defenseclaw init --connector claudecode`n" -ForegroundColor Cyan }
-        "zeptoclaw"  { Write-Host "  Get started (ZeptoClaw):`n`n    defenseclaw init --connector zeptoclaw`n" -ForegroundColor Cyan }
+        { $_ -in @("hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent") } {
+            Write-Host "  Get started ($script:PickedConnector):`n`n    defenseclaw init --connector $script:PickedConnector`n" -ForegroundColor Cyan
+        }
         default      { Write-Host "  Get started (pick a connector later):`n`n    defenseclaw init`n" -ForegroundColor Cyan }
     }
 }
@@ -505,7 +519,9 @@ function Main {
 
     switch ($script:PickedConnector) {
         "openclaw"   { Install-OpenClaw }
-        { $_ -in @("codex", "claudecode", "zeptoclaw") } { Write-Info "Connector '$script:PickedConnector' wires up via the CLI (no OpenClaw runtime needed)." }
+        { $_ -in @("codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent") } {
+            Write-Info "Connector '$script:PickedConnector' wires up via the CLI (no OpenClaw runtime needed)."
+        }
         default      { Write-Info "Skipping connector setup - run 'defenseclaw init' when ready" }
     }
 
