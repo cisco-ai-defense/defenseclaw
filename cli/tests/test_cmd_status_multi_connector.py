@@ -241,6 +241,58 @@ class TestApplicationProtectionStatus(unittest.TestCase):
         self.assertEqual(state["trusted_binary_prefixes"], ["/opt/tools"])
 
 
+class TestHookGuardianStatus(unittest.TestCase):
+    def test_loads_persisted_guardian_state(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            state_path = os.path.join(td, "hook_guardian_state.json")
+            with open(state_path, "w") as f:
+                json.dump(
+                    {
+                        "version": 1,
+                        "updated_at": "2026-06-23T12:00:00Z",
+                        "manifest": "/etc/defenseclaw/hook-guardian/targets.yaml",
+                        "ok": False,
+                        "target_count": 2,
+                        "success_count": 1,
+                        "failure_count": 1,
+                        "results": [
+                            {"user": "alice", "connector": "codex", "ok": True},
+                            {
+                                "user": "bob",
+                                "connector": "claudecode",
+                                "ok": False,
+                                "error": "hook config file missing",
+                            },
+                        ],
+                    },
+                    f,
+                )
+            cfg = _cfg([])
+            cfg.data_dir = td
+
+            state = cmd_status._hook_guardian_status(cfg)
+            self.assertTrue(state["configured"])
+            self.assertFalse(state["ok"])
+            self.assertEqual(state["success_count"], 1)
+            self.assertEqual(state["failure_count"], 1)
+            self.assertEqual(state["results"][1]["connector"], "claudecode")
+
+    def test_unconfigured_guardian_state_is_explicit(self):
+        import shutil
+        import tempfile
+
+        cfg = _cfg([])
+        cfg.data_dir = tempfile.mkdtemp()
+        try:
+            state = cmd_status._hook_guardian_status(cfg)
+            self.assertFalse(state["configured"])
+            self.assertTrue(state["state_file"].endswith("hook_guardian_state.json"))
+        finally:
+            shutil.rmtree(cfg.data_dir, ignore_errors=True)
+
+
 class TestStatusDbErrorSurfacing(unittest.TestCase):
     """SU-05: an audit-DB read error must surface in the Enforcement + Activity
     sections, never silently drop them."""
@@ -297,7 +349,10 @@ class TestStatusJson(unittest.TestCase):
             return runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
 
     def test_json_is_valid_and_has_core_keys(self):
-        result = self._invoke_json()
+        managed_config = os.path.join(self.tmp_dir, "managed-config.yaml")
+        self.app.cfg.deployment_mode = "managed_enterprise"
+        with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": managed_config}):
+            result = self._invoke_json()
         self.assertEqual(result.exit_code, 0, msg=result.output)
         doc = json.loads(result.output)
         for key in ("environment", "scanners", "enforcement", "activity", "connectors", "sidecar"):
@@ -305,6 +360,8 @@ class TestStatusJson(unittest.TestCase):
         self.assertFalse(doc["sidecar"]["running"])
         self.assertEqual(doc["application_protection"]["guardrail_mode"], "observe")
         self.assertFalse(doc["application_protection"]["require_trusted_binary_paths"])
+        self.assertEqual(doc["deployment_mode"], "managed_enterprise")
+        self.assertEqual(doc["config"], managed_config)
 
     def test_json_roster_has_per_connector_mode(self):
         result = self._invoke_json()

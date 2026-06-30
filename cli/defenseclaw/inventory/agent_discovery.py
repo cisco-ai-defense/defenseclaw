@@ -40,7 +40,7 @@ try:  # pragma: no cover - Windows path
 except ImportError:  # pragma: no cover - non-POSIX
     _grp = None  # type: ignore[assignment]
 
-from defenseclaw.config import CONFIG_FILE_NAME, default_data_path
+from defenseclaw.config import config_path_for_data_dir, default_data_path
 from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand, omnigent_config_path
 
 # Sentinel error returned by ``_version_for_binary`` when a connector
@@ -327,8 +327,7 @@ def _ai_discovery_trust_config(
     data_dir: str | os.PathLike[str] | None = None,
 ) -> tuple[bool, tuple[str, ...]]:
     """Return ``(require_trusted_paths, config_prefixes)`` from config.yaml."""
-    root = Path(data_dir) if data_dir is not None else default_data_path()
-    path = root / CONFIG_FILE_NAME
+    path = config_path_for_data_dir(data_dir)
     try:
         with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
@@ -577,6 +576,10 @@ def _is_trusted_binary_path(
             # during passive discovery. Operator opt-in prefixes
             # (DEFENSECLAW_TRUSTED_BIN_PREFIXES) keep the looser checks.
             if prefix in default_prefixes and not _bin_chain_is_system_owned(resolved, prefix):
+                # A user-owned Homebrew tree can fail the default-prefix
+                # ownership gate while a narrower operator opt-in prefix
+                # (DEFENSECLAW_TRUSTED_BIN_PREFIXES) still matches — keep
+                # scanning instead of rejecting early.
                 continue
             return True
     return False

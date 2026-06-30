@@ -43,9 +43,12 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 
 // templateData holds the values injected into hook and shim templates.
 type templateData struct {
-	APIAddr  string
-	APIToken string // gateway bearer token; empty when unconfigured (loopback-allow)
-	FailMode string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	APIAddr     string
+	APIToken    string // gateway bearer token; empty when unconfigured (loopback-allow)
+	FailMode    string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	Managed     bool
+	TokenFile   string
+	ScopedToken bool
 }
 
 // defaultHookFailMode is the fail mode injected into the response-
@@ -116,11 +119,11 @@ func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
 	// authenticated deployments.
 	tokenPath := filepath.Join(shimDir, ".token")
 	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
-	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
+	if err := atomicWriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
 		return fmt.Errorf("write shim token file: %w", err)
 	}
 
-	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode}
+	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode, TokenFile: ".token"}
 
 	for _, name := range shimBinaries {
 		content, err := shimFS.ReadFile("shims/" + name + ".sh")
@@ -147,6 +150,37 @@ func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
 	}
 
 	return nil
+}
+
+func subprocessGeneratedFiles(opts SetupOpts) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	return []string{
+		filepath.Join(opts.DataDir, "shims", ".token"),
+		filepath.Join(opts.DataDir, "policies", "defenseclaw-policy.yaml"),
+	}
+}
+
+func subprocessGeneratedExecutables(opts SetupOpts) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	out := make([]string, 0, len(shimBinaries))
+	for _, name := range shimBinaries {
+		out = append(out, filepath.Join(opts.DataDir, "shims", name))
+	}
+	return out
+}
+
+func subprocessCreatedDirs(opts SetupOpts) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	return []string{
+		filepath.Join(opts.DataDir, "shims"),
+		filepath.Join(opts.DataDir, "policies"),
+	}
 }
 
 // genericHookScripts are agent-agnostic inspection scripts generated for
@@ -288,10 +322,11 @@ func bytesIndex(hay []byte, needle string) int {
 // and leaving hook-failures.jsonl entries without the field —
 // even though the just-rendered hook scripts pass it.
 //
-// Equal versions still rewrite (idempotent overwrite, lets a same-
-// version bug-fix patch land); strictly-newer disk content is
-// preserved. Bumping the embedded `# defenseclaw-managed-hook vN`
-// marker is the explicit signal to roll forward.
+// Equal versions replace only changed bytes, so same-version bug-fix patches
+// still land without causing no-op guardian reconciles to retrigger fsnotify.
+// Strictly-newer disk content is preserved. Bumping the embedded
+// `# defenseclaw-managed-hook vN` marker is the explicit signal to roll
+// forward.
 func writeHookHelpers(hookDir string) error {
 	for _, name := range hookHelperScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
@@ -311,7 +346,7 @@ func writeHookHelpers(hookDir string) error {
 				continue
 			}
 		}
-		if err := os.WriteFile(helperPath, content, 0o600); err != nil {
+		if err := atomicWriteFile(helperPath, content, 0o600); err != nil {
 			return fmt.Errorf("write hook helper %s: %w", name, err)
 		}
 	}
@@ -344,7 +379,7 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	// this file at runtime.
 	tokenPath := filepath.Join(hookDir, ".token")
 	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
-	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
+	if err := atomicWriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
 		return fmt.Errorf("write hook token file: %w", err)
 	}
 
@@ -356,7 +391,7 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	// the .token file or the env var at runtime. FailMode defaults
 	// to "open" so a fresh setup never bricks the agent on a
 	// gateway outage; see defaultHookFailMode for rationale.
-	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: defaultHookFailMode}
+	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: defaultHookFailMode, TokenFile: ".token"}
 
 	for _, name := range hookScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
@@ -370,7 +405,7 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 		}
 
 		hookPath := filepath.Join(hookDir, name)
-		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+		if err := atomicWriteFile(hookPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
 	}
@@ -401,21 +436,31 @@ func writeHookScriptsCommon(hookDir, apiAddr, token string, extras []string) err
 }
 
 func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string, extras []string) error {
+	return writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode, extras, false, "")
+}
+
+func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
 
-	tokenPath := filepath.Join(hookDir, ".token")
-	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
-	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
-		return fmt.Errorf("write hook token file: %w", err)
+	tokenFile, err := writeHookTokenFiles(hookDir, connectorName, token)
+	if err != nil {
+		return err
 	}
 
 	if err := writeHookHelpers(hookDir); err != nil {
 		return err
 	}
 
-	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: normalizeHookFailMode(failMode)}
+	data := templateData{
+		APIAddr:     apiAddr,
+		APIToken:    "",
+		FailMode:    normalizeHookFailMode(failMode),
+		Managed:     managed,
+		TokenFile:   tokenFile,
+		ScopedToken: strings.TrimSpace(connectorName) != "",
+	}
 
 	scripts := hookScriptNamesFromExtras(extras)
 
@@ -429,7 +474,7 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 			return fmt.Errorf("render hook %s: %w", name, err)
 		}
 		hookPath := filepath.Join(hookDir, name)
-		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+		if err := atomicWriteFile(hookPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
 	}
@@ -437,6 +482,35 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 		return err
 	}
 	return nil
+}
+
+func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
+	legacyPath := filepath.Join(hookDir, ".token")
+	if strings.TrimSpace(connectorName) == "" {
+		tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
+		if err := atomicWriteFile(legacyPath, []byte(tokenContent), 0o600); err != nil {
+			return "", fmt.Errorf("write hook token file: %w", err)
+		}
+		return filepath.Base(legacyPath), nil
+	}
+	// Connector-scoped installs must not seed .token from a scoped
+	// credential. Existing upgrades retain any pre-existing legacy sidecar
+	// for old scripts, while clean installs avoid recreating the shared-token
+	// collision that breaks multi-connector authorization.
+	if _, err := os.Lstat(legacyPath); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect legacy hook token file: %w", err)
+	}
+	scopedPath, err := HookTokenFilePath(hookDir, connectorName)
+	if err != nil {
+		return "", fmt.Errorf("resolve connector-scoped hook token file: %w", err)
+	}
+	if strings.ContainsAny(token, "\r\n") {
+		return "", fmt.Errorf("write connector-scoped hook token file: token contains a line break")
+	}
+	if err := atomicWriteFile(scopedPath, []byte(token+"\n"), 0o600); err != nil {
+		return "", fmt.Errorf("write connector-scoped hook token file: %w", err)
+	}
+	return filepath.Base(scopedPath), nil
 }
 
 // hookConfigSidecarName is the file the native Go hook entrypoint reads on
@@ -458,7 +532,7 @@ func writeHookConfigSidecar(hookDir, apiAddr, failMode string) error {
 	body := fmt.Sprintf("DEFENSECLAW_GATEWAY_ADDR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
 		apiAddr, normalizeHookFailMode(failMode))
 	path := filepath.Join(hookDir, hookConfigSidecarName)
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+	if err := atomicWriteFile(path, []byte(body), 0o600); err != nil {
 		return fmt.Errorf("write hook config sidecar: %w", err)
 	}
 	return nil
@@ -518,7 +592,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	return writeHookScriptsCommon(hookDir, apiAddr, token, extras)
+	return writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, defaultHookFailMode, extras, false, c.Name())
 }
 
 // WriteHookScriptsForConnectorObjectWithOpts is the setup-time variant that
@@ -558,7 +632,7 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 			failMode = "open"
 		}
 	}
-	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)
+	return writeHookScriptsCommonWithOptions(hookDir, opts.APIAddr, opts.APIToken, failMode, extras, opts.ManagedEnterprise, c.Name())
 }
 
 // resolveHookFailMode picks the response-layer fail mode for a hook

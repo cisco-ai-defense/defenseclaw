@@ -732,15 +732,20 @@ find_runtime_plugin_path() {
 
 find_quarantined_plugin_path() {
     local name="$1"
-    local candidate
-    for candidate in \
-        "$HOME/.defenseclaw/quarantine/plugins/$name" \
-        "$HOME/.defenseclaw/quarantine/plugins"/*/"$name"; do
-        if [ -d "$candidate" ]; then
-            printf '%s\n' "$candidate"
+    local root="$HOME/.defenseclaw/quarantine/plugins"
+    [ -n "$name" ] || return 1
+    if [ -d "$root/$name" ]; then
+        printf '%s\n' "$root/$name"
+        return 0
+    fi
+    if [ -d "$root" ]; then
+        local match
+        match=$(find "$root" -mindepth 2 -maxdepth 2 -type d -name "$name" -print -quit 2>/dev/null || true)
+        if [ -n "$match" ]; then
+            printf '%s\n' "$match"
             return 0
         fi
-    done
+    fi
     return 1
 }
 
@@ -868,7 +873,7 @@ copy_skill_fixture() {
     local fixture_dir="$1"
     local dest_root="$2"
     local dest_name="$3"
-    local stage_parent stage_dir
+	local stage_parent stage_dir
     if [ -z "$dest_root" ] || [ -z "$dest_name" ]; then
         echo "missing destination for skill fixture copy" >&2
         return 1
@@ -877,38 +882,39 @@ copy_skill_fixture() {
     stage_parent=$(dirname "$dest_root")
     stage_dir=$(mktemp -d "$stage_parent/.defenseclaw-skill-fixture.XXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/defenseclaw-skill-fixture.XXXXXX")
     if ! cp -R "$fixture_dir"/. "$stage_dir/"; then
-        rm -rf "$stage_dir"
+		rm -rf -- "${stage_dir:?}"
         return 1
     fi
     chmod -R u+rwX,go+rX "$stage_dir" 2>/dev/null || true
     rm -rf -- "${dest_root:?}/${dest_name:?}" 2>/dev/null || true
     if ! mv "$stage_dir" "${dest_root:?}/${dest_name:?}"; then
-        rm -rf "$stage_dir"
-        return 1
-    fi
+		rm -rf -- "${stage_dir:?}"
+		return 1
+	fi
 }
 
 copy_plugin_fixture() {
     local fixture_dir="$1"
     local dest_root="$2"
     local dest_name="$3"
-    local stage_parent stage_dir
+	local stage_parent stage_dir
     if [ -z "$dest_root" ] || [ -z "$dest_name" ]; then
         echo "missing destination for plugin fixture copy" >&2
-        return 1
-    fi
-    stage_parent=$(dirname "$dest_root")
+		return 1
+	fi
+	ensure_directory_writable "$dest_root" "copying plugin fixture"
+	stage_parent=$(dirname "$dest_root")
     stage_dir=$(mktemp -d "$stage_parent/.defenseclaw-plugin-fixture.XXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/defenseclaw-plugin-fixture.XXXXXX")
     if ! cp -R "$fixture_dir"/. "$stage_dir/"; then
-        rm -rf "$stage_dir"
+		rm -rf -- "${stage_dir:?}"
         return 1
     fi
     chmod -R u+rwX,go+rX "$stage_dir" 2>/dev/null || true
     rm -rf -- "${dest_root:?}/${dest_name:?}" 2>/dev/null || true
     if ! mv "$stage_dir" "${dest_root:?}/${dest_name:?}"; then
-        rm -rf "$stage_dir"
-        return 1
-    fi
+		rm -rf -- "${stage_dir:?}"
+		return 1
+	fi
     if [ -f "$dest_root/$dest_name/package.json" ]; then
         PLUGIN_FIXTURE_PATH="$dest_root/$dest_name/package.json" PLUGIN_FIXTURE_NAME="$dest_name" python3 - <<'PY'
 import json
@@ -2283,7 +2289,7 @@ phase_block_allow() {
             RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent could use exec before block"
         elif agent_backend_unavailable_output "$allow_out"; then
-            skip "block/allow: agent could use exec before block" "live agent backend unavailable"
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "block/allow: agent could use exec before block" "live agent backend unavailable"
         else
             fail "block/allow: agent could use exec before block" "$allow_out"
         fi
@@ -2307,7 +2313,7 @@ phase_block_allow() {
             RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent was blocked from exec after block"
         elif agent_backend_unavailable_output "$block_out"; then
-            skip "block/allow: agent was blocked from exec after block" "live agent backend unavailable"
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "block/allow: agent was blocked from exec after block" "live agent backend unavailable"
         else
             fail "block/allow: agent was blocked from exec after block" "$block_out"
         fi
@@ -2339,7 +2345,7 @@ phase_block_allow() {
             RUNTIME_TOOL_INSPECTION_EXERCISED=true
             pass "block/allow: agent recovered exec after unblock"
         elif agent_backend_unavailable_output "$recover_out"; then
-            skip "block/allow: agent recovered exec after unblock" "live agent backend unavailable"
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "block/allow: agent recovered exec after unblock" "live agent backend unavailable"
         else
             fail "block/allow: agent recovered exec after unblock" "$recover_out"
         fi
@@ -3430,7 +3436,7 @@ phase_agent_chat() {
 
     if [ "$install_verified" = false ]; then
         if [ "$install_backend_unavailable" = true ]; then
-            skip "agent chat: skill install" "live agent backend unavailable"
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: skill install" "live agent backend unavailable"
         else
             skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: skill install" "agent install could not be verified"
         fi
@@ -3512,7 +3518,7 @@ phase_plugin_lifecycle() {
     local malicious_plugin="${E2E_PREFIX}-malicious-plugin"
     local clean_source="$staging_root/$clean_plugin"
     local malicious_source="$staging_root/$malicious_plugin"
-    local clean_path malicious_path runtime_install_out runtime_clean_path
+    local clean_path malicious_path runtime_install_out runtime_clean_path governance_dir quarantined_path
     local clean_entry malicious_entry
     local install_out agent_out scan_out scan_json findings
     local disable_out enable_out resp payload
@@ -3527,14 +3533,14 @@ phase_plugin_lifecycle() {
 
     agent_out=$(run_agent_prompt "$(agent_session_id plugin-install)" "Run this exact command: DEFENSECLAW_RUN_ID=$DEFENSECLAW_RUN_ID defenseclaw plugin install $clean_source. Reply with exactly INSTALLED once the command succeeds." 180)
     echo "$agent_out"
-    clean_path=$(find_plugin_path "$clean_plugin" || true)
+    clean_path=$(find_runtime_plugin_path "$clean_plugin" || true)
     if [ -n "$clean_path" ]; then
         pass "plugin lifecycle: agent installed clean plugin"
     else
         skip_or_fail "$E2E_REQUIRE_PLUGIN_LIFECYCLE" "plugin lifecycle: agent install" "agent-admin install could not be verified"
         install_out=$(defenseclaw plugin install "$clean_source" 2>&1 || true)
         echo "$install_out"
-        clean_path=$(find_plugin_path "$clean_plugin" || true)
+        clean_path=$(find_runtime_plugin_path "$clean_plugin" || true)
         if [ -n "$clean_path" ]; then
             pass "plugin lifecycle: clean plugin installed via CLI fallback"
         else
@@ -3563,20 +3569,19 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: malicious plugin scan produced findings" "scanner did not produce valid JSON"
     fi
 
-    # `defenseclaw plugin install` now refuses to copy a
-    # plugin tree to plugin_dir when the install-time scan reports
-    # HIGH/CRITICAL findings without an explicit risk-acceptance flag.
-    # The malicious fixture is *deliberately* malicious so subsequent
-    # governance steps can validate quarantine/restore. The standalone
-    # scan above (~line 3184) has already validated that scanning
-    # produces findings, so we use the operator-documented opt-out
-    # path — `defenseclaw plugin allow` — to pre-accept risk before
-    # invoking install. This is the same flow the new error message
-    # tells operators to use.
-    defenseclaw plugin allow "$malicious_plugin" --reason "E2E governance fixture: deliberately malicious" >/dev/null 2>&1 || true
-    install_out=$(defenseclaw plugin install "$malicious_source" --force 2>&1 || true)
-    echo "$install_out"
-    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
+    # Keep the deliberately malicious fixture out of OpenClaw's live runtime
+    # config. Quarantine/restore are DefenseClaw governance operations, so a
+    # direct governance-dir fixture is enough and cannot leave OpenClaw pointing
+    # at a missing malicious manifest after watcher enforcement.
+    governance_dir=$(first_governance_plugin_dir || true)
+    if [ -z "$governance_dir" ]; then
+        fail "plugin lifecycle: malicious plugin installed for governance checks" "governance plugin directory not configured"
+    else
+        ensure_directory_writable "$governance_dir" "plugin governance fixture setup"
+        rm -rf "$governance_dir/$malicious_plugin" 2>/dev/null || true
+        copy_plugin_fixture "$malicious_fixture" "$governance_dir" "$malicious_plugin"
+    fi
+    malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
     if [ -n "$malicious_path" ]; then
         pass "plugin lifecycle: malicious plugin installed for governance checks"
     else
@@ -3587,13 +3592,6 @@ phase_plugin_lifecycle() {
         pass "plugin lifecycle: malicious plugin scan visible in plugin list"
     else
         fail "plugin lifecycle: malicious plugin scan visible in plugin list" "scan entry missing for $malicious_plugin"
-    fi
-
-    defenseclaw plugin block "$malicious_plugin" --reason "E2E plugin block" >/dev/null 2>&1 || true
-    if [ "$(db_has_action plugin "$malicious_plugin" install block)" = "true" ]; then
-        pass "plugin lifecycle: plugin block state recorded"
-    else
-        fail "plugin lifecycle: plugin block state recorded" "block action missing for $malicious_plugin"
     fi
 
     defenseclaw plugin allow "$clean_plugin" --reason "E2E plugin allow" >/dev/null 2>&1 || true
@@ -3668,10 +3666,11 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: API enable updated OpenClaw plugin state" "$resp"
     fi
 
-    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
+    malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
     install_out=$(defenseclaw plugin quarantine "$malicious_plugin" --reason "E2E plugin quarantine" 2>&1 || true)
     echo "$install_out"
-    if [ -n "$malicious_path" ] && [ ! -d "$malicious_path" ] && [ -n "$(find_quarantined_plugin_path "$malicious_plugin" || true)" ]; then
+    quarantined_path=$(find_quarantined_plugin_path "$malicious_plugin" || true)
+    if [ -n "$malicious_path" ] && [ ! -d "$malicious_path" ] && [ -n "$quarantined_path" ]; then
         pass "plugin lifecycle: plugin quarantine moved files"
     else
         fail "plugin lifecycle: plugin quarantine moved files" "$install_out"
@@ -3679,11 +3678,18 @@ phase_plugin_lifecycle() {
 
     install_out=$(defenseclaw plugin restore "$malicious_plugin" 2>&1 || true)
     echo "$install_out"
-    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
+    malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
     if [ -n "$malicious_path" ] && [ -d "$malicious_path" ]; then
         pass "plugin lifecycle: plugin restore restored files"
     else
         fail "plugin lifecycle: plugin restore restored files" "$install_out"
+    fi
+
+    defenseclaw plugin block "$malicious_plugin" --reason "E2E plugin block" >/dev/null 2>&1 || true
+    if [ "$(db_has_action plugin "$malicious_plugin" install block)" = "true" ]; then
+        pass "plugin lifecycle: plugin block state recorded"
+    else
+        fail "plugin lifecycle: plugin block state recorded" "block action missing for $malicious_plugin"
     fi
 
     install_out=$(defenseclaw plugin remove "$clean_plugin" 2>&1 || true)
@@ -4024,6 +4030,20 @@ phase_teardown() {
 
     defenseclaw-gateway stop 2>/dev/null || true
     openclaw gateway stop 2>/dev/null || true
+    if [ -n "$OPENCLAW_PID" ] && kill -0 "$OPENCLAW_PID" 2>/dev/null; then
+        kill -TERM "$OPENCLAW_PID" 2>/dev/null || true
+        for _ in $(seq 1 30); do
+            kill -0 "$OPENCLAW_PID" 2>/dev/null || break
+            sleep 0.2
+        done
+    fi
+    if [ -n "$OPENCLAW_PID" ]; then
+        if kill -0 "$OPENCLAW_PID" 2>/dev/null; then
+            kill -KILL "$OPENCLAW_PID" 2>/dev/null || true
+        fi
+        wait "$OPENCLAW_PID" 2>/dev/null || true
+        OPENCLAW_PID=""
+    fi
 
     # Verify connector teardown cleaned up stale artifacts.
     local shims_dir="$HOME/.defenseclaw/shims"

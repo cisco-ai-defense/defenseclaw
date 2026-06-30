@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -194,6 +195,21 @@ func TestDiffConfigsMarksApplicationProtectionChanged(t *testing.T) {
 	}
 }
 
+func TestDiffConfigsMarksRuntimeTopologyRestartRequired(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := *oldCfg
+	newCfg.Gateway.Host = "gateway.example.test"
+	newCfg.Guardrail.ScannerMode = "remote"
+	newCfg.Guardrail.Connector = "codex"
+
+	diff := diffConfigs(oldCfg, &newCfg)
+	for _, want := range []string{"gateway", "guardrail.scanner_mode", "guardrail.connectors"} {
+		if !slices.Contains(diff.RestartRequired, want) {
+			t.Fatalf("restart_required = %v, missing %s", diff.RestartRequired, want)
+		}
+	}
+}
+
 func TestReloadPredicatesRestartLLMConsumers(t *testing.T) {
 	oldCfg := &config.Config{}
 	newCfg := &config.Config{}
@@ -270,7 +286,7 @@ func TestOTelProviderAccessorsAreConcurrentSafe(t *testing.T) {
 	wg.Wait()
 }
 
-func TestApplyConfigReloadRebuildsSharedJudge(t *testing.T) {
+func TestApplyConfigReloadRequiresRestartForSharedJudgeChange(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	oldCfg.DataDir = t.TempDir()
 	oldCfg.LLM = config.LLMConfig{
@@ -285,36 +301,10 @@ func TestApplyConfigReloadRebuildsSharedJudge(t *testing.T) {
 	newCfg := *oldCfg
 	newCfg.Guardrail.Judge.HookConnectors = []string{"codex"}
 
-	oldJudge := &LLMJudge{model: "old"}
-	router := NewEventRouter(nil, nil, nil, false, nil)
-	router.SetJudge(oldJudge)
-	api := &APIServer{}
-	api.SetHookJudge(oldJudge)
-
-	sidecar := &Sidecar{
-		cfg:    oldCfg,
-		router: router,
-		judge:  oldJudge,
-	}
-	sidecar.setAPIServer(api)
-
-	if err := sidecar.applyConfigReload(context.Background(), oldCfg, &newCfg, diffConfigs(oldCfg, &newCfg)); err != nil {
-		t.Fatalf("applyConfigReload: %v", err)
-	}
-	if sidecar.judge == nil {
-		t.Fatal("shared judge was cleared, want rebuilt judge")
-	}
-	if sidecar.judge == oldJudge {
-		t.Fatal("shared judge was not replaced")
-	}
-	if sidecar.judge.model != "openai/gpt-4o-mini" {
-		t.Fatalf("judge model = %q, want openai/gpt-4o-mini", sidecar.judge.model)
-	}
-	if router.judge != sidecar.judge {
-		t.Fatal("router judge was not updated to the rebuilt shared judge")
-	}
-	if api.hookJudge != sidecar.judge {
-		t.Fatal("API hook judge was not updated to the rebuilt shared judge")
+	sidecar := &Sidecar{cfg: oldCfg}
+	err := sidecar.applyConfigReload(context.Background(), oldCfg, &newCfg, diffConfigs(oldCfg, &newCfg))
+	if err == nil || !strings.Contains(err.Error(), "guardrail") {
+		t.Fatalf("applyConfigReload error = %v, want guardrail restart requirement", err)
 	}
 }
 
@@ -362,8 +352,27 @@ func TestApplyConfigReloadRestartModeRequestsProcessRestart(t *testing.T) {
 	default:
 		t.Fatal("run context was not cancelled")
 	}
-	if got := sidecar.currentConfig().DataDir; got != newCfg.DataDir {
-		t.Fatalf("sidecar cfg DataDir = %q, want %q", got, newCfg.DataDir)
+	if got := sidecar.currentConfig().DataDir; got == newCfg.DataDir {
+		t.Fatalf("sidecar cfg mutated to %q before process restart", got)
+	}
+}
+
+func TestApplyConfigReloadRestartHelperFailureLeavesRuntimeConfigUntouched(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := *oldCfg
+	newCfg.DataDir = filepath.Join(t.TempDir(), "next")
+	newCfg.Gateway.ConfigReload.Mode = "restart"
+
+	oldHelper := launchConfigRestartHelper
+	launchConfigRestartHelper = func() error { return errors.New("helper unavailable") }
+	t.Cleanup(func() { launchConfigRestartHelper = oldHelper })
+
+	sidecar := &Sidecar{cfg: oldCfg}
+	if err := sidecar.applyConfigReload(context.Background(), oldCfg, &newCfg, diffConfigs(oldCfg, &newCfg)); err == nil {
+		t.Fatal("applyConfigReload succeeded when restart helper failed")
+	}
+	if sidecar.currentConfig().DataDir == newCfg.DataDir {
+		t.Fatal("runtime config mutated before restart helper succeeded")
 	}
 }
 
@@ -396,8 +405,8 @@ func TestApplyConfigReloadArmsRestartModeWithoutImmediateRestart(t *testing.T) {
 		t.Fatal("run context was cancelled when only config_reload.mode changed")
 	default:
 	}
-	if got := sidecar.currentConfig().Gateway.ConfigReload.Mode; got != "restart" {
-		t.Fatalf("reload mode = %q, want restart", got)
+	if got := sidecar.currentConfig().Gateway.ConfigReload.Mode; got == "restart" {
+		t.Fatal("runtime config mutated while arming restart mode")
 	}
 }
 
@@ -412,6 +421,17 @@ func TestConfigRestartHelperArgsPreservesOnlySafeRootFlags(t *testing.T) {
 	want := []string{"restart", "--host", "10.0.0.5", "--port=18790"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("configRestartHelperArgs = %v, want %v", got, want)
+	}
+}
+
+func TestDiffConfigsDeploymentModeRequiresRestart(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := *oldCfg
+	oldCfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	newCfg.DeploymentMode = string(config.DeploymentModeUnmanagedBYOD)
+	diff := diffConfigs(oldCfg, &newCfg)
+	if !slices.Contains(diff.RestartRequired, "deployment_mode") {
+		t.Fatalf("restart required = %v, want deployment_mode", diff.RestartRequired)
 	}
 }
 

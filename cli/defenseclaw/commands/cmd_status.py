@@ -28,6 +28,7 @@ from pathlib import Path
 import click
 
 from defenseclaw import ux
+from defenseclaw.config import config_path
 from defenseclaw.context import AppContext, pass_ctx
 
 # ---------------------------------------------------------------------------
@@ -125,8 +126,10 @@ def status(app: AppContext, as_json: bool) -> None:
     click.echo(ux._style("══════════════════", fg="cyan"))
 
     _status_row("Environment", cfg.environment)
+    if getattr(cfg, "deployment_mode", ""):
+        _status_row("Deployment", cfg.deployment_mode)
     _status_row("Data dir", cfg.data_dir)
-    _status_row("Config", f"{cfg.data_dir}/config.yaml")
+    _status_row("Config", str(config_path()))
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
     click.echo()
@@ -237,6 +240,7 @@ def status(app: AppContext, as_json: bool) -> None:
         health = _fetch_health(bind, cfg.gateway.api_port)
         _print_agents(cfg, bind, cfg.gateway.api_port, health=health)
         _print_application_protection(cfg, health=health)
+        _print_hook_guardian(cfg)
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
@@ -248,6 +252,7 @@ def status(app: AppContext, as_json: bool) -> None:
         # so operators know what `start` will spin up.
         _print_agents(cfg)
         _print_application_protection(cfg)
+        _print_hook_guardian(cfg)
         hint(
             "Start sidecar:  defenseclaw-gateway start",
             "Operator overview: defenseclaw status | Sidecar subsystems: defenseclaw-gateway status",
@@ -652,6 +657,69 @@ def _load_application_protection_state(cfg) -> dict:
     return data if isinstance(data, dict) else {"state_file": str(path)}
 
 
+def _print_hook_guardian(cfg) -> None:
+    state = _hook_guardian_status(cfg)
+    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    if not managed and not state.get("configured"):
+        return
+
+    if not state.get("configured"):
+        _status_row("Hook guardian", ux._style("not reconciled", fg="yellow"))
+        click.echo("                " + ux.dim("(no hook_guardian_state.json yet)"))
+        return
+
+    ok = bool(state.get("ok"))
+    status_text = ux._style("healthy", fg="green") if ok else ux._style("attention", fg="yellow")
+    target_count = int(state.get("target_count") or 0)
+    success_count = int(state.get("success_count") or 0)
+    failure_count = int(state.get("failure_count") or 0)
+    status_text += ux.dim(f" ({success_count}/{target_count} targets ok)")
+    if failure_count:
+        status_text += ux.dim(f", {failure_count} failed")
+    _status_row("Hook guardian", status_text)
+
+    updated = str(state.get("updated_at") or "").strip()
+    manifest = str(state.get("manifest") or "").strip()
+    if updated or manifest:
+        detail = []
+        if updated:
+            detail.append(f"last run: {updated}")
+        if manifest:
+            detail.append(f"manifest: {manifest}")
+        click.echo("                " + ux.dim("  ".join(detail)))
+
+    results = [r for r in state.get("results") or [] if isinstance(r, dict)]
+    for row in results[:8]:
+        conn = str(row.get("connector") or "").strip()
+        user = str(row.get("user") or row.get("user_home") or "").strip()
+        label = f"{_friendly_connector_name(conn)} ({conn})"
+        if user:
+            label += f" for {user}"
+        if row.get("ok"):
+            click.echo(f"                  {label} — ok")
+        else:
+            err = str(row.get("error") or "failed")
+            click.echo(f"                  {label} — {ux._style(err, fg='yellow')}")
+
+
+def _hook_guardian_status(cfg) -> dict:
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    path = Path(data_dir) / "hook_guardian_state.json" if data_dir else Path("hook_guardian_state.json")
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {"configured": False, "state_file": str(path)}
+    if not isinstance(data, dict):
+        return {"configured": False, "state_file": str(path)}
+    data.setdefault("state_file", str(path))
+    data["configured"] = True
+    data.setdefault("results", [])
+    data.setdefault("target_count", len(data.get("results") or []))
+    data.setdefault("success_count", sum(1 for r in data.get("results") or [] if isinstance(r, dict) and r.get("ok")))
+    data.setdefault("failure_count", max(0, int(data.get("target_count") or 0) - int(data.get("success_count") or 0)))
+    return data
+
+
 def _print_observability_status(cfg) -> None:
     """Enumerate every observability destination — gateway OTel exporter
     plus every ``audit_sinks`` entry — in a single section.
@@ -831,8 +899,9 @@ def _status_payload(app) -> dict:
     cfg = app.cfg
     payload: dict = {
         "environment": cfg.environment,
+        "deployment_mode": getattr(cfg, "deployment_mode", ""),
         "data_dir": cfg.data_dir,
-        "config": f"{cfg.data_dir}/config.yaml",
+        "config": str(config_path()),
         "audit_db": cfg.audit_db,
         "scope": _connector_scope_text(cfg),
         "sandbox": {"available": _openshell_available(cfg)},
@@ -879,5 +948,6 @@ def _status_payload(app) -> dict:
     payload["sidecar"] = {"running": running}
     payload["connectors"] = _connector_roster(cfg, health=health)
     payload["application_protection"] = _application_protection_status(cfg, health=health)
+    payload["hook_guardian"] = _hook_guardian_status(cfg)
 
     return payload

@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,56 @@ func TestApplicationProtectionControllerSkipsMissingHookConfig(t *testing.T) {
 	}
 	if got := state.Skipped[0].Reason; got != "hook_config_missing" {
 		t.Errorf("skip reason = %q, want hook_config_missing", got)
+	}
+}
+
+func TestApplicationProtectionControllerManagedEnterpriseDoesNotWriteUserHooks(t *testing.T) {
+	dir := t.TempDir()
+	hookConfigPath := filepath.Join(dir, "codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(hookConfigPath), 0o755); err != nil {
+		t.Fatalf("mkdir hook config dir: %v", err)
+	}
+	if err := os.WriteFile(hookConfigPath, []byte("model_provider = \"openai\"\n"), 0o600); err != nil {
+		t.Fatalf("write hook config: %v", err)
+	}
+	cfg := &config.Config{
+		DataDir:               dir,
+		DeploymentMode:        "managed_enterprise",
+		ApplicationProtection: config.DefaultApplicationProtectionConfig(),
+		Guardrail:             config.GuardrailConfig{HookSelfHeal: false},
+	}
+	health := NewSidecarHealth()
+	sidecar := &Sidecar{cfg: cfg, health: health}
+	registry := connector.NewRegistry()
+	conn := &appProtectionHookStub{
+		bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "codex"}},
+		hookConfigPath:    hookConfigPath,
+	}
+	registry.RegisterBuiltin(conn)
+	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+
+	now := time.Now().UTC()
+	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
+		Summary: inventory.AIDiscoverySummary{ScannedAt: now},
+		Signals: []inventory.AISignal{{
+			Category:           inventory.SignalSupportedConnector,
+			SupportedConnector: "codex",
+			Name:               "Codex",
+			Confidence:         0.95,
+			State:              "active",
+			LastSeen:           now,
+		}},
+	})
+
+	if conn.setupCalls != 0 {
+		t.Fatalf("setupCalls = %d, want 0 in managed_enterprise without guardian", conn.setupCalls)
+	}
+	snap := health.Snapshot()
+	if snap.ApplicationProtection.State != StateDisabled {
+		t.Fatalf("application protection state = %s, want disabled", snap.ApplicationProtection.State)
+	}
+	if !strings.Contains(snap.ApplicationProtection.LastError, "guardian") {
+		t.Fatalf("application protection error = %q, want guardian hint", snap.ApplicationProtection.LastError)
 	}
 }
 

@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 type Environment string
@@ -78,6 +80,9 @@ func DefaultDataPath() string {
 }
 
 func ConfigPath() string {
+	if v := os.Getenv(managed.ConfigPathEnv); v != "" {
+		return v
+	}
 	return filepath.Join(DefaultDataPath(), DefaultConfigName)
 }
 

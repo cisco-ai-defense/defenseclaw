@@ -1,0 +1,54 @@
+[Unit]
+Description=DefenseClaw Gateway
+Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=defenseclaw
+Group=defenseclaw
+Environment=DEFENSECLAW_HOME=/var/lib/defenseclaw
+Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
+Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise
+Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian
+ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway
+Restart=on-failure
+RestartSec=5s
+StateDirectory=defenseclaw
+RuntimeDirectory=defenseclaw
+LogsDirectory=defenseclaw
+StateDirectoryMode=0750
+RuntimeDirectoryMode=0750
+LogsDirectoryMode=0750
+WorkingDirectory=/var/lib/defenseclaw
+UMask=0077
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
+ReadWritePaths=/var/lib/defenseclaw /var/log/defenseclaw /run/defenseclaw
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

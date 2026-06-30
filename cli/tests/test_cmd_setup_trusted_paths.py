@@ -178,20 +178,15 @@ class GatePromptContractGateTests(unittest.TestCase):
         binpath = os.path.join(tmp, "codex")
         first = _disc(_signal("", ad.UNTRUSTED_PREFIX_ERROR, binpath))
         discos = [first, _disc(second_signal)] if second_signal is not None else [first]
-        with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False), patch.object(
-            cmd_setup.agent_discovery, "discover_agents", side_effect=discos
-        ) as mock_disc, patch.object(
-            cmd_setup, "resolve_connector_contract", side_effect=contract_side_effect
-        ), patch.object(
-            sys.stdin, "isatty", return_value=True
-        ), patch.object(
-            sys.stdout, "isatty", return_value=True
-        ), patch.object(
-            cmd_setup.click, "confirm", return_value=confirm
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False),
+            patch.object(cmd_setup.agent_discovery, "discover_agents", side_effect=discos) as mock_disc,
+            patch.object(cmd_setup, "resolve_connector_contract", side_effect=contract_side_effect),
+            patch.object(sys.stdin, "isatty", return_value=True),
+            patch.object(sys.stdout, "isatty", return_value=True),
+            patch.object(cmd_setup.click, "confirm", return_value=confirm),
         ):
-            result = cmd_setup._check_connector_version_supported_for_setup(
-                "codex", mode="action", data_dir=tmp
-            )
+            result = cmd_setup._check_connector_version_supported_for_setup("codex", mode="action", data_dir=tmp)
         return result, mock_disc, tmp, binpath
 
     def test_trusted_but_unsupported_version_is_still_refused(self):
@@ -199,7 +194,11 @@ class GatePromptContractGateTests(unittest.TestCase):
         # STATUS_UNKNOWN (unsupported). The OLD code returned True here; the
         # fix re-runs the gate and returns False.
         def contract(_c, v):
-            return _compat(v, STATUS_UNVERSIONED, "codex-hooks-v1") if v == "" else _compat(v, STATUS_UNKNOWN, reason="too new")
+            return (
+                _compat(v, STATUS_UNVERSIONED, "codex-hooks-v1")
+                if v == ""
+                else _compat(v, STATUS_UNKNOWN, reason="too new")
+            )
 
         result, mock_disc, tmp, binpath = self._run(
             _signal("99.0", "", os.path.join(tempfile.gettempdir(), "codex")),
@@ -218,7 +217,11 @@ class GatePromptContractGateTests(unittest.TestCase):
 
     def test_trusted_and_supported_version_is_accepted(self):
         def contract(_c, v):
-            return _compat(v, STATUS_UNVERSIONED, "codex-hooks-v1") if v == "" else _compat(v, STATUS_KNOWN, "codex-hooks-v1")
+            return (
+                _compat(v, STATUS_UNVERSIONED, "codex-hooks-v1")
+                if v == ""
+                else _compat(v, STATUS_KNOWN, "codex-hooks-v1")
+            )
 
         result, mock_disc, _tmp, _bin = self._run(
             _signal("1.0", "", os.path.join(tempfile.gettempdir(), "codex")),
@@ -232,15 +235,15 @@ class GatePromptContractGateTests(unittest.TestCase):
         def contract(_c, v):
             return _compat(v, STATUS_UNVERSIONED, "codex-hooks-v1")
 
-        result, mock_disc, tmp, _bin = self._run(
-            None, confirm=False, contract_side_effect=contract
-        )
+        result, mock_disc, tmp, _bin = self._run(None, confirm=False, contract_side_effect=contract)
         self.assertFalse(result)
         self.assertEqual(mock_disc.call_count, 1, "declining must not trigger a re-discovery")
         cfg_path = os.path.join(tmp, "config.yaml")
         if os.path.isfile(cfg_path):
             body = yaml.safe_load(open(cfg_path, encoding="utf-8")) or {}
-            self.assertNotIn(os.path.dirname(os.path.realpath(_bin)), body.get("ai_discovery", {}).get("trusted_binary_prefixes", []))
+            self.assertNotIn(
+                os.path.dirname(os.path.realpath(_bin)), body.get("ai_discovery", {}).get("trusted_binary_prefixes", [])
+            )
 
     def test_declined_prompt_still_emits_trusted_paths_hint(self):
         """Review follow-up: declining the trust prompt must still show remediation."""
@@ -253,9 +256,7 @@ class GatePromptContractGateTests(unittest.TestCase):
             return _compat(v, STATUS_UNVERSIONED, "codex-hooks-v1")
 
         with patch.object(cmd_setup.ux, "subhead", side_effect=_capture):
-            result, _mock_disc, _tmp, binpath = self._run(
-                None, confirm=False, contract_side_effect=contract
-            )
+            result, _mock_disc, _tmp, binpath = self._run(None, confirm=False, contract_side_effect=contract)
         self.assertFalse(result)
         joined = " ".join(hints)
         self.assertIn("trusted-paths add", joined)
@@ -272,12 +273,14 @@ class GatePromptContractGateTests(unittest.TestCase):
         def contract(_c, v):
             return _compat(v, STATUS_UNVERSIONED, "codex-hooks-v1")
 
-        with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False), \
-                patch.object(cmd_setup.agent_discovery, "discover_agents", return_value=disc), \
-                patch.object(cmd_setup, "resolve_connector_contract", side_effect=contract), \
-                patch.object(sys.stdin, "isatty", return_value=True), \
-                patch.object(sys.stdout, "isatty", return_value=True), \
-                patch.object(cmd_setup.click, "confirm", return_value=False) as confirm:
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False),
+            patch.object(cmd_setup.agent_discovery, "discover_agents", return_value=disc),
+            patch.object(cmd_setup, "resolve_connector_contract", side_effect=contract),
+            patch.object(sys.stdin, "isatty", return_value=True),
+            patch.object(sys.stdout, "isatty", return_value=True),
+            patch.object(cmd_setup.click, "confirm", return_value=False) as confirm,
+        ):
             first = cmd_setup._check_connector_version_supported_for_setup(
                 "codex",
                 mode="action",
@@ -400,6 +403,119 @@ class TrustedPathsCliTests(unittest.TestCase):
             self.assertTrue(json.loads(result.output)["ok"])
             body = yaml.safe_load(open(os.path.join(tmp, "config.yaml"), encoding="utf-8")) or {}
             self.assertNotIn(newdir, body.get("ai_discovery", {}).get("trusted_binary_prefixes", []))
+
+    def test_remove_clears_config_legacy_dotenv_and_process_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            newdir = os.path.join(tmp, "tools")
+            os.makedirs(newdir)
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": newdir}, clear=False):
+                self.runner.invoke(cmd_setup.trusted_paths, ["add", newdir], obj=app)
+                cmd_setup._write_dotenv(
+                    os.path.join(tmp, ".env"),
+                    {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": newdir},
+                )
+                result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", newdir, "--json"], obj=app)
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertNotIn(newdir, os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", ""))
+            body = yaml.safe_load(open(os.path.join(tmp, "config.yaml"), encoding="utf-8")) or {}
+            self.assertNotIn(newdir, body.get("ai_discovery", {}).get("trusted_binary_prefixes", []))
+            dotenv = cmd_setup._load_dotenv(os.path.join(tmp, ".env"))
+            self.assertNotIn(newdir, dotenv.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", ""))
+
+    def test_remove_validates_legacy_dotenv_before_config_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            newdir = os.path.join(tmp, "tools")
+            os.makedirs(newdir)
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
+                self.runner.invoke(cmd_setup.trusted_paths, ["add", newdir], obj=app)
+                with open(os.path.join(tmp, ".env"), "wb") as handle:
+                    handle.write(b"\xff")
+                result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", newdir], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            body = yaml.safe_load(open(os.path.join(tmp, "config.yaml"), encoding="utf-8")) or {}
+            self.assertIn(os.path.realpath(newdir), body.get("ai_discovery", {}).get("trusted_binary_prefixes", []))
+
+    def test_remove_restores_exact_dotenv_when_config_save_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            newdir = os.path.join(tmp, "tools")
+            os.makedirs(newdir)
+            resolved = os.path.realpath(newdir)
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
+                self.runner.invoke(cmd_setup.trusted_paths, ["add", newdir], obj=app)
+                dotenv_path = os.path.join(tmp, ".env")
+                original = f"# preserve me\nOTHER='quoted value'\nDEFENSECLAW_TRUSTED_BIN_PREFIXES={resolved}\n".encode()
+                with open(dotenv_path, "wb") as handle:
+                    handle.write(original)
+                os.chmod(dotenv_path, 0o640)
+                config_path = os.path.join(tmp, "config.yaml")
+                with open(config_path, "rb") as handle:
+                    config_before = handle.read()
+                with patch.object(app.cfg, "save", side_effect=OSError("config save failed")):
+                    result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", newdir], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            with open(dotenv_path, "rb") as handle:
+                self.assertEqual(handle.read(), original)
+            if os.name != "nt":
+                self.assertEqual(os.stat(dotenv_path).st_mode & 0o777, 0o640)
+            self.assertIn(resolved, app.cfg.ai_discovery.trusted_binary_prefixes)
+            with open(config_path, "rb") as handle:
+                self.assertEqual(handle.read(), config_before)
+            body = yaml.safe_load(open(os.path.join(tmp, "config.yaml"), encoding="utf-8")) or {}
+            self.assertIn(resolved, body.get("ai_discovery", {}).get("trusted_binary_prefixes", []))
+
+    def test_remove_restores_exact_dotenv_when_dotenv_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            newdir = os.path.join(tmp, "tools")
+            os.makedirs(newdir)
+            resolved = os.path.realpath(newdir)
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
+                self.runner.invoke(cmd_setup.trusted_paths, ["add", newdir], obj=app)
+                dotenv_path = os.path.join(tmp, ".env")
+                original = f"# preserve me\nDEFENSECLAW_TRUSTED_BIN_PREFIXES={resolved}\n".encode()
+                with open(dotenv_path, "wb") as handle:
+                    handle.write(original)
+                os.chmod(dotenv_path, 0o640)
+                config_path = os.path.join(tmp, "config.yaml")
+                with open(config_path, "rb") as handle:
+                    config_before = handle.read()
+
+                def partial_write(path, _entries):
+                    with open(path, "wb") as handle:
+                        handle.write(b"partial")
+                    raise OSError("dotenv write failed")
+
+                with patch.object(cmd_setup, "_write_dotenv", side_effect=partial_write):
+                    result = self.runner.invoke(cmd_setup.trusted_paths, ["remove", newdir], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            with open(dotenv_path, "rb") as handle:
+                self.assertEqual(handle.read(), original)
+            if os.name != "nt":
+                self.assertEqual(os.stat(dotenv_path).st_mode & 0o777, 0o640)
+            self.assertIn(resolved, app.cfg.ai_discovery.trusted_binary_prefixes)
+            with open(config_path, "rb") as handle:
+                self.assertEqual(handle.read(), config_before)
+
+    def test_restore_dotenv_preserves_zero_mode(self):
+        if os.name == "nt":
+            self.skipTest("Windows does not preserve POSIX mode bits")
+        with tempfile.TemporaryDirectory() as tmp:
+            dotenv_path = os.path.join(tmp, ".env")
+            cmd_setup._restore_dotenv_snapshot(dotenv_path, b"SECRET=value\n", 0)
+            self.assertEqual(os.stat(dotenv_path).st_mode & 0o777, 0)
+
+    @unittest.skipIf(os.name == "nt", "mkfifo is unavailable on Windows")
+    def test_dotenv_snapshot_and_restore_reject_fifo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dotenv_path = os.path.join(tmp, ".env")
+            os.mkfifo(dotenv_path)
+            with self.assertRaisesRegex(OSError, "not a regular file"):
+                cmd_setup._snapshot_dotenv(dotenv_path)
+            with self.assertRaisesRegex(OSError, "not a regular file"):
+                cmd_setup._restore_dotenv_snapshot(dotenv_path, b"SECRET=value\n", 0o600)
 
     def test_remove_builtin_default_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

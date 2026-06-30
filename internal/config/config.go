@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -2134,6 +2135,22 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	}
 	configFile = filepath.Clean(configFile)
 	dataDir := filepath.Dir(configFile)
+	if configuredPath := strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)); configuredPath != "" &&
+		filepath.Clean(configuredPath) == configFile {
+		dataDir = DefaultDataPath()
+	}
+	pinnedDeploymentMode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
+	if err := validateDeploymentMode(pinnedDeploymentMode); err != nil {
+		return nil, fmt.Errorf("config: %s: %w", managed.DeploymentModeEnv, err)
+	}
+	if managed.IsManagedEnterprise(pinnedDeploymentMode) {
+		if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+			}
+			return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
+		}
+	}
 
 	viper.SetConfigFile(configFile)
 	viper.SetConfigType("yaml")
@@ -2219,12 +2236,34 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	migrateFlatOTelConfigFromViper(&cfg)
 	warnDisableRedactionConfig(&cfg)
 	cfg.DeploymentMode = normalizeDeploymentMode(cfg.DeploymentMode)
+	if pinnedDeploymentMode != "" {
+		if cfg.DeploymentMode != "" && cfg.DeploymentMode != pinnedDeploymentMode {
+			return nil, fmt.Errorf("config: deployment_mode=%q conflicts with immutable %s=%q", cfg.DeploymentMode, managed.DeploymentModeEnv, pinnedDeploymentMode)
+		}
+		cfg.DeploymentMode = pinnedDeploymentMode
+	}
 
 	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
 		}
 		return nil, err
+	}
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if !managed.IsManagedEnterprise(pinnedDeploymentMode) {
+			if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
+				if ReportConfigLoadError != nil {
+					ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+				}
+				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
+			}
+		}
+		if err := managed.ValidateTrustedRuntimeDir(cfg.DataDir, "managed data_dir"); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
+			}
+			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
+		}
 	}
 
 	cfg.Gateway.ConfigReload.Mode = normalizeGatewayConfigReloadMode(cfg.Gateway.ConfigReload.Mode)

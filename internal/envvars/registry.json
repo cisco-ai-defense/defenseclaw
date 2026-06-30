@@ -587,16 +587,78 @@
     {
       "name": "DEFENSECLAW_CONFIG",
       "category": "runtime_path",
-      "purpose": "Override the config.yaml path independently from DEFENSECLAW_HOME when migrations are applied to an explicitly selected configuration file.",
+      "purpose": "Override the config.yaml path independently from DEFENSECLAW_HOME. Used by managed-enterprise services to keep administrator-owned config under /etc/defenseclaw while runtime state remains under /var/lib/defenseclaw.",
       "default": "${DEFENSECLAW_HOME}/config.yaml",
       "accepted_values": ["any-absolute-path", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": false,
       "consumers": [
+        {"location": "internal/config/defaults.go:78", "description": "Go config path resolver"},
+        {"location": "cli/defenseclaw/config.py:187", "description": "Python config path resolver"},
         {"location": "cli/defenseclaw/migrations.py:145", "description": "Migration config path resolver"}
       ],
       "since": "0.8.0",
-      "security_note": "Explicit config path selection keeps migrations aligned with the configuration file chosen by the operator or managed service."
+      "security_note": "Managed config path separation — lets system services read admin-owned policy without making the runtime data directory admin-writable."
+    },
+    {
+      "name": "DEFENSECLAW_DEPLOYMENT_MODE",
+      "category": "runtime_path",
+      "purpose": "Pin the process deployment mode independently from config.yaml. Managed service definitions set this to managed_enterprise so a service-writable config replacement cannot downgrade enterprise trust enforcement.",
+      "default": "unset (use config.yaml deployment_mode)",
+      "accepted_values": ["managed_enterprise", "unmanaged_byod", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/config/config.go", "description": "Pins deployment mode before parsing or trusting config.yaml"},
+        {"location": "packaging/systemd/defenseclaw-gateway.service", "description": "Managed Linux service pin"},
+        {"location": "packaging/launchd/com.defenseclaw.gateway.plist", "description": "Managed macOS service pin"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks."
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR",
+      "category": "runtime_path",
+      "purpose": "Select the administrator-owned directory containing the hook guardian protected-target authorization ledger.",
+      "default": "${DEFENSECLAW_HOME}-hook-guardian",
+      "accepted_values": ["any-absolute-admin-owned-path", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/managed/managed.go", "description": "Resolves the protected-target authorization path"},
+        {"location": "internal/cli/enterprise_hooks.go", "description": "Privileged guardian writes successful protected targets"},
+        {"location": "internal/gateway/sidecar.go", "description": "Managed health verifies connector coverage before advertising enforcement"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Privileged repair authorization — must remain root/admin-owned and non-writable by the DefenseClaw service account."
+    },
+    {
+      "name": "DEFENSECLAW_GUARDIAN_CONNECTOR",
+      "category": "runtime_path",
+      "purpose": "Systemd template override naming the connector reconciled by an enterprise hook guardian instance.",
+      "default": "unset",
+      "accepted_values": ["registered hook-native connector name"],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "docs-site/content/docs/setup/enterprise-deployment.mdx:123", "description": "Documented systemd template override for per-user hook guardian instances"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Template-scoped connector selection — avoids broad home scanning by keeping each privileged guardian instance bound to an explicit connector target."
+    },
+    {
+      "name": "DEFENSECLAW_GUARDIAN_AGENT_VERSION",
+      "category": "runtime_path",
+      "purpose": "Systemd template override supplying the local agent version used for enterprise hook-contract validation.",
+      "default": "unset (falls back to cached discovery version when available)",
+      "accepted_values": ["agent version string", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "docs-site/content/docs/setup/enterprise-deployment.mdx:124", "description": "Documented systemd template override for action-mode hook contract validation"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Action-mode hook contract validation — lets managed deployments pin the agent version the guardian validates before writing blocking hooks."
     },
     {
       "name": "DEFENSECLAW_GATEWAY_BIN",

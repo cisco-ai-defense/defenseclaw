@@ -252,6 +252,7 @@ func installOpenTelemetryGlobals(p *Provider) {
 		otel.SetTracerProvider(traceNoop.NewTracerProvider())
 		global.SetLoggerProvider(logNoop.NewLoggerProvider())
 		otel.SetMeterProvider(metricNoop.NewMeterProvider())
+		otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) {}))
 		return
 	}
 	if p.tracerProvider != nil {

@@ -79,6 +79,41 @@ func disabledCfg() *config.Config {
 	}
 }
 
+func TestNewProviderInactiveDoesNotReplaceOpenTelemetryGlobals(t *testing.T) {
+	beforeTracer := otel.GetTracerProvider()
+	beforeLogger := global.GetLoggerProvider()
+	beforeMeter := otel.GetMeterProvider()
+
+	provider, err := NewProviderInactive(context.Background(), disabledCfg(), "test")
+	if err != nil {
+		t.Fatalf("NewProviderInactive: %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	if got := otel.GetTracerProvider(); got != beforeTracer {
+		t.Fatal("inactive provider replaced global tracer provider")
+	}
+	if got := global.GetLoggerProvider(); got != beforeLogger {
+		t.Fatal("inactive provider replaced global logger provider")
+	}
+	if got := otel.GetMeterProvider(); got != beforeMeter {
+		t.Fatal("inactive provider replaced global meter provider")
+	}
+}
+
+func TestActivateProviderNilClearsErrorHandler(t *testing.T) {
+	called := false
+	previous := otel.GetErrorHandler()
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) { called = true }))
+	t.Cleanup(func() { otel.SetErrorHandler(previous) })
+
+	ActivateProvider(nil)
+	otel.Handle(errors.New("after shutdown"))
+	if called {
+		t.Fatal("ActivateProvider(nil) left the previous OpenTelemetry error handler installed")
+	}
+}
+
 func TestDestinationSpanExporterRecordsAcknowledgementFailureAndPartialSuccess(t *testing.T) {
 	tests := []struct {
 		name                                    string

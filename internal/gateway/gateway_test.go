@@ -1453,7 +1453,11 @@ func TestSkillsUpdateParamsSerialization(t *testing.T) {
 func TestConfigPatchRawParamsSerialization(t *testing.T) {
 	allowList := []string{"existing-a"}
 	rawJSON, _ := json.Marshal(pluginConfigRaw("my-plugin", false, allowList))
-	params := ConfigPatchRawParams{Raw: string(rawJSON), BaseHash: "abc123"}
+	params := ConfigPatchRawParams{
+		Raw:          string(rawJSON),
+		BaseHash:     "abc123",
+		ReplacePaths: []string{"plugins.allow"},
+	}
 	data, err := json.Marshal(params)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -1468,6 +1472,10 @@ func TestConfigPatchRawParamsSerialization(t *testing.T) {
 	}
 	if parsed["baseHash"] != "abc123" {
 		t.Errorf("baseHash = %v, want abc123", parsed["baseHash"])
+	}
+	replacePaths, ok := parsed["replacePaths"].([]interface{})
+	if !ok || len(replacePaths) != 1 || replacePaths[0] != "plugins.allow" {
+		t.Errorf("replacePaths = %v, want [plugins.allow]", parsed["replacePaths"])
 	}
 	var nested map[string]interface{}
 	if err := json.Unmarshal([]byte(rawStr), &nested); err != nil {
@@ -2753,6 +2761,38 @@ func TestAPIStatusConnectorModesFansOut(t *testing.T) {
 	}
 	if got["openclaw"] != "guardrail" {
 		t.Errorf("openclaw mode = %q, want guardrail (got roster %v)", got["openclaw"], got)
+	}
+}
+
+func TestAPIStatusConnectorModeReportsHookEnforcement(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Mode = "action"
+
+	api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	api.handleStatus(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Result().StatusCode)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	mode, ok := result["connector_mode"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("connector_mode missing or wrong type: %T", result["connector_mode"])
+	}
+	if got := mode["mode"]; got != "observability" {
+		t.Errorf("mode = %v, want observability for hook-native no-proxy data path", got)
+	}
+	if got := mode["guardrail_mode"]; got != "action" {
+		t.Errorf("guardrail_mode = %v, want action", got)
+	}
+	if got := mode["hook_enforcement"]; got != true {
+		t.Errorf("hook_enforcement = %v, want true", got)
 	}
 }
 
@@ -5251,6 +5291,43 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 	}
 }
 
+func TestHandleGuardrailConfig_PatchRejectedInManagedEnterprise(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	tmpDir := t.TempDir()
+	const tok = "patch-config-tok-managed"
+	api := &APIServer{
+		health: NewSidecarHealth(),
+		logger: logger,
+		store:  store,
+		scannerCfg: &config.Config{
+			DataDir:        tmpDir,
+			DeploymentMode: "managed_enterprise",
+			Gateway:        config.GatewayConfig{Token: tok},
+			Guardrail: config.GuardrailConfig{
+				Mode:        "observe",
+				ScannerMode: "local",
+			},
+		},
+	}
+
+	body, _ := json.Marshal(map[string]string{"mode": "action"})
+	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	api.handleGuardrailConfig(w, req)
+
+	if w.Result().StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body: %s", w.Result().StatusCode, http.StatusForbidden, w.Body.String())
+	}
+	if api.scannerCfg.Guardrail.Mode != "observe" {
+		t.Errorf("mode = %q, want observe", api.scannerCfg.Guardrail.Mode)
+	}
+	if !strings.Contains(w.Body.String(), "administrator privileges") {
+		t.Fatalf("body = %q, want administrator guidance", w.Body.String())
+	}
+}
+
 func TestHandleGuardrailConfig_ConcurrentAccess(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	tmpDir := t.TempDir()
@@ -6576,5 +6653,152 @@ func TestMaxBodyMiddleware_RejectsOversizedBody(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Errorf("expected 400 or 413 for oversized body, got %d", resp.StatusCode)
+	}
+}
+
+func TestHookScopedTokenOnlyAuthenticatesHookRoutes(t *testing.T) {
+	dataDir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	scoped := map[string]string{}
+	hookPaths := map[string]string{}
+	for _, name := range reg.Names() {
+		conn, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		he, ok := conn.(connector.HookEndpoint)
+		if !ok {
+			continue
+		}
+		tok, err := connector.EnsureHookAPIToken(dataDir, name)
+		if err != nil {
+			t.Fatalf("EnsureHookAPIToken(%s): %v", name, err)
+		}
+		scoped[name] = tok
+		hookPaths[name] = he.HookAPIPath()
+	}
+	if len(hookPaths) == 0 {
+		t.Fatal("default registry has no hook endpoints")
+	}
+	api := &APIServer{
+		scannerCfg: &config.Config{
+			DataDir: dataDir,
+			Gateway: config.GatewayConfig{
+				Token: "master-token",
+			},
+		},
+	}
+	api.SetConnectorRegistry(reg)
+	api.SetHookAPITokens(scoped)
+
+	allowed := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for name, path := range hookPaths {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = "127.0.0.1:47777"
+		req.Header.Set("Authorization", "Bearer "+scoped[name])
+		rec := httptest.NewRecorder()
+		allowed.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("%s (%s) with scoped token status = %d, want %d body=%s", name, path, rec.Code, http.StatusNoContent, rec.Body.String())
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer "+scoped["codex"])
+	rec := httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("/api/v1/codex/notify with codex scoped token status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/status", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer "+scoped["codex"])
+	rec = httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("/status with scoped token status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer "+scoped["codex"])
+	rec = httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("claudecode hook with codex scoped token status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHookScopedTokenRevalidatesDeletionAndRotation(t *testing.T) {
+	dataDir := t.TempDir()
+	oldToken, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken: %v", err)
+	}
+	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
+	api.SetHookAPITokens(map[string]string{"codex": oldToken})
+	if !api.hookAPITokenMatches("codex", oldToken) {
+		t.Fatal("provisioned hook token was rejected")
+	}
+
+	tokenPath, err := connector.HookAPITokenFilePath(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("HookAPITokenFilePath: %v", err)
+	}
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatalf("remove hook token: %v", err)
+	}
+	if api.hookAPITokenMatches("codex", oldToken) {
+		t.Fatal("deleted hook token remained valid from cache")
+	}
+
+	newToken, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("rotate hook token: %v", err)
+	}
+	if newToken == oldToken {
+		t.Fatal("rotated hook token unexpectedly reused old value")
+	}
+	if api.hookAPITokenMatches("codex", oldToken) {
+		t.Fatal("old hook token remained valid after rotation")
+	}
+	if !api.hookAPITokenMatches("codex", newToken) {
+		t.Fatal("rotated hook token was rejected")
+	}
+}
+
+func TestHookScopedTokenLegacyFallbackDoesNotInferWildcardHookScopes(t *testing.T) {
+	api := &APIServer{
+		scannerCfg: &config.Config{
+			Gateway: config.GatewayConfig{Token: "master-token"},
+		},
+	}
+	api.SetHookAPITokens(map[string]string{
+		"codex":  "codex-scoped-token",
+		"hermes": "hermes-scoped-token",
+	})
+	allowed := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer codex-scoped-token")
+	rec := httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("legacy codex hook fallback status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer hermes-scoped-token")
+	rec = httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unregistered wildcard hook scope status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }

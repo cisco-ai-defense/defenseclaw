@@ -391,6 +391,30 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	}
 }
 
+func TestHookContractLockDriftedIgnoresHookScriptDigestChanges(t *testing.T) {
+	previous := HookContractLockEntry{
+		Connector:              "codex",
+		RawAgentVersion:        "codex-cli 0.142.0",
+		NormalizedAgentVersion: "0.142.0",
+		ContractID:             "codex-hooks-v1",
+		HookScriptDigests: map[string]string{
+			"codex-hook.sh": "sha256:before",
+		},
+	}
+	current := previous
+	current.HookScriptDigests = map[string]string{
+		"codex-hook.sh": "sha256:after",
+	}
+	if HookContractLockDrifted(previous, current) {
+		t.Fatal("hook script digest change alone must be repairable, not contract drift")
+	}
+	current = previous
+	current.NormalizedAgentVersion = "0.143.0"
+	if !HookContractLockDrifted(previous, current) {
+		t.Fatal("agent version change must still be contract drift")
+	}
+}
+
 func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")

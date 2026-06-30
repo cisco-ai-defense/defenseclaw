@@ -2703,7 +2703,6 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 		report.Signals[i].Source = AISourceExternal
 	}
 	s.fanoutReport(ctx, *report)
-	s.notifyReportObservers(ctx, *report)
 	return nil
 }
 

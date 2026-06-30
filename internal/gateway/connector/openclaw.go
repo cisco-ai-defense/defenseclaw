@@ -613,13 +613,14 @@ func (c *OpenClawConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 func (c *OpenClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	ocHome := openClawHome()
 	return AgentPaths{
-		PatchedFiles: []string{filepath.Join(ocHome, "openclaw.json")},
-		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")},
-		HookScripts:  hookScriptPathsForConnector(opts, c),
-		CreatedDirs: []string{
+		PatchedFiles:         []string{filepath.Join(ocHome, "openclaw.json")},
+		BackupFiles:          []string{managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")},
+		HookScripts:          hookScriptPathsForConnector(opts, c),
+		GeneratedFiles:       subprocessGeneratedFiles(opts),
+		GeneratedExecutables: subprocessGeneratedExecutables(opts),
+		CreatedDirs: append([]string{
 			filepath.Join(ocHome, "extensions", "defenseclaw"),
-			filepath.Join(opts.DataDir, "shims"),
-		},
+		}, subprocessCreatedDirs(opts)...),
 	}
 }
 

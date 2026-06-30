@@ -51,6 +51,21 @@ def _pin_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
 
+def test_discovery_trust_config_honors_config_override(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    config_path = tmp_path / "managed" / "config.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        "ai_discovery:\n  require_trusted_binary_paths: true\n  trusted_binary_prefixes: [/opt/enterprise/bin]\n"
+    )
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(config_path))
+
+    required, prefixes = ad._ai_discovery_trust_config(data_dir)
+
+    assert required is True
+    assert prefixes == ("/opt/enterprise/bin",)
+
+
 def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     now = datetime(2026, 5, 4, 18, 21, tzinfo=timezone.utc)
@@ -302,6 +317,21 @@ def test_trust_check_accepts_canonical_prefix(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(binary)) is True
 
 
+def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path):
+    real_root = tmp_path / "real-tools"
+    binary = real_root / "bin" / "omnigent"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    binary.parent.chmod(0o755)
+    alias = tmp_path / "tools-alias"
+    alias.symlink_to(real_root, target_is_directory=True)
+
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(alias))
+
+    assert ad._is_trusted_binary_path(str(alias / "bin" / "omnigent")) is True
+
+
 def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
     data_dir = tmp_path / ".defenseclaw"
     data_dir.mkdir()
@@ -328,21 +358,6 @@ def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
 
     assert signal.installed is True
     assert signal.version == "codex 1.2.3"
-
-
-def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path):
-    real_root = tmp_path / "real-tools"
-    binary = real_root / "bin" / "omnigent"
-    binary.parent.mkdir(parents=True)
-    binary.write_text("#!/bin/sh\nexit 0\n")
-    binary.chmod(0o755)
-    binary.parent.chmod(0o755)
-    alias = tmp_path / "tools-alias"
-    alias.symlink_to(real_root, target_is_directory=True)
-
-    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(alias))
-
-    assert ad._is_trusted_binary_path(str(alias / "bin" / "omnigent")) is True
 
 
 def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
@@ -397,6 +412,32 @@ def test_operator_prefix_still_applies_after_default_prefix_ownership_failure(
     monkeypatch.setattr(ad, "_bin_chain_is_system_owned", lambda _resolved, _prefix: False)
 
     assert ad._is_trusted_binary_path(str(binary)) is True
+
+
+def test_trust_check_operator_prefix_wins_over_failed_default_ownership(monkeypatch, tmp_path):
+    # Regression: Homebrew npm globals live under a default prefix
+    # (/opt/homebrew/lib/node_modules) that fails F-0421 root-ownership on
+    # user-owned installs. Setup's "trust this directory?" prompt adds only
+    # the package bin dir; _is_trusted_binary_path must not return False
+    # when that narrower operator prefix matches after the default fails.
+    homebrew = tmp_path / "homebrew"
+    real = homebrew / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_text("#!/usr/bin/env node\n")
+    real.chmod(0o755)
+    real.parent.chmod(0o755)
+    link_dir = homebrew / "bin"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / "codex"
+    link.symlink_to(real)
+
+    monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+    monkeypatch.setenv(
+        "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
+        str(homebrew / "lib" / "node_modules" / "@openai" / "codex" / "bin"),
+    )
+
+    assert ad._is_trusted_binary_path(str(link)) is True
 
 
 def test_trust_check_accepts_claude_local_share_target(monkeypatch, tmp_path):

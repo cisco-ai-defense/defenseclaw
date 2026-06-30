@@ -20,6 +20,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -163,6 +164,78 @@ class TestPaths(unittest.TestCase):
     def test_config_path(self):
         cp = config_path()
         self.assertTrue(str(cp).endswith("config.yaml"))
+
+    def test_config_path_explicit_env_override(self):
+        override = Path(tempfile.mkdtemp()) / "managed-config.yaml"
+        with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": str(override)}):
+            self.assertEqual(config_path(), override)
+
+    def test_load_uses_explicit_config_path_override(self):
+        data_dir = Path(tempfile.mkdtemp())
+        override_dir = Path(tempfile.mkdtemp())
+        default_cfg = data_dir / "config.yaml"
+        override_cfg = override_dir / "system-config.yaml"
+        default_cfg.write_text(
+            f"data_dir: {data_dir}\ndeployment_mode: unmanaged_byod\n",
+            encoding="utf-8",
+        )
+        override_cfg.write_text(
+            f"data_dir: {override_dir}\ndeployment_mode: managed_enterprise\n",
+            encoding="utf-8",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "DEFENSECLAW_HOME": str(data_dir),
+                "DEFENSECLAW_CONFIG": str(override_cfg),
+            },
+        ):
+            cfg = load()
+        self.assertEqual(cfg.data_dir, str(override_dir))
+        self.assertEqual(cfg.deployment_mode, "managed_enterprise")
+
+    def test_managed_enterprise_save_requires_admin(self):
+        cfg = Config(data_dir=tempfile.mkdtemp(), deployment_mode="managed_enterprise")
+        with patch("defenseclaw.config._is_admin_process", return_value=False):
+            with self.assertRaises(PermissionError):
+                cfg.save()
+
+    def test_secure_write_rejects_managed_enterprise_for_non_admin(self):
+        path = Path(tempfile.mkdtemp()) / "config.yaml"
+        path.write_text(
+            "config_version: 6\ndeployment_mode: managed_enterprise\n",
+            encoding="utf-8",
+        )
+        with patch("defenseclaw.config._is_admin_process", return_value=False):
+            with self.assertRaises(PermissionError):
+                config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
+
+    def test_secure_write_honors_managed_enterprise_env_pin(self):
+        path = Path(tempfile.mkdtemp()) / "config.yaml"
+        path.write_text("config_version: 6\n", encoding="utf-8")
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_DEPLOYMENT_MODE": "managed_enterprise"}),
+            patch("defenseclaw.config._is_admin_process", return_value=False),
+        ):
+            with self.assertRaises(PermissionError):
+                config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
+
+    def test_secure_write_preserves_group_read_without_write(self):
+        path = Path(tempfile.mkdtemp()) / "config.yaml"
+        path.write_text("config_version: 6\n")
+        os.chmod(path, 0o640)
+        config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+
+    def test_secure_write_uses_path_chmod_without_fchmod(self):
+        path = Path(tempfile.mkdtemp()) / "config.yaml"
+        with patch.object(config_mod.os, "fchmod", None):
+            config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
+        self.assertEqual(config_mod.yaml.safe_load(path.read_text()), {"config_version": 6})
+
+    def test_load_dotenv_ignores_unreadable_file(self):
+        with patch("builtins.open", side_effect=PermissionError("denied")):
+            config_mod._load_dotenv_into_os(tempfile.mkdtemp())
 
 
 class TestDetectEnvironment(unittest.TestCase):
