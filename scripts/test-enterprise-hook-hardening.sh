@@ -45,8 +45,9 @@ protected_file_owner_uid() {
 
 wait_for_file() {
     local path="$1"
+    local max_attempts="${2:-100}"
     local attempt=0
-    while [ "$attempt" -lt 100 ]; do
+    while [ "$attempt" -lt "$max_attempts" ]; do
         [ -f "$path" ] && return 0
         sleep 0.1
         attempt=$((attempt + 1))
@@ -117,6 +118,7 @@ native_config="${target_home}/${native_config_rel}"
 auth_record="${auth_dir}/protected_targets.json"
 server_ready="${target_home}/fake-gateway.ready"
 server_result="${target_home}/fake-gateway-result.json"
+server_log="${target_home}/fake-gateway.log"
 fake_server_pid=''
 
 cleanup() {
@@ -142,7 +144,7 @@ TOKEN_PATH="$user_token" \
 EXPECTED_PATH="$hook_request_path" \
 SERVER_READY="$server_ready" \
 SERVER_RESULT="$server_result" \
-python3 - <<'PY' &
+python3 - >"$server_log" 2>&1 <<'PY' &
 import json
 import os
 import pathlib
@@ -189,7 +191,10 @@ server.handle_request()
 server.server_close()
 PY
 fake_server_pid=$!
-wait_for_file "$server_ready" || fail "fake gateway did not start"
+if ! wait_for_file "$server_ready" 300; then
+    cat "$server_log" >&2 || true
+    fail "fake gateway did not start"
+fi
 api_port="$(cat "$server_ready")"
 case "$api_port" in
     ''|*[!0-9]*) fail "fake gateway returned an invalid port: $api_port" ;;
@@ -353,7 +358,10 @@ if ! printf '%s\n' "$hook_payload" | \
     cat "$hook_stderr" >&2
     fail "managed hook did not complete an allow request"
 fi
-wait_for_file "$server_result" || fail "managed hook did not reach the fake gateway"
+if ! wait_for_file "$server_result"; then
+    cat "$server_log" >&2 || true
+    fail "managed hook did not reach the fake gateway"
+fi
 wait "$fake_server_pid"
 fake_server_pid=''
 [ ! -s "$hook_stdout" ] || fail "allow response unexpectedly wrote agent output"
