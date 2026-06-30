@@ -128,6 +128,7 @@ def discover(
     _load_dotenv_into_os(str(default_data_path()))
     started = time.monotonic()
     disc = agent_discovery.discover_agents(use_cache=not no_cache, refresh=refresh)
+    _apply_discovery_config_state(app, disc)
     duration_ms = int((time.monotonic() - started) * 1000)
 
     otel_result = {"attempted": False, "emitted": False, "error": ""}
@@ -1995,6 +1996,37 @@ def _load_config_best_effort(app: AppContext):
     return cfg
 
 
+def _apply_discovery_config_state(
+    app: AppContext,
+    disc: agent_discovery.AgentDiscovery,
+) -> agent_discovery.AgentDiscovery:
+    """Annotate discovery with active/mode state when config.yaml exists.
+
+    ``agent discover`` remains safe before ``init``: a missing or invalid
+    config simply leaves every connector inactive instead of manufacturing
+    the default OpenClaw state.
+    """
+    cfg = getattr(app, "cfg", None)
+    if cfg is None:
+        from defenseclaw import config as cfg_mod  # noqa: PLC0415
+
+        cfg_path = cfg_mod.default_data_path() / cfg_mod.CONFIG_FILE_NAME
+        if not cfg_path.is_file():
+            return disc
+        try:
+            # Discovery should not mix unrelated migration/deprecation prose
+            # into its table or JSON output. Config loading is read-only here;
+            # any warning remains available on commands that manage config.
+            from contextlib import redirect_stderr  # noqa: PLC0415
+            from io import StringIO  # noqa: PLC0415
+
+            with redirect_stderr(StringIO()):
+                cfg = cfg_mod.load()
+        except Exception:
+            return disc
+    return agent_discovery.apply_config_state(disc, cfg)
+
+
 def _require_loaded_config(app: AppContext):
     """Return ``app.cfg``, lazily loading the real ``config.yaml`` when missing.
 
@@ -3755,6 +3787,9 @@ def _sanitized_discovery_report(disc: agent_discovery.AgentDiscovery, *, duratio
     for name, signal in disc.agents.items():
         agents[name] = {
             "installed": bool(signal.installed),
+            "configured": bool(signal.configured),
+            "active": bool(signal.active),
+            "mode": signal.mode,
             "has_config": bool(signal.config_path),
             "config_basename": _basename(signal.config_path),
             "config_path_hash": _path_hash(signal.config_path),
