@@ -45,6 +45,23 @@ func hookAPIValidateDirectory(path string) error {
 	return nil
 }
 
+func hookAPIValidateDirectoryElement(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("hook API token directory must be absolute: %q", path)
+	}
+	info, err := os.Lstat(filepath.Clean(path))
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("symlinks are not allowed: %s", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("expected directory: %s", path)
+	}
+	return hookAPIValidateDirectoryMetadata(path, info, false)
+}
+
 func hookAPIValidateDirectoryChain(clean string) error {
 	for cur := clean; ; cur = filepath.Dir(cur) {
 		info, err := os.Lstat(cur)

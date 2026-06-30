@@ -37,6 +37,13 @@ func hookAPIValidateDirectory(path string) error {
 	return nil
 }
 
+func hookAPIValidateDirectoryElement(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("hook API token directory must be absolute: %q", path)
+	}
+	return hookAPIValidateWindowsPathElement(filepath.Clean(path), true, true)
+}
+
 func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren bool) error {
 	info, err := os.Lstat(path)
 	if err != nil {

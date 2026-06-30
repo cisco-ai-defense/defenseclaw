@@ -70,6 +70,7 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 	}
 
 	hooksDir := filepath.Dir(tokenPath)
+	hooksDirCreated := false
 	if _, err := os.Lstat(hooksDir); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("inspect hook API token dir: %w", err)
@@ -77,12 +78,23 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 		if err := hookAPIValidateDirectory(dataDir); err != nil {
 			return "", fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
 		}
-		if err := os.Mkdir(hooksDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		if err := os.Mkdir(hooksDir, 0o700); err == nil {
+			hooksDirCreated = true
+		} else if !errors.Is(err, os.ErrExist) {
 			return "", fmt.Errorf("create hook API token dir: %w", err)
 		}
 	}
-	if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil {
-		return "", err
+	if hooksDirCreated {
+		if err := validateOTLPPathTokenLocation(dataDir, tokenPath); err != nil {
+			return "", err
+		}
+		if err := hookAPIValidateDirectoryElement(hooksDir); err != nil {
+			return "", fmt.Errorf("hook API token directory %s is not trusted: %w", hooksDir, err)
+		}
+	} else {
+		if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil {
+			return "", err
+		}
 	}
 
 	buf := make([]byte, otlpTokenLen)
