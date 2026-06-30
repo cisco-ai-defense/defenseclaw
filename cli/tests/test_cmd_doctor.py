@@ -1880,6 +1880,22 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         # prove the auth header was NOT replayed to the redirect target.
         self.requests: list[dict] = []
         recorder = self.requests
+        self.health_body = json.dumps(
+            {
+                "gateway": {
+                    "state": "running",
+                    "details": {"inventory": "x" * 2200},
+                },
+                "watcher": {"state": "running"},
+                "guardrail": {"state": "running"},
+                "api": {"state": "running"},
+                "connectors": [
+                    {"name": "codex", "state": "running"},
+                    {"name": "claudecode", "state": "running"},
+                ],
+            }
+        ).encode("utf-8")
+        health_body = self.health_body
 
         class _Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *args):  # silence test output
@@ -1897,7 +1913,7 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
                     self.send_header("Location", "/leaked")
                     self.end_headers()
                 else:
-                    body = b"reached"
+                    body = health_body if self.path == "/health" else b"reached"
                     self.send_response(200)
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
@@ -1970,6 +1986,43 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         status, body = _http_probe(self._url("/ok"), timeout=5.0)
         self.assertEqual(status, 200, (status, body))
         self.assertIn("reached", body)
+
+    def test_sidecar_health_parses_complete_large_multi_connector_document(self):
+        self.assertGreater(len(self.health_body), 2_000)
+        cfg = SimpleNamespace(
+            openshell=None,
+            gateway=SimpleNamespace(api_port=self.port),
+        )
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        self.assertFalse(
+            any(c["label"] == "Sidecar health JSON" for c in result.checks),
+            result.checks,
+        )
+        subsystem_rows = {
+            c["label"].strip().removeprefix("└─ "): c["status"]
+            for c in result.checks
+            if "└─" in c["label"]
+        }
+        self.assertEqual(subsystem_rows["gateway"], "pass")
+        self.assertEqual(subsystem_rows["watcher"], "pass")
+        self.assertEqual(subsystem_rows["guardrail"], "pass")
+        self.assertEqual(subsystem_rows["api"], "pass")
+
+    def test_structured_probe_rejects_response_over_its_byte_bound(self):
+        from defenseclaw.commands.cmd_doctor import _http_probe
+
+        status, body = _http_probe(
+            self._url("/health"),
+            timeout=5.0,
+            response_limit=128,
+            allow_truncation=False,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body, "response exceeds 128-byte limit")
 
 
 class GuardrailProxyMultiConnectorTests(unittest.TestCase):
