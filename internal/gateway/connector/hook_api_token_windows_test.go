@@ -120,6 +120,51 @@ func TestHookAPITokenWindowsAllowsInheritOnlyCreatorOwnerTemplate(t *testing.T) 
 	}
 }
 
+func TestHookAPITokenWindowsAllowsOwnerRightsACE(t *testing.T) {
+	ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
+	if err != nil {
+		t.Fatalf("Owner Rights SID: %v", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_ALL,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(ownerRights),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("build DACL: %v", err)
+	}
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, true, true); err != nil {
+		t.Fatalf("Owner Rights ACE was rejected after trusted-owner validation: %v", err)
+	}
+}
+
+func TestHookAPITokenWindowsRejectsDirectCreatorOwnerACE(t *testing.T) {
+	creatorOwner, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerSid)
+	if err != nil {
+		t.Fatalf("Creator Owner SID: %v", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_WRITE,
+		AccessMode:        windows.GRANT_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(creatorOwner),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("build DACL: %v", err)
+	}
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, true, true); err == nil {
+		t.Fatal("direct Creator Owner ACE was accepted")
+	}
+}
+
 func TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor(t *testing.T) {
 	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {

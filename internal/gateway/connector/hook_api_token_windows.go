@@ -119,6 +119,9 @@ func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, want
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if hookAPIWindowsOwnerRightsPrincipal(sid) {
+			continue
+		}
 		if inheritOnly && hookAPIWindowsCreatorOwnerTemplate(sid) {
 			continue
 		}
@@ -130,8 +133,11 @@ func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, want
 }
 
 func hookAPIWindowsCreatorOwnerTemplate(sid *windows.SID) bool {
-	value := hookAPIWindowsSIDString(sid)
-	return value == "S-1-3-0" || value == "S-1-3-4"
+	return sid != nil && sid.IsWellKnown(windows.WinCreatorOwnerSid)
+}
+
+func hookAPIWindowsOwnerRightsPrincipal(sid *windows.SID) bool {
+	return sid != nil && sid.IsWellKnown(windows.WinCreatorOwnerRightsSid)
 }
 
 func hookAPIWindowsWriteLikeAccess(mask windows.ACCESS_MASK, protectChildren bool) bool {
