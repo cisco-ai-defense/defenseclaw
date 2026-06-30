@@ -21,18 +21,88 @@ import (
 	"runtime"
 )
 
+// PlatformSupportStatus is the operator-facing availability state for a
+// connector on an operating system.
+type PlatformSupportStatus string
+
+const (
+	PlatformSupported   PlatformSupportStatus = "supported"
+	PlatformPreview     PlatformSupportStatus = "preview"
+	PlatformUnsupported PlatformSupportStatus = "unsupported"
+)
+
+// PlatformSupport includes both the machine-readable state and the reason that
+// setup/presentation surfaces show to the operator.
+type PlatformSupport struct {
+	Status PlatformSupportStatus
+	Reason string
+}
+
 // proxyConnectors are the chat/LLM-proxy connectors that interpose on model
-// traffic through DefenseClaw's local guardrail proxy. They are unsupported on
-// Windows, where DefenseClaw runs hook-only: the native Go hook entrypoint
-// replaces the Bash hook chain, and there is no Windows guardrail-proxy
-// lifecycle to host these connectors.
-//
-// This is the Go single source of truth for OS support. Keep it in sync with
-// the Python cli/defenseclaw/platform_support.py WINDOWS_UNSUPPORTED_CONNECTORS
-// set — a parity test pins the two lists together.
+// traffic through DefenseClaw's local guardrail proxy. Topology and platform
+// support are deliberately separate facts: OpenClaw itself has a native
+// Windows path, but DefenseClaw does not host its proxy lifecycle on Windows.
 var proxyConnectors = map[string]struct{}{
 	"openclaw":  {},
 	"zeptoclaw": {},
+}
+
+// windowsConnectorSupport is the Go source of truth for native Windows
+// connector availability. Keep it in exact parity with the Python
+// cli/defenseclaw/platform_support.py WINDOWS_CONNECTOR_SUPPORT mapping.
+var windowsConnectorSupport = map[string]PlatformSupport{
+	"codex": {
+		Status: PlatformSupported,
+		Reason: "Codex CLI and the DefenseClaw hook entrypoint run natively on Windows.",
+	},
+	"claudecode": {
+		Status: PlatformSupported,
+		Reason: "Claude Code supports native Windows with Git for Windows and native hooks.",
+	},
+	"cursor": {
+		Status: PlatformSupported,
+		Reason: "Cursor IDE hooks run natively on Windows; Cursor CLI remains WSL-only.",
+	},
+	"windsurf": {
+		Status: PlatformSupported,
+		Reason: "Windsurf documents native Windows Cascade hooks.",
+	},
+	"geminicli": {
+		Status: PlatformSupported,
+		Reason: "Gemini CLI documents native Windows command hooks and PowerShell execution.",
+	},
+	"copilot": {
+		Status: PlatformSupported,
+		Reason: "GitHub Copilot CLI documents Windows hook execution through PowerShell.",
+	},
+	"antigravity": {
+		Status: PlatformSupported,
+		Reason: "Antigravity runs natively on Windows and exposes local JSON hooks.",
+	},
+	"opencode": {
+		Status: PlatformSupported,
+		Reason: "OpenCode runs directly on Windows and loads the JavaScript bridge plugin without shell shims.",
+	},
+	"hermes": {
+		Status: PlatformPreview,
+		Reason: "Hermes labels native Windows support Early Beta; setup is available as a preview.",
+	},
+	"openhands": {
+		Status: PlatformUnsupported,
+		Reason: "OpenHands CLI requires WSL; DefenseClaw does not implement a WSL connector path.",
+	},
+	"omnigent": {
+		Status: PlatformUnsupported,
+		Reason: "OmniGent has no supported native Windows terminal/sandbox path for this connector.",
+	},
+	"openclaw": {
+		Status: PlatformUnsupported,
+		Reason: "DefenseClaw on Windows is hook-only; OpenClaw integration requires the guardrail proxy.",
+	},
+	"zeptoclaw": {
+		Status: PlatformUnsupported,
+		Reason: "ZeptoClaw publishes macOS/Linux builds and its DefenseClaw integration requires the guardrail proxy.",
+	},
 }
 
 // IsProxyConnector reports whether name is a proxy/chat connector (as opposed
@@ -42,23 +112,51 @@ func IsProxyConnector(name string) bool {
 	return ok
 }
 
-// connectorSupportedOnOS reports whether a connector can be listed or set up on
-// the given GOOS. Every hook-based connector is supported on every OS; the
-// proxy connectors are unsupported on Windows.
-func connectorSupportedOnOS(name, goos string) bool {
-	if goos == "windows" && IsProxyConnector(name) {
-		return false
+// ConnectorSupportOnOS returns a supported/preview/unsupported classification
+// with a human-readable reason. Unknown plugin connectors preserve historical
+// behavior and remain available.
+func ConnectorSupportOnOS(name, goos string) PlatformSupport {
+	if goos == "windows" {
+		if support, ok := windowsConnectorSupport[name]; ok {
+			return support
+		}
+		return PlatformSupport{
+			Status: PlatformSupported,
+			Reason: "No native Windows restriction is registered for this plugin connector.",
+		}
 	}
-	return true
+	return PlatformSupport{
+		Status: PlatformSupported,
+		Reason: fmt.Sprintf("Connector setup is supported on %s.", goos),
+	}
 }
 
-// ConnectorSupportedOnHostOS reports support on the current host OS.
+// connectorSupportedOnOS reports whether setup/presentation may offer name on
+// goos. Preview connectors are deliberately available.
+func connectorSupportedOnOS(name, goos string) bool {
+	return ConnectorSupportOnOS(name, goos).Status != PlatformUnsupported
+}
+
+// ConnectorSupportOnHostOS returns the full classification for the host OS.
+func ConnectorSupportOnHostOS(name string) PlatformSupport {
+	return ConnectorSupportOnOS(name, runtime.GOOS)
+}
+
+// ConnectorSupportedOnHostOS reports availability on the current host OS.
 func ConnectorSupportedOnHostOS(name string) bool {
-	return connectorSupportedOnOS(name, runtime.GOOS)
+	return ConnectorSupportOnHostOS(name).Status != PlatformUnsupported
 }
 
-// errConnectorUnsupportedOnOS is the clear, behavior-first error proxy-connector
-// Setup returns when invoked on an OS that cannot host the guardrail proxy.
+// validateConnectorSupportedOnOS returns the clear setup error used by direct
+// connector lifecycle calls. It is injectable by OS for focused tests.
+func validateConnectorSupportedOnOS(name, goos string) error {
+	support := ConnectorSupportOnOS(name, goos)
+	if support.Status != PlatformUnsupported {
+		return nil
+	}
+	return fmt.Errorf("connector %q is not supported on %s: %s", name, goos, support.Reason)
+}
+
 func errConnectorUnsupportedOnOS(name, goos string) error {
-	return fmt.Errorf("connector %q is not supported on %s: DefenseClaw on %s is hook-only and proxy connectors require the guardrail proxy", name, goos, goos)
+	return validateConnectorSupportedOnOS(name, goos)
 }

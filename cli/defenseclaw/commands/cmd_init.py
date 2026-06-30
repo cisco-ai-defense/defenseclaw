@@ -215,6 +215,18 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     """
     import platform
 
+    requested_connectors = []
+    if connector:
+        requested_connectors.append(_normalize_connector_arg(connector))
+    requested_connectors.extend(_parse_connector_list(action_connectors))
+    for requested in requested_connectors:
+        support = platform_support.connector_platform_support(requested)
+        if not support.available:
+            raise click.ClickException(
+                f"connector {requested!r} is {support.status} on "
+                f"{platform_support.host_os()}: {support.reason}"
+            )
+
     if _use_guided_first_run(
         non_interactive=non_interactive,
         yes=yes,
@@ -830,7 +842,13 @@ def _installed_hook_connectors(disc) -> list[str]:
     names: list[str] = []
     for name in order:
         sig = disc.agents.get(name)
-        if sig and sig.installed and name in _HOOK_ENFORCED_CONNECTORS and name not in names:
+        if (
+            sig
+            and sig.installed
+            and name in _HOOK_ENFORCED_CONNECTORS
+            and platform_support.connector_supported_on_os(name)
+            and name not in names
+        ):
             names.append(name)
     return names
 
@@ -979,9 +997,12 @@ def _prompt_connector_selection(
 
     fallback = agent_discovery.first_installed(disc, "codex")
     ux.subhead("No hook connectors were detected. Choose one active connector to configure.")
+    choices = platform_support.supported_connectors(sorted(connector_paths.KNOWN_CONNECTORS))
+    if fallback not in choices:
+        fallback = choices[0] if choices else "codex"
     raw = click.prompt(
         "  Connector",
-        type=click.Choice(sorted(connector_paths.KNOWN_CONNECTORS), case_sensitive=False),
+        type=click.Choice(choices, case_sensitive=False),
         default=fallback,
         show_default=True,
     )
@@ -996,12 +1017,23 @@ def _note_proxy_connectors(disc) -> None:
     their dedicated setup so a detected proxy agent isn't silently skipped."""
     order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", None) or sorted(disc.agents)
     detected: list[str] = []
+    unavailable: list[str] = []
     for name in order:
         if not platform_support.is_proxy_connector(name):
             continue
         signal = disc.agents.get(name)
         if signal is not None and signal.installed:
-            detected.append(name)
+            if platform_support.connector_supported_on_os(name):
+                detected.append(name)
+            else:
+                unavailable.append(name)
+    for name in unavailable:
+        support = platform_support.connector_platform_support(name)
+        ux.warn(
+            f"Detected {name}, but it is {support.status} on "
+            f"{platform_support.host_os()}: {support.reason}",
+            indent="  ",
+        )
     if not detected:
         return
     ux.subhead(
@@ -1728,7 +1760,12 @@ def _normalize_connector_arg(
     if connector is None and discover_default:
         try:
             disc = agent_discovery.discover_agents(refresh=refresh_agents)
-            connector = agent_discovery.first_installed(disc, "codex")
+            discovered = agent_discovery.first_installed(disc, "codex")
+            if platform_support.connector_supported_on_os(discovered):
+                connector = discovered
+            else:
+                installed = _installed_hook_connectors(disc)
+                connector = installed[0] if installed else "codex"
         except Exception:
             connector = "codex"
     value = (connector or "codex").strip().lower()

@@ -160,21 +160,22 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(cfg["guardrail"]["detection_strategy"], "regex_judge")
 
     def test_sandbox_flag_reports_explicit_scope(self):
-        result = self._invoke([
-            "--non-interactive",
-            "--yes",
-            "--connector",
-            "openclaw",
-            "--profile",
-            "observe",
-            "--scanner-mode",
-            "local",
-            "--skip-install",
-            "--sandbox",
-            "--no-start-gateway",
-            "--no-verify",
-            "--json-summary",
-        ])
+        with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "openclaw",
+                "--profile",
+                "observe",
+                "--scanner-mode",
+                "local",
+                "--skip-install",
+                "--sandbox",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
 
         summary = json.loads(result.output)
@@ -2786,11 +2787,24 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         from defenseclaw.commands import cmd_init
 
         disc = self._disc({"codex", "openclaw"})
-        with patch.object(cmd_init.ux, "subhead") as subhead:
+        with patch.object(cmd_init.platform_support, "host_os", return_value="linux"), \
+                patch.object(cmd_init.ux, "subhead") as subhead:
             cmd_init._note_proxy_connectors(disc)
         emitted = " ".join(call.args[0] for call in subhead.call_args_list if call.args)
         self.assertIn("openclaw", emitted)
         self.assertIn("defenseclaw setup openclaw", emitted)
+
+    def test_note_proxy_connectors_warns_when_unsupported_on_windows(self):
+        from defenseclaw.commands import cmd_init
+
+        disc = self._disc({"codex", "openclaw"})
+        with patch.object(cmd_init.platform_support, "host_os", return_value="windows"), \
+                patch.object(cmd_init.ux, "warn") as warn:
+            cmd_init._note_proxy_connectors(disc)
+        emitted = " ".join(call.args[0] for call in warn.call_args_list if call.args)
+        self.assertIn("openclaw", emitted)
+        self.assertIn("unsupported on windows", emitted)
+        self.assertIn("guardrail proxy", emitted)
 
     def test_note_proxy_connectors_silent_without_proxy(self):
         from defenseclaw.commands import cmd_init
