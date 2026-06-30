@@ -89,13 +89,19 @@ source_binary="$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
 sudo -n true || fail "passwordless sudo is required"
 
 case "$(uname -s)" in
-    Darwin) admin_group='wheel' ;;
-    Linux) admin_group='root' ;;
+    Darwin)
+        admin_group='wheel'
+        trusted_root='/Library'
+        ;;
+    Linux)
+        admin_group='root'
+        trusted_root='/var/lib'
+        ;;
     *) fail "unsupported operating system: $(uname -s)" ;;
 esac
 
 run_id="$$"
-root_prefix="/opt/defenseclaw-enterprise-ci-${connector}-${run_id}"
+root_prefix="${trusted_root}/defenseclaw-enterprise-ci-${connector}-${run_id}"
 target_home="${HOME}/.defenseclaw-enterprise-ci-${connector}-${run_id}"
 root_binary="${root_prefix}/bin/defenseclaw-gateway"
 service_data="${root_prefix}/runtime"
@@ -109,6 +115,8 @@ user_token="${hook_dir}/.hook-${connector}.token"
 service_token="${service_data}/hooks/.hook-${connector}.token"
 native_config="${target_home}/${native_config_rel}"
 auth_record="${auth_dir}/protected_targets.json"
+server_ready="${target_home}/fake-gateway.ready"
+server_result="${target_home}/fake-gateway-result.json"
 fake_server_pid=''
 
 cleanup() {
@@ -130,21 +138,64 @@ install -d -m 0700 "$target_home" "$(dirname "$native_config")"
 printf '%s\n' "$native_config_seed" >"$native_config"
 chmod 0600 "$native_config"
 
-api_port="$(python3 - <<'PY'
-import socket
+TOKEN_PATH="$user_token" \
+EXPECTED_PATH="$hook_request_path" \
+SERVER_READY="$server_ready" \
+SERVER_RESULT="$server_result" \
+python3 - <<'PY' &
+import json
+import os
+import pathlib
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-with socket.socket() as sock:
-    sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
+expected_path = os.environ["EXPECTED_PATH"]
+result_path = os.environ["SERVER_RESULT"]
+token_path = os.environ["TOKEN_PATH"]
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        try:
+            parsed = json.loads(body)
+            body_ok = isinstance(parsed, dict)
+        except json.JSONDecodeError:
+            body_ok = False
+        expected_token = pathlib.Path(token_path).read_text(encoding="utf-8").rstrip("\n")
+        auth_ok = self.headers.get("Authorization") == f"Bearer {expected_token}"
+        path_ok = self.path == expected_path
+        result = {
+            "auth_ok": auth_ok,
+            "path_ok": path_ok,
+            "body_ok": body_ok,
+            "path": self.path,
+        }
+        with open(result_path, "w", encoding="utf-8") as handle:
+            json.dump(result, handle)
+        self.send_response(200 if auth_ok and path_ok and body_ok else 401)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"action":"allow"}')
+
+    def log_message(self, *_args):
+        return
+
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+with open(os.environ["SERVER_READY"], "w", encoding="utf-8") as handle:
+    handle.write(f"{server.server_port}\n")
+server.handle_request()
+server.server_close()
 PY
-)"
+fake_server_pid=$!
+wait_for_file "$server_ready" || fail "fake gateway did not start"
+api_port="$(cat "$server_ready")"
+case "$api_port" in
+    ''|*[!0-9]*) fail "fake gateway returned an invalid port: $api_port" ;;
+esac
 
-if [ -L /opt ]; then
-    fail "/opt must not be a symlink"
-elif [ ! -e /opt ]; then
-    sudo -n install -d -o root -g "$admin_group" -m 0755 /opt
-fi
-[ -d /opt ] && [ ! -L /opt ] || fail "/opt must be a real directory"
+[ -d "$trusted_root" ] && [ ! -L "$trusted_root" ] || fail "$trusted_root must be a real directory"
 
 sudo -n install -d -o root -g "$admin_group" -m 0755 \
     "$root_prefix" "${root_prefix}/bin" "$auth_dir"
@@ -293,61 +344,6 @@ run_reconcile >"${target_home}/reconcile-noop.json"
 [ "$(file_mtime "$hook_script")" = "$hook_mtime" ] || fail "no-op reconcile rewrote the hook"
 [ "$(file_mtime "$user_token")" = "$token_mtime" ] || fail "no-op reconcile rewrote the scoped token"
 [ "$(file_mtime "$native_config")" = "$config_mtime" ] || fail "no-op reconcile rewrote the native config"
-
-expected_token="$(cat "$user_token")"
-server_ready="${target_home}/fake-gateway.ready"
-server_result="${target_home}/fake-gateway-result.json"
-EXPECTED_TOKEN="$expected_token" \
-EXPECTED_PATH="$hook_request_path" \
-SERVER_PORT="$api_port" \
-SERVER_READY="$server_ready" \
-SERVER_RESULT="$server_result" \
-python3 - <<'PY' &
-import json
-import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-expected_token = os.environ["EXPECTED_TOKEN"]
-expected_path = os.environ["EXPECTED_PATH"]
-result_path = os.environ["SERVER_RESULT"]
-
-
-class Handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length).decode("utf-8")
-        try:
-            parsed = json.loads(body)
-            body_ok = isinstance(parsed, dict)
-        except json.JSONDecodeError:
-            body_ok = False
-        auth_ok = self.headers.get("Authorization") == f"Bearer {expected_token}"
-        path_ok = self.path == expected_path
-        result = {
-            "auth_ok": auth_ok,
-            "path_ok": path_ok,
-            "body_ok": body_ok,
-            "path": self.path,
-        }
-        with open(result_path, "w", encoding="utf-8") as handle:
-            json.dump(result, handle)
-        self.send_response(200 if auth_ok and path_ok and body_ok else 401)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"action":"allow"}')
-
-    def log_message(self, *_args):
-        return
-
-
-server = HTTPServer(("127.0.0.1", int(os.environ["SERVER_PORT"])), Handler)
-with open(os.environ["SERVER_READY"], "w", encoding="utf-8") as handle:
-    handle.write("ready\n")
-server.handle_request()
-server.server_close()
-PY
-fake_server_pid=$!
-wait_for_file "$server_ready" || fail "fake gateway did not start"
 
 hook_stdout="${target_home}/hook.stdout"
 hook_stderr="${target_home}/hook.stderr"

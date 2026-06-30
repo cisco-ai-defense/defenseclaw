@@ -414,7 +414,7 @@ The repository runs `scripts/test-enterprise-hook-hardening.sh` as a four-cell G
 | macOS | Codex |
 | macOS | Claude Code |
 
-Each cell builds the real gateway CLI, creates an isolated root-owned managed control plane under `/opt`, and targets a disposable directory owned by the runner account. Provisioning and reconciliation use passwordless CI `sudo`; every attacker simulation and protected-path assertion executes without privilege elevation. It verifies:
+Each cell builds the real gateway CLI, creates an isolated root-owned managed control plane under `/var/lib` on Ubuntu or `/Library` on macOS, and targets a disposable directory owned by the runner account. Provisioning and reconciliation use passwordless CI `sudo`; every attacker simulation and protected-path assertion executes without privilege elevation. It verifies:
 
 - first-time manifest reconciliation and native agent wiring;
 - root-owned binary, config, manifest, service token, and authorization-record boundaries;
