@@ -8,6 +8,7 @@
     "mcp-scanner",
     "webhooks",
     "registries",
-    "enterprise-deployment"
+    "enterprise-deployment",
+    "enterprise-hardening-validation"
   ]
 }
