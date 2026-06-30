@@ -137,13 +137,21 @@ func LoadHookAPITokens(dataDir string, connectorNames []string) (map[string]stri
 		if err != nil {
 			continue
 		}
-		tok, err := LoadHookAPIToken(dataDir, scope)
+		tokenPath, err := HookAPITokenFilePath(dataDir, scope)
 		if err != nil {
 			return nil, err
 		}
-		if tok != "" {
-			out[scope] = tok
+		if _, err := os.Lstat(tokenPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("inspect hook API token %s: %w", tokenPath, err)
 		}
+		tok, err := readSecureHookAPITokenFile(dataDir, tokenPath)
+		if err != nil {
+			return nil, err
+		}
+		out[scope] = tok
 	}
 	return out, nil
 }

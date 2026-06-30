@@ -92,3 +92,37 @@ func TestHookAPITokenRejectsSymlinkedDataDirParent(t *testing.T) {
 		return filepath.Join(link, "data")
 	})
 }
+
+func TestLoadHookAPITokensSkipsAbsentFilesBeforeTrustValidation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory modes are not available on Windows")
+	}
+	dataDir := t.TempDir()
+	if err := os.Chmod(dataDir, 0o777); err != nil {
+		t.Fatalf("chmod data dir: %v", err)
+	}
+	tokens, err := LoadHookAPITokens(dataDir, []string{"codex", "claudecode"})
+	if err != nil {
+		t.Fatalf("LoadHookAPITokens absent files: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("LoadHookAPITokens absent files = %v, want empty", tokens)
+	}
+}
+
+func TestLoadHookAPITokensValidatesExistingFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory modes are not available on Windows")
+	}
+	dataDir := t.TempDir()
+	if _, err := EnsureHookAPIToken(dataDir, "codex"); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	hooksDir := filepath.Join(dataDir, "hooks")
+	if err := os.Chmod(hooksDir, 0o777); err != nil {
+		t.Fatalf("chmod hooks dir: %v", err)
+	}
+	if _, err := LoadHookAPITokens(dataDir, []string{"codex", "claudecode"}); err == nil || !strings.Contains(err.Error(), "not trusted") {
+		t.Fatalf("LoadHookAPITokens existing file error = %v, want trust rejection", err)
+	}
+}
