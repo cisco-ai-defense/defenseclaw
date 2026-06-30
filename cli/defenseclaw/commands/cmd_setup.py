@@ -1703,7 +1703,11 @@ def _add_trusted_bin_prefix(prefix: str, data_dir: str) -> bool:
         os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", ""),
     )
     parts = [p.strip() for p in current.split(os.pathsep) if p.strip()]
-    added = prefix not in parts
+    prefix_key = agent_discovery._path_key(os.path.realpath(os.path.abspath(prefix)))
+    added = not any(
+        agent_discovery._path_key(os.path.realpath(os.path.abspath(part))) == prefix_key
+        for part in parts
+    )
     if added:
         parts.append(prefix)
     new_val = os.pathsep.join(parts)
@@ -1725,15 +1729,15 @@ def _add_trusted_bin_prefix(prefix: str, data_dir: str) -> bool:
 
 
 def _trusted_prefix_status(resolved: str) -> str:
-    """Classify a resolved prefix: ok / missing / not-a-dir / world-writable."""
+    """Classify a resolved prefix for trusted-paths list output."""
     if not os.path.exists(resolved):
         return "missing"
     if not os.path.isdir(resolved):
         return "not-a-dir"
-    try:
-        if os.stat(resolved).st_mode & 0o002:
-            return "world-writable"
-    except OSError:  # pragma: no cover - rare stat failure
+    _path, error = agent_discovery.validate_trusted_prefix(resolved)
+    if error:
+        if "write access" in error or "writable" in error:
+            return "unsafe-permissions"
         return "error"
     return "ok"
 
@@ -1841,7 +1845,7 @@ def trusted_paths_list(app: AppContext, as_json: bool) -> None:
 
 @trusted_paths.command("add")
 @click.argument("directory")
-@click.option("--force", is_flag=True, help="Add even when the directory is world-writable or missing.")
+@click.option("--force", is_flag=True, help="Record the path even when it is missing or has unsafe permissions.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON instead of text.")
 @pass_ctx
 def trusted_paths_add(app: AppContext, directory: str, force: bool, as_json: bool) -> None:

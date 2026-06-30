@@ -70,7 +70,7 @@ VERSION_TIMEOUT_SECONDS = 2.0
 # default-trusted prefix would let the passive scan exec it. Operators
 # with bespoke install layouts extend the allow-list at runtime via the
 # ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` env var (``os.pathsep``-separated).
-_TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
+_TRUSTED_BIN_PREFIXES_DEFAULT_POSIX: tuple[str, ...] = (
     "/usr/bin",
     "/usr/local/bin",
     "/usr/sbin",
@@ -98,6 +98,67 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     # (``os.pathsep``-separated); the per-file/parent permission checks in
     # _is_trusted_binary_path still apply on top of any extension.
 )
+
+
+def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
+    """Return narrow, documented Windows CLI installation roots.
+
+    Do not trust ``%LOCALAPPDATA%`` or ``%APPDATA%`` wholesale: either root can
+    contain unrelated executables.  These candidates are limited to the
+    connector and package-manager bin directories used by supported Windows
+    installers.  Admission still requires the real ACL checks below.
+    """
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    roaming_app_data = os.environ.get("APPDATA", "")
+    home = os.path.expanduser("~")
+    program_roots = tuple(
+        path
+        for path in (
+            os.environ.get("ProgramFiles", ""),
+            os.environ.get("ProgramFiles(x86)", ""),
+        )
+        if path
+    )
+
+    candidates: list[str] = []
+    if local_app_data:
+        candidates.extend(
+            (
+                os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin"),
+                os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"),
+                os.path.join(local_app_data, "Programs", "Windsurf", "bin"),
+                os.path.join(local_app_data, "Microsoft", "WinGet", "Links"),
+                os.path.join(local_app_data, "pnpm"),
+            )
+        )
+    if roaming_app_data:
+        candidates.append(os.path.join(roaming_app_data, "npm"))
+    if home:
+        candidates.extend(
+            (
+                os.path.join(home, ".local", "bin"),
+                os.path.join(home, ".opencode", "bin"),
+                os.path.join(home, "scoop", "shims"),
+            )
+        )
+    for root in program_roots:
+        candidates.extend(
+            (
+                os.path.join(root, "OpenAI", "Codex", "bin"),
+                os.path.join(root, "cursor", "resources", "app", "bin"),
+                os.path.join(root, "Windsurf", "bin"),
+            )
+        )
+    return tuple(candidates)
+
+
+_TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
+    _windows_default_trusted_bin_prefixes()
+    if os.name == "nt"
+    else _TRUSTED_BIN_PREFIXES_DEFAULT_POSIX
+)
+
+_WINDOWS_EXECUTABLE_EXTENSIONS = frozenset({".com", ".exe", ".bat", ".cmd"})
 
 DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "codex",
@@ -321,8 +382,30 @@ def _trusted_bin_prefixes() -> tuple[str, ...]:
     return tuple(_expand_bin_prefixes((*_TRUSTED_BIN_PREFIXES_DEFAULT, *extras)))
 
 
+def _path_key(path: str) -> str:
+    """Return the platform comparison key for an already-absolute path."""
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _is_filesystem_root(path: str) -> bool:
+    anchor = Path(path).anchor
+    return bool(anchor) and _path_key(path) == _path_key(anchor)
+
+
+def _path_is_within(path: str, prefix: str) -> bool:
+    """Compare canonical paths with component and Windows case semantics."""
+    path_key = _path_key(path)
+    prefix_key = _path_key(prefix)
+    try:
+        return os.path.commonpath((path_key, prefix_key)) == prefix_key
+    except ValueError:
+        # Different Windows drives (or a malformed path) have no common path.
+        return False
+
+
 def _expand_bin_prefixes(prefixes: tuple[str, ...]) -> list[str]:
     expanded: list[str] = []
+    seen: set[str] = set()
     for prefix in prefixes:
         try:
             # Binary admission compares against the binary's realpath, so
@@ -337,13 +420,12 @@ def _expand_bin_prefixes(prefixes: tuple[str, ...]) -> list[str]:
         # `/` matches every absolute path, and `""` would normalize to
         # the current working directory which an attacker can pivot via
         # `cd`. The allow-list must name a real installation root.
-        normalized = absolute.rstrip(os.sep)
-        if normalized in ("", os.sep.rstrip(os.sep)):
+        if _is_filesystem_root(absolute):
             continue
-        # Require at least one path component below the filesystem
-        # root — `/usr` is fine, `/` is not.
-        if absolute.count(os.sep) < 1 or normalized == "":
+        key = _path_key(absolute)
+        if not key or key in seen:
             continue
+        seen.add(key)
         expanded.append(absolute)
     return expanded
 
@@ -392,6 +474,214 @@ def _bin_chain_is_system_owned(resolved: str, prefix: str) -> bool:
             break
         current = parent
     return True
+
+
+def _windows_acl_snapshot(path: str) -> tuple[str, bool, list[tuple[int, int, int, str]]]:
+    """Return ``(owner_sid, null_dacl, access_entries)`` for *path*.
+
+    ``os.stat().st_mode`` on Windows is synthesized from DOS attributes and
+    cannot answer who may replace an executable.  Read the owner and DACL from
+    the Win32 security descriptor instead.  The ctypes declarations stay
+    local so importing this module remains safe on Unix.
+    """
+    if os.name != "nt":  # pragma: no cover - guarded by Windows callers
+        raise OSError("Windows ACLs are unavailable on this platform")
+
+    import ctypes  # noqa: PLC0415
+    from ctypes import wintypes  # noqa: PLC0415
+
+    class _TrusteeW(ctypes.Structure):
+        pass
+
+    _TrusteeW._fields_ = [
+        ("pMultipleTrustee", ctypes.POINTER(_TrusteeW)),
+        ("MultipleTrusteeOperation", wintypes.DWORD),
+        ("TrusteeForm", wintypes.DWORD),
+        ("TrusteeType", wintypes.DWORD),
+        # For TRUSTEE_IS_SID this is a PSID, not a string pointer.
+        ("ptstrName", ctypes.c_void_p),
+    ]
+
+    class _ExplicitAccessW(ctypes.Structure):
+        _fields_ = [
+            ("grfAccessPermissions", wintypes.DWORD),
+            ("grfAccessMode", wintypes.DWORD),
+            ("grfInheritance", wintypes.DWORD),
+            ("Trustee", _TrusteeW),
+        ]
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    get_security = advapi32.GetNamedSecurityInfoW
+    get_security.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    get_security.restype = wintypes.DWORD
+
+    get_entries = advapi32.GetExplicitEntriesFromAclW
+    get_entries.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.ULONG),
+        ctypes.POINTER(ctypes.POINTER(_ExplicitAccessW)),
+    ]
+    get_entries.restype = wintypes.DWORD
+
+    sid_to_string = advapi32.ConvertSidToStringSidW
+    sid_to_string.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    sid_to_string.restype = wintypes.BOOL
+
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    def _sid_string(sid: int | None) -> str:
+        if not sid:
+            return ""
+        value = wintypes.LPWSTR()
+        if not sid_to_string(ctypes.c_void_p(sid), ctypes.byref(value)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return value.value or ""
+        finally:
+            local_free(ctypes.cast(value, ctypes.c_void_p))
+
+    owner = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    # SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+    result = get_security(
+        path,
+        1,
+        0x00000001 | 0x00000004,
+        ctypes.byref(owner),
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if result:
+        raise OSError(result, ctypes.FormatError(result), path)
+
+    entries_ptr = ctypes.POINTER(_ExplicitAccessW)()
+    try:
+        owner_sid = _sid_string(owner.value)
+        if not dacl.value:
+            return owner_sid, True, []
+
+        count = wintypes.ULONG()
+        result = get_entries(dacl, ctypes.byref(count), ctypes.byref(entries_ptr))
+        if result:
+            raise OSError(result, ctypes.FormatError(result), path)
+
+        entries: list[tuple[int, int, int, str]] = []
+        for index in range(count.value):
+            entry = entries_ptr[index]
+            # GetExplicitEntriesFromAcl normally returns SID trustees.  An
+            # unknown form with write rights is retained as an empty identity
+            # and rejected conservatively by the caller.
+            sid = (
+                _sid_string(entry.Trustee.ptstrName)
+                if entry.Trustee.TrusteeForm == 0
+                else ""
+            )
+            entries.append(
+                (
+                    int(entry.grfAccessPermissions),
+                    int(entry.grfAccessMode),
+                    int(entry.grfInheritance),
+                    sid,
+                )
+            )
+        return owner_sid, False, entries
+    finally:
+        if entries_ptr:
+            local_free(ctypes.cast(entries_ptr, ctypes.c_void_p))
+        if descriptor.value:
+            local_free(descriptor)
+
+
+def _windows_acl_write_error(path: str) -> str | None:
+    """Return a refusal when an untrusted Windows principal may write *path*."""
+    try:
+        owner_sid, null_dacl, entries = _windows_acl_snapshot(path)
+    except OSError as exc:
+        return f"cannot read Windows ACL ({exc})"
+
+    if null_dacl:
+        return "ACL grants write access to untrusted principal Everyone (null DACL)"
+
+    # The object owner plus the two privileged Windows control principals may
+    # retain write/full-control.  Other principals may read and execute, but
+    # must not be able to replace the binary or change its DACL/owner.
+    trusted_controllers = {
+        "S-1-3-4",  # OWNER RIGHTS (the descriptor's owner only)
+        "S-1-5-18",  # LocalSystem
+        "S-1-5-32-544",  # BUILTIN\Administrators
+    }
+    if owner_sid:
+        trusted_controllers.add(owner_sid)
+    write_mask = (
+        0x00000002  # FILE_WRITE_DATA / FILE_ADD_FILE
+        | 0x00000004  # FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+        | 0x00000010  # FILE_WRITE_EA
+        | 0x00000040  # FILE_DELETE_CHILD
+        | 0x00000100  # FILE_WRITE_ATTRIBUTES
+        | 0x00010000  # DELETE
+        | 0x00040000  # WRITE_DAC
+        | 0x00080000  # WRITE_OWNER
+        | 0x10000000  # GENERIC_ALL
+        | 0x40000000  # GENERIC_WRITE
+    )
+    sid_labels = {
+        "": "unknown trustee",
+        "S-1-1-0": "Everyone",
+        "S-1-3-0": "CREATOR OWNER",
+        "S-1-5-11": "Authenticated Users",
+        "S-1-5-32-545": "BUILTIN\\Users",
+    }
+    for permissions, access_mode, inheritance, sid in entries:
+        # GRANT_ACCESS and SET_ACCESS are the allow modes emitted by
+        # GetExplicitEntriesFromAcl.  Deny/audit entries do not grant writes.
+        if access_mode not in (1, 2) or not (permissions & write_mask):
+            continue
+        if sid in trusted_controllers:
+            continue
+        # CREATOR OWNER on an inherit-only ACE becomes the already-trusted
+        # owner of a newly created child; it grants nothing on this directory.
+        if sid == "S-1-3-0" and inheritance & 0x08:  # INHERIT_ONLY_ACE
+            continue
+        principal = sid_labels.get(sid, sid)
+        return f"ACL grants write access to untrusted principal {principal}"
+    return None
+
+
+def _windows_acl_chain_is_safe(resolved: str, prefix: str) -> bool:
+    """Check the executable and every ancestor through its trusted prefix."""
+    current = resolved
+    prefix_key = _path_key(prefix)
+    seen: set[str] = set()
+    while current:
+        key = _path_key(current)
+        if key in seen:
+            return False
+        seen.add(key)
+        if _windows_acl_write_error(current) is not None:
+            return False
+        if key == prefix_key:
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+    return False
 
 
 def _trusted_prefix_dir_mode_error(st: os.stat_result) -> str | None:
@@ -453,7 +743,11 @@ def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
         return resolved, f"cannot stat path ({exc})"
     if not os.path.isdir(resolved):
         return resolved, "path is not a directory"
-    mode_err = _trusted_prefix_dir_mode_error(st)
+    mode_err = (
+        _windows_acl_write_error(resolved)
+        if os.name == "nt"
+        else _trusted_prefix_dir_mode_error(st)
+    )
     if mode_err:
         return resolved, mode_err
     return resolved, None
@@ -478,48 +772,56 @@ def _is_trusted_binary_path(binary_path: str) -> bool:
         return False
     if not os.path.isfile(resolved):
         return False
-    if not os.access(resolved, os.X_OK):
-        return False
-    parent = os.path.dirname(resolved)
-    try:
-        parent_st = os.stat(parent)
-    except OSError:
-        return False
-    # World-writable parent → an attacker who can write to that dir
-    # could swap the binary at any time. Treat as untrusted.
-    if parent_st.st_mode & 0o002:
-        return False
-    # also reject group-writable parents unless the
-    # group is the system root group. A non-root user that shares a
-    # group with the parent dir can swap the binary.
-    if parent_st.st_mode & 0o020:
-        grp_name = ""
-        if _grp is not None:
-            try:
-                grp_name = _grp.getgrgid(parent_st.st_gid).gr_name
-            except (KeyError, OSError):
-                grp_name = ""
-        if grp_name not in ("root", "wheel", "admin"):
+    if os.name == "nt":
+        if os.path.splitext(resolved)[1].lower() not in _WINDOWS_EXECUTABLE_EXTENSIONS:
             return False
-    # refuse a binary whose own file is writable by
-    # anyone other than the trusted system owner. The user-writable
-    # ~/.local/bin/* case is the canonical exploit path; even if an
-    # operator extends DEFENSECLAW_TRUSTED_BIN_PREFIXES to include it,
-    # we still refuse the individual file when its mode bits expose
-    # group/world write.
-    try:
-        bin_st = os.stat(resolved)
-    except OSError:
-        return False
-    if bin_st.st_mode & 0o022:
-        return False
+    else:
+        if not os.access(resolved, os.X_OK):
+            return False
+        parent = os.path.dirname(resolved)
+        try:
+            parent_st = os.stat(parent)
+        except OSError:
+            return False
+        # World-writable parent → an attacker who can write to that dir
+        # could swap the binary at any time. Treat as untrusted.
+        if parent_st.st_mode & 0o002:
+            return False
+        # also reject group-writable parents unless the
+        # group is the system root group. A non-root user that shares a
+        # group with the parent dir can swap the binary.
+        if parent_st.st_mode & 0o020:
+            grp_name = ""
+            if _grp is not None:
+                try:
+                    grp_name = _grp.getgrgid(parent_st.st_gid).gr_name
+                except (KeyError, OSError):
+                    grp_name = ""
+            if grp_name not in ("root", "wheel", "admin"):
+                return False
+        # refuse a binary whose own file is writable by
+        # anyone other than the trusted system owner. The user-writable
+        # ~/.local/bin/* case is the canonical exploit path; even if an
+        # operator extends DEFENSECLAW_TRUSTED_BIN_PREFIXES to include it,
+        # we still refuse the individual file when its mode bits expose
+        # group/world write.
+        try:
+            bin_st = os.stat(resolved)
+        except OSError:
+            return False
+        if bin_st.st_mode & 0o022:
+            return False
     prefixes = _trusted_bin_prefixes()
     default_prefixes = _default_trusted_bin_prefixes()
     for prefix in prefixes:
         # Both the resolved binary and the candidate need to share a
         # path-component boundary; suffix-string match would let
         # /usr/binEvil sneak past /usr/bin.
-        if resolved == prefix or resolved.startswith(prefix.rstrip(os.sep) + os.sep):
+        if _path_is_within(resolved, prefix):
+            if os.name == "nt":
+                if not _windows_acl_chain_is_safe(resolved, prefix):
+                    continue
+                return True
             # F-0421: built-in default prefixes additionally require the
             # resolved binary and its parent chain (up to the prefix) to be
             # root-owned. A user-owned, owner-writable binary under a
@@ -533,6 +835,13 @@ def _is_trusted_binary_path(binary_path: str) -> bool:
     return False
 
 
+def _binary_command_name(binary_path: str) -> str:
+    """Normalize a CLI basename, stripping Windows executable wrappers."""
+    name = os.path.basename(binary_path).lower()
+    stem, extension = os.path.splitext(name)
+    return stem if extension in _WINDOWS_EXECUTABLE_EXTENSIONS else name
+
+
 def _version_for_binary(binary_path: str, version_args: tuple[str, ...]) -> tuple[str, str]:
     # M-4: the value of ``binary_path`` is sourced from
     # ``shutil.which(binary_name)`` which honours $PATH — an attacker
@@ -541,10 +850,10 @@ def _version_for_binary(binary_path: str, version_args: tuple[str, ...]) -> tupl
     # anything outside the canonical install prefixes.
     if not _is_trusted_binary_path(binary_path):
         return "", UNTRUSTED_PREFIX_ERROR
-    binary_name = os.path.basename(binary_path).lower()
+    binary_name = _binary_command_name(binary_path)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name in {"hermes", "openhands"}:
+    if binary_name in {"claude", "hermes", "openhands"}:
         timeout = 8.0
     if binary_name == "openhands":
         env = {**os.environ, "OPENHANDS_SUPPRESS_BANNER": "1"}
@@ -578,7 +887,7 @@ def _version_line_for_binary(binary_path: str, stdout: str) -> str:
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
     if not lines:
         return ""
-    binary_name = os.path.basename(binary_path).lower()
+    binary_name = _binary_command_name(binary_path)
     if binary_name == "openhands":
         for line in reversed(lines):
             if "openhands cli" in line.lower():
