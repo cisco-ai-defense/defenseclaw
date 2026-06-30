@@ -9,7 +9,11 @@ datasources:
     isDefault: true
     jsonData:
       httpMethod: POST
-      timeInterval: 15s
+      # DefenseClaw's default OTel metric push interval is 60s. Grafana uses
+      # this value to calculate $__rate_interval; advertising Prometheus'
+      # internal 15s scrape interval produced 1m rate windows with only one
+      # application sample, so otherwise healthy panels rendered "No data".
+      timeInterval: 60s
       exemplarTraceIdDestinations:
         - name: trace_id
           datasourceUid: defenseclaw-tempo

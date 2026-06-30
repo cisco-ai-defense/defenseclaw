@@ -203,7 +203,8 @@
     },
     {
       "type": "stat",
-      "title": "Discovery runs / hour",
+      "title": "Discovery runs (range)",
+      "description": "On-demand connector discovery reports accepted during the selected range.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -216,7 +217,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_ai_discovery_runs_total[$__range])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_agent_discovery_runs_total[$__range])) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -260,7 +261,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (ai_product) (max_over_time(defenseclaw_ai_discovery_signals_total[$__range]))) or vector(0)",
+          "expr": "count(sum by (ecosystem, name) (max_over_time(defenseclaw_ai_components_installs[$__range]))) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -307,7 +308,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (connector) (rate(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[$__rate_interval]))",
+          "expr": "sum by (source) (rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[$__rate_interval]))",
           "legendFormat": "{{source}}",
           "refId": "A"
         }
@@ -363,7 +364,7 @@
       },
       "targets": [
         {
-          "expr": "count by (gen_ai_agent_name) (sum by (gen_ai_agent_name, defenseclaw_agent_instance_id) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_agent_instance_id != \"\" [$__interval])))",
+          "expr": "count by (gen_ai_agent_name) (sum by (gen_ai_agent_name, gen_ai_agent_id) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | gen_ai_agent_id != \"\" [$__interval])))",
           "legendFormat": "{{gen_ai_agent_name}}",
           "refId": "A",
           "datasource": {
@@ -394,7 +395,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (gen_ai_agent_name) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_agent_instance_id != \"\" [$__interval])) / sum by (gen_ai_agent_name) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" [$__interval]))",
+          "expr": "sum by (gen_ai_agent_name) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | gen_ai_agent_id != \"\" [$__interval])) / sum by (gen_ai_agent_name) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" [$__interval]))",
           "legendFormat": "{{gen_ai_agent_name}}",
           "refId": "A",
           "datasource": {
@@ -498,12 +499,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(defenseclaw_agent_discovery_duration_milliseconds_bucket[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "p50"
         },
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(defenseclaw_agent_discovery_duration_milliseconds_bucket[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "p95"
         }
@@ -531,7 +532,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (connector) (increase(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[$__range]))",
+          "expr": "max by (connector) (last_over_time(defenseclaw_agent_discovery_installed_ratio{connector=~\"$connector\"}[$__range]))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -744,7 +745,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (le) (increase(defenseclaw_ai_discovery_duration_milliseconds_bucket[$__range]))",
+          "expr": "sum by (le) (increase(defenseclaw_ai_confidence_identity_score_bucket[$__range]))",
           "format": "heatmap",
           "refId": "A"
         }
@@ -766,7 +767,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (le) (increase(defenseclaw_ai_discovery_duration_milliseconds_bucket[$__range]))",
+          "expr": "sum by (le) (increase(defenseclaw_ai_confidence_presence_score_bucket[$__range]))",
           "format": "heatmap",
           "refId": "A"
         }
@@ -799,7 +800,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"ai_discovery\"",
+          "expr": "{service_name=\"defenseclaw\"} | event_name=~\"defenseclaw[.](agent|ai)[.]discovery.*\"",
           "refId": "A",
           "datasource": {
             "type": "loki",

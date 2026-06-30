@@ -194,8 +194,8 @@
     },
     {
       "type": "stat",
-      "title": "Silence (s)",
-      "description": "Seconds since the last accepted OTel batch (native-OTLP connectors) OR the last hook invocation seen for this connector. Hook-only connectors fall back to the hook-rate freshness so the panel is meaningful for cursor/hermes/copilot/geminicli/windsurf. >600s triggers DefenseClawConnectorTelemetrySilent.",
+      "title": "OTLP silence (s)",
+      "description": "Seconds since the last accepted OTel batch for a native-OTLP connector. Hook-only connectors intentionally show no series because a sampled counter cannot provide an honest last-event timestamp. >600s triggers DefenseClawConnectorTelemetrySilent for connectors that have emitted OTLP.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -208,7 +208,7 @@
       },
       "targets": [
         {
-          "expr": "time() - max(defenseclaw_otel_ingest_last_seen_ts_seconds{source=\"$connector\"}) or (time() - timestamp(sum(rate(defenseclaw_connector_hook_invocations_total{connector=\"$connector\"}[1m])) > bool 0)) or vector(0)",
+          "expr": "time() - max(defenseclaw_otel_ingest_last_seen_ts_seconds{source=\"$connector\"})",
           "refId": "A",
           "instant": true
         }
@@ -605,7 +605,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (severity) (rate(defenseclaw_connector_hook_outcome_total{connector=\"$connector\", severity!=\"NONE\"}[$__rate_interval])) or on() vector(0)",
+          "expr": "sum by (severity) (rate(defenseclaw_connector_hook_outcome_total{connector=\"$connector\", would_block=\"true\", severity!=\"NONE\"}[$__rate_interval])) * 60 or on() vector(0)",
           "legendFormat": "{{severity}}",
           "refId": "A"
         }
@@ -744,7 +744,7 @@
     {
       "type": "table",
       "title": "Top findings by rule (24h)",
-      "description": "Scanner findings aggregated by rule across all scanners.",
+      "description": "Scanner findings for the selected connector, aggregated by rule across all scanners.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -757,7 +757,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sort_desc(sum by (scanner, rule_id, severity) (increase(defenseclaw_scan_findings_by_rule_total[24h]))))",
+          "expr": "topk(20, sort_desc(sum by (scanner, rule_id, severity) (increase(defenseclaw_scan_findings_by_rule_total{connector=\"$connector\"}[24h]))))",
           "instant": true,
           "format": "table",
           "refId": "A"
