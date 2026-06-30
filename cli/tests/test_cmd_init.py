@@ -1020,13 +1020,13 @@ class TestResolveSplunkBridgeBundle(unittest.TestCase):
         from defenseclaw.commands.cmd_init import _resolve_splunk_bridge_bundle
 
         def fake_is_dir(path):
-            path_str = str(path)
+            path_str = str(path).replace("\\", "/")
             return path_str.endswith("_data/splunk_local_bridge") or path_str.endswith("bundles/splunk_local_bridge")
 
         with patch("pathlib.Path.is_dir", autospec=True, side_effect=fake_is_dir):
             result = _resolve_splunk_bridge_bundle()
 
-        self.assertTrue(str(result).endswith("_data/splunk_local_bridge"))
+        self.assertTrue(str(result).replace("\\", "/").endswith("_data/splunk_local_bridge"))
 
 
 class TestInitSeedsSplunkBridge(unittest.TestCase):
