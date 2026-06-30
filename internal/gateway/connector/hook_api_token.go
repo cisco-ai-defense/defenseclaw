@@ -35,14 +35,25 @@ var (
 // narrower than gateway.token: tokenAuth accepts it only for that connector's
 // hook submission routes.
 func HookAPITokenFilePath(dataDir, connectorName string) (string, error) {
+	if dataDir == "" {
+		return "", fmt.Errorf("HookAPITokenFilePath: empty dataDir")
+	}
+	return HookTokenFilePath(filepath.Join(dataDir, "hooks"), connectorName)
+}
+
+// HookTokenFilePath returns the connector-scoped token sidecar path within a
+// hook directory. Managed per-user installs use the same basename as the
+// service-side token so multiple connectors can share one hook directory
+// without overwriting each other's credentials.
+func HookTokenFilePath(hookDir, connectorName string) (string, error) {
 	scope, err := normalizeHookAPITokenScope(connectorName)
 	if err != nil {
 		return "", err
 	}
-	if dataDir == "" {
-		return "", fmt.Errorf("HookAPITokenFilePath: empty dataDir")
+	if hookDir == "" {
+		return "", fmt.Errorf("HookTokenFilePath: empty hookDir")
 	}
-	return filepath.Join(dataDir, "hooks", ".hook-"+scope+".token"), nil
+	return filepath.Join(hookDir, ".hook-"+scope+".token"), nil
 }
 
 // EnsureHookAPIToken returns a stable 64-character hex token for connectorName.

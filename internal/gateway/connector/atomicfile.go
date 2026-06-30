@@ -17,7 +17,9 @@
 package connector
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -39,6 +41,9 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(writePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create dir for %s: %w", writePath, err)
+	}
+	if atomicFileAlreadyMatches(writePath, data, perm) {
+		return nil
 	}
 
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
@@ -67,6 +72,29 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("rename %s → %s: %w", tmpPath, writePath, err)
 	}
 	return nil
+}
+
+func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm() != perm.Perm() {
+		return false
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
+		return false
+	}
+	current, err := io.ReadAll(file)
+	if err != nil || !bytes.Equal(current, data) {
+		return false
+	}
+	pathInfo, err = os.Lstat(path)
+	return err == nil && pathInfo.Mode()&os.ModeSymlink == 0 && os.SameFile(openedInfo, pathInfo)
 }
 
 func resolveAtomicWritePath(path string) (string, error) {

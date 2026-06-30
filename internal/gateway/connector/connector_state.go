@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -189,6 +190,18 @@ func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) erro
 	}
 	if lock.Connectors == nil {
 		lock.Connectors = map[string]HookContractLockEntry{}
+	}
+	if previous, ok := lock.Connectors[entry.Connector]; ok {
+		previousComparison := previous
+		entryComparison := entry
+		previousComparison.UpdatedAt = ""
+		entryComparison.UpdatedAt = ""
+		if reflect.DeepEqual(previousComparison, entryComparison) {
+			return nil
+		}
+	}
+	if entry.UpdatedAt == "" {
+		entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	lock.Connectors[entry.Connector] = entry

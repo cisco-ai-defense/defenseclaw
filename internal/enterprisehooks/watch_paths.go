@@ -125,7 +125,11 @@ func WatchDirs(opts InstallOptions) ([]string, error) {
 		for _, path := range footprint.GeneratedExecutables {
 			addFileParent(path)
 		}
-		for _, path := range hookSidecarFiles(dataDir) {
+		sidecarFiles, sidecarErr := hookSidecarFiles(dataDir, conn.Name())
+		if sidecarErr != nil {
+			return sidecarErr
+		}
+		for _, path := range sidecarFiles {
 			addFileParent(path)
 		}
 		for _, path := range footprint.CreatedDirs {

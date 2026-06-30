@@ -152,7 +152,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		if ap, ok := conn.(connector.AgentPathProvider); ok {
 			footprint = ap.AgentPaths(setupOpts)
 		}
-		if err := validateInstallFootprintBeforeSetup(home, dataDir, uid, footprint, opts.AllowMissingHookConfigRepair); err != nil {
+		if err := validateInstallFootprintBeforeSetup(home, dataDir, uid, conn.Name(), footprint, opts.AllowMissingHookConfigRepair); err != nil {
 			return err
 		}
 
@@ -176,7 +176,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				return fmt.Errorf("enterprise hooks: save hook contract lock: %w", err)
 			}
 
-			if err := hardenInstallFootprint(uid, gid, home, dataDir, footprint, paths); err != nil {
+			if err := hardenInstallFootprint(uid, gid, home, dataDir, conn.Name(), footprint, paths); err != nil {
 				_ = conn.Teardown(ctx, setupOpts)
 				return err
 			}
@@ -269,6 +269,12 @@ func validateHookConfigSurface(home, path string, uid int, allowMissing bool) er
 		return fmt.Errorf("enterprise hooks: hook config path is a directory: %s", path)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
+		if allowMissing {
+			if ok, actual := fileOwnerMatches(path, uid); !ok {
+				return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d", path, actual, uid)
+			}
+			return chmodOwnedPath(path, 0o600)
+		}
 		return fmt.Errorf("enterprise hooks: hook config %s is group/other writable", path)
 	}
 	if ok, actual := fileOwnerMatches(path, uid); !ok {
@@ -407,6 +413,12 @@ func validateOptionalExistingUserFileRepair(home, path string, uid int, label st
 		return fmt.Errorf("enterprise hooks: %s path is a directory: %s", label, path)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
+		if allowRepairSymlink {
+			if ok, actual := fileOwnerMatches(path, uid); !ok {
+				return fmt.Errorf("enterprise hooks: %s %s owner uid=%d does not match target uid=%d", label, path, actual, uid)
+			}
+			return chmodOwnedPath(path, 0o600)
+		}
 		return fmt.Errorf("enterprise hooks: %s %s is group/other writable", label, path)
 	}
 	if ok, actual := fileOwnerMatches(path, uid); !ok {
@@ -475,7 +487,7 @@ func validateExistingUserDir(path string, uid int, label string) error {
 	return nil
 }
 
-func validateInstallFootprintBeforeSetup(home, dataDir string, uid int, footprint connector.AgentPaths, allowRepairSymlink bool) error {
+func validateInstallFootprintBeforeSetup(home, dataDir string, uid int, connectorName string, footprint connector.AgentPaths, allowRepairSymlink bool) error {
 	for _, dir := range sortedUnique(append([]string{filepath.Join(dataDir, "hooks")}, footprint.CreatedDirs...)) {
 		if err := validateOptionalExistingUserDirRepair(home, dir, uid, "footprint dir", allowRepairSymlink); err != nil {
 			return err
@@ -486,7 +498,11 @@ func validateInstallFootprintBeforeSetup(home, dataDir string, uid int, footprin
 	files = append(files, footprint.HookScripts...)
 	files = append(files, footprint.GeneratedFiles...)
 	files = append(files, footprint.GeneratedExecutables...)
-	files = append(files, hookSidecarFiles(dataDir)...)
+	sidecarFiles, err := hookSidecarFiles(dataDir, connectorName)
+	if err != nil {
+		return err
+	}
+	files = append(files, sidecarFiles...)
 	for _, path := range sortedUnique(files) {
 		if strings.TrimSpace(path) == "" {
 			continue
@@ -511,7 +527,7 @@ func removeRepairSymlink(path string, uid int, label string) error {
 	return nil
 }
 
-func hardenInstallFootprint(uid, gid int, home, dataDir string, footprint connector.AgentPaths, hookConfigPaths []string) error {
+func hardenInstallFootprint(uid, gid int, home, dataDir, connectorName string, footprint connector.AgentPaths, hookConfigPaths []string) error {
 	if err := validateExistingUserDir(dataDir, uid, "data dir"); err != nil {
 		return err
 	}
@@ -555,7 +571,11 @@ func hardenInstallFootprint(uid, gid int, home, dataDir string, footprint connec
 	footprintFiles = append(footprintFiles, footprint.HookScripts...)
 	footprintFiles = append(footprintFiles, footprint.GeneratedFiles...)
 	footprintFiles = append(footprintFiles, footprint.GeneratedExecutables...)
-	footprintFiles = append(footprintFiles, hookSidecarFiles(dataDir)...)
+	sidecarFiles, err := hookSidecarFiles(dataDir, connectorName)
+	if err != nil {
+		return err
+	}
+	footprintFiles = append(footprintFiles, sidecarFiles...)
 	for _, path := range sortedUnique(footprintFiles) {
 		path = strings.TrimSpace(path)
 		if path == "" {
@@ -590,13 +610,18 @@ func hardenInstallFootprint(uid, gid int, home, dataDir string, footprint connec
 	return lchownInstallFootprint(uid, gid, dataDir, footprint, hookConfigPaths)
 }
 
-func hookSidecarFiles(dataDir string) []string {
+func hookSidecarFiles(dataDir, connectorName string) ([]string, error) {
 	hookDir := filepath.Join(dataDir, "hooks")
-	return []string{
+	files := []string{
 		filepath.Join(hookDir, ".token"),
 		filepath.Join(hookDir, ".hookcfg"),
 		filepath.Join(hookDir, "_hardening.sh"),
 	}
+	scopedToken, err := connector.HookTokenFilePath(hookDir, connectorName)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: resolve connector-scoped token sidecar: %w", err)
+	}
+	return append(files, scopedToken), nil
 }
 
 func validateHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) error {

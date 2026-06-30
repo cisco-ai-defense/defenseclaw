@@ -70,11 +70,11 @@ type Options struct {
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
 	// or contains a .disabled file the hook is a no-op (exit 0).
 	Home string
-	// HookDir holds the .token sidecar file (default Home/hooks).
+	// HookDir holds connector-scoped and legacy token sidecars (default Home/hooks).
 	HookDir string
 	// Token, when set, is the resolved gateway token (e.g. from the
-	// DEFENSECLAW_GATEWAY_TOKEN env var); it takes precedence over the .token
-	// file. Empty means "fall back to the .token file".
+	// DEFENSECLAW_GATEWAY_TOKEN env var); it takes precedence over the scoped
+	// token file and legacy .token fallback.
 	Token string
 
 	// StrictAvailability mirrors DEFENSECLAW_STRICT_AVAILABILITY: when true,
@@ -128,10 +128,10 @@ func Run(ctx context.Context, opts Options) int {
 	failMode := normalizeFailMode(opts.FailMode)
 
 	// Missing-token branch: only taken when BOTH the env token is empty AND
-	// the .token file is absent. (An empty token inside an existing .token
+	// the resolved token sidecar is absent. (An empty token inside an existing
 	// file is intentionally NOT a missing token — it selects the loopback
 	// no-auth path, same as the .sh.)
-	tokenFile := filepath.Join(opts.HookDir, ".token")
+	tokenFile := hookTokenFile(opts.HookDir, opts.Connector)
 	if opts.Token == "" && !fileExists(tokenFile) {
 		return handleMissingToken(opts, sp, failMode)
 	}
@@ -274,7 +274,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 // then allow (exit 0) by default or block (exit 2) under strict availability.
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode string) int {
-	const reason = "missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
+	const reason = "missing gateway token (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
 	logHookFailure(opts, sp, reason, "transport", failMode)
 	if opts.StrictAvailability {
 		fmt.Fprintf(opts.Stderr,
@@ -396,7 +396,15 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// readTokenFile parses DEFENSECLAW_GATEWAY_TOKEN out of the .token sidecar,
+func hookTokenFile(hookDir, connector string) string {
+	scoped := filepath.Join(hookDir, ".hook-"+strings.ToLower(strings.TrimSpace(connector))+".token")
+	if fileExists(scoped) {
+		return scoped
+	}
+	return filepath.Join(hookDir, ".token")
+}
+
+// readTokenFile parses DEFENSECLAW_GATEWAY_TOKEN out of a token sidecar,
 // which setup writes as `DEFENSECLAW_GATEWAY_TOKEN="<token>"` (Go-quoted). An
 // unreadable/empty file yields an empty token (loopback no-auth path).
 func readTokenFile(path string) string {

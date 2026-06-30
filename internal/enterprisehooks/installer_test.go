@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -59,6 +60,220 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".defenseclaw", "hook_contract_lock.json")); err != nil {
 		t.Fatalf("hook contract lock missing: %v", err)
+	}
+}
+
+func TestInstallMultipleConnectorsKeepsScopedHookTokens(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	claudeConfig := filepath.Join(home, ".claude", "settings.json")
+	for _, path := range []string{codexConfig, claudeConfig} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("mkdir connector config dir: %v", err)
+		}
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	if err := os.WriteFile(claudeConfig, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write Claude Code config: %v", err)
+	}
+
+	registry := connector.NewDefaultRegistry()
+	for _, opts := range []InstallOptions{
+		{
+			ConnectorName: "codex",
+			APIToken:      "codex-token",
+			AgentVersion:  "codex-cli 0.142.0",
+		},
+		{
+			ConnectorName: "claudecode",
+			APIToken:      "claude-token",
+			AgentVersion:  "2.1.187 (Claude Code)",
+		},
+	} {
+		opts.UserHome = home
+		opts.OwnerUID = os.Getuid()
+		opts.OwnerGID = os.Getgid()
+		opts.APIAddr = "127.0.0.1:18970"
+		opts.ProxyAddr = "127.0.0.1:4000"
+		opts.GuardrailMode = "action"
+		opts.HookFailMode = "closed"
+		opts.Registry = registry
+		if _, err := Install(context.Background(), opts); err != nil {
+			t.Fatalf("Install(%s): %v", opts.ConnectorName, err)
+		}
+	}
+
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	otherToken := map[string]string{
+		"codex":      ".hook-claudecode.token",
+		"claudecode": ".hook-codex.token",
+	}
+	for _, tc := range []struct {
+		connector string
+		script    string
+		token     string
+	}{
+		{connector: "codex", script: "codex-hook.sh", token: "codex-token"},
+		{connector: "claudecode", script: "claude-code-hook.sh", token: "claude-token"},
+	} {
+		tokenName := ".hook-" + tc.connector + ".token"
+		tokenData, err := os.ReadFile(filepath.Join(hookDir, tokenName))
+		if err != nil {
+			t.Fatalf("read %s token: %v", tc.connector, err)
+		}
+		wantToken := "DEFENSECLAW_GATEWAY_TOKEN=\"" + tc.token + "\""
+		if got := strings.TrimSpace(string(tokenData)); got != wantToken {
+			t.Fatalf("%s token sidecar = %q, want %q", tc.connector, got, wantToken)
+		}
+		scriptData, err := os.ReadFile(filepath.Join(hookDir, tc.script))
+		if err != nil {
+			t.Fatalf("read %s script: %v", tc.connector, err)
+		}
+		scriptText := string(scriptData)
+		if !strings.Contains(scriptText, "${HOOK_DIR}/"+tokenName) {
+			t.Fatalf("%s script does not reference %s", tc.connector, tokenName)
+		}
+		if strings.Contains(scriptText, "${HOOK_DIR}/.token") {
+			t.Fatalf("%s script still references legacy shared token", tc.connector)
+		}
+		if strings.Contains(scriptText, otherToken[tc.connector]) {
+			t.Fatalf("%s script references another connector token", tc.connector)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(hookDir, ".token")); !os.IsNotExist(err) {
+		t.Fatalf("shared legacy token exists after scoped installs: %v", err)
+	}
+}
+
+func TestInstallAuthorizedRepairNormalizesWritableArtifacts(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	opts := InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      "codex-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "codex-cli 0.142.0",
+		Registry:      connector.NewDefaultRegistry(),
+	}
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("initial Install: %v", err)
+	}
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	modes := map[string]os.FileMode{
+		codexConfig:                                 0o600,
+		filepath.Join(hookDir, "codex-hook.sh"):     0o700,
+		filepath.Join(hookDir, ".hook-codex.token"): 0o600,
+	}
+	for path := range modes {
+		if err := os.Chmod(path, 0o777); err != nil {
+			t.Fatalf("widen %s: %v", path, err)
+		}
+	}
+	opts.AllowMissingHookConfigRepair = true
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("repair Install: %v", err)
+	}
+	for path, want := range modes {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("mode %s = %04o, want %04o", path, got, want)
+		}
+	}
+}
+
+func TestInstallMultipleConnectorsNoOpRepairPreservesModificationTimes(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	claudeConfig := filepath.Join(home, ".claude", "settings.json")
+	for _, path := range []string{codexConfig, claudeConfig} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("mkdir connector config dir: %v", err)
+		}
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	if err := os.WriteFile(claudeConfig, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write Claude Code config: %v", err)
+	}
+
+	registry := connector.NewDefaultRegistry()
+	options := []InstallOptions{
+		{ConnectorName: "codex", APIToken: "codex-token", AgentVersion: "codex-cli 0.142.0"},
+		{ConnectorName: "claudecode", APIToken: "claude-token", AgentVersion: "2.1.187 (Claude Code)"},
+	}
+	installAll := func(allowRepair bool) {
+		t.Helper()
+		for i := range options {
+			opts := options[i]
+			opts.UserHome = home
+			opts.OwnerUID = os.Getuid()
+			opts.OwnerGID = os.Getgid()
+			opts.APIAddr = "127.0.0.1:18970"
+			opts.ProxyAddr = "127.0.0.1:4000"
+			opts.GuardrailMode = "action"
+			opts.HookFailMode = "closed"
+			opts.Registry = registry
+			opts.AllowMissingHookConfigRepair = allowRepair
+			if _, err := Install(context.Background(), opts); err != nil {
+				t.Fatalf("Install(%s): %v", opts.ConnectorName, err)
+			}
+		}
+	}
+	installAll(false)
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	paths := []string{
+		codexConfig,
+		claudeConfig,
+		filepath.Join(hookDir, ".hook-codex.token"),
+		filepath.Join(hookDir, ".hook-claudecode.token"),
+		filepath.Join(hookDir, "codex-hook.sh"),
+		filepath.Join(hookDir, "claude-code-hook.sh"),
+		filepath.Join(home, ".defenseclaw", "hook_contract_lock.json"),
+		filepath.Join(home, ".defenseclaw", "connector_backups", "codex", "config.toml.json"),
+		filepath.Join(home, ".defenseclaw", "connector_backups", "claudecode", "settings.json.json"),
+	}
+	modTimes := make(map[string]int64, len(paths))
+	oldTime := time.Unix(1, 0)
+	for _, path := range paths {
+		if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+			t.Fatalf("age no-op repair fixture %s: %v", path, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat before no-op repair %s: %v", path, err)
+		}
+		modTimes[path] = info.ModTime().UnixNano()
+	}
+	installAll(true)
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat after no-op repair %s: %v", path, err)
+		}
+		if got := info.ModTime().UnixNano(); got != modTimes[path] {
+			t.Fatalf("no-op repair rewrote %s: mtime before=%d after=%d", path, modTimes[path], got)
+		}
 	}
 }
 
@@ -551,7 +766,7 @@ func TestValidateInstallFootprintRefusesGeneratedFileSymlinkBeforeSetup(t *testi
 		t.Fatalf("symlink policy: %v", err)
 	}
 
-	err := validateInstallFootprintBeforeSetup(home, dataDir, os.Getuid(), connector.AgentPaths{
+	err := validateInstallFootprintBeforeSetup(home, dataDir, os.Getuid(), "codex", connector.AgentPaths{
 		GeneratedFiles: []string{generatedPath},
 	}, false)
 	if err == nil || !strings.Contains(err.Error(), "refusing symlink") {
@@ -599,7 +814,7 @@ func TestHardenInstallFootprintRefusesCreatedDirOutsideHome(t *testing.T) {
 		t.Fatalf("chmod outside dir: %v", err)
 	}
 
-	err := hardenInstallFootprint(os.Getuid(), os.Getgid(), home, dataDir, connector.AgentPaths{
+	err := hardenInstallFootprint(os.Getuid(), os.Getgid(), home, dataDir, "codex", connector.AgentPaths{
 		CreatedDirs: []string{outside},
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "refusing created dir outside user home") {

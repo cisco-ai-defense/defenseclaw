@@ -39,6 +39,8 @@ def test_systemd_enterprise_unit_pins_hardening_contract():
     }
     missing = sorted(line for line in required if line not in text)
     assert not missing
+    assert text.splitlines().count("NoNewPrivileges=true") == 1
+    assert "NoNewPrivileges=false" not in text.splitlines()
 
 
 def test_systemd_hook_guardian_is_oneshot_and_keeps_gateway_config_read_only():
@@ -62,10 +64,12 @@ def test_systemd_hook_guardian_is_oneshot_and_keeps_gateway_config_read_only():
         "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID",
         "RestrictNamespaces=true",
         "RestrictSUIDSGID=true",
-        "NoNewPrivileges=true",
+        "NoNewPrivileges=false",
     }
     missing = sorted(line for line in required if line not in text)
     assert not missing
+    assert text.splitlines().count("NoNewPrivileges=false") == 1
+    assert "NoNewPrivileges=true" not in text.splitlines()
 
 
 def test_systemd_hook_guardian_reconcile_timer_and_manifest_contract():
@@ -89,12 +93,18 @@ def test_systemd_hook_guardian_reconcile_timer_and_manifest_contract():
     assert "ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian" in service_text
     assert "Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian" in service_text
     assert "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID" in service_text
+    assert "NoNewPrivileges=false" in service_text
+    assert service_text.splitlines().count("NoNewPrivileges=false") == 1
+    assert "NoNewPrivileges=true" not in service_text.splitlines()
     assert "enterprise hooks watch --manifest /etc/defenseclaw/hook-guardian/targets.yaml --interval 1m" in watch_text
     assert "Restart=always" in watch_text
     assert "ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw" in watch_text
     assert "ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian" in watch_text
     assert "Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian" in watch_text
     assert "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID" in watch_text
+    assert "NoNewPrivileges=false" in watch_text
+    assert watch_text.splitlines().count("NoNewPrivileges=false") == 1
+    assert "NoNewPrivileges=true" not in watch_text.splitlines()
     assert "OnUnitActiveSec=5min" in timer_text
     assert "Persistent=true" in timer_text
     assert "Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment" in timer_text

@@ -435,7 +435,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			if !ok {
 				return nil
 			}
-			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove|fsnotify.Chmod) == 0 {
+			if !enterpriseHookWatchEventRelevant(event) {
 				continue
 			}
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
@@ -458,6 +458,13 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 		}
 	}
+}
+
+func enterpriseHookWatchEventRelevant(event fsnotify.Event) bool {
+	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove|fsnotify.Chmod) == 0 {
+		return false
+	}
+	return !strings.HasSuffix(filepath.Base(event.Name), ".lock")
 }
 
 func syncEnterpriseHookWatchDirs(cmd *cobra.Command, fsw *fsnotify.Watcher, watched map[string]struct{}, dirs []string) {

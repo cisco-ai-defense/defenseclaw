@@ -130,6 +130,10 @@ func chmodOwnedPath(path string, mode os.FileMode) error {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("enterprise hooks: refusing chmod of symlink %s", path)
 	}
+	const relevantMode = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+	if info.Mode()&relevantMode == mode&relevantMode {
+		return nil
+	}
 	if err := os.Chmod(path, mode); err != nil {
 		return fmt.Errorf("enterprise hooks: chmod %s: %w", path, err)
 	}
@@ -150,7 +154,7 @@ func lchownInstallFootprint(uid, gid int, dataDir string, footprint connector.Ag
 		if path == "" {
 			continue
 		}
-		if err := os.Lchown(path, uid, gid); err != nil {
+		if err := lchownIfNeeded(path, uid, gid); err != nil {
 			return fmt.Errorf("enterprise hooks: lchown %s: %w", path, err)
 		}
 	}
@@ -158,7 +162,7 @@ func lchownInstallFootprint(uid, gid int, dataDir string, footprint connector.Ag
 		if path == "" {
 			continue
 		}
-		if err := os.Lchown(path, uid, gid); err != nil {
+		if err := lchownIfNeeded(path, uid, gid); err != nil {
 			return fmt.Errorf("enterprise hooks: lchown %s: %w", path, err)
 		}
 	}
@@ -184,9 +188,24 @@ func chownTree(root string, uid, gid int) error {
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: walk %s: %w", path, err)
 		}
-		if err := os.Lchown(path, uid, gid); err != nil {
+		if err := lchownIfNeeded(path, uid, gid); err != nil {
 			return fmt.Errorf("enterprise hooks: chown %s: %w", path, err)
 		}
 		return nil
 	})
+}
+
+func lchownIfNeeded(path string, uid, gid int) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("cannot inspect owner")
+	}
+	if int(st.Uid) == uid && int(st.Gid) == gid {
+		return nil
+	}
+	return os.Lchown(path, uid, gid)
 }

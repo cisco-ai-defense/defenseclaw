@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -160,6 +161,26 @@ func TestEnterpriseHookScopedTokenUsesManagedDataDir(t *testing.T) {
 		t.Fatalf("stat scoped token: %v", err)
 	} else if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("scoped token mode = %o, want 600", got)
+	}
+}
+
+func TestEnterpriseHookWatchEventRelevantIgnoresLockHousekeeping(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event fsnotify.Event
+		want  bool
+	}{
+		{name: "settings write", event: fsnotify.Event{Name: "/home/alice/.claude/settings.json", Op: fsnotify.Write}, want: true},
+		{name: "hook chmod", event: fsnotify.Event{Name: "/home/alice/.defenseclaw/hooks/codex-hook.sh", Op: fsnotify.Chmod}, want: true},
+		{name: "settings lock create", event: fsnotify.Event{Name: "/home/alice/.claude/settings.json.lock", Op: fsnotify.Create}, want: false},
+		{name: "settings lock remove", event: fsnotify.Event{Name: "/home/alice/.claude/settings.json.lock", Op: fsnotify.Remove}, want: false},
+		{name: "untracked op", event: fsnotify.Event{Name: "/home/alice/.claude/settings.json"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := enterpriseHookWatchEventRelevant(tc.event); got != tc.want {
+				t.Fatalf("enterpriseHookWatchEventRelevant(%+v) = %v, want %v", tc.event, got, tc.want)
+			}
+		})
 	}
 }
 

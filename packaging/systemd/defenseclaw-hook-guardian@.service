@@ -15,7 +15,7 @@ Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardia
 EnvironmentFile=-/etc/defenseclaw/hook-guardian/%i.env
 ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks install --user %i --connector ${DEFENSECLAW_GUARDIAN_CONNECTOR} --agent-version ${DEFENSECLAW_GUARDIAN_AGENT_VERSION}
 UMask=0077
-NoNewPrivileges=true
+NoNewPrivileges=false
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict

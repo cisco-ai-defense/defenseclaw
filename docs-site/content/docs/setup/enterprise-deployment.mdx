@@ -118,6 +118,16 @@ The guardian command:
 - preserves the user's ownership on patched hook files and per-user hook scripts;
 - applies the same action-mode hook-contract validation as gateway startup.
 
+The guardian units set `NoNewPrivileges=false` deliberately. Each reconcile
+temporarily adopts the target user's effective UID/GID so connector files are
+created with the user's ownership, then returns to root to process the next
+allow-listed target. Linux otherwise prevents the long-lived guardian from
+regaining its bounded `CAP_SETUID` after that credential drop. The units still
+limit capabilities to `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`,
+`CAP_SETGID`, and `CAP_SETUID`, retain the `@system-service` syscall filter,
+deny SUID/SGID creation, and restrict writable paths to user homes and the two
+guardian state directories.
+
 For scheduled repair, create `/etc/defenseclaw/hook-guardian/<user>.env`:
 
 ```bash
@@ -159,7 +169,7 @@ sudo systemctl enable --now defenseclaw-hook-guardian.timer
 
 The manifest is an administrator-owned allow-list. The guardian does not enumerate every local user by default, so it will not write into service accounts, stale profiles, or users outside the enterprise policy.
 
-`defenseclaw-hook-guardian-watch.service` watches only directories derived from the manifest and each connector's declared hook/runtime footprint. When a user edits or deletes a watched hook config, hook script, token sidecar, or generated helper, the watcher debounces the event and re-runs the same hardened reconcile path. It still refuses symlink paths, bad owners, group/other-writable files, and missing first-time app configs. The timer keeps a periodic repair backstop for missed filesystem events, reboot catch-up, and deployments that choose not to run the watcher.
+`defenseclaw-hook-guardian-watch.service` watches only directories derived from the manifest and each connector's declared hook/runtime footprint. When a user edits or deletes a watched hook config, hook script, token sidecar, or generated helper, the watcher debounces the event and re-runs the same hardened reconcile path. First-time installs still refuse symlinks, bad owners, group/other-writable files, and missing app configs. After a target has a root-owned authorization record, the watcher may remove target-owned symlinks and normalize target-owned modes before reinstalling the canonical footprint; foreign-owned paths and unsafe parent directories remain hard failures. The timer keeps a periodic repair backstop for missed filesystem events, reboot catch-up, and deployments that choose not to run the watcher.
 
 Each reconcile run writes `/var/lib/defenseclaw/hook_guardian_state.json`. `defenseclaw status` reads that file and reports the last manifest path, run time, target counts, and per-user repair failures under `Hook guardian`.
 

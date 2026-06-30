@@ -57,7 +57,7 @@ DEFENSECLAW_HOOK_CONNECTOR="antigravity"
 DEFENSECLAW_HOOK_NAME="antigravity-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token antigravity antigravity-hook "antigravity tool"
 fi
 
@@ -69,9 +69,9 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   exit 0
 }
 API_ADDR="{{.APIAddr}}"
-if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/.token" ]; then
+if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
   # shellcheck source=/dev/null
-  . "${HOOK_DIR}/.token"
+  . "${HOOK_DIR}/{{.TokenFile}}"
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 
