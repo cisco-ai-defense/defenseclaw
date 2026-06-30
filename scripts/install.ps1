@@ -130,6 +130,38 @@ function Test-HasCommand {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Invoke-Uv {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [switch]$ShowFailureOutput
+    )
+
+    # Windows PowerShell 5.1 turns any native stderr text into an ErrorRecord.
+    # With the installer's global ErrorActionPreference=Stop, harmless uv
+    # progress/status output would therefore abort even when uv exits zero.
+    # Capture both streams under Continue and make the native exit status the
+    # only success criterion. PowerShell 7 does not need the workaround, but
+    # follows the same explicit status contract here.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $output = @()
+    $exitCode = 1
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & uv @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($ShowFailureOutput -and $exitCode -ne 0) {
+        foreach ($line in $output) {
+            Write-Host "    $line" -ForegroundColor DarkGray
+        }
+    }
+    return [int]$exitCode
+}
+
 function Confirm-YesNo {
     param([string]$Prompt, [string]$Default = "y")
     if ($Yes) { return $true }
@@ -186,7 +218,8 @@ function Ensure-Python {
     Write-Step "Checking Python"
     # uv manages an interpreter for us; ask it for 3.12 and install on demand.
     # This avoids depending on a system Python being present or new enough.
-    & uv python install 3.12 *> $null
+    $exitCode = Invoke-Uv -Arguments @("python", "install", "3.12") -ShowFailureOutput
+    if ($exitCode -ne 0) { Die "Failed to install Python 3.12 via uv" }
     Write-Ok "Python 3.12 (managed by uv)"
 }
 
@@ -307,10 +340,10 @@ function Install-Gateway {
 function Install-Cli {
     Write-Step "Installing DefenseClaw CLI"
     Write-Info "Creating Python environment..."
-    & uv venv $Venv --python 3.12 --quiet 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        & uv venv $Venv --quiet
-        if ($LASTEXITCODE -ne 0) { Die "Failed to create Python virtual environment" }
+    $venvExit = Invoke-Uv -Arguments @("venv", $Venv, "--python", "3.12", "--quiet")
+    if ($venvExit -ne 0) {
+        $venvExit = Invoke-Uv -Arguments @("venv", $Venv, "--quiet") -ShowFailureOutput
+        if ($venvExit -ne 0) { Die "Failed to create Python virtual environment" }
     }
     $venvPython = Join-Path $Venv "Scripts\python.exe"
 
@@ -328,8 +361,8 @@ function Install-Cli {
             $resolved = Get-Artifact -Name $whlName -Dest $whlPath
             Test-Checksum -File $whlPath -FileName $resolved
         }
-        & uv pip install --python $venvPython --quiet $whlPath
-        if ($LASTEXITCODE -ne 0) { Die "Failed to install CLI from wheel" }
+        $pipExit = Invoke-Uv -Arguments @("pip", "install", "--python", $venvPython, "--quiet", $whlPath) -ShowFailureOutput
+        if ($pipExit -ne 0) { Die "Failed to install CLI from wheel" }
     } finally {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
