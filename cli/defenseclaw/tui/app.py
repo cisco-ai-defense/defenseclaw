@@ -5515,11 +5515,26 @@ class DefenseClawTUI(App[None]):
                     out[conn.name.strip().lower()] = (conn.state or "").strip()
         return out
 
-    def _connector_last_activity(self, connector: str, *, use_stats: bool = True) -> datetime | None:
-        """Most recent audit-event timestamp attributed to ``connector``."""
+    def _connector_last_activity(
+        self,
+        connector: str,
+        *,
+        health_row: ConnectorHealth | None = None,
+    ) -> datetime | None:
+        """Most recent live or audit timestamp attributed to ``connector``.
+
+        New gateways publish ``last_activity_at`` alongside their live hook
+        counters. Older gateways omit it, so the grouped audit timestamp
+        remains the compatibility fallback even when live counters exist.
+        """
+
+        if health_row is not None:
+            live_activity = _parse_timestamp(health_row.last_activity_at)
+            if live_activity is not None:
+                return live_activity
 
         want = connector.strip().lower()
-        if use_stats and self.overview_model.health is not None:
+        if self.overview_model.health is not None:
             stats_newest = self._connector_hook_event_stats().get(want, {}).get("newest")
             if isinstance(stats_newest, datetime):
                 return stats_newest
@@ -5587,7 +5602,10 @@ class DefenseClawTUI(App[None]):
                 else:
                     allow, alerts, blocks, _newest = self._connector_hook_stats_for_connectors((connector,))
                 calls = allow + alerts + blocks
-            last = self._connector_last_activity(connector, use_stats=not health_has_live_window)
+            last = self._connector_last_activity(
+                connector,
+                health_row=health_row,
+            )
             # A guardrail-disabled connector keeps its historical counts (so
             # the row still tells the story) but its STATUS is forced to
             # "disabled" — the gateway drops it from connectors[], so without
@@ -10830,6 +10848,9 @@ def _connector_from_mapping(raw: Any) -> ConnectorHealth | None:
         name=_coerce_str(raw.get("name")),
         state=_coerce_str(raw.get("state")),
         since=_coerce_str(raw.get("since")),
+        last_activity_at=_coerce_str(
+            raw.get("last_activity_at") or raw.get("lastActivityAt")
+        ),
         tool_inspection_mode=_coerce_str(
             raw.get("tool_inspection_mode") or raw.get("toolInspectionMode")
         ),
