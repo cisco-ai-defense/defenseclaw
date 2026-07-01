@@ -248,8 +248,9 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertEqual(gc.connectors["codex"].mode, "action")
         self.assertEqual(gc.connectors["hermes"].mode, "observe")
 
-    def test_omitting_flags_preserves_existing(self):
-        # SU-02/J1 preserve-don't-clobber: a re-run without flags keeps judge.
+    def test_omitting_judge_flags_preserves_existing_action_judge(self):
+        # SU-02/J1 preserve-don't-clobber: an action-mode re-run without judge
+        # flags keeps the connector's existing judge selection.
         self._seed_map("codex", "hermes")
         gc = self.app.cfg.guardrail
         gc.judge.enabled = True
@@ -257,7 +258,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         gc.detection_strategy = "regex_judge"
         gc.connectors["hermes"].block_message = "keep-me"
         with _stub_side_effects():
-            res = _invoke(["hermes", "--yes", "--no-restart"], self.app)
+            res = _invoke(["hermes", "--yes", "--no-restart", "--mode", "action"], self.app)
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertTrue(gc.judge.enabled)
         self.assertEqual(gc.detection_strategy, "regex_judge")
@@ -270,7 +271,10 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         gc.judge.hook_connectors = ["codex"]
         gc.detection_strategy = "regex_judge"
         with _stub_side_effects():
-            res = _invoke(["hermes", "--yes", "--no-restart", "--enable-judge"], self.app)
+            res = _invoke(
+                ["hermes", "--yes", "--no-restart", "--mode", "action", "--enable-judge"],
+                self.app,
+            )
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertTrue(gc.judge.enabled)
         self.assertEqual(gc.judge.hook_connectors, ["codex", "hermes"])
@@ -289,6 +293,23 @@ class TestPerConnectorWriteSurface(_BaseSetup):
     def test_direct_action_missing_connector_falls_back_to_observe(self):
         signal = SimpleNamespace(version="", installed=False, error="", binary_path="")
         disc = SimpleNamespace(agents={"copilot": signal})
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["copilot"]
+        gc.detection_strategy = "regex_judge"
+        gc.detection_strategy_completion = "regex_judge"
+        saved_judge_states: list[tuple[bool, list[str], str]] = []
+
+        def capture_save():
+            saved_judge_states.append(
+                (
+                    bool(gc.judge.enabled),
+                    list(gc.judge.hook_connectors or []),
+                    gc.detection_strategy,
+                )
+            )
+
+        self.app.cfg.save = capture_save  # type: ignore[assignment]
 
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None))
@@ -307,6 +328,40 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertIn("GitHub Copilot CLI: requested action mode was refused", res.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "copilot")
         self.assertEqual(self.app.cfg.guardrail.mode, "observe")
+        self.assertEqual(saved_judge_states[-1], (False, [], "regex_only"))
+        self.assertFalse(gc.judge.enabled)
+        self.assertEqual(gc.judge.hook_connectors, [])
+
+    def test_guardrail_action_fallback_prunes_only_refused_connector_from_judge(self):
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.connectors["codex"].mode = "action"
+        gc.connectors["hermes"].mode = "action"
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["codex", "hermes"]
+        gc.detection_strategy = "regex_judge"
+        gc.detection_strategy_completion = "regex_judge"
+
+        def version_gate(connector, **_kwargs):
+            return connector != "hermes"
+
+        with patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            side_effect=version_gate,
+        ):
+            ok = cmd_setup._check_guardrail_setup_connector_versions(
+                self.app,
+                gc,
+                explicit_connector=None,
+                allow_prompt=False,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(gc.effective_mode("codex"), "action")
+        self.assertEqual(gc.effective_mode("hermes"), "observe")
+        self.assertTrue(gc.judge.enabled)
+        self.assertEqual(gc.judge.hook_connectors, ["codex"])
 
 
 # ---------------------------------------------------------------------------
@@ -923,7 +978,10 @@ class TestBareSetupBatch(_BaseSetup):
         gc.judge.hook_connectors = ["codex", "hermes"]
 
         with _stub_side_effects():
-            res = _invoke(["-c", "hermes", "--yes", "--no-restart"], self.app)
+            res = _invoke(
+                ["-c", "hermes", "--yes", "--no-restart", "--mode", "action"],
+                self.app,
+            )
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertEqual(sorted(gc.connectors), ["hermes"])
         self.assertEqual(gc.connector, "hermes")
@@ -1059,6 +1117,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
             res = _invoke(
                 [
                     "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
+                    "--mode", "action",
                     "--detection-strategy", "regex_judge",
                 ],
                 self.app,
@@ -1108,6 +1167,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
             res = _invoke(
                 [
                     "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
+                    "--mode", "action",
                     "--detection-strategy", "regex_judge",
                     "--detection-strategy-completion", "regex_only",
                 ],

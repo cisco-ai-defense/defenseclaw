@@ -85,7 +85,7 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 	"hermes": {
 		Status: PlatformPreview,
-		Reason: "Hermes labels native Windows support Early Beta; setup is available as a preview.",
+		Reason: "Hermes supports native Windows upstream, but DefenseClaw's native Windows hook integration remains preview pending live end-to-end validation.",
 	},
 	"openhands": {
 		Status: PlatformUnsupported,

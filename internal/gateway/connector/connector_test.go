@@ -1230,6 +1230,225 @@ func TestClaudeCode_Setup_PatchesSettings(t *testing.T) {
 	}
 }
 
+func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native absolute hook-command refresh is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	thirdPartyCommand := `C:\Tools\team-hook.exe --notify`
+	initial := fmt.Sprintf(
+		`{"hooks":{"Notification":[{"hooks":[{"type":"command","command":%q}]}]}}`,
+		thirdPartyCommand,
+	)
+	if err := os.WriteFile(settingsPath, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	firstBinary := filepath.Join(dir, "installed", windowsGatewayBinaryName)
+	secondBinary := filepath.Join(dir, "source-build", windowsGatewayBinaryName)
+	defenseclawHookBinaryOverride = firstBinary
+	firstCommand := hookInvocationCommandFor("windows", "claudecode", "")
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("first Setup: %v", err)
+	}
+	defenseclawHookBinaryOverride = secondBinary
+	secondCommand := hookInvocationCommandFor("windows", "claudecode", "")
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("refresh Setup: %v", err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("idempotent Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks missing after Setup: %T", settings["hooks"])
+	}
+
+	managedCount := 0
+	thirdPartyCount := 0
+	for _, rawEntries := range hooks {
+		entries, _ := rawEntries.([]interface{})
+		for _, rawEntry := range entries {
+			entry, _ := rawEntry.(map[string]interface{})
+			commands, _ := entry["hooks"].([]interface{})
+			for _, rawCommand := range commands {
+				command, _ := rawCommand.(map[string]interface{})
+				value, _ := command["command"].(string)
+				switch value {
+				case secondCommand:
+					managedCount++
+				case thirdPartyCommand:
+					thirdPartyCount++
+				}
+				if value == firstCommand {
+					t.Fatalf("stale managed command survived refresh: %q", value)
+				}
+			}
+		}
+	}
+	if managedCount != len(hookGroups) {
+		t.Fatalf("managed hook count=%d, want %d (one per event)", managedCount, len(hookGroups))
+	}
+	if thirdPartyCount != 1 {
+		t.Fatalf("third-party hook count=%d, want 1", thirdPartyCount)
+	}
+}
+
+func TestClaudeCode_SetupRefreshDeduplicatesPreUpgradeInstalledAndRepoCommands(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("canonical native install command is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	installedCommand := windowsQuoteExe(
+		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
+	) + " " + nativeHookFlag + "claudecode"
+	repoCommand := `"C:\Users\test\src\defenseclaw\defenseclaw-gateway.exe" hook --connector claudecode`
+	foreignCommand := `"C:\Tools\team-hook.exe" --notify`
+	hooks := map[string]interface{}{}
+	for _, group := range hookGroups {
+		hooks[group.eventType] = []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{"type": "command", "command": installedCommand},
+				},
+			},
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{"type": "command", "command": repoCommand},
+				},
+			},
+		}
+	}
+	hooks["Notification"] = append(hooks["Notification"].([]interface{}), map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": foreignCommand},
+		},
+	})
+	settings := map[string]interface{}{
+		"hooks": hooks,
+	}
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = filepath.Join(dir, "source-build", windowsGatewayBinaryName)
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	// Simulate the pre-managed-command backup schema already present on an
+	// upgraded installation. This is the state behind the live 28 -> 56 report.
+	c := NewClaudeCodeConnector()
+	if err := c.saveBackup(dir, claudeCodeBackup{HadHooksKey: false}); err != nil {
+		t.Fatalf("seed legacy backup: %v", err)
+	}
+	opts := SetupOpts{
+		DataDir:  dir,
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "test-token",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("idempotent Setup: %v", err)
+	}
+
+	updated, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if err := json.Unmarshal(updated, &settings); err != nil {
+		t.Fatalf("parse updated settings: %v", err)
+	}
+	installedFound := false
+	repoFound := false
+	foreignFound := false
+	managedCount := 0
+	currentCommand := hookInvocationCommandFor("windows", "claudecode", "")
+	for _, rawEntries := range settings["hooks"].(map[string]interface{}) {
+		for _, rawEntry := range rawEntries.([]interface{}) {
+			entry := rawEntry.(map[string]interface{})
+			for _, rawHook := range entry["hooks"].([]interface{}) {
+				command, _ := rawHook.(map[string]interface{})["command"].(string)
+				installedFound = installedFound || command == installedCommand
+				repoFound = repoFound || command == repoCommand
+				foreignFound = foreignFound || command == foreignCommand
+				if command == currentCommand {
+					managedCount++
+				}
+			}
+		}
+	}
+	if installedFound || repoFound {
+		t.Fatal("pre-upgrade managed commands survived refresh")
+	}
+	if managedCount != len(hookGroups) {
+		t.Fatalf("managed hook count=%d, want %d", managedCount, len(hookGroups))
+	}
+	if !foreignFound {
+		t.Fatal("third-party hook was removed")
+	}
+}
+
+func TestLegacyClaudeCodeNativeHookCommandRequiresExactSignature(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("legacy native command signature is Windows-specific")
+	}
+	valid := []string{
+		`"C:\Users\test\.local\bin\defenseclaw-gateway.exe" hook --connector claudecode`,
+		`"C:\Users\test\src\defenseclaw-gateway.exe" hook --connector claudecode`,
+		`defenseclaw-gateway.exe hook --connector claudecode`,
+	}
+	for _, command := range valid {
+		if !isLegacyClaudeCodeNativeHookCommand(command) {
+			t.Errorf("valid managed command was not recognized: %q", command)
+		}
+	}
+
+	invalid := []string{
+		`"C:\Tools\team-hook.exe" hook --connector claudecode`,
+		`"C:\Tools\defenseclaw-gateway.exe" hook --connector codex`,
+		`"C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode --extra`,
+		`"C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode & whoami`,
+		`"C:\Tools\defenseclaw-gateway.exe hook --connector claudecode`,
+		`C:\Program Files\DefenseClaw\defenseclaw-gateway.exe hook --connector claudecode`,
+	}
+	for _, command := range invalid {
+		if isLegacyClaudeCodeNativeHookCommand(command) {
+			t.Errorf("non-exact command was recognized as managed: %q", command)
+		}
+	}
+}
+
 // TestClaudeCode_Setup_RegistersFullEventCoverage verifies the Claude
 // Code hook registration matches the current documented lifecycle, with the
 // event-type specific matchers Claude Code expects.

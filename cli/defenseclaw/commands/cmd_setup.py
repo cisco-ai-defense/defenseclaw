@@ -2676,9 +2676,13 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.defenseclaw/hooks/ and notify bridge files",
     ),
     "hermes": (
-        "~/.hermes/config.yaml hooks",
-        "~/.hermes/config.yaml MCP entries when configured explicitly",
-        "~/.hermes/skills and ~/.hermes/plugins discovery/install surfaces",
+        (
+            "HERMES_HOME/config.yaml hooks (defaults to "
+            "%LOCALAPPDATA%\\hermes\\config.yaml on Windows and "
+            "~/.hermes/config.yaml elsewhere)"
+        ),
+        "HERMES_HOME/config.yaml MCP entries when configured explicitly",
+        "HERMES_HOME/skills and HERMES_HOME/plugins discovery/install surfaces",
         "~/.defenseclaw/hooks/hermes-hook.sh",
     ),
     "cursor": (
@@ -3132,7 +3136,8 @@ def _check_guardrail_setup_connector_versions(
 ) -> bool:
     """Verify every connector affected by a guardrail setup run."""
     trusted_prompt_cache: dict[str, bool] | None = {} if allow_prompt else None
-    for connector in _guardrail_setup_check_targets(app, gc, explicit_connector):
+    targets = _guardrail_setup_check_targets(app, gc, explicit_connector)
+    for connector in targets:
         mode = (
             gc.effective_mode(connector)
             if hasattr(gc, "effective_mode")
@@ -3150,6 +3155,11 @@ def _check_guardrail_setup_connector_versions(
                 _downgrade_guardrail_setup_action_connector(gc, connector)
                 continue
             return False
+    # Version validation can refuse a requested action mode and persist an
+    # observe fallback. Reconcile the hook-lane judge gate after every target
+    # has reached its final mode so a refused connector cannot remain judged
+    # when execute_guardrail_setup() saves the configuration below.
+    _prune_judge_gate_to_action_scope(gc, targets)
     return True
 
 
@@ -4641,6 +4651,11 @@ def _apply_hook_connector_setup(
         enable_judge=enable_judge,
         judge_hook_connectors=judge_hook_connectors,
     )
+    # Judge eligibility follows the connector's final enforcement mode. Do
+    # this before cfg.save(): action validation may have fallen back to a
+    # second observe-mode setup call, and pruning only after that save leaves
+    # a stale gate on disk that the restarted gateway immediately reloads.
+    _prune_judge_gate_to_action_scope(gc, [connector])
 
     gc.scanner_mode = "local"
     gc.port = gc.port or 4000
@@ -5478,6 +5493,11 @@ def _prune_judge_gate_to_action_scope(gc, connectors: list[str]) -> list[str]:
         return []
 
     if current_gate == ["*"]:
+        # Nothing in this setup scope needs removing. Keep the wildcard rather
+        # than needlessly narrowing "all" to today's configured connector
+        # list, which would stop future action-mode connectors inheriting it.
+        if action_targets == targets:
+            return current_gate
         configured_hook_connectors = {
             normalize_connector(c)
             for c in _configured_connector_set(gc)

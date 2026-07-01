@@ -170,6 +170,12 @@
         "hermes"
       ],
       "config_paths": [
+        "$HERMES_HOME/config.yaml",
+        "$HERMES_HOME/skills",
+        "$HERMES_HOME/plugins",
+        "$LOCALAPPDATA/hermes/config.yaml",
+        "$LOCALAPPDATA/hermes/skills",
+        "$LOCALAPPDATA/hermes/plugins",
         "~/.hermes/config.yaml",
         "~/.hermes/skills",
         "~/.hermes/plugins",
@@ -177,10 +183,14 @@
       ],
       "extension_ids": [],
       "mcp_paths": [
+        "$HERMES_HOME/config.yaml",
+        "$LOCALAPPDATA/hermes/config.yaml",
         "~/.hermes/config.yaml"
       ],
       "package_names": [],
-      "env_var_names": [],
+      "env_var_names": [
+        "HERMES_HOME"
+      ],
       "domain_patterns": [
         "hermes-agent.nousresearch.com"
       ],

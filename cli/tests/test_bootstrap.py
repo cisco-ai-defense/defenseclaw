@@ -109,6 +109,19 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertEqual(report.data_dir, cfg.data_dir)
         self.assertEqual(report.audit_db, cfg.audit_db)
 
+    def test_hermes_readiness_honors_hermes_home(self):
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        hermes_home = os.path.join(self._tmp.name, "hermes-home")
+        os.makedirs(hermes_home)
+        with open(os.path.join(hermes_home, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("hooks: {}\n")
+
+        with patch.dict(os.environ, {"HERMES_HOME": hermes_home}):
+            result = _connector_readiness(cfg, "hermes")
+
+        self.assertEqual(result.status, "pass")
+        self.assertIn("Hermes config found", result.detail)
+
     def test_omnigent_readiness_honors_config_home(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         config_home = os.path.join(self._tmp.name, "omnigent-config")

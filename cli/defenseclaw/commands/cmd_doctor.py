@@ -39,7 +39,11 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
-from defenseclaw.connector_paths import omnigent_config_path
+from defenseclaw.connector_paths import (
+    hermes_config_path,
+    hermes_legacy_config_path,
+    omnigent_config_path,
+)
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener
@@ -1435,9 +1439,13 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     label = _HOOK_HEALTH_LABELS.get(connector, f"{connector} hooks")
     home = os.path.expanduser("~")
     # Prefer the lock-file's recorded paths; fall back to the static map.
-    candidates = _hook_health_paths_from_lock(cfg, connector) or [
-        os.path.join(home, rel) for rel in rel_candidates
-    ]
+    candidates = _hook_health_paths_from_lock(cfg, connector)
+    if not candidates:
+        candidates = (
+            [hermes_config_path()]
+            if connector == "hermes"
+            else [os.path.join(home, rel) for rel in rel_candidates]
+        )
     present = [p for p in candidates if os.path.isfile(p)]
     if not present:
         _emit("fail", label, "hook file not found: " + ", ".join(candidates), r=r)
@@ -1450,6 +1458,34 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         "fail",
         label,
         "hook file exists but does not reference DefenseClaw: " + ", ".join(present),
+        r=r,
+    )
+
+
+def _check_hermes_legacy_config(r: _DoctorResult, *, platform_name: str | None = None) -> None:
+    """Warn about the pre-native-Windows Hermes config without migrating it.
+
+    Native Hermes uses ``HERMES_HOME`` or ``%LOCALAPPDATA%\\hermes``. Older
+    DefenseClaw builds wrote ``~/.hermes/config.yaml`` on every platform. That
+    file can contain credentials, so doctor only reports it and leaves any
+    review, merge, archival, or deletion to the operator.
+    """
+    if (platform_name or os.name) != "nt":
+        return
+
+    current = os.path.abspath(hermes_config_path())
+    legacy = os.path.abspath(hermes_legacy_config_path())
+    if os.path.normcase(current) == os.path.normcase(legacy) or not os.path.isfile(legacy):
+        return
+
+    current_state = "already exists" if os.path.isfile(current) else "does not exist yet"
+    _emit(
+        "warn",
+        "Hermes config migration",
+        f"legacy Hermes config found at {legacy}. Native Hermes now uses {current}, "
+        f"which {current_state}. Review and merge any needed settings manually, then "
+        "re-run `defenseclaw setup hermes`. DefenseClaw will not copy or delete the "
+        "legacy file because it may contain credentials.",
         r=r,
     )
 
@@ -1481,6 +1517,8 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
         # hermes / cursor / windsurf / geminicli / opencode — generic
         # lock-file-driven hook-health row (D4).
         _check_hook_health(cfg, connector, r)
+        if connector == "hermes":
+            _check_hermes_legacy_config(r)
 
 
 def _workspace_dir(cfg) -> str:

@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"gopkg.in/yaml.v3"
 )
@@ -435,13 +436,13 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			WritePaths:      []string{hermesConfigPath(opts)},
 			SupportsBackup:  true,
 			SupportsRestore: true,
-			Notes:           []string{"MCP servers are merged into ~/.hermes/config.yaml."},
+			Notes:           []string{"MCP servers are merged into the resolved Hermes config.yaml (HERMES_HOME or the platform default)."},
 		}
 		caps.Skills = SurfaceCapability{
 			Supported:      true,
 			Scope:          "user",
-			ReadPaths:      []string{homePath(".hermes", "skills")},
-			WritePaths:     []string{homePath(".hermes", "skills")},
+			ReadPaths:      []string{filepath.Join(hermespath.HomeDir(), "skills")},
+			WritePaths:     []string{filepath.Join(hermespath.HomeDir(), "skills")},
 			InstallTargets: []string{"skill"},
 			RequiresOptIn:  true,
 		}
@@ -970,7 +971,7 @@ func hermesConfigPath(SetupOpts) string {
 	if HermesConfigPathOverride != "" {
 		return HermesConfigPathOverride
 	}
-	return homePath(".hermes", "config.yaml")
+	return hermespath.ConfigPath()
 }
 
 // opencodePluginPath resolves the destination of DefenseClaw's bridge

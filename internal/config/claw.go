@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	toml "github.com/pelletier/go-toml/v2"
 	yaml "gopkg.in/yaml.v3"
 )
@@ -494,7 +495,7 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 	case "zeptoclaw":
 		return filepath.Join(home, ".zeptoclaw")
 	case "hermes":
-		return filepath.Join(home, ".hermes")
+		return hermespath.HomeDir()
 	case "cursor":
 		return filepath.Join(home, ".cursor")
 	case "windsurf":
@@ -626,7 +627,7 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".zeptoclaw", "skills"),
 		})
 	case "hermes":
-		return []string{filepath.Join(home, ".hermes", "skills")}
+		return []string{filepath.Join(hermespath.HomeDir(), "skills")}
 	case "cursor":
 		return dedupNonEmpty([]string{
 			filepath.Join(home, ".cursor", "skills"),
@@ -695,7 +696,7 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 		}
 	case "hermes":
 		return dedupNonEmpty([]string{
-			filepath.Join(home, ".hermes", "plugins"),
+			filepath.Join(hermespath.HomeDir(), "plugins"),
 			workspaceJoin(cwd, ".hermes", "plugins"),
 		})
 	case "geminicli":
@@ -839,8 +840,7 @@ func readMCPServersZeptoClaw(workspaceDir string) ([]MCPServerEntry, error) {
 }
 
 func readMCPServersHermes() ([]MCPServerEntry, error) {
-	home, _ := os.UserHomeDir()
-	return readMCPFromYAMLPath(filepath.Join(home, ".hermes", "config.yaml"), []string{"mcp", "servers"}, []string{"mcpServers"})
+	return readMCPFromYAMLPath(hermespath.ConfigPath(), []string{"mcp", "servers"}, []string{"mcpServers"})
 }
 
 func readMCPServersCursor(workspaceDir string) ([]MCPServerEntry, error) {

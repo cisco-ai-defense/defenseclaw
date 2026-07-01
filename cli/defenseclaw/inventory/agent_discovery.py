@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import locale
 import os
 import shutil
 import subprocess
@@ -39,7 +40,12 @@ except ImportError:  # pragma: no cover - non-POSIX
     _grp = None  # type: ignore[assignment]
 
 from defenseclaw.config import default_data_path
-from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand, omnigent_config_path
+from defenseclaw.connector_paths import (
+    KNOWN_CONNECTORS,
+    _expand,
+    hermes_config_path,
+    omnigent_config_path,
+)
 
 # Sentinel error returned by ``_version_for_binary`` when a connector
 # binary resolves outside the trusted install prefixes. Callers (e.g.
@@ -128,6 +134,13 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
         candidates.extend(
             (
                 os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin"),
+                os.path.join(
+                    local_app_data,
+                    "hermes",
+                    "hermes-agent",
+                    "venv",
+                    "Scripts",
+                ),
                 os.path.join(local_app_data, "agy", "bin"),
                 os.path.join(local_app_data, "Programs", "antigravity"),
                 os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"),
@@ -222,7 +235,9 @@ _SPECS: dict[str, _AgentSpec] = {
     ),
     "openclaw": _AgentSpec(("~/.openclaw/openclaw.json",), "openclaw", ("--version",)),
     "zeptoclaw": _AgentSpec(("~/.zeptoclaw/config.json",), "zeptoclaw", ("--version",)),
-    "hermes": _AgentSpec(("~/.hermes/config.yaml",), "hermes", ("--version",)),
+    # Hermes' path is resolved dynamically in _scan_agent so HERMES_HOME and
+    # the native Windows %LOCALAPPDATA% default are honored.
+    "hermes": _AgentSpec((), "hermes", ("--version",)),
     "cursor": _AgentSpec(("~/.cursor/hooks.json", "~/.cursor/mcp.json"), "cursor", ("--version",)),
     "windsurf": _AgentSpec(
         (
@@ -405,7 +420,9 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
 def _scan_agent(name: str) -> AgentSignal:
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_candidates = spec.config_candidates
-    if name == "omnigent":
+    if name == "hermes":
+        config_candidates = (hermes_config_path(),)
+    elif name == "omnigent":
         config_path = omnigent_config_path()
         config_candidates = (config_path,)
     config_path = _first_existing_file(config_candidates)
@@ -910,6 +927,36 @@ def _binary_command_name(binary_path: str) -> str:
     return stem if extension in _WINDOWS_EXECUTABLE_EXTENSIONS else name
 
 
+def _decode_version_probe_output(output: bytes | str | None) -> str:
+    """Decode CLI output without relying on the Windows ANSI code page.
+
+    Modern CLIs commonly write UTF-8 to redirected stdout even when Python's
+    preferred Windows text encoding is a legacy code page.  Decode UTF-8 first
+    so multibyte punctuation remains intact, then preserve compatibility with
+    older native tools by falling back to the host's preferred encoding.
+    """
+
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        # Test doubles and callers that already decoded the stream remain
+        # supported; production probes request bytes below.
+        return output
+
+    encodings = ("utf-8-sig", locale.getpreferredencoding(False) or "utf-8")
+    attempted: set[str] = set()
+    for encoding in encodings:
+        key = encoding.casefold().replace("_", "-")
+        if key in attempted:
+            continue
+        attempted.add(key)
+        try:
+            return output.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return output.decode("utf-8", errors="replace")
+
+
 def _version_for_binary(binary_path: str, version_args: tuple[str, ...]) -> tuple[str, str]:
     # M-4: the value of ``binary_path`` is sourced from
     # ``shutil.which(binary_name)`` which honours $PATH — an attacker
@@ -932,7 +979,7 @@ def _version_for_binary(binary_path: str, version_args: tuple[str, ...]) -> tupl
             shell=False,
             timeout=timeout,
             capture_output=True,
-            text=True,
+            text=False,
             env=env,
         )
     except subprocess.TimeoutExpired:
@@ -940,9 +987,10 @@ def _version_for_binary(binary_path: str, version_args: tuple[str, ...]) -> tupl
     except Exception as exc:
         return "", f"version probe failed: {exc}"
 
-    stdout = (result.stdout or "").strip()
+    stdout = _decode_version_probe_output(result.stdout).strip()
+    stderr = _decode_version_probe_output(result.stderr).strip()
     if result.returncode != 0:
-        detail = (result.stderr or stdout or "").strip()
+        detail = stderr or stdout
         if detail:
             return "", f"version probe exited {result.returncode}: {detail}"
         return "", f"version probe exited {result.returncode}"
@@ -1129,6 +1177,17 @@ def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, .
 
     if connector == "codex" and local_app_data:
         prefixes.insert(0, os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin"))
+    elif connector == "hermes" and local_app_data:
+        prefixes.insert(
+            0,
+            os.path.join(
+                local_app_data,
+                "hermes",
+                "hermes-agent",
+                "venv",
+                "Scripts",
+            ),
+        )
     elif connector == "cursor" and local_app_data:
         prefixes.insert(0, os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"))
     elif connector == "windsurf" and local_app_data:

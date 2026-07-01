@@ -12,10 +12,12 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+from defenseclaw.connector_paths import hermes_config_path, hermes_home
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.tui.services import connector_filter
 from defenseclaw.tui.services.ai_discovery_state import AIUsageSignal, AIUsageSnapshot
@@ -1206,12 +1208,14 @@ def friendly_connector_name(connector: str) -> str:
 
 def connector_source_label(connector: str, category: str) -> str:
     connector = (connector or "").strip().lower()
+    hermes_root = hermes_home()
+    hermes_config = hermes_config_path()
     sources = {
         ("openclaw", "skills"): ("./skills", "~/.openclaw/skills"),
         ("claudecode", "skills"): ("~/.claude/skills", "./.claude/skills"),
         ("codex", "skills"): ("~/.codex/skills", "./.codex/skills"),
         ("zeptoclaw", "skills"): ("~/.zeptoclaw/skills", "./.zeptoclaw/skills"),
-        ("hermes", "skills"): ("~/.hermes/skills",),
+        ("hermes", "skills"): (os.path.join(hermes_root, "skills"),),
         ("cursor", "skills"): ("./.cursor/skills", "./.agents/skills", "~/.cursor/skills", "~/.agents/skills"),
         ("windsurf", "skills"): ("unsupported/documented paths only",),
         ("geminicli", "skills"): ("./.gemini/skills", "./.agents/skills"),
@@ -1228,7 +1232,7 @@ def connector_source_label(connector: str, category: str) -> str:
         ("claudecode", "mcps"): ("~/.claude/settings.json (mcpServers)", "./.mcp.json"),
         ("codex", "mcps"): ("~/.codex/config.toml ([mcp_servers])", "./.mcp.json"),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
-        ("hermes", "mcps"): ("~/.hermes/config.yaml (mcp.servers)",),
+        ("hermes", "mcps"): (f"{hermes_config} (mcp.servers)",),
         ("cursor", "mcps"): ("./.cursor/mcp.json", "~/.cursor/mcp.json"),
         ("windsurf", "mcps"): ("~/.codeium/windsurf/mcp_config.json", "~/.codeium/windsurf/mcp.json"),
         ("geminicli", "mcps"): ("~/.gemini/settings.json (mcpServers)", "./.mcp.json"),
@@ -1245,7 +1249,10 @@ def connector_source_label(connector: str, category: str) -> str:
         ("claudecode", "plugins"): ("~/.claude/plugins",),
         ("codex", "plugins"): ("~/.codex/plugins",),
         ("zeptoclaw", "plugins"): ("~/.zeptoclaw/plugins",),
-        ("hermes", "plugins"): ("~/.hermes/plugins", "./.hermes/plugins (discovery-only)"),
+        ("hermes", "plugins"): (
+            os.path.join(hermes_root, "plugins"),
+            "./.hermes/plugins (discovery-only)",
+        ),
         ("cursor", "plugins"): ("unsupported",),
         ("windsurf", "plugins"): ("unsupported",),
         ("geminicli", "plugins"): ("./.gemini/extensions",),
@@ -1262,7 +1269,7 @@ def connector_source_label(connector: str, category: str) -> str:
         ("claudecode", "config"): ("~/.claude/settings.json",),
         ("codex", "config"): ("~/.codex/config.toml",),
         ("zeptoclaw", "config"): ("~/.zeptoclaw/config.json",),
-        ("hermes", "config"): ("~/.hermes/config.yaml",),
+        ("hermes", "config"): (hermes_config,),
         ("cursor", "config"): ("~/.cursor/hooks.json",),
         ("windsurf", "config"): ("~/.codeium/windsurf/hooks.json",),
         ("geminicli", "config"): ("~/.gemini/settings.json",),

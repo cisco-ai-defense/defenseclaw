@@ -391,6 +391,31 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	}
 }
 
+func TestHookContractCompatibilityDriftExcludesGeneratedArtifactChanges(t *testing.T) {
+	previous := HookContractLockEntry{
+		Connector:              "codex",
+		RawAgentVersion:        "codex-cli 0.142.4",
+		NormalizedAgentVersion: "0.142.4",
+		ContractID:             "codex-hooks-v1",
+		HookScriptDigests:      map[string]string{"codex-hook.sh": "sha256:old"},
+	}
+	current := previous
+	current.HookScriptDigests = map[string]string{"codex-hook.sh": "sha256:new"}
+
+	if !HookContractLockDrifted(previous, current) {
+		t.Fatal("full lock drift must still report a changed generated artifact")
+	}
+	if HookContractCompatibilityDrifted(previous, current) {
+		t.Fatal("generated artifact drift must not be treated as upstream contract drift")
+	}
+
+	current = previous
+	current.ContractID = "codex-hooks-v2"
+	if !HookContractCompatibilityDrifted(previous, current) {
+		t.Fatal("contract identity changes must remain compatibility drift")
+	}
+}
+
 func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")

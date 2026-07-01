@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -394,6 +395,12 @@ type claudeCodeBackup struct {
 	OriginalHooks json.RawMessage `json:"original_hooks"`
 	HadHooksKey   bool            `json:"had_hooks_key"`
 
+	// ManagedHookCommands records the exact native command lines written by
+	// previous Setup runs. The gateway binary can move during an upgrade or a
+	// source-build test. This exact allow-list lets the next Setup remove the
+	// command it actually wrote, then replaces the list with the current command.
+	ManagedHookCommands []string `json:"managed_hook_commands,omitempty"`
+
 	// OTel env block backup (set on the very first patch only — see
 	// patchClaudeCodeHooks). HadEnvKey distinguishes "operator had no
 	// env block at all" from "operator had an empty env block": on
@@ -521,16 +528,16 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 			}
 		}
 
-		backupPath := filepath.Join(opts.DataDir, "claudecode_backup.json")
-		if _, statErr := os.Stat(backupPath); os.IsNotExist(statErr) {
-			backup := claudeCodeBackup{}
+		backup, backupErr := c.loadBackup(opts.DataDir)
+		if backupErr != nil {
+			if !os.IsNotExist(backupErr) {
+				return fmt.Errorf("load claudecode backup: %w", backupErr)
+			}
+			backup = claudeCodeBackup{}
 			if hooks, ok := settings["hooks"]; ok {
 				raw, _ := json.Marshal(hooks)
 				backup.OriginalHooks = raw
 				backup.HadHooksKey = true
-			}
-			if err := c.saveBackup(opts.DataDir, backup); err != nil {
-				return fmt.Errorf("save claudecode backup: %w", err)
 			}
 		}
 
@@ -540,8 +547,9 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 		}
 
 		hooksDir := filepath.Join(opts.DataDir, "hooks")
+		managedCommands := append([]string(nil), backup.ManagedHookCommands...)
 		for key, hk := range hooks {
-			hooks[key] = removeOwnedHooks(hk, hooksDir)
+			hooks[key] = removeOwnedClaudeCodeHooks(hk, hooksDir, managedCommands)
 		}
 
 		for _, group := range hookGroups {
@@ -571,6 +579,10 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 
 		if err := atomicWriteFile(settingsPath, out, 0o600); err != nil {
 			return err
+		}
+		backup.ManagedHookCommands = []string{hookCommand}
+		if err := c.saveBackup(opts.DataDir, backup); err != nil {
+			return fmt.Errorf("save claudecode backup: %w", err)
 		}
 		return nil
 	})
@@ -892,4 +904,105 @@ func removeOwnedHooks(hookEventValue interface{}, hooksDir string) []interface{}
 		}
 	}
 	return list[:n]
+}
+
+// removeOwnedClaudeCodeHooks extends the generic marker/path recognizer with
+// exact commands persisted by earlier Setup runs and the strict legacy native
+// signature used before command tracking existed.
+func removeOwnedClaudeCodeHooks(
+	hookEventValue interface{},
+	hooksDir string,
+	managedCommands []string,
+) []interface{} {
+	list, ok := hookEventValue.([]interface{})
+	if !ok {
+		return nil
+	}
+	n := 0
+	for _, entry := range list {
+		if !isOwnedHook(entry, hooksDir) &&
+			!hookEntryUsesExactCommand(entry, managedCommands) &&
+			!hookEntryUsesLegacyClaudeCodeNativeCommand(entry) {
+			list[n] = entry
+			n++
+		}
+	}
+	return list[:n]
+}
+
+func hookEntryUsesLegacyClaudeCodeNativeCommand(hookEntry interface{}) bool {
+	entry, ok := hookEntry.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	hooks, _ := entry["hooks"].([]interface{})
+	for _, rawHook := range hooks {
+		hook, _ := rawHook.(map[string]interface{})
+		command, _ := hook["command"].(string)
+		if isLegacyClaudeCodeNativeHookCommand(command) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLegacyClaudeCodeNativeHookCommand recognizes the exact native command
+// signature written by pre-command-tracking Windows releases, even when the
+// gateway executable moved between the canonical install and a source build.
+// It is deliberately scoped to Claude Code refresh: generic ownership checks
+// remain tied to the current executable path.
+func isLegacyClaudeCodeNativeHookCommand(command string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	command = strings.TrimSpace(command)
+	marker := " " + nativeHookFlag
+	idx := strings.LastIndex(command, marker)
+	if idx <= 0 || strings.TrimSpace(command[idx+len(marker):]) != "claudecode" {
+		return false
+	}
+
+	executable := strings.TrimSpace(command[:idx])
+	if strings.ContainsAny(executable, "&|<>;\r\n") {
+		return false
+	}
+	quoted := false
+	if strings.HasPrefix(executable, `"`) || strings.HasSuffix(executable, `"`) {
+		if len(executable) < 2 || !strings.HasPrefix(executable, `"`) || !strings.HasSuffix(executable, `"`) {
+			return false
+		}
+		quoted = true
+		executable = executable[1 : len(executable)-1]
+	}
+	if executable == "" || strings.ContainsAny(executable, `"'`) {
+		return false
+	}
+	if !quoted && strings.ContainsAny(executable, " \t") {
+		return false
+	}
+
+	normalized := strings.ReplaceAll(executable, `\`, "/")
+	base := strings.ToLower(filepath.Base(normalized))
+	return base == "defenseclaw-gateway.exe" || base == "defenseclaw-gateway"
+}
+
+func hookEntryUsesExactCommand(hookEntry interface{}, commands []string) bool {
+	entry, ok := hookEntry.(map[string]interface{})
+	if !ok || len(commands) == 0 {
+		return false
+	}
+	hooks, _ := entry["hooks"].([]interface{})
+	for _, rawHook := range hooks {
+		hook, _ := rawHook.(map[string]interface{})
+		command, _ := hook["command"].(string)
+		if command == "" {
+			continue
+		}
+		for _, managed := range commands {
+			if managed != "" && command == managed {
+				return true
+			}
+		}
+	}
+	return false
 }

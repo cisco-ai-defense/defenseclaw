@@ -183,6 +183,8 @@
           "hook_script_version": "v6",
           "hook_script": "hermes-hook.sh",
           "hook_config_path_templates": [
+            "$HERMES_HOME/config.yaml",
+            "%LOCALAPPDATA%/hermes/config.yaml",
             "~/.hermes/config.yaml"
           ],
           "response_field": "hook_output",

@@ -89,7 +89,8 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "hermes": ConnectorPlatformSupport(
         PREVIEW,
-        "Hermes labels native Windows support Early Beta; setup is available as a preview.",
+        "Hermes supports native Windows upstream, but DefenseClaw's native "
+        "Windows hook integration remains preview pending live end-to-end validation.",
     ),
     "openhands": ConnectorPlatformSupport(
         UNSUPPORTED,
