@@ -5,10 +5,7 @@ VERSION     := 0.8.5
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
-INSTALL_DIR := $(HOME)/.local/bin
 PLUGIN_DIR  := extensions/defenseclaw
-DC_EXT_DIR  := $(HOME)/.defenseclaw/extensions/defenseclaw
-OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install,maybe-openclaw-plugin-install)
 # The race-enabled gateway package can exceed the default test deadline on
@@ -26,12 +23,29 @@ UPGRADE_SMOKE_FROM ?= 0.8.4 0.8.3 0.8.2 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.
 # Linux/macOS. $(OS) is set to "Windows_NT" by Windows itself and inherited by
 # the MSYS/Git-Bash shell make runs there; it is unset elsewhere.
 ifeq ($(OS),Windows_NT)
+# PowerShell's inherited PATH places System32 before MSYS. Make recipes rely on
+# POSIX utilities such as find, cp, ln, and rm, so prefer the MSYS toolchain;
+# otherwise Windows find.exe interprets GNU find arguments and prints
+# "FIND: Parameter format not correct" while silently skipping work.
+export PATH := /usr/bin:$(PATH)
+# GNU Make runs these recipes through MSYS, whose HOME defaults to
+# /home/<user>. Native PowerShell and the installed DefenseClaw CLI use
+# USERPROFILE instead, so deriving install paths from HOME silently places a
+# second copy under C:\msys64\home that PowerShell never executes. Convert the
+# native profile path to an MSYS path for recipe compatibility while keeping
+# every installed artifact in the real Windows user profile.
+USER_HOME := $(shell if [ -n "$$USERPROFILE" ]; then cygpath -u "$$USERPROFILE" 2>/dev/null || printf '%s' "$$USERPROFILE"; else printf '%s' "$$HOME"; fi)
 VENV_BIN := $(VENV)/Scripts
 EXE      := .exe
 else
+USER_HOME := $(HOME)
 VENV_BIN := $(VENV)/bin
 EXE      :=
 endif
+
+INSTALL_DIR := $(USER_HOME)/.local/bin
+DC_EXT_DIR  := $(USER_HOME)/.defenseclaw/extensions/defenseclaw
+OC_EXT_DIR  := $(USER_HOME)/.openclaw/extensions/defenseclaw
 
 # _bundle-data is a prerequisite of the target that creates $(VENV), so a
 # fresh checkout cannot use the project interpreter while staging its first
