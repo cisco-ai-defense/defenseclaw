@@ -71,6 +71,8 @@ def test_installer_help_does_not_pipe_main_installer() -> None:
         text = (ROOT / rel).read_text()
         assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh" not in text
         assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.ps1" not in text
+        assert "github.com/cisco-ai-defense/defenseclaw/main" not in text
+        assert "defenseclaw/main" not in text
 
 
 def test_install_docs_track_current_release() -> None:
