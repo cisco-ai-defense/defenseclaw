@@ -593,7 +593,8 @@ class CatalogListModel(Generic[RowT]):
             f"[bold #22D3EE]{title}[/]\n"
             f"{len(self.filtered)} of {len(self.items)} rows{filter_text}{detail}\n"
             "[dim]Navigate:[/] j/k move  ·  Enter detail  ·  / filter  ·  Esc close  ·  r refresh\n"
-            "[dim]Actions:[/]  o open menu  ·  s scan  ·  b block  ·  a allow  ·  R reveal in registry"
+            "[dim]Actions:[/]  o open menu  ·  s scan  ·  b block  ·  a allow  ·  "
+            "u unblock  ·  R reveal in registry"
         )
 
     def _haystack(self, row: RowT) -> str:

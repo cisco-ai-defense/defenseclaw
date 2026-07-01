@@ -843,6 +843,7 @@ def test_catalog_summary_text_splits_navigation_and_action_keys() -> None:
     # Action set is on its own line so it can't be missed.
     assert "[dim]Actions:[/]" in text
     assert "o open menu" in text
+    assert "u unblock" in text
     # Navigation primer is on the row above, not jammed in with actions.
     assert "[dim]Navigate:[/]" in text
     # Filter / detail metadata still on line 2.
