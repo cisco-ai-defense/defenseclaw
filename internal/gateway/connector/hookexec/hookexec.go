@@ -118,12 +118,14 @@ func Run(ctx context.Context, opts Options) int {
 	}
 
 	// DEFENSECLAW_HOME guard: if the data dir is gone or the operator dropped
-	// a .disabled file, do nothing. Mirrors the top-of-script guard.
+	// a .disabled file, return the connector's explicit no-op response. Cursor
+	// requires valid JSON even for an intentional allow; other connectors keep
+	// their existing empty response because openAllow is unset for them.
 	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
-		return 0
+		return emit(opts.Stdout, sp.openAllow)
 	}
 	if _, err := os.Stat(filepath.Join(opts.Home, ".disabled")); err == nil {
-		return 0
+		return emit(opts.Stdout, sp.openAllow)
 	}
 
 	failMode := normalizeFailMode(opts.FailMode)
@@ -298,6 +300,8 @@ func (sp spec) decide(opts Options, body []byte) int {
 	case styleHookEcho:
 		if output != "" {
 			fmt.Fprintln(opts.Stdout, output)
+		} else {
+			return emit(opts.Stdout, sp.openAllow)
 		}
 		return 0
 
@@ -334,9 +338,9 @@ func handleMissingToken(opts Options, sp spec, failMode string) int {
 	if opts.StrictAvailability {
 		fmt.Fprintf(opts.Stderr,
 			"defenseclaw: %s, blocking %s (DEFENSECLAW_STRICT_AVAILABILITY=1)\n", reason, sp.subject)
-		return blockExit
+		return emit(opts.Stdout, sp.unreachableStrict)
 	}
-	return 0
+	return emit(opts.Stdout, sp.openAllow)
 }
 
 // handleOversized mirrors the per-connector oversized-payload branch.
@@ -346,7 +350,7 @@ func handleOversized(opts Options, sp spec, failMode string) int {
 	if failMode == "closed" {
 		return emit(opts.Stdout, sp.oversizedClosed)
 	}
-	return 0
+	return emit(opts.Stdout, sp.openAllow)
 }
 
 // failUnreachable mirrors the transport-layer failure path: always allow
@@ -359,7 +363,7 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		return emit(opts.Stdout, sp.unreachableStrict)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, reason)
-	return 0
+	return emit(opts.Stdout, sp.openAllow)
 }
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
@@ -368,7 +372,7 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	logHookFailure(opts, sp, reason, "response", failMode)
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
 	if failMode == "open" {
-		return 0
+		return emit(opts.Stdout, sp.openAllow)
 	}
 	return emit(opts.Stdout, sp.responseClosed)
 }

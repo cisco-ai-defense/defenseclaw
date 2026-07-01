@@ -287,6 +287,70 @@ class TestScanAllSweep(_PluginScanUXBase):
         result = self.invoke(["scan", "all"])
         self.assertEqual(result.exit_code, 0, result.output)
 
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_codex_cache_scans_manifest_roots_not_registry_buckets(
+        self, mock_scan, _mock_oc,
+    ) -> None:
+        codex_home = os.path.join(self.tmp_dir, ".codex")
+        plugin_root = os.path.join(codex_home, "plugins")
+        cache = os.path.join(plugin_root, "cache")
+
+        def seed(registry: str, name: str, version: str) -> str:
+            root = os.path.join(cache, registry, name, version)
+            manifest_dir = os.path.join(root, ".codex-plugin")
+            os.makedirs(manifest_dir, exist_ok=True)
+            with open(
+                os.path.join(manifest_dir, "plugin.json"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                json.dump({"name": name, "version": version}, handle)
+            return root
+
+        browser = seed("openai-bundled", "browser", "2.0.0")
+        sites = seed("openai-bundled", "sites", "1.2.0")
+        stale_sites = seed("openai-curated-remote", "sites", "9.0.0")
+        github = seed("openai-curated-remote", "github", "0.2.0")
+        workspace_agents = seed(
+            "openai-curated-remote", "workspace-agents", "0.1.0"
+        )
+        os.makedirs(codex_home, exist_ok=True)
+        with open(
+            os.path.join(codex_home, "config.toml"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(
+                "[plugins.'browser@openai-bundled']\n"
+                "enabled = true\n"
+                "[plugins.'sites@openai-bundled']\n"
+                "enabled = true\n"
+            )
+
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: [plugin_root, cache]  # type: ignore[method-assign]
+        mock_scan.side_effect = lambda path, **_kwargs: ScanResult(
+            scanner="plugin-scanner",
+            target=path,
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+            duration=timedelta(milliseconds=1),
+        )
+
+        result = self.invoke(["scan", "--all", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        scanned = {call.args[0] for call in mock_scan.call_args_list}
+        self.assertEqual(
+            scanned,
+            {self.plugin_path, browser, sites, github, workspace_agents},
+        )
+        self.assertNotIn(stale_sites, scanned)
+        self.assertNotIn(os.path.join(cache, "openai-bundled"), scanned)
+        self.assertNotIn(os.path.join(cache, "openai-curated-remote"), scanned)
+
 
 if __name__ == "__main__":
     unittest.main()

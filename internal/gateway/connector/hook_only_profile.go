@@ -76,16 +76,12 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 			output = map[string]interface{}{"context": in.AdditionalContext}
 		}
 	case "cursor":
-		switch in.Action {
-		case "block":
-			output = map[string]interface{}{"continue": true, "permission": "deny", "user_message": reason, "agent_message": reason}
-		case "confirm":
-			output = map[string]interface{}{"continue": true, "permission": "ask", "user_message": reason, "agent_message": reason}
-		case "alert":
-			if in.AdditionalContext != "" {
-				output = map[string]interface{}{"continue": true, "permission": "allow", "agent_message": in.AdditionalContext}
-			}
-		}
+		output = cursorHookOutputForProfile(
+			in.Req.HookEventName,
+			in.Action,
+			reason,
+			in.AdditionalContext,
+		)
 	case "windsurf":
 		if in.Action == "block" {
 			output = map[string]interface{}{"message": reason}
@@ -124,6 +120,49 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		output = map[string]interface{}{"systemMessage": in.AdditionalContext}
 	}
 	return HookRespondOutput{FieldName: "hook_output", Output: output}
+}
+
+// cursorHookOutputForProfile always returns a JSON object. Cursor treats an
+// empty stdout stream as a failed command hook; with failClosed enabled that
+// converts a harmless allow into a host-side block. beforeSubmitPrompt has a
+// narrower schema than permission hooks: continue=false blocks submission,
+// while shell/MCP/tool gates use permission=deny/ask/allow.
+func cursorHookOutputForProfile(event, action, reason, additional string) map[string]interface{} {
+	event = canonicalHookEvent(event)
+	if event == "beforesubmitprompt" {
+		if action == "block" {
+			return map[string]interface{}{"continue": false, "user_message": reason}
+		}
+		return map[string]interface{}{"continue": true}
+	}
+
+	switch action {
+	case "block":
+		return map[string]interface{}{
+			"continue": true, "permission": "deny",
+			"user_message": reason, "agent_message": reason,
+		}
+	case "confirm":
+		return map[string]interface{}{
+			"continue": true, "permission": "ask",
+			"user_message": reason, "agent_message": reason,
+		}
+	case "alert":
+		if additional != "" {
+			return map[string]interface{}{
+				"continue": true, "permission": "allow", "agent_message": additional,
+			}
+		}
+	}
+
+	// A valid no-op response is required even for lifecycle/post events whose
+	// stdout fields Cursor otherwise ignores. This distinguishes an intentional
+	// allow from a crashed hook that produced no output.
+	switch event {
+	case "pretooluse", "beforeshellexecution", "beforemcpexecution", "beforereadfile", "beforetabfileread", "stop":
+		return map[string]interface{}{"continue": true, "permission": "allow"}
+	}
+	return map[string]interface{}{"continue": true}
 }
 
 // antigravityHookOutputForProfile renders the per-event hook

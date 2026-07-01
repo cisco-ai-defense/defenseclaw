@@ -259,7 +259,7 @@ var builtinHookContracts = map[string][]HookContract{
 		ContractID:              "cursor-hooks-v1",
 		MinAgentVersion:         "1.7.0",
 		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
+		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"~/.cursor/hooks.json"},
 		ResponseFieldName:       "hook_output",
 		Events: []string{
@@ -309,6 +309,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Notes: []string{
 			"Cursor 1.7 introduced beta hooks for the agent loop.",
 			"Cursor native ask is limited to beforeShellExecution and beforeMCPExecution.",
+			"Every command-hook invocation returns a non-empty JSON object; beforeSubmitPrompt uses continue while permission gates use permission.",
 		},
 	}},
 	"windsurf": {{

@@ -50,6 +50,7 @@ from defenseclaw.commands.cmd_doctor import (
     _active_connector,
     _check_connector_hooks,
     _check_connector_inventory,
+    _check_cursor_configured_runtime,
     _check_hook_contract_lock,
     _check_hook_health,
     _check_omnigent_policy_health,
@@ -263,6 +264,93 @@ class TestCheckConnectorHooks(unittest.TestCase):
         with _doctor_label_suffix("[codex]"):
             _check_connector_hooks(cfg, "codex", r)
         self.assertEqual(r.checks[-1]["label"], "Codex hooks [codex]")
+
+    def _cursor_runtime_case(self, tmp: str, *, mode: str, fail_closed: bool):
+        runtime = os.path.join(tmp, "defenseclaw-hook.exe")
+        with open(runtime, "wb") as fh:
+            fh.write(b"MZ")
+        hooks_path = os.path.join(tmp, "hooks.json")
+        with open(hooks_path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "version": 1,
+                    "hooks": {
+                        "beforeSubmitPrompt": [
+                            {
+                                "command": f'"{runtime}" hook --connector cursor',
+                                "failClosed": fail_closed,
+                            }
+                        ]
+                    },
+                },
+                fh,
+            )
+        cfg = MagicMock()
+        cfg.guardrail.effective_mode.return_value = mode
+        cfg.guardrail.effective_hook_fail_mode.return_value = "closed" if fail_closed else "open"
+        return cfg, hooks_path, runtime
+
+    def test_cursor_doctor_validates_configured_native_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, runtime = self._cursor_runtime_case(
+                tmp,
+                mode="observe",
+                fail_closed=False,
+            )
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="nt",
+            )
+
+        self.assertEqual(r.checks[-1]["status"], "pass")
+        self.assertIn(runtime, r.checks[-1]["detail"])
+        self.assertIn("mode=observe", r.checks[-1]["detail"])
+        self.assertIn("failClosed=false", r.checks[-1]["detail"])
+        self.assertNotIn("inspect-tool.sh", r.checks[-1]["detail"])
+
+    def test_cursor_doctor_rejects_fail_closed_observe_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, _runtime = self._cursor_runtime_case(
+                tmp,
+                mode="observe",
+                fail_closed=True,
+            )
+            cfg.guardrail.effective_hook_fail_mode.return_value = "open"
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="nt",
+            )
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("expected false", r.checks[-1]["detail"])
+
+    def test_cursor_doctor_accepts_fail_closed_action_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, _runtime = self._cursor_runtime_case(
+                tmp,
+                mode="action",
+                fail_closed=True,
+            )
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="nt",
+            )
+
+        self.assertEqual(r.checks[-1]["status"], "pass")
+        self.assertIn("mode=action", r.checks[-1]["detail"])
+        self.assertIn("failClosed=true", r.checks[-1]["detail"])
 
     def test_unknown_connector_is_noop(self) -> None:
         r = _DoctorResult()
@@ -737,7 +825,7 @@ class TestCheckHookHealth(unittest.TestCase):
                 r = _DoctorResult()
                 _check_connector_hooks(cfg, connector, r)
             self.assertTrue(r.checks, msg=connector)
-            self.assertEqual(r.checks[-1]["label"], label, msg=connector)
+            self.assertIn(label, {check["label"] for check in r.checks}, msg=connector)
 
 
 class TestConnectorEnabled(unittest.TestCase):

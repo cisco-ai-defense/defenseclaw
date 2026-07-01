@@ -206,6 +206,13 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:   0,
 		},
 		{
+			name:       "cursor allow without hook_output emits valid json",
+			connector:  "cursor",
+			respBody:   `{"action":"allow"}`,
+			wantStdout: cursorAllow() + "\n",
+			wantCode:   0,
+		},
+		{
 			name:       "cursor echoes hook_output exit 0",
 			connector:  "cursor",
 			respBody:   `{"hook_output":{"continue":true,"permission":"deny","user_message":"no"}}`,
@@ -408,6 +415,16 @@ func TestUnreachable(t *testing.T) {
 		}
 	})
 
+	t.Run("cursor fail open emits valid allow json", func(t *testing.T) {
+		r := run(t, "cursor", &stubRT{err: errors.New("dial tcp: refused")}, nil)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorAllow()+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
+		}
+	})
+
 	t.Run("strict availability fails closed", func(t *testing.T) {
 		r := run(t, "openhands", &stubRT{err: errors.New("refused")}, func(o *Options) {
 			o.StrictAvailability = true
@@ -437,6 +454,16 @@ func TestResponseFailure(t *testing.T) {
 		r := run(t, "claudecode", &stubRT{status: 401, body: "unauthorized"}, nil)
 		if r.code != 0 {
 			t.Fatalf("code = %d, want 0", r.code)
+		}
+	})
+
+	t.Run("cursor response failure fail open emits valid allow json", func(t *testing.T) {
+		r := run(t, "cursor", &stubRT{status: 401, body: "unauthorized"}, nil)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorAllow()+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
 		}
 	})
 
@@ -488,6 +515,16 @@ func TestMissingToken(t *testing.T) {
 		}
 		if rt.requests != 0 {
 			t.Fatalf("gateway called %d times, want 0", rt.requests)
+		}
+	})
+
+	t.Run("cursor default emits valid allow json", func(t *testing.T) {
+		r := run(t, "cursor", ok(`{"action":"allow"}`), noToken)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorAllow()+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
 		}
 	})
 
@@ -662,6 +699,39 @@ func TestDisabledHomeIsNoop(t *testing.T) {
 	}
 	if rt.requests != 0 {
 		t.Fatalf("gateway called %d times despite .disabled", rt.requests)
+	}
+}
+
+func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		home func(t *testing.T) string
+	}{
+		{name: "disabled", home: func(t *testing.T) string {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return home
+		}},
+		{name: "missing", home: func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), "missing")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			home := tc.home(t)
+			code := Run(context.Background(), Options{
+				Connector: "cursor", Home: home, HookDir: filepath.Join(home, "hooks"),
+				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
+			})
+			if code != 0 {
+				t.Fatalf("code = %d, want 0", code)
+			}
+			if out.String() != cursorAllow()+"\n" {
+				t.Fatalf("stdout = %q, want Cursor allow JSON", out.String())
+			}
+		})
 	}
 }
 

@@ -1219,12 +1219,13 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         codex_list = self.invoke(["list", "--connector", "codex"])
         self.assertEqual(codex_list.exit_code, 0, codex_list.output)
         self.assertIn("shared", codex_list.output)
-        self.assertIn("quarant", codex_list.output)
+        # Rich may truncate the column one character earlier on Windows.
+        self.assertIn("quaran", codex_list.output)
 
         hermes_list = self.invoke(["list", "--connector", "hermes"])
         self.assertEqual(hermes_list.exit_code, 0, hermes_list.output)
         self.assertIn("shared", hermes_list.output)
-        self.assertIn("quarant", hermes_list.output)
+        self.assertIn("quaran", hermes_list.output)
 
         codex_json = self.invoke(["list", "--connector", "codex", "--json"])
         self.assertEqual(codex_json.exit_code, 0, codex_json.output)

@@ -1310,6 +1310,120 @@ def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
     return any(m and m in data for m in markers)
 
 
+def _split_configured_hook_command(command: str, *, platform_name: str | None = None) -> list[str]:
+    """Split the narrow command shape DefenseClaw writes into hooks.json."""
+    is_windows = (platform_name or os.name) == "nt"
+    try:
+        parts = shlex.split(command, posix=not is_windows)
+    except ValueError:
+        return []
+    if is_windows:
+        parts = [part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part for part in parts]
+    return parts
+
+
+def _check_cursor_configured_runtime(
+    cfg,
+    path: str,
+    label: str,
+    r: _DoctorResult,
+    *,
+    platform_name: str | None = None,
+) -> None:
+    """Validate the exact command Cursor invokes, not generated shell assets.
+
+    The hook contract lock records portable script assets even when native
+    Windows Cursor actually launches ``defenseclaw-hook.exe``. Parse the live
+    hooks.json, verify every DefenseClaw-owned entry uses one consistent,
+    reachable runtime, and ensure Cursor's host-side failClosed flag agrees
+    with the connector's effective observe/action mode.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            document = json.load(fh)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        _emit("fail", label, f"cannot parse configured hook file {path}: {exc}", r=r)
+        return
+
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        _emit("fail", label, f"configured hook file has no hooks object: {path}", r=r)
+        return
+
+    managed: list[tuple[str, dict[str, object], str]] = []
+    for event, raw_entries in hooks.items():
+        if not isinstance(raw_entries, list):
+            continue
+        for raw_entry in raw_entries:
+            if not isinstance(raw_entry, dict):
+                continue
+            command = str(raw_entry.get("command") or "").strip()
+            if "hook --connector cursor" in command or "cursor-hook.sh" in command:
+                managed.append((str(event), raw_entry, command))
+
+    if not managed:
+        _emit("fail", label, f"{path} has no DefenseClaw Cursor command entries", r=r)
+        return
+
+    commands = {command for _event, _entry, command in managed}
+    if len(commands) != 1:
+        _emit("fail", label, "DefenseClaw Cursor entries use inconsistent commands", r=r)
+        return
+    command = next(iter(commands))
+    argv = _split_configured_hook_command(command, platform_name=platform_name)
+    if not argv:
+        _emit("fail", label, f"cannot parse configured Cursor command: {command}", r=r)
+        return
+
+    target = os.path.expanduser(argv[0])
+    basename = os.path.basename(target).lower()
+    native = basename in {"defenseclaw-hook", "defenseclaw-hook.exe"}
+    script = basename == "cursor-hook.sh"
+    if native:
+        if argv[1:] != ["hook", "--connector", "cursor"]:
+            _emit("fail", label, f"configured Cursor launcher has unexpected arguments: {command}", r=r)
+            return
+    elif script:
+        if len(argv) != 1:
+            _emit("fail", label, f"configured Cursor script has unexpected arguments: {command}", r=r)
+            return
+    else:
+        _emit("fail", label, f"configured Cursor command is not a DefenseClaw hook runtime: {command}", r=r)
+        return
+
+    resolved = target if os.path.isabs(target) else (shutil.which(target) or "")
+    if not resolved or not os.path.isfile(resolved):
+        _emit("fail", label, f"configured Cursor hook runtime is missing: {target}", r=r)
+        return
+
+    guardrail = getattr(cfg, "guardrail", None)
+    mode_resolver = getattr(guardrail, "effective_mode", None)
+    fail_resolver = getattr(guardrail, "effective_hook_fail_mode", None)
+    mode = str(mode_resolver("cursor") if callable(mode_resolver) else "observe").strip().lower()
+    fail_mode = str(fail_resolver("cursor") if callable(fail_resolver) else "open").strip().lower()
+    expected_fail_closed = mode == "action" and fail_mode == "closed"
+    mismatched = [
+        event for event, entry, _command in managed if (entry.get("failClosed") is True) != expected_fail_closed
+    ]
+    if mismatched:
+        _emit(
+            "fail",
+            label,
+            f"configured failClosed does not match mode={mode or 'observe'} "
+            f"(expected {str(expected_fail_closed).lower()}): {', '.join(sorted(mismatched))}",
+            r=r,
+        )
+        return
+
+    _emit(
+        "pass",
+        label,
+        f"configured runtime={resolved}; entries={len(managed)}; "
+        f"mode={mode or 'observe'}; failClosed={str(expected_fail_closed).lower()}",
+        r=r,
+    )
+
+
 def _hook_health_paths_from_lock(cfg, connector: str) -> list[str]:
     """Return the hook config path(s) the gateway actually wrote for
     ``connector``, read from ``hook_contract_lock.json``.
@@ -1455,7 +1569,10 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         return
     for path in present:
         if _file_references_marker(path, markers):
-            _emit("pass", label, f"reachable at {path}", r=r)
+            if connector == "cursor":
+                _check_cursor_configured_runtime(cfg, path, label, r)
+            else:
+                _emit("pass", label, f"reachable at {path}", r=r)
             return
     _emit(
         "fail",

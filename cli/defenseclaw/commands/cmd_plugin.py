@@ -33,7 +33,10 @@ import click
 
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.inventory.plugin_directories import plugin_directory_entries
+from defenseclaw.inventory.plugin_directories import (
+    discover_plugin_directories,
+    plugin_directory_entries,
+)
 
 
 def _api_bind_host(app: AppContext) -> str:
@@ -490,7 +493,11 @@ def _scan_all_plugins(
             pid = p.get("id", "")
             if not pid:
                 continue
-            scan_dir = _resolve_plugin_dir(pid, app.cfg.plugin_dir, connector, host_dirs)
+            scan_dir = str(p.get("host_path") or "")
+            if not os.path.isdir(scan_dir):
+                scan_dir = _resolve_plugin_dir(
+                    pid, app.cfg.plugin_dir, connector, host_dirs
+                ) or ""
             if scan_dir:
                 targets.append((pid, scan_dir))
 
@@ -1336,11 +1343,12 @@ def _merge_all_plugins(
     # connectors. We de-dup by id against DefenseClaw-managed plugins:
     # a DefenseClaw plugin with the same id wins (it's our copy).
     if cfg is not None:
-        seen_ids = {p["id"] for p in plugins}
+        seen_ids = {str(p["id"]).casefold() for p in plugins}
         for hp in _list_host_plugins(connector, cfg):
-            if hp["id"] in seen_ids:
+            plugin_key = str(hp["id"]).casefold()
+            if plugin_key in seen_ids:
                 continue
-            seen_ids.add(hp["id"])
+            seen_ids.add(plugin_key)
             plugins.append(hp)
 
     return plugins
@@ -1578,6 +1586,10 @@ def _resolve_plugin_dir(
         host_candidate = os.path.join(d, name_or_path)
         if os.path.isdir(host_candidate):
             return host_candidate
+        requested = name_or_path.casefold()
+        for discovered in discover_plugin_directories(d, connector=connector):
+            if requested in {discovered.id.casefold(), discovered.name.casefold()}:
+                return discovered.path
 
     for lookup in dict.fromkeys([name_or_path, name_or_path.lower()]):
         info = _get_openclaw_plugin_info(lookup, connector)
@@ -1707,6 +1719,7 @@ def _list_defenseclaw_plugins(plugin_dir: str) -> list[str]:
 # false positives (treating a config file as a plugin) and DoS
 # (large directory walks during ``plugin list``).
 _HOST_PLUGIN_MANIFEST_FILES = (
+    os.path.join(".codex-plugin", "plugin.json"),
     "plugin.json",
     "plugin.yaml",
     "plugin.yml",
@@ -1752,24 +1765,39 @@ def _scan_plugin_dir(host_dir: str, connector: str) -> list[dict[str, Any]]:
     own node_modules tree).
     """
     out: list[dict[str, Any]] = []
-    for entry, plugin_path in plugin_directory_entries(host_dir):
+    for discovered in discover_plugin_directories(host_dir, connector=connector):
+        entry = discovered.id
+        plugin_path = discovered.path
         manifest = _read_host_plugin_manifest(plugin_path) or {}
-        plugin_id = manifest.get("id") or entry
-        plugin_name = manifest.get("name") or plugin_id
-        out.append({
+        plugin_id = manifest.get("id") or manifest.get("name") or entry
+        plugin_name = manifest.get("name") or discovered.name or plugin_id
+        row = {
             "id": str(plugin_id),
             "name": str(plugin_name),
-            "description": str(manifest.get("description", "")),
-            "version": str(manifest.get("version", "")),
-            "origin": str(manifest.get("origin", "host")),
-            "enabled": bool(manifest.get("enabled", True)),
+            "description": str(
+                manifest.get("description") or discovered.description
+            ),
+            "version": str(manifest.get("version") or discovered.version),
+            "origin": str(manifest.get("origin") or discovered.origin or "host"),
+            "enabled": (
+                discovered.enabled
+                if discovered.cached
+                else bool(manifest.get("enabled", True))
+            ),
             # Provenance label per plan C6 — the merged list MUST
             # disambiguate "managed by DefenseClaw" from "owned by the
             # host agent" so policy hooks (block/quarantine) only
             # touch the right side.
             "source": f"host:{connector}",
             "host_path": plugin_path,
-        })
+        }
+        if discovered.manifest:
+            row["manifest"] = discovered.manifest
+        if discovered.registry:
+            row["registry"] = discovered.registry
+        if discovered.cached:
+            row["cached"] = True
+        out.append(row)
     return out
 
 
@@ -1800,7 +1828,7 @@ def _list_host_plugins(connector: str, cfg) -> list[dict[str, Any]]:
     seen_ids: set[str] = set()
     for d in dirs:
         for entry in _scan_plugin_dir(d, name):
-            pid = entry["id"]
+            pid = entry["id"].casefold()
             if pid in seen_ids:
                 # First occurrence wins. Two plugin dirs (e.g.
                 # ``~/.claude/plugins`` + ``./.claude/plugins``) may
@@ -3084,7 +3112,7 @@ def _build_plugin_scan_map_for_connector(app: AppContext, connector: str) -> dic
         return scan_map
     matches: dict[str, tuple[Any, dict[str, Any]]] = {}
     for ls in latest:
-        name = os.path.basename(ls["target"])
+        name = _plugin_id_for_scan_target(app, connector, ls["target"])
         payload = _plugin_scan_payload_from_latest(ls)
         if connector and not _scan_entry_matches_plugin_connector(app, payload, connector):
             continue
@@ -3095,6 +3123,26 @@ def _build_plugin_scan_map_for_connector(app: AppContext, connector: str) -> dic
     for name, (_timestamp, payload) in matches.items():
         scan_map[name] = payload
     return scan_map
+
+
+def _plugin_id_for_scan_target(
+    app: AppContext, connector: str, target: str,
+) -> str:
+    """Map a concrete cached version directory back to its logical plugin ID."""
+    try:
+        real_target = os.path.normcase(os.path.realpath(target))
+    except (OSError, ValueError):
+        return os.path.basename(target)
+    for plugin_entry in _list_host_plugins(connector, app.cfg):
+        plugin_path = str(plugin_entry.get("host_path") or "")
+        if not plugin_path:
+            continue
+        try:
+            if os.path.normcase(os.path.realpath(plugin_path)) == real_target:
+                return str(plugin_entry.get("id") or os.path.basename(target))
+        except (OSError, ValueError):
+            continue
+    return os.path.basename(target)
 
 
 def _scan_entry_matches_plugin_connector(
@@ -3125,7 +3173,7 @@ def _latest_plugin_scan_for_connector(
         return None
     matches: list[tuple[Any, dict[str, Any]]] = []
     for ls in latest:
-        if os.path.basename(ls["target"]) != plugin_name:
+        if _plugin_id_for_scan_target(app, connector, ls["target"]) != plugin_name:
             continue
         payload = _plugin_scan_payload_from_latest(ls)
         if connector and not _scan_entry_matches_plugin_connector(app, payload, connector):

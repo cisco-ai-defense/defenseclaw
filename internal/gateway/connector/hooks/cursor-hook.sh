@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v6
+# defenseclaw-managed-hook v7
 # DefenseClaw Cursor hook — forwards Cursor command-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
@@ -39,6 +39,7 @@ export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  printf '{"continue":true}\n'
   exit 0
 fi
 {{end}}
@@ -58,7 +59,15 @@ DEFENSECLAW_HOOK_NAME="cursor-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token cursor cursor-hook "cursor tool"
+  MISSING_TOKEN_REASON="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
+  defenseclaw_log_hook_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    echo "defenseclaw: ${MISSING_TOKEN_REASON}, blocking cursor tool (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
+    printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
+    exit 2
+  fi
+  printf '{"continue":true}\n'
+  exit 0
 fi
 
 # Read stdin under a 1MB cap so a hostile / runaway agent can't OOM
@@ -66,9 +75,10 @@ fi
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: cursor hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
-    printf '{"continue":true,"permission":"deny","user_message":"DefenseClaw hook payload too large","agent_message":"DefenseClaw hook payload too large"}\n'
+    printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook payload too large","agent_message":"DefenseClaw hook payload too large"}\n'
     exit 2
   fi
+  printf '{"continue":true}\n'
   exit 0
 }
 API_ADDR="{{.APIAddr}}"
@@ -88,9 +98,10 @@ fail_unreachable() {
   defenseclaw_log_hook_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "cursor tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    printf '{"continue":true,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
+    printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
     exit 2
   fi
+  printf '{"continue":true}\n'
   exit 0
 }
 
@@ -98,9 +109,10 @@ fail_response() {
   defenseclaw_log_hook_failure cursor cursor-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: cursor hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
+    printf '{"continue":true}\n'
     exit 0
   fi
-  printf '{"continue":true,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
+  printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
   exit 0
 }
 
@@ -142,5 +154,7 @@ OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
 }
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
+else
+  printf '{"continue":true}\n'
 fi
 exit 0

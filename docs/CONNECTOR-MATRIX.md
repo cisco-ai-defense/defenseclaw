@@ -225,7 +225,7 @@ with a warning. Action mode fails closed unless
 | Codex | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Claude Code | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
-| Cursor | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Cursor | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v7` | prompt, tool_call, tool_result |
 | Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Gemini CLI | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | Copilot CLI | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |

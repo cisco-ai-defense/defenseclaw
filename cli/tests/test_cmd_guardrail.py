@@ -716,6 +716,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
     def test_set_one_connector_closed_persists_and_restarts_only_it(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.connectors["codex"].mode = "action"
         with patch(
             "defenseclaw.commands.cmd_setup._restart_services"
         ) as restart_mock:
@@ -742,7 +743,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
             cmd_guardrail.fail_mode_cmd, ["--connector", "codex"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("closed", result.output)
+        self.assertIn("open", result.output)
         self.assertIn("override", result.output)
         app.cfg.save.assert_not_called()
 
@@ -782,6 +783,8 @@ class PerConnectorFailModeTests(unittest.TestCase):
     def test_bare_set_fans_out_to_all_active_connectors(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.connectors["codex"].mode = "action"
+        app.cfg.guardrail.connectors["claudecode"].mode = "action"
         with patch("defenseclaw.commands.cmd_setup._restart_services"):
             result = runner.invoke(
                 cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
@@ -810,12 +813,28 @@ class PerConnectorFailModeTests(unittest.TestCase):
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
 
+    def test_connector_open_clears_dormant_closed_override_in_observe_mode(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd,
+                ["open", "--connector", "codex", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("nothing to do", result.output)
+        self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
+        app.cfg.save.assert_called_once()
+
     def test_bare_show_fans_out_to_all_active_connectors(self):
         # No value AND no --connector: the bare read MUST show EVERY active
         # connector's effective fail mode (not just the global/active one),
         # so a 3-connector install shows all three.
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.connectors["codex"].mode = "action"
         app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
