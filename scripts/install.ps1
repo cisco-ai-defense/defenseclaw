@@ -21,11 +21,13 @@
 .DESCRIPTION
     Installs DefenseClaw from pre-built release artifacts on Windows. The Go
     gateway ships as defenseclaw_<version>_windows_<arch>.zip (containing
-    defenseclaw.exe) and the CLI ships as a pure-Python wheel. This is the
+    defenseclaw.exe and defenseclaw-hook.exe) and the CLI ships as a
+    pure-Python wheel. This is the
     Windows counterpart to scripts/install.sh; it lands:
 
-      * <home>\bin\defenseclaw-gateway.exe  (the Go gateway/sidecar binary)
-      * <home>\bin\defenseclaw.cmd          (shim to the CLI in the venv)
+      * <home>\.local\bin\defenseclaw-gateway.exe  (gateway/sidecar)
+      * <home>\.local\bin\defenseclaw-hook.exe     (no-console hook launcher)
+      * <home>\.local\bin\defenseclaw.cmd          (CLI shim)
 
     and adds that bin dir to the user PATH. Only Python + uv are required; no Go,
     Node.js, or git. Connector-specific wiring (Codex, Claude Code, ...) is done
@@ -321,14 +323,20 @@ function Install-Gateway {
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     try {
         if ($Local) {
-            # Accept either the zip or a raw defenseclaw.exe in the local dir.
+            # Accept either the release-shaped zip or explicit raw binaries.
             $zip = Get-ChildItem -Path (Join-Path $Local "defenseclaw_*_windows_$Arch.zip") -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($zip) {
                 Expand-Archive -Path $zip.FullName -DestinationPath $tmp -Force
             } else {
-                $exe = Get-ChildItem -Path (Join-Path $Local "defenseclaw*.exe") -ErrorAction SilentlyContinue | Select-Object -First 1
-                if (-not $exe) { Die "No windows zip or defenseclaw.exe found in $Local" }
-                Copy-Item $exe.FullName (Join-Path $tmp "defenseclaw.exe") -Force
+                $gatewayExe = Join-Path $Local "defenseclaw.exe"
+                if (-not (Test-Path $gatewayExe)) {
+                    $gatewayExe = Join-Path $Local "defenseclaw-gateway.exe"
+                }
+                $hookExe = Join-Path $Local "defenseclaw-hook.exe"
+                if (-not (Test-Path $gatewayExe)) { Die "No windows zip or gateway executable found in $Local" }
+                if (-not (Test-Path $hookExe)) { Die "defenseclaw-hook.exe missing from $Local" }
+                Copy-Item $gatewayExe (Join-Path $tmp "defenseclaw.exe") -Force
+                Copy-Item $hookExe (Join-Path $tmp "defenseclaw-hook.exe") -Force
             }
         } else {
             $zipName = "defenseclaw_${script:ReleaseVersion}_windows_${Arch}.zip"
@@ -338,12 +346,16 @@ function Install-Gateway {
             Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
         }
         $binary = Join-Path $tmp "defenseclaw.exe"
+        $hookBinary = Join-Path $tmp "defenseclaw-hook.exe"
         if (-not (Test-Path $binary)) { Die "defenseclaw.exe missing from archive" }
+        if (-not (Test-Path $hookBinary)) { Die "defenseclaw-hook.exe missing from archive" }
         Copy-Item $binary (Join-Path $InstallDir "defenseclaw-gateway.exe") -Force
+        Copy-Item $hookBinary (Join-Path $InstallDir "defenseclaw-hook.exe") -Force
     } finally {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
     Write-Ok "Gateway installed -> $InstallDir\defenseclaw-gateway.exe"
+    Write-Ok "No-console hook launcher installed -> $InstallDir\defenseclaw-hook.exe"
 }
 
 # ── Install: Python CLI (from wheel) ──────────────────────────────────────────

@@ -40,12 +40,13 @@ func userHomeDir() string {
 }
 
 // nativeHookFlag is the distinctive argument fragment that marks a command as
-// the DefenseClaw native Go hook entrypoint (`defenseclaw-gateway hook
+// the DefenseClaw native Go hook entrypoint (`defenseclaw-hook hook
 // --connector <name>`). It is used both when writing an agent's hook command on
 // Windows and when recognizing DefenseClaw-owned hooks during teardown.
 const nativeHookFlag = "hook --connector "
 
 const windowsGatewayBinaryName = "defenseclaw-gateway.exe"
+const windowsHookBinaryName = "defenseclaw-hook.exe"
 
 // windowsSafePATHCommandPrefix disables cmd.exe's implicit current-directory
 // executable lookup before resolving a command through PATH. Codex runs hook
@@ -55,11 +56,11 @@ const windowsGatewayBinaryName = "defenseclaw-gateway.exe"
 //
 // Using the installer-provided PATH entry avoids that quoting failure. Setting
 // NoDefaultCurrentDirectoryInExePath prevents an untrusted repository from
-// shadowing defenseclaw-gateway.exe in the session working directory.
+// shadowing defenseclaw-hook.exe in the session working directory.
 const windowsSafePATHCommandPrefix = "set NoDefaultCurrentDirectoryInExePath=1&& "
 
 // defenseclawHookBinaryOverride is a test seam for exercising generated
-// Windows configs with an installed gateway path that contains spaces. It is
+// Windows configs with an installed launcher path that contains spaces. It is
 // intentionally package-private and empty in production.
 var defenseclawHookBinaryOverride string
 
@@ -91,31 +92,45 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	// Codex passes the full command as one argument to cmd.exe /C. A leading
 	// quoted executable path is escaped by Windows process argument encoding and
 	// becomes part of argv[0], so cmd.exe returns exit code 1 without launching
-	// the gateway. Resolve the stable installer-provided binary name through
+	// the hook. Resolve the stable installer-provided binary name through
 	// PATH, with current-directory lookup disabled to prevent repository
 	// shadowing.
 	if connector == "codex" {
-		return windowsSafePATHCommandPrefix + windowsGatewayBinaryName + " " + nativeHookFlag + connector
+		return windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + connector
 	}
 	// Antigravity (agy v1) tokenizes the command itself and passes quote
 	// characters through to direct exec. An absolute path containing spaces
 	// therefore cannot be quoted safely in its command field. The Windows
-	// installer adds the gateway directory to PATH, so use the stable binary
+	// installer adds the hook directory to PATH, so use the stable binary
 	// name for this one direct-exec surface. Other agents accept a normal
 	// quoted Windows command line and keep the absolute path.
 	if connector == "antigravity" {
-		return windowsGatewayBinaryName + " " + nativeHookFlag + connector
+		return windowsHookBinaryName + " " + nativeHookFlag + connector
 	}
 	return windowsQuoteExe(defenseclawHookBinary()) + " " + nativeHookFlag + connector
 }
 
-// defenseclawHookBinary returns the path to the running gateway binary, which
-// also hosts the hidden `hook` subcommand. Falls back to the bare binary name
-// (resolved via PATH by the agent) when the path cannot be determined.
+// defenseclawHookBinary returns the stable installed launcher path on Windows.
+// It deliberately does not derive the path from os.Executable(): setup is often
+// run from a repository build, while generated agent config must survive that
+// repository being moved or deleted.
 func defenseclawHookBinary() string {
 	if strings.TrimSpace(defenseclawHookBinaryOverride) != "" {
 		return defenseclawHookBinaryOverride
 	}
+	if runtime.GOOS == "windows" {
+		if home := strings.TrimSpace(userHomeDir()); home != "" {
+			return filepath.Join(home, ".local", "bin", windowsHookBinaryName)
+		}
+		return windowsHookBinaryName
+	}
+	if exe, err := os.Executable(); err == nil && strings.TrimSpace(exe) != "" {
+		return exe
+	}
+	return "defenseclaw-gateway"
+}
+
+func defenseclawGatewayBinary() string {
 	if exe, err := os.Executable(); err == nil && strings.TrimSpace(exe) != "" {
 		return exe
 	}
@@ -163,14 +178,20 @@ func isNativeHookCommand(cmd string) bool {
 	if exe == "" || strings.ContainsAny(exe, `"'`) {
 		return false
 	}
-	return isDefenseClawGatewayExecutable(exe)
+	return isDefenseClawHookExecutable(exe)
 }
 
-func isDefenseClawGatewayExecutable(exe string) bool {
+func isDefenseClawHookExecutable(exe string) bool {
 	exe = strings.TrimSpace(exe)
-	if current := strings.TrimSpace(defenseclawHookBinary()); current != "" &&
-		strings.EqualFold(filepath.Clean(exe), filepath.Clean(current)) {
-		return true
+	for _, owned := range []string{
+		defenseclawHookBinary(),
+		defenseclawGatewayBinary(), // legacy pre-launcher config
+		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
+	} {
+		if strings.TrimSpace(owned) != "" &&
+			strings.EqualFold(filepath.Clean(exe), filepath.Clean(owned)) {
+			return true
+		}
 	}
 	// Antigravity intentionally stores a bare PATH-resolved executable name.
 	// Accept that exact form, but never accept an arbitrary absolute path merely
@@ -180,7 +201,9 @@ func isDefenseClawGatewayExecutable(exe string) bool {
 	if strings.Contains(normalized, "/") {
 		return false
 	}
-	return strings.EqualFold(normalized, windowsGatewayBinaryName) ||
+	return strings.EqualFold(normalized, windowsHookBinaryName) ||
+		strings.EqualFold(normalized, "defenseclaw-hook") ||
+		strings.EqualFold(normalized, windowsGatewayBinaryName) ||
 		strings.EqualFold(normalized, "defenseclaw-gateway")
 }
 

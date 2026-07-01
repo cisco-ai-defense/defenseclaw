@@ -33,12 +33,30 @@ func setHookBinaryOverride(t *testing.T, path string) {
 	t.Cleanup(func() { defenseclawHookBinaryOverride = prev })
 }
 
+func TestWindowsHookBinaryUsesStableInstalledLocation(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows installed launcher path")
+	}
+	previous := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = ""
+	t.Cleanup(func() { defenseclawHookBinaryOverride = previous })
+
+	want := filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName)
+	if got := defenseclawHookBinary(); !strings.EqualFold(filepath.Clean(got), filepath.Clean(want)) {
+		t.Fatalf("defenseclawHookBinary() = %q, want installed path %q", got, want)
+	}
+	notify := codexNativeNotifyCommand()
+	if len(notify) != 2 || !strings.EqualFold(filepath.Clean(notify[0]), filepath.Clean(want)) || notify[1] != "notify" {
+		t.Fatalf("codexNativeNotifyCommand() = %#v, want installed launcher + notify", notify)
+	}
+}
+
 // TestHookInvocationCommand pins the platform split: Unix runs the bundled .sh
 // path; Windows invokes the native Go `hook` subcommand instead of any Bash/.cmd
 // wrapper.
 func TestHookInvocationCommand(t *testing.T) {
 	const unix = "/home/u/.defenseclaw/hooks/codex-hook.sh"
-	const windowsExe = `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`
+	const windowsExe = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
 	setHookBinaryOverride(t, windowsExe)
 
 	for _, goos := range []string{"linux", "darwin"} {
@@ -48,7 +66,7 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 
 	win := hookInvocationCommandFor("windows", "cursor", unix)
-	wantWin := `"C:\Program Files\DefenseClaw\defenseclaw-gateway.exe" hook --connector cursor`
+	wantWin := `"C:\Program Files\DefenseClaw\defenseclaw-hook.exe" hook --connector cursor`
 	if win != wantWin {
 		t.Errorf("windows command = %q, want %q", win, wantWin)
 	}
@@ -68,7 +86,7 @@ func TestHookInvocationCommand(t *testing.T) {
 	// Codex passes this string to cmd.exe /C as one argument. Do not use the
 	// quoted absolute-path form that Windows re-escapes into a literal argv[0].
 	codex := hookInvocationCommandFor("windows", "codex", unix)
-	wantCodex := windowsSafePATHCommandPrefix + windowsGatewayBinaryName + " " + nativeHookFlag + "codex"
+	wantCodex := windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + "codex"
 	if codex != wantCodex {
 		t.Errorf("codex command = %q, want %q", codex, wantCodex)
 	}
@@ -83,7 +101,7 @@ func TestHookInvocationCommand(t *testing.T) {
 	// installer-provided PATH entry so an install root containing spaces still
 	// works without quote characters becoming part of argv[0].
 	agy := hookInvocationCommandFor("windows", "antigravity", unix)
-	if agy != `defenseclaw-gateway.exe hook --connector antigravity` {
+	if agy != `defenseclaw-hook.exe hook --connector antigravity` {
 		t.Errorf("antigravity command = %q", agy)
 	}
 	if strings.ContainsAny(agy, `"'`) {
@@ -102,7 +120,7 @@ func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
 	}
 
 	command := hookInvocationCommandFor("windows", "codex", "")
-	wantTail := windowsGatewayBinaryName + " " + nativeHookFlag + "codex"
+	wantTail := windowsHookBinaryName + " " + nativeHookFlag + "codex"
 	probe := strings.Replace(command, wantTail, "where.exe cmd.exe", 1)
 	if probe == command {
 		t.Fatalf("generated Codex command %q did not contain %q", command, wantTail)
@@ -124,8 +142,8 @@ func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
 // corrupt the native Windows command (which is already a complete command line)
 // while still quoting Unix script paths for the agent's shell.
 func TestShellWordPassesNativeCommandThrough(t *testing.T) {
-	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`)
-	native := `"C:\Program Files\DefenseClaw\defenseclaw-gateway.exe" hook --connector cursor`
+	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
+	native := `"C:\Program Files\DefenseClaw\defenseclaw-hook.exe" hook --connector cursor`
 	if got := shellWord(native); got != native {
 		t.Errorf("shellWord(native) = %q, want unchanged", got)
 	}
@@ -138,7 +156,7 @@ func TestShellWordPassesNativeCommandThrough(t *testing.T) {
 // the trust hash over the exact command it executes (so Codex recognizes it),
 // and that teardown reproduces the same fingerprint to remove the state.
 func TestBuildCodexHooksTableHashesTheCommand(t *testing.T) {
-	const cmd = windowsSafePATHCommandPrefix + windowsGatewayBinaryName + " " + nativeHookFlag + "codex"
+	const cmd = windowsSafePATHCommandPrefix + windowsHookBinaryName + " " + nativeHookFlag + "codex"
 	const configPath = "/home/u/.codex/config.toml"
 
 	table := buildCodexHooksTable(configPath, cmd)
@@ -183,13 +201,13 @@ func TestBuildCodexHooksTableHashesTheCommand(t *testing.T) {
 // hooks dir and carries no on-disk marker.
 func TestIsOwnedHookRecognizesNativeCommand(t *testing.T) {
 	const hooksDir = "/home/u/.defenseclaw/hooks"
-	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`)
+	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
 
 	owned := map[string]interface{}{
 		"hooks": []interface{}{
 			map[string]interface{}{
 				"type":    "command",
-				"command": `"C:\Program Files\DefenseClaw\defenseclaw-gateway.exe" hook --connector claudecode`,
+				"command": `"C:\Program Files\DefenseClaw\defenseclaw-hook.exe" hook --connector claudecode`,
 			},
 		},
 	}
@@ -222,7 +240,7 @@ func TestIsOwnedHookRecognizesNativeCommand(t *testing.T) {
 		"hooks": []interface{}{
 			map[string]interface{}{
 				"type":    "command",
-				"command": `"C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode`,
+				"command": `"C:\Tools\defenseclaw-hook.exe" hook --connector claudecode`,
 			},
 		},
 	}
@@ -232,19 +250,23 @@ func TestIsOwnedHookRecognizesNativeCommand(t *testing.T) {
 }
 
 func TestCodexNativeNotifyOwnership(t *testing.T) {
-	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`)
+	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
 	opts := SetupOpts{DataDir: `C:\Users\me\.defenseclaw`}
-	owned := []interface{}{`C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`, "notify"}
+	owned := []interface{}{`C:\Program Files\DefenseClaw\defenseclaw-hook.exe`, "notify"}
 	if !codexNotifyLooksManaged(owned, opts) {
 		t.Fatal("native Codex notifier was not recognized as managed")
+	}
+	legacy := []interface{}{filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName), "notify"}
+	if !codexNotifyLooksManaged(legacy, opts) {
+		t.Fatal("legacy installed gateway notifier was not recognized for migration")
 	}
 	foreign := []interface{}{`C:\Tools\desktop-notifier.exe`, "notify"}
 	if codexNotifyLooksManaged(foreign, opts) {
 		t.Fatal("foreign notifier was incorrectly recognized as managed")
 	}
-	foreignSameBasename := []interface{}{`C:\Tools\defenseclaw-gateway.exe`, "notify"}
+	foreignSameBasename := []interface{}{`C:\Tools\defenseclaw-hook.exe`, "notify"}
 	if codexNotifyLooksManaged(foreignSameBasename, opts) {
-		t.Fatal("different absolute gateway notifier was incorrectly recognized as managed")
+		t.Fatal("different absolute hook notifier was incorrectly recognized as managed")
 	}
 }
 
@@ -255,7 +277,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-native config matrix")
 	}
-	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`)
+	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
 
 	tests := []struct {
 		name     string
@@ -298,8 +320,8 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			}
 			text := string(data)
 			connectorName := tt.conn.Name()
-			if !strings.Contains(text, windowsGatewayBinaryName) {
-				t.Errorf("config does not invoke %s:\n%s", windowsGatewayBinaryName, text)
+			if !strings.Contains(text, windowsHookBinaryName) {
+				t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
 			}
 			if !strings.Contains(text, nativeHookFlag+connectorName) {
 				t.Errorf("config missing native connector command for %s:\n%s", connectorName, text)

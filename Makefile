@@ -1,5 +1,6 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
+HOOK_LAUNCHER := defenseclaw-hook
 VERSION     := 0.8.0
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
@@ -309,6 +310,10 @@ gateway: sync-openclaw-extension
 	@echo "Built $(GATEWAY)$(EXE)"
 	@echo "  Run with: ./$(GATEWAY)$(EXE)"
 	@echo "  Check status: ./$(GATEWAY)$(EXE) status"
+ifeq ($(OS),Windows_NT)
+	go build -ldflags "-H=windowsgui -X main.version=$(VERSION)" -o $(HOOK_LAUNCHER).exe ./cmd/defenseclaw-hook
+	@echo "Built $(HOOK_LAUNCHER).exe (Windows GUI subsystem)"
+endif
 
 # sync-openclaw-extension copies the runtime files of the DefenseClaw
 # OpenClaw plugin into internal/gateway/connector/openclaw_extension so
@@ -380,6 +385,11 @@ extensions: plugin sync-openclaw-extension
 gateway-cross: sync-openclaw-extension
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
+	@if [ "$(GOOS)" = "windows" ]; then \
+		GOOS=$(GOOS) GOARCH=$(GOARCH) go build \
+			-ldflags "-H=windowsgui -X main.version=$(VERSION)" \
+			-o $(HOOK_LAUNCHER)-$(GOOS)-$(GOARCH).exe ./cmd/defenseclaw-hook; \
+	fi
 	@echo "Built $(BINARY)-$(GOOS)-$(GOARCH)"
 
 gateway-run: gateway
@@ -455,10 +465,19 @@ gateway-install: cli-install gateway
 		echo "Starting the updated Windows gateway..."; \
 		"$$gwt" start; \
 	fi
+	@if [ "$(OS)" = "Windows_NT" ]; then \
+		hook_target="$(INSTALL_DIR)/$(HOOK_LAUNCHER).exe"; \
+		hook_tmp="$$hook_target.new.$$$$"; \
+		trap 'rm -f "$$hook_tmp"' EXIT INT TERM; \
+		cp "$(HOOK_LAUNCHER).exe" "$$hook_tmp"; \
+		chmod +x "$$hook_tmp"; \
+		mv -f "$$hook_tmp" "$$hook_target"; \
+	fi
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 		codesign -f -s - "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" 2>/dev/null || true; \
 	fi
 	@echo "Installed $(GATEWAY)$(EXE) to $(INSTALL_DIR)"
+	@if [ "$(OS)" = "Windows_NT" ]; then echo "Installed $(HOOK_LAUNCHER).exe to $(INSTALL_DIR)"; fi
 	@# On Unix, a running sidecar keeps the old inode; tell the operator a
 	@# restart is needed. The Windows branch above stops and starts the sidecar
 	@# around replacement because a live .exe cannot retain Unix inode semantics.
@@ -819,7 +838,7 @@ dist-clean:
 	rm -rf sandbox-test-*
 
 clean:
-	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(BINARY)-linux-* $(BINARY)-darwin-*
+	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(HOOK_LAUNCHER)-windows-*.exe
 	rm -rf $(VENV) cli/*.egg-info
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml

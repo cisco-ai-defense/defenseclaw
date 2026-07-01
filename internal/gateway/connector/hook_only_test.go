@@ -517,11 +517,11 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 	if command != wantCommand {
 		t.Fatalf("command=%q want %q", command, wantCommand)
 	}
-	// Unix runs the absolute shell hook. Windows uses the stable gateway
+	// Unix runs the absolute shell hook. Windows uses the stable no-console hook
 	// basename through PATH because agy's direct-exec tokenizer cannot dequote
 	// an absolute executable path containing spaces.
 	if runtime.GOOS == "windows" {
-		if command != `defenseclaw-gateway.exe hook --connector antigravity` {
+		if command != `defenseclaw-hook.exe hook --connector antigravity` {
 			t.Fatalf("windows command=%q", command)
 		}
 	} else {

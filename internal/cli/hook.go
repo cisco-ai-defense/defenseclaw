@@ -36,7 +36,7 @@ func init() {
 
 // newHookCmd builds the hidden `hook` subcommand the agent runtime invokes per
 // event. On Windows this replaces the Bash hook scripts entirely: the agent is
-// configured to run `defenseclaw-gateway hook --connector <name> --event <ev>`,
+// configured to run `defenseclaw-hook hook --connector <name> --event <ev>`,
 // which reads the event JSON from stdin, forwards it to the local gateway, and
 // shapes the agent-native stdout + exit code. It is hidden because it is a
 // machine-facing entrypoint, not something a human runs directly.

@@ -17,7 +17,7 @@
 #   2. Feeds every golden stdin payload under golden/<connector>/ into the
 #      *installed* hook entrypoint:
 #        - unix:    ~/.defenseclaw/hooks/<connector>-hook.sh
-#        - windows: defenseclaw-gateway hook --connector <name> --event <ev>
+#        - windows: defenseclaw-hook hook --connector <name> --event <ev>
 #   3. Asserts the gateway received the event (fires) and that the entrypoint
 #      shaped the verdict correctly (allow -> exit 0; block -> exit 2 or a
 #      decision JSON carrying block/deny).
