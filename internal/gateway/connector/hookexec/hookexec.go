@@ -181,13 +181,13 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 		return 0
 	}
 
-	tokenFile := filepath.Join(opts.HookDir, ".token")
+	tokenFile, scopedTokenFile := hookTokenFile(opts.HookDir, "codex")
 	if opts.Token == "" && !fileExists(tokenFile) {
 		return 0
 	}
 	token := opts.Token
-	if token == "" {
-		token = readTokenFile(tokenFile)
+	if scopedTokenFile || token == "" {
+		token = readTokenFile(tokenFile, scopedTokenFile)
 	}
 
 	notifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -209,7 +209,6 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 	if v := strings.TrimSpace(opts.TraceState); v != "" && validTracestate(v) {
 		req.Header.Set("tracestate", v)
 	}
-
 	resp, err := opts.HTTPClient.Do(req)
 	if err != nil {
 		return 0
