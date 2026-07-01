@@ -174,3 +174,6 @@ outputs/
 # Locally built mock AI Defense ingest server (scripts/build-managed-bundle.sh
 # / manual testing). Compiled artifact — never commit.
 /mock-aid-ingest
+
+# Local native-Windows manual acceptance walkthrough.
+/WINDOWS_NATIVE_MANUAL_TEST.md
