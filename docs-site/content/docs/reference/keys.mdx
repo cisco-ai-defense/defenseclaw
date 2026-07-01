@@ -22,7 +22,12 @@ DefenseClaw stores secrets in a single dotenv file and reads them through one re
 ~/.defenseclaw/.env       # 0o600 file. Never commit. Never log.
 ```
 
-Created on demand by `defenseclaw keys set <ENV>`. Atomic tmp+rename writes; values are read **lazily** by the gateway and CLI on every operation, so rotating a secret is a single `defenseclaw keys set` (or a `vim` followed by save) — no service restart.
+Created on demand by `defenseclaw keys set <ENV>` using an atomic tmp+rename
+write. New CLI processes read the updated value immediately. Long-running
+gateway components may hold the credential they resolved at startup or during
+configuration reload, so restart the gateway after rotating a key unless the
+specific setup command documents hot reload. Use the matching `setup ... test`
+command or `defenseclaw doctor` to verify the new credential.
 
 The CLI also supports overriding any value at runtime by `export`-ing it in your shell. That's the highest-priority source.
 

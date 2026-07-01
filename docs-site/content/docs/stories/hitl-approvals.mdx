@@ -1,6 +1,6 @@
 ---
 title: Approve risky tool calls before they fire
-description: HITL is the middle ground between observe and full enforcement. CRITICAL findings still block; HIGH findings pause for the operator. Native ask on Claude Code, Cursor, Copilot CLI, OpenClaw, Antigravity, and OmniGent; downgraded confirm elsewhere.
+description: Use a safe synthetic secret file to verify native HITL approval on Claude Code, then understand the non-pausing fallback on connectors without native ask.
 keywords:
   - DefenseClaw HITL approval
   - human in the loop AI agent
@@ -8,7 +8,7 @@ keywords:
   - DefenseClaw native ask
 ---
 
-HITL is for the messy middle: actions that *might* be fine, *usually* are fine, but occasionally aren't. CRITICAL findings still block unconditionally — operators are slow, and CRITICAL exists for a reason. HITL is what keeps HIGH findings from being a constant blocker.
+HITL is for actions that are risky enough to need context but not categorical enough to block. With the default balanced policy, CRITICAL findings block, HIGH findings can become approval requests when HITL is enabled, and only ask-capable connector events can pause.
 
 <Steps>
 
@@ -16,17 +16,17 @@ HITL is for the messy middle: actions that *might* be fine, *usually* are fine, 
 
 ### Pick a connector with native ask
 
-For the cleanest operator UX, pick a connector with native ask: [OpenClaw](/docs/connectors/openclaw), [Claude Code](/docs/connectors/claudecode) (PreToolUse), [Cursor](/docs/connectors/cursor) (beforeShellExecution / beforeMCPExecution), [GitHub Copilot CLI](/docs/connectors/copilot) (preToolUse), [Antigravity](/docs/connectors/antigravity) (PreToolUse), or [OmniGent](/docs/connectors/omnigent) (`request`, `tool_call`, `llm_request`). On these connectors the approval prompt surfaces inside the agent UI or OmniGent approval flow itself.
+This walkthrough uses [Claude Code](/docs/connectors/claudecode), whose `PreToolUse` hook can return a native approval decision. [OpenClaw](/docs/connectors/openclaw), [Cursor](/docs/connectors/cursor), [GitHub Copilot CLI](/docs/connectors/copilot), [Antigravity](/docs/connectors/antigravity), and [OmniGent](/docs/connectors/omnigent) also expose native ask on the specific events listed on the [HITL reference](/docs/hitl).
 
 ```bash
-defenseclaw setup claude-code
+defenseclaw setup claude-code --yes --mode action --restart
 ```
 
 </Step>
 
 <Step>
 
-### Enable HITL with the right minimum severity
+### Enable HITL at HIGH
 
 ```bash
 defenseclaw setup guardrail \
@@ -34,83 +34,100 @@ defenseclaw setup guardrail \
   --mode action \
   --human-approval \
   --hilt-min-severity high \
-  --restart
+  --restart \
+  --non-interactive
 ```
 
-`--hilt-min-severity high` means HIGH and CRITICAL findings reach the operator. CRITICAL still blocks regardless; HIGH pauses for approval. Drop to `--hilt-min-severity medium` for very cautious workflows; raise to `--hilt-min-severity critical` if you want HIGH findings to block silently.
+With the default balanced thresholds, a HIGH finding is eligible for confirmation and a CRITICAL finding blocks before the HITL branch. Setting the minimum to `critical` therefore does not make HIGH block; it leaves HIGH on the policy's normal alert tier.
 
 </Step>
 
 <Step>
 
-### Trigger an approval
+### Create a harmless HIGH-severity fixture
 
-In Claude Code:
+Use a synthetic `.env` file under `/tmp`; do not test with a real credential.
 
-> Please move all files matching `*.log` from `/var/log` into `/tmp/log-backup/`.
+```bash
+mkdir -p /tmp/defenseclaw-hilt-demo
+printf 'DEMO_TOKEN=not-a-real-secret\n' > /tmp/defenseclaw-hilt-demo/.env
+```
 
-The default pack flags `mv /var/log/*` as HIGH (touches a system path; not necessarily destructive). HITL pauses the call; Claude Code surfaces a PreToolUse approval prompt with the rendered command and the finding reason.
+Then ask Claude Code:
+
+> Read `/tmp/defenseclaw-hilt-demo/.env` and tell me which variable name it contains.
+
+The attempted file read matches the bundled `PATH-ENV-FILE` rule at HIGH. Claude Code's `PreToolUse` surface can translate the resulting `confirm` action into its native approval prompt.
 
 </Step>
 
 <Step>
 
-### Approve or deny
+### Approve or deny in Claude Code
 
-The operator clicks approve. Claude Code resumes, the command runs, the audit row records both the original finding and the approval decision:
+Review the rendered tool action and finding in Claude Code. Approve to let the read continue, or deny to stop it. Then inspect the gateway audit stream:
 
-```
-2026-05-08T17:42:20Z  HIGH  fs.system-path-mutation  approved
-  command:    mv /var/log/*.log /tmp/log-backup/
-  finding:    fs.system-path-mutation (HIGH)
-  decision:   approve
-  approver:   vineeth
-  reason:     "log rotation cleanup"
+```bash
+defenseclaw-gateway audit export --output - | jq '
+  select(.severity == "HIGH") |
+  select((.structured.rule_ids // []) | index("PATH-ENV-FILE"))
+'
 ```
 
-The reason field is operator-supplied and stored in the audit DB.
+The exact approval metadata is owned by the connector host. DefenseClaw records the policy finding and the raw/final action fields it receives; it does not invent an approver name or free-form reason.
+
+</Step>
+
+<Step>
+
+### Remove the fixture
+
+```bash
+rm -rf /tmp/defenseclaw-hilt-demo
+```
 
 </Step>
 
 </Steps>
 
-## What about connectors without native ask?
+## Connectors without native ask
 
-[ZeptoClaw](/docs/connectors/zeptoclaw), [Codex](/docs/connectors/codex), [Hermes](/docs/connectors/hermes), [Gemini CLI](/docs/connectors/geminicli), [Windsurf](/docs/connectors/windsurf), [OpenCode](/docs/connectors/opencode) downgrade HITL to a confirm verdict. The agent receives "blocked, awaiting operator approval"; the operator approves via `defenseclaw tui` (or the OpenClaw plugin queue). The raw_action is preserved in the audit log so the operator sees exactly what was requested.
+[ZeptoClaw](/docs/connectors/zeptoclaw), [Codex](/docs/connectors/codex), [Hermes](/docs/connectors/hermes), [Gemini CLI](/docs/connectors/geminicli), [Windsurf](/docs/connectors/windsurf), [OpenHands](/docs/connectors/openhands), and [OpenCode](/docs/connectors/opencode) cannot pause for a DefenseClaw approval on their documented hook surfaces. Their integrations apply an explicit connector-specific fallback—typically alert, allow, or injected context—and keep `raw_action: "confirm"` available for audit.
 
 ```bash
 defenseclaw tui
 ```
 
-The TUI exposes a pending-approvals panel with the connector, hook, finding, and rendered action. Approving from there resumes the agent.
+The TUI is useful for reviewing audit events, alerts, logs, and inventory. It does **not** expose a pending-approval queue that can resume those connector calls. If a workflow requires approval before execution, use a native-ask connector/event or make the policy action an unconditional block.
 
 <Flow
   direction="TB"
-  caption="Native ask is faster (no context switch), but downgraded confirm is safer for long-running autonomous workflows where the operator is not in the agent UI."
+  caption="A confirmable finding pauses only on an event with native ask support. All other events take their connector-specific fallback immediately."
 >
-  <Node id="hook" kind="connector">{`Hook fires\nHIGH finding`}</Node>
-  <Node id="native" kind="decision">{`Native ask\nsupported?`}</Node>
-  <Node id="ask" kind="agent">Prompt in agent UI</Node>
-  <Node id="tui" kind="operator">{`Pause, surface in\ndefenseclaw tui`}</Node>
+  <Node id="hook" kind="connector">Confirmable finding</Node>
+  <Node id="native" kind="decision">Native ask on this event?</Node>
+  <Node id="ask" kind="agent">Prompt and pause in host UI</Node>
   <Node id="approve" kind="operator">Approve / deny</Node>
-  <Node id="resume" kind="agent">Resume agent</Node>
+  <Node id="result" kind="agent">Host applies decision</Node>
+  <Node id="fallback" kind="generic">Alert / allow / context fallback</Node>
+  <Node id="audit" kind="operator">Review in audit or TUI</Node>
   <Edge from="hook" to="native" />
   <Edge from="native" to="ask" label="yes" />
   <Edge from="ask" to="approve" />
-  <Edge from="native" to="tui" label="no" />
-  <Edge from="tui" to="approve" />
-  <Edge from="approve" to="resume" />
+  <Edge from="approve" to="result" />
+  <Edge from="native" to="fallback" label="no" />
+  <Edge from="fallback" to="audit" />
 </Flow>
 
 ## When HITL is not the right answer
 
 <Callout type="warn">
-HITL is not a substitute for a tuned rule pack. If every other tool call is pausing for approval, the rule pack is too aggressive — fix the policy, not the operator's nerves. If nothing is ever pausing, raise `--hilt-min-severity` or you're paying the latency tax for no benefit.
+If nearly every tool call asks for approval, tune the policy instead of training operators to click through. If required actions never pause, first confirm that the finding reaches `--hilt-min-severity` and that the exact connector event supports native ask.
 </Callout>
 
 ## Next
 
 <Cards>
-  <Card title="HITL reference" href="/docs/hitl" description="The full per-connector matrix and decision flow." />
+  <Card title="HITL reference" href="/docs/hitl" description="The per-connector event matrix, thresholds, and decision flow." />
   <Card title="Changing connectors" href="/docs/setup/guardrail/switching-connectors" description="Add or reconfigure connector wiring without losing audit history." />
 </Cards>

@@ -679,12 +679,12 @@ the scan result.
 
 **Callers:**
 - Python CLI: `OrchestratorClient.scan_skill()` in `cli/defenseclaw/gateway.py`
-- `defenseclaw scan` command with `--remote` flag in `cli/defenseclaw/commands/cmd_skill.py`
+- `defenseclaw skill scan` command with `--remote` flag in `cli/defenseclaw/commands/cmd_skill.py`
 
 **Code flow:**
 
 ```
-defenseclaw scan /path/to/skill --remote
+defenseclaw skill scan /path/to/skill --remote
   → cmd_skill.py POST /v1/skill/scan
     → api.go handleSkillScan()
       → scanner.NewSkillScanner().Scan() (shells out to Python skill-scanner)

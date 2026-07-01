@@ -157,7 +157,7 @@
 
 ---
 
-## 13. `defenseclaw setup sandbox` / `defenseclaw init sandbox`
+## 13. `defenseclaw sandbox setup` / `defenseclaw init sandbox`
 
 | Feature | OpenClaw | ZeptoClaw | Claude Code | Codex |
 |---|---|---|---|---|

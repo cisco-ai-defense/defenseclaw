@@ -26,7 +26,7 @@ migration, and verification flow.
   <Folder name="~/.defenseclaw" defaultOpen>
     <File name="config.yaml" />
     <File name="audit.db" />
-    <File name="gateway-token" />
+    <File name=".env" />
     <File name="picked_connector" />
     <Folder name=".venv">
       <File name="…" />
@@ -37,9 +37,17 @@ migration, and verification flow.
     <Folder name="policies" defaultOpen>
       <Folder name="guardrail">
         <Folder name="default">
-          <File name="shell.yaml" />
-          <File name="secrets.yaml" />
-          <File name="prompt-injection.yaml" />
+          <Folder name="rules">
+            <File name="commands.yaml" />
+            <File name="secrets.yaml" />
+            <File name="sensitive-paths.yaml" />
+          </Folder>
+          <Folder name="judge">
+            <File name="injection.yaml" />
+            <File name="pii.yaml" />
+            <File name="tool-injection.yaml" />
+          </Folder>
+          <File name="suppressions.yaml" />
         </Folder>
         <Folder name="strict" />
         <Folder name="permissive" />

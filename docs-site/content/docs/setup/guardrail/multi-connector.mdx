@@ -31,13 +31,13 @@ claw:
 guardrail:
   enabled: true
   mode: action                 # global default — inherited by any connector that doesn't override
-  hook_fail_mode: open
+  hook_fail_mode: closed
   rule_pack_dir: ~/.defenseclaw/policies/guardrail/default
 
   connectors:
     codex:
       mode: action             # Codex enforces
-      hook_fail_mode: closed
+      hook_fail_mode: open         # explicit softer override for Codex
     claudecode:
       mode: observe            # Claude Code only logs
       hilt:

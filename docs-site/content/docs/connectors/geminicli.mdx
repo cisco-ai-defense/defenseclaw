@@ -16,7 +16,7 @@ The Gemini CLI connector wires DefenseClaw into [Google's Gemini CLI hooks](http
 defenseclaw setup geminicli
 ```
 
-`setup geminicli` is shorthand for `setup guardrail --connector geminicli`: it adds or reconfigures Gemini CLI, wires hooks against `~/.gemini/settings.json`, and points Gemini's native OTLP exporter at the gateway. **There is no proxy-enforcement path** for Gemini CLI — blocking happens hook-side via the documented `BeforeAgent`, `BeforeModel`, `BeforeTool`, `AfterTool`, and `AfterAgent` events. Gemini CLI has no native ask surface, so HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI.
+`setup geminicli` is shorthand for `setup guardrail --connector geminicli`: it adds or reconfigures Gemini CLI, wires hooks against `~/.gemini/settings.json`, and points Gemini's native OTLP exporter at the gateway. **There is no proxy-enforcement path** for Gemini CLI — blocking happens hook-side via the documented `BeforeAgent`, `BeforeModel`, `BeforeTool`, `AfterTool`, and `AfterAgent` events. Gemini CLI has no native ask surface, so confirm verdicts use an immediate alert/context fallback with `raw_action` preserved for audit.
 
 #### What `setup geminicli` actually does
 
@@ -57,7 +57,7 @@ Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo
 <Tab value="Add scanning rigor">
 
 ```bash
-export DEFENSECLAW_LLM_KEY=<your-key>
+export DEFENSECLAW_LLM_KEY='replace-with-your-key'
 
 defenseclaw setup geminicli                               # base alias first
 defenseclaw setup guardrail \
@@ -86,7 +86,7 @@ connector_hooks:
     fail_mode: open       # open | closed
 ```
 
-Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Gemini's lifecycle hooks block on findings; HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI since Gemini CLI has no native ask surface — make sure operators are reachable there.
+Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Gemini's lifecycle hooks block when policy returns `block`. Because Gemini CLI has no native ask surface, `confirm` uses an alert/context fallback; operators can review the event in audit or the TUI, but cannot resume it there.
 
 </Tab>
 
@@ -95,7 +95,7 @@ Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Ge
 #### Decision aids — should I turn this on?
 
 <Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Gemini CLI downgrades to confirm verdicts in the TUI / audit log since it has no native ask." />
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Gemini CLI has no native ask; confirm uses an alert/context fallback preserved in audit." />
   <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector geminicli` when tuning Gemini CLI." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
@@ -123,7 +123,7 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 <HookEventsList connector="geminicli" />
 
 <Callout>
-Gemini CLI has no native human-approval surface. HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI / audit log.
+Gemini CLI has no native human-approval surface. Confirm verdicts fall back to an alert/context response with `raw_action` preserved in the audit log; the TUI is review-only.
 </Callout>
 
 ## Telemetry channels

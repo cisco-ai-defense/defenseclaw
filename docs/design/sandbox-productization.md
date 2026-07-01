@@ -19,7 +19,7 @@ Today the sandbox integration works but requires manual steps:
 - Manually pair the DefenseClaw device with OpenClaw
 
 All of this needs to be automated into the existing CLI lifecycle:
-`defenseclaw init` → `defenseclaw setup sandbox` → `defenseclaw sandbox start`.
+`defenseclaw init` → `defenseclaw sandbox setup` → `defenseclaw sandbox start`.
 
 ### Scope: single sandbox
 
@@ -70,7 +70,7 @@ Directory layout at the sandbox home:
     plugin-verify.pub             # DEFENSECLAW-OWNED
 ```
 
-When sandbox mode is active, `defenseclaw setup sandbox` sets:
+When sandbox mode is active, `defenseclaw sandbox setup` sets:
 
 ```yaml
 claw:
@@ -110,7 +110,7 @@ needs elevated access and why.
 | `post-sandbox.sh` | Injects iptables rules into the sandbox namespace via `ip netns exec` + `iptables` | Every sandbox start (ExecStartPost) |
 | `cleanup-sandbox.sh` | Cleans orphan namespaces and veth interfaces after unclean shutdown | Every sandbox stop (ExecStopPost) |
 | `defenseclaw init --sandbox` | Creates the `sandbox` system user (`useradd`), sets file ownership (`chown`) | One-time setup |
-| `defenseclaw setup sandbox` | Installs systemd unit files to `/etc/systemd/system/`, installs launcher scripts to `/usr/local/lib/defenseclaw/`, sets plugin ownership to `root:root`, sets sandbox config ownership to `sandbox:sandbox` | One-time setup (re-runnable) |
+| `defenseclaw sandbox setup` | Installs systemd unit files to `/etc/systemd/system/`, installs launcher scripts to `/usr/local/lib/defenseclaw/`, sets plugin ownership to `root:root`, sets sandbox config ownership to `sandbox:sandbox` | One-time setup (re-runnable) |
 | `systemctl start/stop/restart` | Managing systemd services | Administrative operations |
 | `sandbox exec --netns` / `sandbox shell --netns` | Uses `ip netns exec` to enter the sandbox namespace (troubleshooting only) | On-demand administrative operations |
 
@@ -225,7 +225,7 @@ OPENSHELL_VERSION=<pinned> curl -LsSf \
 If `uv` is available and `curl` is not, fall back to:
 
 ```bash
-uv tool install openshell==<pinned>
+uv tool install openshell==0.6.2
 ```
 
 #### 1.3 Go verification
@@ -412,7 +412,7 @@ network_policies:
 
 **`strict-data.yaml`** — included but NOT applied by default. For
 security-conscious deployments that want minimal attack surface.
-Users select it via `defenseclaw setup sandbox --policy strict`.
+Users select it via `defenseclaw sandbox setup --policy strict`.
 
 ```yaml
 network_policies:
@@ -561,7 +561,7 @@ curl -sSfL .../install.sh | bash -s -- --sandbox
 defenseclaw init --sandbox
 
 # Step 3: Configure sandbox networking and guardrail
-defenseclaw setup sandbox --sandbox-ip 10.200.0.2 --host-ip 10.200.0.1
+defenseclaw sandbox setup --sandbox-ip 10.200.0.2 --host-ip 10.200.0.1
 defenseclaw setup guardrail --mode observe --non-interactive
 
 # Step 4: Start (independent systemd services)
@@ -619,12 +619,12 @@ Additional steps when `--sandbox` is passed:
      cp policies/openshell/default.rego → <data_dir>/openshell-policy.rego
      cp policies/openshell/default-data.yaml → <data_dir>/openshell-policy.yaml
 7. Print summary and next steps:
-     "Run: defenseclaw setup sandbox --sandbox-ip ... --host-ip ..."
+     "Run: defenseclaw sandbox setup --sandbox-ip ... --host-ip ..."
 ```
 
 Init creates the user and directory skeleton. All configuration (config
 patching, systemd units, policy generation with correct IPs/ports, device
-pairing) is done by `defenseclaw setup sandbox` (Phase 5), which is
+pairing) is done by `defenseclaw sandbox setup` (Phase 5), which is
 re-runnable.
 
 ### 4.3 Idempotency
@@ -634,7 +634,7 @@ should not create duplicate users or overwrite customized policies.
 
 ---
 
-## Phase 5: Sandbox Setup (`defenseclaw setup sandbox`)
+## Phase 5: Sandbox Setup (`defenseclaw sandbox setup`)
 
 ### 5.1 Current behavior
 
@@ -644,10 +644,10 @@ next steps.
 
 ### 5.2 Enhanced behavior
 
-`defenseclaw setup sandbox` should become a full orchestration command:
+`defenseclaw sandbox setup` should become a full orchestration command:
 
 ```
-defenseclaw setup sandbox \
+defenseclaw sandbox setup \
   --sandbox-ip 10.200.0.2 \
   --host-ip 10.200.0.1 \
   [--openclaw-port 18789] \
@@ -727,7 +727,7 @@ and injected into both sides during setup. The user never sees or manages
 it. The sidecar's device key (Ed25519 keypair for challenge-response auth)
 is also auto-generated. Secrets stay off the command line.
 
-### 5.3 `defenseclaw setup sandbox --disable`
+### 5.3 `defenseclaw sandbox setup --disable`
 
 Reverts to host mode:
 
@@ -761,7 +761,7 @@ systemd
   │                 └── openclaw  (child, privilege-dropped to sandbox user)
   │
   ├── defenseclaw-gateway.service (runs as defenseclaw user or root)
-  │     └── defenseclaw-gateway run
+  │     └── defenseclaw-gateway
   │           ├── Gateway client: WebSocket → sandbox IP
   │           ├── fsnotify watcher
   │           ├── REST API
@@ -785,7 +785,7 @@ With independent processes:
 
 ### 6.2 systemd unit files
 
-Generated by `defenseclaw setup sandbox` and installed to
+Generated by `defenseclaw sandbox setup` and installed to
 `/etc/systemd/system/` (requires root).
 
 #### `openshell-sandbox.service`
@@ -820,7 +820,7 @@ WantedBy=defenseclaw-sandbox.target
 
 #### `defenseclaw-gateway.service`
 
-All paths are hardcoded at generation time by `defenseclaw setup sandbox`.
+All paths are hardcoded at generation time by `defenseclaw sandbox setup`.
 
 ```ini
 [Unit]
@@ -831,7 +831,7 @@ Wants=openshell-sandbox.service
 
 [Service]
 Type=exec
-ExecStart=/usr/local/bin/defenseclaw-gateway run
+ExecStart=/usr/local/bin/defenseclaw-gateway
 
 Restart=on-failure
 RestartSec=3
@@ -844,7 +844,7 @@ SyslogIdentifier=defenseclaw-gateway
 # Sidecar does not need root
 NoNewPrivileges=true
 ProtectSystem=strict
-# Paths injected by `defenseclaw setup sandbox` — absolute, no %h
+# Paths injected by `defenseclaw sandbox setup` — absolute, no %h
 #
 # ReadWritePaths: host-side DefenseClaw data dir (SQLite DB, config,
 #   device key, policy files, litellm config)
@@ -878,7 +878,7 @@ WantedBy=multi-user.target
 ### 6.3 Launcher scripts
 
 These scripts handle the namespace plumbing that doesn't fit cleanly
-in systemd unit directives. Generated by `defenseclaw setup sandbox`
+in systemd unit directives. Generated by `defenseclaw sandbox setup`
 and installed to `/usr/local/lib/defenseclaw/`.
 
 #### `pre-sandbox.sh` — pre-launch cleanup (ExecStartPre)
@@ -886,7 +886,7 @@ and installed to `/usr/local/lib/defenseclaw/`.
 Runs as root before the sandbox starts. Cleans stale artifacts from
 a previous unclean shutdown (see 7.7).
 
-All paths are hardcoded at generation time by `defenseclaw setup sandbox`
+All paths are hardcoded at generation time by `defenseclaw sandbox setup`
 using the configured `openshell.sandbox_home` and `data_dir`. No `$HOME`
 or `~` expansion at runtime.
 
@@ -894,7 +894,7 @@ or `~` expansion at runtime.
 #!/bin/bash
 set -euo pipefail
 
-# Paths injected by `defenseclaw setup sandbox` — do not use $HOME
+# Paths injected by `defenseclaw sandbox setup` — do not use $HOME
 SANDBOX_HOME="/home/sandbox"
 DEFENSECLAW_DIR="/home/admin/.defenseclaw"
 
@@ -935,7 +935,7 @@ All paths are hardcoded at generation time — no `$HOME` expansion.
 #!/bin/bash
 set -euo pipefail
 
-# Paths injected by `defenseclaw setup sandbox`
+# Paths injected by `defenseclaw sandbox setup`
 DEFENSECLAW_DIR="/home/admin/.defenseclaw"
 RESOLV_FILE="$DEFENSECLAW_DIR/sandbox-resolv.conf"
 POLICY_REGO="$DEFENSECLAW_DIR/openshell-policy.rego"
@@ -987,7 +987,7 @@ for veth in $(ip link show 2>/dev/null | grep -oP 'veth-h-\S+(?=@)'); do
 done
 ```
 
-#### DNS resolv.conf — created by `defenseclaw setup sandbox`
+#### DNS resolv.conf — created by `defenseclaw sandbox setup`
 
 The resolv.conf file is written once during setup and bind-mounted into
 the sandbox on every start (see 7.6 for details):
@@ -1144,7 +1144,7 @@ ExecStartPost=/usr/local/lib/defenseclaw/post-sandbox.sh
 #!/bin/bash
 set -euo pipefail
 
-# Paths injected by `defenseclaw setup sandbox`
+# Paths injected by `defenseclaw sandbox setup`
 DEFENSECLAW_DIR="/home/admin/.defenseclaw"
 HOST_IP="10.200.0.1"
 API_PORT=18970
@@ -1201,7 +1201,7 @@ supports two modes, controlled by the `gateway.auto_pair` config field:
 
 | `gateway.auto_pair` | Behavior |
 |---|---|
-| `true` (default) | `defenseclaw setup sandbox` pre-injects the sidecar's device key into the sandbox's `devices.json`. The sidecar connects immediately on first start — no manual approval step. |
+| `true` (default) | `defenseclaw sandbox setup` pre-injects the sidecar's device key into the sandbox's `devices.json`. The sidecar connects immediately on first start — no manual approval step. |
 | `false` | The device key is NOT pre-injected. The operator must manually approve the sidecar's pairing request via OpenClaw's UI, CLI, or chat the first time. |
 
 In both modes, the pairing is **persistent**. Once paired (whether
@@ -1212,7 +1212,7 @@ on every start.
 
 #### Pre-pairing (auto_pair=true, default)
 
-`defenseclaw setup sandbox` (Phase 5.2, step 5):
+`defenseclaw sandbox setup` (Phase 5.2, step 5):
 
 ```
 1. Load or generate the sidecar's Ed25519 device key
@@ -1242,7 +1242,7 @@ For environments that require explicit approval of all device
 connections:
 
 ```bash
-defenseclaw setup sandbox --no-auto-pair
+defenseclaw sandbox setup --no-auto-pair
 ```
 
 On first sidecar start, the sidecar connects and receives `NOT_PAIRED`.
@@ -1270,7 +1270,7 @@ immediately.
 #### Re-keying
 
 If the device key is rotated (`rm <data_dir>/device.key`), re-run
-`defenseclaw setup sandbox` to inject the new key into `devices.json`.
+`defenseclaw sandbox setup` to inject the new key into `devices.json`.
 The old device entry is replaced (matched by device ID).
 
 ---
@@ -1315,14 +1315,14 @@ Replace the `X-DefenseClaw-Client` header with real authentication:
 
 ```
 Option A: Shared secret (simple)
-  - defenseclaw setup sandbox generates a random token
+  - defenseclaw sandbox setup generates a random token
   - Stored in <sandbox_home>/.defenseclaw/config.yaml (sandbox side)
   - Stored in <data_dir>/config.yaml (host side)
   - Plugin sends token in Authorization header
   - Sidecar validates on every request
 
 Option B: mTLS (stronger)
-  - defenseclaw setup sandbox generates a CA, server cert, client cert
+  - defenseclaw sandbox setup generates a CA, server cert, client cert
   - Server cert for sidecar API (host)
   - Client cert for plugin (sandbox)
   - Stored in <data_dir>/tls/ (CA + server) and
@@ -1352,7 +1352,7 @@ host only; the key cannot be exfiltrated to arbitrary endpoints.
 Replace the `chown root:root` ownership hack:
 
 ```
-1. defenseclaw setup sandbox generates an Ed25519 keypair
+1. defenseclaw sandbox setup generates an Ed25519 keypair
    - Private key: <data_dir>/plugin-signing.key (mode 0600)
    - Public key: <sandbox_home>/.defenseclaw/plugin-verify.pub
 
@@ -1389,7 +1389,7 @@ if s.cfg.Gateway.APIBind != "" {
 }
 ```
 
-Better: `defenseclaw setup sandbox --host-ip 10.200.0.1` already stores
+Better: `defenseclaw sandbox setup --host-ip 10.200.0.1` already stores
 this in `guardrail.host`. Use that as the default API bind in standalone
 mode.
 
@@ -1433,7 +1433,7 @@ public DNS resolvers, and iptables rules allow UDP 53 outbound.
 
 #### Setup
 
-`defenseclaw setup sandbox` creates the resolv.conf file:
+`defenseclaw sandbox setup` creates the resolv.conf file:
 
 ```bash
 # <data_dir>/sandbox-resolv.conf
@@ -1445,14 +1445,14 @@ The nameservers default to `8.8.8.8` and `1.1.1.1` (Google and
 Cloudflare public DNS). Operators can override via:
 
 ```bash
-defenseclaw setup sandbox --dns 10.0.0.2,10.0.0.3
+defenseclaw sandbox setup --dns 10.0.0.2,10.0.0.3
 ```
 
 Using the host's upstream resolver (parsed from the host's
 `/etc/resolv.conf` before the bind mount) is also supported:
 
 ```bash
-defenseclaw setup sandbox --dns host
+defenseclaw sandbox setup --dns host
 ```
 
 #### Trade-off: DNS exfiltration
@@ -1533,8 +1533,8 @@ pattern.
 
 #### Sandbox-specific fields (new code)
 
-These fields are set by `defenseclaw setup sandbox` and restored by
-`defenseclaw setup sandbox --disable`. They configure OpenClaw's
+These fields are set by `defenseclaw sandbox setup` and restored by
+`defenseclaw sandbox setup --disable`. They configure OpenClaw's
 gateway to be reachable from the host via the veth pair.
 
 | JSON path | Patch operation | Value | Why |
@@ -1585,7 +1585,7 @@ Everything else in `openclaw.json` is user-owned:
 #### Implementation
 
 The sandbox-specific gateway patching is in **Python** (`cmd_setup.py`),
-because `defenseclaw setup sandbox` is a Python CLI command. It uses the
+because `defenseclaw sandbox setup` is a Python CLI command. It uses the
 same read-modify-write JSON pattern as `guardrail.py`.
 
 ```python
@@ -1851,7 +1851,7 @@ manually on a Linux VM:
 sudo make sandbox-test
 # Tests:
 # 1. defenseclaw init --sandbox (user creation, config, policy)
-# 2. defenseclaw setup sandbox (full setup, systemd unit generation)
+# 2. defenseclaw sandbox setup (full setup, systemd unit generation)
 # 3. systemctl start defenseclaw-sandbox.target
 # 4. sidecar connects to sandbox OpenClaw
 # 5. tool inspection from sandbox network
@@ -1864,7 +1864,7 @@ sudo make sandbox-test
 ```
 □ Clean Linux host
 □ defenseclaw init --sandbox completes without errors
-□ defenseclaw setup sandbox configures all components
+□ defenseclaw sandbox setup configures all components
 □ defenseclaw setup guardrail patches sandbox-side config
 □ systemctl start defenseclaw-sandbox.target starts both services
 □ OpenClaw healthy inside sandbox (GET /health via sandbox IP)
@@ -1918,7 +1918,7 @@ sudo make sandbox-test
 | P0 | Sandbox state persistence (merge strategy + cleanup) | 7.7 | M |
 | P1 | OpenShell binary download/install | 1 | M |
 | P1 | `defenseclaw init --sandbox` automation | 4 | M |
-| P1 | `defenseclaw setup sandbox` full orchestration (+ systemd units) | 5, 6 | L |
+| P1 | `defenseclaw sandbox setup` full orchestration (+ systemd units) | 5, 6 | L |
 | P1 | systemd unit files + launcher scripts | 6.2, 6.3 | M |
 | P1 | CLI convenience wrappers (`sandbox start/stop/status/exec`) | 6.4 | M |
 | P1 | Post-launch iptables injection (sandbox ExecStartPost) | 6.5 | S |

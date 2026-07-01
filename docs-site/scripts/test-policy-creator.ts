@@ -31,6 +31,7 @@ import {
   __TEST_INTERNALS,
 } from '../components/policy-creator/lib/share.js';
 import { emit, __TEST_INTERNALS as EMIT_INTERNALS } from '../components/policy-creator/lib/emit.js';
+import { emitInstallScript } from '../components/policy-creator/lib/emit-script.js';
 import { highlightRegoToHtml, tokenizeRego } from '../components/policy-creator/lib/rego-highlight.js';
 import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/lib/json-highlight.js';
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
@@ -96,6 +97,13 @@ function makePolicy(overrides: Partial<Policy> = {}): Policy {
   };
   return base;
 }
+
+test('install script honors DEFENSECLAW_HOME with the standard home fallback', () => {
+  const script = emitInstallScript(makePolicy());
+  assert.match(script, /DC_ROOT="\$\{DEFENSECLAW_HOME:-\$\{HOME\}\/\.defenseclaw\}"/);
+  assert.match(script, /POLICIES_ROOT="\$\{DC_ROOT\}\/policies"/);
+  assert.doesNotMatch(script, /POLICIES_ROOT="\$\{HOME\}\/\.defenseclaw\/policies"/);
+});
 
 // ── share: round trip ───────────────────────────────────────────────
 

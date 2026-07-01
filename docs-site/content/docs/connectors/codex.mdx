@@ -37,7 +37,7 @@ The three flags above explicitly set: connector, mode, and post-setup restart. E
 | LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
 | Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
 | HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
-| Hook fail-mode | `open` (allow on guardrail-side failure) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
+| Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
 | Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
 | Verify after setup | on | `--no-verify` |
@@ -64,7 +64,7 @@ The `[hooks]`, `[otel]`, and `[notify]` blocks are owned by DefenseClaw; everyth
 <HookEventsList connector="codex" />
 
 <Callout>
-Codex has no native ask surface here. Confirm verdicts are downgraded with `raw_action` preserved so operators can review the original action in the TUI / OpenClaw plugin.
+Codex has no native ask surface here. Confirm verdicts become an alert/system message with `raw_action` preserved so operators can review the original action in audit or the TUI. That review cannot resume the hook call.
 </Callout>
 
 ## Telemetry channels at boot

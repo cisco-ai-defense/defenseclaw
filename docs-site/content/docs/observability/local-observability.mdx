@@ -49,10 +49,13 @@ All five run under one Compose project (`defenseclaw-local-observability`). They
     **Generate traffic.** Run any DefenseClaw-managed agent, or send a synthetic event to every configured sink:
 
     ```bash
-    defenseclaw setup observability test
+    defenseclaw setup observability test local-observability
     ```
 
-    The `test` subcommand fans a probe through every enabled destination — OTel exporter, audit sinks, webhooks — so you can confirm Grafana, Splunk, and notifier wiring in one shot.
+    The `test` subcommand sends a probe to the named `local-observability`
+    destination. Run `defenseclaw setup observability list` first if you renamed
+    it. Test other destinations individually by name; notifier webhooks use
+    `defenseclaw setup webhook test <name>` instead.
   </Step>
   <Step>
     **Watch the dashboards populate.** "DefenseClaw → Overview" lights up first; per-rail dashboards (Guardrail, Admission, Judge, HITL) follow as the events flow.
@@ -254,7 +257,7 @@ See [Splunk integration](/docs/observability/splunk) for the dashboards we ship 
 
 <Accordions>
   <Accordion title="Grafana shows no data">
-    Run `defenseclaw setup local-observability up` again so the host-mounted dashboards and collector config are refreshed from the bundle, then send a synthetic event with `defenseclaw setup observability test` and check the collector logs (`defenseclaw setup local-observability logs --service otel-collector --follow`). Most remaining "no data" issues are the collector not being reachable from the gateway, not a Grafana problem.
+    Run `defenseclaw setup local-observability up` again so the host-mounted dashboards and collector config are refreshed from the bundle, then send a synthetic event with `defenseclaw setup observability test local-observability` and check the collector logs (`defenseclaw setup local-observability logs --service otel-collector --follow`). Most remaining "no data" issues are the collector not being reachable from the gateway, not a Grafana problem.
   </Accordion>
   <Accordion title="Port already in use">
     Grafana 3000, Loki 3100, Tempo 3200, OTLP 4317/4318, Prometheus 9090. The bundled compose file pins these ports; the `up` preflight refuses to launch if a non-stack process is bound to one of them. Free the conflicting port (or stop the foreign container shown in the preflight warning) and re-run `up`. There is no `--port-shift` flag — edit `bundles/local_observability_stack/docker-compose.yml` if you need to relocate a port permanently.

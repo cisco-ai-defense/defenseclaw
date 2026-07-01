@@ -53,12 +53,16 @@ OmniGent parks only its pre-action `request`, `tool_call`, and `llm_request` pha
 
 Policy evaluations always produce DefenseClaw hook logs, counters, and spans. When OmniGent has an active OpenTelemetry span, the bridge forwards its W3C `traceparent`; otherwise the gateway starts a new trace.
 
-OmniGent also supports native OTLP through standard process environment variables. This channel is **not active after setup**: DefenseClaw does not edit shell startup files or the OmniGent launcher. Export the variables in the process that starts OmniGent, substituting the gateway token securely:
+OmniGent also supports native OTLP through standard process environment variables. This channel is **not active after setup**: DefenseClaw does not edit shell startup files or the OmniGent launcher. Export the variables in the process that starts OmniGent. Load the generated gateway token from DefenseClaw's mode-`0600` dotenv file without printing it:
 
 ```bash
+set -a
+. ~/.defenseclaw/.env
+set +a
+
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:18970"
 export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
-export OTEL_EXPORTER_OTLP_HEADERS="x-defenseclaw-source=omnigent,x-defenseclaw-client=omnigent-otel/1.0,x-defenseclaw-token=<gateway-token>"
+export OTEL_EXPORTER_OTLP_HEADERS="x-defenseclaw-source=omnigent,x-defenseclaw-client=omnigent-otel/1.0,x-defenseclaw-token=${DEFENSECLAW_GATEWAY_TOKEN}"
 export OTEL_LOGS_EXPORTER="otlp"
 export OTEL_METRICS_EXPORTER="otlp"
 export OTEL_TRACES_EXPORTER="otlp"

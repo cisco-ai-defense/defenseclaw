@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import matrix from '@/data/capability-matrix.json';
+import { basePath } from '@/lib/site';
 
 // Interactive, non-interactive `defenseclaw setup guardrail` command
 // builder. Every knob the operator can pass on the CLI is exposed as
@@ -9,7 +10,7 @@ import matrix from '@/data/capability-matrix.json';
 // --non-interactive ...` is rendered live below the form with a copy
 // button and a notes panel that surfaces validation warnings (e.g.
 // remote scanner requires Cisco endpoint, HITL in observe mode is a
-// no-op, connectors without native ask downgrade to a TUI confirm).
+// no-op, and connectors without native ask use an immediate fallback).
 //
 // The component reads the capability matrix shipped at
 // `data/capability-matrix.json` for connector metadata so this stays
@@ -438,7 +439,7 @@ function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[
   if (s.mode === 'action' && s.humanApproval && connectorRow) {
     if (!connectorRow.hooks.canAskNative) {
       warnings.push(
-        `${connectorRow.label} has no native ask surface. HITL prompts downgrade to a confirm verdict that the operator approves in 'defenseclaw tui' (raw_action preserved in the audit log).`,
+        `${connectorRow.label} has no native ask surface. Confirm verdicts use the connector's immediate fallback; 'defenseclaw tui' can review raw_action in audit but cannot approve or resume the call.`,
       );
     } else if (connectorRow.hooks.askEvents.length > 0) {
       warnings.push(
@@ -862,9 +863,9 @@ export function CommandGenerator() {
           subtitle={
             state.mode === 'action'
               ? selected?.hooks.canAskNative
-                ? `${selected.label} supports native ask. HIGH findings pause inside the agent UI.`
+                ? `${selected.label} supports native ask on the events shown below. Eligible findings can pause inside the agent UI.`
                 : selected
-                  ? `${selected.label} has no native ask surface — HITL downgrades to a confirm verdict in defenseclaw tui.`
+                  ? `${selected.label} has no native ask surface — confirm uses a non-pausing connector fallback.`
                   : 'Pause risky tool calls and ask for operator approval before they run.'
               : 'HITL only fires in action mode. Switch above to enable.'
           }
@@ -1019,7 +1020,7 @@ export function CommandGenerator() {
               <Capability label="Tool inspection">{selected.toolInspection}</Capability>
               <Capability label="Subprocess policy">{selected.subprocessPolicy}</Capability>
               <Capability label="Native ask">
-                {selected.hooks.canAskNative ? 'yes' : 'no — downgrades to confirm'}
+                {selected.hooks.canAskNative ? 'yes' : 'no — immediate fallback'}
               </Capability>
               <Capability label="Fail-closed">
                 {selected.hooks.supportsFailClosed ? 'supported' : 'not supported'}
@@ -1028,7 +1029,7 @@ export function CommandGenerator() {
             <p className="mt-3 text-xs text-fd-muted-foreground">
               See{' '}
               <a
-                href={`/docs/connectors/${selected.id}`}
+                href={`${basePath}/docs/connectors/${selected.id}`}
                 className="text-[var(--brand-cisco-strong)] hover:underline"
               >
                 /docs/connectors/{selected.id}
@@ -1098,7 +1099,7 @@ function ConnectorOption({
         </span>
       </div>
       <span className="text-[11px] text-fd-muted-foreground">
-        {row.hooks.canAskNative ? 'native ask' : 'downgraded confirm'}
+        {row.hooks.canAskNative ? 'native ask' : 'non-pausing fallback'}
         {' · '}
         {row.hooks.supportsFailClosed ? 'fail-closed ok' : 'fail-open only'}
       </span>

@@ -190,14 +190,14 @@ The watcher's verdict is the default. Operators always have manual override:
 defenseclaw skill list                              # on-disk skills + state, across ALL active connectors
 defenseclaw skill list --connector codex            # one connector
 defenseclaw skill scan my-skill --connector codex   # scan Codex's matching copy
-defenseclaw skill block <name> --reason "untrusted publisher"
-defenseclaw skill block <name> --connector codex --reason "Codex-only override"
-defenseclaw skill quarantine <name> --reason "review pending"
-defenseclaw skill restore <name>                    # un-quarantine
-defenseclaw skill allow <name> --reason "vetted"
-defenseclaw skill disable <name>                    # runtime off, file untouched
-defenseclaw skill enable <name>
-defenseclaw skill info <name>                       # detailed view
+defenseclaw skill block my-skill --reason "untrusted publisher"
+defenseclaw skill block my-skill --connector codex --reason "Codex-only override"
+defenseclaw skill quarantine my-skill --reason "review pending"
+defenseclaw skill restore my-skill                    # un-quarantine
+defenseclaw skill allow my-skill --reason "vetted"
+defenseclaw skill disable my-skill                    # runtime off, file untouched
+defenseclaw skill enable my-skill
+defenseclaw skill info my-skill                       # detailed view
 ```
 
 Without `--connector`, policy and runtime commands apply to matching configured connector copies where present or the unscoped fallback policy where that command uses one. Pass `--connector <name>` when the same skill exists under more than one connector and you want only that connector's copy.

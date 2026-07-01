@@ -29,8 +29,8 @@ curl -sSf https://get.defenseclaw.dev | sh
 # Initialize (creates sandbox, loads scanners, generates default policy)
 defenseclaw init
 
-# Start the claw inside the secured sandbox
-defenseclaw start
+# Start the gateway sidecar
+defenseclaw-gateway start
 
 # Open the TUI dashboard
 defenseclaw tui
