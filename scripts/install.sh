@@ -136,6 +136,40 @@ is_valid_connector() {
     return 1
 }
 
+is_hook_connector() {
+    local n="$1"
+    is_valid_connector "$n" || return 1
+    [[ "$n" != "openclaw" && "$n" != "none" ]]
+}
+
+connector_display_name() {
+    case "$1" in
+        codex) echo "Codex" ;;
+        claudecode) echo "Claude Code" ;;
+        zeptoclaw) echo "ZeptoClaw" ;;
+        openclaw) echo "OpenClaw" ;;
+        hermes) echo "Hermes Agent" ;;
+        geminicli) echo "Gemini CLI" ;;
+        copilot) echo "GitHub Copilot CLI" ;;
+        openhands) echo "OpenHands" ;;
+        antigravity) echo "Antigravity" ;;
+        opencode) echo "OpenCode" ;;
+        omnigent) echo "OmniGent" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+connector_menu_hint() {
+    case "$1" in
+        codex) echo "patch ~/.codex/config.toml + hooks (no OpenClaw)" ;;
+        claudecode) echo "patch ~/.claude/settings.json hooks (no OpenClaw)" ;;
+        zeptoclaw) echo "patch ~/.zeptoclaw/config.json (no OpenClaw)" ;;
+        openclaw) echo "install OpenClaw runtime + DefenseClaw plugin" ;;
+        none) echo "install gateway/CLI only; pick later" ;;
+        *) printf "configure %s hooks\n" "$(connector_display_name "$1")" ;;
+    esac
+}
+
 # pick_connector_interactive — prompt the user to pick a connector when
 # none was passed on the command line and we are not in --yes mode.
 # Sets global CONNECTOR. Non-interactive installs intentionally choose
@@ -156,22 +190,7 @@ pick_connector_interactive() {
     echo ""
     local i=1
     for v in "${CONNECTOR_CHOICES[@]}"; do
-        case "$v" in
-            codex)      printf "    ${BOLD}%d)${NC} codex      — patch ~/.codex/config.toml + hooks (no OpenClaw)\n" "$i" ;;
-            claudecode) printf "    ${BOLD}%d)${NC} claudecode — patch ~/.claude/settings.json hooks (no OpenClaw)\n" "$i" ;;
-            zeptoclaw)  printf "    ${BOLD}%d)${NC} zeptoclaw  — patch ~/.zeptoclaw/config.json (no OpenClaw)\n" "$i" ;;
-            openclaw)   printf "    ${BOLD}%d)${NC} openclaw   — install OpenClaw runtime + DefenseClaw plugin\n" "$i" ;;
-            hermes)     printf "    ${BOLD}%d)${NC} hermes     — configure Hermes Agent hooks\n" "$i" ;;
-            cursor)     printf "    ${BOLD}%d)${NC} cursor     — configure Cursor hooks\n" "$i" ;;
-            windsurf)   printf "    ${BOLD}%d)${NC} windsurf   — configure Windsurf hooks\n" "$i" ;;
-            geminicli)  printf "    ${BOLD}%d)${NC} geminicli  — configure Gemini CLI hooks\n" "$i" ;;
-            copilot)    printf "    ${BOLD}%d)${NC} copilot    — configure GitHub Copilot CLI hooks\n" "$i" ;;
-            openhands)  printf "    ${BOLD}%d)${NC} openhands  — configure OpenHands hooks\n" "$i" ;;
-            antigravity) printf "    ${BOLD}%d)${NC} antigravity — configure Antigravity hooks\n" "$i" ;;
-            opencode)   printf "    ${BOLD}%d)${NC} opencode   — configure OpenCode hooks\n" "$i" ;;
-            omnigent)   printf "    ${BOLD}%d)${NC} omnigent   — configure OmniGent hooks\n" "$i" ;;
-            none)       printf "    ${BOLD}%d)${NC} none       — install gateway/CLI only; pick later\n" "$i" ;;
-        esac
+        printf "    ${BOLD}%d)${NC} %-11s — %s\n" "$i" "$v" "$(connector_menu_hint "$v")"
         i=$((i + 1))
     done
     echo ""
@@ -644,41 +663,22 @@ print_success() {
     printf "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════╝${NC}\n"
     echo ""
 
-    # Connector-specific next-step guidance. The picked connector
-    # determines which `defenseclaw` command to run next; surfacing
-    # this here means the operator does not have to read docs after
-    # `curl | bash` to find the right verb.
-    case "${CONNECTOR}" in
-        openclaw)
-            if [[ "${INSTALL_SANDBOX}" == true ]] && [[ "${OS}" == "linux" ]]; then
-                printf "  Get started:\n\n"
-                printf "    ${CYAN}defenseclaw init --connector openclaw --sandbox${NC}\n"
-            else
-                printf "  Get started:\n\n"
-                printf "    ${CYAN}defenseclaw init --connector openclaw --profile observe${NC}\n"
-            fi
-            ;;
-        codex)
-            printf "  Get started (Codex):\n\n"
-            printf "    ${CYAN}defenseclaw init --connector codex${NC}\n"
-            ;;
-        claudecode)
-            printf "  Get started (Claude Code):\n\n"
-            printf "    ${CYAN}defenseclaw init --connector claudecode${NC}\n"
-            ;;
-        zeptoclaw)
-            printf "  Get started (ZeptoClaw):\n\n"
-            printf "    ${CYAN}defenseclaw init --connector zeptoclaw${NC}\n"
-            ;;
-        hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|omnigent)
-            printf "  Get started (%s):\n\n" "${CONNECTOR}"
-            printf "    ${CYAN}defenseclaw init --connector %s${NC}\n" "${CONNECTOR}"
-            ;;
-        none|"")
-            printf "  Get started (pick a connector later):\n\n"
-            printf "    ${CYAN}defenseclaw init${NC}\n"
-            ;;
-    esac
+    # Connector-specific next-step guidance. The picked connector determines
+    # which `defenseclaw` command to run next.
+    if [[ "${CONNECTOR}" == "openclaw" ]]; then
+        printf "  Get started:\n\n"
+        if [[ "${INSTALL_SANDBOX}" == true ]] && [[ "${OS}" == "linux" ]]; then
+            printf "    ${CYAN}defenseclaw init --connector openclaw --sandbox${NC}\n"
+        else
+            printf "    ${CYAN}defenseclaw init --connector openclaw --profile observe${NC}\n"
+        fi
+    elif is_hook_connector "${CONNECTOR}"; then
+        printf "  Get started (%s):\n\n" "$(connector_display_name "${CONNECTOR}")"
+        printf "    ${CYAN}defenseclaw init --connector %s${NC}\n" "${CONNECTOR}"
+    else
+        printf "  Get started (pick a connector later):\n\n"
+        printf "    ${CYAN}defenseclaw init${NC}\n"
+    fi
     if [[ "${INSTALL_SANDBOX}" == true && "${CONNECTOR}" != "openclaw" ]]; then
         warn "Sandbox setup is experimental and currently applies to the OpenClaw/OpenShell path only."
     fi
@@ -786,22 +786,17 @@ pick_connector_interactive
 install_gateway
 install_python_cli
 
-# Only install the OpenClaw plugin and the OpenClaw runtime when the user
-# actually picked OpenClaw. Other connectors integrate via CLI setup and need
-# neither npm nor the plugin tarball. For "none" we skip connector-specific
-# work and let the user run `defenseclaw init` later.
-case "${CONNECTOR}" in
-    openclaw)
-        install_plugin
-        handle_openclaw
-        ;;
-    codex|claudecode|zeptoclaw|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|omnigent)
-        info "Skipping OpenClaw plugin/runtime install (connector: ${CONNECTOR})"
-        ;;
-    none|"")
-        info "Skipping connector setup — run 'defenseclaw init' when ready"
-        ;;
-esac
+# Only install the OpenClaw plugin and runtime when the user actually picked
+# OpenClaw. Other connectors integrate via CLI setup and need neither npm nor
+# the plugin tarball.
+if [[ "${CONNECTOR}" == "openclaw" ]]; then
+    install_plugin
+    handle_openclaw
+elif is_hook_connector "${CONNECTOR}"; then
+    info "Skipping OpenClaw plugin/runtime install (connector: ${CONNECTOR})"
+else
+    info "Skipping connector setup — run 'defenseclaw init' when ready"
+fi
 
 record_picked_connector
 
