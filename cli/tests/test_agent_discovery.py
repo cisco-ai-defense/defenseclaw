@@ -384,6 +384,18 @@ def test_antigravity_windows_roots_are_narrow_trusted_prefixes(monkeypatch, tmp_
     assert ad._path_key(str(local_app_data)) not in prefixes
 
 
+def test_codex_desktop_runtime_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+    runtime_root = local_app_data / "OpenAI" / "Codex" / "runtimes"
+
+    assert ad._path_key(str(runtime_root)) in prefixes
+    assert ad._path_key(str(local_app_data / "OpenAI")) not in prefixes
+    assert ad._path_key(str(local_app_data)) not in prefixes
+
+
 def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
     local_app_data = tmp_path / "local-app-data"
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))

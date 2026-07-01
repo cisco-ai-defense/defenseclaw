@@ -31,9 +31,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ntpath
 import os
 import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -90,6 +93,11 @@ _SAFE_INHERIT_ENV = (
     "PATH", "HOME", "USER", "SHELL", "TERM", "LOGNAME",
     "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ",
     "PWD", "PYTHONPATH", "NODE_PATH", "DISPLAY",
+    # Native Windows runtimes commonly need these to locate their profile,
+    # temporary directory, and system DLL/tool roots. They identify paths but
+    # do not carry credentials.
+    "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP",
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
 )
 
 # F-0221: env vars that control how/what an executable RESOLVES, LOADS,
@@ -209,8 +217,114 @@ _FORBIDDEN_STDIO_FLAGS = frozenset({
 })
 
 
+def _trusted_codex_runtime_roots() -> tuple[str, ...]:
+    """Return narrow native Codex runtime roots used by Codex Desktop."""
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local_app_data:
+        return ()
+    return (os.path.join(local_app_data, "OpenAI", "Codex", "runtimes"),)
+
+
+def _windows_path_is_within(path: str, root: str) -> bool:
+    """Compare Windows paths using component and case semantics."""
+    path_key = ntpath.normcase(ntpath.normpath(path))
+    root_key = ntpath.normcase(ntpath.normpath(root))
+    try:
+        return ntpath.commonpath((path_key, root_key)) == root_key
+    except ValueError:
+        return False
+
+
+def _is_trusted_codex_node_repl(command: str) -> bool:
+    """Admit only Codex Desktop's bundled native ``node_repl.exe``.
+
+    The executable must resolve to the documented product-specific layout
+    ``runtimes/cua_node/<runtime-id>/bin/node_repl.exe`` and pass the shared
+    trusted-binary file, prefix, owner, and DACL checks. No other absolute MCP
+    executable is admitted by this exception.
+    """
+    if os.name != "nt" or not isinstance(command, str):
+        return False
+    raw = command.strip()
+    if not raw or not ntpath.isabs(raw):
+        return False
+    try:
+        resolved = os.path.realpath(os.path.abspath(raw))
+    except (OSError, ValueError):
+        return False
+
+    for root in _trusted_codex_runtime_roots():
+        try:
+            resolved_root = os.path.realpath(os.path.abspath(root))
+        except (OSError, ValueError):
+            continue
+        if not _windows_path_is_within(resolved, resolved_root):
+            continue
+        relative = ntpath.relpath(resolved, resolved_root)
+        parts = tuple(part for part in relative.split(ntpath.sep) if part)
+        if (
+            len(parts) != 4
+            or parts[0].lower() != "cua_node"
+            or parts[1] in (".", "..")
+            or parts[2].lower() != "bin"
+            or parts[3].lower() != "node_repl.exe"
+        ):
+            continue
+        from defenseclaw.inventory.agent_discovery import _is_trusted_binary_path
+
+        return _is_trusted_binary_path(resolved)
+    return False
+
+
+def _stdio_scan_command_error(command: str, args: list | None) -> str | None:
+    """Return a concise refusal reason, or ``None`` for an admitted command."""
+    if not isinstance(command, str):
+        return "command must be a string"
+    cmd = command.strip()
+    if not cmd:
+        return "command is empty"
+
+    argv = args or []
+    if _is_trusted_codex_node_repl(cmd):
+        if argv:
+            return "the bundled Codex node_repl.exe must not have configured arguments"
+        return None
+
+    # Give a targeted trust-boundary error for a lookalike native executable.
+    if ntpath.basename(cmd).lower() == "node_repl.exe":
+        return (
+            "Codex node_repl.exe is outside the trusted Codex Desktop runtime "
+            "layout or failed owner/DACL validation"
+        )
+
+    # No path components — only bare launcher names. This blocks absolute and
+    # relative paths on every host.
+    if "/" in cmd or "\\" in cmd:
+        return "command is not an allowlisted stdio launcher (allowed: npx, uvx)"
+    if os.sep in cmd or (os.altsep and os.altsep in cmd):
+        return "command is not an allowlisted stdio launcher (allowed: npx, uvx)"
+    if cmd.lower() not in _SAFE_STDIO_LAUNCHERS:
+        return "command is not an allowlisted stdio launcher (allowed: npx, uvx)"
+
+    if not isinstance(argv, (list, tuple)):
+        return f"launcher {cmd!r} arguments must be a list"
+    package_arg_found = False
+    for arg in argv:
+        if not isinstance(arg, str):
+            return f"launcher {cmd!r} arguments must be strings"
+        token = arg.strip()
+        flag = token.split("=", 1)[0].lower()
+        if flag in _FORBIDDEN_STDIO_FLAGS:
+            return f"launcher {cmd!r} uses forbidden execution flag {flag!r}"
+        if token and not token.startswith("-"):
+            package_arg_found = True
+    if not package_arg_found:
+        return f"launcher {cmd!r} requires a package/server argument"
+    return None
+
+
 def is_safe_stdio_scan_command(command: str, args: list | None) -> bool:
-    """Return True only when *command* is an allowlisted package runner.
+    """Return True only for an allowlisted launcher or trusted Codex runtime.
 
     This is the single source of truth for "is it safe to spawn this
     stdio MCP server during a scan" and is shared by both the registry
@@ -219,31 +333,12 @@ def is_safe_stdio_scan_command(command: str, args: list | None) -> bool:
 
     The check is a positive allowlist, not a denylist:
 
-    * the command must be a bare launcher name (no path separators) so
-      absolute / relative executable paths are rejected outright;
-    * that name must be in :data:`_SAFE_STDIO_LAUNCHERS`;
-    * no argv token may be a code-exec flag (``-c`` / ``-e`` / …).
+    * package runners must be bare names in :data:`_SAFE_STDIO_LAUNCHERS`,
+      include a package/server argument, and carry no code-exec flag;
+    * the sole absolute-path exception is Codex Desktop's bundled
+      ``node_repl.exe`` after layout, real-path, owner, and DACL validation.
     """
-    if not isinstance(command, str):
-        return False
-    cmd = command.strip()
-    if not cmd:
-        return False
-    # No path components — only bare launcher names. This blocks
-    # absolute paths (``/tmp/evil``), relative paths (``./evil``,
-    # ``../evil``), and Windows-style paths regardless of host OS.
-    if "/" in cmd or "\\" in cmd:
-        return False
-    if os.sep in cmd or (os.altsep and os.altsep in cmd):
-        return False
-    if cmd.lower() not in _SAFE_STDIO_LAUNCHERS:
-        return False
-    for a in args or []:
-        if not isinstance(a, str):
-            return False
-        if a.strip() in _FORBIDDEN_STDIO_FLAGS:
-            return False
-    return True
+    return _stdio_scan_command_error(command, args) is None
 
 
 def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
@@ -315,21 +410,6 @@ class MCPScannerWrapper:
 
         warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
 
-        try:
-            from mcpscanner import Config as MCPConfig
-            from mcpscanner import Scanner as MCPSDKScanner
-            from mcpscanner.core.models import AnalyzerEnum
-        except ImportError:
-            print(
-                "error: cisco-ai-mcp-scanner not installed.\n"
-                "  Install with: pip install cisco-ai-mcp-scanner\n"
-                "\n"
-                "  Or install DefenseClaw with the mcp-scan extra:\n"
-                "  pip install defenseclaw[mcp-scan]",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-
         llm = self._llm
         aid = self.cisco_ai_defense
 
@@ -356,13 +436,33 @@ class MCPScannerWrapper:
         # loopback, link-local and CGNAT blocked unless the operator
         # explicitly opts in with allow_private).
         if is_local:
-            if not is_safe_stdio_scan_command(server_entry.command, server_entry.args):
+            command_error = _stdio_scan_command_error(
+                server_entry.command, server_entry.args
+            )
+            if command_error:
                 raise ValueError(
                     f"refusing to scan local MCP server {server_entry.name!r}: "
-                    f"command {server_entry.command!r} is not an allowlisted "
-                    f"stdio launcher (allowed: "
-                    f"{', '.join(sorted(_SAFE_STDIO_LAUNCHERS))})"
+                    f"{command_error}"
                 )
+
+        # Import only after local command validation so malformed stdio
+        # entries fail concisely without entering the SDK, while preserving
+        # the established dependency error order for remote scans.
+        try:
+            from mcpscanner import Config as MCPConfig
+            from mcpscanner import Scanner as MCPSDKScanner
+            from mcpscanner.core.models import AnalyzerEnum
+        except ImportError:
+            print(
+                "error: cisco-ai-mcp-scanner not installed.\n"
+                "  Install with: pip install cisco-ai-mcp-scanner\n"
+                "\n"
+                "  Or install DefenseClaw with the mcp-scan extra:\n"
+                "  pip install defenseclaw[mcp-scan]",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
         pinned_target: tuple[str, str, int] | None = None
         if not is_local:
             try:
@@ -544,13 +644,8 @@ class MCPScannerWrapper:
                 scan_kwargs["analyzers"] = analyzers
 
             errors: list[tuple[str, str]] = []
-            handler = _ErrorCapture(errors)
-            loggers = _attach_error_handler(handler)
-            try:
+            with _capture_sdk_error_logs(errors):
                 results = asyncio.run(scanner.scan_mcp_config_file(**scan_kwargs))
-            finally:
-                for lgr in loggers:
-                    lgr.removeHandler(handler)
 
             # Partition captured ERROR logs. An unreachable *LLM backend*
             # (Ollama / vLLM / a cloud endpoint) must NOT abort a local
@@ -795,11 +890,22 @@ class _ErrorCapture(logging.Handler):
         self._errors = errors
 
     def emit(self, record: logging.LogRecord) -> None:
-        try:
-            msg = self.format(record)
-        except Exception:  # pragma: no cover - formatting must never raise here
-            msg = record.getMessage()
+        # ``record.exc_info`` may contain a full dependency traceback. Keep
+        # only the actionable message; the CLI reports one normalized error.
+        msg = record.getMessage()
         self._errors.append((record.name, msg))
+
+
+_SDK_ERROR_LOGGER_NAMES = (
+    "mcpscanner",
+    "mcpscanner.core",
+    "mcpscanner.core.scanner",
+    "mcpscanner.core.analyzers",
+    "mcpscanner.core.analyzers.llm_analyzer",
+    # The MCP transport logs JSON/Pydantic parse failures with ``exc_info``.
+    # Catch at its package root so new child logger names are also contained.
+    "mcp",
+)
 
 
 def _attach_error_handler(handler: logging.Handler) -> list[logging.Logger]:
@@ -812,14 +918,37 @@ def _attach_error_handler(handler: logging.Handler) -> list[logging.Logger]:
     propagate. Returns the list of loggers so the caller can remove the
     handler.
     """
-    names = [
-        "mcpscanner",
-        "mcpscanner.core",
-        "mcpscanner.core.scanner",
-        "mcpscanner.core.analyzers",
-        "mcpscanner.core.analyzers.llm_analyzer",
-    ]
-    loggers = [logging.getLogger(n) for n in names]
+    loggers = [logging.getLogger(n) for n in _SDK_ERROR_LOGGER_NAMES]
     for lgr in loggers:
         lgr.addHandler(handler)
     return loggers
+
+
+@contextmanager
+def _capture_sdk_error_logs(
+    errors: list[tuple[str, str]],
+) -> Iterator[None]:
+    """Capture SDK errors without leaking dependency tracebacks to users.
+
+    Several upstream scanner loggers install their own stderr handlers and
+    disable propagation, while the MCP transport can fall through to Python's
+    ``lastResort`` handler. Temporarily replace those routes with one bounded
+    message-only handler, then restore the exact logger state.
+    """
+    handler = _ErrorCapture(errors)
+    loggers = [logging.getLogger(name) for name in _SDK_ERROR_LOGGER_NAMES]
+    states = [
+        (logger, list(logger.handlers), logger.propagate, logger.level)
+        for logger in loggers
+    ]
+    try:
+        for logger in loggers:
+            logger.handlers = [handler]
+            logger.propagate = False
+            logger.setLevel(logging.ERROR)
+        yield
+    finally:
+        for logger, handlers, propagate, level in states:
+            logger.handlers = handlers
+            logger.propagate = propagate
+            logger.setLevel(level)

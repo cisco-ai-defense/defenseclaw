@@ -1728,18 +1728,20 @@ def _scan_all(
         if hasattr(app.cfg, "active_connector")
         else "openclaw"
     )
-    # When an explicit connector is requested (multi-connector fan-out or
-    # --connector) and it is NOT the active one, the OpenClaw-specific
-    # skill listing does not apply — walk that connector's skill_dirs
-    # directly. The default single-connector path is byte-identical.
     resolved_connector = connector or active
-    use_openclaw_list = resolved_connector == active
 
-    oc_list = _list_openclaw_skills_full(app) if use_openclaw_list else None
+    # The list adapter is connector-aware: non-OpenClaw connectors use the
+    # shared filesystem discovery rules, while OpenClaw keeps its sidecar/CLI
+    # chain. Always pass the resolved connector so a non-active Codex scan sees
+    # the child skills inside its reserved .system container.
+    oc_list = _list_openclaw_skills_full(app, connector=resolved_connector)
     if oc_list and oc_list.get("skills"):
-        skill_names = [s["name"] for s in oc_list["skills"]]
+        skill_entries = [
+            entry for entry in oc_list["skills"]
+            if isinstance(entry, dict) and entry.get("name")
+        ]
     else:
-        skill_names = []
+        skill_entries = []
 
     pe = PolicyEngine(app.store)
     verdicts = []
@@ -1751,13 +1753,33 @@ def _scan_all(
     # preamble (count + sources) before the first scanner run.
     targets: list[tuple[str, str]] = []  # (name, base_dir)
     sources: list[str] = []
+    scan_dirs = list(app.cfg.skill_dirs(resolved_connector))
 
-    if skill_names:
-        for name in skill_names:
-            info = _get_openclaw_skill_info(name, app)
-            base_dir = _skill_info_path(info) if info else ""
+    if skill_entries:
+        from defenseclaw.safety import is_symlink, is_within_roots
+
+        for info in skill_entries:
+            name = str(info["name"])
+            base_dir = _skill_info_path(info)
             if not base_dir:
                 click.echo(f"[scan] warning: no baseDir for {name}", err=True)
+                continue
+            # Connector homes are untrusted. Apply the same containment gate
+            # to list-adapter paths as the filesystem fallback below so
+            # expanding .system never turns a symlink/junction into an
+            # out-of-root scan.
+            if is_symlink(base_dir):
+                click.echo(
+                    f"[scan] skipping symlinked skill entry {name!r}",
+                    err=True,
+                )
+                continue
+            if not is_within_roots(base_dir, scan_dirs):
+                click.echo(
+                    f"[scan] skipping skill entry {name!r}: resolves outside "
+                    f"configured skill roots",
+                    err=True,
+                )
                 continue
             targets.append((name, base_dir))
         sources = sorted({os.path.dirname(p) for _, p in targets if p})
@@ -1765,13 +1787,21 @@ def _scan_all(
         # Fall back to directory scan — resolve the target connector's
         # skill dirs so the selected configured connector's skills are scanned.
         from defenseclaw.safety import is_symlink, is_within_roots
-        dirs = app.cfg.skill_dirs(connector)
+        from defenseclaw.skill_discovery import discover_skill_directories
+
+        dirs = scan_dirs
         sources = list(dirs)
+        seen_names: set[str] = set()
         for skill_dir in dirs:
             if not os.path.isdir(skill_dir):
                 continue
-            for entry in sorted(os.listdir(skill_dir)):
-                path = os.path.join(skill_dir, entry)
+            for discovered in discover_skill_directories(
+                skill_dir, connector=resolved_connector
+            ):
+                entry = discovered.name
+                path = discovered.path
+                if entry in seen_names:
+                    continue
                 # F-0502: ``os.path.isdir`` follows symlinks, so a symlinked
                 # entry under a skill root (connector homes are UNTRUSTED)
                 # would be scanned at its realpath — anywhere on the host.
@@ -1792,12 +1822,13 @@ def _scan_all(
                         err=True,
                     )
                     continue
+                seen_names.add(entry)
                 targets.append((entry, path))
 
-        if not targets:
-            if not as_json:
-                _render_skill_scan_empty_state(connector, list(dirs or []))
-            return []
+    if not targets:
+        if not as_json:
+            _render_skill_scan_empty_state(connector, scan_dirs)
+        return []
 
     ctx = _scan_ui.ScanContext.for_skill(
         connector=connector, paths=sources, as_json=as_json,

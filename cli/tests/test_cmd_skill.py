@@ -414,6 +414,42 @@ class TestSkillScan(SkillCommandTestBase):
 
         scanner.scan.assert_called_once_with(skill_dir)
 
+    def test_scan_all_nonactive_codex_expands_system_child_skills(self):
+        from defenseclaw.commands.cmd_skill import _scan_all
+
+        codex_root = os.path.join(self.tmp_dir, ".codex", "skills")
+        regular = os.path.join(codex_root, "operator-skill")
+        system_root = os.path.join(codex_root, ".system")
+        child_a = os.path.join(system_root, "imagegen")
+        child_b = os.path.join(system_root, "skill-installer")
+        for path in (regular, child_a, child_b):
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(f"# {os.path.basename(path)}\n")
+        os.makedirs(os.path.join(system_root, "not-a-skill"), exist_ok=True)
+
+        self.app.cfg.active_connector = lambda: "antigravity"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["antigravity", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: (  # type: ignore[method-assign]
+            [codex_root] if connector == "codex" else []
+        )
+
+        scanner = MagicMock()
+        scanner.scan.side_effect = lambda path: ScanResult(
+            scanner="skill-scanner",
+            target=path,
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+            duration=timedelta(seconds=0.1),
+        )
+
+        _scan_all(self.app, scanner, as_json=False, connector="codex")
+
+        scanned = [call.args[0] for call in scanner.scan.call_args_list]
+        self.assertEqual(scanned, [regular, child_a, child_b])
+        self.assertNotIn(system_root, scanned)
+        self.assertNotIn(os.path.join(system_root, "not-a-skill"), scanned)
+
 
 class TestSkillScanContainment(SkillCommandTestBase):
     """F-0501/F-0502: scan must not trust a connector-reported baseDir or a
@@ -477,6 +513,27 @@ class TestSkillScanContainment(SkillCommandTestBase):
         result = self.invoke(["scan", "anything", "--path", outside])
         self.assertEqual(result.exit_code, 0, result.output)
         scanner.scan.assert_called_once_with(outside)
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_scan_all_rejects_list_adapter_path_outside_skill_roots(
+        self, mock_list,
+    ):
+        from defenseclaw.commands.cmd_skill import _scan_all
+
+        skill_root = os.path.join(self.tmp_dir, "skills")
+        outside = os.path.join(self.tmp_dir, "outside-target")
+        os.makedirs(skill_root)
+        os.makedirs(outside)
+        mock_list.return_value = {
+            "skills": [{"name": "outside", "path": outside, "baseDir": outside}]
+        }
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [skill_root]  # type: ignore[method-assign]
+        scanner = MagicMock()
+
+        _scan_all(self.app, scanner, as_json=False, connector="codex")
+
+        scanner.scan.assert_not_called()
 
     @patch("defenseclaw.config.Config.skill_dirs")
     def test_f0502_scan_all_skips_symlinked_entry(self, mock_skill_dirs):

@@ -95,6 +95,39 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
             self.assertEqual(r["baseDir"], os.path.join(skill_root, r["name"]))
             self.assertEqual(r["path"], os.path.join(skill_root, r["name"]))
 
+    def test_codex_system_container_expands_bundled_child_skills(self):
+        cfg = _make_cfg(self.tmp, "codex")
+        skill_root = os.path.join(self.tmp, ".codex", "skills")
+        system_root = os.path.join(skill_root, ".system")
+        _seed_skill(system_root, "skill-creator", body="# System skill")
+        os.makedirs(os.path.join(system_root, "not-a-skill"), exist_ok=True)
+        _seed_skill(skill_root, "operator-skill", body="# Operator skill")
+
+        with self._patch_skill_dirs([skill_root]):
+            rows = skill_list.list_skills(cfg)
+
+        by_name = {row["name"]: row for row in rows}
+        self.assertNotIn(".system", by_name)
+        self.assertNotIn("not-a-skill", by_name)
+        self.assertEqual(set(by_name), {"operator-skill", "skill-creator"})
+        self.assertTrue(by_name["skill-creator"]["bundled"])
+        self.assertEqual(by_name["skill-creator"]["source"], system_root)
+        self.assertTrue(by_name["skill-creator"]["eligible"])
+        self.assertFalse(by_name["operator-skill"]["bundled"])
+
+    def test_codex_operator_skill_precedes_same_named_system_skill(self):
+        cfg = _make_cfg(self.tmp, "codex")
+        skill_root = os.path.join(self.tmp, ".codex", "skills")
+        _seed_skill(skill_root, "shared", body="# Operator copy")
+        _seed_skill(os.path.join(skill_root, ".system"), "shared", body="# System copy")
+
+        with self._patch_skill_dirs([skill_root]):
+            rows = skill_list.list_skills(cfg)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["description"], "Operator copy")
+        self.assertFalse(rows[0]["bundled"])
+
     def test_claudecode_walks_disk(self):
         cfg = _make_cfg(self.tmp, "claudecode")
         skill_root = os.path.join(self.tmp, ".claude", "skills")

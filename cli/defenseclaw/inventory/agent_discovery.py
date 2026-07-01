@@ -136,6 +136,11 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
         candidates.extend(
             (
                 os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin"),
+                # Codex Desktop installs its bundled native MCP executables
+                # below this product-specific runtime root.  Never trust all
+                # of LOCALAPPDATA; executable admission still validates the
+                # full owner/DACL chain through this narrow prefix.
+                os.path.join(local_app_data, "OpenAI", "Codex", "runtimes"),
                 os.path.join(
                     local_app_data,
                     "hermes",
