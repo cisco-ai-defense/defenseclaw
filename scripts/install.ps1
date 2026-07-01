@@ -36,7 +36,9 @@
     %USERPROFILE%\.defenseclaw\.venv, so an installed setup upgrades in place.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.ps1 | iex
+    $Version = "0.8.3"
+    $InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
+    & ([scriptblock]::Create((irm $InstallUrl))) -Version $Version
 
 .EXAMPLE
     # Pin a version and pick a connector, non-interactively:
@@ -102,7 +104,9 @@ function Show-Help {
 DefenseClaw Installer (Windows)
 
 Usage:
-  irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex
+  `$Version = "0.8.3"
+  `$InstallUrl = "https://raw.githubusercontent.com/$Repo/`$Version/scripts/install.ps1"
+  & ([scriptblock]::Create((irm `$InstallUrl))) -Version `$Version
   .\install.ps1 -Local .\dist                 # from a local build
   .\install.ps1 -Yes                          # non-interactive
   .\install.ps1 -Connector codex -Quickstart  # pick connector + bootstrap

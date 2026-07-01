@@ -22,7 +22,9 @@
 # No Go, Node.js, or git required — only Python and uv.
 #
 #   # From GitHub release:
-#   curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash
+#   VERSION=0.8.3
+#   INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
+#   curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 #
 #   # From local dist/ directory (for testing):
 #   ./scripts/install.sh --local ./dist
@@ -718,7 +720,9 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo ""
             echo "Usage:"
-            echo "  curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash"
+            echo '  VERSION=0.8.3'
+            echo '  INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"'
+            echo '  curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash'
             echo "  ./scripts/install.sh --local ./dist               # from local build"
             echo "  curl -LsSf <url>/install.sh | bash -s -- --yes    # non-interactive"
             echo "  curl ... | bash -s -- --sandbox                   # OpenClaw/OpenShell sandbox support"
