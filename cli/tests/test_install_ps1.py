@@ -52,6 +52,14 @@ def test_windows_installer_offers_only_native_connector_surface() -> None:
     assert "function Install-OpenClaw" not in text
 
 
+def test_windows_installer_requires_and_installs_no_console_hook_launcher() -> None:
+    text = INSTALL_PS1.read_text()
+
+    assert 'Join-Path $tmp "defenseclaw-hook.exe"' in text
+    assert 'Die "defenseclaw-hook.exe missing from archive"' in text
+    assert 'Join-Path $InstallDir "defenseclaw-hook.exe"' in text
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell native stderr semantics")
 @pytest.mark.parametrize(
     ("native_exit", "expected"),

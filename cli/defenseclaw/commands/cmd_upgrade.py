@@ -1422,6 +1422,11 @@ def _gateway_binary_filename(os_name: str) -> str:
     return "defenseclaw.exe" if os_name == "windows" else "defenseclaw"
 
 
+def _hook_binary_filename(os_name: str) -> str | None:
+    """Return the Windows no-console hook artifact name, when applicable."""
+    return "defenseclaw-hook.exe" if os_name == "windows" else None
+
+
 def _installed_gateway_filename(os_name: str) -> str:
     """Name the gateway is installed as on PATH.
 
@@ -1851,8 +1856,9 @@ def _download_gateway(
     ``checksums.txt`` entry; we keep the binary path stable so existing
     callers don't break when checksum verification is opted into.
 
-    The archive is a .zip on Windows (containing defenseclaw.exe) and a
-    .tar.gz elsewhere (containing defenseclaw), matching .goreleaser.yaml.
+    The archive is a .zip on Windows (containing defenseclaw.exe and the
+    no-console defenseclaw-hook.exe) and a .tar.gz elsewhere (containing
+    defenseclaw), matching .goreleaser.yaml.
     """
     archive = artifact_name or _gateway_archive_name(version, os_name, arch)
     url = f"{_release_download_base()}/{version}/{archive}"
@@ -1885,6 +1891,13 @@ def _download_gateway(
     if not os.path.isfile(binary):
         ux.err(
             f"Gateway archive did not contain the expected {binary_name} binary.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    hook_name = _hook_binary_filename(os_name)
+    if hook_name and not os.path.isfile(os.path.join(staging_dir, hook_name)):
+        ux.err(
+            f"Gateway archive did not contain the expected {hook_name} launcher.",
             indent="  ",
         )
         raise SystemExit(1)
@@ -3450,6 +3463,27 @@ def _install_gateway(
                 indent="  ",
             )
 
+    hook_source = None
+    hook_target = None
+    if os_name == "windows":
+        hook_name = _hook_binary_filename(os_name)
+        assert hook_name is not None
+        hook_source = os.path.join(os.path.dirname(binary_path), hook_name)
+        hook_target = os.path.join(install_dir, hook_name)
+        if not os.path.isfile(hook_source):
+            ux.err(f"Windows hook launcher is missing: {hook_source}", indent="  ")
+            raise SystemExit(1)
+
+        if backup_dir and os.path.isfile(hook_target):
+            try:
+                snapshot = os.path.join(backup_dir, hook_name + ".previous")
+                shutil.copy2(hook_target, snapshot)
+            except OSError as exc:
+                ux.warn(
+                    f"Could not snapshot previous hook launcher: {exc}",
+                    indent="  ",
+                )
+
     # Publish from a fully copied, flushed same-directory file. A power loss or
     # SIGKILL before os.replace leaves the old gateway intact; after os.replace
     # the target names complete candidate bytes, never a truncated in-place
@@ -3483,7 +3517,11 @@ def _install_gateway(
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+    if hook_source and hook_target:
+        shutil.copy2(hook_source, hook_target)
     ux.ok("Gateway binary installed")
+    if hook_target:
+        ux.ok("No-console hook launcher installed")
     return target
 
 

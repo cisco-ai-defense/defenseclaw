@@ -18,12 +18,25 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
 
+  - id: defenseclaw-hook
+    main: ./cmd/defenseclaw-hook
+    binary: defenseclaw-hook
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -H=windowsgui -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
 archives:
   - id: default
     # tar.gz everywhere except Windows, which ships .zip (the native archive
-    # format Windows users and PowerShell's Expand-Archive expect). The binary
-    # inside the Windows archive is defenseclaw.exe; scripts/install.ps1
-    # extracts and installs it as defenseclaw-gateway.exe.
+    # format Windows users and PowerShell's Expand-Archive expect). Windows
+    # archives contain defenseclaw.exe plus the GUI-subsystem
+    # defenseclaw-hook.exe; scripts/install.ps1 installs both.
     formats:
       - tar.gz
     format_overrides:

@@ -1253,8 +1253,8 @@ func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t
 
 	c := NewClaudeCodeConnector()
 	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
-	firstBinary := filepath.Join(dir, "installed", windowsGatewayBinaryName)
-	secondBinary := filepath.Join(dir, "source-build", windowsGatewayBinaryName)
+	firstBinary := filepath.Join(dir, "installed", windowsHookBinaryName)
+	secondBinary := filepath.Join(dir, "source-build", windowsHookBinaryName)
 	defenseclawHookBinaryOverride = firstBinary
 	firstCommand := hookInvocationCommandFor("windows", "claudecode", "")
 	if err := c.Setup(context.Background(), opts); err != nil {
@@ -1357,7 +1357,7 @@ func TestClaudeCode_SetupRefreshDeduplicatesPreUpgradeInstalledAndRepoCommands(t
 	previousSettingsOverride := ClaudeCodeSettingsPathOverride
 	ClaudeCodeSettingsPathOverride = settingsPath
 	previousBinaryOverride := defenseclawHookBinaryOverride
-	defenseclawHookBinaryOverride = filepath.Join(dir, "source-build", windowsGatewayBinaryName)
+	defenseclawHookBinaryOverride = filepath.Join(dir, "installed", windowsHookBinaryName)
 	t.Cleanup(func() {
 		ClaudeCodeSettingsPathOverride = previousSettingsOverride
 		defenseclawHookBinaryOverride = previousBinaryOverride
@@ -2856,16 +2856,16 @@ log_user_prompt = false
 
 // TestCodex_Setup_WiresNotifyBridge pins the agent-turn-complete telemetry
 // path. Codex appends a JSON arg to the configured notify argv array. Windows
-// invokes the gateway's native notify subcommand; Unix keeps the per-instance
+// invokes the no-console launcher's native notify subcommand; Unix keeps the per-instance
 // Bash bridge that POSTs to /api/v1/codex/notify.
 //
 // Asserts the platform-specific artifact plus the canonical TOML argv array:
-// Windows writes ["<gateway.exe>", "notify"] with no shell bridge; Unix writes
+// Windows writes ["<hook.exe>", "notify"] with no shell bridge; Unix writes
 // ["bash", "<DataDir>/notify-bridge.sh"] and keeps the operator-only bridge.
 func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 	dir := t.TempDir()
 	if runtime.GOOS == "windows" {
-		setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe`)
+		setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
 	}
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte(`model = "gpt-5"
@@ -2925,8 +2925,8 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 		t.Fatalf("notify array has %d entries, want 2; got %v", len(notify), notify)
 	}
 	if runtime.GOOS == "windows" {
-		if first, _ := notify[0].(string); first != `C:\Program Files\DefenseClaw\defenseclaw-gateway.exe` {
-			t.Errorf("notify[0] = %q, want native gateway path", first)
+		if first, _ := notify[0].(string); first != `C:\Program Files\DefenseClaw\defenseclaw-hook.exe` {
+			t.Errorf("notify[0] = %q, want installed no-console hook path", first)
 		}
 		if second, _ := notify[1].(string); second != "notify" {
 			t.Errorf("notify[1] = %q, want native notify subcommand", second)

@@ -1,5 +1,6 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
+HOOK_LAUNCHER := defenseclaw-hook
 VERSION     := 0.8.5
 .DEFAULT_GOAL := help
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
@@ -375,6 +376,10 @@ gateway: sync-openclaw-extension
 	@echo "Built $(GATEWAY)$(EXE)"
 	@echo "  Run with: ./$(GATEWAY)$(EXE)"
 	@echo "  Check status: ./$(GATEWAY)$(EXE) status"
+ifeq ($(OS),Windows_NT)
+	go build -ldflags "-H=windowsgui -X main.version=$(VERSION)" -o $(HOOK_LAUNCHER).exe ./cmd/defenseclaw-hook
+	@echo "Built $(HOOK_LAUNCHER).exe (Windows GUI subsystem)"
+endif
 
 # sync-openclaw-extension copies the runtime files of the DefenseClaw
 # OpenClaw plugin into internal/gateway/connector/openclaw_extension so
@@ -446,6 +451,11 @@ extensions: plugin sync-openclaw-extension
 gateway-cross: sync-openclaw-extension
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
+	@if [ "$(GOOS)" = "windows" ]; then \
+		GOOS=$(GOOS) GOARCH=$(GOARCH) go build \
+			-ldflags "-H=windowsgui -X main.version=$(VERSION)" \
+			-o $(HOOK_LAUNCHER)-$(GOOS)-$(GOARCH).exe ./cmd/defenseclaw-hook; \
+	fi
 	@echo "Built $(BINARY)-$(GOOS)-$(GOARCH)"
 
 gateway-run: gateway
@@ -576,13 +586,13 @@ gateway-install: _source-install-preflight cli-install
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@echo "Installed $(GATEWAY)$(EXE) to $(INSTALL_DIR)"
-	@# If a sidecar is already running it kept the old inode; tell the
-	@# operator so they know a restart is needed to pick up the new build.
+	@# On Unix, a running sidecar kept the old inode; tell the operator so
+	@# they know a restart is needed to pick up the new build.
 	@# Use pgrep -x against the *basename* only — `pgrep -f "$(GATEWAY)"`
 	@# matches this very make invocation ("make gateway-install") and
 	@# any editor/tail window with the binary path on its cmdline, so
 	@# it would fire a false "sidecar is running" hint on every build.
-	@if pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
+	@if [ "$(OS)" != "Windows_NT" ] && pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
 		echo "  Gateway sidecar is running an older build — restart with:"; \
 		echo "    $(INSTALL_DIR)/$(GATEWAY)$(EXE) restart"; \
 	fi
@@ -1095,7 +1105,7 @@ dist-clean:
 	rm -rf sandbox-test-*
 
 clean:
-	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(BINARY)-linux-* $(BINARY)-darwin-*
+	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(HOOK_LAUNCHER)-windows-*.exe
 	rm -rf $(VENV) cli/*.egg-info
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml
