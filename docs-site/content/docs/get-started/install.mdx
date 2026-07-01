@@ -9,7 +9,7 @@ keywords:
   - defenseclaw make all
 ---
 
-DefenseClaw ships pre-built binaries for macOS, Linux, and Windows. The macOS/Linux installer drops the `defenseclaw` CLI and `defenseclaw-gateway` sidecar into `~/.local/bin/`, creates `~/.defenseclaw/`, and sets up a virtualenv under `~/.defenseclaw/.venv/`. The Windows installer uses the same per-user layout under `%USERPROFILE%`: `defenseclaw-gateway.exe` plus a `defenseclaw.cmd` CLI shim in `%USERPROFILE%\.local\bin`, with the virtualenv under `%USERPROFILE%\.defenseclaw\.venv`.
+DefenseClaw ships pre-built binaries for macOS, Linux, and Windows. The macOS/Linux installer drops the `defenseclaw` CLI and `defenseclaw-gateway` sidecar into `~/.local/bin/`, creates `~/.defenseclaw/`, and sets up a virtualenv under `~/.defenseclaw/.venv/`. The Windows installer uses the same per-user layout under `%USERPROFILE%`: `defenseclaw-gateway.exe`, the no-console `defenseclaw-hook.exe` launcher, and a `defenseclaw.cmd` CLI shim in `%USERPROFILE%\.local\bin`, with the virtualenv under `%USERPROFILE%\.defenseclaw\.venv`.
 
 <Callout>
 Installing as `root` is supported but discouraged — DefenseClaw is per-user by design so each operator's audit DB and connector state stays isolated.
@@ -63,21 +63,29 @@ defenseclaw quickstart --connector codex
 <Tab value="Windows PowerShell">
 
 ```powershell
-$Version = "0.8.3"
-$InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
-& ([scriptblock]::Create((irm $InstallUrl))) -Version $Version
+$Version = "<release-version>"
+$Installer = Join-Path $env:TEMP "install-defenseclaw.ps1"
+$InstallerUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
+Invoke-WebRequest -Uri $InstallerUrl -OutFile $Installer -UseBasicParsing
+& $Installer -Version $Version
 defenseclaw init
 ```
 
-The PowerShell installer downloads the Windows release ZIP for your architecture, verifies it against the release checksums, installs `defenseclaw-gateway.exe`, creates the CLI shim, and adds `%USERPROFILE%\.local\bin` to the user `PATH`. It also installs `uv` when needed so the Python CLI can run from the per-user virtualenv.
+The PowerShell installer downloads the Windows release ZIP for your architecture, verifies it against the release checksums, installs `defenseclaw-gateway.exe` and `defenseclaw-hook.exe`, creates the CLI shim, and adds `%USERPROFILE%\.local\bin` to the user `PATH`. It also installs `uv` when needed so the Python CLI can run from the per-user virtualenv.
 
 For non-interactive demos or CI, download the script and pass flags directly:
 
 ```powershell
-$Version = "0.8.3"
-$InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
-& ([scriptblock]::Create((irm $InstallUrl))) -Version $Version -Connector codex -Quickstart -Yes
+$Version = "<release-version>"
+$Installer = Join-Path $env:TEMP "install-defenseclaw.ps1"
+$InstallerUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
+Invoke-WebRequest -Uri $InstallerUrl -OutFile $Installer -UseBasicParsing
+& $Installer -Version $Version -Connector codex -Quickstart -Yes
 ```
+
+Native Windows uses agent hooks rather than the OpenClaw/ZeptoClaw proxy path.
+See [Native Windows](/docs/get-started/windows) for the supported connector
+matrix, multi-connector setup, file locations, and troubleshooting.
 
 </Tab>
 
@@ -125,7 +133,7 @@ defenseclaw init
   </Folder>
 </Files>
 
-On Windows, read the same tree under `%USERPROFILE%`: `%USERPROFILE%\.defenseclaw\` for config, audit state, hooks, and the virtualenv; `%USERPROFILE%\.local\bin\` for `defenseclaw.cmd` and `defenseclaw-gateway.exe`.
+On Windows, read the same tree under `%USERPROFILE%`: `%USERPROFILE%\.defenseclaw\` for config, audit state, hooks, and the virtualenv; `%USERPROFILE%\.local\bin\` for `defenseclaw.cmd`, `defenseclaw-gateway.exe`, and the no-console `defenseclaw-hook.exe` launcher.
 
 ## Verify
 
@@ -150,6 +158,7 @@ The default tears down connector integrations (restores `~/.codex/config.toml`, 
 ## Next
 
 <Cards>
+  <Card title="Native Windows" href="/docs/get-started/windows" description="PowerShell install, native hook connectors, verification, and troubleshooting." />
   <Card title="Quickstart" href="/docs/get-started/quickstart" description="Zero-prompt setup that gets you a guardrail in two minutes." />
   <Card title="Upgrade safely" href="/docs/get-started/upgrade" description="Verified artifacts, automatic migrations, backups, health checks, and observability schema compatibility." />
   <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The full configuration surface for the central command." />
