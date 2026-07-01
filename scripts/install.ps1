@@ -90,10 +90,7 @@ $ConnectorChoices = @(
     "windsurf", "geminicli", "copilot", "openhands",
     "antigravity", "opencode", "omnigent", "none"
 )
-$HookConnectors = @(
-    "hermes", "cursor", "windsurf", "geminicli", "copilot",
-    "openhands", "antigravity", "opencode", "omnigent"
-)
+$HookConnectors = $ConnectorChoices | Where-Object { $_ -notin @("codex", "claudecode", "none") }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -372,6 +369,7 @@ function Select-Connector {
             "opencode"   { Write-Host "    $i) opencode   - configure OpenCode hooks" }
             "omnigent"   { Write-Host "    $i) omnigent   - configure OmniGent hooks" }
             "none"       { Write-Host "    $i) none       - install gateway/CLI only; pick later" }
+            default      { Write-Host "    $i) $v" }
         }
         $i++
     }

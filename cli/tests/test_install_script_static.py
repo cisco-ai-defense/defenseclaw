@@ -40,8 +40,20 @@ def test_release_installers_track_known_connector_choices() -> None:
     ps_match = re.search(r"\$ConnectorChoices = @\((.*?)\)", ps_text, re.DOTALL)
     assert ps_match is not None
     ps_choices = tuple(re.findall(r'"([^"]+)"', ps_match.group(1)))
+    hook_match = re.search(
+        r"\$HookConnectors = \$ConnectorChoices \| Where-Object "
+        r'\{ \$_ -notin @\((.*?)\) \}',
+        ps_text,
+        re.DOTALL,
+    )
+    assert hook_match is not None
+    hook_exclusions = tuple(re.findall(r'"([^"]+)"', hook_match.group(1)))
 
     assert shell_choices == (*CONNECTOR_CHOICES, "none")
 
     windows_choices = tuple(supported_connectors(CONNECTOR_CHOICES, "windows"))
     assert ps_choices == (*windows_choices, "none")
+    assert hook_exclusions == ("codex", "claudecode", "none")
+    assert tuple(c for c in ps_choices if c not in hook_exclusions) == tuple(
+        c for c in windows_choices if c not in hook_exclusions
+    )
