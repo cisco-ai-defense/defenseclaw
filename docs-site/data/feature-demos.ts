@@ -589,7 +589,7 @@ llm_intent_analysis: optional` },
       { id: 'registry-config', label: 'registry.yaml', language: 'yaml', source: `id: internal-catalog
 kind: http_yaml
 url: https://registry.example.invalid/catalog.yaml
-auth_env: DEFENSECLAW_REGISTRY_AUTH
+auth_env: REGISTRY_AUTH_TOKEN
 allow_private_network: false
 sync: on_demand
 registry_required: true` },
