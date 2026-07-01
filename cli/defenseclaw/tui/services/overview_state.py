@@ -1259,9 +1259,9 @@ def connector_source_label(connector: str, category: str) -> str:
         ("copilot", "plugins"): ("copilot plugin list",),
         ("openhands", "plugins"): ("unsupported",),
         ("antigravity", "plugins"): (
-            "~/.gemini/config/plugins/<plugin>/ (discovery-only)",
+            "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
-            "<workspace>/.agents/plugins/<plugin>/ (discovery-only)",
+            "<workspace>/.agents/plugins/<plugin>/ (read/write)",
         ),
         ("opencode", "plugins"): ("~/.config/opencode/plugins/defenseclaw.js (DefenseClaw bridge)",),
         ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
