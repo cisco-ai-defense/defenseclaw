@@ -143,6 +143,11 @@ type GuardrailProxy struct {
 	defaultAgentName string
 	defaultPolicyID  string
 
+	// modelRouter is an optional embedded semantic router that selects
+	// the optimal model/provider for each request based on content
+	// signals. When nil, the proxy uses its default provider resolution.
+	modelRouter ModelRouter
+
 	// skipAuthForTest is a test-only escape hatch: when true,
 	// authenticateRequest returns true without consulting the
 	// connector / token / master-key. Plan B2 fails authentication
@@ -454,6 +459,7 @@ func NewGuardrailProxy(
 		limiter:      rate.NewLimiter(rate.Limit(100), 200),
 		mode:         cfg.Mode,
 		blockMessage: cfg.BlockMessage,
+		modelRouter:  globalModelRouter,
 	}
 	p.resolveProviderFn = p.resolveProviderFromHeaders
 	return p, nil
@@ -2660,6 +2666,40 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				p.writeBlockedResponse(w, req.Model, msg)
 			}
 			return
+		}
+	}
+
+	// --- Semantic Model Router ---
+	// When an embedded model router is configured, evaluate signals and
+	// potentially override the target URL, model, or serve from cache.
+	// This runs AFTER guardrails (reuses their signals) and BEFORE the
+	// upstream forward. A nil return gracefully falls through.
+	if p.modelRouter != nil {
+		routerInput := &ModelRouterInput{
+			Model:    req.Model,
+			Messages: req.Messages,
+			Stream:   req.Stream,
+		}
+		if decision := p.modelRouter.Route(r.Context(), routerInput); decision != nil {
+			if decision.CacheHit && !req.Stream {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Semantic-Router", "cache-hit")
+				w.Header().Set("X-Semantic-Router-Reason", decision.Reason)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(decision.CachedResponse)
+				return
+			}
+			if decision.TargetURL != "" {
+				req.TargetURL = decision.TargetURL
+			}
+			if decision.Model != "" {
+				req.Model = decision.Model
+			}
+			if decision.APIKey != "" {
+				req.TargetAPIKey = decision.APIKey
+			}
+			w.Header().Set("X-Semantic-Router", "routed")
+			w.Header().Set("X-Semantic-Router-Reason", decision.Reason)
 		}
 	}
 
