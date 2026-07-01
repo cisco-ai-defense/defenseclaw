@@ -19,6 +19,7 @@ package connector
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -64,6 +65,20 @@ func TestHookInvocationCommand(t *testing.T) {
 		t.Errorf("isNativeHookCommand(%q) = true, want false for a .sh path", unix)
 	}
 
+	// Codex passes this string to cmd.exe /C as one argument. Do not use the
+	// quoted absolute-path form that Windows re-escapes into a literal argv[0].
+	codex := hookInvocationCommandFor("windows", "codex", unix)
+	wantCodex := windowsSafePATHCommandPrefix + windowsGatewayBinaryName + " " + nativeHookFlag + "codex"
+	if codex != wantCodex {
+		t.Errorf("codex command = %q, want %q", codex, wantCodex)
+	}
+	if strings.ContainsAny(codex, `"'`) {
+		t.Errorf("codex cmd.exe command contains quote characters: %q", codex)
+	}
+	if !isNativeHookCommand(codex) {
+		t.Errorf("isNativeHookCommand(%q) = false, want true", codex)
+	}
+
 	// Antigravity's direct-exec parser does not dequote command paths. Use the
 	// installer-provided PATH entry so an install root containing spaces still
 	// works without quote characters becoming part of argv[0].
@@ -73,6 +88,35 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 	if strings.ContainsAny(agy, `"'`) {
 		t.Errorf("antigravity direct-exec command contains literal quotes: %q", agy)
+	}
+}
+
+// TestCodexWindowsHookCommandRunsAsSingleCmdArgument reproduces Codex's native
+// Windows launch shape. The probe substitutes a system executable for the
+// gateway while preserving the generated command prefix and single-argument
+// cmd.exe /C boundary; a leading quoted executable would fail before where.exe
+// starts, which is the production regression this test guards against.
+func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("cmd.exe launch semantics are Windows-specific")
+	}
+
+	command := hookInvocationCommandFor("windows", "codex", "")
+	wantTail := windowsGatewayBinaryName + " " + nativeHookFlag + "codex"
+	probe := strings.Replace(command, wantTail, "where.exe cmd.exe", 1)
+	if probe == command {
+		t.Fatalf("generated Codex command %q did not contain %q", command, wantTail)
+	}
+	comspec := os.Getenv("COMSPEC")
+	if comspec == "" {
+		comspec = "cmd.exe"
+	}
+	out, err := exec.Command(comspec, "/C", probe).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Codex-style cmd.exe launch failed: %v\ncommand: %s\noutput: %s", err, probe, out)
+	}
+	if !strings.Contains(strings.ToLower(string(out)), "cmd.exe") {
+		t.Fatalf("Codex-style cmd.exe probe did not execute where.exe; output: %s", out)
 	}
 }
 
@@ -94,7 +138,7 @@ func TestShellWordPassesNativeCommandThrough(t *testing.T) {
 // the trust hash over the exact command it executes (so Codex recognizes it),
 // and that teardown reproduces the same fingerprint to remove the state.
 func TestBuildCodexHooksTableHashesTheCommand(t *testing.T) {
-	const cmd = `"C:\Program Files\defenseclaw\defenseclaw-gateway.exe" hook --connector codex`
+	const cmd = windowsSafePATHCommandPrefix + windowsGatewayBinaryName + " " + nativeHookFlag + "codex"
 	const configPath = "/home/u/.codex/config.toml"
 
 	table := buildCodexHooksTable(configPath, cmd)
