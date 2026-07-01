@@ -50,7 +50,11 @@ from defenseclaw.registries.ssrf import (
     pinned_getaddrinfo,
     resolve_and_pin,
 )
-from defenseclaw.scanner._llm_env import inject_llm_env, litellm_model
+from defenseclaw.scanner._llm_env import (
+    inject_llm_env,
+    litellm_model,
+    llm_analyzer_ready,
+)
 
 if TYPE_CHECKING:
     pass
@@ -392,10 +396,18 @@ class MCPScannerWrapper:
         # is the correct default; operators who need a custom endpoint
         # set ``llm.base_url`` (or ``scanners.mcp_scanner.llm.base_url``)
         # explicitly.
+        llm_api_key = llm.resolved_api_key()
+        # The upstream SDK requires a non-empty key even for local
+        # OpenAI-compatible providers that do not authenticate. Supply a
+        # non-secret sentinel only for those loopback/local providers so an
+        # otherwise usable Ollama/vLLM scan is not disabled by SDK validation.
+        if not llm_api_key and llm.is_local_provider():
+            llm_api_key = "local-no-key"
+
         sdk_config = MCPConfig(
             api_key=aid.resolved_api_key(),
             endpoint_url=aid.endpoint,
-            llm_provider_api_key=llm.resolved_api_key(),
+            llm_provider_api_key=llm_api_key,
             llm_model=litellm_model(llm),
             llm_base_url=llm.base_url,
             llm_timeout=llm.effective_timeout(),
@@ -424,15 +436,14 @@ class MCPScannerWrapper:
     def _parse_analyzers(self, analyzer_enum_cls: type) -> list | None:
         """Resolve configured analyzer names into SDK enum values.
 
-        Selection is *model-driven* via the ``"auto"`` sentinel. ``auto``
+        Selection is *readiness-driven* via the ``"auto"`` sentinel. ``auto``
         means "run YARA always, and add the LLM analyzer only when a
-        model is actually configured for this scanner
-        (``resolve_llm('scanners.mcp')`` yielded one)". This is what lets
-        the unified LLM lane be default-on without firing LLM calls — and
-        failing — on installs that never set a model. Once the config
-        default flips from ``"yara"`` to ``"auto"`` (see
-        ``MCPScannerConfig.analyzers`` / the Go parity default), every
-        scan picks YARA+LLM when a model resolves and YARA-only otherwise.
+        model and its required authentication are available for this scanner".
+        Local providers need no key, and Bedrock may use its AWS credential
+        chain. This lets the unified LLM lane be default-on without making a
+        missing optional credential fail the entire scan. With
+        ``MCPScannerConfig.analyzers`` and the Go parity default set to auto, every
+        scan picks YARA+LLM when the LLM lane is usable and YARA-only otherwise.
 
         An explicit comma-separated list (``yara`` / ``yara,llm,api`` / …)
         is honoured verbatim as a local-only escape hatch — ``yara`` keeps
@@ -477,19 +488,27 @@ class MCPScannerWrapper:
         """Model-driven analyzer set for the ``"auto"`` default.
 
         YARA always runs — it needs no model and no network. The LLM
-        analyzer is added only when the resolved LLM actually carries a
-        model (surfaced as a non-empty ``litellm_model``); with no model
-        we fall back to YARA-only so a default-on scan is a safe no-op
-        (no LLM call, no error) instead of a hard failure.
+        analyzer is added only when the resolved LLM carries a model and can
+        authenticate. A configured cloud model with a missing key degrades to
+        YARA with a warning instead of turning an optional analyzer into a
+        fatal scan error.
         """
         selected: list = []
         yara = analyzer_map.get("yara")
         if yara is not None:
             selected.append(yara)
-        if litellm_model(self._llm):
+        model = litellm_model(self._llm)
+        if model and llm_analyzer_ready(self._llm, model=model):
             llm = analyzer_map.get("llm")
             if llm is not None:
                 selected.append(llm)
+        elif model:
+            key_name = self._llm.api_key_env or "DEFENSECLAW_LLM_KEY"
+            print(
+                "warning: LLM analyzer skipped: "
+                f"{key_name} is not configured; continuing with local analyzers",
+                file=sys.stderr,
+            )
         # If the SDK enum exposes neither name, defer to its own default
         # (None = all) rather than handing it an empty list.
         return selected or None

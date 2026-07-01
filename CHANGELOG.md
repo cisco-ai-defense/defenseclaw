@@ -30,6 +30,12 @@ deleted.
 
 ### Behaviour changes (no flag)
 
+- **Skill, MCP, and plugin scans now degrade cleanly when optional LLM
+  credentials are unavailable**: the local/static analyzers still complete,
+  the CLI and TUI show a nonfatal skip warning, and Setup/Keys identifies the
+  missing credential. Auto mode adds the LLM analyzer only when its model and
+  authentication are usable; local providers and Bedrock's AWS credential
+  chain remain supported without a DefenseClaw API key.
 - **Antigravity local surfaces now match the PR #365 contract**:
   MCP reads/writes `~/.gemini/config/mcp_config.json` and
   `<workspace>/.agents/mcp_config.json`; hooks remain global-only at

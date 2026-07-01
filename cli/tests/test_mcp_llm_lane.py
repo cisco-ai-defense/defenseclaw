@@ -60,9 +60,19 @@ class _FakeAnalyzerEnum(Enum):
     API = "api"
 
 
-def _wrapper(analyzers: str, *, model: bool) -> MCPScannerWrapper:
+def _wrapper(
+    analyzers: str,
+    *,
+    model: bool,
+    credential: bool = True,
+    provider: str = "openai",
+) -> MCPScannerWrapper:
     llm = (
-        LLMConfig(provider="openai", model="gpt-4o")
+        LLMConfig(
+            provider=provider,
+            model=f"{provider}/test-model",
+            api_key="test-key" if credential else "",
+        )
         if model
         else LLMConfig()
     )
@@ -83,6 +93,23 @@ class AutoAnalyzerSelectionTests(unittest.TestCase):
     def test_auto_without_model_is_yara_only(self):
         s = _wrapper("auto", model=False)
         self.assertEqual(self._values(s._parse_analyzers(_FakeAnalyzerEnum)), ["yara"])
+
+    def test_auto_with_cloud_model_but_no_key_warns_and_runs_yara(self):
+        s = _wrapper("auto", model=True, credential=False, provider="anthropic")
+        captured = io.StringIO()
+        with patch("sys.stderr", captured):
+            selected = s._parse_analyzers(_FakeAnalyzerEnum)
+        self.assertEqual(self._values(selected), ["yara"])
+        self.assertIn("LLM analyzer skipped", captured.getvalue())
+        self.assertIn("continuing with local analyzers", captured.getvalue())
+
+    def test_auto_with_local_model_needs_no_key(self):
+        s = _wrapper("auto", model=True, credential=False, provider="ollama")
+        self.assertEqual(self._values(s._parse_analyzers(_FakeAnalyzerEnum)), ["yara", "llm"])
+
+    def test_auto_with_bedrock_model_uses_aws_credential_chain(self):
+        s = _wrapper("auto", model=True, credential=False, provider="bedrock")
+        self.assertEqual(self._values(s._parse_analyzers(_FakeAnalyzerEnum)), ["yara", "llm"])
 
     def test_auto_is_case_insensitive(self):
         s = _wrapper("AUTO", model=True)

@@ -35,6 +35,7 @@ from defenseclaw.config import (
     GuardrailConfig,
     JudgeConfig,
     LLMConfig,
+    MCPScannerConfig,
     OpenShellConfig,
     OTelConfig,
     OTelDestinationConfig,
@@ -174,6 +175,38 @@ class RequirementPredicateTests(unittest.TestCase):
             ),
         )
         self.assertEqual(C._virustotal_key(on), C.Requirement.REQUIRED)
+
+    def test_default_llm_key_required_for_auto_mcp_scan_with_cloud_model(self):
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            llm=LLMConfig(api_key_env="DEFENSECLAW_LLM_KEY"),
+            scanners=ScannersConfig(
+                mcp_scanner=MCPScannerConfig(
+                    analyzers="auto",
+                    llm=LLMConfig(
+                        provider="anthropic",
+                        model="anthropic/claude-test",
+                    ),
+                ),
+            ),
+        )
+        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)
+
+    def test_default_llm_key_not_required_for_yara_only_mcp_scan(self):
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            llm=LLMConfig(api_key_env="DEFENSECLAW_LLM_KEY"),
+            scanners=ScannersConfig(
+                mcp_scanner=MCPScannerConfig(
+                    analyzers="yara",
+                    llm=LLMConfig(
+                        provider="anthropic",
+                        model="anthropic/claude-test",
+                    ),
+                ),
+            ),
+        )
+        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.NOT_USED)
 
     def test_splunk_required_when_enabled(self):
         off = _make_cfg("/tmp/dc-test")

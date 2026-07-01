@@ -16,6 +16,7 @@
 
 """Tests for defenseclaw.scanner — MCP and skill scanner wrappers."""
 
+import io
 import os
 import sys
 import unittest
@@ -662,6 +663,54 @@ class TestSkillScannerWrapper(unittest.TestCase):
         self.assertNotIn("use_llm", kwargs)
         self.assertNotIn("llm_model", kwargs)
         self.assertNotIn("llm_provider", kwargs)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper._convert")
+    def test_scan_skips_llm_when_cloud_key_missing_and_keeps_static_scan(self, mock_convert):
+        from datetime import datetime, timezone
+
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.skill import SkillScannerWrapper
+
+        mock_sdk_module = MagicMock()
+        mock_scanner_instance = MagicMock()
+        mock_sdk_module.SkillScanner.return_value = mock_scanner_instance
+        mock_scanner_instance.scan_skill.return_value = MagicMock(findings=[])
+        build_analyzers = MagicMock(return_value=[])
+        mock_convert.return_value = ScanResult(
+            scanner="skill-scanner",
+            target="/tmp/skill",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        cfg = SkillScannerConfig(use_llm=True, use_behavioral=True)
+        llm = LLMConfig(
+            provider="anthropic",
+            model="anthropic/claude-test",
+            api_key_env="MISSING_SKILL_TEST_KEY",
+        )
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {}, clear=False), patch(
+            "sys.stderr", stderr
+        ), patch.dict("sys.modules", {
+            "skill_scanner": mock_sdk_module,
+            "skill_scanner.core": MagicMock(),
+            "skill_scanner.core.analyzer_factory": MagicMock(
+                build_analyzers=build_analyzers
+            ),
+            "skill_scanner.core.scan_policy": MagicMock(),
+        }):
+            os.environ.pop("MISSING_SKILL_TEST_KEY", None)
+            os.environ.pop("SKILL_SCANNER_LLM_API_KEY", None)
+            scanner = SkillScannerWrapper(cfg, llm=llm)
+            scanner.scan("/tmp/skill")
+
+        kwargs = build_analyzers.call_args.kwargs
+        self.assertTrue(kwargs.get("use_behavioral"))
+        self.assertNotIn("use_llm", kwargs)
+        self.assertIn("LLM analyzer skipped", stderr.getvalue())
+        self.assertIn("continuing with local analyzers", stderr.getvalue())
 
 
 class TestMCPScannerCommonConfigs(unittest.TestCase):

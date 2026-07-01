@@ -164,7 +164,7 @@ def _any_llm_component_uses_default_key(cfg: Config) -> bool:
     """
     def needs_key(path: str) -> bool:
         r = cfg.resolve_llm(path)
-        if r.is_local_provider():
+        if r.is_local_provider() or r.provider_prefix() == "bedrock":
             return False
         # If the resolved api_key_env is empty, the component falls back
         # to DEFENSECLAW_LLM_KEY — so this IS the canonical env var that
@@ -182,16 +182,26 @@ def _any_llm_component_uses_default_key(cfg: Config) -> bool:
     sc = getattr(cfg, "scanners", None)
     if sc is not None:
         ss = getattr(sc, "skill_scanner", None)
-        if ss is not None and getattr(ss, "use_llm", False) and needs_key("scanners.skill"):
+        # Skill and plugin scan commands use their resolved model as the
+        # default-on signal. Surface the missing key in Setup/Keys before the
+        # operator encounters a scan-time skip warning.
+        if ss is not None:
+            skill_llm = cfg.resolve_llm("scanners.skill")
+            if (
+                getattr(ss, "use_llm", False) or skill_llm.model
+            ) and needs_key("scanners.skill"):
+                return True
+        plugin_llm = cfg.resolve_llm("scanners.plugin")
+        if plugin_llm.model and needs_key("scanners.plugin"):
             return True
         ms = getattr(sc, "mcp_scanner", None)
         if ms is not None:
-            # mcp-scanner uses LLM only when scan_prompts/scan_resources/
-            # scan_instructions is on (which triggers LiteLLM). Err on the
-            # side of "required" when any of those are set.
-            if any(getattr(ms, attr, False) for attr in ("scan_prompts", "scan_resources", "scan_instructions")):
-                if needs_key("scanners.mcp"):
-                    return True
+            analyzers = str(getattr(ms, "analyzers", "auto") or "").lower()
+            selected = {item.strip() for item in analyzers.split(",") if item.strip()}
+            mcp_llm = cfg.resolve_llm("scanners.mcp")
+            uses_llm = not selected or "llm" in selected or "auto" in selected
+            if mcp_llm.model and uses_llm and needs_key("scanners.mcp"):
+                return True
     return False
 
 
