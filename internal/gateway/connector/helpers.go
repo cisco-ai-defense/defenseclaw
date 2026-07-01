@@ -81,6 +81,17 @@ const nativeHookFlag = "hook --connector "
 
 const windowsGatewayBinaryName = "defenseclaw-gateway.exe"
 
+// windowsSafePATHCommandPrefix disables cmd.exe's implicit current-directory
+// executable lookup before resolving a command through PATH. Codex runs hook
+// commands as a single `cmd.exe /C <command>` argument on Windows. A command
+// whose first token is a quoted absolute path is re-escaped by CreateProcess
+// and reaches cmd.exe as a literal `\"C:\\...\"`, so the hook never starts.
+//
+// Using the installer-provided PATH entry avoids that quoting failure. Setting
+// NoDefaultCurrentDirectoryInExePath prevents an untrusted repository from
+// shadowing defenseclaw-gateway.exe in the session working directory.
+const windowsSafePATHCommandPrefix = "set NoDefaultCurrentDirectoryInExePath=1&& "
+
 // defenseclawHookBinaryOverride is a test seam for exercising generated
 // Windows configs with an installed gateway path that contains spaces. It is
 // intentionally package-private and empty in production.
@@ -110,6 +121,15 @@ func hookInvocationCommand(connector, unixCommand string) string {
 func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	if goos != "windows" {
 		return unixCommand
+	}
+	// Codex passes the full command as one argument to cmd.exe /C. A leading
+	// quoted executable path is escaped by Windows process argument encoding and
+	// becomes part of argv[0], so cmd.exe returns exit code 1 without launching
+	// the gateway. Resolve the stable installer-provided binary name through
+	// PATH, with current-directory lookup disabled to prevent repository
+	// shadowing.
+	if connector == "codex" {
+		return windowsSafePATHCommandPrefix + windowsGatewayBinaryName + " " + nativeHookFlag + connector
 	}
 	// Antigravity (agy v1) tokenizes the command itself and passes quote
 	// characters through to direct exec. An absolute path containing spaces
@@ -152,6 +172,12 @@ func windowsQuoteExe(p string) string {
 // native (non-file) command does not carry.
 func isNativeHookCommand(cmd string) bool {
 	cmd = strings.TrimSpace(cmd)
+	// Codex's Windows command uses PATH with current-directory lookup disabled;
+	// strip only that exact hardening prefix before applying the existing strict
+	// executable and connector signature checks.
+	if strings.HasPrefix(cmd, windowsSafePATHCommandPrefix) {
+		cmd = strings.TrimSpace(strings.TrimPrefix(cmd, windowsSafePATHCommandPrefix))
+	}
 	marker := " " + nativeHookFlag
 	idx := strings.LastIndex(cmd, marker)
 	if idx <= 0 {
