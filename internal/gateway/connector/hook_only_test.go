@@ -217,6 +217,46 @@ printf '{"nested":{"action":"deny"}}' | _dc_jq -r '.action // "allow"'
 	}
 }
 
+func TestHermesConfigPathHonorsHermesHomeAndExplicitOverride(t *testing.T) {
+	hermesHome := filepath.Join(t.TempDir(), "Hermes Home")
+	t.Setenv("HERMES_HOME", hermesHome)
+
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = ""
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	if got, want := hermesConfigPath(SetupOpts{}), filepath.Join(hermesHome, "config.yaml"); got != want {
+		t.Fatalf("hermesConfigPath() = %q, want %q", got, want)
+	}
+	caps := NewHermesConnector().Capabilities(SetupOpts{})
+	if got, want := caps.Skills.ReadPaths, []string{filepath.Join(hermesHome, "skills")}; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("Hermes skill paths = %v, want %v", got, want)
+	}
+
+	explicit := filepath.Join(t.TempDir(), "explicit-config.yaml")
+	HermesConfigPathOverride = explicit
+	if got := hermesConfigPath(SetupOpts{}); got != explicit {
+		t.Fatalf("HermesConfigPathOverride lost precedence: got %q, want %q", got, explicit)
+	}
+}
+
+func TestHermesConfigPathUsesWindowsLocalAppData(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows Hermes path")
+	}
+	localAppData := filepath.Join(t.TempDir(), "Local AppData")
+	t.Setenv("HERMES_HOME", "")
+	t.Setenv("LOCALAPPDATA", localAppData)
+
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = ""
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	if got, want := hermesConfigPath(SetupOpts{}), filepath.Join(localAppData, "hermes", "config.yaml"); got != want {
+		t.Fatalf("hermesConfigPath() = %q, want %q", got, want)
+	}
+}
+
 func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: t.TempDir(), APIAddr: "127.0.0.1:18970"}
 	cases := []struct {

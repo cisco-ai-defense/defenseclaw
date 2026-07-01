@@ -2370,7 +2370,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	if !guardianManagedLifecycle {
 		if previous := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); previous.Connector != "" {
 			current := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
-			if connector.HookContractLockDrifted(previous, current) && strings.EqualFold(s.currentConfig().Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+			// Generated hook drift is repairable by Setup below and must not block
+			// an explicit setup/restart from refreshing an existing connector.
+			// Only an upstream agent-version/contract change requires the action-mode override.
+			if connector.HookContractCompatibilityDrifted(previous, current) && strings.EqualFold(s.currentConfig().Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 				return fmt.Errorf("connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
 			}
 		}
@@ -3330,15 +3333,20 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	// surface a warning, keeping the other connectors running (DN1), instead of
 	// shipping an unverified enforcing hook.
 	contractResolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)
+	actionMode := strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action")
 	if connector.HookContractNeedsActionOverride(contractResolution) &&
-		strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action") &&
+		actionMode &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), opts.AgentVersion, contractResolution.Reason)
 	}
 	if previous := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
-		if connector.HookContractLockDrifted(previous, current) &&
-			strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action") &&
+		// Setup refreshes generated hook artifacts for every configured
+		// connector on boot. A stale generated digest is therefore a repair
+		// trigger, not an upstream compatibility failure. Keep failing closed
+		// only when the agent version or selected contract changed.
+		if connector.HookContractCompatibilityDrifted(previous, current) &&
+			actionMode &&
 			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 			return fmt.Errorf("connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
 		}

@@ -167,7 +167,11 @@ def test_windows_views_hide_unsupported_and_mark_hermes_preview() -> None:
     assert {choice.wire for choice in win_modes} == expected
     hermes = next(choice for choice in win_modes if choice.wire == "hermes")
     assert hermes.label == "Hermes (preview)"
-    assert "Early Beta" in hermes.tagline
+    assert "preview" in hermes.tagline.lower()
+    assert connector_platform_support("hermes", "windows").reason == (
+        "Hermes supports native Windows upstream, but DefenseClaw's native "
+        "Windows hook integration remains preview pending live end-to-end validation."
+    )
 
 
 def test_non_windows_views_are_unfiltered() -> None:

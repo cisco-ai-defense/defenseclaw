@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -42,6 +43,7 @@ type bootStubConnector struct {
 	setupCalls    int
 	teardownCalls int
 	credsSet      bool
+	artifactPath  string
 }
 
 func (b *bootStubConnector) Setup(context.Context, connector.SetupOpts) error {
@@ -60,6 +62,13 @@ type hookBootStubConnector struct{ bootStubConnector }
 
 func (*hookBootStubConnector) HookScriptNames(connector.SetupOpts) []string {
 	return []string{"codex-hook.sh"}
+}
+
+func (b *bootStubConnector) HookRuntimeArtifacts(connector.SetupOpts) []string {
+	if b.artifactPath == "" {
+		return nil
+	}
+	return []string{b.artifactPath}
 }
 
 func multiBootSidecar(t *testing.T) *Sidecar {
@@ -202,6 +211,99 @@ func TestSetupOneConnector_ActionModeContractDriftOverride(t *testing.T) {
 	}
 	if conn.setupCalls != 1 {
 		t.Errorf("setupCalls=%d, want 1 (override should let Setup run)", conn.setupCalls)
+	}
+}
+
+// An observe-mode connector in a mixed-mode batch must use its own effective
+// mode for the action-only hook-contract gate. The global mode may be action
+// because another connector enforces; that must not make an unversioned
+// observe connector fail before Setup can refresh its hooks.
+func TestSetupOneConnector_ObserveOverrideIgnoresGlobalActionContractGate(t *testing.T) {
+	s := multiBootSidecar(t)
+	s.cfg.Guardrail.Mode = "action"
+	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"hermes": {Mode: "observe"},
+	}
+	conn := &bootStubConnector{stubConnector: stubConnector{name: "hermes"}}
+
+	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	if opts.AgentVersion != "" {
+		t.Fatalf("test requires an unversioned connector, got %q", opts.AgentVersion)
+	}
+	if err := s.setupOneConnector(context.Background(), conn, opts, "master", guardrail.NewRulePackCache()); err != nil {
+		t.Fatalf("observe override should allow hook refresh despite global action mode: %v", err)
+	}
+	if conn.setupCalls != 1 {
+		t.Fatalf("setupCalls=%d, want 1", conn.setupCalls)
+	}
+}
+
+// Existing action connectors must be refreshed during the same boot as newly
+// added peers. A stale generated hook digest is exactly what an upgrade/setup
+// needs Connector.Setup to replace; it is not evidence that the upstream
+// agent contract changed.
+func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *testing.T) {
+	s := multiBootSidecar(t)
+	s.cfg.Guardrail.Mode = "action"
+	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex": {Mode: "action"},
+	}
+
+	discovery := map[string]any{
+		"agents": map[string]any{
+			"codex":  map[string]any{"version": "codex-cli 0.142.4"},
+			"cursor": map[string]any{"version": "3.9.16"},
+		},
+	}
+	raw, err := json.Marshal(discovery)
+	if err != nil {
+		t.Fatalf("marshal discovery: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.cfg.DataDir, "agent_discovery.json"), raw, 0o600); err != nil {
+		t.Fatalf("write discovery: %v", err)
+	}
+
+	artifact := filepath.Join(s.cfg.DataDir, "hooks", "codex-hook.sh")
+	if err := os.MkdirAll(filepath.Dir(artifact), 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	if err := os.WriteFile(artifact, []byte("stale generated hook"), 0o600); err != nil {
+		t.Fatalf("write stale hook: %v", err)
+	}
+	previous := connector.HookContractLockEntry{
+		Connector:              "codex",
+		RawAgentVersion:        "codex-cli 0.142.4",
+		NormalizedAgentVersion: "0.142.4",
+		ContractID:             "codex-hooks-v1",
+		HookScriptDigests:      map[string]string{"codex-hook.sh": "sha256:previous-generated-build"},
+	}
+	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, previous); err != nil {
+		t.Fatalf("save previous lock: %v", err)
+	}
+
+	existing := &bootStubConnector{
+		stubConnector: stubConnector{name: "codex"},
+		artifactPath:  artifact,
+	}
+	added := &bootStubConnector{stubConnector: stubConnector{name: "cursor"}}
+	got, err := s.setupConnectorsIsolated(
+		context.Background(),
+		[]connector.Connector{existing, added},
+		"tok", "127.0.0.1:0", "127.0.0.1:0", "master",
+		guardrail.NewRulePackCache(),
+	)
+	if err != nil {
+		t.Fatalf("setupConnectorsIsolated: %v", err)
+	}
+	if want := []string{"codex", "cursor"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("refreshed connectors=%v, want %v", got, want)
+	}
+	if existing.setupCalls != 1 || added.setupCalls != 1 {
+		t.Fatalf(
+			"setupCalls existing=%d added=%d, want 1/1",
+			existing.setupCalls,
+			added.setupCalls,
+		)
 	}
 }
 

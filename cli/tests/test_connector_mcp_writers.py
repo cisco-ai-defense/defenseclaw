@@ -514,7 +514,25 @@ class TestCoverage:
                 with pytest.MonkeyPatch.context() as m:
                     m.chdir(tmp_path)
                     m.setenv("HOME", str(tmp_path))
+                    if name == "hermes":
+                        m.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
                     set_mcp_server(name, "x", {"command": "y"})
+
+
+class TestHermesWrites:
+    def test_set_and_unset_honor_hermes_home(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "custom-hermes"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        set_mcp_server("hermes", "demo", {"command": "hermes-mcp"})
+
+        config = hermes_home / "config.yaml"
+        assert config.is_file()
+        assert [entry.name for entry in connector_paths.mcp_servers("hermes")] == ["demo"]
+
+        unset_mcp_server("hermes", "demo")
+
+        assert connector_paths.mcp_servers("hermes") == []
 
 
 # ---------------------------------------------------------------------------
