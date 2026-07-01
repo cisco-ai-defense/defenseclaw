@@ -812,6 +812,7 @@ class DefenseClawTUI(App[None]):
         self._overview_deferred_render_token: int = 0
         self._overview_sampled_refresh_scheduled = False
         self._overview_connector_rows_signature_cache: tuple[object, ...] | None = None
+        self._overview_live_data_signature_cache: tuple[object, ...] | None = None
         # Set while ``_render_panel_table`` programmatically restores the
         # DataTable cursor. Textual fires ``RowHighlighted`` for that move just
         # like a real keypress, and the handler would call the model's
@@ -2589,10 +2590,10 @@ class DefenseClawTUI(App[None]):
                 and self._last_body_signature is not None
             )
             wheel_active = self._overview_scroll_activity_recent() and self._last_body_signature is not None
-            connector_rows_changed = (
-                False if wheel_active else self._overview_connector_rows_changed_since_render()
+            live_data_changed = (
+                False if wheel_active else self._overview_live_data_changed_since_render()
             )
-            if (scrolling_now or wheel_active) and not connector_rows_changed:
+            if (scrolling_now or wheel_active) and not live_data_changed:
                 self._overview_last_render_scroll_y = current_scroll_y
                 self._table_columns = ()
                 self._table_rows = ()
@@ -2601,9 +2602,11 @@ class DefenseClawTUI(App[None]):
                     renderable = self._overview_renderable()
                     body_signature = self._overview_body_signature()
                     connector_rows_signature = self._overview_connector_rows_signature()
+                    live_data_signature = self._overview_live_data_signature()
                     if (
                         body_signature != self._last_body_signature
                         or connector_rows_signature != self._overview_connector_rows_signature_cache
+                        or live_data_signature != self._overview_live_data_signature_cache
                     ):
                         body_widget.update(renderable)
                         self._last_body_signature = body_signature
@@ -2611,6 +2614,7 @@ class DefenseClawTUI(App[None]):
                         current_scroll_y = self._restore_overview_scroll(
                             body_scroller, current_scroll_y
                         )
+                    self._overview_live_data_signature_cache = live_data_signature
                     self._overview_last_render_scroll_y = current_scroll_y
                     # Overview has no DataTable of its own and skips _body_text()
                     # (the only place these are reset), so clear the panel-table
@@ -5625,6 +5629,7 @@ class DefenseClawTUI(App[None]):
                     blocks=blocks,
                     alerts=alerts,
                     status=status,
+                    last_activity_at=last,
                 )
             )
         if self._connector_hook_event_cache_enabled:
@@ -5634,21 +5639,15 @@ class DefenseClawTUI(App[None]):
     def _overview_connector_rows_signature(self) -> tuple[object, ...]:
         """Stable fingerprint for real CONNECTORS table data changes."""
 
-        def activity_bucket(label: str) -> str:
-            text = (label or "").strip()
-            if not text or text == "—":
-                return "none"
-            if re.fullmatch(r"\d+(?:s|m|h|d) ago", text):
-                return "active"
-            return text
-
         rows = self._overview_connector_rows()
+        now = datetime.now(timezone.utc)
         return tuple(
             (
                 row.connector,
                 row.mode,
                 row.rule_pack,
-                activity_bucket(row.last_activity),
+                _activity_timestamp_key(row.last_activity_at),
+                _activity_refresh_bucket(row.last_activity_at, now),
                 row.calls,
                 row.blocks,
                 row.alerts,
@@ -5667,6 +5666,63 @@ class DefenseClawTUI(App[None]):
                 signature = self._overview_connector_rows_signature()
         changed = signature != self._overview_connector_rows_signature_cache
         if changed:
+            self._connector_hook_event_stats_cache = None
+            self._connector_hook_event_stats_loaded_at = 0.0
+        return changed
+
+    def _overview_live_data_signature(self) -> tuple[object, ...]:
+        """Fingerprint every live value shared across the Overview surfaces.
+
+        CONNECTORS, ENFORCEMENT, and the large metric tiles are rendered from
+        one sampled generation. Keeping their source values in a single
+        signature prevents one surface from advancing while another remains
+        stale, without adding any hook-triggered polling.
+        """
+
+        counts = self._overview_session_enforcement_counts()
+        metrics = self._overview_metric_data()
+        selected = self._connector_filter()
+        scope = (selected,) if selected else tuple(self._active_connector_names())
+        enforcement = self._enforcement_scope_breakdown(scope)
+        return (
+            self._overview_connector_rows_signature(),
+            enforcement,
+            (
+                counts.active_alerts,
+                counts.total_scans,
+                counts.blocked_skills,
+                counts.allowed_skills,
+                counts.blocked_mcps,
+                counts.allowed_mcps,
+            ),
+            tuple(
+                (
+                    metric.key,
+                    metric.label,
+                    metric.value,
+                    metric.value_text,
+                    metric.detail,
+                    metric.state,
+                )
+                for metric in metrics
+            ),
+        )
+
+    def _overview_live_data_changed_since_render(self) -> bool:
+        """Whether a sampled Overview value or age bucket has advanced."""
+
+        if self._connector_hook_event_cache_enabled:
+            signature = self._overview_live_data_signature()
+        else:
+            with self._connector_hook_event_render_cache():
+                signature = self._overview_live_data_signature()
+        changed = signature != self._overview_live_data_signature_cache
+        if changed:
+            # A live signature can advance from audit data even when the
+            # gateway has no per-connector counter window (older gateways).
+            # Drop the short-lived grouped-stats cache before the synchronized
+            # render so CONNECTORS does not lag behind tiles/ENFORCEMENT by one
+            # additional TTL.
             self._connector_hook_event_stats_cache = None
             self._connector_hook_event_stats_loaded_at = 0.0
         return changed
@@ -9744,9 +9800,13 @@ class DefenseClawTUI(App[None]):
             self._schedule_data_refresh()
             return
         if self.active_panel == "overview" and not self.help_open:
-            connector_rows_changed = self._overview_connector_rows_changed_since_render()
-            self._render_overview_metrics()
-            self._schedule_overview_sampled_refresh(allow_scrolled=connector_rows_changed)
+            live_data_changed = self._overview_live_data_changed_since_render()
+            # A changed generation is rendered as one unit so the native tiles,
+            # ENFORCEMENT box, and CONNECTORS table never show mixed samples.
+            # When nothing changed, retain the cheap native-tile refresh.
+            if not live_data_changed:
+                self._render_overview_metrics()
+            self._schedule_overview_sampled_refresh(allow_scrolled=live_data_changed)
             return
         self._periodic_refresh_running = True
         try:
@@ -9953,7 +10013,10 @@ class DefenseClawTUI(App[None]):
         # 3s timer can block the first wheel/key event after idle.
         if self.active_panel == "overview" and not self.help_open:
             self._render_overview_scope_indicator()
-            self._schedule_overview_sampled_refresh()
+            live_data_changed = self._overview_live_data_changed_since_render()
+            self._schedule_overview_sampled_refresh(
+                allow_scrolled=live_data_changed,
+            )
 
     async def _poll_ai_usage(self, *, force_render: bool) -> None:
         snapshot = await asyncio.to_thread(_fetch_ai_usage, self.config)
@@ -10794,6 +10857,43 @@ def _relative_time_label(when: datetime | None, now: datetime) -> str:
     if hours < 24:
         return f"{hours}h ago"
     return f"{hours // 24}d ago"
+
+
+def _activity_refresh_bucket(
+    when: datetime | None,
+    now: datetime,
+) -> tuple[str, int]:
+    """Bound relative-time repaints without hiding fresh activity.
+
+    The raw timestamp is a separate part of the Overview signature and changes
+    for every sampled hook event. This bucket controls clock-only repaints:
+    ten-second steps for the first minute, then minute/hour/day steps.
+    """
+
+    if when is None:
+        return ("none", 0)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    seconds = max(int((now - when).total_seconds()), 0)
+    if seconds < 60:
+        return ("10s", seconds // 10)
+    if seconds < 3600:
+        return ("minute", seconds // 60)
+    if seconds < 86400:
+        return ("hour", seconds // 3600)
+    return ("day", seconds // 86400)
+
+
+def _activity_timestamp_key(when: datetime | None) -> str:
+    """Stable UTC key for detecting a newly sampled activity timestamp."""
+
+    if when is None:
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc).isoformat()
 
 
 def _overview_state_line(name: str, state: str, detail: str) -> str:

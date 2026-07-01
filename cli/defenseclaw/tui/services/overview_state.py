@@ -72,6 +72,9 @@ class ConnectorOverviewRow:
     blocks: int
     alerts: int
     status: str
+    # Raw source timestamp retained separately from the human label so the
+    # shell can distinguish a new event from the normal passage of time.
+    last_activity_at: datetime | None = None
 
 
 @dataclass(frozen=True)
