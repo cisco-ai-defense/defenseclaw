@@ -7,6 +7,7 @@ import contextlib
 import ntpath
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -121,6 +122,7 @@ class CommandExecutor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=child_env,
+                **captured_subprocess_kwargs(),
             )
         except OSError as exc:
             yield CommandEvent("output", f"Failed to start: {exc}")
@@ -223,6 +225,20 @@ def resolve_subprocess_argv(binary: str, args: tuple[str, ...]) -> tuple[str, ..
     if binary == "defenseclaw-gateway":
         return (resolve_gateway_binary() or "defenseclaw-gateway", *args)
     return (binary, *args)
+
+
+def captured_subprocess_kwargs() -> dict[str, int]:
+    """Return platform flags for a noninteractive, captured child process.
+
+    Windows console executables allocate a transient console when their parent
+    is a graphical or detached process. The TUI already captures each child's
+    standard streams, so suppressing that extra console does not detach the
+    process or change its output, exit status, cancellation, or wait behavior.
+    """
+
+    if os.name != "nt":
+        return {}
+    return {"creationflags": subprocess.CREATE_NO_WINDOW}
 
 
 def _split_terminal_chunk(text: str) -> tuple[str, ...]:

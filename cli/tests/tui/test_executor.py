@@ -16,11 +16,16 @@ import ast
 import asyncio
 import inspect
 import os
+import subprocess
 import sys
 
 import defenseclaw.tui.app as app_module
 import pytest
-from defenseclaw.tui.executor import CommandExecutor, resolve_subprocess_argv
+from defenseclaw.tui.executor import (
+    CommandExecutor,
+    captured_subprocess_kwargs,
+    resolve_subprocess_argv,
+)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="stdlib PTYs are POSIX-only")
@@ -91,9 +96,38 @@ def test_self_cli_resolves_via_current_python_not_path_shim() -> None:
     assert shim_argv[3:] == ("doctor",)
 
 
+def test_captured_subprocess_flags_match_platform() -> None:
+    kwargs = captured_subprocess_kwargs()
+
+    if os.name == "nt":
+        assert kwargs == {"creationflags": subprocess.CREATE_NO_WINDOW}
+    else:
+        assert kwargs == {}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows console allocation behavior")
+@pytest.mark.asyncio
+async def test_executor_captured_child_has_no_windows_console() -> None:
+    events = [
+        event
+        async for event in CommandExecutor(use_pty=False).run(
+            sys.executable,
+            (
+                "-c",
+                "import ctypes; print(int(bool(ctypes.windll.kernel32.GetConsoleWindow())))",
+            ),
+        )
+    ]
+
+    output = [event.text.strip() for event in events if event.kind == "output"]
+    assert output == ["0"]
+    assert events[-1].exit_code == 0
+
+
 @pytest.mark.asyncio
 async def test_executor_launches_self_cli_with_resolved_argv(monkeypatch) -> None:
     seen: list[tuple[str, ...]] = []
+    seen_kwargs: list[dict[str, object]] = []
 
     class EmptyStdout:
         @staticmethod
@@ -109,8 +143,9 @@ async def test_executor_launches_self_cli_with_resolved_argv(monkeypatch) -> Non
         async def wait() -> int:
             return 0
 
-    async def fake_exec(*argv: str, **_kwargs) -> Process:
+    async def fake_exec(*argv: str, **kwargs: object) -> Process:
         seen.append(argv)
+        seen_kwargs.append(kwargs)
         return Process()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
@@ -130,6 +165,9 @@ async def test_executor_launches_self_cli_with_resolved_argv(monkeypatch) -> Non
             "doctor",
         )
     ]
+    assert seen_kwargs[0].get("creationflags") == captured_subprocess_kwargs().get(
+        "creationflags"
+    )
     assert events[-1].exit_code == 0
 
 
@@ -183,3 +221,10 @@ def test_every_direct_app_subprocess_uses_central_argv_resolution() -> None:
         assert isinstance(resolver_call, ast.Call)
         assert isinstance(resolver_call.func, ast.Name)
         assert resolver_call.func.id == "resolve_subprocess_argv"
+        assert any(
+            keyword.arg is None
+            and isinstance(keyword.value, ast.Call)
+            and isinstance(keyword.value.func, ast.Name)
+            and keyword.value.func.id == "captured_subprocess_kwargs"
+            for keyword in call.keywords
+        ), "captured TUI subprocess must suppress transient Windows consoles"

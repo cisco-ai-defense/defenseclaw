@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
@@ -267,7 +268,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	}()
 
 	args := s.buildArgs(target)
-	cmd := exec.CommandContext(ctx, s.Config.Binary, args...)
+	cmd := processutil.CommandContext(ctx, s.Config.Binary, args...)
 	cmd.Env = s.scanEnv()
 
 	var stdout, stderr bytes.Buffer

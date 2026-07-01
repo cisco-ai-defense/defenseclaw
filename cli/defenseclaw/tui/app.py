@@ -45,6 +45,7 @@ from defenseclaw.tui.command_line import (
 from defenseclaw.tui.executor import (
     CommandAlreadyRunningError,
     CommandExecutor,
+    captured_subprocess_kwargs,
     resolve_subprocess_argv,
 )
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
@@ -3872,6 +3873,7 @@ class DefenseClawTUI(App[None]):
                     *resolve_subprocess_argv("defenseclaw", ("doctor",)),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    **captured_subprocess_kwargs(),
                 )
             except (FileNotFoundError, OSError) as exc:
                 # Most common failure here: ``defenseclaw`` binary not on
@@ -8967,6 +8969,7 @@ class DefenseClawTUI(App[None]):
                 ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **captured_subprocess_kwargs(),
             )
             stdout, stderr = await process.communicate()
         except OSError as exc:
@@ -9005,6 +9008,7 @@ class DefenseClawTUI(App[None]):
                 *resolve_subprocess_argv(intent.binary, intent.args),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **captured_subprocess_kwargs(),
             )
             stdout, stderr = await process.communicate()
         except OSError as exc:
@@ -9042,6 +9046,7 @@ class DefenseClawTUI(App[None]):
                     *resolve_subprocess_argv(intent.binary, intent.args),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    **captured_subprocess_kwargs(),
                 )
                 stdout, stderr = await process.communicate()
             except OSError:
@@ -9274,6 +9279,7 @@ class DefenseClawTUI(App[None]):
                 *resolve_subprocess_argv(intent.binary, intent.args),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **captured_subprocess_kwargs(),
             )
             stdout, stderr = await process.communicate()
         except OSError as exc:
@@ -9310,6 +9316,7 @@ class DefenseClawTUI(App[None]):
                     *resolve_subprocess_argv(intent.binary, intent.args),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    **captured_subprocess_kwargs(),
                 )
                 stdout, stderr = await process.communicate()
             except OSError:
