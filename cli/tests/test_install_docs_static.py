@@ -13,8 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-CURRENT_RELEASE = "0.8.2"
-STALE_RELEASES = ("0.8.0", "0.8.1")
+CURRENT_RELEASE = "0.8.3"
+STALE_RELEASES = ("0.8.0", "0.8.1", "0.8.2")
 
 BASH_INSTALL_LINES = (
     f"VERSION={CURRENT_RELEASE}",
@@ -51,6 +51,11 @@ DOC_INSTALL_COMMANDS = {
     ),
 }
 
+INSTALLER_FILES = (
+    "scripts/install.sh",
+    "scripts/install.ps1",
+)
+
 
 def test_quickstart_docs_do_not_pipe_main_installer() -> None:
     for rel, expected_lines in DOC_INSTALL_COMMANDS.items():
@@ -59,6 +64,12 @@ def test_quickstart_docs_do_not_pipe_main_installer() -> None:
         assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.ps1" not in text
         for expected in expected_lines:
             assert expected in text, f"{rel} is missing install snippet line: {expected}"
+
+
+def test_installer_help_does_not_pipe_main_installer() -> None:
+    for rel in INSTALLER_FILES:
+        text = (ROOT / rel).read_text()
+        assert "defenseclaw/main" not in text
 
 
 def test_install_docs_track_current_release() -> None:
