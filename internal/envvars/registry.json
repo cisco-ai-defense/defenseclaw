@@ -16,7 +16,7 @@
     {
       "name": "DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY",
       "category": "security_opt_out",
-      "purpose": "Bypass the provenance-sentinel check during 'defenseclaw setup sandbox' pre-pairing. When the gateway has not yet created the .provenance sibling next to device.key, set this to 1 to fall back to the legacy loose acceptance of any 32-byte blob found at data_dir/device.key.",
+      "purpose": "Bypass the provenance-sentinel check during 'defenseclaw sandbox setup' pre-pairing. When the gateway has not yet created the .provenance sibling next to device.key, set this to 1 to fall back to the legacy loose acceptance of any 32-byte blob found at data_dir/device.key.",
       "default": "unset (fail-closed)",
       "accepted_values": ["1", "unset"],
       "security_impact": "high",
@@ -295,13 +295,13 @@
     {
       "name": "DEFENSECLAW_FAIL_MODE",
       "category": "security_opt_out",
-      "purpose": "Per-shell override of guardrail.hook_fail_mode. 'open' allows on transport errors; 'closed' blocks. Templated into every *-hook.sh.",
+      "purpose": "Per-shell override of guardrail.hook_fail_mode for malformed, unauthorized, or incomplete gateway responses. Transport failures are controlled separately by DEFENSECLAW_STRICT_AVAILABILITY. Templated into every *-hook.sh.",
       "default": "(value from guardrail.hook_fail_mode in config.yaml)",
       "accepted_values": ["open", "closed", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/gateway/connector/hooks/inspect-tool.sh:43", "description": "Read by every inspect-*.sh hook"}
+        {"location": "internal/gateway/connector/hooks/inspect-tool.sh:83", "description": "Representative shared template; every generated hook reads the same override"}
       ],
       "since": "0.4.0"
     },

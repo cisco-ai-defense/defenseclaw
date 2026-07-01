@@ -67,8 +67,8 @@ DEFENSECLAW_REVEAL_PII=1 defenseclaw tui     # raw values in the Logs panel only
 
 — the audit DB and Splunk HEC will continue to receive redacted placeholders.
 
-<Callout title="Do not use `defenseclaw config set …`">
-There is no `defenseclaw config set` subcommand — `defenseclaw config` only exposes `show`, `path`, and `validate`. Use `defenseclaw setup redaction on|off` to flip the kill-switch. The Go and Python loaders emit a startup warning when `privacy.disable_redaction=true`; that warning has been corrected to point at this command.
+<Callout title="There is no config-set command">
+The `defenseclaw config` group only exposes `show`, `path`, and `validate`. Use `defenseclaw setup redaction on|off` to flip the kill-switch. The Go and Python loaders emit a startup warning when `privacy.disable_redaction=true`; that warning points at this command.
 </Callout>
 
 ## What `status` prints

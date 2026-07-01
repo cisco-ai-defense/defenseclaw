@@ -22,7 +22,7 @@ OpenClaw is the connector DefenseClaw was designed against. It is also the only 
 <Cards>
   <Card title="DefenseClaw plugin" description="TypeScript plugin under extensions/defenseclaw/. Hooks into OpenClaw's fetch interceptor and before_tool_call lifecycle." />
   <Card title="defenseclaw-gateway" description="Go sidecar. Receives plugin requests, evaluates policy, returns verdicts, and writes the audit row." />
-  <Card title="DefenseClaw CLI" description="Python operator surface. Runs setup, exposes the TUI, drives HITL approvals." />
+  <Card title="DefenseClaw CLI" description="Python operator surface. Runs setup and exposes the TUI for audit, alerts, logs, and inventory." />
 </Cards>
 
 ## Protocol compatibility
@@ -38,15 +38,18 @@ The DefenseClaw gateway client speaks the OpenClaw WebSocket handshake across th
     { id: 'oc', label: 'OpenClaw',            kind: 'agent' },
     { id: 'p',  label: 'DefenseClaw plugin',  kind: 'connector' },
     { id: 'g',  label: 'defenseclaw-gateway', kind: 'gateway' },
-    { id: 'op', label: 'Operator (TUI)',      kind: 'operator' },
+    { id: 'op', label: 'Operator (chat)',     kind: 'operator' },
   ]}
 >
   <Message from="u"  to="oc" label="prompt" />
   <Message from="oc" to="p"  label="fetch (LLM request)" />
   <Message from="p"  to="g"  label="POST /v1/inspect (X-DefenseClaw-Correlation-Id)" />
   <Message from="g"  to="p"  kind="return" label="allow / block / pause" />
-  <Message from="g"  to="op" label="enqueue approval (when paused)" />
-  <Message from="op" to="g"  kind="return" label="approve / deny" />
+  <Message from="p"  to="oc" label="publish approval prompt (when paused)" />
+  <Message from="oc" to="op" label="approval request in chat" />
+  <Message from="op" to="oc" kind="return" label="approve / deny" />
+  <Message from="oc" to="p"  kind="return" label="approval response" />
+  <Message from="p"  to="g"  label="resolve approval" />
   <Message from="g"  to="p"  kind="return" label="resolved verdict" />
   <Message from="p"  to="oc" kind="return" label="forward (or reject)" />
   <Message from="oc" to="p"  label="before_tool_call(name, args)" />
@@ -62,9 +65,9 @@ Every plugin → gateway request carries `X-DefenseClaw-Correlation-Id` so the a
 
 ## HITL: the only connector with plugin-mediated approval
 
-OpenClaw is one of two connectors (alongside Claude Code) where HITL approvals reach the operator inside the agent UI. The DefenseClaw plugin queues approvals in OpenClaw's chat origin, so the operator approves or denies without leaving OpenClaw.
+OpenClaw provides a native, plugin-mediated approval flow in its chat origin, so the operator approves or denies without leaving OpenClaw. Other native-ask connectors use their own host hook UI instead of this plugin path.
 
-The other connectors fall back to a downgraded confirm verdict surfaced through `defenseclaw tui`. See the [HITL page](/docs/hitl) for the per-connector matrix.
+Connectors and hook events without native ask apply their documented alert/allow/context fallback. Their events remain visible in audit and `defenseclaw tui`, but the TUI cannot resume the original call. See the [HITL page](/docs/hitl) for the per-connector matrix.
 
 ## Files DefenseClaw owns inside the OpenClaw tree
 

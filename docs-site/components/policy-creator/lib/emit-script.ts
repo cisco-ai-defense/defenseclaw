@@ -16,7 +16,8 @@ const HEADER = `#!/usr/bin/env bash
 # Inspect every heredoc below before running. Re-run is idempotent.
 set -euo pipefail
 
-POLICIES_ROOT="\${HOME}/.defenseclaw/policies"
+DC_ROOT="\${DEFENSECLAW_HOME:-\${HOME}/.defenseclaw}"
+POLICIES_ROOT="\${DC_ROOT}/policies"
 mkdir -p "\${POLICIES_ROOT}"
 `;
 

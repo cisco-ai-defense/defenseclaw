@@ -75,14 +75,14 @@ sudo iptables -t nat -L -n | grep 10.200.0
 ## Audit Trail
 
 All scan results, admission decisions, and enforcement actions are logged to
-the SQLite database at `~/.defenseclaw/defenseclaw.db`.
+the SQLite database at `~/.defenseclaw/audit.db`.
 
 ```bash
-# Recent events
-defenseclaw audit list --limit 20
+# Recent alerts
+defenseclaw alerts --limit 20
 
-# Export
-defenseclaw audit export --format json
+# Export audit events as JSONL
+defenseclaw-gateway audit export --limit 20 --output -
 ```
 
 Optional Splunk HEC forwarding can be configured for real-time SIEM

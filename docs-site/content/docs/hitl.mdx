@@ -1,48 +1,46 @@
 ---
 title: Human-in-the-Loop (HITL)
-description: How DefenseClaw escalates risky tool calls to a human operator. Covers when HITL fires, how min-severity gates the prompt, and the per-connector difference between native ask and downgraded confirm verdicts.
+description: How DefenseClaw turns confirmable findings into native approval prompts when a connector can pause, and what happens on connectors without an ask surface.
 keywords:
   - DefenseClaw human in the loop
   - DefenseClaw HITL
   - human approval AI agent
   - native ask AI agent
-  - downgraded confirm verdict
+  - confirm verdict fallback
 ---
 
-Human-in-the-Loop (HITL) sits between observe (log only) and full enforcement. When a finding clears the configured severity, the agent pauses and waits for an operator decision — approve, deny, or supply a reason.
+Human-in-the-Loop (HITL) changes a confirmable policy finding into an approval request **only when the current connector event has a native ask surface**. A supported event pauses in the agent UI while the operator approves or denies it. A connector without native ask cannot manufacture that pause: it applies its documented fallback and preserves `raw_action: "confirm"` for audit.
 
 <Callout type="info">
-HITL is opt-in and only meaningful in **action mode**. It is mutually exclusive with observe mode; observe never blocks, so there is nothing to pause on.
+HITL is opt-in and only affects **action mode**. Observe mode records findings without enforcing them. CRITICAL findings reach the block threshold before HITL is considered and still block unconditionally with the default policy profile.
 </Callout>
 
-## Two delivery models
+## Two runtime outcomes
 
 <Cards>
-  <Card title="Native ask" description="The connector exposes a hook event that can prompt the operator inside the agent UI. The agent pauses; the operator clicks approve/deny; the agent continues. No context switch." />
-  <Card title="Downgraded confirm" description="The connector cannot natively prompt the operator, so DefenseClaw downgrades the verdict to confirm. The raw_action is preserved in the audit log and the operator approves via the DefenseClaw TUI / OpenClaw plugin instead." />
+  <Card title="Native ask" description="The current hook event can prompt inside the agent UI. DefenseClaw maps confirm to the connector's ask response, and the host pauses until the operator approves or denies." />
+  <Card title="Explicit fallback" description="The current event cannot ask. Hook integrations normally return an alert or context message and preserve raw_action=confirm in audit; generic inspect clients may instead fail closed. There is no resumable approval in the DefenseClaw TUI." />
 </Cards>
 
 ## Per-connector behaviour
 
-| Connector | Model | Surface |
+| Connector | Native ask events | Other confirm verdicts |
 | --- | --- | --- |
-| OpenClaw | Native ask + plugin | Plugin-mediated approval reaches the OpenClaw chat origin |
-| Claude Code | Native ask | PreToolUse prompt inside Claude Code |
-| Cursor | Native ask | beforeShellExecution + beforeMCPExecution prompts inside Cursor |
-| GitHub Copilot CLI | Native ask | preToolUse prompt inside Copilot CLI |
-| ZeptoClaw | Downgraded confirm | DefenseClaw TUI |
-| Codex | Downgraded confirm | DefenseClaw TUI / OpenClaw plugin |
-| Hermes | Downgraded confirm | DefenseClaw TUI |
-| Gemini CLI | Downgraded confirm | DefenseClaw TUI |
-| Windsurf | Downgraded confirm | DefenseClaw TUI |
-| OpenHands | Downgraded confirm | DefenseClaw TUI |
+| OpenClaw | `before_tool_call`; plugin/chat-origin approval | Non-ask proxy surfaces use their route-specific enforcement behaviour |
+| Claude Code | `PreToolUse` | Other hook events are demoted to a non-pausing response |
+| Cursor | `beforeShellExecution`, `beforeMCPExecution` | Alert/context fallback; `raw_action` remains auditable |
+| Copilot CLI | `preToolUse` | Alert/context fallback; `raw_action` remains auditable |
+| Antigravity | `PreToolUse` (empirically verified) | Other registered lifecycle events are non-pausing telemetry/spec-parity surfaces |
+| OmniGent | Pre-action `request`, `tool_call`, `llm_request` phases | Configured fallback for post-action phases |
+| ZeptoClaw, Codex, Hermes, Gemini CLI, Windsurf, OpenHands, OpenCode | None | Connector-specific alert/allow/context fallback; no pause or TUI resume |
 
-For the full machine-readable view see the [Capability Matrix](/docs/capability-matrix).
+For block events, fail-closed support, and the machine-readable source, see the [Capability Matrix](/docs/capability-matrix).
 
 ## Configure
 
 ```bash
 defenseclaw setup guardrail \
+  --connector claudecode \
   --mode action \
   --human-approval \
   --hilt-min-severity high \
@@ -57,38 +55,39 @@ defenseclaw setup guardrail \
     },
     "--hilt-min-severity": {
       type: "high|medium|low|critical",
-      description: "Lowest severity that triggers an approval prompt. CRITICAL findings always block regardless of HITL. Click accepts the value case-insensitively; the underlying config stores the canonical uppercase rank label.",
+      description: "Lowest non-blocked severity eligible for confirmation. CRITICAL reaches the default block threshold first. Click accepts the value case-insensitively; config stores the canonical uppercase label.",
       default: "high",
     },
   }}
 />
 
+With the default balanced thresholds, CRITICAL blocks, HIGH can become `confirm` when HITL is enabled, MEDIUM alerts, and LOW allows. Without HITL, HIGH is an alert rather than a silent block. A strict or custom policy pack can change those thresholds.
+
 ## Decision flow
 
 <Flow
   direction="TB"
-  caption="HITL is the difference between block and pause. CRITICAL findings always block; HIGH findings pause if HITL is on, otherwise block; LOW/MEDIUM never pause unless you opt in via --hilt-min-severity."
+  caption="Policy thresholds run first. HITL only changes a non-blocked, confirmable finding, and a real pause requires native ask support on that event."
 >
-  <Node id="req" kind="generic">Tool call / prompt</Node>
+  <Node id="req" kind="generic">Tool call</Node>
   <Node id="score" kind="policy">Score finding</Node>
-  <Node id="crit" kind="decision">Severity</Node>
-  <Node id="hitl" kind="decision">HITL on?</Node>
-  <Node id="native" kind="decision">Native ask?</Node>
-  <Node id="block" kind="generic">Block</Node>
-  <Node id="allow" kind="generic">Allow</Node>
+  <Node id="block" kind="decision">At block threshold?</Node>
+  <Node id="deny" kind="generic">Block</Node>
+  <Node id="eligible" kind="decision">HITL enabled and at minimum?</Node>
+  <Node id="normal" kind="generic">Normal alert / allow tier</Node>
+  <Node id="native" kind="decision">Native ask on this event?</Node>
   <Node id="ask" kind="agent">Ask in agent UI</Node>
-  <Node id="confirm" kind="operator">{`Downgrade to confirm\nin DefenseClaw TUI`}</Node>
+  <Node id="fallback" kind="operator">Connector fallback + audit</Node>
+  <Node id="result" kind="generic">Host applies operator decision</Node>
   <Edge from="req" to="score" />
-  <Edge from="score" to="crit" />
-  <Edge from="crit" to="block" label="CRITICAL" />
-  <Edge from="crit" to="hitl" label="HIGH" />
-  <Edge from="crit" to="allow" label="MEDIUM/LOW" />
-  <Edge from="hitl" to="block" label="no" />
-  <Edge from="hitl" to="native" label="yes" />
+  <Edge from="score" to="block" />
+  <Edge from="block" to="deny" label="yes" />
+  <Edge from="block" to="eligible" label="no" />
+  <Edge from="eligible" to="normal" label="no" />
+  <Edge from="eligible" to="native" label="yes" />
   <Edge from="native" to="ask" label="yes" />
-  <Edge from="native" to="confirm" label="no" />
-  <Edge from="ask" to="allow" />
-  <Edge from="confirm" to="allow" />
+  <Edge from="native" to="fallback" label="no" />
+  <Edge from="ask" to="result" />
 </Flow>
 
 ## Operator workflow
@@ -96,23 +95,19 @@ defenseclaw setup guardrail \
 <Steps>
 
 <Step>
-The agent attempts a tool call. The PreToolUse / beforeShellExecution / fetch_request hook fires (whichever the connector exposes).
+The agent attempts an action and a pre-action hook reaches the gateway.
 </Step>
 
 <Step>
-The hook reaches the gateway, which scores the action, finds a HIGH finding, and returns a `pause` verdict because HITL is on.
+The gateway scores the action. If the result is below the block threshold but meets the configured HITL minimum, the raw policy action is `confirm`.
 </Step>
 
 <Step>
-On native-ask connectors, the agent surfaces a prompt inside its UI. On downgraded-confirm connectors, the operator sees the pending action in `defenseclaw tui` (or the OpenClaw plugin queue).
+On a native-ask event, the connector renders its own approval prompt and pauses. Approving lets the host continue; denying stops the action.
 </Step>
 
 <Step>
-The operator approves or denies. The decision is written to the audit log alongside the original finding.
-</Step>
-
-<Step>
-The agent receives the decision and either runs the tool call or surfaces the deny reason to the user.
+On any other event, the connector applies its explicit fallback. The TUI and audit log can show the finding and `raw_action`, but they do not hold or resume that tool call.
 </Step>
 
 </Steps>
@@ -120,5 +115,5 @@ The agent receives the decision and either runs the tool call or surfaces the de
 ## What HITL is not
 
 <Callout type="warn">
-HITL is not a replacement for a strong rule pack. CRITICAL findings should still block unconditionally — operators are slow, and CRITICAL exists for a reason. HITL is for the messy middle: actions that are usually fine but occasionally aren't.
+HITL is not a replacement for block rules or a tuned policy pack. Use unconditional blocks for actions that must never run, and use HITL only where the connector can actually ask and the operator has enough context to make a safe decision.
 </Callout>

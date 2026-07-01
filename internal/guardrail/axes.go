@@ -258,9 +258,12 @@ var ruleAxes = map[string][]DataAxis{
 	// over an outbound call (egress) — both axes. The C2- prefix
 	// fallback only sets egress, so these exact entries add the
 	// sensitive-access leg.
-	"C2-METADATA-AWS":   {AxisSensitiveAccess, AxisEgressExternal},
-	"C2-METADATA-GCP":   {AxisSensitiveAccess, AxisEgressExternal},
-	"C2-METADATA-AZURE": {AxisSensitiveAccess, AxisEgressExternal},
+	"C2-METADATA-AWS":     {AxisSensitiveAccess, AxisEgressExternal},
+	"C2-METADATA-GCP":     {AxisSensitiveAccess, AxisEgressExternal},
+	"C2-METADATA-AZURE":   {AxisSensitiveAccess, AxisEgressExternal},
+	"C2-METADATA-HEX":     {AxisSensitiveAccess, AxisEgressExternal},
+	"C2-METADATA-DECIMAL": {AxisSensitiveAccess, AxisEgressExternal},
+	"C2-METADATA-OCTAL":   {AxisSensitiveAccess, AxisEgressExternal},
 
 	// SRC-* is a mixed family (some read secrets, some open the
 	// network, some exec). Only the data-axis-bearing members are

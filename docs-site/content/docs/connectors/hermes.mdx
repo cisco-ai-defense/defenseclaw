@@ -20,7 +20,7 @@ The Hermes connector wires DefenseClaw into the Hermes agent runtime via `~/.her
 defenseclaw setup hermes
 ```
 
-`setup hermes` is shorthand for `setup guardrail --connector hermes`: it adds or reconfigures Hermes, wires hooks against `~/.hermes/config.yaml`, and discovers existing MCP servers, skills, and plugins. **There is no proxy-enforcement path** for Hermes — blocking happens hook-side via the documented pre-tool-call hook. Hermes has no native human-approval surface, so HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI.
+`setup hermes` is shorthand for `setup guardrail --connector hermes`: it adds or reconfigures Hermes, wires hooks against `~/.hermes/config.yaml`, and discovers existing MCP servers, skills, and plugins. **There is no proxy-enforcement path** for Hermes — blocking happens hook-side via the documented pre-tool-call hook. Hermes has no native human-approval surface, so confirm verdicts use an immediate system-message fallback with `raw_action` preserved for audit.
 
 #### What `setup hermes` actually does
 
@@ -61,7 +61,7 @@ Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo
 <Tab value="Add scanning rigor">
 
 ```bash
-export DEFENSECLAW_LLM_KEY=<your-key>
+export DEFENSECLAW_LLM_KEY='replace-with-your-key'
 
 defenseclaw setup hermes                                  # base alias first
 defenseclaw setup guardrail \
@@ -90,7 +90,7 @@ connector_hooks:
     fail_mode: open       # open | closed
 ```
 
-Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Hermes' pre-tool-call hook blocks on findings; HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI since Hermes has no native ask surface — make sure operators are reachable there.
+Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Hermes' pre-tool-call hook blocks when policy returns `block`. A `confirm` result falls back to a system message because Hermes has no native ask surface; the TUI can review the audit event but cannot resume the call.
 
 </Tab>
 
@@ -99,7 +99,7 @@ Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, He
 #### Decision aids — should I turn this on?
 
 <Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Hermes downgrades to confirm verdicts in the TUI / audit log since it has no native ask." />
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Hermes has no native ask; confirm uses a system-message fallback preserved in audit." />
   <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector hermes` when tuning Hermes." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
@@ -127,7 +127,7 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 <HookEventsList connector="hermes" />
 
 <Callout>
-Hermes can block supported hook events but has no native human-approval surface; HITL approvals fall back to confirm verdicts in the DefenseClaw TUI / audit log.
+Hermes can block supported hook events but has no native human-approval surface. Confirm verdicts use a system-message fallback with `raw_action` preserved; audit and the TUI are review-only.
 </Callout>
 
 ## Disable

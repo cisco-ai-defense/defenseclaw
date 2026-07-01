@@ -1,6 +1,6 @@
 ---
-title: Stop Claude Code from running rm -rf
-description: Wire DefenseClaw into Claude Code, observe for a week, then promote to action mode and watch a destructive shell command never reach the disk.
+title: Stop Claude Code from deleting a critical path
+description: Wire DefenseClaw into Claude Code, observe for a week, then safely verify the CMD-RM-RF rule against a disposable path.
 keywords:
   - block rm -rf claude code
   - claude code dangerous shell
@@ -8,7 +8,7 @@ keywords:
   - claude code observability
 ---
 
-> "I want to observe my Claude Code, and make sure it doesn't run `rm -rf` on my home directory."
+> "I want to observe Claude Code and block recursive force deletion against critical system paths."
 
 That sentence is the original DefenseClaw user story. Here is the entire flow, end to end.
 
@@ -18,7 +18,8 @@ By the end of this story, you'll have:
 
 - Claude Code wired to DefenseClaw via [native hooks + OTel](/docs/connectors/claudecode).
 - A week of audit data in `~/.defenseclaw/audit.db` proving what your agent actually does.
-- An `action` mode policy that blocks `rm -rf <home subtree>` with a CRITICAL finding.
+- An `action` mode policy that blocks recursive force deletion under protected
+  root prefixes with a CRITICAL finding.
 - An audit row showing the block, with the rule reference for the next reviewer.
 
 <Steps>
@@ -61,10 +62,14 @@ Open Claude Code and use it normally. Every prompt, tool call, and response show
 
 ```bash
 ls ~/.defenseclaw/policies/guardrail/default/
-cat ~/.defenseclaw/policies/guardrail/default/shell.yaml
+sed -n '80,125p' ~/.defenseclaw/policies/guardrail/default/rules/commands.yaml
 ```
 
-The default pack ships with a CRITICAL rule for recursive deletes against home-directory paths. The `strict` pack adds dot-file targeting and `/var/lib/*`; the `permissive` pack drops to HIGH and only matches `~/`.
+The `CMD-RM-RF` rule is CRITICAL and matches `/` plus protected top-level
+prefixes such as `/etc`, `/var`, `/home`, `/usr`, and `/opt`. It deliberately
+does not flag every `rm -rf` command or arbitrary home subdirectory. The three
+bundled packs currently carry the same command-rule boundary; their policy
+thresholds and other configuration differ.
 
 </Step>
 
@@ -85,7 +90,7 @@ defenseclaw setup guardrail \
 Three flags matter here:
 
 - `--mode action` — CRITICAL findings now block.
-- `--human-approval` — HIGH findings pause for operator approval.
+- `--human-approval` — HIGH findings become confirmation requests on ask-capable events.
 - `--hilt-min-severity high` — MEDIUM and LOW still log; only HIGH and above prompt.
 
 Claude Code supports native PreToolUse ask, so the approval prompt surfaces inside the agent UI itself.
@@ -96,11 +101,20 @@ Claude Code supports native PreToolUse ask, so the approval prompt surfaces insi
 
 ### Trigger the rule
 
-In Claude Code:
+Create an empty target so the exercise remains safe even if the connector is
+not enforcing:
 
-> Please run `rm -rf ~/projects/old-experiments` to free disk space.
+```bash
+mkdir -p /var/tmp/defenseclaw-demo-empty
+```
 
-The PreToolUse hook fires, the gateway scores the command, the default rule pack flags it CRITICAL, and the hook returns `block`. Claude Code never executes the command and surfaces the block reason to the user.
+Then ask Claude Code:
+
+> Please run `rm -rf /var/tmp/defenseclaw-demo-empty`.
+
+The PreToolUse hook fires, the gateway scores the command, the default rule pack
+returns `CMD-RM-RF` at CRITICAL, and Claude Code receives a deny decision before
+the shell runs.
 
 </Step>
 
@@ -116,10 +130,10 @@ tail -f ~/.defenseclaw/gateway.jsonl \
 ```
 
 ```
-2026-05-08T14:02:11Z  CRITICAL  shell.dangerous-rm  blocked
-  command:    rm -rf ~/projects/old-experiments
-  reason:     recursive delete targeting user home subtree
-  rule:       policies/guardrail/default/shell.yaml:14
+2026-05-08T14:02:11Z  CRITICAL  CMD-RM-RF  blocked
+  command:    rm -rf /var/tmp/defenseclaw-demo-empty
+  reason:     Recursive force delete from critical root path
+  rule:       policies/guardrail/default/rules/commands.yaml
   connector:  claudecode
   hook:       PreToolUse
   decision:   block
@@ -141,11 +155,11 @@ tail -f ~/.defenseclaw/gateway.jsonl \
     { id: 'p',  label: 'Policy',         kind: 'policy' },
   ]}
 >
-  <Message from="u"  to="cc" label="rm -rf ~/projects/old-experiments" />
+  <Message from="u"  to="cc" label="rm -rf /var/tmp/defenseclaw-demo-empty" />
   <Message from="cc" to="h"  label="PreToolUse(command)" />
   <Message from="h"  to="g"  label="POST /api/v1/claudecode/hook" />
   <Message from="g"  to="p"  label="evaluate(command)" />
-  <Message from="p"  to="g"  kind="return" label="CRITICAL · shell.dangerous-rm" />
+  <Message from="p"  to="g"  kind="return" label="CRITICAL · CMD-RM-RF" />
   <Message from="g"  to="h"  kind="return" label="block · recursive delete" />
   <Message from="h"  to="cc" kind="return" label="block" />
   <Message from="cc" to="u"  kind="return" label="I can't run that — DefenseClaw blocked it." />
@@ -157,13 +171,17 @@ tail -f ~/.defenseclaw/gateway.jsonl \
 
 <Accordion title="What if I want to allow it on a specific path?">
 
-Edit `~/.defenseclaw/policies/guardrail/default/shell.yaml` and add an allow-list entry under the rule. Or downgrade the rule to HIGH and rely on HITL to surface the request — operators with approval rights can let it through interactively.
+Use a less destructive command when possible. If your organization truly needs
+a different boundary, copy the pack, edit `rules/commands.yaml`, validate the
+custom pack, and select it with `defenseclaw setup guardrail --rule-pack-dir /absolute/path/to/pack --restart`. The current rule schema does not provide a
+per-path allow-list field, and CRITICAL findings cannot be approved through
+HITL.
 
 </Accordion>
 
 <Accordion title="What if I'm running an autonomous agent with no operator?">
 
-Drop HITL (`--no-human-approval`) and rely on `--mode action`. CRITICAL still blocks unconditionally; HIGH blocks instead of pausing. Set up a webhook sink so the audit row reaches your on-call channel.
+Drop HITL (`--no-human-approval`) and rely on `--mode action`. In the default balanced profile, CRITICAL still blocks unconditionally while HIGH alerts instead of pausing. Use a strict or custom pack if HIGH must block, and configure a webhook sink so the audit row reaches your on-call channel.
 
 </Accordion>
 
@@ -175,7 +193,7 @@ Drop HITL (`--no-human-approval`) and rely on `--mode action`. CRITICAL still bl
 
 <Accordion title="What if the gateway is unreachable when the hook fires?">
 
-Default fail-mode is `open` — transport failures allow. Set `DEFENSECLAW_STRICT_AVAILABILITY=1` to enforce fail-closed. Claude Code supports fail-closed natively; for connectors that don't, configure operator-side timeouts.
+Transport failures are fail-open by default even though new installs use response-layer `hook_fail_mode: closed`. Set `DEFENSECLAW_STRICT_AVAILABILITY=1` to make supported hooks fail closed when the gateway is unreachable. Claude Code supports that path; check the [Capability Matrix](/docs/capability-matrix) for other connectors.
 
 </Accordion>
 

@@ -148,13 +148,17 @@ The scanner uses a versioned signature pack to know what an "AI artifact" looks 
 
 ```bash
 defenseclaw agent signatures list
-defenseclaw agent signatures install <pack>
-defenseclaw agent signatures validate <path>
-defenseclaw agent signatures disable <id>
-defenseclaw agent signatures enable <id>
+defenseclaw agent signatures install ./corp-signatures.yaml
+defenseclaw agent signatures validate ./corp-signatures.yaml
+defenseclaw agent signatures disable codex
+defenseclaw agent signatures enable codex
 ```
 
-The bundled pack covers every connector listed in [Capability matrix](/docs/capability-matrix). Custom packs are useful when you ship internal AI tooling and want it surfaced as a first-party signal rather than `unknown`.
+`disable` and `enable` take an individual signature ID, not a pack name; use
+`signatures list` to find the ID. The bundled pack covers every connector listed
+in [Capability matrix](/docs/capability-matrix). Custom packs are useful when
+you ship internal AI tooling and want it surfaced as a first-party signal
+rather than `unknown`.
 
 ## On-demand discovery (CLI)
 

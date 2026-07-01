@@ -15,7 +15,7 @@ The Windsurf connector wires DefenseClaw into [Codeium's Cascade hooks](https://
 defenseclaw setup windsurf
 ```
 
-`setup windsurf` is shorthand for `setup guardrail --connector windsurf`: it adds or reconfigures Windsurf and wires hooks against `~/.codeium/windsurf/hooks.json`. DefenseClaw discovers existing MCP / rules but never auto-creates workspace configuration. **There is no proxy-enforcement path** for Windsurf — blocking happens hook-side via Cascade's `pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, and `pre_mcp_tool_use` events. Windsurf has no native ask surface, so HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI.
+`setup windsurf` is shorthand for `setup guardrail --connector windsurf`: it adds or reconfigures Windsurf and wires hooks against `~/.codeium/windsurf/hooks.json`. DefenseClaw discovers existing MCP / rules but never auto-creates workspace configuration. **There is no proxy-enforcement path** for Windsurf — blocking happens hook-side via Cascade's `pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, and `pre_mcp_tool_use` events. Windsurf has no native ask surface, so confirm verdicts use its explicit non-pausing fallback with `raw_action` preserved for audit.
 
 #### What `setup windsurf` actually does
 
@@ -56,7 +56,7 @@ Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo
 <Tab value="Add scanning rigor">
 
 ```bash
-export DEFENSECLAW_LLM_KEY=<your-key>
+export DEFENSECLAW_LLM_KEY='replace-with-your-key'
 
 defenseclaw setup windsurf                                # base alias first
 defenseclaw setup guardrail \
@@ -85,7 +85,7 @@ connector_hooks:
     fail_mode: open       # open | closed
 ```
 
-Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Cascade hooks block on findings; HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI since Windsurf has no native ask surface — make sure operators are reachable there.
+Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Cascade hooks block when policy returns `block`. Because Windsurf has no native ask surface, `confirm` uses its explicit fallback; operators can review the result in audit or the TUI, but cannot resume it there.
 
 </Tab>
 
@@ -94,7 +94,7 @@ Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Ca
 #### Decision aids — should I turn this on?
 
 <Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Windsurf downgrades to confirm verdicts in the TUI / audit log since it has no native ask." />
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Windsurf has no native ask; confirm uses an immediate fallback preserved in audit." />
   <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector windsurf` when tuning Windsurf." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
@@ -122,7 +122,7 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 <HookEventsList connector="windsurf" />
 
 <Callout>
-Windsurf has no native human-approval surface. HITL approvals downgrade to confirm verdicts; operators see them in the DefenseClaw TUI / audit log instead of inside Cascade.
+Windsurf has no native human-approval surface. Confirm verdicts use an immediate fallback with `raw_action` preserved; operators can review them in the TUI or audit log, but cannot approve and resume them there.
 </Callout>
 
 ## Subprocess policy

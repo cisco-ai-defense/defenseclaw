@@ -41,7 +41,7 @@ On **macOS**, OpenShell is not available. DefenseClaw still works for scanning, 
 On **Windows**, DefenseClaw is **hook-only**. The hook-based connectors —
 Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, and
 OpenHands — are fully supported. Their hook decisions run **natively in the
-`defenseclaw` binary** (the agent invokes `defenseclaw hook --connector <name>
+`defenseclaw-gateway` binary** (the agent invokes `defenseclaw-gateway hook --connector <name>
 --event <event>`), so Windows needs **no Git Bash, no `jq`, and no shell
 shims** — there are zero external prerequisites beyond the binary itself.
 

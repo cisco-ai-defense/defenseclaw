@@ -20,7 +20,7 @@ This page is the single source of truth for "can this connector do X?". Every ro
   <Card title="Tool inspection" description="When DefenseClaw can see the tool call. pre-execution + response-scan means we score before the call fires and after it returns." />
   <Card title="Subprocess policy" description="sandbox = DefenseClaw wires the agent into the openshell sandbox. none = the agent's own runtime executes commands; we observe via hooks." />
   <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
-  <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Connectors without native ask downgrade HITL to a confirm verdict in the DefenseClaw TUI." />
+  <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Without native ask, confirm uses a connector-specific alert/allow/context fallback; the TUI can review the event but cannot resume it." />
   <Card title="Fail-closed" description="Whether the hook surface supports a fail-closed response — i.e. block on transport failure to the gateway. Connectors marked false require operator-managed timeouts." />
   <Card title="HITL behaviour" description="One-line summary of how human-in-the-loop approvals reach the operator for this connector." />
 </Cards>
@@ -50,8 +50,8 @@ Hook-only enforcement is supported on [Claude Code](/docs/connectors/claudecode)
 
 ### "I want HITL approvals to surface inside the agent UI"
 
-Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor (beforeShellExecution / beforeMCPExecution), GitHub Copilot CLI (preToolUse), Antigravity (ask), or OmniGent (`request`, `tool_call`, `llm_request`). Other connectors downgrade to a confirm verdict.
+Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor (beforeShellExecution / beforeMCPExecution), GitHub Copilot CLI (preToolUse), Antigravity (verified PreToolUse), or OmniGent (`request`, `tool_call`, `llm_request`). Confirm verdicts on every other connector/event take an immediate connector-specific fallback; there is no TUI approval queue.
 
 ### "I want fail-closed on transport failures"
 
-Pick a row with **fail-closed: yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot CLI, OpenCode, OmniGent. For Hermes and Windsurf, configure operator-side timeouts.
+Pick a row with **fail-closed: yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Gemini CLI, OpenCode, OpenHands, and OmniGent. GitHub Copilot CLI, Hermes, Windsurf, and Antigravity do not expose a DefenseClaw-controlled fail-closed transport response.

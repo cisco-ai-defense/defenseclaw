@@ -29,7 +29,7 @@ The flags above explicitly set: connector, mode, and (optionally) rule pack. Eve
 | Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
 | HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
 | HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
-| Hook fail-mode | `open` (allow on guardrail-side failure) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
+| Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
 | Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
@@ -64,14 +64,14 @@ defenseclaw setup zeptoclaw \
   --restart
 ```
 
-HIGH findings pause for operator approval; CRITICAL still blocks unconditionally. ZeptoClaw has **no native ask surface**, so HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI / audit log — make sure operators are reachable there. See the [HITL page](/docs/hitl) for the per-connector matrix.
+HIGH findings can produce a raw `confirm` action; CRITICAL still blocks unconditionally. ZeptoClaw has **no native ask surface**, so confirm takes its immediate fallback with `raw_action` preserved. The TUI and audit log can review the event but cannot approve and resume it. See the [HITL page](/docs/hitl) for the per-connector matrix.
 
 </Tab>
 
 <Tab value="Action + judge">
 
 ```bash
-export DEFENSECLAW_LLM_KEY=<your-key>
+export DEFENSECLAW_LLM_KEY='replace-with-your-key'
 
 defenseclaw setup zeptoclaw \
   --mode action \
@@ -93,13 +93,11 @@ Adds the LLM judge as a second pass on regex-flagged prompts. Costs a few cents 
 defenseclaw policy activate strict
 defenseclaw setup zeptoclaw \
   --mode action \
-  --human-approval \
-  --hilt-min-severity low \
   --rule-pack strict \
   --restart
 ```
 
-Block ≥ MEDIUM, no allow-list bypass, HITL on every LOW+ event. Pair with the OpenShell sandbox profile and an MCP allow-list for full lockdown.
+Block MEDIUM and above, alert on LOW, and do not offer approval for findings that have already crossed the block threshold. Pair with the OpenShell sandbox profile and a reviewed first-party allow-list for full lockdown.
 
 </Tab>
 
@@ -108,7 +106,7 @@ Block ≥ MEDIUM, no allow-list bypass, HITL on every LOW+ event. Pair with the 
 #### Decision aids — should I turn this on?
 
 <Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="When --human-approval is worth it. ZeptoClaw downgrades to confirm verdicts since it has no native ask — operators see them in the TUI / audit log." />
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="ZeptoClaw has no native ask. Confirm uses an immediate fallback with raw_action preserved for review." />
   <Card href="/docs/setup/guardrail#tabs-by-mode-non-interactive-recipes" title="Mode + judge recipes" description="Side-by-side bash for observe / action / action+HITL / action+judge — copy-paste ready." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
@@ -138,7 +136,7 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 <HookEventsList connector="zeptoclaw" />
 
 <Callout>
-ZeptoClaw has no native ask surface. Confirm verdicts are downgraded with `raw_action` preserved so operators can review the original request in the TUI / audit log.
+ZeptoClaw has no native ask surface. Confirm verdicts take an immediate fallback with `raw_action` preserved so operators can review the original request in the TUI or audit log; neither surface can resume it.
 </Callout>
 
 ## Subprocess policy

@@ -939,8 +939,9 @@ event types:
 | `guardrail-inspection` | `GuardrailProxy.recordTelemetry()` after inspection (`proxy.go`, `guardrail.go`) | From verdict |
 | `guardrail-opa-inspection` | `POST /v1/guardrail/evaluate` handler when that HTTP API is used (`api.go`) | From OPA output |
 
-These events are queryable via `defenseclaw audit list` and forwarded to
-Splunk when the SIEM adapter is enabled.
+These events are exportable via `defenseclaw-gateway audit export` and
+forwarded to Splunk when the SIEM adapter is enabled. Use the Python CLI's
+`defenseclaw alerts` command for the recent operator-facing findings view.
 
 ## Streaming Response Inspection
 

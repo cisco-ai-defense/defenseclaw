@@ -63,6 +63,9 @@ and an existing name updates only that destination. Run `list --json` for the
 complete target/kind/signal inventory and `add ... --dry-run` for a safe preview.
 The TUI mirrors the runtime-loaded inventory in **Overview → Observability
 Destinations** and exposes the wizard at **0 Setup → Observability / Galileo**.
+
+| Command | Use it for |
+| --- | --- |
 | `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and persists to `~/.defenseclaw/.env`; `remove` only touches operator-added entries. All verbs accept `--json`. |
 
 <Callout title="Safety gates are intentional">
@@ -115,7 +118,7 @@ These list/inventory verbs read across the full active roster:
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw tui` | Interactive Bubbletea dashboard — audit, alerts, logs, inventory panels. The recommended live view. |
+| `defenseclaw tui` | Interactive Textual dashboard — audit, alerts, logs, inventory, and setup panels. The recommended live view. |
 | `defenseclaw alerts [--connector X]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
@@ -124,7 +127,7 @@ These list/inventory verbs read across the full active roster:
 
 ## Scanning
 
-The Python CLI exposes one scan group per asset family — there is no top-level `defenseclaw scan` group. Code-scanning lives on the Go sidecar.
+The Python CLI exposes one scan group per asset family — there is no top-level `scan` group. Code-scanning lives on the Go gateway binary.
 
 | Command | Binary | Use it for |
 | --- | --- | --- |
@@ -165,7 +168,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw tui` | Open the interactive operator UI. Pending-approvals panel, audit stream, settings. |
+| `defenseclaw tui` | Open the interactive operator UI for audit, alerts, logs, inventory, and settings. It does not provide a resumable approval queue for hook calls. |
 
 ## Upgrade
 

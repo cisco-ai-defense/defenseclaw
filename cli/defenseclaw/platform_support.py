@@ -11,7 +11,7 @@
 """Per-OS connector support — the Python single source of truth.
 
 DefenseClaw runs hook-only on Windows: agents invoke the native Go hook
-entrypoint (``defenseclaw hook``) directly, and there is no Windows
+entrypoint (``defenseclaw-gateway hook``) directly, and there is no Windows
 guardrail-proxy lifecycle. The proxy/chat connectors (``openclaw`` and
 ``zeptoclaw``) therefore cannot run on Windows, so the TUI/CLI must not
 offer or accept them there.

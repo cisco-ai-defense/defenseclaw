@@ -56,7 +56,7 @@ settings, skill actions, and everything else.
 
 | | |
 |---|---|
-| **Created by** | `defenseclaw init`, `defenseclaw setup skill-scanner`, `defenseclaw setup mcp-scanner`, `defenseclaw setup gateway`, `defenseclaw setup guardrail`, `defenseclaw setup sandbox` — all via Python `cfg.save()` (`cli/defenseclaw/config.py:290`) |
+| **Created by** | `defenseclaw init`, `defenseclaw setup skill-scanner`, `defenseclaw setup mcp-scanner`, `defenseclaw setup gateway`, `defenseclaw setup guardrail`, `defenseclaw sandbox setup` — all via Python `cfg.save()` (`cli/defenseclaw/config.py:290`) |
 | **Read by** | **Python CLI** at startup via `config.load()` (`cli/defenseclaw/config.py:426`). **Go sidecar** at startup via `config.Load()` (`internal/config/config.go:262`, Viper). |
 | **NOT read by** | Standalone Python guardrail code paths (none in the default stack); the Go sidecar loads YAML via Viper and passes structs into the proxy. |
 
@@ -264,7 +264,7 @@ The sidecar **runs the guardrail proxy in-process** (`internal/gateway/sidecar.g
 
 ## Sandbox-related config fields
 
-These fields are set by `defenseclaw setup sandbox` for openshell-sandbox
+These fields are set by `defenseclaw sandbox setup` for openshell-sandbox
 standalone mode (Linux supervisor with Landlock, seccomp, network namespace).
 
 ### `openshell.mode`
@@ -272,7 +272,7 @@ standalone mode (Linux supervisor with Landlock, seccomp, network namespace).
 | | |
 |---|---|
 | **Values** | `""` (default, no sandbox), `"standalone"` |
-| **Set by** | `defenseclaw setup sandbox` |
+| **Set by** | `defenseclaw sandbox setup` |
 | **Read by** | Go sidecar (`internal/config/config.go: OpenShellConfig.IsStandalone()`). |
 | **Effect** | When `"standalone"`, the sidecar knows OpenClaw is running inside a Linux namespace with a veth pair. |
 
@@ -290,7 +290,7 @@ standalone mode (Linux supervisor with Landlock, seccomp, network namespace).
 | | |
 |---|---|
 | **Values** | `"/home/sandbox"` (default) |
-| **Set by** | `defenseclaw setup sandbox --sandbox-home <path>` |
+| **Set by** | `defenseclaw sandbox setup --sandbox-home <path>` |
 | **Read by** | Setup, init, systemd unit generation — all sandbox paths derive from this. |
 | **Effect** | Root directory for the sandbox user's home. All OpenClaw and DefenseClaw sandbox-side files live here. |
 
@@ -299,8 +299,8 @@ standalone mode (Linux supervisor with Landlock, seccomp, network namespace).
 | | |
 |---|---|
 | **Values** | `true` (default), `false` |
-| **Set by** | `defenseclaw setup sandbox --no-auto-pair` |
-| **Read by** | `defenseclaw setup sandbox` (device pre-pairing step). |
+| **Set by** | `defenseclaw sandbox setup --no-auto-pair` |
+| **Read by** | `defenseclaw sandbox setup` (device pre-pairing step). |
 | **Effect** | When `true`, the sidecar's Ed25519 device key is pre-injected into the sandbox's `devices.json` during setup. The sidecar connects immediately on first start without manual approval. When `false`, the operator must manually approve the pairing request. |
 
 ### `gateway.api_bind`
@@ -308,7 +308,7 @@ standalone mode (Linux supervisor with Landlock, seccomp, network namespace).
 | | |
 |---|---|
 | **Values** | `""` (default: `127.0.0.1`), or an explicit IP address |
-| **Set by** | `defenseclaw setup sandbox` (auto-detected from `guardrail.host` in standalone mode) |
+| **Set by** | `defenseclaw sandbox setup` (auto-detected from `guardrail.host` in standalone mode) |
 | **Read by** | Go sidecar `runAPI()` — determines which interface the REST API binds to. |
 | **Effect** | In standalone mode, defaults to the host veth IP (e.g., `10.200.0.1`) so the sandbox can reach the API. Otherwise defaults to loopback. |
 
@@ -317,7 +317,7 @@ standalone mode (Linux supervisor with Landlock, seccomp, network namespace).
 | | |
 |---|---|
 | **Values** | `"localhost"` (default), or a bridge IP like `"10.200.0.1"` |
-| **Set by** | `defenseclaw setup sandbox --host-ip <ip>` |
+| **Set by** | `defenseclaw sandbox setup --host-ip <ip>` |
 | **Read by** | **Python CLI** `patch_openclaw_config()` — sets the `defenseclaw` provider `baseUrl` in `openclaw.json` to `http://{host}:{guardrail.port}`. **Go sidecar** `runAPI()` — in standalone mode, when `api_bind` is unset and host is not `localhost`, uses `guardrail.host` as the REST API bind address. |
 | **Effect** | Lets OpenClaw inside the sandbox point at the guardrail proxy and sidecar API on the host veth IP. |
 
@@ -351,13 +351,13 @@ defenseclaw setup webhook add generic    --url https://ops.example.com/hooks --s
 
 # Inspect / manage
 defenseclaw setup webhook list
-defenseclaw setup webhook show <name>
-defenseclaw setup webhook enable  <name>
-defenseclaw setup webhook disable <name>
-defenseclaw setup webhook remove  <name>
+defenseclaw setup webhook show slack-hooks-slack-com
+defenseclaw setup webhook enable slack-hooks-slack-com
+defenseclaw setup webhook disable slack-hooks-slack-com
+defenseclaw setup webhook remove slack-hooks-slack-com
 
-# Smoke-test without touching production (does not write to config.yaml)
-defenseclaw setup webhook test slack --url https://hooks.slack.com/services/... --preview-only
+# Preview the payload for an already-configured destination (no delivery)
+defenseclaw setup webhook test slack-hooks-slack-com --dry-run
 ```
 
 The same wizard is available in the TUI under Setup → Webhooks; it collects
@@ -404,8 +404,8 @@ webhooks:
 ## Desktop Notifications Config
 
 > **Local-only.** `notifications.*` fires user-session OS toasts
-> (macOS `osascript`, Linux `notify-send`) for blocks and pending HITL
-> approvals. It is **not** an audit sink and **not** a remote
+> (macOS `osascript`, Linux `notify-send`) for blocks and OpenClaw chat
+> approvals managed by the gateway. It is **not** an audit sink and **not** a remote
 > notification channel — for chat / incident routing use `webhooks[]`
 > above, and for downstream forwarding see
 > [docs/OBSERVABILITY.md](OBSERVABILITY.md).
@@ -418,9 +418,11 @@ desktop toast whenever:
    **blocks** a tool call.
 2. The same component **would have blocked** the call but is in
    observe / would-block mode.
-3. A **Human-in-the-Loop approval** is pending in the chat / TUI
-   (informational only — clicking the notification does not approve
-   anything; the operator still replies in the existing surface).
+3. An OpenClaw **Human-in-the-Loop approval** is pending in the chat-origin
+   session (informational only — clicking the notification does not approve
+   anything; the operator replies in OpenClaw). Native-ask hook connectors
+   render their own host prompt and connectors without native ask do not
+   create a pending TUI approval.
 
 The dispatcher applies a global token-bucket rate limit, an LRU
 dedup window, and a per-category / per-source filter so it can be
@@ -478,7 +480,7 @@ notifications:
   block_enforced: true       # action-mode block events
   block_would_block: false   # observe-mode "would have blocked / would have asked" events
                              # (off by default; opt in while tuning policy in observe mode)
-  hitl_approval: true        # informational toasts for pending approvals
+  hitl_approval: true        # informational toasts for gateway-brokered OpenClaw approvals
   sources:
     hook: true               # claude_code_hook + codex_hook decisions
     guardrail: true          # GuardrailProxy verdicts
@@ -492,7 +494,7 @@ notifications:
 | `enabled` | bool | `true` on darwin, `false` elsewhere | Master switch (see `config.DefaultNotificationsEnabled` / Python `_default_notifications_enabled`). When `false` the dispatcher is short-circuited and no other field has any effect. |
 | `block_enforced` | bool | `true` | Surface a toast for action-mode blocks (`action == "block"`). |
 | `block_would_block` | bool | `false` | Surface a toast for observe-mode would-block events (verdict was a block but the runtime mode degraded it to alert) AND for "would-ask" events where a `confirm` verdict never reached the chat surface (observe mode, or the connector cannot natively ask — see `BlockEvent.WouldAsk`). Off by default so a fresh install only notifies for things that actually happened. |
-| `hitl_approval` | bool | `true` | Surface an **informational** toast at the start of `HILTApprovalManager.Request`. The notification has no buttons; the operator replies in chat / TUI as today. |
+| `hitl_approval` | bool | `true` | Surface an **informational** toast at the start of the OpenClaw `HILTApprovalManager.Request` flow. The notification has no buttons; the operator replies in the OpenClaw chat-origin session. |
 | `sources.hook` | bool | `true` | Allow notifications from `evaluateClaudeCodeHook` / `evaluateCodexHook`. |
 | `sources.guardrail` | bool | `true` | Allow notifications from `GuardrailProxy` block / would-block branches. |
 | `sources.asset_policy` | bool | `true` | Allow notifications from `evaluateRuntimeMCPAssetPolicy` / `evaluateRuntimeSkillAssetPolicy`. |

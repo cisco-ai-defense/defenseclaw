@@ -108,7 +108,7 @@ The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` unde
 <HookEventsList connector="openhands" />
 
 <Callout>
-OpenHands can block supported hook events but has no native human-approval surface; HITL approvals fall back to confirm verdicts in the DefenseClaw TUI / audit log, with `raw_action: "confirm"` preserved.
+OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only.
 </Callout>
 
 ## Disable

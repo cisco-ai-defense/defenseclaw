@@ -11,6 +11,7 @@
     "start": "next start",
     "lint": "next lint",
     "validate-links": "tsx ./scripts/validate-links.ts",
+    "validate-snippets": "tsx ./scripts/validate-shell-snippets.ts",
     "check-diagram-widths": "tsx ./scripts/check-diagram-widths.ts",
     "build:policy-assets": "tsx ./scripts/build-policy-assets.ts",
     "test:policy-creator": "tsx --test ./scripts/test-policy-creator.ts",
