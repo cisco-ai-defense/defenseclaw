@@ -105,7 +105,8 @@ class TestStatusCommand(unittest.TestCase):
     def test_status_accepts_openshell_sandbox_binary(self, mock_which, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
 
-        def fake_which(binary):
+        def fake_which(binary, *, path=None):
+            del path
             if binary == "openshell-sandbox":
                 return "/usr/local/bin/openshell-sandbox"
             return None
@@ -134,7 +135,8 @@ class TestStatusCommand(unittest.TestCase):
 
         self.app.cfg.openshell.binary = "/opt/operator/openshell"
 
-        def fake_which(binary):
+        def fake_which(binary, *, path=None):
+            del path
             if binary == "openshell-sandbox":
                 return "/usr/local/bin/openshell-sandbox"
             return None
