@@ -114,6 +114,17 @@ func TestOmnigentSetupAndTeardown(t *testing.T) {
 	if got, want := strings.TrimSpace(string(pthBytes)), filepath.Dir(modulePath); got != want {
 		t.Fatalf(".pth target = %q, want %q", got, want)
 	}
+	if !OwnsManagedHookRuntime(conn) {
+		t.Fatal("OmniGent policy module is not recognized as a guardian-managed hook runtime")
+	}
+	if paths := HookConfigPathsForConnector(conn, opts); len(paths) != 1 || filepath.Clean(paths[0]) != filepath.Clean(configPath) {
+		t.Fatalf("HookConfigPathsForConnector = %v, want [%s]", paths, configPath)
+	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil {
+		t.Fatalf("OwnedHooksPresent: %v", err)
+	} else if !present {
+		t.Fatal("OwnedHooksPresent = false after OmniGent policy setup")
+	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)

@@ -32,19 +32,17 @@ test <name>           Probe the configured endpoint and report status
 migrate-splunk        Move legacy ``splunk:`` block to ``audit_sinks[]``
 migrate-otel          Convert flat ``otel:`` transport into a named route
 
-All destructive subcommands write atomically (``config.yaml.tmp`` ->
-``rename``) so a crash mid-write cannot leave the gateway with an
-unparseable config.
+All destructive subcommands write through the shared secure atomic
+config writer so a crash mid-write cannot leave the gateway with an
+unparseable config and managed-mode writes remain administrator-gated.
 """
 
 from __future__ import annotations
 
-import contextlib
 import json as _json
 import os
 import socket
 import ssl
-import tempfile
 import urllib.error
 import urllib.request
 from typing import Any
@@ -536,7 +534,7 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
             click.echo(f"  audit_sinks already contains {s.get('name')!r} with same endpoint; skipping")
             if do_apply:
                 raw.pop("splunk", None)
-                _write_atomically(cfg_path, raw)
+                write_config_yaml_secure(cfg_path, raw)
                 click.echo("  Removed legacy splunk: block.")
             return
 
@@ -554,7 +552,7 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
     sinks.append(new_entry)
     raw["audit_sinks"] = sinks
     raw.pop("splunk", None)
-    _write_atomically(cfg_path, raw)
+    write_config_yaml_secure(cfg_path, raw)
     click.echo(f"  Migrated splunk: block to audit_sinks[{name}].")
     if app.logger:
         app.logger.log_action(
@@ -1209,24 +1207,14 @@ def _slug(value: str) -> str:
 
 
 def _write_atomically(cfg_path: str, raw: dict[str, Any]) -> None:
-    import yaml
+    """Compatibility wrapper around the authoritative secure config writer.
 
-    # Create the staging file with ``tempfile.mkstemp`` (``O_EXCL``, 0600)
-    # in the target dir instead of a predictable ``<cfg>.tmp`` name: a
-    # predictable temp path is symlink/pre-create-able by a local attacker
-    # and this config can carry HEC/OTLP tokens (F-0186).
-    directory = os.path.dirname(cfg_path) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=directory)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as f:
-            yaml.safe_dump(raw, f, default_flow_style=False, sort_keys=False)
-        os.replace(tmp, cfg_path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+    Older callers and the F-0186 regression test import this private helper.
+    Keeping the shim avoids splitting atomic-write behavior while ensuring all
+    writes use the managed-mode authorization and mode-preservation checks in
+    :func:`write_config_yaml_secure`.
+    """
+    write_config_yaml_secure(cfg_path, raw)
 
 
 # ---------------------------------------------------------------------------

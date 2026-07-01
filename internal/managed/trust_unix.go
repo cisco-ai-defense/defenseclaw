@@ -97,6 +97,9 @@ func validateTrustedPathElement(path string, wantDir bool, label string) error {
 	if info.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%s: group/other writable permissions %04o are not trusted", path, info.Mode().Perm())
 	}
+	if err := validateTrustedPathACL(path); err != nil {
+		return err
+	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return fmt.Errorf("%s: cannot inspect file owner", path)
@@ -120,6 +123,9 @@ func validateTrustedRuntimeDirElement(path string, label string) error {
 	}
 	if info.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%s: group/other writable permissions %04o are not trusted", path, info.Mode().Perm())
+	}
+	if err := validateTrustedPathACL(path); err != nil {
+		return err
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {

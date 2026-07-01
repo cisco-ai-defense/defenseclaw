@@ -69,6 +69,7 @@ from defenseclaw.connector_paths import (  # noqa: F401
 _log = logging.getLogger(__name__)
 _privacy_disable_redaction_warned = False
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
+_untrusted_managed_config_warned_paths: set[str] = set()
 
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
@@ -302,6 +303,123 @@ def _assert_config_write_allowed(path: str, data: dict[str, Any] | None = None) 
             "administrator privileges; use the enterprise managed config path "
             "or rerun this command with admin elevation"
         )
+
+
+def _managed_config_trust_problem(path: str) -> str | None:
+    """Return why a managed config path would fail the Unix gateway trust check.
+
+    This is diagnostic only: the Go gateway remains the enforcement boundary.
+    Keep the Unix checks aligned with ``internal/managed/trust_unix.go`` so the
+    Python CLI does not report a managed posture from a config the gateway will
+    refuse to load. Windows uses ACL-based trust validation in the gateway and
+    is intentionally not approximated with POSIX metadata here.
+    """
+    if os.name == "nt":
+        return None
+
+    current = os.path.abspath(path)
+    is_config = True
+    while True:
+        try:
+            info = os.lstat(current)
+        except OSError as exc:
+            return f"{current}: cannot inspect path metadata: {exc}"
+
+        mode = info.st_mode
+        if stat.S_ISLNK(mode):
+            return f"{current}: symlinks are not allowed in managed config paths"
+        if is_config:
+            if not stat.S_ISREG(mode):
+                return f"{current}: expected a regular managed config file"
+        elif not stat.S_ISDIR(mode):
+            return f"{current}: expected a directory in the managed config path"
+        if stat.S_IMODE(mode) & 0o022:
+            return (
+                f"{current}: group/other writable permissions "
+                f"{stat.S_IMODE(mode):04o} are not trusted"
+            )
+
+        acl_problem = _macos_write_acl_problem(current)
+        if acl_problem is not None:
+            return acl_problem
+
+        owner_uid = getattr(info, "st_uid", None)
+        if owner_uid is None:
+            return f"{current}: cannot inspect path owner"
+        if owner_uid != 0:
+            return (
+                f"{current}: owner uid {owner_uid} is not trusted; "
+                "expected root/admin uid 0"
+            )
+
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+        is_config = False
+
+
+def _macos_write_acl_problem(path: str) -> str | None:
+    """Return a fail-closed diagnostic for write-capable macOS ACL entries."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        proc = subprocess.run(
+            ["/bin/ls", "-lde", "--", path],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"LANG": "C", "LC_ALL": "C"},
+        )
+    except OSError as exc:
+        return f"{path}: cannot inspect macOS ACL: {exc}"
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or f"exit {proc.returncode}"
+        return f"{path}: cannot inspect macOS ACL: {detail}"
+
+    write_permissions = {
+        "write",
+        "add_file",
+        "append",
+        "add_subdirectory",
+        "delete",
+        "delete_child",
+        "writeattr",
+        "writeextattr",
+        "writesecurity",
+        "chown",
+    }
+    for line in proc.stdout.splitlines():
+        normalized = line.strip().lower()
+        prefix, separator, _ = normalized.partition(":")
+        if not separator or not prefix.isdigit() or " allow " not in normalized:
+            continue
+        permissions = normalized.split(" allow ", 1)[1].split(None, 1)
+        if not permissions:
+            return f"{path}: cannot parse macOS allow ACL"
+        if write_permissions.intersection(permissions[0].split(",")):
+            return f"{path}: write-capable macOS ACL entry is not trusted"
+    return None
+
+
+def _warn_untrusted_managed_config(path: str, data: dict[str, Any]) -> None:
+    """Warn once when CLI state came from a gateway-untrusted managed config."""
+    if not _is_managed_enterprise_doc(data):
+        return
+    normalized = os.path.abspath(path)
+    if normalized in _untrusted_managed_config_warned_paths:
+        return
+    problem = _managed_config_trust_problem(normalized)
+    if problem is None:
+        return
+    _untrusted_managed_config_warned_paths.add(normalized)
+    print(
+        "warning: managed_enterprise config trust check failed: "
+        f"{problem}. The gateway will reject this config; CLI-reported state is "
+        "not authoritative. Provision it with the macOS enterprise installer "
+        "or another administrator-owned deployment mechanism.",
+        file=sys.stderr,
+    )
 
 
 _sandbox_mode_cache: bool | None = None
@@ -2002,7 +2120,9 @@ class ApplicationProtectionConnectorConfig:
 
 @dataclass
 class ApplicationProtectionConfig:
-    enabled: bool = True
+    # Automatic activation writes into third-party agent configuration. Keep
+    # it opt-in so upgrades preserve the pre-feature unmanaged behavior.
+    enabled: bool = False
     min_confidence: float = 0.80
     remove_when_gone: bool = False
     gone_after_min: int = 60
@@ -3762,7 +3882,7 @@ def _merge_asset_runtime_detection(raw: dict[str, Any] | None) -> AssetRuntimeDe
     if not isinstance(raw, dict):
         return AssetRuntimeDetectionConfig()
     return AssetRuntimeDetectionConfig(
-        enabled=bool(raw.get("enabled", True)),
+        enabled=bool(raw.get("enabled", False)),
         terminal_commands=bool(raw.get("terminal_commands", True)),
         unknown_terminal_mcp=str(raw.get("unknown_terminal_mcp", "observe") or "observe"),
     )
@@ -4488,6 +4608,7 @@ def load() -> Config:
             raw = yaml.safe_load(f) or {}
     except OSError:
         pass
+    _warn_untrusted_managed_config(cfg_file, raw)
 
     scanners_raw = raw.get("scanners", {})
     ss_raw = scanners_raw.get("skill_scanner", {})

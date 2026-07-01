@@ -79,6 +79,9 @@ type Sidecar struct {
 	osNotifier    *notifier.Dispatcher
 	configMgr     *ConfigManager
 
+	otelMu             sync.RWMutex
+	webhooksMu         sync.RWMutex
+	aiDiscoveryMu      sync.RWMutex
 	apiMu              sync.RWMutex
 	apiServer          *APIServer
 	proxyMu            sync.RWMutex
@@ -504,6 +507,66 @@ func (s *Sidecar) publishConfig(cfg *config.Config) *config.Config {
 	return snapshot
 }
 
+func (s *Sidecar) otelSnapshot() *telemetry.Provider {
+	if s == nil {
+		return nil
+	}
+	s.otelMu.RLock()
+	defer s.otelMu.RUnlock()
+	return s.otel
+}
+
+func (s *Sidecar) swapOTel(next *telemetry.Provider) *telemetry.Provider {
+	if s == nil {
+		return nil
+	}
+	s.otelMu.Lock()
+	defer s.otelMu.Unlock()
+	previous := s.otel
+	s.otel = next
+	return previous
+}
+
+func (s *Sidecar) webhooksSnapshot() *WebhookDispatcher {
+	if s == nil {
+		return nil
+	}
+	s.webhooksMu.RLock()
+	defer s.webhooksMu.RUnlock()
+	return s.webhooks
+}
+
+func (s *Sidecar) swapWebhooks(next *WebhookDispatcher) *WebhookDispatcher {
+	if s == nil {
+		return nil
+	}
+	s.webhooksMu.Lock()
+	defer s.webhooksMu.Unlock()
+	previous := s.webhooks
+	s.webhooks = next
+	return previous
+}
+
+func (s *Sidecar) aiDiscoverySnapshot() *inventory.ContinuousDiscoveryService {
+	if s == nil {
+		return nil
+	}
+	s.aiDiscoveryMu.RLock()
+	defer s.aiDiscoveryMu.RUnlock()
+	return s.aiDiscovery
+}
+
+func (s *Sidecar) swapAIDiscovery(next *inventory.ContinuousDiscoveryService) *inventory.ContinuousDiscoveryService {
+	if s == nil {
+		return nil
+	}
+	s.aiDiscoveryMu.Lock()
+	defer s.aiDiscoveryMu.Unlock()
+	previous := s.aiDiscovery
+	s.aiDiscovery = next
+	return previous
+}
+
 // Run starts all subsystems as independent goroutines. Each subsystem runs
 // in its own goroutine so that a gateway disconnect does not stop the watcher
 // or API server. Run blocks until ctx is cancelled, then shuts everything down.
@@ -582,9 +645,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	}
 	inventory.SetPathHashKey(deriveAIInventoryHashKey(apiToken))
 
-	if err := s.attachApplicationProtectionObserver(runCtx, apiToken); err != nil {
-		return err
-	}
+	s.attachApplicationProtectionObserver(runCtx, apiToken)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 6)
@@ -661,8 +722,8 @@ func (s *Sidecar) Run(ctx context.Context) error {
 
 	// Report telemetry (OTel) health — not a goroutine, just state
 	s.reportTelemetryHealth()
-	if s.otel != nil {
-		s.otel.EmitStartupSpan(runCtx)
+	if tel := s.otelSnapshot(); tel != nil {
+		tel.EmitStartupSpan(runCtx)
 	}
 
 	// Report aggregate audit-sink health — not a goroutine, just state
@@ -682,8 +743,8 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	// Shutdown — ctx is already Done, but still carries correlation values.
 	emitLifecycle(runCtx, "gateway", "stop", nil)
 	_ = s.logger.LogAction(string(audit.ActionSidecarStop), "", "all subsystems stopped")
-	if s.webhooks != nil {
-		s.webhooks.Close()
+	if webhooks := s.webhooksSnapshot(); webhooks != nil {
+		webhooks.Close()
 	}
 	// Drain the async judge-persistence queue BEFORE the audit DB
 	// handle is closed: any rows still buffered after a SIGTERM
@@ -765,8 +826,8 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		SetEgressTelemetry(nil)
 		SetJudgePersistor(nil)
 	}
-	if s.otel != nil {
-		_ = s.otel.Shutdown(context.Background())
+	if tel := s.otelSnapshot(); tel != nil {
+		_ = tel.Shutdown(context.Background())
 	}
 	telemetry.ActivateProvider(nil)
 
@@ -779,22 +840,23 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	}
 }
 
-func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiToken string) error {
+func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiToken string) {
 	if s == nil || s.currentConfig() == nil || s.health == nil {
-		return nil
+		return
 	}
-	if s.aiDiscovery == nil {
+	aiDiscovery := s.aiDiscoverySnapshot()
+	if aiDiscovery == nil {
 		s.health.SetApplicationProtection(StateDisabled, "ai discovery disabled", map[string]interface{}{
 			"enabled": s.currentConfig().ApplicationProtection.Enabled,
 		})
-		return nil
+		return
 	}
+	// Token synthesis is deliberately completed before this method is called.
+	// Keeping observer attachment infallible prevents a reload from publishing
+	// new configuration and then reporting failure after old resources closed.
 	if strings.TrimSpace(apiToken) == "" {
-		var err error
-		apiToken, err = s.ensureGatewayTokenSynthesis()
-		if err != nil {
-			return fmt.Errorf("application protection gateway token: %w", err)
-		}
+		s.health.SetApplicationProtection(StateError, "gateway token unavailable", nil)
+		return
 	}
 
 	registry := connector.NewDefaultRegistry()
@@ -818,14 +880,13 @@ func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiTo
 		s.appProtection.UpdateRuntime(registry, apiToken, proxyAddr, apiAddr, masterKey)
 	}
 	controller := s.appProtection
-	s.aiDiscovery.AddReportObserver(func(reportCtx context.Context, report inventory.AIDiscoveryReport) {
+	aiDiscovery.AddReportObserver(func(reportCtx context.Context, report inventory.AIDiscoveryReport) {
 		controller.OnDiscoveryReport(reportCtx, report)
 	})
 	s.health.SetApplicationProtection(StateStarting, "", map[string]interface{}{
 		"enabled":    s.currentConfig().ApplicationProtection.Enabled,
 		"state_file": filepath.Join(s.currentConfig().DataDir, applicationProtectionStateFile),
 	})
-	return nil
 }
 
 func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
@@ -1053,7 +1114,7 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 
 	var nextAIDiscovery *inventory.ContinuousDiscoveryService
 	if aiRestart {
-		tel := s.otel
+		tel := s.otelSnapshot()
 		if otelReload {
 			tel = nextOTel
 		}
@@ -1085,6 +1146,23 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 		nextJudge = buildSharedJudge(&next, nextRulePack)
 	}
 
+	// Application-protection observer attachment must be infallible after the
+	// commit point below. Resolve the only fallible dependency (the gateway
+	// token) while all old resources and the published config are still live.
+	if aiRestart && nextAIDiscovery != nil && strings.TrimSpace(next.Gateway.Token) == "" {
+		apiToken, err := s.ensureGatewayTokenSynthesis()
+		if err != nil {
+			if nextSinks != nil {
+				_ = nextSinks.Close()
+			}
+			if nextOTel != nil {
+				_ = nextOTel.Shutdown(context.Background())
+			}
+			return fmt.Errorf("config reload application protection gateway token: %w", err)
+		}
+		next.Gateway.Token = apiToken
+	}
+
 	redaction.SetDisableAll(next.Privacy.DisableRedaction)
 	appliedCfg := current
 	if !onlyConfigReloadModeChanged(oldCfg, newCfg) {
@@ -1092,8 +1170,7 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if otelReload {
-		oldOTel := s.otel
-		s.otel = nextOTel
+		oldOTel := s.swapOTel(nextOTel)
 		s.applyOTelProvider(nextOTel)
 		if oldOTel != nil && oldOTel != nextOTel {
 			_ = oldOTel.Shutdown(context.Background())
@@ -1147,13 +1224,13 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if webhooksChanged(oldCfg, newCfg) {
-		oldWebhooks := s.webhooks
-		s.webhooks = NewWebhookDispatcher(appliedCfg.Webhooks, appliedCfg.Observability)
-		if s.webhooks != nil {
-			s.webhooks.BindObservability(s.otel)
+		nextWebhooks := NewWebhookDispatcher(appliedCfg.Webhooks, appliedCfg.Observability)
+		if nextWebhooks != nil {
+			nextWebhooks.BindObservability(s.otelSnapshot())
 		}
+		oldWebhooks := s.swapWebhooks(nextWebhooks)
 		if proxy := s.proxySnapshot(); proxy != nil {
-			proxy.SetWebhookDispatcher(s.webhooks)
+			proxy.SetWebhookDispatcher(nextWebhooks)
 		}
 		if oldWebhooks != nil {
 			oldWebhooks.Close()
@@ -1169,13 +1246,11 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	}
 
 	if aiRestart {
-		s.aiDiscovery = nextAIDiscovery
+		s.swapAIDiscovery(nextAIDiscovery)
 		if api := s.apiSnapshot(); api != nil {
 			api.SetAIDiscoveryService(nextAIDiscovery)
 		}
-		if err := s.attachApplicationProtectionObserver(ctx, ""); err != nil {
-			return err
-		}
+		s.attachApplicationProtectionObserver(ctx, next.Gateway.Token)
 	}
 
 	if watcherRestart {
@@ -1199,8 +1274,8 @@ func (s *Sidecar) buildReloadOTelProvider(ctx context.Context, cfg *config.Confi
 		return nil, fmt.Errorf("config reload otel: %w", err)
 	}
 	agentInstanceID := ""
-	if s != nil && s.otel != nil {
-		agentInstanceID = s.otel.AgentInstanceID()
+	if tel := s.otelSnapshot(); tel != nil {
+		agentInstanceID = tel.AgentInstanceID()
 	}
 	if agentInstanceID == "" {
 		agentInstanceID = audit.ProcessAgentInstanceID()
@@ -1227,8 +1302,8 @@ func (s *Sidecar) applyOTelProvider(p *telemetry.Provider) {
 	if s.hilt != nil {
 		s.hilt.SetOTelProvider(p)
 	}
-	if s.webhooks != nil {
-		s.webhooks.BindObservability(p)
+	if webhooks := s.webhooksSnapshot(); webhooks != nil {
+		webhooks.BindObservability(p)
 	}
 	if s.shell != nil {
 		s.shell.BindObservability(p, s.events)
@@ -1441,8 +1516,8 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 			continue
 		}
 
-		if !firstConnect && s.otel != nil {
-			s.otel.RecordWatcherRestart(ctx)
+		if tel := s.otelSnapshot(); !firstConnect && tel != nil {
+			tel.RecordWatcherRestart(ctx)
 		}
 		firstConnect = false
 
@@ -1625,14 +1700,15 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	})
 
-	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, s.shell, s.opa, s.otel, func(r watcher.AdmissionResult) {
+	tel := s.otelSnapshot()
+	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, s.shell, s.opa, tel, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
-	if s.otel != nil {
-		w.SetOTelProvider(s.otel)
+	if tel != nil {
+		w.SetOTelProvider(tel)
 	}
-	if s.webhooks != nil {
-		w.SetWebhookDispatcher(s.webhooks)
+	if webhooks := s.webhooksSnapshot(); webhooks != nil {
+		w.SetWebhookDispatcher(webhooks)
 	}
 
 	fmt.Fprintf(os.Stderr, "[sidecar] watcher starting (%d skill dirs, %d plugin dirs, skill_take_action=%v, plugin_take_action=%v)\n",
@@ -1753,7 +1829,7 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 		s.notify.Push(notification)
 	}
 
-	if s.webhooks != nil {
+	if webhooks := s.webhooksSnapshot(); webhooks != nil {
 		event := audit.Event{
 			ID:        uuid.New().String(),
 			Timestamp: time.Now().UTC(),
@@ -1763,7 +1839,7 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 			Details:   fmt.Sprintf("type=%s severity=%s findings=%d actions=%s reason=%s", subjectType, severity, findings, strings.Join(actions, ","), safeReason),
 			Severity:  severity,
 		}
-		s.webhooks.Dispatch(event)
+		webhooks.Dispatch(event)
 	}
 
 	sessionKeys := s.activeSessionKeys()
@@ -2058,7 +2134,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// SetCredentials() again with the same values (idempotent restore).
 	masterKey := deriveMasterKey(s.currentConfig().DataDir)
 	conn.SetCredentials(apiToken, masterKey)
-	hookAPIToken, err := connectorSetupAPIToken(s.currentConfig().DataDir, conn, apiToken)
+	setupTokens, err := connectorSetupTokensFor(s.currentConfig().DataDir, conn, apiToken, managed.IsManagedEnterprise(s.currentConfig().DeploymentMode))
 	if err != nil {
 		return fmt.Errorf("connector %s scoped hook token: %w", conn.Name(), err)
 	}
@@ -2076,8 +2152,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// config — same source the proxy uses for credential wiring
 		// below, so the baked value and the value accepted by the API
 		// middleware stay in lockstep.
-		APIToken:     hookAPIToken,
-		WorkspaceDir: workspaceDir,
+		APIToken:           setupTokens.connectorToken,
+		HookAPIToken:       setupTokens.hookToken,
+		HookAPITokenScoped: setupTokens.hookTokenScoped,
+		WorkspaceDir:       workspaceDir,
 		// HookFailMode is the operator-chosen response-layer fail mode
 		// for every generated hook (see GuardrailConfig.HookFailMode
 		// for the contract). Routed via EffectiveHookFailMode so the
@@ -2209,12 +2287,13 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 	s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
 
+	tel := s.otelSnapshot()
 	proxy, err := NewGuardrailProxy(
 		&s.currentConfig().Guardrail,
 		&s.currentConfig().CiscoAIDefense,
 		s.logger,
 		s.health,
-		s.otel,
+		tel,
 		s.store,
 		s.currentConfig().DataDir,
 		s.currentConfig().PolicyDir,
@@ -2223,8 +2302,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.currentConfig().ResolveLLM("guardrail.judge"),
 		conn,
 	)
-	if err == nil && s.webhooks != nil {
-		proxy.SetWebhookDispatcher(s.webhooks)
+	if webhooks := s.webhooksSnapshot(); err == nil && webhooks != nil {
+		proxy.SetWebhookDispatcher(webhooks)
 	}
 	if err == nil && proxy != nil {
 		s.setGuardrailProxy(proxy)
@@ -2884,10 +2963,11 @@ func stopHookConfigGuards(guards []*HookConfigGuard) {
 // notifyHookHealed fans a successful multi-connector hook re-install out to
 // webhooks. The durable audit row and OTel metric are emitted by the guard.
 func (s *Sidecar) notifyHookHealed(connectorName string, paths []string) {
-	if s == nil || s.webhooks == nil {
+	webhooks := s.webhooksSnapshot()
+	if webhooks == nil {
 		return
 	}
-	s.webhooks.Dispatch(audit.Event{
+	webhooks.Dispatch(audit.Event{
 		Timestamp: time.Now().UTC(),
 		Action:    string(audit.ActionConnectorHookRepaired),
 		Target:    connectorName,
@@ -2940,32 +3020,57 @@ func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector
 func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, proxyAddr, apiAddr string) (connector.SetupOpts, error) {
 	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
-	setupToken, err := connectorSetupAPIToken(s.currentConfig().DataDir, conn, apiToken)
+	setupTokens, err := connectorSetupTokensFor(s.currentConfig().DataDir, conn, apiToken, managed.IsManagedEnterprise(s.currentConfig().DeploymentMode))
 	if err != nil {
 		return connector.SetupOpts{}, err
 	}
 	return connector.SetupOpts{
-		DataDir:          s.currentConfig().DataDir,
-		ProxyAddr:        proxyAddr,
-		APIAddr:          apiAddr,
-		APIToken:         setupToken,
-		WorkspaceDir:     s.currentConfig().ConnectorWorkspaceDir(),
-		HookFailMode:     s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
-		HILTEnabled:      s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
-		InstallCodeGuard: false,
-		AgentVersion:     agentVersion,
-		HookContractID:   contractResolution.Contract.ContractID,
+		DataDir:            s.currentConfig().DataDir,
+		ProxyAddr:          proxyAddr,
+		APIAddr:            apiAddr,
+		APIToken:           setupTokens.connectorToken,
+		HookAPIToken:       setupTokens.hookToken,
+		HookAPITokenScoped: setupTokens.hookTokenScoped,
+		WorkspaceDir:       s.currentConfig().ConnectorWorkspaceDir(),
+		HookFailMode:       s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
+		HILTEnabled:        s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
+		InstallCodeGuard:   false,
+		AgentVersion:       agentVersion,
+		HookContractID:     contractResolution.Contract.ContractID,
 	}, nil
 }
 
-func connectorSetupAPIToken(dataDir string, conn connector.Connector, gatewayToken string) (string, error) {
-	if conn == nil || connector.IsProxyConnector(conn.Name()) {
-		return gatewayToken, nil
+type connectorSetupTokens struct {
+	connectorToken  string
+	hookToken       string
+	hookTokenScoped bool
+}
+
+func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayToken string, managedMode bool) (connectorSetupTokens, error) {
+	fallback := connectorSetupTokens{connectorToken: gatewayToken, hookToken: gatewayToken}
+	if conn == nil {
+		return fallback, nil
 	}
-	if _, ok := conn.(connector.HookScriptOwner); !ok {
-		return gatewayToken, nil
+	_, hasHookEndpoint := conn.(connector.HookEndpoint)
+	needsHookToken := hasHookEndpoint || connector.IsProxyConnector(conn.Name()) || connector.OwnsManagedHookRuntime(conn)
+	if !needsHookToken {
+		return fallback, nil
 	}
-	return connector.EnsureHookAPIToken(dataDir, conn.Name())
+	scoped, err := connector.EnsureHookAPIToken(dataDir, conn.Name())
+	if err != nil {
+		if managedMode {
+			return connectorSetupTokens{}, err
+		}
+		// Unmanaged installs historically allowed symlinked/group-writable data
+		// directories. Preserve setup by falling back to the already-configured
+		// master token and a legacy .token sidecar instead of aborting protection.
+		return fallback, nil
+	}
+	out := connectorSetupTokens{connectorToken: scoped, hookToken: scoped, hookTokenScoped: true}
+	if connector.IsProxyConnector(conn.Name()) {
+		out.connectorToken = gatewayToken
+	}
+	return out, nil
 }
 
 // setupOneConnector performs the full setup-and-verify sequence for a single
@@ -3414,7 +3519,8 @@ func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connec
 
 // runAIDiscovery starts continuous shadow-AI visibility when enabled.
 func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
-	if s.aiDiscovery == nil {
+	aiDiscovery := s.aiDiscoverySnapshot()
+	if aiDiscovery == nil {
 		s.health.SetAIDiscovery(StateDisabled, "", nil)
 		<-ctx.Done()
 		return ctx.Err()
@@ -3428,7 +3534,7 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 	})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- s.aiDiscovery.Run(ctx)
+		errCh <- aiDiscovery.Run(ctx)
 	}()
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -3446,7 +3552,7 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 			s.health.SetAIDiscovery(StateStopped, "", nil)
 			return nil
 		case <-ticker.C:
-			report := s.aiDiscovery.Snapshot()
+			report := aiDiscovery.Snapshot()
 			s.health.SetAIDiscovery(StateRunning, "", map[string]interface{}{
 				"mode":            report.Summary.PrivacyMode,
 				"last_scan":       report.Summary.ScannedAt.Format(time.RFC3339),
@@ -3474,9 +3580,13 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	addr := fmt.Sprintf("%s:%d", bind, s.currentConfig().Gateway.APIPort)
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
+	if s.configMgr != nil {
+		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)
+	}
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
-	api.SetOTelProvider(s.otel)
+	tel := s.otelSnapshot()
+	api.SetOTelProvider(tel)
 	api.SetHILTApprovalManager(s.hilt)
 	// Wire the Cisco AI Defense inspector onto the API server so the
 	// hook lane (inspectToolPolicy / inspectMessageContent) can forward
@@ -3485,7 +3595,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// when no key resolves; the hook lane silently skips AID in that
 	// case and falls back to the regex + CodeGuard verdict.
 	if cisco := NewCiscoInspectClient(&s.currentConfig().CiscoAIDefense, filepath.Join(s.currentConfig().DataDir, ".env")); cisco != nil {
-		cisco.SetTelemetry(s.otel)
+		cisco.SetTelemetry(tel)
 		api.SetCiscoInspector(cisco)
 	}
 	// Wire the LLM judge onto the API server so hook connectors listed
@@ -3497,7 +3607,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	if s.judge != nil {
 		api.SetHookJudge(s.judge)
 	}
-	api.SetAIDiscoveryService(s.aiDiscovery)
+	api.SetAIDiscoveryService(s.aiDiscoverySnapshot())
 	api.SetNotifier(s.osNotifier)
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
@@ -3633,7 +3743,8 @@ func (h destinationDeliveryHealth) MarshalJSON() ([]byte, error) {
 }
 
 func (s *Sidecar) reportTelemetryHealth() {
-	if s.otel == nil || !s.otel.Enabled() {
+	tel := s.otelSnapshot()
+	if tel == nil || !tel.Enabled() {
 		s.health.SetTelemetry(StateDisabled, "", nil)
 		return
 	}
@@ -3653,12 +3764,12 @@ func (s *Sidecar) reportTelemetryHealth() {
 			}
 			if destination.Traces.Enabled {
 				entry["delivery"] = destinationDeliveryHealth{
-					provider: s.otel, destination: destination.Name,
+					provider: tel, destination: destination.Name,
 				}
 			}
 			if destination.SpanFilter.Enabled() {
 				entry["routing"] = destinationRoutingHealth{
-					provider: s.otel, destination: destination.Name,
+					provider: tel, destination: destination.Name,
 				}
 			}
 			destinations = append(destinations, entry)

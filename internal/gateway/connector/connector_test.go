@@ -3740,21 +3740,57 @@ func TestWriteAllHookScripts_CreatesAllFour(t *testing.T) {
 func TestOpenClawHookWriter_WritesGenericHooksOnly(t *testing.T) {
 	dataDir := t.TempDir()
 	hookDir := filepath.Join(dataDir, "hooks")
-	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hook dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=gateway-master\n"), 0o600); err != nil {
+		t.Fatalf("seed legacy master-token sidecar: %v", err)
+	}
+	opts := SetupOpts{
+		DataDir:            dataDir,
+		APIAddr:            "127.0.0.1:18970",
+		APIToken:           "gateway-master",
+		HookAPIToken:       "openclaw-scoped",
+		HookAPITokenScoped: true,
+	}
 
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewOpenClawConnector()); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 
 	for _, name := range genericHookScripts {
-		if _, err := os.Stat(filepath.Join(hookDir, name)); err != nil {
+		path := filepath.Join(hookDir, name)
+		if _, err := os.Stat(path); err != nil {
 			t.Errorf("generic hook %s not created under hookDir: %v", name, err)
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read generic hook %s: %v", name, err)
+		}
+		if !strings.Contains(string(body), ".hook-openclaw.token") {
+			t.Errorf("generic hook %s does not reference connector-scoped token sidecar", name)
+		}
+		if !strings.Contains(string(body), "X-DefenseClaw-Connector: openclaw") {
+			t.Errorf("generic hook %s does not bind scoped token to OpenClaw", name)
 		}
 	}
 	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "hermes-hook.sh"} {
 		if _, err := os.Stat(filepath.Join(hookDir, name)); !os.IsNotExist(err) {
 			t.Errorf("OpenClaw hook writer should not create vendor hook %s, stat err=%v", name, err)
 		}
+	}
+	scopedToken, err := os.ReadFile(filepath.Join(hookDir, ".hook-openclaw.token"))
+	if err != nil {
+		t.Fatalf("read OpenClaw scoped token: %v", err)
+	}
+	if strings.TrimSpace(string(scopedToken)) != "openclaw-scoped" {
+		t.Fatalf("OpenClaw scoped sidecar = %q, want least-privilege hook token", strings.TrimSpace(string(scopedToken)))
+	}
+	if bytes.Contains(scopedToken, []byte("gateway-master")) {
+		t.Fatal("OpenClaw scoped token sidecar leaked the master gateway token")
+	}
+	if _, err := os.Lstat(filepath.Join(hookDir, ".token")); !os.IsNotExist(err) {
+		t.Fatalf("legacy master-token sidecar survived scoped rewrite: %v", err)
 	}
 }
 
@@ -5537,6 +5573,40 @@ func TestManagedEnterpriseHookIgnoresUserControlledHomeAndDisableSentinel(t *tes
 	}
 	if !strings.Contains(rendered, `DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"`) {
 		t.Fatal("managed hook does not derive its data directory from the verified hook path")
+	}
+	if !strings.Contains(rendered, "DEFENSECLAW_MANAGED_HOOK=1") {
+		t.Fatal("managed hook does not force fail-closed transport and missing-token behavior")
+	}
+}
+
+func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks are not used on Windows")
+	}
+	dir := t.TempDir()
+	opts := SetupOpts{
+		APIAddr:           "127.0.0.1:1",
+		APIToken:          "scoped-token",
+		ManagedEnterprise: true,
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	tokenPath, err := HookTokenFilePath(dir, "codex")
+	if err != nil {
+		t.Fatalf("HookTokenFilePath: %v", err)
+	}
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatalf("remove token: %v", err)
+	}
+
+	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_STRICT_AVAILABILITY=0")
+	err = cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("managed missing-token hook error = %v, want exit 2", err)
 	}
 }
 

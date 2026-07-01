@@ -1172,6 +1172,60 @@ class MigrateSplunkTests(unittest.TestCase):
         hec_names_second = sorted(d.name for d in dests_after_second if d.kind == "splunk_hec")
         self.assertEqual(hec_names_first, hec_names_second)
 
+    def test_managed_migrate_apply_is_rejected_without_modifying_config(self) -> None:
+        cfg_path = os.path.join(self.tmp, "config.yaml")
+        with open(cfg_path) as f:
+            raw = yaml.safe_load(f)
+        raw["deployment_mode"] = "managed_enterprise"
+        with open(cfg_path, "w") as f:
+            yaml.safe_dump(raw, f, sort_keys=False)
+        with open(cfg_path, "rb") as f:
+            before = f.read()
+
+        with patch("defenseclaw.config._is_admin_process", return_value=False):
+            result = self.runner.invoke(
+                observability_cmd,
+                ["migrate-splunk", "--apply"],
+                obj=self.app,
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIsInstance(result.exception, PermissionError)
+        with open(cfg_path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_managed_duplicate_cleanup_is_rejected_without_modifying_config(self) -> None:
+        cfg_path = os.path.join(self.tmp, "config.yaml")
+        with open(cfg_path) as f:
+            raw = yaml.safe_load(f)
+        raw["deployment_mode"] = "managed_enterprise"
+        raw["audit_sinks"] = [
+            {
+                "name": "existing-splunk",
+                "kind": "splunk_hec",
+                "enabled": True,
+                "splunk_hec": {
+                    "endpoint": "https://splunk.example.com:8088/services/collector/event",
+                },
+            }
+        ]
+        with open(cfg_path, "w") as f:
+            yaml.safe_dump(raw, f, sort_keys=False)
+        with open(cfg_path, "rb") as f:
+            before = f.read()
+
+        with patch("defenseclaw.config._is_admin_process", return_value=False):
+            result = self.runner.invoke(
+                observability_cmd,
+                ["migrate-splunk", "--apply"],
+                obj=self.app,
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIsInstance(result.exception, PermissionError)
+        with open(cfg_path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

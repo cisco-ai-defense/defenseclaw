@@ -9,7 +9,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -114,7 +113,7 @@ def test_systemd_hook_guardian_reconcile_timer_and_manifest_contract():
     assert "Persistent=true" in timer_text
     assert "Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment" in timer_text
     assert "d /etc/defenseclaw/hook-guardian 0750 root defenseclaw -" in tmpfiles_text
-    assert "d /var/lib/defenseclaw-hook-guardian 0755 root root -" in tmpfiles_text
+    assert "d /var/lib/defenseclaw-hook-guardian 0750 root defenseclaw -" in tmpfiles_text
     assert "version: 1" in sample_text
     assert "connector: codex" in sample_text
 
@@ -196,6 +195,9 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
         'install_file_atomic "$CONFIG_SOURCE" "$CONFIG_DEST" root "$SERVICE_GROUP" 0640',
         'assert_path_metadata "$CONFIG_DEST" file 0 "$SERVICE_GID" 640',
         'refuse_symlink "$CONFIG_DEST"',
+        "assert_no_write_acl()",
+        'assert_no_write_acl "$path"',
+        "write-capable macOS ACL is not trusted",
         'EnvironmentVariables',
         'DEFENSECLAW_DEPLOYMENT_MODE',
     }
@@ -205,3 +207,7 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "macos-enterprise-packaging:" in workflow
     assert "./scripts/test-macos-enterprise-packaging.sh" in workflow
+
+    smoke = (ROOT / "scripts" / "test-macos-enterprise-packaging.sh").read_text(encoding="utf-8")
+    assert "everyone allow add_file,add_subdirectory,delete_child" in smoke
+    assert "installer accepted a write-capable managed-root ACL" in smoke

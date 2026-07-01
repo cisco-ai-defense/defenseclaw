@@ -63,6 +63,7 @@ func TestEvaluateClaudeCodeHook_ActiveConnectorImpliesEnabled(t *testing.T) {
 
 func TestClaudeCodeEnabled_AutomaticSourceNotLazyHealthCounter(t *testing.T) {
 	cfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
+	cfg.ApplicationProtection.Enabled = true
 	health := NewSidecarHealth()
 	health.RecordConnectorRequestFor("claudecode")
 	api := &APIServer{scannerCfg: cfg, health: health}

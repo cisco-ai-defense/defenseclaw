@@ -2404,7 +2404,12 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	// hash is still stable across identical in-memory configs.
 	seedProvenanceOnLoad(configFile, &cfg)
 
-	if migrateRuntime {
+	// Managed-enterprise config is an administrator-owned trust boundary while
+	// data_dir is intentionally writable by the lower-privilege service account.
+	// Never let ordinary gateway or root guardian startup promote legacy runtime
+	// state across that boundary. Managed upgrades must migrate config through an
+	// explicit administrator-controlled workflow; config.yaml remains authoritative.
+	if guardrailRuntimeMigrationAllowed(migrateRuntime, cfg.DeploymentMode) {
 		migrated, err := MigrateGuardrailRuntimeFile(configFile, cfg.DataDir)
 		if err != nil {
 			if ReportConfigLoadError != nil {
@@ -2418,6 +2423,10 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
+	return requested && !managed.IsManagedEnterprise(deploymentMode)
 }
 
 func warnDisableRedactionConfig(cfg *Config) {
@@ -3234,7 +3243,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("ai_discovery.require_trusted_binary_paths", false)
 	viper.SetDefault("ai_discovery.trusted_binary_prefixes", []string{})
 
-	viper.SetDefault("application_protection.enabled", true)
+	viper.SetDefault("application_protection.enabled", false)
 	viper.SetDefault("application_protection.min_confidence", DefaultApplicationProtectionMinConfidence)
 	viper.SetDefault("application_protection.remove_when_gone", false)
 	viper.SetDefault("application_protection.gone_after_min", DefaultApplicationProtectionGoneAfterMin)

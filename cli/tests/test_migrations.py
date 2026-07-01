@@ -1710,6 +1710,38 @@ class TestMigrate080Compatibility(unittest.TestCase):
         _migrate_0_8_0(ctx2)
         self.assertFalse(any("guardrail_runtime.json" in c for c in ctx2.changes))
 
+    def test_managed_config_never_consumes_service_runtime_overlay(self):
+        runtime_path = os.path.join(self.data_dir, "guardrail_runtime.json")
+        self._write(
+            "deployment_mode: managed_enterprise\n"
+            "guardrail:\n"
+            "  mode: action\n"
+        )
+        _write_json(runtime_path, {"mode": "observe"})
+        before = self._read()
+
+        ctx = self._ctx()
+        _migrate_0_8_0_guardrail_runtime_json(ctx)
+
+        self.assertEqual(self._read(), before)
+        self.assertTrue(os.path.exists(runtime_path))
+        self.assertFalse(ctx.changes)
+
+    def test_environment_pinned_managed_mode_blocks_legacy_overlay(self):
+        runtime_path = os.path.join(self.data_dir, "guardrail_runtime.json")
+        self._write("guardrail:\n  mode: action\n")
+        _write_json(runtime_path, {"mode": "observe"})
+        before = self._read()
+
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_DEPLOYMENT_MODE": "managed_enterprise"},
+        ):
+            _migrate_0_8_0_guardrail_runtime_json(self._ctx())
+
+        self.assertEqual(self._read(), before)
+        self.assertTrue(os.path.exists(runtime_path))
+
     def test_preserves_runtime_overlay_when_supported_value_is_invalid(self):
         runtime_path = os.path.join(self.data_dir, "guardrail_runtime.json")
         self._write("guardrail:\n  mode: observe\n")

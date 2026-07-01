@@ -20,8 +20,8 @@ func appBoolPtr(v bool) *bool        { return &v }
 
 func TestDefaultConfigApplicationProtection(t *testing.T) {
 	cfg := DefaultConfig()
-	if !cfg.ApplicationProtection.Enabled {
-		t.Fatal("DefaultConfig().ApplicationProtection.Enabled = false, want true")
+	if cfg.ApplicationProtection.Enabled {
+		t.Fatal("DefaultConfig().ApplicationProtection.Enabled = true, want opt-in false")
 	}
 	if cfg.ApplicationProtection.MinConfidence != DefaultApplicationProtectionMinConfidence {
 		t.Errorf("MinConfidence = %v, want %v", cfg.ApplicationProtection.MinConfidence, DefaultApplicationProtectionMinConfidence)
@@ -49,6 +49,7 @@ func TestApplicationProtectionPolicyOverlay(t *testing.T) {
 	cfg.Guardrail.HILT = HILTConfig{Enabled: false, MinSeverity: "HIGH"}
 	cfg.AssetPolicy.Mode = AssetPolicyModeObserve
 	cfg.ApplicationProtection = DefaultApplicationProtectionConfig()
+	cfg.ApplicationProtection.Enabled = true
 	cfg.ApplicationProtection.Connectors = map[string]ApplicationProtectionConnectorConfig{
 		"codex": {
 			MinConfidence: appFloatPtr(0.91),
@@ -100,6 +101,7 @@ func TestApplicationProtectionAutomaticModesDefaultObserve(t *testing.T) {
 	cfg.Guardrail.Mode = "action"
 	cfg.AssetPolicy.Mode = AssetPolicyModeAction
 	cfg.ApplicationProtection = DefaultApplicationProtectionConfig()
+	cfg.ApplicationProtection.Enabled = true
 
 	if got := cfg.EffectiveGuardrailModeForConnector("codex"); got != "observe" {
 		t.Errorf("EffectiveGuardrailModeForConnector(codex) = %q, want observe", got)
@@ -114,6 +116,7 @@ func TestApplicationProtectionTopLevelActionOptIn(t *testing.T) {
 	cfg.Guardrail.Mode = "observe"
 	cfg.AssetPolicy.Mode = AssetPolicyModeObserve
 	cfg.ApplicationProtection = DefaultApplicationProtectionConfig()
+	cfg.ApplicationProtection.Enabled = true
 	cfg.ApplicationProtection.Guardrail.Mode = "action"
 	cfg.ApplicationProtection.AssetPolicy.Mode = AssetPolicyModeAction
 
@@ -189,6 +192,7 @@ func TestApplicationProtectionValidateRejectsBadValues(t *testing.T) {
 
 func TestApplicationProtectionEffectiveEnabled(t *testing.T) {
 	cfg := DefaultApplicationProtectionConfig()
+	cfg.Enabled = true
 	cfg.Connectors = map[string]ApplicationProtectionConnectorConfig{
 		"codex": {Enabled: appBoolPtr(false)},
 	}

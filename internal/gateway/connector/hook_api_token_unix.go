@@ -141,6 +141,12 @@ func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowSticky
 }
 
 func hookAPITrustedOwner(uid uint32) bool {
+	// Current-UID ownership is intentional for unmanaged/OSS installs, where
+	// the gateway and ~/.defenseclaw belong to the interactive user. Managed
+	// mode is separately pinned to the packaged defenseclaw service account and
+	// validates the entire data-dir chain during config load before this token
+	// helper is reachable; in that mode current UID is therefore the trusted
+	// defenseclaw service UID, not an arbitrary desktop user.
 	if uid == 0 || int(uid) == os.Getuid() {
 		return true
 	}

@@ -111,8 +111,8 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if connector.IsProxyConnector(conn.Name()) {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q is proxy/plugin setup-only; per-user hook install is not supported", conn.Name())
 	}
-	if _, ok := conn.(connector.HookScriptOwner); !ok {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q does not own a hook script", conn.Name())
+	if !connector.OwnsManagedHookRuntime(conn) {
+		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q does not own a managed hook runtime", conn.Name())
 	}
 	if !connector.ConnectorSupportedOnHostOS(conn.Name()) {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q is not supported on this host OS", conn.Name())

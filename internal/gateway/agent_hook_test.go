@@ -1054,6 +1054,7 @@ func TestAgentHookEnabled_SingleConnectorUnchanged(t *testing.T) {
 
 func TestAgentHookEnabled_AutomaticSourceNotLazyHealthCounter(t *testing.T) {
 	cfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
+	cfg.ApplicationProtection.Enabled = true
 	health := NewSidecarHealth()
 	health.RecordConnectorRequestFor("codex")
 	a := &APIServer{scannerCfg: cfg, health: health}

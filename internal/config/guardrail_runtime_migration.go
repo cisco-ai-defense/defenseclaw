@@ -19,6 +19,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,8 +29,8 @@ const GuardrailRuntimeFileName = "guardrail_runtime.json"
 
 // MigrateGuardrailRuntimeFile folds the removed guardrail_runtime.json overlay
 // into config.yaml and deletes the overlay after the patched config validates.
-// The runtime file is no longer a live config source; a migration failure is
-// fatal so the gateway never runs with split-brain guardrail posture.
+// The legacy overlay was historically best-effort, so malformed or unreadable
+// state is warned about and preserved rather than preventing gateway startup.
 func MigrateGuardrailRuntimeFile(configFile, dataDir string) (bool, error) {
 	if strings.TrimSpace(dataDir) == "" {
 		return false, nil
@@ -40,37 +41,52 @@ func MigrateGuardrailRuntimeFile(configFile, dataDir string) (bool, error) {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("config: read legacy %s: %w", runtimeFile, err)
+		log.Printf("WARNING: config: cannot read legacy %s; preserving it for repair: %v", runtimeFile, err)
+		return false, nil
 	}
 
 	updates, err := guardrailRuntimeUpdates(data)
 	if err != nil {
-		return false, fmt.Errorf("config: migrate legacy %s: %w", runtimeFile, err)
+		// The legacy overlay was historically best-effort. A stale or hand-edited
+		// value must not brick gateway startup during an upgrade; preserve the
+		// file for operator repair and continue using the validated config.yaml.
+		log.Printf("WARNING: config: preserving invalid legacy %s for repair: %v", runtimeFile, err)
+		return false, nil
 	}
 
 	original, readErr := os.ReadFile(configFile)
 	originalExisted := readErr == nil
+	originalMode := os.FileMode(0o600)
 	if readErr != nil && !os.IsNotExist(readErr) {
-		return false, fmt.Errorf("config: read %s before migration: %w", configFile, readErr)
+		log.Printf("WARNING: config: cannot read %s before legacy runtime migration; preserving %s: %v", configFile, runtimeFile, readErr)
+		return false, nil
+	}
+	if originalExisted {
+		if info, statErr := os.Stat(configFile); statErr == nil {
+			originalMode = info.Mode().Perm()
+		}
 	}
 	if len(updates) > 0 && !originalExisted {
-		return false, fmt.Errorf("config: cannot migrate legacy %s: primary config %s does not exist", runtimeFile, configFile)
+		log.Printf("WARNING: config: cannot migrate legacy %s because primary config %s does not exist; preserving it for repair", runtimeFile, configFile)
+		return false, nil
 	}
 
 	if len(updates) > 0 {
 		if err := PatchYAMLFile(configFile, updates); err != nil {
-			return false, fmt.Errorf("config: patch %s from legacy runtime: %w", configFile, err)
+			log.Printf("WARNING: config: cannot patch %s from legacy %s; preserving it for repair: %v", configFile, runtimeFile, err)
+			return false, nil
 		}
 		if _, err := loadFromFile(configFile, false); err != nil {
-			if restoreErr := restoreConfigAfterFailedMigration(configFile, original, originalExisted); restoreErr != nil {
+			if restoreErr := restoreConfigAfterFailedMigration(configFile, original, originalMode, originalExisted); restoreErr != nil {
 				return false, fmt.Errorf("config: patched config invalid after legacy runtime migration: %w; restore failed: %v", err, restoreErr)
 			}
-			return false, fmt.Errorf("config: patched config invalid after legacy runtime migration: %w", err)
+			log.Printf("WARNING: config: legacy %s produced an invalid config; restored %s and preserved the runtime file for repair: %v", runtimeFile, configFile, err)
+			return false, nil
 		}
 	}
 
 	if err := os.Remove(runtimeFile); err != nil && !os.IsNotExist(err) {
-		return false, fmt.Errorf("config: delete legacy %s after migration: %w", runtimeFile, err)
+		log.Printf("WARNING: config: migrated legacy %s but could not delete it: %v", runtimeFile, err)
 	}
 	return true, nil
 }
@@ -88,6 +104,7 @@ func guardrailRuntimeUpdates(data []byte) (map[string]any, error) {
 			if err != nil {
 				return nil, err
 			}
+			s = strings.ToLower(s)
 			if s != "observe" && s != "action" {
 				return nil, fmt.Errorf("%s must be observe or action", key)
 			}
@@ -97,6 +114,7 @@ func guardrailRuntimeUpdates(data []byte) (map[string]any, error) {
 			if err != nil {
 				return nil, err
 			}
+			s = strings.ToLower(s)
 			if s != "local" && s != "remote" && s != "both" {
 				return nil, fmt.Errorf("%s must be local, remote, or both", key)
 			}
@@ -112,7 +130,7 @@ func guardrailRuntimeUpdates(data []byte) (map[string]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			updates["guardrail.connector"] = s
+			updates["guardrail.connector"] = strings.ToLower(s)
 		case "hilt_enabled":
 			b, err := runtimeBoolValue(value, key)
 			if err != nil {
@@ -124,8 +142,17 @@ func guardrailRuntimeUpdates(data []byte) (map[string]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			updates["guardrail.hilt.min_severity"] = strings.ToUpper(s)
+			s = strings.ToUpper(s)
+			switch s {
+			case "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO":
+				updates["guardrail.hilt.min_severity"] = s
+			default:
+				return nil, fmt.Errorf("%s must be CRITICAL, HIGH, MEDIUM, LOW, or INFO", key)
+			}
 		}
+	}
+	if len(raw) > 0 && len(updates) == 0 {
+		return nil, fmt.Errorf("legacy runtime contains no supported values")
 	}
 	return updates, nil
 }
@@ -157,9 +184,9 @@ func runtimeBoolValue(value any, key string) (bool, error) {
 	return false, fmt.Errorf("%s must be a boolean", key)
 }
 
-func restoreConfigAfterFailedMigration(path string, original []byte, existed bool) error {
+func restoreConfigAfterFailedMigration(path string, original []byte, mode os.FileMode, existed bool) error {
 	if existed {
-		return writeFileAtomic(path, original, 0o600)
+		return writeFileAtomic(path, original, mode)
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err

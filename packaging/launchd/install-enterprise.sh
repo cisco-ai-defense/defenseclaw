@@ -51,6 +51,30 @@ refuse_symlink() {
     [ ! -L "$path" ] || die "refusing symlink path: $path"
 }
 
+assert_no_write_acl() {
+    local path="$1"
+    local output line normalized permissions permission
+    local -a acl_permissions
+    output="$(/bin/ls -lde -- "$path")" || die "cannot inspect macOS ACL: $path"
+    while IFS= read -r line; do
+        normalized="$(printf '%s' "$line" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+        normalized="${normalized#"${normalized%%[![:space:]]*}"}"
+        [[ "$normalized" =~ ^[0-9]+: ]] || continue
+        [[ "$normalized" == *" allow "* ]] || continue
+        permissions="${normalized#* allow }"
+        permissions="${permissions%% *}"
+        [ -n "$permissions" ] || die "cannot parse macOS allow ACL: $path"
+        IFS=',' read -r -a acl_permissions <<<"$permissions"
+        for permission in "${acl_permissions[@]}"; do
+            case "$permission" in
+                write|add_file|append|add_subdirectory|delete|delete_child|writeattr|writeextattr|writesecurity|chown)
+                    die "write-capable macOS ACL is not trusted: $path"
+                    ;;
+            esac
+        done
+    done <<<"$output"
+}
+
 require_regular_source() {
     local path="$1"
     local label="$2"
@@ -64,10 +88,22 @@ assert_trusted_system_dir() {
     local uid mode
     refuse_symlink "$path"
     [ -d "$path" ] || die "required system directory is missing: $path"
+    assert_no_write_acl "$path"
     uid="$(/usr/bin/stat -f '%u' "$path")"
     mode="$(/usr/bin/stat -f '%Lp' "$path")"
     [ "$uid" = 0 ] || die "system directory is not root-owned: $path"
     [ $((8#$mode & 8#022)) -eq 0 ] || die "system directory is group/other writable: $path ($mode)"
+}
+
+assert_existing_acl_safe_dir_or_absent() {
+    local path="$1"
+    [ -e "$path" ] || {
+        refuse_symlink "$path"
+        return
+    }
+    refuse_symlink "$path"
+    [ -d "$path" ] || die "required directory path is not a directory: $path"
+    assert_no_write_acl "$path"
 }
 
 assert_existing_secure_dir_or_absent() {
@@ -92,6 +128,7 @@ assert_path_metadata() {
         dir) [ -d "$path" ] || die "installed path is not a directory: $path" ;;
         *) die "unknown metadata kind: $kind" ;;
     esac
+    assert_no_write_acl "$path"
     uid="$(/usr/bin/stat -f '%u' "$path")"
     gid="$(/usr/bin/stat -f '%g' "$path")"
     mode="$(/usr/bin/stat -f '%Lp' "$path")"
@@ -207,11 +244,12 @@ assert_trusted_system_dir "/Library/Application Support"
 assert_trusted_system_dir /Library/LaunchDaemons
 assert_trusted_system_dir /Library/Logs
 assert_existing_secure_dir_or_absent "$BINARY_ROOT"
+assert_existing_secure_dir_or_absent "$BIN_DIR"
 assert_existing_secure_dir_or_absent "$MANAGED_ROOT"
 assert_existing_secure_dir_or_absent "$GUARDIAN_DIR"
 assert_existing_secure_dir_or_absent "$AUTH_DIR"
-refuse_symlink "$RUNTIME_DIR"
-refuse_symlink "$LOG_DIR"
+assert_existing_acl_safe_dir_or_absent "$RUNTIME_DIR"
+assert_existing_acl_safe_dir_or_absent "$LOG_DIR"
 refuse_symlink "$CONFIG_DEST"
 
 for destination in \
@@ -221,6 +259,9 @@ for destination in \
     "$GATEWAY_PLIST_DEST" \
     "$GUARDIAN_PLIST_DEST"; do
     refuse_symlink "$destination"
+    if [ -e "$destination" ]; then
+        assert_no_write_acl "$destination"
+    fi
 done
 
 stop_job_if_loaded com.defenseclaw.hook-guardian

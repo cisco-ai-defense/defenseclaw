@@ -84,8 +84,9 @@ func failingHookTokenDataDir(t *testing.T) string {
 func TestRunActiveGuardrailPublishesScopedTokenFailure(t *testing.T) {
 	s := &Sidecar{
 		cfg: &config.Config{
-			DataDir: failingHookTokenDataDir(t),
-			Gateway: config.GatewayConfig{Token: "gateway-token"},
+			DataDir:        failingHookTokenDataDir(t),
+			DeploymentMode: string(config.DeploymentModeManagedEnterprise),
+			Gateway:        config.GatewayConfig{Token: "gateway-token"},
 			Guardrail: config.GuardrailConfig{
 				Enabled:   true,
 				Connector: "codex",
@@ -278,6 +279,7 @@ func TestSetupConnectorsIsolated_AllFailReturnsEmpty(t *testing.T) {
 func TestSetupConnectorsIsolatedPreflightsAllScopedTokens(t *testing.T) {
 	s := multiBootSidecar(t)
 	s.cfg.DataDir = failingHookTokenDataDir(t)
+	s.cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
 	first := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 	second := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "cursor"}}}
 
@@ -422,8 +424,9 @@ func TestStartMultiHookConfigGuardsFailsClosedWhenScopedTokenFails(t *testing.T)
 	reg.RegisterBuiltin(conn)
 	s := &Sidecar{
 		cfg: &config.Config{
-			DataDir:   failingHookTokenDataDir(t),
-			Guardrail: config.GuardrailConfig{Enabled: true, HookSelfHeal: true},
+			DataDir:        failingHookTokenDataDir(t),
+			DeploymentMode: string(config.DeploymentModeManagedEnterprise),
+			Guardrail:      config.GuardrailConfig{Enabled: true, HookSelfHeal: true},
 		},
 	}
 
@@ -445,8 +448,9 @@ func TestStartMultiHookConfigGuardsStopsEarlierGuardsOnLaterTokenFailure(t *test
 	reg.RegisterBuiltin(second)
 	s := &Sidecar{
 		cfg: &config.Config{
-			DataDir:   failingHookTokenDataDir(t),
-			Guardrail: config.GuardrailConfig{Enabled: true, HookSelfHeal: true},
+			DataDir:        failingHookTokenDataDir(t),
+			DeploymentMode: string(config.DeploymentModeManagedEnterprise),
+			Guardrail:      config.GuardrailConfig{Enabled: true, HookSelfHeal: true},
 		},
 	}
 	originalFactory := newSidecarHookConfigGuard
@@ -475,6 +479,43 @@ func TestStartMultiHookConfigGuardsStopsEarlierGuardsOnLaterTokenFailure(t *test
 	created[0].mu.Unlock()
 	if started {
 		t.Fatal("earlier hook guard remained started after a later scoped-token failure")
+	}
+}
+
+func TestConnectorSetupTokensUnmanagedFallsBackToMasterToken(t *testing.T) {
+	conn := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "codex"}}}
+	tokens, err := connectorSetupTokensFor(failingHookTokenDataDir(t), conn, "gateway-token", false)
+	if err != nil {
+		t.Fatalf("connectorSetupTokensFor unmanaged fallback: %v", err)
+	}
+	if tokens.connectorToken != "gateway-token" || tokens.hookToken != "gateway-token" {
+		t.Fatalf("fallback tokens = %+v, want master gateway token", tokens)
+	}
+	if tokens.hookTokenScoped {
+		t.Fatal("unmanaged fallback mislabeled master token as connector-scoped")
+	}
+}
+
+func TestConnectorSetupTokensProxyKeepsMasterOutOfScopedSidecar(t *testing.T) {
+	tokens, err := connectorSetupTokensFor(t.TempDir(), connector.NewOpenClawConnector(), "gateway-master", false)
+	if err != nil {
+		t.Fatalf("connectorSetupTokensFor proxy: %v", err)
+	}
+	if tokens.connectorToken != "gateway-master" {
+		t.Fatalf("proxy connector token = %q, want gateway master", tokens.connectorToken)
+	}
+	if !tokens.hookTokenScoped || tokens.hookToken == "" || tokens.hookToken == "gateway-master" {
+		t.Fatalf("proxy hook token = %+v, want distinct connector-scoped credential", tokens)
+	}
+}
+
+func TestConnectorSetupTokensOmnigentGetsScopedToken(t *testing.T) {
+	tokens, err := connectorSetupTokensFor(t.TempDir(), connector.NewOmnigentConnector(), "gateway-master", false)
+	if err != nil {
+		t.Fatalf("connectorSetupTokensFor omnigent: %v", err)
+	}
+	if !tokens.hookTokenScoped || tokens.connectorToken == "" || tokens.connectorToken == "gateway-master" {
+		t.Fatalf("OmniGent tokens = %+v, want connector-scoped policy credential", tokens)
 	}
 }
 

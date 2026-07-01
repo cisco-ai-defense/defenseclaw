@@ -43,12 +43,13 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 
 // templateData holds the values injected into hook and shim templates.
 type templateData struct {
-	APIAddr     string
-	APIToken    string // gateway bearer token; empty when unconfigured (loopback-allow)
-	FailMode    string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
-	Managed     bool
-	TokenFile   string
-	ScopedToken bool
+	APIAddr       string
+	APIToken      string // gateway bearer token; empty when unconfigured (loopback-allow)
+	FailMode      string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	Managed       bool
+	TokenFile     string
+	ScopedToken   bool
+	ConnectorName string
 }
 
 // defaultHookFailMode is the fail mode injected into the response-
@@ -436,15 +437,19 @@ func writeHookScriptsCommon(hookDir, apiAddr, token string, extras []string) err
 }
 
 func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string, extras []string) error {
-	return writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode, extras, false, "")
+	return writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode, extras, false, "", false)
 }
 
-func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string) error {
+func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
 
-	tokenFile, err := writeHookTokenFiles(hookDir, connectorName, token)
+	tokenScope := ""
+	if scopedToken {
+		tokenScope = connectorName
+	}
+	tokenFile, err := writeHookTokenFiles(hookDir, tokenScope, token)
 	if err != nil {
 		return err
 	}
@@ -454,12 +459,13 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 	}
 
 	data := templateData{
-		APIAddr:     apiAddr,
-		APIToken:    "",
-		FailMode:    normalizeHookFailMode(failMode),
-		Managed:     managed,
-		TokenFile:   tokenFile,
-		ScopedToken: strings.TrimSpace(connectorName) != "",
+		APIAddr:       apiAddr,
+		APIToken:      "",
+		FailMode:      normalizeHookFailMode(failMode),
+		Managed:       managed,
+		TokenFile:     tokenFile,
+		ScopedToken:   scopedToken,
+		ConnectorName: strings.ToLower(strings.TrimSpace(connectorName)),
 	}
 
 	scripts := hookScriptNamesFromExtras(extras)
@@ -493,12 +499,13 @@ func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
 		}
 		return filepath.Base(legacyPath), nil
 	}
-	// Connector-scoped installs must not seed .token from a scoped
-	// credential. Existing upgrades retain any pre-existing legacy sidecar
-	// for old scripts, while clean installs avoid recreating the shared-token
-	// collision that breaks multi-connector authorization.
-	if _, err := os.Lstat(legacyPath); err != nil && !os.IsNotExist(err) {
-		return "", fmt.Errorf("inspect legacy hook token file: %w", err)
+	// Connector-scoped installs must not leave a legacy .token behind. Older
+	// releases put the master gateway bearer there, so retaining it on upgrade
+	// would preserve the exact cross-connector authority this migration removes.
+	// Setup rewrites every generated hook to the scoped basename before it
+	// returns, making removal safe for the managed artifacts in this directory.
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("remove legacy hook token file: %w", err)
 	}
 	scopedPath, err := HookTokenFilePath(hookDir, connectorName)
 	if err != nil {
@@ -592,7 +599,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	return writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, defaultHookFailMode, extras, false, c.Name())
+	return writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, defaultHookFailMode, extras, false, c.Name(), !IsProxyConnector(c.Name()))
 }
 
 // WriteHookScriptsForConnectorObjectWithOpts is the setup-time variant that
@@ -632,7 +639,16 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 			failMode = "open"
 		}
 	}
-	return writeHookScriptsCommonWithOptions(hookDir, opts.APIAddr, opts.APIToken, failMode, extras, opts.ManagedEnterprise, c.Name())
+	hookToken := opts.HookAPIToken
+	scopedToken := opts.HookAPITokenScoped
+	if strings.TrimSpace(hookToken) == "" {
+		hookToken = opts.APIToken
+		// Backward-compatible direct callers predate HookAPIToken. Preserve
+		// scoped sidecars for hook-native connectors, but never disguise a
+		// proxy connector's master token as connector-scoped.
+		scopedToken = !IsProxyConnector(c.Name())
+	}
+	return writeHookScriptsCommonWithOptions(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken)
 }
 
 // resolveHookFailMode picks the response-layer fail mode for a hook

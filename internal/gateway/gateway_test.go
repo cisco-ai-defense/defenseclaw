@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -61,6 +62,70 @@ func testStoreAndLogger(t *testing.T) (*audit.Store, *audit.Logger) {
 	}
 	t.Cleanup(func() { store.Close() })
 	return store, audit.NewLogger(store)
+}
+
+func bindTestConfigRuntime(t *testing.T, api *APIServer) {
+	t.Helper()
+	if api == nil || api.scannerCfg == nil {
+		t.Fatal("bindTestConfigRuntime requires an API config")
+	}
+	path := configFilePathForSnapshot(api.scannerCfg)
+	api.scannerCfg.ConfigFilePath = path
+	data, err := yaml.Marshal(map[string]any{
+		"config_version":  7,
+		"data_dir":        api.scannerCfg.DataDir,
+		"deployment_mode": api.scannerCfg.DeploymentMode,
+		"gateway": map[string]any{
+			"token": api.scannerCfg.Gateway.Token,
+			"config_reload": map[string]any{
+				"mode": api.scannerCfg.Gateway.ConfigReload.Mode,
+			},
+		},
+		"guardrail": map[string]any{
+			"enabled":       api.scannerCfg.Guardrail.Enabled,
+			"mode":          api.scannerCfg.Guardrail.Mode,
+			"scanner_mode":  api.scannerCfg.Guardrail.ScannerMode,
+			"block_message": api.scannerCfg.Guardrail.BlockMessage,
+			"connector":     api.scannerCfg.Guardrail.Connector,
+			"hilt": map[string]any{
+				"enabled":      api.scannerCfg.Guardrail.HILT.Enabled,
+				"min_severity": api.scannerCfg.Guardrail.HILT.MinSeverity,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal API config: %v", err)
+	}
+	if err := config.WriteFileAtomic(path, data, 0o600); err != nil {
+		t.Fatalf("write API config: %v", err)
+	}
+
+	initial, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("load API config: %v", err)
+	}
+	api.cfgMu.Lock()
+	api.scannerCfg = cloneConfig(initial)
+	api.cfgMu.Unlock()
+	var liveMu sync.RWMutex
+	live := cloneConfig(initial)
+	api.SetConfigRuntime(func(context.Context, string) error {
+		next, err := config.LoadFromFile(path)
+		if err != nil {
+			return err
+		}
+		liveMu.Lock()
+		live = next
+		liveMu.Unlock()
+		api.cfgMu.Lock()
+		api.scannerCfg = cloneConfig(next)
+		api.cfgMu.Unlock()
+		return nil
+	}, func() *config.Config {
+		liveMu.RLock()
+		defer liveMu.RUnlock()
+		return cloneConfig(live)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -5187,6 +5252,7 @@ func TestHandleGuardrailConfig_PatchRollbackOnWriteFailure(t *testing.T) {
 			},
 		},
 	}
+	api.SetConfigRuntime(func(context.Context, string) error { return nil }, nil)
 
 	body, _ := json.Marshal(map[string]string{
 		"mode":         "action",
@@ -5219,7 +5285,7 @@ func TestPatchGuardrailConfigFile_RestoresInvalidPatch(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
 	original := []byte("config_version: 6\ndata_dir: " + dir + "\ndeployment_mode: standalone\n")
-	if err := os.WriteFile(path, original, 0o600); err != nil {
+	if err := os.WriteFile(path, original, 0o640); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -5233,6 +5299,13 @@ func TestPatchGuardrailConfigFile_RestoresInvalidPatch(t *testing.T) {
 	}
 	if !bytes.Equal(got, original) {
 		t.Fatalf("restored config = %q, want %q", got, original)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat restored config: %v", err)
+	}
+	if gotMode := info.Mode().Perm(); gotMode != 0o640 {
+		t.Fatalf("restored config mode = %o, want 640", gotMode)
 	}
 }
 
@@ -5253,10 +5326,10 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 			},
 		},
 	}
+	bindTestConfigRuntime(t, api)
 
 	body, _ := json.Marshal(map[string]any{
 		"mode":              "action",
-		"scanner_mode":      "both",
 		"hilt_enabled":      true,
 		"hilt_min_severity": "medium",
 	})
@@ -5276,8 +5349,8 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 	if api.scannerCfg.Guardrail.Mode != "action" {
 		t.Errorf("mode = %q, want action", api.scannerCfg.Guardrail.Mode)
 	}
-	if api.scannerCfg.Guardrail.ScannerMode != "both" {
-		t.Errorf("scanner_mode = %q, want both", api.scannerCfg.Guardrail.ScannerMode)
+	if api.scannerCfg.Guardrail.ScannerMode != "local" {
+		t.Errorf("scanner_mode = %q, want local", api.scannerCfg.Guardrail.ScannerMode)
 	}
 	var response map[string]any
 	if err := json.NewDecoder(w.Result().Body).Decode(&response); err != nil {
@@ -5288,6 +5361,81 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 	}
 	if response["hilt_min_severity"] != "MEDIUM" {
 		t.Fatalf("hilt_min_severity = %#v, want MEDIUM", response["hilt_min_severity"])
+	}
+	if response["live"] != true {
+		t.Fatalf("live = %#v, want true", response["live"])
+	}
+}
+
+func TestHandleGuardrailConfig_RefusesWriteWithoutCentralReload(t *testing.T) {
+	tmpDir := t.TempDir()
+	const tok = "patch-config-no-reloader"
+	api := &APIServer{
+		scannerCfg: &config.Config{
+			DataDir: tmpDir,
+			Gateway: config.GatewayConfig{Token: tok},
+			Guardrail: config.GuardrailConfig{
+				Mode:        "observe",
+				ScannerMode: "local",
+			},
+		},
+	}
+	body, _ := json.Marshal(map[string]any{"mode": "action"})
+	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	api.handleGuardrailConfig(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, config.DefaultConfigName)); !os.IsNotExist(err) {
+		t.Fatalf("uncoordinated PATCH created config file: %v", err)
+	}
+}
+
+func TestHandleGuardrailConfig_RestartRequiredHotChangeRollsBack(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	tmpDir := t.TempDir()
+	const tok = "patch-config-tok-restart-required"
+	api := &APIServer{
+		health: NewSidecarHealth(),
+		logger: logger,
+		store:  store,
+		scannerCfg: &config.Config{
+			DataDir: tmpDir,
+			Gateway: config.GatewayConfig{Token: tok},
+			Guardrail: config.GuardrailConfig{
+				Mode:        "observe",
+				ScannerMode: "local",
+			},
+		},
+	}
+	bindTestConfigRuntime(t, api)
+	path := api.configFilePath()
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config before PATCH: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"scanner_mode": "both"})
+	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	api.handleGuardrailConfig(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config after PATCH: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("restart-required hot PATCH changed config.yaml despite rejection")
+	}
+	if got := api.runtimeConfigSnapshot().Guardrail.ScannerMode; got != "local" {
+		t.Fatalf("live scanner_mode = %q, want local", got)
 	}
 }
 
@@ -5328,6 +5476,50 @@ func TestHandleGuardrailConfig_PatchRejectedInManagedEnterprise(t *testing.T) {
 	}
 }
 
+func TestHandleGuardrailConfig_ReauthorizesAfterEnteringWriteTransaction(t *testing.T) {
+	tmpDir := t.TempDir()
+	const tok = "patch-config-transition-to-managed"
+	unmanaged := &config.Config{
+		DataDir: tmpDir,
+		Gateway: config.GatewayConfig{Token: tok},
+		Guardrail: config.GuardrailConfig{
+			Mode:        "observe",
+			ScannerMode: "local",
+		},
+	}
+	managedCfg := cloneConfig(unmanaged)
+	managedCfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+
+	api := &APIServer{scannerCfg: unmanaged}
+	snapshotCalls := 0
+	api.SetConfigRuntime(func(context.Context, string) error {
+		t.Fatal("managed transition reached central reload")
+		return nil
+	}, func() *config.Config {
+		snapshotCalls++
+		if snapshotCalls == 1 {
+			return cloneConfig(unmanaged)
+		}
+		return cloneConfig(managedCfg)
+	})
+
+	body, _ := json.Marshal(map[string]string{"mode": "action"})
+	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	api.handleGuardrailConfig(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "administrator privileges") {
+		t.Fatalf("body = %q, want managed-mode authorization guidance", w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, config.DefaultConfigName)); !os.IsNotExist(err) {
+		t.Fatalf("PATCH wrote config after managed transition: %v", err)
+	}
+}
+
 func TestHandleGuardrailConfig_ConcurrentAccess(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	tmpDir := t.TempDir()
@@ -5345,6 +5537,7 @@ func TestHandleGuardrailConfig_ConcurrentAccess(t *testing.T) {
 			},
 		},
 	}
+	bindTestConfigRuntime(t, api)
 
 	const N = 50
 	var wg sync.WaitGroup
@@ -6680,6 +6873,11 @@ func TestHookScopedTokenOnlyAuthenticatesHookRoutes(t *testing.T) {
 	if len(hookPaths) == 0 {
 		t.Fatal("default registry has no hook endpoints")
 	}
+	proxyScopedToken, err := connector.EnsureHookAPIToken(dataDir, "openclaw")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken(openclaw): %v", err)
+	}
+	scoped["openclaw"] = proxyScopedToken
 	api := &APIServer{
 		scannerCfg: &config.Config{
 			DataDir: dataDir,
@@ -6711,6 +6909,26 @@ func TestHookScopedTokenOnlyAuthenticatesHookRoutes(t *testing.T) {
 	allowed.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("/api/v1/codex/notify with codex scoped token status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer "+proxyScopedToken)
+	req.Header.Set("X-DefenseClaw-Connector", "openclaw")
+	rec = httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("generic inspect route with matching OpenClaw scoped token status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer "+proxyScopedToken)
+	req.Header.Set("X-DefenseClaw-Connector", "codex")
+	rec = httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("generic inspect route with mismatched scoped token status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/status", nil)

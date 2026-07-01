@@ -63,6 +63,58 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	}
 }
 
+func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	configPath := filepath.Join(home, ".omnigent", "config.yaml")
+	sitePackages := filepath.Join(home, ".local", "lib", "python", "site-packages")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatalf("mkdir OmniGent config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("server: https://example.test\npolicy_modules: []\n"), 0o600); err != nil {
+		t.Fatalf("write OmniGent config: %v", err)
+	}
+
+	previousConfig := connector.OmnigentConfigPathOverride
+	previousSite := connector.OmnigentSitePackagesPathOverride
+	connector.OmnigentConfigPathOverride = configPath
+	connector.OmnigentSitePackagesPathOverride = sitePackages
+	t.Cleanup(func() {
+		connector.OmnigentConfigPathOverride = previousConfig
+		connector.OmnigentSitePackagesPathOverride = previousSite
+	})
+
+	result, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "omnigent",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      "omnigent-scoped-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "omnigent 0.1.0",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("Install OmniGent: %v", err)
+	}
+	if result.Connector != "omnigent" {
+		t.Fatalf("connector = %q, want omnigent", result.Connector)
+	}
+	if len(result.HookConfigPaths) != 1 || result.HookConfigPaths[0] != configPath {
+		t.Fatalf("hook config paths = %v, want %s", result.HookConfigPaths, configPath)
+	}
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read OmniGent config: %v", err)
+	}
+	if !strings.Contains(string(configData), "defenseclaw_omnigent_policy.defenseclaw_policy") {
+		t.Fatalf("OmniGent config does not reference DefenseClaw policy module:\n%s", configData)
+	}
+}
+
 func TestInstallMultipleConnectorsKeepsScopedHookTokens(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)

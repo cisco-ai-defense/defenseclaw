@@ -21,7 +21,8 @@ import (
 
 func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
+	authorizationDir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
 	rows := []enterpriseHookReconcileRow{
 		{User: "alice", Connector: "codex", OK: true},
 		{User: "bob", Connector: "claudecode", OK: false, Error: "hook config file missing"},
@@ -46,6 +47,17 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	}
 	if len(state.Results) != 2 || state.Results[1].Error == "" {
 		t.Fatalf("results = %+v, want persisted rows", state.Results)
+	}
+	if info, statErr := os.Stat(authorizationDir); statErr != nil {
+		t.Fatalf("stat authorization dir: %v", statErr)
+	} else if got := info.Mode().Perm(); got != 0o750 {
+		t.Fatalf("authorization dir mode = %o, want 750", got)
+	}
+	authorizationPath := filepath.Join(authorizationDir, hookGuardianAuthorizationFile)
+	if info, statErr := os.Stat(authorizationPath); statErr != nil {
+		t.Fatalf("stat authorization file: %v", statErr)
+	} else if got := info.Mode().Perm(); got != 0o640 {
+		t.Fatalf("authorization file mode = %o, want 640", got)
 	}
 }
 

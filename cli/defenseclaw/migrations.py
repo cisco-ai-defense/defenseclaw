@@ -1859,6 +1859,18 @@ def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
         )
         return
 
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+    if _guardrail_runtime_migration_is_managed(text):
+        ux.warn(
+            "managed_enterprise config will not consume the service-owned "
+            f"legacy overlay at {runtime_path}; migrate it only through an "
+            "explicit administrator-controlled config change",
+            indent="    ",
+        )
+        return
+
     try:
         with open(runtime_path, encoding="utf-8") as fh:
             runtime = json.load(fh)
@@ -1882,10 +1894,6 @@ def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
             indent="    ",
         )
         return
-    text = _read_config_text(cfg_path)
-    if text is None:
-        return
-
     new_text = _patch_guardrail_runtime_yaml(text, updates)
     if not _guardrail_runtime_yaml_contains_updates(new_text, updates):
         ux.warn(
@@ -1905,6 +1913,27 @@ def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
 
     migrated = ", ".join(path for path, _ in updates) if updates else "no supported values"
     ctx.changes.append(f"migrated guardrail_runtime.json into config.yaml ({migrated})")
+
+
+def _guardrail_runtime_migration_is_managed(config_text: str) -> bool:
+    """Return whether legacy runtime state must not mutate this config.
+
+    The service definition can pin managed mode even when an older config does
+    not contain the field, so the immutable environment wins. Parsing failures
+    return false here because the normal migration verification will preserve
+    both files rather than write an invalid config.
+    """
+    pinned = os.environ.get("DEFENSECLAW_DEPLOYMENT_MODE", "").strip().lower()
+    if pinned in {"managed", "managed_enterprise"}:
+        return True
+    try:
+        parsed = yaml.safe_load(config_text) or {}
+    except yaml.YAMLError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    mode = str(parsed.get("deployment_mode") or "").strip().lower()
+    return mode in {"managed", "managed_enterprise"}
 
 
 def _guardrail_runtime_yaml_contains_updates(

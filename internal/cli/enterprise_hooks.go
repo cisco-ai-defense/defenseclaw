@@ -594,18 +594,24 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 	}
 	authorizationData = append(authorizationData, '\n')
 	authorizationDir := managed.HookGuardianAuthorizationDir(dataDir)
-	if err := os.MkdirAll(authorizationDir, 0o755); err != nil {
+	if err := os.MkdirAll(authorizationDir, 0o750); err != nil {
 		return fmt.Errorf("create hook guardian authorization directory: %w", err)
 	}
-	if err := os.Chmod(authorizationDir, 0o755); err != nil {
+	if err := os.Chmod(authorizationDir, 0o750); err != nil {
 		return fmt.Errorf("harden hook guardian authorization directory: %w", err)
+	}
+	if err := setEnterpriseHookAuthorizationOwnership(authorizationDir); err != nil {
+		return fmt.Errorf("set hook guardian authorization directory ownership: %w", err)
 	}
 	authorizationPath := filepath.Join(authorizationDir, hookGuardianAuthorizationFile)
 	if err := safefile.Write(authorizationPath, authorizationData); err != nil {
 		return fmt.Errorf("write %s: %w", authorizationPath, err)
 	}
-	if err := os.Chmod(authorizationPath, 0o644); err != nil {
+	if err := os.Chmod(authorizationPath, 0o640); err != nil {
 		return fmt.Errorf("make hook guardian authorization readable: %w", err)
+	}
+	if err := setEnterpriseHookAuthorizationOwnership(authorizationPath); err != nil {
+		return fmt.Errorf("set hook guardian authorization file ownership: %w", err)
 	}
 
 	state := enterpriseHookGuardianState{

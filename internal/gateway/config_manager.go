@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,7 +30,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -218,18 +218,18 @@ func cloneConfig(in *config.Config) *config.Config {
 	if in == nil {
 		return nil
 	}
-	data, err := yaml.Marshal(in)
+	// JSON preserves the distinction between nil and explicitly empty slices
+	// and maps. YAML omitempty round-tripping collapsed those values, causing a
+	// freshly loaded snapshot to compare different from the same file on reload
+	// and spuriously classify unrelated security sections as changed.
+	data, err := json.Marshal(in)
 	if err != nil {
 		panic(fmt.Errorf("config manager: clone config: %w", err))
 	}
 	var out config.Config
-	if err := yaml.Unmarshal(data, &out); err != nil {
+	if err := json.Unmarshal(data, &out); err != nil {
 		panic(fmt.Errorf("config manager: decode cloned config: %w", err))
 	}
-	out.ConfigFilePath = in.ConfigFilePath
-	out.Gateway.NoTLS = in.Gateway.NoTLS
-	out.Gateway.SandboxHome = in.Gateway.SandboxHome
-	out.Gateway.ClawHome = in.Gateway.ClawHome
 	return &out
 }
 
@@ -291,6 +291,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 
 	var restart []string
 	hotReloadable := map[string]struct{}{
+		"guardrail":        {},
 		"otel":             {},
 		"audit_sinks":      {},
 		"webhooks":         {},
@@ -302,6 +303,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		"discovery_source": {},
 	}
 	for _, path := range changed {
+		if path == "guardrail" && guardrailNeedsRestart(oldCfg, newCfg) {
+			restart = append(restart, path)
+			continue
+		}
 		if path == "gateway" && onlyConfigReloadModeChanged(oldCfg, newCfg) {
 			continue
 		}

@@ -23,6 +23,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
+func enabledApplicationProtectionConfig() config.ApplicationProtectionConfig {
+	appProtection := config.DefaultApplicationProtectionConfig()
+	appProtection.Enabled = true
+	return appProtection
+}
+
 func TestApplicationProtectionControllerActivatesHookConnector(t *testing.T) {
 	dir := t.TempDir()
 	hookConfigPath := filepath.Join(dir, "codex", "config.toml")
@@ -34,7 +40,7 @@ func TestApplicationProtectionControllerActivatesHookConnector(t *testing.T) {
 	}
 	cfg := &config.Config{
 		DataDir:               dir,
-		ApplicationProtection: config.DefaultApplicationProtectionConfig(),
+		ApplicationProtection: enabledApplicationProtectionConfig(),
 		Guardrail:             config.GuardrailConfig{HookSelfHeal: false},
 	}
 	health := NewSidecarHealth()
@@ -86,7 +92,7 @@ func TestApplicationProtectionControllerSkipsMissingHookConfig(t *testing.T) {
 	hookConfigPath := filepath.Join(dir, "codex", "config.toml")
 	cfg := &config.Config{
 		DataDir:               dir,
-		ApplicationProtection: config.DefaultApplicationProtectionConfig(),
+		ApplicationProtection: enabledApplicationProtectionConfig(),
 		Guardrail:             config.GuardrailConfig{HookSelfHeal: false},
 	}
 	sidecar := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
@@ -138,7 +144,7 @@ func TestApplicationProtectionControllerManagedEnterpriseDoesNotWriteUserHooks(t
 	cfg := &config.Config{
 		DataDir:               dir,
 		DeploymentMode:        "managed_enterprise",
-		ApplicationProtection: config.DefaultApplicationProtectionConfig(),
+		ApplicationProtection: enabledApplicationProtectionConfig(),
 		Guardrail:             config.GuardrailConfig{HookSelfHeal: false},
 	}
 	health := NewSidecarHealth()
@@ -187,7 +193,7 @@ func TestApplicationProtectionControllerSkipsUnverifiedHookContractInActionMode(
 	}
 	cfg := &config.Config{
 		DataDir:               dir,
-		ApplicationProtection: config.DefaultApplicationProtectionConfig(),
+		ApplicationProtection: enabledApplicationProtectionConfig(),
 		Guardrail: config.GuardrailConfig{
 			HookSelfHeal: false,
 		},
@@ -251,7 +257,7 @@ func TestApplicationProtectionControllerRepairsPreviouslyActiveWithoutHookConfig
 	}
 	cfg := &config.Config{
 		DataDir:               dir,
-		ApplicationProtection: config.DefaultApplicationProtectionConfig(),
+		ApplicationProtection: enabledApplicationProtectionConfig(),
 		Guardrail:             config.GuardrailConfig{HookSelfHeal: false},
 	}
 	sidecar := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
@@ -292,7 +298,7 @@ func TestApplicationProtectionControllerSkipsProxyConnector(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{
 		DataDir:               dir,
-		ApplicationProtection: config.DefaultApplicationProtectionConfig(),
+		ApplicationProtection: enabledApplicationProtectionConfig(),
 		Guardrail:             config.GuardrailConfig{HookSelfHeal: false},
 	}
 	sidecar := &Sidecar{cfg: cfg, health: NewSidecarHealth()}

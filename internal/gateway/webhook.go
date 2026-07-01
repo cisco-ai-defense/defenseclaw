@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -69,7 +70,9 @@ type WebhookDispatcher struct {
 	debug        bool
 	wg           sync.WaitGroup
 	done         chan struct{}
-	otel         *telemetry.Provider
+	otel         atomic.Pointer[telemetry.Provider]
+	lifecycleMu  sync.Mutex
+	closed       bool
 }
 
 type webhookEndpoint struct {
@@ -299,7 +302,7 @@ func (d *WebhookDispatcher) BindObservability(p *telemetry.Provider) {
 	if d == nil {
 		return
 	}
-	d.otel = p
+	d.otel.Store(p)
 }
 
 func hashWebhookTargetURL(raw string) string {
@@ -367,16 +370,18 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 				event.Target, action, ep.url, ep.cooldown)
 			ctx := context.Background()
 			tHash := hashWebhookTargetURL(ep.url)
-			if d.otel != nil {
-				d.otel.RecordWebhookCooldownSuppressed(ctx, ep.channelType)
-				d.otel.RecordWebhookDispatch(ctx, ep.channelType, "cooldown_suppressed", 0)
-				d.otel.RecordWebhookLatency(ctx, ep.channelType, tHash, 0, 0)
+			if tel := d.otel.Load(); tel != nil {
+				tel.RecordWebhookCooldownSuppressed(ctx, ep.channelType)
+				tel.RecordWebhookDispatch(ctx, ep.channelType, "cooldown_suppressed", 0)
+				tel.RecordWebhookLatency(ctx, ep.channelType, tHash, 0, 0)
 			}
 			emitError(ctx, string(gatewaylog.SubsystemWebhook), string(gatewaylog.ErrCodeWebhookCooldown),
 				"webhook delivery suppressed: duplicate target/action within cooldown window", nil)
 			continue
 		}
-		d.wg.Add(1)
+		if !d.startDelivery() {
+			return
+		}
 		go func(ep *webhookEndpoint, key string) {
 			defer d.wg.Done()
 			d.sem <- struct{}{}
@@ -396,22 +401,34 @@ func (d *WebhookDispatcher) Close() {
 	if d == nil {
 		return
 	}
-	select {
-	case <-d.done:
-	default:
+	d.lifecycleMu.Lock()
+	if !d.closed {
+		d.closed = true
 		close(d.done)
 	}
+	d.lifecycleMu.Unlock()
 	d.wg.Wait()
 }
 
 // closing returns true after Close has been called.
 func (d *WebhookDispatcher) closing() bool {
-	select {
-	case <-d.done:
-		return true
-	default:
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
+	return d.closed
+}
+
+// startDelivery serializes WaitGroup.Add with Close's transition to closed.
+// sync.WaitGroup does not permit an Add racing a Wait when the counter can be
+// zero; the lifecycle mutex guarantees Close observes every accepted delivery
+// before it begins waiting and that no later delivery can increment the group.
+func (d *WebhookDispatcher) startDelivery() bool {
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
+	if d.closed {
 		return false
 	}
+	d.wg.Add(1)
+	return true
 }
 
 // claimSlot atomically checks the cooldown and reserves the slot so
@@ -486,9 +503,9 @@ func (ep *webhookEndpoint) noteWebhookFailure(d *WebhookDispatcher, targetHash s
 		opened = true
 	}
 	ep.brkMu.Unlock()
-	if opened && d.otel != nil {
+	if tel := d.otel.Load(); opened && tel != nil {
 		ctx := context.Background()
-		d.otel.RecordWebhookCircuitBreaker(ctx, targetHash, "opened")
+		tel.RecordWebhookCircuitBreaker(ctx, targetHash, "opened")
 		emitWebhookCircuitActivity(targetHash, "webhook-circuit-open")
 	}
 }
@@ -500,9 +517,9 @@ func (ep *webhookEndpoint) noteWebhookSuccess(d *WebhookDispatcher, targetHash s
 	ep.circuitOpenUntil = time.Time{}
 	ep.breakerTripped = false
 	ep.brkMu.Unlock()
-	if shouldClose && d.otel != nil {
+	if tel := d.otel.Load(); shouldClose && tel != nil {
 		ctx := context.Background()
-		d.otel.RecordWebhookCircuitBreaker(ctx, targetHash, "closed")
+		tel.RecordWebhookCircuitBreaker(ctx, targetHash, "closed")
 		emitWebhookCircuitActivity(targetHash, "webhook-circuit-closed")
 	}
 }
@@ -511,11 +528,12 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 	tctx := context.Background()
 	targetHash := hashWebhookTargetURL(ep.url)
 	record := func(status int, ms float64, outcome string) {
-		if d.otel == nil {
+		tel := d.otel.Load()
+		if tel == nil {
 			return
 		}
-		d.otel.RecordWebhookLatency(tctx, ep.channelType, targetHash, status, ms)
-		d.otel.RecordWebhookDispatch(tctx, ep.channelType, outcome, ms)
+		tel.RecordWebhookLatency(tctx, ep.channelType, targetHash, status, ms)
+		tel.RecordWebhookDispatch(tctx, ep.channelType, outcome, ms)
 	}
 
 	ep.refreshCircuitAfterCooldown()

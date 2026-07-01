@@ -129,6 +129,19 @@ service_gid="$(id -g defenseclaw)"
 [ "$(sudo -n stat -f '%Lp' "$config_dest")" = 640 ] || fail "managed config mode is not 0640"
 [ ! -w "$config_dest" ] || fail "standard user can write managed config"
 
+config_hash_before_acl="$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')"
+sudo -n chmod +a "everyone allow add_file,add_subdirectory,delete_child,writeattr,writeextattr,writesecurity,chown" "$managed_root"
+if sudo -n "$installer" \
+    --binary "$binary" \
+    --config "$config_source" \
+    --manifest "$manifest_source" \
+    --no-start >"${fixture}/acl.stdout" 2>"${fixture}/acl.stderr"; then
+    fail "installer accepted a write-capable managed-root ACL"
+fi
+grep -Fq "write-capable macOS ACL is not trusted: $managed_root" "${fixture}/acl.stderr" || fail "ACL refusal was not explicit"
+[ "$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')" = "$config_hash_before_acl" ] || fail "ACL preflight failure modified managed config"
+sudo -n chmod -N "$managed_root"
+
 sudo -n chown "$(id -u):$(id -g)" "$config_dest"
 sudo -n chmod 0666 "$config_dest"
 sudo -n "$installer" \

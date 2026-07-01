@@ -60,7 +60,10 @@ type ApplicationProtectionAssetPolicyConfig struct {
 // by both DefaultConfig() and viper defaults.
 func DefaultApplicationProtectionConfig() ApplicationProtectionConfig {
 	return ApplicationProtectionConfig{
-		Enabled:        true,
+		// Automatic connector activation mutates third-party agent config. Keep
+		// it opt-in so upgrading an unmanaged/OSS install does not start writing
+		// hooks merely because AI discovery recognized a local agent.
+		Enabled:        false,
 		MinConfidence:  DefaultApplicationProtectionMinConfidence,
 		RemoveWhenGone: false,
 		GoneAfterMin:   DefaultApplicationProtectionGoneAfterMin,

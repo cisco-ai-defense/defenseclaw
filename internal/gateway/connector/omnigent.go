@@ -401,6 +401,10 @@ func (c *OmnigentConnector) HookRuntimeArtifacts(opts SetupOpts) []string {
 	}
 }
 
+func (c *OmnigentConnector) HookConfigReferenceNeedles(SetupOpts) []string {
+	return []string{omnigentPolicyHandler}
+}
+
 func (c *OmnigentConnector) RequiredEnv() []EnvRequirement {
 	return append([]EnvRequirement{{
 		Scope:       EnvScopeNone,

@@ -397,6 +397,41 @@ func TestWebhookDispatcherNil(t *testing.T) {
 	d.Close()               // should not panic
 }
 
+func TestWebhookDispatcherConcurrentCloseAndDispatch(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	d := NewWebhookDispatcher([]config.WebhookConfig{{
+		URL: srv.URL, Type: "generic", Enabled: true,
+	}})
+	if d == nil {
+		t.Fatal("NewWebhookDispatcher returned nil")
+	}
+
+	start := make(chan struct{})
+	var callers sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			<-start
+			d.Dispatch(testEvent())
+		}()
+	}
+	callers.Add(1)
+	go func() {
+		defer callers.Done()
+		<-start
+		d.Close()
+	}()
+	close(start)
+	callers.Wait()
+	d.Close()
+}
+
 func TestCategorizeAction(t *testing.T) {
 	tests := []struct {
 		action   string

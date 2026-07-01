@@ -31,7 +31,11 @@ def settings_save(app: AppContext) -> None:
     except OSError:
         before_txt = ""
 
-    app.cfg.save()
+    try:
+        app.cfg.save()
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}")
+        raise SystemExit(1) from exc
 
     after_txt = ""
     try:

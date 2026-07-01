@@ -17,8 +17,12 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,6 +31,8 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
@@ -207,6 +213,123 @@ func TestDiffConfigsMarksRuntimeTopologyRestartRequired(t *testing.T) {
 		if !slices.Contains(diff.RestartRequired, want) {
 			t.Fatalf("restart_required = %v, missing %s", diff.RestartRequired, want)
 		}
+	}
+}
+
+func TestDiffConfigsAllowsHotGuardrailPolicyFields(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := cloneConfig(oldCfg)
+	newCfg.Guardrail.Mode = "action"
+	newCfg.Guardrail.BlockMessage = "updated block message"
+	newCfg.Guardrail.HILT.Enabled = !oldCfg.Guardrail.HILT.Enabled
+	newCfg.Guardrail.HILT.MinSeverity = "MEDIUM"
+
+	diff := diffConfigs(oldCfg, newCfg)
+	if !slices.Contains(diff.Changed, "guardrail") {
+		t.Fatalf("changed = %v, missing guardrail", diff.Changed)
+	}
+	if slices.Contains(diff.RestartRequired, "guardrail") {
+		t.Fatalf("restart_required = %v, pure policy fields should hot-apply", diff.RestartRequired)
+	}
+}
+
+func TestApplyConfigReloadHotAppliesGuardrailPolicy(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := cloneConfig(oldCfg)
+	newCfg.Guardrail.Mode = "action"
+	newCfg.Guardrail.BlockMessage = "updated block message"
+	newCfg.Guardrail.HILT.Enabled = true
+	newCfg.Guardrail.HILT.MinSeverity = "MEDIUM"
+
+	inspector := NewGuardrailInspector("local", nil, nil, "")
+	proxy := &GuardrailProxy{
+		cfg:          &oldCfg.Guardrail,
+		mode:         oldCfg.Guardrail.Mode,
+		blockMessage: oldCfg.Guardrail.BlockMessage,
+		inspector:    inspector,
+	}
+	sidecar := &Sidecar{cfg: oldCfg}
+	sidecar.publishConfig(oldCfg)
+	sidecar.setGuardrailProxy(proxy)
+
+	if err := sidecar.applyConfigReload(context.Background(), oldCfg, newCfg, diffConfigs(oldCfg, newCfg)); err != nil {
+		t.Fatalf("applyConfigReload: %v", err)
+	}
+	proxy.rtMu.RLock()
+	mode, blockMessage := proxy.mode, proxy.blockMessage
+	proxy.rtMu.RUnlock()
+	if mode != "action" || blockMessage != "updated block message" {
+		t.Fatalf("live proxy policy = mode %q block %q", mode, blockMessage)
+	}
+	if got := sidecar.currentConfig().Guardrail.Mode; got != "action" {
+		t.Fatalf("sidecar mode = %q, want action", got)
+	}
+}
+
+func TestGuardrailAPIPatchCommitsDiskManagerSidecarAndProxyTogether(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	raw := "config_version: 7\n" +
+		"data_dir: " + dir + "\n" +
+		"gateway:\n  token: transactional-token\n" +
+		"guardrail:\n  enabled: true\n  mode: observe\n  scanner_mode: local\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+	oldCfg, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("load initial config: %v", err)
+	}
+
+	proxy := &GuardrailProxy{
+		cfg:          &oldCfg.Guardrail,
+		mode:         oldCfg.Guardrail.Mode,
+		blockMessage: oldCfg.Guardrail.BlockMessage,
+		inspector:    NewGuardrailInspector("local", nil, nil, ""),
+	}
+	sidecar := &Sidecar{cfg: oldCfg}
+	sidecar.publishConfig(oldCfg)
+	sidecar.setGuardrailProxy(proxy)
+	mgr := NewConfigManager(path, oldCfg, nil, nil, sidecar.applyConfigReload)
+	api := &APIServer{scannerCfg: cloneConfig(oldCfg)}
+	api.SetConfigRuntime(mgr.Reload, sidecar.currentConfig)
+
+	body, _ := json.Marshal(map[string]any{"mode": "action"})
+	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer transactional-token")
+	w := httptest.NewRecorder()
+	api.handleGuardrailConfig(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	for label, got := range map[string]string{
+		"manager": mgr.Current().Guardrail.Mode,
+		"sidecar": sidecar.currentConfig().Guardrail.Mode,
+	} {
+		if got != "action" {
+			t.Fatalf("%s mode = %q, want action", label, got)
+		}
+	}
+	proxy.rtMu.RLock()
+	proxyMode := proxy.mode
+	proxy.rtMu.RUnlock()
+	if proxyMode != "action" {
+		t.Fatalf("proxy mode = %q, want action", proxyMode)
+	}
+	persisted, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if persisted.Guardrail.Mode != "action" {
+		t.Fatalf("persisted mode = %q, want action", persisted.Guardrail.Mode)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["live"] != true || response["mode"] != "action" {
+		t.Fatalf("response = %#v, want live action", response)
 	}
 }
 
@@ -432,6 +555,90 @@ func TestDiffConfigsDeploymentModeRequiresRestart(t *testing.T) {
 	diff := diffConfigs(oldCfg, &newCfg)
 	if !slices.Contains(diff.RestartRequired, "deployment_mode") {
 		t.Fatalf("restart required = %v, want deployment_mode", diff.RestartRequired)
+	}
+}
+
+func TestReloadableSubsystemSnapshotsAreSynchronized(t *testing.T) {
+	sidecar := &Sidecar{}
+	providers := []*telemetry.Provider{{}, {}}
+	dispatchers := []*WebhookDispatcher{{}, {}}
+	discoveryServices := []*inventory.ContinuousDiscoveryService{{}, {}}
+
+	const iterations = 1000
+	var wg sync.WaitGroup
+	for _, run := range []func(){
+		func() {
+			for i := 0; i < iterations; i++ {
+				sidecar.swapOTel(providers[i%len(providers)])
+			}
+		},
+		func() {
+			for i := 0; i < iterations; i++ {
+				_ = sidecar.otelSnapshot()
+			}
+		},
+		func() {
+			for i := 0; i < iterations; i++ {
+				sidecar.swapWebhooks(dispatchers[i%len(dispatchers)])
+			}
+		},
+		func() {
+			for i := 0; i < iterations; i++ {
+				_ = sidecar.webhooksSnapshot()
+			}
+		},
+		func() {
+			for i := 0; i < iterations; i++ {
+				sidecar.swapAIDiscovery(discoveryServices[i%len(discoveryServices)])
+			}
+		},
+		func() {
+			for i := 0; i < iterations; i++ {
+				_ = sidecar.aiDiscoverySnapshot()
+			}
+		},
+	} {
+		wg.Add(1)
+		go func(run func()) {
+			defer wg.Done()
+			run()
+		}(run)
+	}
+	wg.Wait()
+}
+
+func TestApplyConfigReloadTokenPreflightFailureIsAtomic(t *testing.T) {
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	t.Setenv("TEST_RELOAD_GATEWAY_TOKEN", "")
+
+	dir := t.TempDir()
+	blockedDataDir := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blockedDataDir, []byte("blocked"), 0o600); err != nil {
+		t.Fatalf("write blocked data dir: %v", err)
+	}
+
+	oldCfg := config.DefaultConfig()
+	oldCfg.DataDir = blockedDataDir
+	oldCfg.Gateway.Token = ""
+	oldCfg.Gateway.TokenEnv = "TEST_RELOAD_GATEWAY_TOKEN"
+	oldCfg.AIDiscovery.Enabled = true
+
+	newCfg := cloneConfig(oldCfg)
+	newCfg.Environment = oldCfg.Environment + "-reloaded"
+	oldDiscovery := &inventory.ContinuousDiscoveryService{}
+	sidecar := &Sidecar{cfg: oldCfg, health: NewSidecarHealth(), aiDiscovery: oldDiscovery}
+	sidecar.publishConfig(oldCfg)
+
+	err := sidecar.applyConfigReload(context.Background(), oldCfg, newCfg, diffConfigs(oldCfg, newCfg))
+	if err == nil || !strings.Contains(err.Error(), "gateway token") {
+		t.Fatalf("applyConfigReload error = %v, want gateway-token preflight failure", err)
+	}
+	if sidecar.currentConfig().Environment == newCfg.Environment {
+		t.Fatal("failed reload published the candidate environment")
+	}
+	if sidecar.aiDiscoverySnapshot() != oldDiscovery {
+		t.Fatal("failed reload swapped the AI discovery service")
 	}
 }
 

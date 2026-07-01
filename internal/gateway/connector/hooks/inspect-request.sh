@@ -32,6 +32,8 @@ HOOK_PARENT="${HOOK_SOURCE%/*}"
 HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
 unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 {{if .Managed}}
+DEFENSECLAW_MANAGED_HOOK=1
+export DEFENSECLAW_MANAGED_HOOK
 DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
@@ -55,14 +57,19 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 # every inspection call. Pre-fix the hook never sent Authorization,
 # so a sidecar that required token auth would 401 every request and
 # (with FAIL_MODE=open) silently allow them. The token lives in
-# ${HOOK_DIR}/.token (mode 0600, written by WriteHookScriptsWithToken)
+# ${HOOK_DIR}/{{.TokenFile}} (mode 0600, written by the hook installer)
 # and may be overridden by the env var for ephemeral CI shells.
-if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token inspect inspect-request "request"
 fi
-if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/.token" ]; then
+if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
+  {{if .ScopedToken}}
+  DEFENSECLAW_GATEWAY_TOKEN="$(tr -d '\r\n' < "${HOOK_DIR}/{{.TokenFile}}")"
+  export DEFENSECLAW_GATEWAY_TOKEN
+  {{else}}
   # shellcheck source=/dev/null
-  . "${HOOK_DIR}/.token"
+  . "${HOOK_DIR}/{{.TokenFile}}"
+  {{end}}
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 
@@ -111,10 +118,15 @@ AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
+CONNECTOR_HEADER_ARGS=()
+{{if .ConnectorName}}
+CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: {{.ConnectorName}}")
+{{end}}
 
 RESPONSE=$(printf '%s' "$CONTENT" | curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/request" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
+  "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 5 \

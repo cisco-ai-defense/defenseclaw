@@ -79,6 +79,7 @@ func TestEvaluateCodexHook_ActiveConnectorImpliesEnabled(t *testing.T) {
 
 func TestCodexEnabled_AutomaticSourceNotLazyHealthCounter(t *testing.T) {
 	cfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
+	cfg.ApplicationProtection.Enabled = true
 	health := NewSidecarHealth()
 	health.RecordConnectorRequestFor("codex")
 	api := &APIServer{scannerCfg: cfg, health: health}

@@ -522,9 +522,10 @@ defenseclaw_response_failure_reason() {
   esac
 }
 
-# defenseclaw_should_fail_closed_on_unreachable returns 0 (true) only
-# when the operator has explicitly opted into strict availability via
-# DEFENSECLAW_STRICT_AVAILABILITY=1. The default is to fail open on
+# defenseclaw_should_fail_closed_on_unreachable returns 0 (true) for
+# guardian-installed managed hooks, or when an unmanaged operator explicitly
+# opts into strict availability via DEFENSECLAW_STRICT_AVAILABILITY=1. The
+# unmanaged default is to fail open on
 # transport failures (gateway down / network error / 5xx) regardless
 # of FAIL_MODE — a DefenseClaw outage must NEVER brick the user's
 # coding agent. FAIL_MODE still governs response-layer failures (4xx,
@@ -532,6 +533,9 @@ defenseclaw_response_failure_reason() {
 # was wrong; those represent likely misconfiguration that the operator
 # should be told about loudly.
 defenseclaw_should_fail_closed_on_unreachable() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+  esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
     *) return 1 ;;

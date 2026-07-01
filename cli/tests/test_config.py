@@ -25,6 +25,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -194,6 +195,93 @@ class TestPaths(unittest.TestCase):
         self.assertEqual(cfg.data_dir, str(override_dir))
         self.assertEqual(cfg.deployment_mode, "managed_enterprise")
 
+    @unittest.skipIf(os.name == "nt", "Unix ownership diagnostic")
+    def test_managed_config_trust_problem_reports_untrusted_owner(self):
+        cfg_path = os.path.abspath("/managed/config.yaml")
+
+        def fake_lstat(path):
+            if os.path.abspath(path) == cfg_path:
+                return SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o644,
+                    st_uid=501,
+                )
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o755,
+                st_uid=0,
+            )
+
+        with (
+            patch.object(config_mod.os, "lstat", side_effect=fake_lstat),
+            patch.object(config_mod, "_macos_write_acl_problem", return_value=None),
+        ):
+            problem = config_mod._managed_config_trust_problem(cfg_path)
+
+        self.assertIn("owner uid 501", problem)
+        self.assertIn("expected root/admin uid 0", problem)
+
+    def test_load_warns_when_managed_config_is_not_gateway_trusted(self):
+        data_dir = Path(tempfile.mkdtemp())
+        cfg_path = data_dir / "config.yaml"
+        cfg_path.write_text(
+            f"data_dir: {data_dir}\ndeployment_mode: managed_enterprise\n",
+            encoding="utf-8",
+        )
+        stderr = io.StringIO()
+        config_mod._untrusted_managed_config_warned_paths.discard(str(cfg_path))
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DEFENSECLAW_HOME": str(data_dir),
+                    "DEFENSECLAW_CONFIG": str(cfg_path),
+                },
+            ),
+            patch(
+                "defenseclaw.config._managed_config_trust_problem",
+                return_value=f"{cfg_path}: owner uid 501 is not trusted",
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            cfg = load()
+
+        self.assertEqual(cfg.deployment_mode, "managed_enterprise")
+        warning = stderr.getvalue()
+        self.assertIn("managed_enterprise config trust check failed", warning)
+        self.assertIn("gateway will reject this config", warning)
+        self.assertIn("CLI-reported state is not authoritative", warning)
+
+    def test_macos_write_acl_problem_rejects_effective_write_entry(self):
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "-rw-r-----+ 1 root defenseclaw 1 Jan 1 00:00 config.yaml\n"
+                " 0: group:everyone allow write,append,writeattr,writesecurity,chown\n"
+            ),
+            stderr="",
+        )
+        with (
+            patch.object(config_mod.platform, "system", return_value="Darwin"),
+            patch.object(config_mod.subprocess, "run", return_value=completed),
+        ):
+            problem = config_mod._macos_write_acl_problem("/managed/config.yaml")
+
+        self.assertIn("write-capable macOS ACL", problem)
+
+    def test_macos_write_acl_problem_accepts_acl_free_path(self):
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout="-rw-r----- 1 root defenseclaw 1 Jan 1 00:00 config.yaml\n",
+            stderr="",
+        )
+        with (
+            patch.object(config_mod.platform, "system", return_value="Darwin"),
+            patch.object(config_mod.subprocess, "run", return_value=completed),
+        ):
+            problem = config_mod._macos_write_acl_problem("/managed/config.yaml")
+
+        self.assertIsNone(problem)
+
     def test_managed_enterprise_save_requires_admin(self):
         cfg = Config(data_dir=tempfile.mkdtemp(), deployment_mode="managed_enterprise")
         with patch("defenseclaw.config._is_admin_process", return_value=False):
@@ -341,6 +429,7 @@ class TestAIDiscoveryConfig(unittest.TestCase):
 class TestApplicationProtectionConfig(unittest.TestCase):
     def test_default_auto_modes_are_observe(self):
         cfg = config_mod.ApplicationProtectionConfig()
+        self.assertFalse(cfg.enabled)
         self.assertEqual(cfg.effective_guardrail_mode("codex"), "observe")
         self.assertEqual(cfg.effective_asset_policy_mode("codex"), "observe")
 

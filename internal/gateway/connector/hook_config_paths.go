@@ -22,8 +22,8 @@ import (
 // ~/.cursor/hooks.json, ~/.claude/settings.json, ~/.codex/config.toml).
 //
 // It returns nil for proxy/plugin connectors that do not register lifecycle
-// hooks in an agent hook file (openclaw, zeptoclaw). Those connectors do not
-// implement HookScriptOwner, so the self-heal guard treats them as inert.
+// hooks in an agent config file (openclaw, zeptoclaw). Shell-hook owners and
+// non-shell policy-module owners both expose repairable config references.
 //
 // The resolved paths come from ResolvedConnectorLocations, the same path
 // contract captured into hook_contract_lock.json, so the guard watches
@@ -32,10 +32,7 @@ func HookConfigPathsForConnector(conn Connector, opts SetupOpts) []string {
 	if conn == nil {
 		return nil
 	}
-	// Only connectors that own a vendor hook script register lifecycle
-	// hooks in an agent config file. Proxy/plugin connectors (openclaw,
-	// zeptoclaw) do not implement HookScriptOwner and must stay inert.
-	if _, ok := conn.(HookScriptOwner); !ok {
+	if !OwnsManagedHookRuntime(conn) {
 		return nil
 	}
 	return uniqueNonEmptyStrings(ResolvedConnectorLocations(opts, conn).HookConfigPaths)
@@ -72,6 +69,9 @@ func ownedHookCommandNeedles(opts SetupOpts, conn Connector) []string {
 //     same distinctive marker isNativeHookCommand recognizes — which contains
 //     no escaped characters and survives verbatim across JSON/TOML/YAML.
 func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []string {
+	if owner, ok := conn.(HookConfigReferenceOwner); ok {
+		return uniqueNonEmptyStrings(owner.HookConfigReferenceNeedles(opts))
+	}
 	owner, ok := conn.(HookScriptOwner)
 	if !ok {
 		return nil
@@ -163,7 +163,7 @@ func structuredHookCommandReferences(raw interface{}, needles []string) bool {
 		}
 	case map[string]interface{}:
 		for key, item := range value {
-			if key == "command" || key == "bash" {
+			if key == "command" || key == "bash" || key == "handler" {
 				command := strings.TrimSpace(stringValue(item))
 				for _, needle := range needles {
 					needle = strings.TrimSpace(needle)
