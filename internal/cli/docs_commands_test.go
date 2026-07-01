@@ -12,6 +12,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // TestDocumentedGatewayCommandsParse keeps public MDX, active operator guides,
@@ -46,6 +49,9 @@ func TestDocumentedGatewayCommandsParse(t *testing.T) {
 	for _, documented := range commands {
 		documented := documented
 		t.Run(fmt.Sprintf("%s:%d", documented.path, documented.line), func(t *testing.T) {
+			resetDocumentedGatewayCommandState(t, rootCmd)
+			defer resetDocumentedGatewayCommandState(t, rootCmd)
+
 			fields := strings.Fields(documented.command)
 			if len(fields) < 1 || fields[0] != "defenseclaw-gateway" {
 				t.Fatalf("invalid extracted command %q", documented.command)
@@ -79,6 +85,26 @@ func TestDocumentedGatewayCommandsParse(t *testing.T) {
 	}
 
 	t.Logf("validated %d documented defenseclaw-gateway commands", len(commands))
+}
+
+// resetDocumentedGatewayCommandState restores flag defaults throughout the
+// shared Cobra tree so one documented example cannot affect the next.
+func resetDocumentedGatewayCommandState(t *testing.T, command *cobra.Command) {
+	t.Helper()
+	resetFlags := func(flags *pflag.FlagSet) {
+		flags.VisitAll(func(flag *pflag.Flag) {
+			if err := flag.Value.Set(flag.DefValue); err != nil {
+				t.Fatalf("reset flag %s on %s: %v", flag.Name, command.CommandPath(), err)
+			}
+			flag.Changed = false
+		})
+	}
+	resetFlags(command.Flags())
+	resetFlags(command.PersistentFlags())
+	command.SetArgs(nil)
+	for _, child := range command.Commands() {
+		resetDocumentedGatewayCommandState(t, child)
+	}
 }
 
 func TestRepresentativeDocumentedGatewayField(t *testing.T) {
@@ -301,6 +327,7 @@ func documentedGatewayCommands(root, repoRoot string) ([]documentedGatewayComman
 			commands = append(commands, documentedGatewayCommand{path: rel, line: logicalStart, command: text})
 		}
 
+		checkInline := checkInlineGatewayCommands(path, repoRoot)
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
 			lineNumber++
@@ -311,12 +338,16 @@ func documentedGatewayCommands(root, repoRoot string) ([]documentedGatewayComman
 					shellFence = false
 					continue
 				}
-				lang := strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
+				langFields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(trimmed, "```")))
+				lang := ""
+				if len(langFields) > 0 {
+					lang = langFields[0]
+				}
 				shellFence = lang == "bash" || lang == "sh" || lang == "shell" || lang == "zsh" || lang == "console"
 				continue
 			}
 			if !shellFence {
-				if checkInlineGatewayCommands(path, repoRoot) {
+				if checkInline {
 					parts := strings.Split(scanner.Text(), "`")
 					for index := 1; index < len(parts); index += 2 {
 						text := strings.TrimSpace(strings.SplitN(parts[index], `\n`, 2)[0])

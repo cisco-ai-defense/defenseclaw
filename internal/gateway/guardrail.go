@@ -989,7 +989,8 @@ var piiRequestPatterns = append([]string(nil), defaultPIIRequestPatterns...)
 
 var defaultPIIDataRegexSources = []string{
 	`\b\d{3}-\d{2}-\d{4}\b`,
-	`\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`,
+	`\b(?:4\d{3}|5[1-5]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`,
+	`\b3[47]\d{2}[- ]?\d{6}[- ]?\d{5}\b`,
 }
 
 var piiDataRegexes = compileBaseline(defaultPIIDataRegexSources)
@@ -1339,7 +1340,7 @@ var ssnDashRegex = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
 var bare9DigitRegex = regexp.MustCompile(`\b\d{9}\b`)
 
 // Credit card patterns are HIGH_SIGNAL.
-var creditCardRegex = regexp.MustCompile(`\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`)
+var creditCardRegex = regexp.MustCompile(`(?:\b(?:4\d{3}|5[1-5]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b|\b3[47]\d{2}[- ]?\d{6}[- ]?\d{5}\b)`)
 
 func triagePatterns(direction, content string) []TriageSignal {
 	// Snapshot the overridable pattern sets once for the lifetime of

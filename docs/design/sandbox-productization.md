@@ -638,7 +638,7 @@ should not create duplicate users or overwrite customized policies.
 
 ### 5.1 Current behavior
 
-`cmd_setup.py` has a `setup sandbox` subcommand that sets config values
+`cmd_setup.py` has a `sandbox setup` subcommand that sets config values
 (`openshell.mode`, `gateway.host`, `guardrail.host`) and prints manual
 next steps.
 
