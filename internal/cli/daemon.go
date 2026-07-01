@@ -97,6 +97,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	// Pass through relevant flags to the daemon process
 	args := collectDaemonArgs(cmd)
 
+	startAttemptedAt := time.Now()
 	pid, err := d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -112,6 +113,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		sidecarHealthURL(cfg),
 		defaultStartReadinessTimeout,
 		defaultReadinessPollInterval,
+		daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt),
 		func() bool {
 			running, currentPID := d.IsRunning()
 			return running && currentPID == pid
@@ -187,6 +189,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	fmt.Print("Starting gateway sidecar daemon... ")
 
 	args := collectDaemonArgs(cmd)
+	startAttemptedAt := time.Now()
 	pid, err := d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -202,6 +205,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		sidecarHealthURL(cfg),
 		defaultStartReadinessTimeout,
 		defaultReadinessPollInterval,
+		daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt),
 		func() bool {
 			running, currentPID := d.IsRunning()
 			return running && currentPID == pid
@@ -284,16 +288,49 @@ func readDotEnv(path string) map[string]string {
 	return env
 }
 
-// waitForGatewayReadiness waits for the health endpoint to publish a running
-// API state. The endpoint being reachable is not enough: it can briefly serve
-// the initial "starting" snapshot before APIServer marks itself running.
-// A live process that does not become ready by the deadline is returned as a
-// truthful STARTING state; a process exit or explicit API error fails fast.
+type daemonReadinessRequirements struct {
+	guardrailEnabled bool
+	watcherEnabled   bool
+	telemetryEnabled bool
+	sinksEnabled     bool
+	startedNotBefore time.Time
+}
+
+func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore time.Time) daemonReadinessRequirements {
+	if cfg == nil {
+		return daemonReadinessRequirements{startedNotBefore: startedNotBefore}
+	}
+	requirements := daemonReadinessRequirements{
+		guardrailEnabled: cfg.Guardrail.Enabled,
+		watcherEnabled:   cfg.Gateway.Watcher.Enabled,
+		telemetryEnabled: cfg.OTel.Enabled,
+		startedNotBefore: startedNotBefore,
+	}
+	for _, sink := range cfg.AuditSinks {
+		requirements.sinksEnabled = requirements.sinksEnabled || sink.Enabled
+	}
+	for _, connectorConfig := range cfg.Observability.Connectors {
+		if connectorConfig.AuditSinks == nil {
+			continue
+		}
+		for _, sink := range *connectorConfig.AuditSinks {
+			requirements.sinksEnabled = requirements.sinksEnabled || sink.Enabled
+		}
+	}
+	return requirements
+}
+
+// waitForGatewayReadiness waits for every required startup subsystem to reach
+// its final state. The health endpoint and API can become reachable before
+// connector Setup finishes, so API=running alone is not readiness. In
+// particular, an enabled guardrail's initial disabled state must transition to
+// running before start/restart prints OK.
 func waitForGatewayReadiness(
 	client *http.Client,
 	healthURL string,
 	timeout time.Duration,
 	pollInterval time.Duration,
+	requirements daemonReadinessRequirements,
 	processRunning func() bool,
 ) (gateway.HealthSnapshot, bool, error) {
 	if pollInterval <= 0 {
@@ -318,15 +355,12 @@ func waitForGatewayReadiness(
 		if err == nil {
 			lastSnap = snap
 			lastProbeErr = nil
-			switch snap.API.State {
-			case gateway.StateRunning:
+			ready, readinessErr := gatewaySnapshotReady(snap, requirements)
+			if readinessErr != nil {
+				return snap, false, readinessErr
+			}
+			if ready {
 				return snap, true, nil
-			case gateway.StateError:
-				detail := strings.TrimSpace(snap.API.LastError)
-				if detail == "" {
-					detail = "API reported an error state"
-				}
-				return snap, false, fmt.Errorf("gateway API failed during startup: %s", detail)
 			}
 		} else {
 			lastProbeErr = err
@@ -334,7 +368,19 @@ func waitForGatewayReadiness(
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return lastSnap, false, nil
+			detail := summarizeHealthSnapshot(lastSnap)
+			if lastProbeErr != nil {
+				return lastSnap, false, fmt.Errorf(
+					"gateway readiness timed out after %s (last health probe: %v)",
+					timeout,
+					lastProbeErr,
+				)
+			}
+			return lastSnap, false, fmt.Errorf(
+				"gateway readiness timed out after %s (last health: %s)",
+				timeout,
+				detail,
+			)
 		}
 		delay := pollInterval
 		if remaining < delay {
@@ -343,6 +389,106 @@ func waitForGatewayReadiness(
 		timer := time.NewTimer(delay)
 		<-timer.C
 	}
+}
+
+func gatewaySnapshotReady(
+	snap gateway.HealthSnapshot,
+	requirements daemonReadinessRequirements,
+) (bool, error) {
+	// A process can briefly answer on the same port while restart is handing
+	// off between generations. Never declare the new PID ready from an older
+	// process's final health snapshot.
+	if !requirements.startedNotBefore.IsZero() && snap.StartedAt.Before(requirements.startedNotBefore) {
+		return false, nil
+	}
+
+	subsystems := []struct {
+		name   string
+		health gateway.SubsystemHealth
+	}{
+		{name: "api", health: snap.API},
+		{name: "gateway", health: snap.Gateway},
+		{name: "watcher", health: snap.Watcher},
+		{name: "guardrail", health: snap.Guardrail},
+		{name: "telemetry", health: snap.Telemetry},
+		{name: "sinks", health: snap.Sinks},
+	}
+	for _, subsystem := range subsystems {
+		switch subsystem.health.State {
+		case gateway.StateStopped:
+			detail := strings.TrimSpace(subsystem.health.LastError)
+			if detail == "" {
+				detail = string(subsystem.health.State)
+			}
+			return false, fmt.Errorf(
+				"gateway %s failed during startup: %s",
+				subsystem.name,
+				detail,
+			)
+		}
+	}
+	// The gateway uplink retries after StateError, so an error there is
+	// transitional until the readiness deadline. The other required startup
+	// components do not recover in-place from Error and can fail immediately.
+	for _, subsystem := range []struct {
+		name   string
+		health gateway.SubsystemHealth
+	}{
+		{name: "api", health: snap.API},
+		{name: "watcher", health: snap.Watcher},
+		{name: "guardrail", health: snap.Guardrail},
+		{name: "telemetry", health: snap.Telemetry},
+		{name: "sinks", health: snap.Sinks},
+	} {
+		if subsystem.health.State != gateway.StateError {
+			continue
+		}
+		detail := strings.TrimSpace(subsystem.health.LastError)
+		if detail == "" {
+			detail = string(subsystem.health.State)
+		}
+		return false, fmt.Errorf(
+			"gateway %s failed during startup: %s",
+			subsystem.name,
+			detail,
+		)
+	}
+
+	if snap.API.State != gateway.StateRunning {
+		return false, nil
+	}
+	// The OpenClaw fleet uplink is intentionally disabled for native hook-only
+	// standalone installs, including Windows. That is a final ready state, not
+	// a failure. A reconnecting/starting uplink is still pending.
+	if snap.Gateway.State != gateway.StateRunning && snap.Gateway.State != gateway.StateDisabled {
+		return false, nil
+	}
+	if !subsystemMatchesConfiguredState(snap.Watcher.State, requirements.watcherEnabled) {
+		return false, nil
+	}
+	if !subsystemMatchesConfiguredState(snap.Guardrail.State, requirements.guardrailEnabled) {
+		return false, nil
+	}
+	// Guardrail starts life as disabled in NewSidecarHealth. When disabled is
+	// the configured final state, require the guardrail goroutine to publish a
+	// newer health record so the initial placeholder cannot win the race.
+	if !requirements.guardrailEnabled && !snap.StartedAt.IsZero() && !snap.Guardrail.Since.After(snap.StartedAt) {
+		return false, nil
+	}
+	if !subsystemMatchesConfiguredState(snap.Telemetry.State, requirements.telemetryEnabled) {
+		return false, nil
+	}
+	if !subsystemMatchesConfiguredState(snap.Sinks.State, requirements.sinksEnabled) {
+		return false, nil
+	}
+	return true, nil
+}
+
+func subsystemMatchesConfiguredState(state gateway.SubsystemState, enabled bool) bool {
+	if enabled {
+		return state == gateway.StateRunning
+	}
+	return state == gateway.StateDisabled
 }
 
 func printDaemonStartResult(pid int, snap gateway.HealthSnapshot, ready bool) {
