@@ -17,8 +17,11 @@
 package gateway
 
 import (
+	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -30,6 +33,65 @@ func connByName(conns []ConnectorHealth) map[string]ConnectorHealth {
 		out[c.Name] = c
 	}
 	return out
+}
+
+func TestConnectorLastActivityTracksAcceptedRequests(t *testing.T) {
+	h := NewSidecarHealth()
+	h.SetConnector("codex", "", "")
+
+	initial := h.Snapshot()
+	if initial.Connector == nil {
+		t.Fatal("expected primary connector")
+	}
+	if initial.Connector.LastActivityAt != nil {
+		t.Fatalf("initial last activity = %v, want nil", initial.Connector.LastActivityAt)
+	}
+	encoded, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatalf("marshal initial health: %v", err)
+	}
+	if strings.Contains(string(encoded), "last_activity_at") {
+		t.Fatalf("initial health unexpectedly includes last_activity_at: %s", encoded)
+	}
+
+	before := time.Now().UTC()
+	h.RecordConnectorRequestFor("codex")
+	after := time.Now().UTC()
+
+	snap := h.Snapshot()
+	codex := connByName(snap.Connectors)["codex"]
+	if codex.LastActivityAt == nil {
+		t.Fatal("connector last activity is nil after request")
+	}
+	if codex.LastActivityAt.Before(before) || codex.LastActivityAt.After(after) {
+		t.Fatalf("last activity %s outside request bounds [%s, %s]", codex.LastActivityAt, before, after)
+	}
+	if snap.Connector == nil || snap.Connector.LastActivityAt == nil {
+		t.Fatal("primary connector is missing last activity after request")
+	}
+	if !snap.Connector.LastActivityAt.Equal(*codex.LastActivityAt) {
+		t.Fatalf("primary last activity %v != roster last activity %v", snap.Connector.LastActivityAt, codex.LastActivityAt)
+	}
+	encoded, err = json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal active health: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"last_activity_at":"`) {
+		t.Fatalf("active health is missing last_activity_at: %s", encoded)
+	}
+}
+
+func TestConnectorLastActivityNeverRegresses(t *testing.T) {
+	h := NewSidecarHealth()
+	stats := h.statsFor("codex")
+	later := time.Now().UTC()
+	stats.recordActivity(later)
+	stats.recordActivity(later.Add(-time.Hour))
+
+	got := connByName(h.Snapshot().Connectors)["codex"].LastActivityAt
+	if got == nil || !got.Equal(later) {
+		t.Fatalf("last activity = %v, want %s", got, later)
+	}
 }
 
 // TestConnectorCountersAreIsolated verifies that each connector accumulates its

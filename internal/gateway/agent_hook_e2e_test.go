@@ -166,7 +166,8 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = sh.connector
-			api := &APIServer{scannerCfg: cfg}
+			health := NewSidecarHealth()
+			api := &APIServer{scannerCfg: cfg, health: health}
 			handler := otelHTTPServerMiddleware(
 				"sidecar-api",
 				http.HandlerFunc(api.handleAgentHook(sh.connector)),
@@ -227,6 +228,14 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 				t.Errorf("dangerous request action=%q, want %q\nbody=%s", action, sh.expectAction, w.Body.String())
 			}
 
+			connectorHealth := connByName(health.Snapshot().Connectors)[sh.connector]
+			if connectorHealth.Requests != 1 {
+				t.Errorf("connector health requests=%d, want 1", connectorHealth.Requests)
+			}
+			if connectorHealth.LastActivityAt == nil {
+				t.Error("connector health last_activity_at is nil after accepted hook")
+			}
+
 			// Span attribute parity: every connector must emit a
 			// span with the gen_ai.conversation.id (session_id)
 			// set so SIEM correlation works across the full
@@ -277,7 +286,8 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 //   - no panic propagates if the evaluator throws — same fail-open
 //     posture as the regular path.
 func TestHandleAgentHook_FullChain_SyntheticPath(t *testing.T) {
-	api := &APIServer{}
+	health := NewSidecarHealth()
+	api := &APIServer{health: health}
 	ctx := context.Background()
 
 	req := agentHookRequest{
@@ -308,6 +318,13 @@ func TestHandleAgentHook_FullChain_SyntheticPath(t *testing.T) {
 	wire := renderAgentHookResponse("codex", resp)
 	if _, ok := wire["codex_output"]; !ok && resp.HookOutput != nil {
 		t.Errorf("synthetic codex response missing codex_output: %+v", wire)
+	}
+	connectorHealth := connByName(health.Snapshot().Connectors)["codex"]
+	if connectorHealth.Requests != 1 {
+		t.Errorf("synthetic connector health requests=%d, want 1", connectorHealth.Requests)
+	}
+	if connectorHealth.LastActivityAt == nil {
+		t.Error("synthetic connector health last_activity_at is nil after accepted hook")
 	}
 }
 

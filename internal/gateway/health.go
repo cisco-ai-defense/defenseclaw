@@ -49,6 +49,7 @@ type ConnectorHealth struct {
 	Name               string                       `json:"name"`
 	State              SubsystemState               `json:"state"`
 	Since              time.Time                    `json:"since"`
+	LastActivityAt     *time.Time                   `json:"last_activity_at,omitempty"`
 	ToolInspectionMode connector.ToolInspectionMode `json:"tool_inspection_mode"`
 	SubprocessPolicy   connector.SubprocessPolicy   `json:"subprocess_policy"`
 	Requests           int64                        `json:"requests"`
@@ -113,6 +114,7 @@ type connectorStats struct {
 	subprocessPolicy   connector.SubprocessPolicy
 
 	requests         atomic.Int64
+	lastActivityAt   atomic.Int64
 	errors           atomic.Int64
 	toolInspections  atomic.Int64
 	toolBlocks       atomic.Int64
@@ -120,17 +122,40 @@ type connectorStats struct {
 }
 
 func (s *connectorStats) snapshot() ConnectorHealth {
+	// Load Requests before LastActivityAt. RecordConnectorRequestFor stores the
+	// timestamp first, so a snapshot that observes a new request can never pair
+	// that count with a missing activity timestamp.
+	requests := s.requests.Load()
+	var lastActivityAt *time.Time
+	if unixNanos := s.lastActivityAt.Load(); unixNanos > 0 {
+		activityAt := time.Unix(0, unixNanos).UTC()
+		lastActivityAt = &activityAt
+	}
 	return ConnectorHealth{
 		Name:               s.name,
 		State:              s.state,
 		Since:              s.since,
+		LastActivityAt:     lastActivityAt,
 		ToolInspectionMode: s.toolInspectionMode,
 		SubprocessPolicy:   s.subprocessPolicy,
-		Requests:           s.requests.Load(),
+		Requests:           requests,
 		Errors:             s.errors.Load(),
 		ToolInspections:    s.toolInspections.Load(),
 		ToolBlocks:         s.toolBlocks.Load(),
 		SubprocessBlocks:   s.subprocessBlocks.Load(),
+	}
+}
+
+func (s *connectorStats) recordActivity(at time.Time) {
+	candidate := at.UnixNano()
+	for {
+		current := s.lastActivityAt.Load()
+		if candidate <= current {
+			return
+		}
+		if s.lastActivityAt.CompareAndSwap(current, candidate) {
+			return
+		}
 	}
 }
 
@@ -317,8 +342,14 @@ func (h *SidecarHealth) statsFor(name string) *connectorStats {
 	return s
 }
 
-// RecordConnectorRequestFor increments the request counter for a connector.
-func (h *SidecarHealth) RecordConnectorRequestFor(name string) { h.statsFor(name).requests.Add(1) }
+// RecordConnectorRequestFor records one accepted hook event for a connector.
+// The timestamp is stored before the count so a concurrent health snapshot
+// never exposes a new request without its matching activity time.
+func (h *SidecarHealth) RecordConnectorRequestFor(name string) {
+	stats := h.statsFor(name)
+	stats.recordActivity(time.Now())
+	stats.requests.Add(1)
+}
 
 // RecordConnectorErrorFor increments the error counter for a connector.
 func (h *SidecarHealth) RecordConnectorErrorFor(name string) { h.statsFor(name).errors.Add(1) }

@@ -4431,6 +4431,7 @@ async def test_overview_prefers_live_connector_counts_over_lifetime_history() ->
                     name="claudecode",
                     state="running",
                     since=since.isoformat(),
+                    last_activity_at=(since + timedelta(seconds=5)).isoformat(),
                     requests=6,
                     tool_inspections=1,
                 ),
@@ -4438,6 +4439,7 @@ async def test_overview_prefers_live_connector_counts_over_lifetime_history() ->
                     name="codex",
                     state="running",
                     since=since.isoformat(),
+                    last_activity_at=(since + timedelta(seconds=10)).isoformat(),
                     requests=135,
                     tool_inspections=73,
                 ),
@@ -4537,6 +4539,7 @@ async def test_overview_prefers_live_connector_counts_over_lifetime_history() ->
         assert rows["codex"].calls == 135
         assert rows["codex"].blocks == 0
         assert rows["codex"].alerts == 2
+        assert rows["codex"].last_activity != "—"
         assert store.stats_calls == 0
 
         app._set_connector_filter("codex")
@@ -4554,6 +4557,71 @@ async def test_overview_prefers_live_connector_counts_over_lifetime_history() ->
         session_counts = app._overview_session_enforcement_counts()
         assert session_counts.active_alerts == 3
         assert session_counts.total_scans == 2
+
+
+@pytest.mark.asyncio
+async def test_overview_live_counts_old_gateway_uses_audit_last_activity() -> None:
+    """Live counters without a gateway timestamp retain the audit fallback."""
+
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(minutes=2)
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "observe"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="disabled"),
+            connectors=(
+                ConnectorHealth(
+                    name="codex",
+                    state="running",
+                    since=since.isoformat(),
+                    requests=1,
+                ),
+                ConnectorHealth(
+                    name="cursor",
+                    state="running",
+                    since=since.isoformat(),
+                    last_activity_at="not-a-timestamp",
+                    requests=2,
+                ),
+            ),
+        )
+    )
+
+    class HookStatsStore:
+        def __init__(self) -> None:
+            self.stats_calls = 0
+
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return []
+
+        def connector_hook_event_stats(self) -> dict[str, dict[str, object]]:
+            self.stats_calls += 1
+            return {
+                "codex": {"calls": 100, "newest": (now - timedelta(seconds=5)).isoformat()},
+                "cursor": {"calls": 200, "newest": (now - timedelta(seconds=10)).isoformat()},
+            }
+
+    store = HookStatsStore()
+    app = DefenseClawTUI(
+        overview_model=overview,
+        audit_model=AuditPanelModel(store),
+    )
+
+    async with app.run_test(size=(190, 50)) as pilot:
+        await pilot.pause()
+
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert rows["codex"].calls == 1
+        assert rows["cursor"].calls == 2
+        assert rows["codex"].last_activity != "—"
+        assert rows["cursor"].last_activity != "—"
+        assert store.stats_calls >= 1
 
 
 @pytest.mark.asyncio
@@ -5257,10 +5325,23 @@ def test_connectors_health_array_parsed() -> None:
     snap = _health_snapshot_from_mapping(
         {
             "gateway": {"state": "running"},
-            "connector": {"name": "codex", "state": "running"},
+            "connector": {
+                "name": "codex",
+                "state": "running",
+                "last_activity_at": "2026-07-01T14:35:00Z",
+            },
             "connectors": [
-                {"name": "codex", "state": "running", "requests": 5},
-                {"name": "cursor", "state": "degraded"},
+                {
+                    "name": "codex",
+                    "state": "running",
+                    "requests": 5,
+                    "last_activity_at": "2026-07-01T14:35:00Z",
+                },
+                {
+                    "name": "cursor",
+                    "state": "degraded",
+                    "lastActivityAt": "2026-07-01T14:36:00Z",
+                },
                 {"state": "running"},  # nameless entry is skipped
             ],
         }
@@ -5268,6 +5349,10 @@ def test_connectors_health_array_parsed() -> None:
     names = [c.name for c in snap.connectors]
     assert names == ["codex", "cursor"]
     assert snap.connectors[0].requests == 5
+    assert snap.connector is not None
+    assert snap.connector.last_activity_at == "2026-07-01T14:35:00Z"
+    assert snap.connectors[0].last_activity_at == "2026-07-01T14:35:00Z"
+    assert snap.connectors[1].last_activity_at == "2026-07-01T14:36:00Z"
 
 
 # --- A2: _overview_config roster build is defensive -------------------------
