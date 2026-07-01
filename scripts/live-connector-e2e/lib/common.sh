@@ -15,7 +15,7 @@
 #
 # Cross-OS note: on Linux/macOS the agent invokes the installed Bash hook
 # script (~/.defenseclaw/hooks/<connector>-hook.sh). On native Windows the
-# agent invokes `defenseclaw-gateway hook --connector <name> --event <ev>`
+# agent invokes `defenseclaw-hook hook --connector <name> --event <ev>`
 # (PR #308). Both forward the stdin event payload to the local gateway, so
 # every assertion below works against canonical ~/.defenseclaw/audit.db history
 # regardless of OS.
@@ -271,14 +271,14 @@ dc_hook_script() {
 # dc_invoke_hook <connector> <event> <payload_file> — feed a golden event
 # payload into the installed hook entrypoint and echo "exit:<code>" on the
 # last line so callers can assert verdict shaping. On Windows this targets the
-# native `defenseclaw-gateway hook` subcommand instead of the Bash script.
+# native no-console `defenseclaw-hook hook` subcommand instead of the Bash script.
 #
 # Stdout of the hook (the agent-native decision JSON) is forwarded verbatim
 # before the trailing exit line.
 dc_invoke_hook() {
   local connector="$1" event="$2" payload="$3" code out
   if dc_is_windows; then
-    out="$(defenseclaw-gateway hook --connector "${connector}" --event "${event}" < "${payload}" 2>&1)" && code=0 || code=$?
+    out="$(defenseclaw-hook hook --connector "${connector}" --event "${event}" < "${payload}" 2>&1)" && code=0 || code=$?
   else
     local script; script="$(dc_hook_script "${connector}")"
     if [ ! -x "${script}" ]; then

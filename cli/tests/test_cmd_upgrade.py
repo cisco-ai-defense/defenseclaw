@@ -5626,8 +5626,7 @@ class TestGatewayTarballExtraction(unittest.TestCase):
 
 
 class TestGatewayWindowsArchive(unittest.TestCase):
-    """Windows ships a .zip containing defenseclaw.exe; the upgrade path must
-    download, validate, and extract it the same way it does the .tar.gz."""
+    """Windows ships gateway and no-console hook executables in one zip."""
 
     @staticmethod
     def _write_zip(path, entries):
@@ -5653,7 +5652,10 @@ class TestGatewayWindowsArchive(unittest.TestCase):
         with TemporaryDirectory() as tmp:
 
             def fake_download(_url, dest):
-                self._write_zip(dest, {"defenseclaw.exe": "MZ\x00binary"})
+                self._write_zip(dest, {
+                    "defenseclaw.exe": "MZ\x00gateway",
+                    "defenseclaw-hook.exe": "MZ\x00hook",
+                })
 
             with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
                 binary, archive_name = _download_gateway("9.9.9", "windows", "amd64", tmp)
@@ -5661,12 +5663,24 @@ class TestGatewayWindowsArchive(unittest.TestCase):
             self.assertEqual(archive_name, "defenseclaw_9.9.9_windows_amd64.zip")
             self.assertTrue(binary.endswith("defenseclaw.exe"))
             self.assertTrue(os.path.isfile(binary))
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "defenseclaw-hook.exe")))
 
     def test_download_gateway_rejects_zip_without_exe(self):
         with TemporaryDirectory() as tmp:
 
             def fake_download(_url, dest):
                 self._write_zip(dest, {"README.md": "missing binary"})
+
+            with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
+                with self.assertRaises(SystemExit) as ctx:
+                    _download_gateway("9.9.9", "windows", "amd64", tmp)
+            self.assertEqual(ctx.exception.code, 1)
+
+    def test_download_gateway_rejects_zip_without_hook_launcher(self):
+        with TemporaryDirectory() as tmp:
+
+            def fake_download(_url, dest):
+                self._write_zip(dest, {"defenseclaw.exe": "MZ\x00gateway"})
 
             with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
                 with self.assertRaises(SystemExit) as ctx:
@@ -5782,6 +5796,34 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
 
             self.assertEqual(active.read_bytes(), b"signed bridge gateway")
             self.assertTrue(codesign.call_args.kwargs["check"])
+
+    def test_windows_install_places_no_console_hook_next_to_gateway(self):
+        with TemporaryDirectory() as staging, TemporaryDirectory() as fake_home:
+            gateway = os.path.join(staging, "defenseclaw.exe")
+            hook = os.path.join(staging, "defenseclaw-hook.exe")
+            with open(gateway, "wb") as stream:
+                stream.write(b"gateway")
+            with open(hook, "wb") as stream:
+                stream.write(b"hook")
+
+            def fake_expanduser(path):
+                return path.replace("~", fake_home, 1)
+
+            with patch(
+                "defenseclaw.commands.cmd_upgrade.os.path.expanduser",
+                side_effect=fake_expanduser,
+            ):
+                target = _install_gateway(gateway, "windows")
+
+            self.assertEqual(
+                os.path.normpath(target),
+                os.path.join(fake_home, ".local", "bin", "defenseclaw-gateway.exe"),
+            )
+            installed_hook = os.path.join(
+                fake_home, ".local", "bin", "defenseclaw-hook.exe"
+            )
+            with open(installed_hook, "rb") as stream:
+                self.assertEqual(stream.read(), b"hook")
 
 
 class TestPostInstallVersionVerification(unittest.TestCase):

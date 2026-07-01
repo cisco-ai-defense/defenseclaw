@@ -772,8 +772,8 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	cfg["otel"] = otelBlock
 
 	// agent-turn-complete bridge: Codex appends one JSON payload argument to
-	// this argv array. Windows invokes the gateway's hidden native notifier
-	// directly; Unix keeps the existing Bash bridge. The native form is an
+	// this argv array. Windows invokes the installed no-console hook launcher;
+	// Unix keeps the existing Bash bridge. The native form is an
 	// argv array rather than a command string, so paths containing spaces need
 	// no shell quoting and no Bash/jq/curl dependency is introduced.
 	if runtime.GOOS == "windows" {
@@ -1027,7 +1027,7 @@ func codexShellNotifyCommand(opts SetupOpts) []string {
 }
 
 // codexNotifyLooksManaged recognizes both the current platform command and the
-// legacy Bash bridge. Native matching is strict on argv shape and gateway
+// legacy Bash bridge. Native matching is strict on argv shape and DefenseClaw
 // executable basename so teardown never removes an unrelated user notifier
 // that happens to contain the word "notify".
 func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
@@ -1049,7 +1049,7 @@ func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	default:
 		return false
 	}
-	return len(argv) == 2 && argv[1] == "notify" && isDefenseClawGatewayExecutable(argv[0])
+	return len(argv) == 2 && argv[1] == "notify" && isDefenseClawHookExecutable(argv[0])
 }
 
 // writeCodexNotifyBridge writes ~/.defenseclaw/notify-bridge.sh, the

@@ -33,7 +33,7 @@
 #     cli/defenseclaw/inventory/validated_versions.json).
 #
 # Native Windows hook execution (the agent invoking
-# `defenseclaw-gateway hook --connector <c> --event <e>`) depends on the
+# `defenseclaw-hook hook --connector <c> --event <e>`) depends on the
 # native Windows hook entrypoint. Until that is proven on hosted Windows
 # runners, all Windows cells (and Copilot everywhere) run with
 # continue-on-error so a flake does not turn the whole matrix red.
@@ -259,7 +259,7 @@ jobs:
             -run "TestConnectorLifecycle_Matrix/${{ matrix.connector }}|TestV7Observability_DestinationAppPerConnector/${{ matrix.connector }}|TestConnectorVerifyCleanOnFreshDataDir/${{ matrix.connector }}|TestGoldenPerConnectorLayout"
 
       # Golden-payload entrypoint smoke: feed each registry event into the
-      # installed hook entrypoint (Bash script on unix, `defenseclaw-gateway
+      # installed hook entrypoint (Bash script on unix, `defenseclaw-hook
       # hook` on Windows) and assert fire + verdict shaping + clean teardown.
       - name: Contract entrypoint smoke
         if: steps.select.outputs.run == 'true'

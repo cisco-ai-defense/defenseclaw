@@ -764,7 +764,9 @@ jobs:
           python3 scripts/source_release_identity.py check --expected-release 0.8.3
 
       # Reproduce the legacy GoReleaser Windows output by hand so the smoke
-      # stays fast and self-contained. The CLI wheel is built via `make dist-cli`,
+      # stays fast and self-contained: the archive contains defenseclaw.exe
+      # plus the GUI-subsystem defenseclaw-hook.exe. The CLI wheel is built via
+      # `make dist-cli`,
       # the same target `make dist` uses — it stages cli/defenseclaw/_data
       # (policies, skills, dashboards) before `uv build`, so the wheel matches
       # a real release. `make install` already runs this _bundle-data path on
@@ -776,6 +778,8 @@ jobs:
           mkdir -p dist/gwstage
           CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=0.8.3" \
             -o dist/gwstage/defenseclaw.exe ./cmd/defenseclaw
+          CGO_ENABLED=0 go build -ldflags "-s -w -H=windowsgui -X main.version=0.8.3" \
+            -o dist/gwstage/defenseclaw-hook.exe ./cmd/defenseclaw-hook
           make dist-cli
           ls -la dist
 
@@ -783,7 +787,7 @@ jobs:
         shell: pwsh
         run: |
           $zip = "dist/defenseclaw_0.8.3_windows_amd64.zip"
-          Compress-Archive -Path dist/gwstage/defenseclaw.exe -DestinationPath $zip -Force
+          Compress-Archive -Path dist/gwstage/defenseclaw.exe,dist/gwstage/defenseclaw-hook.exe -DestinationPath $zip -Force
           Get-ChildItem dist
 
       - name: Build and verify legacy installer policy fixture
@@ -824,15 +828,21 @@ jobs:
       # New pwsh session: install.ps1 persists the install dir to the *user*
       # PATH, which a mid-job step does not auto-reload, so prepend it here
       # before resolving the shim. --version short-circuits before any config
-      # load on both binaries, so neither needs `defenseclaw init`.
+      # load for the gateway and CLI; the launcher is exercised through notify.
       - name: Verify installed gateway + CLI resolve and run
         shell: pwsh
         run: |
           $bin  = Join-Path $env:USERPROFILE ".local\bin"
           $gw   = Join-Path $bin "defenseclaw-gateway.exe"
+          $hook = Join-Path $bin "defenseclaw-hook.exe"
           $shim = Join-Path $bin "defenseclaw.cmd"
           if (-not (Test-Path $gw))   { throw "gateway not installed: $gw" }
+          if (-not (Test-Path $hook)) { throw "hook launcher not installed: $hook" }
           if (-not (Test-Path $shim)) { throw "CLI shim not installed: $shim" }
+          $bytes = [System.IO.File]::ReadAllBytes($hook)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          $subsystem = [BitConverter]::ToUInt16($bytes, $peOffset + 24 + 68)
+          if ($subsystem -ne 2) { throw "defenseclaw-hook subsystem $subsystem; expected Windows GUI (2)" }
           $env:PATH = "$bin;$env:PATH"
           foreach ($command in @($gw, "defenseclaw")) {
             $output = (& $command --version 2>&1 | Out-String).Trim()
@@ -842,3 +852,5 @@ jobs:
               throw "$command did not report exact 0.8.3: $output"
             }
           }
+          $hookProcess = Start-Process -FilePath $hook -ArgumentList @("notify", "{}") -Wait -PassThru
+          if ($hookProcess.ExitCode -ne 0) { throw "defenseclaw-hook notify exit $($hookProcess.ExitCode)" }
