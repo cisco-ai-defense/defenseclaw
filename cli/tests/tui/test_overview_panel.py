@@ -653,7 +653,9 @@ def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -
     assert "hooks-only" not in antigravity_mcps
     assert "unsupported" not in antigravity_mcps
     assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
-    assert "discovery-only" in connector_source_label("antigravity", "plugins")
+    antigravity_plugins = connector_source_label("antigravity", "plugins")
+    assert ".gemini/config/plugins" in antigravity_plugins
+    assert "read/write" in antigravity_plugins
     assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
     assert "managed by OmniGent" in connector_source_label("omnigent", "mcps")
     assert "unsupported" in connector_source_label("omnigent", "skills")
