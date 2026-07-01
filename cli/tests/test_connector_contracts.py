@@ -143,6 +143,18 @@ class TestConnectorContractManifest(unittest.TestCase):
             templates.index("~/.omnigent/config.yaml"),
         )
 
+    def test_hermes_contract_advertises_native_windows_path_precedence(self) -> None:
+        compat = resolve_connector_contract("hermes", "")
+
+        self.assertEqual(
+            compat.contract.hook_config_path_templates,
+            (
+                "$HERMES_HOME/config.yaml",
+                "%LOCALAPPDATA%/hermes/config.yaml",
+                "~/.hermes/config.yaml",
+            ),
+        )
+
     def test_manifest_loader_preserves_unversioned_default_marker(self) -> None:
         _, contracts = _load_contracts_from_manifest(
             {

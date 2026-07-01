@@ -531,6 +531,29 @@ func surfaceLocations(cap SurfaceCapability) SurfaceLocations {
 }
 
 func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
+	if HookContractCompatibilityDrifted(previous, current) {
+		return true
+	}
+	if len(previous.HookScriptDigests) > 0 && len(current.HookScriptDigests) > 0 {
+		for name, digest := range previous.HookScriptDigests {
+			if current.HookScriptDigests[name] != "" && current.HookScriptDigests[name] != digest {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HookContractCompatibilityDrifted reports only upstream compatibility
+// changes: the installed agent version or the selected hook contract changed.
+// It deliberately excludes generated hook-script digests.
+//
+// A digest mismatch means an installed DefenseClaw hook is stale or was
+// edited. Connector Setup is the repair path for that state, so rejecting
+// startup before Setup runs makes an explicit setup/restart unable to refresh
+// the hook. Callers that need the broader integrity signal (for doctor/status)
+// should continue to use HookContractLockDrifted.
+func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" {
 		return false
 	}

@@ -620,7 +620,9 @@ def test_sort_ai_discovery_signals_for_overview_tiebreakers() -> None:
     assert ordered[0].model.status == "loaded"
 
 
-def test_connector_labels_cover_hook_surface_connectors() -> None:
+def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -> None:
+    hermes_home = tmp_path / "hermes-home"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     cases = {
         "hermes": "Hermes",
         "cursor": "Cursor",
@@ -631,7 +633,10 @@ def test_connector_labels_cover_hook_surface_connectors() -> None:
     for wire, want in cases.items():
         assert friendly_connector_name(wire) == want
 
-    assert ".hermes/config.yaml" in connector_source_label("hermes", "mcps")
+    assert str(hermes_home / "config.yaml") in connector_source_label("hermes", "mcps")
+    assert str(hermes_home / "config.yaml") in connector_source_label("hermes", "config")
+    assert str(hermes_home / "skills") in connector_source_label("hermes", "skills")
+    assert str(hermes_home / "plugins") in connector_source_label("hermes", "plugins")
     assert ".cursor/skills" in connector_source_label("cursor", "skills")
     assert ".codeium/windsurf/hooks.json" in connector_source_label("windsurf", "config")
     assert ".gemini/extensions" in connector_source_label("geminicli", "plugins")

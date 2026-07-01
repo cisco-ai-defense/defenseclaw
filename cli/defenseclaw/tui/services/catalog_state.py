@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
+from defenseclaw.connector_paths import hermes_config_path
 from defenseclaw.tui.panels.registries import registry_badge
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 
@@ -1641,7 +1642,7 @@ def mcp_unset_target_for_connector(connector: str) -> str:
         case "zeptoclaw":
             return "~/.zeptoclaw/config.json"
         case "hermes":
-            return "~/.hermes/config.yaml"
+            return hermes_config_path()
         case "cursor":
             return "./.cursor/mcp.json"
         case "windsurf":

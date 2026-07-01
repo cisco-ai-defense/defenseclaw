@@ -104,6 +104,7 @@ class TestSkillDirs:
     def test_new_connector_skill_dirs_are_connector_specific(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home" / ".hermes"))
         monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "opencode-custom"))
         assert connector_paths.skill_dirs("hermes") == [
             os.path.join(str(tmp_path / "home"), ".hermes", "skills"),
@@ -236,6 +237,7 @@ class TestPluginDirs:
     def test_new_connector_plugin_dirs(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home" / ".hermes"))
         monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "opencode-custom"))
         assert os.path.join(str(tmp_path / "home"), ".hermes", "plugins") in connector_paths.plugin_dirs("hermes")
         assert connector_paths.plugin_dirs("cursor") == []
@@ -313,6 +315,7 @@ class TestMCPServers:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("HERMES_HOME", str(fake_home / ".hermes"))
 
         hermes = fake_home / ".hermes" / "config.yaml"
         hermes.parent.mkdir(parents=True)
@@ -728,6 +731,61 @@ class TestConnectorHome:
         assert ".openclaw" not in home
 
 
+class TestHermesPathResolution:
+    def test_hermes_home_override_has_highest_precedence(self, monkeypatch, tmp_path):
+        configured = tmp_path / "custom-hermes"
+        monkeypatch.setenv("HERMES_HOME", str(configured))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+
+        assert connector_paths.hermes_home() == str(configured)
+        assert connector_paths.hermes_config_path() == str(configured / "config.yaml")
+
+    def test_windows_defaults_to_local_app_data(self, tmp_path):
+        home = tmp_path / "home"
+        local_app_data = tmp_path / "local-app-data"
+
+        resolved = connector_paths._resolve_hermes_home(
+            platform_name="nt",
+            user_home=str(home),
+            local_app_data=str(local_app_data),
+            override="",
+        )
+
+        assert resolved == str(local_app_data / "hermes")
+
+    def test_non_windows_preserves_dot_hermes_default(self, tmp_path):
+        home = tmp_path / "home"
+
+        resolved = connector_paths._resolve_hermes_home(
+            platform_name="posix",
+            user_home=str(home),
+            local_app_data=str(tmp_path / "ignored"),
+            override="",
+        )
+
+        assert resolved == str(home / ".hermes")
+
+    def test_windows_without_local_app_data_falls_back_to_user_home(self, tmp_path):
+        home = tmp_path / "home"
+
+        resolved = connector_paths._resolve_hermes_home(
+            platform_name="nt",
+            user_home=str(home),
+            local_app_data="",
+            override="",
+        )
+
+        assert resolved == str(home / ".hermes")
+
+    def test_legacy_config_path_is_read_only_migration_candidate(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: home)
+
+        assert connector_paths.hermes_legacy_config_path() == str(
+            home / ".hermes" / "config.yaml"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Round-trip via Config.skill_dirs / plugin_dirs / mcp_servers
 # ---------------------------------------------------------------------------
@@ -738,21 +796,20 @@ class TestConnectorConfigFiles:
     actually writes, not a phantom path."""
 
     def test_hermes_lists_yaml_not_json(self, tmp_path, monkeypatch):
-        # The Go source of truth (hermesConfigPath / the hook-contract
-        # template) resolves hermes' config to ~/.hermes/config.yaml; the old
-        # ~/.hermes/config.json is never written. (N2)
         fake_home = tmp_path / "home"
         fake_home.mkdir()
-        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: fake_home)
+        hermes_home = fake_home / "effective-hermes"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
         files = connector_paths.connector_config_files("hermes")
-        assert os.path.join(str(fake_home), ".hermes", "config.yaml") in files
+        assert str(hermes_home / "config.yaml") in files
         assert not any(p.endswith(os.path.join(".hermes", "config.json")) for p in files)
 
     def test_hermes_workspace_path_is_yaml(self, tmp_path, monkeypatch):
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: fake_home)
+        monkeypatch.setenv("HERMES_HOME", str(fake_home / ".hermes"))
 
         files = connector_paths.connector_config_files(
             "hermes", workspace_dir=str(tmp_path)

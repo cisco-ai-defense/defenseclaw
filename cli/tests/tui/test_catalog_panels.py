@@ -234,13 +234,15 @@ def test_mcp_parse_scoped_group_and_empty_group() -> None:
     assert parse_mcp_list_json(json.dumps({"connector": "claudecode", "mcp_servers": []})) == ()
 
 
-def test_mcp_actions_name_connector_specific_unset_targets() -> None:
+def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path) -> None:
+    hermes_config = tmp_path / "hermes-home" / "config.yaml"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_config.parent))
     cases = {
         "openclaw": "OpenClaw config",
         "claudecode": "~/.claude/settings.json",
         "codex": "./.mcp.json",
         "zeptoclaw": "~/.zeptoclaw/config.json",
-        "hermes": "~/.hermes/config.yaml",
+        "hermes": str(hermes_config),
         "cursor": "./.cursor/mcp.json",
         "windsurf": "~/.codeium/windsurf/mcp_config.json",
         "geminicli": "~/.gemini/settings.json",

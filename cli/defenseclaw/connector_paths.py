@@ -236,6 +236,60 @@ def _omnigent_config_home() -> str:
     return os.path.join(str(Path.home()), ".omnigent")
 
 
+def _resolve_hermes_home(
+    *,
+    platform_name: str,
+    user_home: str,
+    local_app_data: str,
+    override: str,
+) -> str:
+    """Resolve Hermes' effective home without mutating process state.
+
+    Hermes gives ``HERMES_HOME`` highest precedence. Native Windows installs
+    otherwise use ``%LOCALAPPDATA%\\hermes``; macOS, Linux, and WSL retain the
+    historical ``~/.hermes`` default. A Windows process missing
+    ``LOCALAPPDATA`` safely falls back to the user-scoped historical path
+    instead of constructing a relative path from the current directory.
+    """
+    configured = (override or "").strip()
+    if configured:
+        return os.path.abspath(os.path.expanduser(configured))
+
+    home = os.path.abspath(os.path.expanduser((user_home or "").strip()))
+    if platform_name == "nt":
+        windows_root = (local_app_data or "").strip()
+        if windows_root:
+            return os.path.abspath(
+                os.path.join(os.path.expanduser(windows_root), "hermes")
+            )
+    return os.path.join(home, ".hermes")
+
+
+def hermes_home() -> str:
+    """Return the home directory used by the current Hermes installation."""
+    return _resolve_hermes_home(
+        platform_name=os.name,
+        user_home=str(Path.home()),
+        local_app_data=os.environ.get("LOCALAPPDATA", ""),
+        override=os.environ.get("HERMES_HOME", ""),
+    )
+
+
+def hermes_config_path() -> str:
+    """Return Hermes' effective user-level ``config.yaml`` path."""
+    return os.path.join(hermes_home(), "config.yaml")
+
+
+def hermes_legacy_config_path() -> str:
+    """Return the pre-native-Windows Hermes config path for migration checks.
+
+    This helper is intentionally not used as current configuration evidence.
+    Callers may surface a read-only migration warning, but must not silently
+    copy, merge, or delete the potentially secret-bearing legacy file.
+    """
+    return os.path.join(os.path.abspath(str(Path.home())), ".hermes", "config.yaml")
+
+
 def omnigent_config_path() -> str:
     """Return OmniGent's effective user-level ``config.yaml`` path.
 
@@ -308,7 +362,7 @@ def connector_home(
     if name == "windsurf":
         return os.path.join(home, ".codeium", "windsurf")
     if name == "hermes":
-        return os.path.join(home, ".hermes")
+        return hermes_home()
     if name == "opencode":
         # opencode keeps its config under ~/.config/opencode/ (XDG-style).
         # Surfaced so inventory/doctor render a truthful home label rather
@@ -405,15 +459,12 @@ def connector_config_files(
     elif name == "windsurf":
         paths = list(_windsurf_mcp_paths(home))
     elif name == "hermes":
-        # Hermes' real config file is YAML, not JSON — the Go source of
-        # truth resolves it to ~/.hermes/config.yaml (hermesConfigPath in
-        # internal/gateway/connector/hook_only.go and the hook-contract
-        # template in hook_contract.go). The setup adapter merges MCP
-        # servers into that file and the hook contract is registered
-        # against it, so inventory/doctor/aibom must point operators at
-        # the .yaml path, not a phantom .json that is never written. (N2)
+        # Hermes' real config file is YAML, not JSON. HERMES_HOME takes
+        # precedence, native Windows defaults to %LOCALAPPDATA%\\hermes, and
+        # macOS/Linux/WSL retain ~/.hermes. The optional workspace entry is a
+        # read surface only; gateway hook setup writes the effective user file.
         paths = [
-            os.path.join(home, ".hermes", "config.yaml"),
+            hermes_config_path(),
             _workspace_path(workspace_dir, ".hermes", "config.yaml"),
         ]
     elif name == "openclaw":
@@ -612,7 +663,7 @@ def _zeptoclaw_skill_dirs(workspace_dir: str | None = None) -> list[str]:
 
 
 def _hermes_skill_dirs() -> list[str]:
-    return [os.path.join(str(Path.home()), ".hermes", "skills")]
+    return [os.path.join(hermes_home(), "skills")]
 
 
 def _cursor_skill_dirs(workspace_dir: str | None = None) -> list[str]:
@@ -764,10 +815,9 @@ def _zeptoclaw_plugin_dirs() -> list[str]:
 
 
 def _hermes_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
-    home = str(Path.home())
     return _dedup(
         [
-            os.path.join(home, ".hermes", "plugins"),
+            os.path.join(hermes_home(), "plugins"),
             _workspace_path(workspace_dir, ".hermes", "plugins"),
         ]
     )
@@ -947,7 +997,7 @@ def _openclaw_mcp_servers(
 
 def _hermes_mcp_servers() -> list[MCPServerEntry]:
     return _read_yaml_mcp_servers(
-        os.path.join(str(Path.home()), ".hermes", "config.yaml"),
+        hermes_config_path(),
         key_paths=(("mcp", "servers"), ("mcpServers",)),
     )
 
@@ -1451,8 +1501,7 @@ def set_mcp_server(
             _set_codex_global_mcp_server(name, entry)
         return
     if name_n == "hermes":
-        path = os.path.join(str(Path.home()), ".hermes", "config.yaml")
-        _atomic_yaml_merge(path, ("mcp", "servers", name), entry)
+        _atomic_yaml_merge(hermes_config_path(), ("mcp", "servers", name), entry)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -1550,8 +1599,7 @@ def unset_mcp_server(
             _unset_codex_global_mcp_server(name)
         return
     if name_n == "hermes":
-        path = os.path.join(str(Path.home()), ".hermes", "config.yaml")
-        _atomic_yaml_delete(path, ("mcp", "servers", name))
+        _atomic_yaml_delete(hermes_config_path(), ("mcp", "servers", name))
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)

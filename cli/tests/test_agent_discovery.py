@@ -20,6 +20,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -252,6 +253,8 @@ def test_each_connector_tracks_meaningful_config_separately_from_installation(
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    if connector == "hermes":
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
 
     signal = ad._scan_agent(connector)
@@ -259,6 +262,66 @@ def test_each_connector_tracks_meaningful_config_separately_from_installation(
     assert signal.installed is False
     assert signal.configured is True
     assert ad._path_key(signal.config_path) == ad._path_key(str(config))
+
+
+def test_hermes_legacy_windows_config_is_not_current_configuration_evidence(
+    monkeypatch,
+    tmp_path,
+):
+    _pin_home(monkeypatch, tmp_path)
+    legacy = tmp_path / ".hermes" / "config.yaml"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("hooks: {}\n", encoding="utf-8")
+    effective = tmp_path / "local-app-data" / "hermes" / "config.yaml"
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.setattr(ad, "hermes_config_path", lambda: str(effective))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("hermes")
+
+    assert signal.installed is False
+    assert signal.configured is False
+    assert signal.config_path == ""
+
+
+def test_hermes_native_windows_venv_is_discovered_without_path(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    local_app_data = tmp_path / "local-app-data"
+    binary = (
+        local_app_data
+        / "hermes"
+        / "hermes-agent"
+        / "venv"
+        / "Scripts"
+        / "hermes.exe"
+    )
+    config = local_app_data / "hermes" / "config.yaml"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test executable")
+    config.write_text("hooks: {}\n", encoding="utf-8")
+    _pin_home(monkeypatch, home)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ad.os, "name", "nt")
+    monkeypatch.setattr(ad, "hermes_config_path", lambda: str(config))
+    monkeypatch.setattr(
+        ad,
+        "_version_for_agent_binary",
+        lambda name, path, _args: (
+            ("Hermes Agent v0.17.0", "")
+            if name == "hermes" and ad._path_key(path) == ad._path_key(str(binary))
+            else ("", "bad")
+        ),
+    )
+
+    signal = ad._scan_agent("hermes")
+
+    assert signal.installed is True
+    assert signal.configured is True
+    assert ad._path_key(signal.binary_path) == ad._path_key(str(binary))
+    assert ad._path_key(signal.config_path) == ad._path_key(str(config))
+    assert signal.version == "Hermes Agent v0.17.0"
 
 
 def test_antigravity_windows_cli_fallback_is_detected(monkeypatch, tmp_path):
@@ -321,6 +384,20 @@ def test_antigravity_windows_roots_are_narrow_trusted_prefixes(monkeypatch, tmp_
     assert ad._path_key(str(local_app_data)) not in prefixes
 
 
+def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+    hermes_scripts = (
+        local_app_data / "hermes" / "hermes-agent" / "venv" / "Scripts"
+    )
+
+    assert ad._path_key(str(hermes_scripts)) in prefixes
+    assert ad._path_key(str(local_app_data / "hermes")) not in prefixes
+    assert ad._path_key(str(local_app_data)) not in prefixes
+
+
 @pytest.mark.parametrize(
     ("connector", "relative_binary"),
     [
@@ -328,7 +405,17 @@ def test_antigravity_windows_roots_are_narrow_trusted_prefixes(monkeypatch, tmp_
         ("claudecode", ("home", ".local", "bin", "claude.exe")),
         ("openclaw", ("home", ".local", "bin", "openclaw.exe")),
         ("zeptoclaw", ("home", ".local", "bin", "zeptoclaw.exe")),
-        ("hermes", ("home", ".local", "bin", "hermes.exe")),
+        (
+            "hermes",
+            (
+                "local",
+                "hermes",
+                "hermes-agent",
+                "venv",
+                "Scripts",
+                "hermes.exe",
+            ),
+        ),
         ("cursor", ("local", "Programs", "cursor", "resources", "app", "bin", "cursor.cmd")),
         ("windsurf", ("local", "Programs", "Windsurf", "bin", "windsurf.exe")),
         ("geminicli", ("roaming", "npm", "gemini.cmd")),
@@ -408,7 +495,7 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
     assert kwargs["shell"] is False
     assert kwargs["timeout"] == 2.0
     assert kwargs["capture_output"] is True
-    assert kwargs["text"] is True
+    assert kwargs["text"] is False
 
 
 def test_openhands_version_probe_prefers_cli_line_after_banner(monkeypatch, tmp_path):
@@ -460,9 +547,39 @@ def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
     assert kwargs["timeout"] == 8.0
 
 
+def test_version_probe_decodes_utf8_hermes_output_from_isolated_subprocess(
+    monkeypatch,
+    tmp_path,
+):
+    fixture = tmp_path / "hermes_version_fixture.py"
+    fixture.write_text(
+        "import sys\n"
+        "sys.stdout.buffer.write("
+        "b'Hermes Agent v0.13.0 \\xc2\\xb7 upstream abc "
+        "\\xc2\\xb7 local def\\n'"
+        ")\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
+
+    version, error = ad._version_for_binary(sys.executable, (str(fixture),))
+
+    assert error == ""
+    assert version == "Hermes Agent v0.13.0 \u00b7 upstream abc \u00b7 local def"
+    assert "\u00c2" not in version
+
+
+def test_version_probe_decoder_preserves_legacy_windows_output(monkeypatch):
+    monkeypatch.setattr(ad.locale, "getpreferredencoding", lambda _setlocale=False: "cp1252")
+
+    output = ad._decode_version_probe_output(b"Cursor 3.9.16 caf\xe9")
+
+    assert output == "Cursor 3.9.16 caf\u00e9"
+
+
 def test_windows_executable_suffixes_preserve_agent_specific_probe_rules(monkeypatch):
     calls = []
-    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path: True)
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
 
     def fake_run(args, **kwargs):
         calls.append((args, kwargs))
@@ -485,7 +602,7 @@ def test_windows_executable_suffixes_preserve_agent_specific_probe_rules(monkeyp
 
 def test_claude_version_probe_gets_longer_timeout_with_exe_suffix(monkeypatch):
     calls = []
-    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path: True)
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
 
     def fake_run(args, **kwargs):
         calls.append((args, kwargs))
@@ -700,7 +817,7 @@ def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path
 def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
     data_dir = tmp_path / ".defenseclaw"
     data_dir.mkdir()
-    binary = tmp_path / "tools" / "codex"
+    binary = tmp_path / "tools" / ("codex.exe" if os.name == "nt" else "codex")
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("#!/bin/sh\nexit 0\n")
     binary.chmod(0o755)
@@ -781,6 +898,7 @@ def test_operator_prefix_still_applies_after_default_prefix_ownership_failure(
     assert ad._is_trusted_binary_path(str(binary)) is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX Homebrew ownership/symlink semantics")
 def test_trust_check_operator_prefix_wins_over_failed_default_ownership(monkeypatch, tmp_path):
     # Regression: Homebrew npm globals live under a default prefix
     # (/opt/homebrew/lib/node_modules) that fails F-0421 root-ownership on

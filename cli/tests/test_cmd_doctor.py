@@ -36,7 +36,9 @@ from defenseclaw.commands.cmd_doctor import (
     _check_copilot_hooks,
     _check_custom_provider_overlay,
     _check_guardrail_proxy,
+    _check_hermes_legacy_config,
     _check_hilt_support,
+    _check_hook_health,
     _check_llm_api_key,
     _check_openhands_hooks,
     _check_security_overrides,
@@ -118,6 +120,75 @@ class DoctorMultiConnectorInventoryTests(unittest.TestCase):
         self.assertEqual(seen["skill"], ["codex"])
         self.assertEqual(seen["plugin"], ["codex"])
         self.assertEqual(seen["mcp"], ["codex"])
+
+
+class DoctorHermesMigrationTests(unittest.TestCase):
+    def test_hook_health_uses_resolved_hermes_config_without_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, "LocalAppData", "hermes", "config.yaml")
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, "w", encoding="utf-8") as fh:
+                fh.write('command: "defenseclaw-gateway.exe hook --connector hermes"\n')
+
+            result = _DoctorResult()
+            cfg = SimpleNamespace(data_dir=os.path.join(tmp, "defenseclaw"))
+            with patch(
+                "defenseclaw.commands.cmd_doctor.hermes_config_path",
+                return_value=config_path,
+            ):
+                _check_hook_health(cfg, "hermes", result)
+
+            self.assertEqual(result.passed, 1, result.checks)
+            self.assertEqual(result.failed, 0, result.checks)
+            self.assertIn(config_path, result.checks[0]["detail"])
+
+    def test_warns_without_mutating_legacy_windows_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = os.path.join(tmp, "LocalAppData", "hermes", "config.yaml")
+            legacy = os.path.join(tmp, "home", ".hermes", "config.yaml")
+            os.makedirs(os.path.dirname(current), exist_ok=True)
+            os.makedirs(os.path.dirname(legacy), exist_ok=True)
+            with open(current, "w", encoding="utf-8") as fh:
+                fh.write("hooks: {}\n")
+            legacy_body = "api_key: keep-secret\n"
+            with open(legacy, "w", encoding="utf-8") as fh:
+                fh.write(legacy_body)
+
+            result = _DoctorResult()
+            with patch(
+                "defenseclaw.commands.cmd_doctor.hermes_config_path",
+                return_value=current,
+            ), patch(
+                "defenseclaw.commands.cmd_doctor.hermes_legacy_config_path",
+                return_value=legacy,
+            ):
+                _check_hermes_legacy_config(result, platform_name="nt")
+
+            self.assertEqual(result.warned, 1, result.checks)
+            self.assertIn(legacy, result.checks[0]["detail"])
+            self.assertIn(current, result.checks[0]["detail"])
+            self.assertIn("will not copy or delete", result.checks[0]["detail"])
+            with open(legacy, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), legacy_body)
+
+    def test_skips_non_windows_and_same_effective_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, ".hermes", "config.yaml")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("{}\n")
+
+            for platform_name in ("posix", "nt"):
+                result = _DoctorResult()
+                with patch(
+                    "defenseclaw.commands.cmd_doctor.hermes_config_path",
+                    return_value=path,
+                ), patch(
+                    "defenseclaw.commands.cmd_doctor.hermes_legacy_config_path",
+                    return_value=path,
+                ):
+                    _check_hermes_legacy_config(result, platform_name=platform_name)
+                self.assertEqual(result.warned, 0, result.checks)
 
 
 class DoctorGuardrailTests(unittest.TestCase):

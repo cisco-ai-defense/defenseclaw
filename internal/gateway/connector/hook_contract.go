@@ -209,7 +209,7 @@ var builtinHookContracts = map[string][]HookContract{
 		MinAgentVersion:         "0.11.0",
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v6",
-		HookConfigPathTemplates: []string{"~/.hermes/config.yaml"},
+		HookConfigPathTemplates: []string{"$HERMES_HOME/config.yaml", "%LOCALAPPDATA%/hermes/config.yaml", "~/.hermes/config.yaml"},
 		ResponseFieldName:       "hook_output",
 		// Hermes' shell-hook surface (cli-config.yaml `hooks:` block).
 		// Only pre_tool_call can block; pre_llm_call injects context;
