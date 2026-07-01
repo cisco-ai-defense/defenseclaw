@@ -2604,6 +2604,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	userText := lastUserText(req.Messages)
 	_, promptProviderName := p.llmSystemAndProvider(req.Model)
 	promptID := ""
+	preCallSeverity := "" // populated by guardrail inspection; fed to model router
 	inspectionText := promptInspectionText(userText)
 	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
 	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
@@ -2652,6 +2653,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			p.otel.EndGuardrailSpan(grSpan, decision, verdict.Severity, verdict.Reason, t0)
 		}
 
+		preCallSeverity = verdict.Severity
 		p.logPreCall(req.Model, req.Messages, verdict, elapsed)
 		p.recordTelemetry(r.Context(), "prompt", req.Model, verdict, elapsed, nil, nil,
 			rawTelemetryField{key: "raw_request_body", raw: req.RawBody})
@@ -2679,6 +2681,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			Model:    req.Model,
 			Messages: req.Messages,
 			Stream:   req.Stream,
+			Severity: preCallSeverity,
 		}
 		if decision := p.modelRouter.Route(r.Context(), routerInput); decision != nil {
 			if decision.CacheHit && !req.Stream {
