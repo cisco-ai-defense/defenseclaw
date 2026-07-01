@@ -18,6 +18,7 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -421,7 +422,11 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					"cursor",
 					filepath.Join(dataDir, "hooks", "cursor-hook.sh"),
 				)
-				if !strings.Contains(text, wantCommand) {
+				encodedCommand, err := json.Marshal(wantCommand)
+				if err != nil {
+					t.Fatalf("encode Cursor Windows adapter command: %v", err)
+				}
+				if !strings.Contains(text, string(encodedCommand)) {
 					t.Errorf("config missing Cursor Windows adapter command %q:\n%s", wantCommand, text)
 				}
 				adapter, err := os.ReadFile(filepath.Join(dataDir, "hooks", "cursor-hook.ps1"))
@@ -468,7 +473,19 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				}
 			}
 
-			token, err := os.ReadFile(filepath.Join(dataDir, "hooks", ".token"))
+			hookDir := filepath.Join(dataDir, "hooks")
+			tokenPath := filepath.Join(hookDir, ".token")
+			scopedToken := !IsProxyConnector(connectorName)
+			if scopedToken {
+				tokenPath, err = HookTokenFilePath(hookDir, connectorName)
+				if err != nil {
+					t.Fatalf("resolve connector-scoped hook token sidecar: %v", err)
+				}
+				if _, err := os.Lstat(filepath.Join(hookDir, ".token")); !os.IsNotExist(err) {
+					t.Fatalf("legacy shared hook token sidecar still exists: %v", err)
+				}
+			}
+			token, err := os.ReadFile(tokenPath)
 			if err != nil {
 				t.Fatalf("read hook token sidecar: %v", err)
 			}
@@ -500,12 +517,13 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 				t.Errorf("generated config survived teardown: %v", err)
 			}
-			// These sidecars are shared by all active native connectors. A
-			// single connector teardown must not remove them and break peers.
-			for _, name := range []string{".token", hookConfigSidecarName} {
-				if _, err := os.Stat(filepath.Join(dataDir, "hooks", name)); err != nil {
-					t.Errorf("shared sidecar %s removed by connector teardown: %v", name, err)
-				}
+			// Runtime sidecars can still be referenced by another managed config
+			// for the same connector, so one config teardown must preserve them.
+			if _, err := os.Stat(filepath.Join(hookDir, hookConfigSidecarName)); err != nil {
+				t.Errorf("shared sidecar %s removed by connector teardown: %v", hookConfigSidecarName, err)
+			}
+			if _, err := os.Stat(tokenPath); err != nil {
+				t.Errorf("hook token sidecar removed by connector teardown: %v", err)
 			}
 		})
 	}
