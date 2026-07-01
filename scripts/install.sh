@@ -149,6 +149,8 @@ connector_display_name() {
         zeptoclaw) echo "ZeptoClaw" ;;
         openclaw) echo "OpenClaw" ;;
         hermes) echo "Hermes Agent" ;;
+        cursor) echo "Cursor" ;;
+        windsurf) echo "Windsurf" ;;
         geminicli) echo "Gemini CLI" ;;
         copilot) echo "GitHub Copilot CLI" ;;
         openhands) echo "OpenHands" ;;

@@ -90,6 +90,10 @@ $ConnectorChoices = @(
     "windsurf", "geminicli", "copilot", "openhands",
     "antigravity", "opencode", "omnigent", "none"
 )
+$HookConnectors = @(
+    "hermes", "cursor", "windsurf", "geminicli", "copilot",
+    "openhands", "antigravity", "opencode", "omnigent"
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -438,7 +442,7 @@ function Write-Success {
     switch ($script:PickedConnector) {
         "codex"      { Write-Host "  Get started (Codex):`n`n    defenseclaw init --connector codex`n" -ForegroundColor Cyan }
         "claudecode" { Write-Host "  Get started (Claude Code):`n`n    defenseclaw init --connector claudecode`n" -ForegroundColor Cyan }
-        { $_ -in @("hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent") } {
+        { $_ -in $HookConnectors } {
             Write-Host "  Get started ($script:PickedConnector):`n`n    defenseclaw init --connector $script:PickedConnector`n" -ForegroundColor Cyan
         }
         default      { Write-Host "  Get started (pick a connector later):`n`n    defenseclaw init`n" -ForegroundColor Cyan }
@@ -484,8 +488,9 @@ function Main {
     Install-Gateway -Arch $arch
     Install-Cli
 
+    $cliWiredConnectors = @("codex", "claudecode") + $HookConnectors
     switch ($script:PickedConnector) {
-        { $_ -in @("codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent") } {
+        { $_ -in $cliWiredConnectors } {
             Write-Info "Connector '$script:PickedConnector' wires up via the CLI (no OpenClaw runtime needed)."
         }
         default      { Write-Info "Skipping connector setup - run 'defenseclaw init' when ready" }
