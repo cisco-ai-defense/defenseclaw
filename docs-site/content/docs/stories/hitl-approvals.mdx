@@ -38,7 +38,7 @@ defenseclaw setup guardrail \
   --non-interactive
 ```
 
-With the default balanced thresholds, a HIGH finding is eligible for confirmation and a CRITICAL finding blocks before the HITL branch. Setting the minimum to `critical` therefore does not make HIGH block; it leaves HIGH on the policy's normal alert tier.
+With the default balanced thresholds, a HIGH finding is eligible for confirmation and a CRITICAL finding blocks before the HITL branch. The configured minimum of `high` therefore includes HIGH findings in the confirmation flow.
 
 </Step>
 

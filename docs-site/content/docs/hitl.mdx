@@ -29,7 +29,7 @@ HITL is opt-in and only affects **action mode**. Observe mode records findings w
 | OpenClaw | `before_tool_call`; plugin/chat-origin approval | Non-ask proxy surfaces use their route-specific enforcement behaviour |
 | Claude Code | `PreToolUse` | Other hook events are demoted to a non-pausing response |
 | Cursor | `beforeShellExecution`, `beforeMCPExecution` | Alert/context fallback; `raw_action` remains auditable |
-| GitHub Copilot CLI | `preToolUse` | Alert/context fallback; `raw_action` remains auditable |
+| Copilot CLI | `preToolUse` | Alert/context fallback; `raw_action` remains auditable |
 | Antigravity | `PreToolUse` (empirically verified) | Other registered lifecycle events are non-pausing telemetry/spec-parity surfaces |
 | OmniGent | Pre-action `request`, `tool_call`, `llm_request` phases | Configured fallback for post-action phases |
 | ZeptoClaw, Codex, Hermes, Gemini CLI, Windsurf, OpenHands, OpenCode | None | Connector-specific alert/allow/context fallback; no pause or TUI resume |

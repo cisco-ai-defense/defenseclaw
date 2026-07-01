@@ -66,7 +66,7 @@ sed -n '80,125p' ~/.defenseclaw/policies/guardrail/default/rules/commands.yaml
 ```
 
 The `CMD-RM-RF` rule is CRITICAL and matches `/` plus protected top-level
-prefixes such as `/etc`, `/var`, `/home`, `/Users`, and `/opt`. It deliberately
+prefixes such as `/etc`, `/var`, `/home`, `/usr`, and `/opt`. It deliberately
 does not flag every `rm -rf` command or arbitrary home subdirectory. The three
 bundled packs currently carry the same command-rule boundary; their policy
 thresholds and other configuration differ.

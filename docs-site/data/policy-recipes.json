@@ -378,6 +378,7 @@
         "credential"
       ],
       "data_axis": [
+        "sensitive_access",
         "egress_external"
       ]
     },
@@ -405,6 +406,7 @@
         "credential"
       ],
       "data_axis": [
+        "sensitive_access",
         "egress_external"
       ]
     },
@@ -432,6 +434,7 @@
         "credential"
       ],
       "data_axis": [
+        "sensitive_access",
         "egress_external"
       ]
     },

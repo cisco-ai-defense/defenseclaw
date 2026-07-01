@@ -683,7 +683,7 @@ the scan result.
 
 **Code flow:**
 
-```
+```text
 defenseclaw skill scan /path/to/skill --remote
   → cmd_skill.py POST /v1/skill/scan
     → api.go handleSkillScan()

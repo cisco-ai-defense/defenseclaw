@@ -54,11 +54,12 @@ func TestDocumentedGatewayCommandsParse(t *testing.T) {
 				validateDocumentedGatewayPath(t, fields[1:], documented.command)
 				return
 			}
-			for i, field := range fields {
-				if i > 0 && strings.ContainsAny(field, "<>") {
+			for i := 1; i < len(fields); i++ {
+				if isDocumentedShellRedirection(fields[i]) {
 					fields = fields[:i]
 					break
 				}
+				fields[i] = representativeDocumentedGatewayField(fields[i])
 			}
 
 			cmd, args, err := rootCmd.Find(fields[1:])
@@ -80,11 +81,153 @@ func TestDocumentedGatewayCommandsParse(t *testing.T) {
 	t.Logf("validated %d documented defenseclaw-gateway commands", len(commands))
 }
 
+func TestRepresentativeDocumentedGatewayField(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"<path>":                  ".",
+		"<connector>":             "codex",
+		"<event>":                 "PreToolUse",
+		"<severity>":              "high",
+		"--connector=<name>":      "--connector=example",
+		"<observe|action>":        "observe",
+		"REQUEST_ID":              "example",
+		"--request-id=REQUEST_ID": "--request-id=example",
+		"...":                     "example",
+		"…":                       "example",
+		"literal":                 "literal",
+	}
+	for input, want := range tests {
+		input, want := input, want
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			if got := representativeDocumentedGatewayField(input); got != want {
+				t.Fatalf("representativeDocumentedGatewayField(%q) = %q, want %q", input, got, want)
+			}
+		})
+	}
+}
+
+func TestIsDocumentedShellRedirection(t *testing.T) {
+	t.Parallel()
+	for _, field := range []string{"2>&1", ">", ">>"} {
+		if !isDocumentedShellRedirection(field) {
+			t.Errorf("isDocumentedShellRedirection(%q) = false, want true", field)
+		}
+	}
+	for _, field := range []string{"<path>", "--output", "literal"} {
+		if isDocumentedShellRedirection(field) {
+			t.Errorf("isDocumentedShellRedirection(%q) = true, want false", field)
+		}
+	}
+}
+
+func TestTruncateDocumentedGatewayConsumerSyntax(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"defenseclaw-gateway scan <observe|action> | jq":                     "defenseclaw-gateway scan <observe|action>",
+		"defenseclaw-gateway audit export # JSONL":                           "defenseclaw-gateway audit export",
+		"defenseclaw-gateway proxy --url https://example.invalid/api#status": "defenseclaw-gateway proxy --url https://example.invalid/api#status",
+		"defenseclaw-gateway status":                                         "defenseclaw-gateway status",
+	}
+	for input, want := range tests {
+		if got := truncateDocumentedGatewayConsumerSyntax(input); got != want {
+			t.Errorf("truncateDocumentedGatewayConsumerSyntax(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 type documentedGatewayCommand struct {
 	path    string
 	line    int
 	command string
 	inline  bool
+}
+
+// representativeDocumentedGatewayField turns documentation notation into one
+// concrete value so Cobra validates required positional arguments and flags.
+// Truncating at the first placeholder would let missing arguments pass unseen.
+func representativeDocumentedGatewayField(field string) string {
+	result := field
+	for {
+		start := strings.Index(result, "<")
+		if start < 0 {
+			break
+		}
+		endOffset := strings.Index(result[start+1:], ">")
+		if endOffset < 0 {
+			break
+		}
+		end := start + 1 + endOffset
+		label := strings.TrimSpace(result[start+1 : end])
+		choice := strings.Split(label, "|")[0]
+		value := "example"
+		switch strings.ToLower(choice) {
+		case "path", "file", "dir", "directory":
+			value = "."
+		case "connector":
+			value = "codex"
+		case "event":
+			value = "PreToolUse"
+		case "severity":
+			value = "high"
+		default:
+			if strings.Contains(label, "|") {
+				value = choice
+			}
+		}
+		result = result[:start] + value + result[end+1:]
+	}
+	if result == "..." || result == "…" {
+		return "example"
+	}
+	if key, value, ok := strings.Cut(result, "="); ok && isUppercaseDocumentedPlaceholder(value) {
+		return key + "=example"
+	}
+	if isUppercaseDocumentedPlaceholder(result) {
+		return "example"
+	}
+	return result
+}
+
+func isUppercaseDocumentedPlaceholder(field string) bool {
+	if !strings.Contains(field, "_") || field != strings.ToUpper(field) {
+		return false
+	}
+	for _, r := range field {
+		if (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func isDocumentedShellRedirection(field string) bool {
+	trimmed := strings.TrimLeft(field, "0123456789")
+	return strings.HasPrefix(trimmed, ">") ||
+		(strings.HasPrefix(trimmed, "<") && !strings.Contains(trimmed, ">"))
+}
+
+// truncateDocumentedGatewayConsumerSyntax removes shell consumers and comments
+// while preserving choice pipes inside compact placeholders such as
+// <observe|action>.
+func truncateDocumentedGatewayConsumerSyntax(text string) string {
+	for index := 0; index < len(text); index++ {
+		if text[index] == '<' {
+			if offset := strings.IndexByte(text[index+1:], '>'); offset >= 0 {
+				end := index + 1 + offset
+				if !strings.ContainsAny(text[index+1:end], " \t") {
+					index = end
+					continue
+				}
+			}
+		}
+		isComment := text[index] == '#' &&
+			(index == 0 || text[index-1] == ' ' || text[index-1] == '\t')
+		if text[index] == '|' || isComment {
+			return strings.TrimSpace(text[:index])
+		}
+	}
+	return strings.TrimSpace(text)
 }
 
 func validateDocumentedGatewayPath(t *testing.T, fields []string, documented string) {
@@ -151,11 +294,9 @@ func documentedGatewayCommands(root, repoRoot string) ([]documentedGatewayComman
 				return
 			}
 			// Everything after a shell pipeline or comment belongs to the
-			// consumer, not the gateway invocation. The documented gateway
-			// flags themselves do not contain either character.
-			if idx := strings.IndexAny(text, "|#"); idx >= 0 {
-				text = strings.TrimSpace(text[:idx])
-			}
+			// consumer, not the gateway invocation. Choice pipes inside an
+			// angle-bracket placeholder remain part of the invocation.
+			text = truncateDocumentedGatewayConsumerSyntax(text)
 			rel, _ := filepath.Rel(repoRoot, path)
 			commands = append(commands, documentedGatewayCommand{path: rel, line: logicalStart, command: text})
 		}

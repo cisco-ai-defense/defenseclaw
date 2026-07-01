@@ -30,6 +30,8 @@ COMMAND_NAME = "defenseclaw"
 
 @dataclass(frozen=True)
 class DocumentedCommand:
+    """A CLI invocation extracted from a documentation source location."""
+
     path: Path
     line: int
     text: str
@@ -37,6 +39,8 @@ class DocumentedCommand:
 
 
 def _logical_shell_lines(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Join backslash-continued shell lines while retaining their start lines."""
+
     logical: list[tuple[int, str]] = []
     current: list[str] = []
     start_line = 0
@@ -60,6 +64,8 @@ def _logical_shell_lines(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
 
 
 def _extract_defenseclaw_command(text: str) -> str | None:
+    """Extract a safe-to-parse DefenseClaw invocation from one shell statement."""
+
     try:
         tokens = shlex.split(text, comments=True, posix=True)
     except ValueError:
@@ -94,6 +100,8 @@ def _extract_defenseclaw_command(text: str) -> str | None:
 
 
 def documentation_paths() -> list[Path]:
+    """Return every public and supporting Markdown documentation file."""
+
     paths = [
         *PUBLIC_DOCS_ROOT.rglob("*.mdx"),
         *SUPPORTING_DOCS_ROOT.rglob("*.md"),
@@ -124,6 +132,8 @@ def _check_inline_commands(path: Path) -> bool:
 
 
 def documented_commands() -> list[DocumentedCommand]:
+    """Collect runnable and inline DefenseClaw commands from documentation."""
+
     commands: list[DocumentedCommand] = []
     for path in documentation_paths():
         fence_lines: list[tuple[int, str]] = []
@@ -181,10 +191,14 @@ def documented_commands() -> list[DocumentedCommand]:
 
 
 def _no_op_command_tree() -> click.Command:
+    """Clone the Click tree with callbacks and filesystem existence checks disabled."""
+
     command = copy.deepcopy(cli)
     command.name = COMMAND_NAME
 
     def disable_callbacks(node: click.Command) -> None:
+        """Recursively neutralize callbacks while preserving the command grammar."""
+
         node.callback = lambda **_kwargs: None
         for parameter in node.params:
             if isinstance(parameter.type, click.Path):
@@ -232,6 +246,8 @@ def _validate_inline_path(command: click.Command, documented: DocumentedCommand)
 
 
 def validate() -> list[str]:
+    """Return location-rich failures for documentation commands that do not parse."""
+
     command = _no_op_command_tree()
     runner = CliRunner()
     failures: list[str] = []
@@ -257,6 +273,8 @@ def validate() -> list[str]:
 
 
 def main() -> int:
+    """Run the documentation command validator as a command-line program."""
+
     failures = validate()
     if failures:
         print("Documented CLI command validation failed:", file=sys.stderr)

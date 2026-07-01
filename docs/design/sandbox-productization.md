@@ -646,7 +646,7 @@ next steps.
 
 `defenseclaw sandbox setup` should become a full orchestration command:
 
-```
+```text
 defenseclaw sandbox setup \
   --sandbox-ip 10.200.0.2 \
   --host-ip 10.200.0.1 \

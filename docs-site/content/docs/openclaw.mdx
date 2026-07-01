@@ -45,8 +45,11 @@ The DefenseClaw gateway client speaks the OpenClaw WebSocket handshake across th
   <Message from="oc" to="p"  label="fetch (LLM request)" />
   <Message from="p"  to="g"  label="POST /v1/inspect (X-DefenseClaw-Correlation-Id)" />
   <Message from="g"  to="p"  kind="return" label="allow / block / pause" />
-  <Message from="g"  to="op" label="enqueue approval (when paused)" />
-  <Message from="op" to="g"  kind="return" label="approve / deny" />
+  <Message from="p"  to="oc" label="publish approval prompt (when paused)" />
+  <Message from="oc" to="op" label="approval request in chat" />
+  <Message from="op" to="oc" kind="return" label="approve / deny" />
+  <Message from="oc" to="p"  kind="return" label="approval response" />
+  <Message from="p"  to="g"  label="resolve approval" />
   <Message from="g"  to="p"  kind="return" label="resolved verdict" />
   <Message from="p"  to="oc" kind="return" label="forward (or reject)" />
   <Message from="oc" to="p"  label="before_tool_call(name, args)" />

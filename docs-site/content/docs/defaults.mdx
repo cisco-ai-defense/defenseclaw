@@ -61,7 +61,7 @@ The rule pack directory (`policies/guardrail/<name>/`) holds the regex YAMLs, ju
 
 | Pack | `rules/` files | `judge/` prompts | `suppressions.yaml` | `sensitive-tools.yaml` |
 | --- | --- | --- | --- | --- |
-| `permissive` | c2, cognitive, commands, enterprise-data, local-patterns, secrets, sensitive-paths, trust-exploit | injection, pii, tool-injection (higher judge thresholds) | broadest; additionally suppresses all IP findings and selected file-inspection PII | same six sensitive tool definitions as the other packs |
+| `permissive` | c2, cognitive, commands, enterprise-data, local-patterns, secrets, sensitive-paths, trust-exploit | pii and tool-injection (higher judge thresholds); injection ships disabled | broadest; additionally suppresses all IP findings and selected file-inspection PII | same six sensitive tool definitions as the other packs |
 | `default` | same eight families; balanced variants where profiles differ | injection, pii, tool-injection | private/loopback IPs, platform IDs, expected system metadata | same six sensitive tool definitions as the other packs |
 | `strict` | same eight families; stricter variants where profiles differ | injection, pii, tool-injection (lower judge thresholds) | minimal structural suppressions; no tool suppressions | same six sensitive tool definitions as the other packs |
 

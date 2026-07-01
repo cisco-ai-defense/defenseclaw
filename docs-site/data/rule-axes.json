@@ -21,7 +21,28 @@
       ]
     },
     {
+      "id": "C2-METADATA-DECIMAL",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
       "id": "C2-METADATA-GCP",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-METADATA-HEX",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "C2-METADATA-OCTAL",
       "axes": [
         "sensitive_access",
         "egress_external"

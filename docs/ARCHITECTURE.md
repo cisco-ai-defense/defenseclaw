@@ -344,7 +344,7 @@ requires only a new case in `internal/config/claw.go`.
 
 ## Internal Packages (Go Gateway)
 
-The Go gateway is organized into 19 internal packages:
+The Go gateway's key internal packages are:
 
 | Package | Purpose |
 |---------|---------|
@@ -364,8 +364,10 @@ The Go gateway is organized into 19 internal packages:
 | `sandbox/` | NVIDIA OpenShell sandbox policy enforcement |
 | `scanner/` | 9 built-in scanner implementations: ClawShield (injection, malware, PII, secrets, vuln), CodeGuard, MCP scanner, Skill scanner, Plugin scanner. Common `Scanner` interface |
 | `telemetry/` | OpenTelemetry: `guardrail/{stage}` and `guardrail.{phase}` span hierarchy, `inspect/{tool}` spans, 20+ metric instruments (verdicts, judge latency, cache hits, sink delivery, stream lifecycle) |
-| `cli/defenseclaw/tui/` | 12-panel Python Textual dashboard |
 | `watcher/` | File system monitoring (fsnotify) with 500ms debounce, three-phase admission gate (pre-scan OPA → scan → post-scan OPA), periodic rescan (60-min default) with 8-type drift detection, policy file watching (2s poll) |
+
+The Python operator surface lives outside the Go package tree. Its
+`cli/defenseclaw/tui/` package provides the 12-panel Textual dashboard.
 
 ## Multi-Turn Injection Detection
 

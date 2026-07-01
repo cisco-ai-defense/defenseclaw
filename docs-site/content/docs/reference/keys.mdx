@@ -26,8 +26,9 @@ Created on demand by `defenseclaw keys set <ENV>` using an atomic tmp+rename
 write. New CLI processes read the updated value immediately. Long-running
 gateway components may hold the credential they resolved at startup or during
 configuration reload, so restart the gateway after rotating a key unless the
-specific setup command documents hot reload. Use the matching `setup ... test`
-command or `defenseclaw doctor` to verify the new credential.
+specific setup command documents hot reload. Run `defenseclaw doctor` to verify
+the new credential; a setup command's documented test subcommand can provide a
+more targeted check when one is available.
 
 The CLI also supports overriding any value at runtime by `export`-ing it in your shell. That's the highest-priority source.
 
