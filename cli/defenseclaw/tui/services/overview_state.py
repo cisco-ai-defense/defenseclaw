@@ -45,6 +45,7 @@ class ConnectorHealth:
     name: str = ""
     state: str = ""
     since: str = ""
+    last_activity_at: str = ""
     tool_inspection_mode: str = ""
     subprocess_policy: str = ""
     requests: int = 0
