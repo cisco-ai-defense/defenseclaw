@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -62,6 +63,7 @@ from defenseclaw.commands.cmd_doctor import (
     _DoctorResult,
     _fix_plugin_registry_required,
     _plugin_registry_required_offenders,
+    _probe_cursor_windows_runtime,
 )
 
 
@@ -265,10 +267,25 @@ class TestCheckConnectorHooks(unittest.TestCase):
             _check_connector_hooks(cfg, "codex", r)
         self.assertEqual(r.checks[-1]["label"], "Codex hooks [codex]")
 
-    def _cursor_runtime_case(self, tmp: str, *, mode: str, fail_closed: bool):
-        runtime = os.path.join(tmp, "defenseclaw-hook.exe")
-        with open(runtime, "wb") as fh:
-            fh.write(b"MZ")
+    def _cursor_runtime_case(self, tmp: str, *, mode: str, fail_closed: bool, legacy_native: bool = False):
+        runtime_dir = os.path.join(tmp, "DefenseClaw Hooks")
+        os.makedirs(runtime_dir, exist_ok=True)
+        if legacy_native:
+            runtime = os.path.join(runtime_dir, "defenseclaw-hook.exe")
+            with open(runtime, "wb") as fh:
+                fh.write(b"MZ")
+            command = f'"{runtime}" hook --connector cursor'
+        else:
+            runtime = os.path.join(runtime_dir, "cursor-hook.ps1")
+            with open(runtime, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "# defenseclaw-managed-hook v8\n"
+                    "$startInfo = New-Object System.Diagnostics.ProcessStartInfo\n"
+                    "$startInfo.RedirectStandardOutput = $true\n"
+                    "$process.WaitForExit()\n"
+                    "# defenseclaw-hook.exe hook --connector cursor --input-file $payloadPath\n"
+                )
+            command = "& '" + runtime.replace("'", "''") + "'"
         hooks_path = os.path.join(tmp, "hooks.json")
         with open(hooks_path, "w", encoding="utf-8") as fh:
             json.dump(
@@ -277,7 +294,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
                     "hooks": {
                         "beforeSubmitPrompt": [
                             {
-                                "command": f'"{runtime}" hook --connector cursor',
+                                "command": command,
                                 "failClosed": fail_closed,
                             }
                         ]
@@ -290,7 +307,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg.guardrail.effective_hook_fail_mode.return_value = "closed" if fail_closed else "open"
         return cfg, hooks_path, runtime
 
-    def test_cursor_doctor_validates_configured_native_runtime(self) -> None:
+    def test_cursor_doctor_validates_configured_windows_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg, hooks_path, runtime = self._cursor_runtime_case(
                 tmp,
@@ -304,6 +321,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 "Cursor hooks",
                 r,
                 platform_name="nt",
+                probe_runtime=False,
             )
 
         self.assertEqual(r.checks[-1]["status"], "pass")
@@ -311,6 +329,27 @@ class TestCheckConnectorHooks(unittest.TestCase):
         self.assertIn("mode=observe", r.checks[-1]["detail"])
         self.assertIn("failClosed=false", r.checks[-1]["detail"])
         self.assertNotIn("inspect-tool.sh", r.checks[-1]["detail"])
+
+    def test_cursor_doctor_rejects_legacy_direct_windows_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, _runtime = self._cursor_runtime_case(
+                tmp,
+                mode="observe",
+                fail_closed=False,
+                legacy_native=True,
+            )
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="nt",
+                probe_runtime=False,
+            )
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("PowerShell input adapter", r.checks[-1]["detail"])
 
     def test_cursor_doctor_rejects_fail_closed_observe_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -327,6 +366,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 "Cursor hooks",
                 r,
                 platform_name="nt",
+                probe_runtime=False,
             )
 
         self.assertEqual(r.checks[-1]["status"], "fail")
@@ -346,11 +386,80 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 "Cursor hooks",
                 r,
                 platform_name="nt",
+                probe_runtime=False,
             )
 
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertIn("mode=action", r.checks[-1]["detail"])
         self.assertIn("failClosed=true", r.checks[-1]["detail"])
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
+    def test_cursor_windows_runtime_probe_requires_json_and_counter_advance(
+        self,
+        run_mock,
+        http_probe_mock,
+    ) -> None:
+        before = json.dumps(
+            {"connectors": [{"name": "cursor", "requests": 4, "errors": 0}]}
+        )
+        after = json.dumps(
+            {
+                "connectors": [
+                    {
+                        "name": "cursor",
+                        "requests": 5,
+                        "errors": 0,
+                        "last_activity_at": "2026-07-01T22:46:47Z",
+                    }
+                ]
+            }
+        )
+        http_probe_mock.side_effect = [(200, before), (200, after)]
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=["powershell.exe"],
+            returncode=0,
+            stdout=b'{"continue":true}',
+            stderr=b"",
+        )
+        cfg = MagicMock()
+        cfg.gateway.api_port = 18970
+
+        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+
+        self.assertTrue(ok)
+        self.assertIn("requests 4->5", detail)
+        argv = run_mock.call_args.args[0]
+        self.assertEqual(
+            argv[:4],
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand"],
+        )
+        self.assertFalse(run_mock.call_args.kwargs.get("shell", False))
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
+    def test_cursor_windows_runtime_probe_rejects_fail_open_without_delivery(
+        self,
+        run_mock,
+        http_probe_mock,
+    ) -> None:
+        health = json.dumps(
+            {"connectors": [{"name": "cursor", "requests": 4, "errors": 0}]}
+        )
+        http_probe_mock.side_effect = [(200, health), (200, health)]
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=["powershell.exe"],
+            returncode=0,
+            stdout=b'{"continue":true}',
+            stderr=b"",
+        )
+        cfg = MagicMock()
+        cfg.gateway.api_port = 18970
+
+        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+
+        self.assertFalse(ok)
+        self.assertIn("did not advance", detail)
 
     def test_unknown_connector_is_noop(self) -> None:
         r = _DoctorResult()

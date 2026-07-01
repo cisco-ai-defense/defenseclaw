@@ -22,6 +22,7 @@ misconfiguration before the user discovers them at runtime.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
 import json
@@ -31,6 +32,7 @@ import shlex
 import shutil
 import ssl
 import subprocess
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1318,8 +1320,156 @@ def _split_configured_hook_command(command: str, *, platform_name: str | None = 
     except ValueError:
         return []
     if is_windows:
-        parts = [part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part for part in parts]
+        if parts and parts[0] == "&":
+            parts = parts[1:]
+        normalized = []
+        for part in parts:
+            if len(part) >= 2 and part[0] == part[-1] and part[0] in {"'", '"'}:
+                quote = part[0]
+                part = part[1:-1]
+                if quote == "'":
+                    part = part.replace("''", "'")
+            normalized.append(part)
+        parts = normalized
     return parts
+
+
+def _powershell_literal(value: str) -> str:
+    """Return one inert single-quoted PowerShell string literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _cursor_health_row(document: str) -> dict[str, object] | None:
+    try:
+        parsed = json.loads(document)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    connectors = parsed.get("connectors") if isinstance(parsed, dict) else None
+    if not isinstance(connectors, list):
+        return None
+    for row in connectors:
+        if isinstance(row, dict) and str(row.get("name") or "").strip().lower() == "cursor":
+            return row
+    return None
+
+
+def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
+    """Exercise Cursor's real PowerShell transport and verify gateway receipt.
+
+    A valid fail-open response alone is insufficient: the launcher deliberately
+    emits one when the gateway is unavailable. Compare the live Cursor request
+    counter before/after so Doctor proves stdin -> adapter -> launcher ->
+    gateway -> stdout instead of merely proving that files exist.
+    """
+    gateway = getattr(cfg, "gateway", None)
+    try:
+        api_port = int(getattr(gateway, "api_port", 0) or 0)
+    except (TypeError, ValueError):
+        api_port = 0
+    if api_port <= 0 or api_port > 65535:
+        return False, "cannot resolve the sidecar API port for a Cursor runtime probe"
+
+    health_url = f"http://127.0.0.1:{api_port}/health"
+    before_code, before_body = _http_probe(
+        health_url,
+        timeout=3.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+    )
+    before = _cursor_health_row(before_body) if before_code == 200 else None
+    if before is None:
+        return False, "sidecar /health has no live Cursor connector row"
+
+    payload = json.dumps(
+        {
+            "hook_event_name": "sessionStart",
+            "session_id": "defenseclaw-doctor-probe",
+            "source": "defenseclaw-doctor",
+            "workspace_roots": [],
+        },
+        separators=(",", ":"),
+    )
+    vendor_input = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".json",
+            prefix="defenseclaw-cursor-doctor-",
+            delete=False,
+        ) as fh:
+            fh.write(payload)
+            vendor_input = fh.name
+
+        # This mirrors Cursor 3.9's Windows command-hook boundary. Paths are
+        # encoded as PowerShell literals, the whole script is UTF-16LE/base64,
+        # and subprocess receives an argv list (never shell=True).
+        script = (
+            "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+            f"Get-Content -LiteralPath {_powershell_literal(vendor_input)} -Raw | "
+            f"& {{ $input | & {_powershell_literal(adapter_path)} }}"
+        )
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                encoded,
+            ],
+            capture_output=True,
+            timeout=15.0,
+            check=False,
+            creationflags=creationflags,
+        )
+    except FileNotFoundError:
+        return False, "powershell.exe is unavailable for the Cursor runtime probe"
+    except subprocess.TimeoutExpired:
+        return False, "Cursor runtime probe timed out"
+    except OSError as exc:
+        return False, f"Cursor runtime probe could not start: {exc}"
+    finally:
+        if vendor_input:
+            try:
+                os.remove(vendor_input)
+            except OSError:
+                pass
+
+    stdout = proc.stdout[:_HTTP_PROBE_DISPLAY_BYTES].decode("utf-8", errors="replace").lstrip("\ufeff").strip()
+    stderr = proc.stderr[:_HTTP_PROBE_DISPLAY_BYTES].decode("utf-8", errors="replace").strip()
+    if proc.returncode != 0:
+        detail = stderr.splitlines()[0] if stderr else f"exit code {proc.returncode}"
+        return False, f"configured Cursor adapter failed: {detail}"
+    try:
+        response = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False, "configured Cursor adapter returned no valid JSON response"
+    if not isinstance(response, dict) or response.get("continue") is not True:
+        return False, "configured Cursor adapter did not return an allow response"
+
+    after_code, after_body = _http_probe(
+        health_url,
+        timeout=3.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+    )
+    after = _cursor_health_row(after_body) if after_code == 200 else None
+    if after is None:
+        return False, "sidecar /health lost the Cursor connector row after the probe"
+    try:
+        before_requests = int(before.get("requests") or 0)
+        after_requests = int(after.get("requests") or 0)
+        before_errors = int(before.get("errors") or 0)
+        after_errors = int(after.get("errors") or 0)
+    except (TypeError, ValueError):
+        return False, "sidecar returned invalid Cursor counter values"
+    if after_requests <= before_requests:
+        return False, "adapter returned allow JSON but the gateway Cursor request counter did not advance"
+    if after_errors > before_errors:
+        return False, "gateway Cursor error counter increased during the runtime probe"
+    return True, f"live round trip OK (requests {before_requests}->{after_requests})"
 
 
 def _check_cursor_configured_runtime(
@@ -1329,11 +1479,13 @@ def _check_cursor_configured_runtime(
     r: _DoctorResult,
     *,
     platform_name: str | None = None,
+    probe_runtime: bool = True,
 ) -> None:
     """Validate the exact command Cursor invokes, not generated shell assets.
 
-    The hook contract lock records portable script assets even when native
-    Windows Cursor actually launches ``defenseclaw-hook.exe``. Parse the live
+    The hook contract lock records portable script assets, while Windows
+    Cursor uses ``cursor-hook.ps1`` to preserve the vendor's PowerShell object
+    pipeline before invoking ``defenseclaw-hook.exe``. Parse the live
     hooks.json, verify every DefenseClaw-owned entry uses one consistent,
     reachable runtime, and ensure Cursor's host-side failClosed flag agrees
     with the connector's effective observe/action mode.
@@ -1358,7 +1510,11 @@ def _check_cursor_configured_runtime(
             if not isinstance(raw_entry, dict):
                 continue
             command = str(raw_entry.get("command") or "").strip()
-            if "hook --connector cursor" in command or "cursor-hook.sh" in command:
+            if (
+                "hook --connector cursor" in command
+                or "cursor-hook.sh" in command
+                or "cursor-hook.ps1" in command
+            ):
                 managed.append((str(event), raw_entry, command))
 
     if not managed:
@@ -1378,12 +1534,22 @@ def _check_cursor_configured_runtime(
     target = os.path.expanduser(argv[0])
     basename = os.path.basename(target).lower()
     native = basename in {"defenseclaw-hook", "defenseclaw-hook.exe"}
-    script = basename == "cursor-hook.sh"
+    shell_script = basename == "cursor-hook.sh"
+    windows_adapter = basename == "cursor-hook.ps1"
     if native:
         if argv[1:] != ["hook", "--connector", "cursor"]:
             _emit("fail", label, f"configured Cursor launcher has unexpected arguments: {command}", r=r)
             return
-    elif script:
+        if (platform_name or os.name) == "nt":
+            _emit(
+                "fail",
+                label,
+                "Cursor on Windows is configured to invoke the native launcher directly; "
+                "run `defenseclaw setup cursor` to install the PowerShell input adapter",
+                r=r,
+            )
+            return
+    elif shell_script or windows_adapter:
         if len(argv) != 1:
             _emit("fail", label, f"configured Cursor script has unexpected arguments: {command}", r=r)
             return
@@ -1394,6 +1560,17 @@ def _check_cursor_configured_runtime(
     resolved = target if os.path.isabs(target) else (shutil.which(target) or "")
     if not resolved or not os.path.isfile(resolved):
         _emit("fail", label, f"configured Cursor hook runtime is missing: {target}", r=r)
+        return
+    adapter_markers = (
+        "defenseclaw-managed-hook v8",
+        "--input-file",
+        "defenseclaw-hook.exe",
+        "ProcessStartInfo",
+        "RedirectStandardOutput",
+        "WaitForExit",
+    )
+    if windows_adapter and not all(_file_references_marker(resolved, (marker,)) for marker in adapter_markers):
+        _emit("fail", label, f"configured Cursor Windows adapter is stale or invalid: {resolved}", r=r)
         return
 
     guardrail = getattr(cfg, "guardrail", None)
@@ -1415,11 +1592,19 @@ def _check_cursor_configured_runtime(
         )
         return
 
+    runtime_detail = ""
+    if windows_adapter and (platform_name or os.name) == "nt" and probe_runtime:
+        runtime_ok, runtime_detail = _probe_cursor_windows_runtime(cfg, resolved)
+        if not runtime_ok:
+            _emit("fail", label, runtime_detail, r=r)
+            return
+
     _emit(
         "pass",
         label,
         f"configured runtime={resolved}; entries={len(managed)}; "
-        f"mode={mode or 'observe'}; failClosed={str(expected_fail_closed).lower()}",
+        f"mode={mode or 'observe'}; failClosed={str(expected_fail_closed).lower()}"
+        + (f"; {runtime_detail}" if runtime_detail else ""),
         r=r,
     )
 

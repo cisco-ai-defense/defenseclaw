@@ -259,7 +259,7 @@ var builtinHookContracts = map[string][]HookContract{
 		ContractID:              "cursor-hooks-v1",
 		MinAgentVersion:         "1.7.0",
 		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v7",
+		HookScriptVersion:       "v8",
 		HookConfigPathTemplates: []string{"~/.cursor/hooks.json"},
 		ResponseFieldName:       "hook_output",
 		Events: []string{

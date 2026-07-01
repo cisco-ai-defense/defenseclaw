@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v7
+# defenseclaw-managed-hook v8
 # DefenseClaw Cursor hook — forwards Cursor command-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail

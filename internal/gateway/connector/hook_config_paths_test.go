@@ -5,7 +5,6 @@
 package connector
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -133,28 +132,33 @@ func TestOwnedHookNeedles_WindowsSurvivesConfigEscaping(t *testing.T) {
 	conn := NewCursorConnector()
 
 	needles := ownedHookCommandNeedlesFor("windows", opts, conn)
-	if len(needles) != 1 || needles[0] != nativeHookFlag+conn.Name() {
-		t.Fatalf("windows needles = %v, want [%q]", needles, nativeHookFlag+conn.Name())
+	wantCommand := hookInvocationCommandFor(
+		"windows",
+		conn.Name(),
+		filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh"),
+	)
+	if len(needles) != 1 || needles[0] != wantCommand {
+		t.Fatalf("windows needles = %v, want [%q]", needles, wantCommand)
 	}
 
 	// What Setup actually writes on Windows: the native command embedded in a
 	// JSON config, where the exe path's backslashes/quotes get escaped.
-	winCmd := `"C:\Users\me\AppData\Local\defenseclaw\defenseclaw-gateway.exe" ` + nativeHookFlag + conn.Name()
+	winCmd := wantCommand
 	encoded, err := json.Marshal(map[string]string{"command": winCmd})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	// The full raw command must NOT appear in the escaped bytes (this is the
-	// failure mode the marker avoids) ...
-	if bytes.Contains(encoded, []byte(winCmd)) {
-		t.Fatalf("precondition: expected JSON to escape the windows command, but it appeared verbatim:\n%s", encoded)
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	// ... while the escaping-invariant marker IS present.
-	for _, n := range needles {
-		if !bytes.Contains(encoded, []byte(n)) {
-			t.Fatalf("windows needle %q not found in escaped config:\n%s", n, encoded)
-		}
+	present, err := configFileReferencesHook(path, needles)
+	if err != nil {
+		t.Fatalf("configFileReferencesHook: %v", err)
+	}
+	if !present {
+		t.Fatalf("decoded matcher did not recognize Cursor adapter command %q", winCmd)
 	}
 }
 

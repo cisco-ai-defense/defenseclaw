@@ -52,10 +52,11 @@ func TestWindowsHookBinaryUsesStableInstalledLocation(t *testing.T) {
 }
 
 // TestHookInvocationCommand pins the platform split: Unix runs the bundled .sh
-// path; Windows invokes the native Go `hook` subcommand instead of any Bash/.cmd
-// wrapper.
+// path; Windows Cursor uses the PowerShell object-pipeline adapter while other
+// connectors invoke the native Go `hook` subcommand directly.
 func TestHookInvocationCommand(t *testing.T) {
 	const unix = "/home/u/.defenseclaw/hooks/codex-hook.sh"
+	const cursorUnix = "/home/u/.defenseclaw/hooks/cursor-hook.sh"
 	const windowsExe = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
 	setHookBinaryOverride(t, windowsExe)
 
@@ -65,19 +66,22 @@ func TestHookInvocationCommand(t *testing.T) {
 		}
 	}
 
-	win := hookInvocationCommandFor("windows", "cursor", unix)
-	wantWin := `"C:\Program Files\DefenseClaw\defenseclaw-hook.exe" hook --connector cursor`
+	win := hookInvocationCommandFor("windows", "cursor", cursorUnix)
+	wantWin := `& '/home/u/.defenseclaw/hooks/cursor-hook.ps1'`
 	if win != wantWin {
 		t.Errorf("windows command = %q, want %q", win, wantWin)
 	}
-	if !strings.Contains(win, nativeHookFlag+"cursor") {
-		t.Errorf("windows command = %q, missing %q", win, nativeHookFlag+"cursor")
+	if !strings.Contains(win, "cursor-hook.ps1") {
+		t.Errorf("windows command = %q, missing Cursor adapter", win)
 	}
 	if strings.Contains(win, ".sh") || strings.Contains(win, ".cmd") || strings.Contains(win, "bash") {
-		t.Errorf("windows command = %q should not reference a shell/script wrapper", win)
+		t.Errorf("windows command = %q should reference only the PowerShell adapter", win)
 	}
-	if !isNativeHookCommand(win) {
-		t.Errorf("isNativeHookCommand(%q) = false, want true", win)
+	if got := shellWord(win); got != win {
+		t.Errorf("shellWord(Cursor adapter) = %q, want complete PowerShell command %q", got, win)
+	}
+	if isNativeHookCommand(win) {
+		t.Errorf("isNativeHookCommand(%q) = true for adapter command", win)
 	}
 	if isNativeHookCommand(unix) {
 		t.Errorf("isNativeHookCommand(%q) = true, want false for a .sh path", unix)
@@ -106,6 +110,98 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 	if strings.ContainsAny(agy, `"'`) {
 		t.Errorf("antigravity direct-exec command contains literal quotes: %q", agy)
+	}
+}
+
+// TestCursorWindowsAdapterPreservesObjectPipelineJSON reproduces Cursor 3.9's
+// actual Windows launch boundary: Get-Content reads a vendor temp file and
+// passes the payload through PowerShell's object pipeline into the configured
+// hook command. A native executable receives only encoding preambles on this
+// boundary; the generated adapter must recover the JSON exactly, invoke the
+// launcher through --input-file, forward stdout, and remove its payload file.
+func TestCursorWindowsAdapterPreservesObjectPipelineJSON(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Cursor PowerShell transport is Windows-specific")
+	}
+
+	root := t.TempDir()
+	hookDir := filepath.Join(root, "hooks")
+	helper := filepath.Join(root, "fake-defenseclaw-hook.exe")
+	helperSource := filepath.Join(root, "fake-defenseclaw-hook.go")
+	helperBody := `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	for i, arg := range os.Args {
+		if arg != "--input-file" || i+1 >= len(os.Args) {
+			continue
+		}
+		payload, err := os.ReadFile(os.Args[i+1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(8)
+		}
+		_, _ = os.Stdout.Write(payload)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "missing input file argument")
+	os.Exit(9)
+}
+`
+	if err := os.WriteFile(helperSource, []byte(helperBody), 0o600); err != nil {
+		t.Fatalf("write launcher probe source: %v", err)
+	}
+	build := exec.Command("go", "build", "-o", helper, helperSource)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build launcher probe: %v\n%s", err, output)
+	}
+	setHookBinaryOverride(t, helper)
+
+	if err := WriteHookScriptsForConnectorObject(
+		hookDir,
+		"127.0.0.1:18970",
+		"tok-test",
+		NewCursorConnector(),
+	); err != nil {
+		t.Fatalf("render Cursor adapter: %v", err)
+	}
+
+	payload := `{"hook_event_name":"beforeSubmitPrompt","prompt":"DefenseClaw Cursor adapter test"}`
+	vendorInput := filepath.Join(root, "cursor-vendor-input.json")
+	if err := os.WriteFile(vendorInput, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write Cursor vendor input: %v", err)
+	}
+	configuredCommand := hookInvocationCommand(
+		"cursor",
+		filepath.Join(hookDir, "cursor-hook.sh"),
+	)
+	command := "$OutputEncoding = [System.Text.Encoding]::UTF8; " +
+		"Get-Content -LiteralPath " + powershellQuoteLiteral(vendorInput) +
+		" -Raw | & { $input | " + configuredCommand + " }"
+
+	out, err := exec.Command(
+		"powershell.exe",
+		"-NoProfile",
+		"-NonInteractive",
+		"-Command",
+		command,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Cursor-style PowerShell launch failed: %v\ncommand: %s\noutput: %s", err, command, out)
+	}
+	if !strings.Contains(strings.TrimSpace(string(out)), payload) {
+		t.Fatalf("adapter output did not preserve JSON\nwant: %s\ngot: %q", payload, out)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(hookDir, ".cursor-input-*.json"))
+	if err != nil {
+		t.Fatalf("find adapter payload leftovers: %v", err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("adapter left temporary payload files behind: %v", leftovers)
 	}
 }
 
@@ -320,11 +416,29 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			}
 			text := string(data)
 			connectorName := tt.conn.Name()
-			if !strings.Contains(text, windowsHookBinaryName) {
-				t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
-			}
-			if !strings.Contains(text, nativeHookFlag+connectorName) {
-				t.Errorf("config missing native connector command for %s:\n%s", connectorName, text)
+			if connectorName == "cursor" {
+				wantCommand := hookInvocationCommand(
+					"cursor",
+					filepath.Join(dataDir, "hooks", "cursor-hook.sh"),
+				)
+				if !strings.Contains(text, wantCommand) {
+					t.Errorf("config missing Cursor Windows adapter command %q:\n%s", wantCommand, text)
+				}
+				adapter, err := os.ReadFile(filepath.Join(dataDir, "hooks", "cursor-hook.ps1"))
+				if err != nil {
+					t.Fatalf("read Cursor Windows adapter: %v", err)
+				}
+				if !strings.Contains(string(adapter), windowsHookBinaryName) ||
+					!strings.Contains(string(adapter), "--input-file") {
+					t.Errorf("Cursor adapter does not invoke the native launcher through --input-file:\n%s", adapter)
+				}
+			} else {
+				if !strings.Contains(text, windowsHookBinaryName) {
+					t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
+				}
+				if !strings.Contains(text, nativeHookFlag+connectorName) {
+					t.Errorf("config missing native connector command for %s:\n%s", connectorName, text)
+				}
 			}
 			lower := strings.ToLower(text)
 			for _, forbidden := range []string{".sh", `"bash"`, "curl", "jq"} {
