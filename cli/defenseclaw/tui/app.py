@@ -8,9 +8,10 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
 from defenseclaw import __version__
 from defenseclaw import config as config_module
+from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.tui.command_line import (
     CommandLineError,
     ParsedCommand,
@@ -140,6 +142,35 @@ from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, Over
 from defenseclaw.tui.widgets.status_strip import render_status_strip
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
 
+
+def _write_owner_only_text(path: Path, text: str) -> None:
+    """Atomically write sensitive TUI output with a native owner-only ACL."""
+    fd = -1
+    tmp = ""
+    try:
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        set_file_mode(fd, tmp, 0o600)
+        stream = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+        tmp = ""
+    finally:
+        if fd != -1:
+            with suppress(OSError):
+                os.close(fd)
+        if tmp:
+            with suppress(OSError):
+                os.unlink(tmp)
+
+
 TOKENS = DEFAULT_TOKENS
 
 
@@ -160,11 +191,12 @@ _SETUP_DRIVER_LABELS: dict[SetupWizard, frozenset[str]] = {
 
 
 _DEFENSECLAW_LOGO = (
-    "    ____        ____                   ______\n"
-    "   / __ \\___   / __/__  ____  _____ _/ ____/ /__ _      __\n"
-    "  / / / / _ \\ / /_/ _ \\/ __ \\/ ___// __/ / / __ \\ | /| / /\n"
-    " / /_/ /  __// __/  __/ / / (__  )/ /___/ / /_/ / |/ |/ /\n"
-    "/_____/\\___//_/  \\___/_/ /_/____//_____/_/\\__,_/|__/|__/"
+    "██████╗ ███████╗███████╗███████╗███╗   ██╗███████╗███████╗  ██████╗██╗      █████╗ ██╗    ██╗\n"
+    "██╔══██╗██╔════╝██╔════╝██╔════╝████╗  ██║██╔════╝██╔════╝ ██╔════╝██║     ██╔══██╗██║    ██║\n"
+    "██║  ██║█████╗  █████╗  █████╗  ██╔██╗ ██║███████╗█████╗   ██║     ██║     ███████║██║ █╗ ██║\n"
+    "██║  ██║██╔══╝  ██╔══╝  ██╔══╝  ██║╚██╗██║╚════██║██╔══╝   ██║     ██║     ██╔══██║██║███╗██║\n"
+    "██████╔╝███████╗██║     ███████╗██║ ╚████║███████║███████╗ ╚██████╗███████╗██║  ██║╚███╔███╔╝\n"
+    "╚═════╝ ╚══════╝╚═╝     ╚══════╝╚═╝  ╚═══╝╚══════╝╚══════╝  ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝"
 )
 
 
@@ -3721,11 +3753,7 @@ class DefenseClawTUI(App[None]):
         target = (self.data_dir or Path.home() / ".defenseclaw" / "tui") / "last-copy.txt"
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8")
-            try:
-                os.chmod(target, 0o600)
-            except OSError:
-                pass
+            _write_owner_only_text(target, text)
         except OSError:
             return False, ""
         return True, f"file:{target}"
@@ -3898,14 +3926,7 @@ class DefenseClawTUI(App[None]):
         target = (self.data_dir or Path.home() / ".defenseclaw" / "tui") / "last-run.log"
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(header + body + "\n", encoding="utf-8")
-            try:
-                os.chmod(target, 0o600)
-            except OSError:
-                # Best effort — Windows / restricted filesystems don't
-                # honour chmod and that's fine; the data still landed
-                # at the intended path with normal user perms.
-                pass
+            _write_owner_only_text(target, header + body + "\n")
         except OSError as exc:
             self.notify_toast("error", f"Save failed: {exc}")
             return
@@ -3938,10 +3959,9 @@ class DefenseClawTUI(App[None]):
                 f"# {entry.status_label}\n"
                 f"# saved {datetime.now(timezone.utc).isoformat()}\n\n"
             )
-            target.write_text(header + "\n".join(entry.output) + "\n", encoding="utf-8")
+            _write_owner_only_text(target, header + "\n".join(entry.output) + "\n")
             # F-0782: command output frequently contains tokens/secrets, so
             # the saved transcript must be owner-only, not world-readable.
-            os.chmod(target, 0o600)
         except OSError as exc:
             self._set_status(f"Save failed: {exc}")
             return
@@ -7354,14 +7374,10 @@ class DefenseClawTUI(App[None]):
                 }
             )
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        _write_owner_only_text(target, json.dumps(rows, indent=2))
         # F-0781: audit exports can carry sensitive identifiers (targets,
         # actors, run ids), so the file must be owner-only rather than
         # world-readable under the operator's umask.
-        try:
-            os.chmod(target, 0o600)
-        except OSError:
-            pass
         return target
 
     def _refresh_hint(self) -> None:

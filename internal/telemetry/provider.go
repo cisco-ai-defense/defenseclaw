@@ -78,6 +78,7 @@ type Provider struct {
 
 	// capacityShutdown stops the 15s runtime/SQLite metrics goroutine.
 	capacityShutdown context.CancelFunc
+	shutdown         atomic.Bool
 
 	// agentInstanceID is the per-process stable identifier the
 	// sidecar mints at boot. Accessed from multiple goroutines
@@ -95,12 +96,29 @@ type Provider struct {
 // NewProvider initializes the OTel SDK providers and exporters. When
 // cfg.Enabled is false, it returns a no-op provider safe to call.
 func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*Provider, error) {
+	return newProvider(ctx, fullCfg, version, true)
+}
+
+// NewProviderInactive constructs a provider without installing it as the
+// package-global telemetry provider. Config reload uses this to validate and
+// prepare a replacement before committing the new config snapshot.
+func NewProviderInactive(ctx context.Context, fullCfg *config.Config, version string) (*Provider, error) {
+	return newProvider(ctx, fullCfg, version, false)
+}
+
+func newProvider(ctx context.Context, fullCfg *config.Config, version string, install bool) (*Provider, error) {
 	cfg := fullCfg.OTel
 	if !cfg.Enabled {
-		return &Provider{
+		p := &Provider{
 			enabled: false,
 			tracer:  traceNoop.NewTracerProvider().Tracer("defenseclaw"),
-		}, nil
+			logger:  logNoop.NewLoggerProvider().Logger("defenseclaw"),
+			meter:   metricNoop.NewMeterProvider().Meter("defenseclaw"),
+		}
+		if install {
+			installGlobalHooks(p)
+		}
+		return p, nil
 	}
 
 	res := buildResource(fullCfg, version)
@@ -142,11 +160,9 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 	if traceCount > 0 {
 		tp := sdktrace.NewTracerProvider(traceOpts...)
 		p.tracerProvider = tp
-		otel.SetTracerProvider(tp)
 		p.tracer = tp.Tracer("defenseclaw")
 	} else {
 		tp := traceNoop.NewTracerProvider()
-		otel.SetTracerProvider(tp)
 		p.tracer = tp.Tracer("defenseclaw")
 	}
 
@@ -166,11 +182,9 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 	if logCount > 0 {
 		lp := sdklog.NewLoggerProvider(logOpts...)
 		p.loggerProvider = lp
-		global.SetLoggerProvider(lp)
 		p.logger = lp.Logger("defenseclaw")
 	} else {
 		lp := logNoop.NewLoggerProvider()
-		global.SetLoggerProvider(lp)
 		p.logger = lp.Logger("defenseclaw")
 	}
 
@@ -192,11 +206,9 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 	if metricCount > 0 {
 		mp := sdkmetric.NewMeterProvider(meterOpts...)
 		p.meterProvider = mp
-		otel.SetMeterProvider(mp)
 		p.meter = mp.Meter("defenseclaw")
 	} else {
 		mp := metricNoop.NewMeterProvider()
-		otel.SetMeterProvider(mp)
 		p.meter = mp.Meter("defenseclaw")
 	}
 
@@ -206,6 +218,58 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 	}
 	p.metrics = ms
 
+	if install {
+		installGlobalHooks(p)
+	}
+
+	if metricCount > 0 {
+		capCtx, capCancel := context.WithCancel(context.Background())
+		p.capacityShutdown = capCancel
+		startCapacityBackground(capCtx, p)
+	}
+
+	return p, nil
+}
+
+func ActivateProvider(p *Provider) {
+	installGlobalHooks(p)
+}
+
+func installGlobalHooks(p *Provider) {
+	installOpenTelemetryGlobals(p)
+	setGlobalTelemetryProvider(p)
+	if p == nil {
+		config.ReportConfigLoadError = nil
+		return
+	}
+	config.ReportConfigLoadError = func(ctx context.Context, reason string) {
+		p.RecordConfigLoadError(ctx, reason)
+	}
+}
+
+func installOpenTelemetryGlobals(p *Provider) {
+	if p == nil {
+		otel.SetTracerProvider(traceNoop.NewTracerProvider())
+		global.SetLoggerProvider(logNoop.NewLoggerProvider())
+		otel.SetMeterProvider(metricNoop.NewMeterProvider())
+		otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) {}))
+		return
+	}
+	if p.tracerProvider != nil {
+		otel.SetTracerProvider(p.tracerProvider)
+	} else {
+		otel.SetTracerProvider(traceNoop.NewTracerProvider())
+	}
+	if p.loggerProvider != nil {
+		global.SetLoggerProvider(p.loggerProvider)
+	} else {
+		global.SetLoggerProvider(logNoop.NewLoggerProvider())
+	}
+	if p.meterProvider != nil {
+		otel.SetMeterProvider(p.meterProvider)
+	} else {
+		otel.SetMeterProvider(metricNoop.NewMeterProvider())
+	}
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
 		if err == nil || p.metrics == nil {
 			return
@@ -221,19 +285,6 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 			))
 		p.emitExporterFailure(context.Background(), "otel_sdk")
 	}))
-
-	setGlobalTelemetryProvider(p)
-	config.ReportConfigLoadError = func(ctx context.Context, reason string) {
-		p.RecordConfigLoadError(ctx, reason)
-	}
-
-	if metricCount > 0 {
-		capCtx, capCancel := context.WithCancel(context.Background())
-		p.capacityShutdown = capCancel
-		startCapacityBackground(capCtx, p)
-	}
-
-	return p, nil
 }
 
 // Enabled reports whether OTel export is active.
@@ -300,7 +351,10 @@ func (p *Provider) AgentInstanceID() string {
 
 // Shutdown flushes pending telemetry and releases resources.
 func (p *Provider) Shutdown(ctx context.Context) error {
-	if !p.Enabled() {
+	if p == nil || !p.Enabled() {
+		return nil
+	}
+	if !p.shutdown.CompareAndSwap(false, true) {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)

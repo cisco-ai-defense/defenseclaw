@@ -294,6 +294,7 @@
         "credential"
       ],
       "data_axis": [
+        "sensitive_access",
         "egress_external"
       ]
     },
@@ -321,6 +322,7 @@
         "credential"
       ],
       "data_axis": [
+        "sensitive_access",
         "egress_external"
       ]
     },
@@ -348,6 +350,7 @@
         "credential"
       ],
       "data_axis": [
+        "sensitive_access",
         "egress_external"
       ]
     },
@@ -375,6 +378,7 @@
         "credential"
       ],
       "data_axis": [
+        "sensitive_access",
         "egress_external"
       ]
     },
@@ -402,6 +406,7 @@
         "credential"
       ],
       "data_axis": [
+        "sensitive_access",
         "egress_external"
       ]
     },
@@ -429,6 +434,7 @@
         "credential"
       ],
       "data_axis": [
+        "sensitive_access",
         "egress_external"
       ]
     },
@@ -506,6 +512,9 @@
       "source": "policies/guardrail/strict/rules/cognitive.yaml",
       "tags": [
         "cognitive-tampering"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -528,6 +537,9 @@
       "source": "policies/guardrail/strict/rules/cognitive.yaml",
       "tags": [
         "cognitive-tampering"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -550,6 +562,9 @@
       "source": "policies/guardrail/strict/rules/cognitive.yaml",
       "tags": [
         "cognitive-tampering"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -572,6 +587,9 @@
       "source": "policies/guardrail/strict/rules/cognitive.yaml",
       "tags": [
         "cognitive-tampering"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -594,6 +612,9 @@
       "source": "policies/guardrail/strict/rules/cognitive.yaml",
       "tags": [
         "cognitive-tampering"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -616,6 +637,9 @@
       "source": "policies/guardrail/strict/rules/cognitive.yaml",
       "tags": [
         "cognitive-tampering"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -638,6 +662,9 @@
       "source": "policies/guardrail/strict/rules/cognitive.yaml",
       "tags": [
         "cognitive-tampering"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -660,6 +687,9 @@
       "source": "policies/guardrail/strict/rules/cognitive.yaml",
       "tags": [
         "cognitive-tampering"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -780,6 +810,9 @@
       "tags": [
         "execution",
         "download-exec"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -804,6 +837,9 @@
       "tags": [
         "execution",
         "download-exec"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -1184,6 +1220,9 @@
       "tags": [
         "network",
         "exfiltration"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -1208,6 +1247,9 @@
       "tags": [
         "network",
         "exfiltration"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -1254,6 +1296,9 @@
       "source": "policies/guardrail/strict/rules/commands.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {

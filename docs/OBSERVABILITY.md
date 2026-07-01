@@ -771,14 +771,16 @@ event category.
 ```bash
 defenseclaw setup webhook add slack \
     --url https://hooks.slack.com/services/T000/B000/XXXX \
-    --events scan.failed,block \
+    --events scan,block \
     --min-severity high
 
 defenseclaw setup webhook add pagerduty \
-    --routing-key-env PAGERDUTY_ROUTING_KEY \
+    --url https://events.pagerduty.com/v2/enqueue \
+    --secret-env PAGERDUTY_ROUTING_KEY \
     --min-severity critical
 
 defenseclaw setup webhook add webex \
+    --url https://webexapis.com/v1/messages \
     --room-id Y2lzY29zcGFyazovL3VzL1JPT00v… \
     --secret-env WEBEX_BOT_TOKEN
 
@@ -788,11 +790,11 @@ defenseclaw setup webhook add generic \
     --min-severity high
 
 defenseclaw setup webhook list
-defenseclaw setup webhook show <name>
-defenseclaw setup webhook enable  <name>
-defenseclaw setup webhook disable <name>
-defenseclaw setup webhook remove  <name>
-defenseclaw setup webhook test    <name>   # dispatches a synthetic event
+defenseclaw setup webhook show slack-hooks-slack-com
+defenseclaw setup webhook enable slack-hooks-slack-com
+defenseclaw setup webhook disable slack-hooks-slack-com
+defenseclaw setup webhook remove slack-hooks-slack-com
+defenseclaw setup webhook test slack-hooks-slack-com   # dispatches a synthetic event
 ```
 
 All secrets are resolved from env vars (never written in `config.yaml`).
@@ -807,9 +809,9 @@ webhooks:
     secret_env:       ""               # unused for slack (URL carries the secret)
     room_id:          ""               # webex only
     min_severity:     high             # info | low | medium | high | critical
-    events: [scan.failed, block]
+    events: [scan, block]
     timeout_seconds:  10
-    cooldown_seconds: 60               # optional; omit (null) to disable debounce
+    cooldown_seconds: 60               # optional; omit/null uses the 300s runtime default
     enabled:          true
 ```
 

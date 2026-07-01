@@ -16,7 +16,7 @@ The OpenCode connector wires DefenseClaw into [opencode](https://opencode.ai). U
 />
 
 <Callout type="info">
-**No `opencode.json` edit, no shell shim.** Local plugins under `~/.config/opencode/plugins/` are loaded automatically, so installing the connector is just writing one file. The bridge uses the runtime's global `fetch`, so it needs no npm dependencies (and never triggers a `bun install`). Because the mechanism is a JavaScript plugin rather than a shell script, OpenCode is cross-platform — including Windows — without the native `defenseclaw hook` binary the shell-hook connectors rely on.
+**No `opencode.json` edit, no shell shim.** Local plugins under `~/.config/opencode/plugins/` are loaded automatically, so installing the connector is just writing one file. The bridge uses the runtime's global `fetch`, so it needs no npm dependencies (and never triggers a `bun install`). Because the mechanism is a JavaScript plugin rather than a shell script, OpenCode is cross-platform — including Windows — without the native `defenseclaw-gateway hook` entrypoint used by the other hook connectors on Windows.
 </Callout>
 
 ## Setup
@@ -62,7 +62,7 @@ When the gateway is unreachable, the bridge honors the configured fail mode: `FA
   </Folder>
 </Files>
 
-DefenseClaw v1 governs opencode tool execution via the bridge plugin. opencode's MCP servers live in `opencode.json`; `defenseclaw mcp list/set/unset --connector opencode` reads and updates the top-level `mcp` map. For local MCP servers, `mcp set` refuses commands outside trusted install prefixes unless you add the directory to `DEFENSECLAW_TRUSTED_BIN_PREFIXES` or pass `--force-untrusted-command` for that one write, because OpenCode will execute the stored command. Skills / rules / plugins / agents surfaces remain unsupported and their panels are hidden while `claw.mode=opencode`.
+DefenseClaw v1 governs opencode tool execution via the bridge plugin. opencode's MCP servers live in `opencode.json`; `defenseclaw mcp list --connector opencode`, `defenseclaw mcp set <name> --connector opencode`, and `defenseclaw mcp unset <name> --connector opencode` read or update the top-level `mcp` map. For local MCP servers, `mcp set` refuses commands outside trusted install prefixes unless you add the directory to `DEFENSECLAW_TRUSTED_BIN_PREFIXES` or pass `--force-untrusted-command` for that one write, because OpenCode will execute the stored command. Skills / rules / plugins / agents surfaces remain unsupported and their panels are hidden while `claw.mode=opencode`.
 
 ## Hook capabilities
 

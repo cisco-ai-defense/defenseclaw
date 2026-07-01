@@ -1,6 +1,6 @@
 ---
 title: Claude Code
-description: Claude Code connector wires PreToolUse, PostToolUse, UserPromptSubmit, Stop, and PermissionRequest hooks plus the native OTel exporter. Native ask is supported on PreToolUse for HITL.
+description: Claude Code connector wires the documented lifecycle hook set plus native OTel. Fourteen current events can return block decisions, and PreToolUse supports native HITL ask.
 keywords:
   - DefenseClaw Claude Code connector
   - Claude Code hooks
@@ -37,7 +37,7 @@ Every other knob falls back to the values DefenseClaw ships with — schema-defi
 | LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
 | Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
 | HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
-| Hook fail-mode | `open` (allow on guardrail-side failure) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
+| Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
 | Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
 | Verify after setup | on | `--no-verify` |

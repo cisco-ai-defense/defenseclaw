@@ -50,6 +50,8 @@ from defenseclaw.tui.services.catalog_state import (
 )
 from defenseclaw.tui.services.gateway_events import load_gateway_scan_blocks
 
+from tests.permissions import assert_owner_only_file
+
 
 def _set_wizard_field(model: SetupPanelModel, label: str, value: str) -> None:
     for index, field in enumerate(model.form_fields):
@@ -270,7 +272,7 @@ def test_f0781_audit_export_is_owner_only(tmp_path) -> None:
 
     target = app._export_audit(None)  # noqa: SLF001 - direct sync export
     assert target.exists()
-    assert (target.stat().st_mode & 0o777) == 0o600
+    assert_owner_only_file(target)
 
 
 # ---------------------------------------------------------------------------
@@ -291,4 +293,4 @@ async def test_f0782_activity_save_is_owner_only(tmp_path) -> None:
 
     saved = list(tmp_path.glob("defenseclaw-activity-*-defenseclaw-doctor.txt"))
     assert len(saved) == 1
-    assert (saved[0].stat().st_mode & 0o777) == 0o600
+    assert_owner_only_file(saved[0])

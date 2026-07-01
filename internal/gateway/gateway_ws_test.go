@@ -224,6 +224,9 @@ func assertPluginConfigPatch(t *testing.T, rawParams json.RawMessage, pluginName
 	if params.BaseHash == "" {
 		t.Error("baseHash should not be empty")
 	}
+	if len(params.ReplacePaths) != 1 || params.ReplacePaths[0] != "plugins.allow" {
+		t.Errorf("ReplacePaths = %v, want [plugins.allow]", params.ReplacePaths)
+	}
 	var nested map[string]interface{}
 	if err := json.Unmarshal([]byte(params.Raw), &nested); err != nil {
 		t.Fatalf("Raw JSON parse: %v (raw=%q)", err, params.Raw)

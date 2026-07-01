@@ -34,17 +34,25 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import inspect
 import ipaddress
 import os
 import re
 import socket
+import stat
 import tempfile
 from dataclasses import dataclass
+from functools import wraps
 from typing import Any
 from urllib.parse import urlparse
 
 import yaml
 
+from defenseclaw.config import (
+    _assert_config_write_allowed,
+    config_path_for_data_dir,
+    locked_config_yaml,
+)
 from defenseclaw.file_permissions import set_file_mode
 
 # ---------------------------------------------------------------------------
@@ -130,6 +138,22 @@ class WebhookView:
 # ---------------------------------------------------------------------------
 
 
+def _locked_webhook_mutation(func):
+    signature = inspect.signature(func)
+
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        if bound.arguments.get("dry_run", False):
+            return func(*args, **kwargs)
+        cfg_path = str(config_path_for_data_dir(bound.arguments["data_dir"]))
+        with locked_config_yaml(cfg_path):
+            return func(*args, **kwargs)
+
+    return wrapped
+
+
+@_locked_webhook_mutation
 def apply_webhook(
     *,
     name: str | None,
@@ -177,8 +201,7 @@ def apply_webhook(
     severity = (min_severity or DEFAULT_MIN_SEVERITY).upper()
     if severity not in VALID_SEVERITIES:
         raise ValueError(
-            f"invalid min_severity {min_severity!r}; "
-            f"choose one of: {', '.join(VALID_SEVERITIES)}",
+            f"invalid min_severity {min_severity!r}; choose one of: {', '.join(VALID_SEVERITIES)}",
         )
 
     events_list = _normalize_events(events)
@@ -194,7 +217,7 @@ def apply_webhook(
             f"webhook name {derived_name!r} must match {_NAME_RE.pattern}",
         )
 
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     raw = _load_yaml(cfg_path)
     before = copy.deepcopy(raw)
 
@@ -221,8 +244,7 @@ def apply_webhook(
                 prior_name = str(matched.get("name", "") or "")
                 if prior_name and prior_name != derived_name:
                     warnings.append(
-                        f"webhook matched by url — preserving existing "
-                        f"name {prior_name!r} (pass --name to override)",
+                        f"webhook matched by url — preserving existing name {prior_name!r} (pass --name to override)",
                     )
                     derived_name = prior_name
                     matched_by_url_only = True
@@ -248,8 +270,7 @@ def apply_webhook(
     if existing_idx >= 0:
         if not matched_by_url_only:
             warnings.append(
-                f"webhook[{derived_name}] already existed — fields overwritten "
-                "(other keys preserved)",
+                f"webhook[{derived_name}] already existed — fields overwritten (other keys preserved)",
             )
         merged = dict(webhooks[existing_idx]) if isinstance(webhooks[existing_idx], dict) else {}
         # If caller did not supply cooldown_seconds but the prior entry
@@ -278,7 +299,7 @@ def apply_webhook(
 
 def list_webhooks(data_dir: str) -> list[WebhookView]:
     """Return every configured webhook entry in file order."""
-    raw = _load_yaml(os.path.join(data_dir, CONFIG_FILE_NAME))
+    raw = _load_yaml(str(config_path_for_data_dir(data_dir)))
     out: list[WebhookView] = []
     for entry in raw.get("webhooks") or []:
         if not isinstance(entry, dict):
@@ -287,7 +308,9 @@ def list_webhooks(data_dir: str) -> list[WebhookView]:
         if not url:
             continue
         name = str(entry.get("name", "") or "") or _derive_name(
-            None, str(entry.get("type", "generic") or "generic"), url,
+            None,
+            str(entry.get("type", "generic") or "generic"),
+            url,
         )
         cd_raw = entry.get("cooldown_seconds")
         cooldown: int | None
@@ -298,24 +321,27 @@ def list_webhooks(data_dir: str) -> list[WebhookView]:
                 cooldown = int(cd_raw)
             except (TypeError, ValueError):
                 cooldown = None
-        out.append(WebhookView(
-            name=name,
-            type=str(entry.get("type", "generic") or "generic"),
-            url=url,
-            secret_env=str(entry.get("secret_env", "") or ""),
-            room_id=str(entry.get("room_id", "") or ""),
-            min_severity=str(entry.get("min_severity", "") or DEFAULT_MIN_SEVERITY).upper(),
-            events=[str(e) for e in (entry.get("events") or [])],
-            timeout_seconds=int(entry.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS),
-            cooldown_seconds=cooldown,
-            enabled=bool(entry.get("enabled", False)),
-        ))
+        out.append(
+            WebhookView(
+                name=name,
+                type=str(entry.get("type", "generic") or "generic"),
+                url=url,
+                secret_env=str(entry.get("secret_env", "") or ""),
+                room_id=str(entry.get("room_id", "") or ""),
+                min_severity=str(entry.get("min_severity", "") or DEFAULT_MIN_SEVERITY).upper(),
+                events=[str(e) for e in (entry.get("events") or [])],
+                timeout_seconds=int(entry.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS),
+                cooldown_seconds=cooldown,
+                enabled=bool(entry.get("enabled", False)),
+            )
+        )
     return out
 
 
+@_locked_webhook_mutation
 def set_webhook_enabled(name: str, enabled: bool, data_dir: str) -> WebhookWriteResult:
     """Flip the ``enabled`` flag on a named webhook."""
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     raw = _load_yaml(cfg_path)
     webhooks = raw.get("webhooks")
     if not isinstance(webhooks, list):
@@ -337,9 +363,10 @@ def set_webhook_enabled(name: str, enabled: bool, data_dir: str) -> WebhookWrite
     )
 
 
+@_locked_webhook_mutation
 def remove_webhook(name: str, data_dir: str) -> WebhookWriteResult:
     """Delete the webhook entry with ``name``."""
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     raw = _load_yaml(cfg_path)
     webhooks = raw.get("webhooks")
     if not isinstance(webhooks, list):
@@ -473,8 +500,7 @@ def validate_webhook_url(url: str) -> None:
             raise ValueError(f"IP {literal_ip} is private/reserved")
         if _is_cgnat(literal_ip) and not _cgnat_allowed():
             raise ValueError(
-                f"IP {literal_ip} is in the RFC 6598 CGNAT range "
-                "(set DEFENSECLAW_ALLOW_CGNAT=1 to opt in)"
+                f"IP {literal_ip} is in the RFC 6598 CGNAT range (set DEFENSECLAW_ALLOW_CGNAT=1 to opt in)"
             )
         return
 
@@ -499,8 +525,7 @@ def validate_webhook_url(url: str) -> None:
             )
         if _is_cgnat(resolved) and not _cgnat_allowed():
             raise ValueError(
-                f"hostname {host!r} resolves to RFC 6598 CGNAT IP "
-                f"{resolved} (set DEFENSECLAW_ALLOW_CGNAT=1 to opt in)"
+                f"hostname {host!r} resolves to RFC 6598 CGNAT IP {resolved} (set DEFENSECLAW_ALLOW_CGNAT=1 to opt in)"
             )
 
 
@@ -560,26 +585,34 @@ def _load_yaml(path: str) -> dict[str, Any]:
 
 
 def _write_yaml(path: str, data: dict[str, Any]) -> None:
-    """Atomically write *data* as YAML to *path* with 0600 permissions.
-
-    The staging file is created via :func:`tempfile.mkstemp` (``O_EXCL``)
-    in the target directory rather than a predictable ``<path>.tmp``. A
-    predictable temp name lets a local attacker pre-create or symlink it
-    to hijack the write or read the secret-bearing config mid-flight, and
-    a plain ``open()`` would also leave the file world-readable; we force
-    0600 since this config embeds webhook secrets (F-0441).
-    """
+    """Atomically write webhook config with managed-mode and ACL checks."""
+    _assert_config_write_allowed(path, data)
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
+    target_mode = 0o600
+    if os.name != "nt":
+        try:
+            existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError:
+            existing_mode = None
+        if existing_mode is not None and existing_mode != 0o600:
+            target_mode = existing_mode & 0o600
+            if target_mode == 0o600 and existing_mode & 0o077 == 0o040:
+                target_mode = 0o640
+            elif target_mode == 0:
+                target_mode = 0o600
+
     fd = -1
     tmp = ""
     try:
         fd, tmp = tempfile.mkstemp(prefix=".webhooks.", suffix=".tmp", dir=directory)
-        set_file_mode(fd, tmp, 0o600)
+        set_file_mode(fd, tmp, target_mode)
         stream = os.fdopen(fd, "w")
-        fd = -1  # ownership transferred; stream closes on every with-path
+        fd = -1
         with stream as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
         tmp = ""
     finally:
@@ -587,7 +620,6 @@ def _write_yaml(path: str, data: dict[str, Any]) -> None:
             with contextlib.suppress(OSError):
                 os.close(fd)
         if tmp:
-            # Close first: an open CRT descriptor prevents unlink on Windows.
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
 
@@ -608,8 +640,7 @@ def _normalize_events(events: list[str] | tuple[str, ...] | None) -> list[str]:
             continue
         if evt not in VALID_EVENT_CATEGORIES:
             raise ValueError(
-                f"unknown event category {evt!r}; "
-                f"choose from: {', '.join(VALID_EVENT_CATEGORIES)}",
+                f"unknown event category {evt!r}; choose from: {', '.join(VALID_EVENT_CATEGORIES)}",
             )
         if evt in seen:
             continue
@@ -692,8 +723,7 @@ def _reject_inline_url_credentials(url: str) -> None:
         return
     if parsed.username or parsed.password:
         raise ValueError(
-            "webhook URL must not embed credentials (user:password@host); "
-            "pass the secret via --secret-env instead",
+            "webhook URL must not embed credentials (user:password@host); pass the secret via --secret-env instead",
         )
 
 

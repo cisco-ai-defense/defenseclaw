@@ -172,7 +172,10 @@ The `/api/v1/inspect/*` family is the hot path that connector hooks and the Open
 | --- | --- | --- |
 | `POST` | `/v1/guardrail/event` | Submit a guardrail event (used by the LiteLLM bridge for upstream-triggered events). |
 | `POST` | `/v1/guardrail/evaluate` | Evaluate the guardrail rule pack against arbitrary content. |
-| `GET` | `/v1/guardrail/config` | Return the active guardrail config the gateway resolved at boot — handy for verifying `setup guardrail` actually wrote what you thought. |
+| `GET` | `/v1/guardrail/config` | Return the active guardrail config snapshot. |
+| `PATCH` | `/v1/guardrail/config` | Patch supported guardrail runtime fields into `~/.defenseclaw/config.yaml`, validate the full YAML file, and let the config watcher/reconciler apply the latest config. Body is JSON, not raw YAML. Supported fields: `mode`, `scanner_mode`, `block_message`, `connector`, `hilt_enabled`, `hilt_min_severity`. |
+
+Changing `connector` uses restart semantics so listener and hook state are rebuilt; it is not accepted as an in-place connector swap.
 
 ### Enforcement logging
 
@@ -206,7 +209,7 @@ Audit export includes the legacy `details` text and, when present, first-class `
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/config/patch` | Apply a JSON-Patch-style update to a single config key (used by the TUI's quick-edit panel). For full reloads, restart the gateway — see [`setup guardrail`](/docs/setup/guardrail) which restarts when needed. |
+| `POST` | `/config/patch` | Apply a JSON-Patch-style update to a single config key (used by the TUI's quick-edit panel). The gateway watches `config.yaml` and reconciles valid changes; set `gateway.config_reload.mode: restart` when a deployment should use a fresh process for substantive config edits. |
 
 ### AI usage / discovery (AIBOM)
 
@@ -253,54 +256,63 @@ The four `/api/v1/inspect/*` endpoints return a [`ToolInspectVerdict`](https://g
   "raw_action": "block",
   "severity":   "CRITICAL | HIGH | MEDIUM | LOW | INFO",
   "confidence": 0.93,
-  "reason":     "matched: shell.dangerous-rm:Recursive delete on root",
-  "findings":   ["shell.dangerous-rm"],
+  "reason":     "matched: CMD-RM-RF:Recursive force delete from critical root path",
+  "findings":   ["CMD-RM-RF:Recursive force delete from critical root path"],
   "detailed_findings": [
     {
-      "rule_id":    "shell.dangerous-rm",
-      "title":      "Recursive delete on root",
+      "rule_id":    "CMD-RM-RF",
+      "title":      "Recursive force delete from critical root path",
       "severity":   "CRITICAL",
-      "confidence": 0.93,
+      "confidence": 0.95,
       "evidence":   "rm -rf /",
       "tags":       ["destructive", "shell"]
     }
   ],
   "mode":       "action | observe",
   "would_block": true,
-  "approval_timeout_ms": 0,
-  "evaluation_id": "eval-7f3a…",
-  "rule_ids":      ["shell.dangerous-rm"]
+  "approval_timeout_ms": 0
 }
 ```
 
 Notable behaviours:
 
 - **`action` is the *effective* verdict, not the raw policy decision.** `applyMode()` downgrades `block` / `confirm` / `alert` to `allow` when the gateway is in `observe` mode, but preserves the raw verdict in `raw_action` and the would-have-blocked signal in `would_block`. This is how observe-mode dry-runs work without touching the rule pack.
-- **`confirm` is the in-process HITL signal.** The gateway resolves the operator approval inline (via the in-process `HILTApprovalManager` it constructs in `SetHILTApprovalManager()`) before returning. There is **no** HTTP HITL surface — every HITL decision happens in-process and the verdict is downgraded to `allow` or `block` before the response is written. The TUI reads HITL state from the audit DB, not from a `/v1/hilt/*` endpoint.
-- **`evaluation_id` is the runtime join key.** For every `/api/v1/inspect/*` call and every connector hook (`/api/v1/{claude-code,codex,cursor,windsurf,geminicli,copilot,openhands,antigravity,hermes,opencode,omnigent}/hook`), the gateway mints a UUID and stamps it on (a) the structured `EventScan` / `EventScanFinding` / `EventVerdict` rows in `gateway.jsonl`, (b) the matching `scan_results.evaluation_id` / `scan_findings.evaluation_id` / `judge_responses.evaluation_id` columns in the audit DB, and (c) the `evaluation_id` and `rule_ids` fields in this response. SIEM dashboards keyed on `evaluation_id` can pivot from any per-finding row back to the aggregate evaluation and the verdict that gated it. See [Observability §1.4](/docs/observability) for the full per-surface contract.
+- **`confirm` is surface-dependent.** A native OpenClaw tool-approval caller can
+  receive `confirm` and resolve it in the plugin. A non-native caller cannot
+  safely pause, so the inspect handler fails the confirmation closed to
+  `block`. Proxy-lane confirmations may be resolved by the in-process
+  `HILTApprovalManager`; unsupported proxy surfaces degrade to `alert`. There
+  is no `/v1/hilt/*` HTTP API.
+- **`evaluation_id` is the runtime join key in telemetry.** Inspect calls stamp
+  it on structured JSONL and audit/scan rows, but the current
+  `ToolInspectVerdict` HTTP schema does not expose `evaluation_id` or
+  `rule_ids`. Connector-hook responses do expose both fields, as shown below.
+  See [Observability §1.4](/docs/observability) for the per-surface contract.
 - **`detailed_findings` and `findings` are both populated** for backward compatibility. Existing clients that only read `findings: []string` are unaffected by the new structured field.
 
 Other endpoints return their own shapes — `/v1/skill/scan` returns a scanner-specific envelope, `/audit/event` returns `{"status": "stored", "id": "..."}`, `/skill/disable` returns `{"status": "disabled", "skillKey": "..."}`. Always confirm against the handler code before assuming a shape.
 
 ## Connector hook responses
 
-Every connector hook response (`/api/v1/{claude-code,codex,cursor,...}/hook`) carries the same correlation triplet as the inspect verdict so SIEM joins work uniformly across both surfaces:
+Every connector hook response (`/api/v1/{claude-code,codex,cursor,...}/hook`)
+carries `evaluation_id` and the top `rule_ids` so clients can join it to the
+audit and scan rows:
 
 ```json
 {
   "action":        "allow | block | deny | …",
   "reason":        "rule X fired",
   "findings":      ["rule.id.one", "rule.id.two"],
-  "detailed_findings": [
-    { "rule_id": "rule.id.one", "title": "…", "severity": "HIGH",
-      "confidence": 0.88, "evidence": "…", "tags": [] }
-  ],
   "evaluation_id": "eval-c1d0…",
   "rule_ids":      ["rule.id.one", "rule.id.two"]
 }
 ```
 
-`detailed_findings` is opt-in (gated by an `X-DefenseClaw-Reveal-Findings: 1` header so existing string-only clients don't get a payload change), and `findings` continues to ship by default. `evaluation_id` and `rule_ids` are always populated when at least one rule fired.
+Connector-hook responses expose the string `findings` list, not the inspect
+endpoint's `detailed_findings` objects. For `/api/v1/inspect/*`, evidence is
+redacted by default; `X-DefenseClaw-Reveal-PII: 1` requests raw evidence and
+creates an audited reveal event. `evaluation_id` and `rule_ids` are populated
+when the hook evaluation produced correlation data.
 
 ## Headers
 

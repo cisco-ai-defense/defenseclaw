@@ -391,7 +391,7 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	}
 }
 
-func TestHookContractCompatibilityDriftExcludesGeneratedArtifactChanges(t *testing.T) {
+func TestHookContractDriftExcludesGeneratedArtifactChanges(t *testing.T) {
 	previous := HookContractLockEntry{
 		Connector:              "codex",
 		RawAgentVersion:        "codex-cli 0.142.4",
@@ -402,8 +402,8 @@ func TestHookContractCompatibilityDriftExcludesGeneratedArtifactChanges(t *testi
 	current := previous
 	current.HookScriptDigests = map[string]string{"codex-hook.sh": "sha256:new"}
 
-	if !HookContractLockDrifted(previous, current) {
-		t.Fatal("full lock drift must still report a changed generated artifact")
+	if HookContractLockDrifted(previous, current) {
+		t.Fatal("generated artifact drift must remain repairable")
 	}
 	if HookContractCompatibilityDrifted(previous, current) {
 		t.Fatal("generated artifact drift must not be treated as upstream contract drift")
@@ -413,6 +413,9 @@ func TestHookContractCompatibilityDriftExcludesGeneratedArtifactChanges(t *testi
 	current.ContractID = "codex-hooks-v2"
 	if !HookContractCompatibilityDrifted(previous, current) {
 		t.Fatal("contract identity changes must remain compatibility drift")
+	}
+	if !HookContractLockDrifted(previous, current) {
+		t.Fatal("contract identity changes must remain lock drift")
 	}
 }
 

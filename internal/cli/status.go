@@ -18,8 +18,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -181,8 +184,46 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	printConnectors(&snap)
+	if isLocalStatusTarget(bind) {
+		printHookGuardianStatus()
+	}
 
 	return nil
+}
+
+func isLocalStatusTarget(host string) bool {
+	host = strings.TrimSpace(host)
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if hostname, err := os.Hostname(); err == nil && strings.EqualFold(host, hostname) {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsUnspecified() {
+		return true
+	}
+	for _, addr := range addrs {
+		switch local := addr.(type) {
+		case *net.IPNet:
+			if local.IP.Equal(ip) {
+				return true
+			}
+		case *net.IPAddr:
+			if local.IP.Equal(ip) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // printConnectors renders the active-connector roster. The HealthSnapshot
@@ -259,6 +300,114 @@ func printConnectorBody(c *gateway.ConnectorHealth) {
 		subBlk)
 }
 
+type hookGuardianStatus struct {
+	Configured   bool                       `json:"-"`
+	StateFile    string                     `json:"state_file,omitempty"`
+	OK           bool                       `json:"ok"`
+	UpdatedAt    string                     `json:"updated_at,omitempty"`
+	Manifest     string                     `json:"manifest,omitempty"`
+	TargetCount  int                        `json:"target_count,omitempty"`
+	SuccessCount int                        `json:"success_count,omitempty"`
+	FailureCount int                        `json:"failure_count,omitempty"`
+	Results      []hookGuardianStatusResult `json:"results,omitempty"`
+}
+
+type hookGuardianStatusResult struct {
+	User      string `json:"user,omitempty"`
+	UserHome  string `json:"user_home,omitempty"`
+	Connector string `json:"connector,omitempty"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}
+
+func loadHookGuardianStatus() hookGuardianStatus {
+	state := hookGuardianStatus{}
+	if cfg == nil || strings.TrimSpace(cfg.DataDir) == "" {
+		state.StateFile = "hook_guardian_state.json"
+		return state
+	}
+	state.StateFile = filepath.Join(cfg.DataDir, "hook_guardian_state.json")
+	data, err := os.ReadFile(state.StateFile)
+	if err != nil {
+		return state
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return hookGuardianStatus{StateFile: state.StateFile}
+	}
+	state.Configured = true
+	if state.TargetCount == 0 {
+		state.TargetCount = len(state.Results)
+	}
+	if state.SuccessCount == 0 {
+		for _, row := range state.Results {
+			if row.OK {
+				state.SuccessCount++
+			}
+		}
+	}
+	if state.FailureCount == 0 && state.TargetCount >= state.SuccessCount {
+		state.FailureCount = state.TargetCount - state.SuccessCount
+	}
+	return state
+}
+
+func printHookGuardianStatus() {
+	state := loadHookGuardianStatus()
+	managed := cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.DeploymentMode), "managed_enterprise")
+	if !managed && !state.Configured {
+		return
+	}
+
+	if !state.Configured {
+		printGatewayKV("Hook guardian", Style("not reconciled", "fg=yellow"))
+		fmt.Printf("                %s\n\n", Dim("(no hook_guardian_state.json yet)"))
+		return
+	}
+
+	statusText := Style("healthy", "fg=green")
+	if !state.OK {
+		statusText = Style("attention", "fg=yellow")
+	}
+	statusText += Dim(fmt.Sprintf(" (%d/%d targets ok)", state.SuccessCount, state.TargetCount))
+	if state.FailureCount > 0 {
+		statusText += Dim(fmt.Sprintf(", %d failed", state.FailureCount))
+	}
+	printGatewayKV("Hook guardian", statusText)
+
+	var details []string
+	if state.UpdatedAt != "" {
+		details = append(details, "last run: "+state.UpdatedAt)
+	}
+	if state.Manifest != "" {
+		details = append(details, "manifest: "+state.Manifest)
+	}
+	if len(details) > 0 {
+		fmt.Printf("                %s\n", Dim(strings.Join(details, "  ")))
+	}
+	for i, row := range state.Results {
+		if i >= 8 {
+			break
+		}
+		conn := strings.TrimSpace(row.Connector)
+		label := fmt.Sprintf("%s (%s)", friendlyConnectorName(conn), conn)
+		if user := strings.TrimSpace(row.User); user != "" {
+			label += " for " + user
+		} else if home := strings.TrimSpace(row.UserHome); home != "" {
+			label += " for " + home
+		}
+		if row.OK {
+			fmt.Printf("                  %s — ok\n", label)
+		} else {
+			errText := row.Error
+			if errText == "" {
+				errText = "failed"
+			}
+			fmt.Printf("                  %s — %s\n", label, Style(errText, "fg=yellow"))
+		}
+	}
+	fmt.Println()
+}
+
 // friendlyConnectorName renders a human-friendly connector label for the
 // CLI text output. The table is kept in sync with the Python CLI's
 // _FRIENDLY_CONNECTOR_NAMES (cli/defenseclaw/commands/cmd_status.py) so the
@@ -315,6 +464,8 @@ type connectorModeSummary struct {
 	EnforcementSurface string   `json:"enforcement_surface"`
 	Telemetry          []string `json:"telemetry"`
 	ProxyIntercept     bool     `json:"proxy_intercept"`
+	GuardrailMode      string   `json:"guardrail_mode"`
+	HookEnforcement    bool     `json:"hook_enforcement"`
 }
 
 // fetchConnectorModes returns one mode summary per active connector. It
@@ -411,6 +562,18 @@ func printConnectorModeEntry(m *connectorModeSummary) {
 	if len(m.Telemetry) > 0 {
 		telLabel := Style(fmt.Sprintf("%-18s", "Telemetry:"), "fg=bright_black", "bold")
 		fmt.Printf("    %s%s\n", telLabel, strings.Join(m.Telemetry, ", "))
+	}
+	if m.GuardrailMode != "" {
+		modeLabel := Style(fmt.Sprintf("%-18s", "Guardrail mode:"), "fg=bright_black", "bold")
+		fmt.Printf("    %s%s\n", modeLabel, m.GuardrailMode)
+	}
+	if !m.ProxyIntercept {
+		hookLabel := Style(fmt.Sprintf("%-18s", "Hook enforcement:"), "fg=bright_black", "bold")
+		hookState := "no"
+		if m.HookEnforcement {
+			hookState = "yes (action-mode hooks can block)"
+		}
+		fmt.Printf("    %s%s\n", hookLabel, hookState)
 	}
 	intercept := "no (traffic flows directly to upstream)"
 	if m.ProxyIntercept {

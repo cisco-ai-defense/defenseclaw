@@ -7,12 +7,41 @@ set -euo pipefail
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
 
-# Fail-open guard. See inspect-request.sh for rationale.
+HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
+HOOK_LINK_DEPTH=0
+while [ -L "$HOOK_SOURCE" ]; do
+  HOOK_LINK_DEPTH=$((HOOK_LINK_DEPTH + 1))
+  [ "$HOOK_LINK_DEPTH" -le 40 ] || exit 2
+  HOOK_PARENT="${HOOK_SOURCE%/*}"
+  [ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
+  HOOK_BASE="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
+  if [ -x /usr/bin/readlink ]; then
+    HOOK_TARGET="$(/usr/bin/readlink -- "$HOOK_SOURCE")" || exit 2
+  elif [ -x /bin/readlink ]; then
+    HOOK_TARGET="$(/bin/readlink -- "$HOOK_SOURCE")" || exit 2
+  else
+    exit 2
+  fi
+  case "$HOOK_TARGET" in
+    /*) HOOK_SOURCE="$HOOK_TARGET" ;;
+    *) HOOK_SOURCE="$HOOK_BASE/$HOOK_TARGET" ;;
+  esac
+done
+HOOK_PARENT="${HOOK_SOURCE%/*}"
+[ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
+HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
+unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
+{{if .Managed}}
+DEFENSECLAW_MANAGED_HOOK=1
+export DEFENSECLAW_MANAGED_HOOK
+DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+export DEFENSECLAW_HOME
+{{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   exit 0
 fi
-HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+{{end}}
 
 # Plan B4 / S0.4: shell-side hook hardening.
 . "${HOOK_DIR}/_hardening.sh"
@@ -25,17 +54,19 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 # Avarice F-2025 / chain F-3397: authenticate inspection calls. See
 # inspect-request.sh for the full rationale.
-if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token inspect inspect-tool-response "tool-response"
 fi
-if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/.token" ]; then
+if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
+  {{if .ScopedToken}}
+  DEFENSECLAW_GATEWAY_TOKEN="$(tr -d '\r\n' < "${HOOK_DIR}/{{.TokenFile}}")"
+  export DEFENSECLAW_GATEWAY_TOKEN
+  {{else}}
   # shellcheck source=/dev/null
-  . "${HOOK_DIR}/.token"
+  . "${HOOK_DIR}/{{.TokenFile}}"
+  {{end}}
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
-
-TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
-TOOL_OUTPUT=$(cat)
 
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
 TOOL_OUTPUT="$(defenseclaw_read_stdin_capped)" || {
@@ -78,12 +109,17 @@ AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
+CONNECTOR_HEADER_ARGS=()
+{{if .ConnectorName}}
+CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: {{.ConnectorName}}")
+{{end}}
 
 RESPONSE=$(jq -n --arg tool "$TOOL_NAME" --arg output "$TOOL_OUTPUT" \
   '{tool: $tool, output: $output}' | \
   curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/tool-response" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
+  "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 5 \

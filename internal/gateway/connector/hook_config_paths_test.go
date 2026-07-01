@@ -157,3 +157,67 @@ func TestOwnedHookNeedles_WindowsSurvivesConfigEscaping(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigFileReferencesHookIgnoresDecoyPathOutsideCommandField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	needle := "/home/alice/.defenseclaw/hooks/cursor-hook.sh"
+	data := []byte(`{"hooks":{"beforeSubmitPrompt":[{"note":"` + needle + `"}]}}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write hook config: %v", err)
+	}
+	present, err := configFileReferencesHook(path, []string{needle})
+	if err != nil {
+		t.Fatalf("configFileReferencesHook: %v", err)
+	}
+	if present {
+		t.Fatal("decoy path outside command field was treated as a managed hook")
+	}
+}
+
+func TestConfigFileReferencesHookRejectsWrapperCommand(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	needle := "/home/alice/.defenseclaw/hooks/cursor-hook.sh"
+	data := []byte(`{"hooks":{"beforeSubmitPrompt":[{"command":"echo ` + needle + `"}]}}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write hook config: %v", err)
+	}
+	present, err := configFileReferencesHook(path, []string{needle})
+	if err != nil {
+		t.Fatalf("configFileReferencesHook: %v", err)
+	}
+	if present {
+		t.Fatal("wrapper command was treated as an enforcing managed hook")
+	}
+}
+
+func TestConfigFileReferencesHookAcceptsManagedCommandField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	needle := "/home/alice/.defenseclaw/hooks/cursor-hook.sh"
+	data := []byte(`{"hooks":{"beforeSubmitPrompt":[{"command":"'` + needle + `'"}]}}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write hook config: %v", err)
+	}
+	present, err := configFileReferencesHook(path, []string{needle})
+	if err != nil {
+		t.Fatalf("configFileReferencesHook: %v", err)
+	}
+	if !present {
+		t.Fatal("managed command field was not detected")
+	}
+}
+
+func TestConfigFileReferencesHookAcceptsNestedTOMLCommand(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.toml")
+	needle := "/home/alice/.defenseclaw/hooks/codex-hook.sh"
+	data := []byte("[[hooks.beforeSubmitPrompt]]\ncommand = \"'" + needle + "'\"\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write hook config: %v", err)
+	}
+	present, err := configFileReferencesHook(path, []string{needle})
+	if err != nil {
+		t.Fatalf("configFileReferencesHook: %v", err)
+	}
+	if !present {
+		t.Fatal("nested TOML command field was not detected")
+	}
+}

@@ -25,6 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from defenseclaw import config as config_module
 from defenseclaw import file_permissions, migrations
 from defenseclaw.commands import cmd_setup_observability as setup_writer
 from defenseclaw.observability import writer as observability_writer
@@ -33,6 +34,14 @@ from defenseclaw.webhooks import writer as webhook_writer
 from tests.permissions import assert_owner_only_file
 
 _ATOMIC_WRITERS = [
+    (
+        "config",
+        config_module,
+        lambda path: config_module.write_config_yaml_secure(
+            os.fspath(path),
+            {"data_dir": os.fspath(path.parent)},
+        ),
+    ),
     (
         "webhooks",
         webhook_writer,
@@ -187,8 +196,9 @@ def test_posix_file_mode_still_uses_descriptor_api(monkeypatch):
 @pytest.mark.parametrize(
     ("name", "write"),
     [
-        ("webhooks", _ATOMIC_WRITERS[0][2]),
-        ("setup-observability", _ATOMIC_WRITERS[1][2]),
+        ("config", _ATOMIC_WRITERS[0][2]),
+        ("webhooks", _ATOMIC_WRITERS[1][2]),
+        ("setup-observability", _ATOMIC_WRITERS[2][2]),
         (
             "migrations",
             lambda path: migrations._atomic_write_text(

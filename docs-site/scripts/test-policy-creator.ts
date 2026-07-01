@@ -31,6 +31,7 @@ import {
   __TEST_INTERNALS,
 } from '../components/policy-creator/lib/share.js';
 import { emit, __TEST_INTERNALS as EMIT_INTERNALS } from '../components/policy-creator/lib/emit.js';
+import { emitInstallScript } from '../components/policy-creator/lib/emit-script.js';
 import { highlightRegoToHtml, tokenizeRego } from '../components/policy-creator/lib/rego-highlight.js';
 import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/lib/json-highlight.js';
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
@@ -96,6 +97,13 @@ function makePolicy(overrides: Partial<Policy> = {}): Policy {
   };
   return base;
 }
+
+test('install script honors DEFENSECLAW_HOME with the standard home fallback', () => {
+  const script = emitInstallScript(makePolicy());
+  assert.match(script, /DC_ROOT="\$\{DEFENSECLAW_HOME:-\$\{HOME\}\/\.defenseclaw\}"/);
+  assert.match(script, /POLICIES_ROOT="\$\{DC_ROOT\}\/policies"/);
+  assert.doesNotMatch(script, /POLICIES_ROOT="\$\{HOME\}\/\.defenseclaw\/policies"/);
+});
 
 // ── share: round trip ───────────────────────────────────────────────
 
@@ -547,6 +555,41 @@ test('emit: custom Rego snippet → custom-<name>.rego file', () => {
   const rego = files.find((f) => f.path.endsWith('custom-block-prod-models.rego'));
   assert.ok(rego, 'expected custom-block-prod-models.rego in emit output');
   assert.ok(rego!.contents.includes('package custom'));
+});
+
+test('emit: rejects command-injection characters in custom Rego names', () => {
+  const policy = makePolicy({
+    custom_rego: [
+      {
+        name: 'safe; touch /tmp/pwned',
+        package: 'defenseclaw.custom.safe',
+        description: 'malicious share payload',
+        source: 'package defenseclaw.custom.safe\n',
+      },
+    ],
+  });
+  assert.throws(() => emit(policy), /custom Rego name must contain only/);
+});
+
+test('emit: rejects surrounding whitespace in names used by install-script comments', () => {
+  assert.throws(
+    () => emit(makePolicy({ name: 'safe-policy\n' })),
+    /policy name must not have leading or trailing whitespace/,
+  );
+  const policy = makePolicy({
+    judges: [
+      {
+        name: 'safe-judge\n',
+        enabled: true,
+        system_prompt: 'Inspect the request.',
+        categories: {},
+      },
+    ] as unknown as Policy['judges'],
+  });
+  assert.throws(
+    () => emit(policy),
+    /judge name must not have leading or trailing whitespace/,
+  );
 });
 
 test('emit: empty custom_rego source is skipped', () => {

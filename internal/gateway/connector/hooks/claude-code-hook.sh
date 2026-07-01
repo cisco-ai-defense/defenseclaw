@@ -14,12 +14,41 @@ set -euo pipefail
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
 
-# Fail-open guard. See inspect-request.sh for rationale.
+HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
+HOOK_LINK_DEPTH=0
+while [ -L "$HOOK_SOURCE" ]; do
+  HOOK_LINK_DEPTH=$((HOOK_LINK_DEPTH + 1))
+  [ "$HOOK_LINK_DEPTH" -le 40 ] || exit 2
+  HOOK_PARENT="${HOOK_SOURCE%/*}"
+  [ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
+  HOOK_BASE="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
+  if [ -x /usr/bin/readlink ]; then
+    HOOK_TARGET="$(/usr/bin/readlink -- "$HOOK_SOURCE")" || exit 2
+  elif [ -x /bin/readlink ]; then
+    HOOK_TARGET="$(/bin/readlink -- "$HOOK_SOURCE")" || exit 2
+  else
+    exit 2
+  fi
+  case "$HOOK_TARGET" in
+    /*) HOOK_SOURCE="$HOOK_TARGET" ;;
+    *) HOOK_SOURCE="$HOOK_BASE/$HOOK_TARGET" ;;
+  esac
+done
+HOOK_PARENT="${HOOK_SOURCE%/*}"
+[ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
+HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
+unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
+{{if .Managed}}
+DEFENSECLAW_MANAGED_HOOK=1
+export DEFENSECLAW_MANAGED_HOOK
+DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+export DEFENSECLAW_HOME
+{{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   exit 0
 fi
-HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+{{end}}
 
 # Plan B4 / S0.4: shell-side hook hardening — sourced BEFORE the
 # missing-token branch (mirrors codex-hook.sh) so the bypass goes
@@ -43,7 +72,7 @@ DEFENSECLAW_HOOK_CONNECTOR="claudecode"
 DEFENSECLAW_HOOK_NAME="claude-code-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool"
 fi
 
@@ -58,10 +87,17 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
 API_ADDR="{{.APIAddr}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
-# into this script). The env var takes precedence if already set.
-if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/.token" ]; then
+# into this script). Connector-scoped sidecars override an inherited generic
+# gateway token; legacy .token files retain the explicit env override.
+if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
+  DEFENSECLAW_GATEWAY_TOKEN=
+  if [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
+    IFS= read -r DEFENSECLAW_GATEWAY_TOKEN < "${HOOK_DIR}/{{.TokenFile}}" || true
+  fi
+  export DEFENSECLAW_GATEWAY_TOKEN
+elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
-  . "${HOOK_DIR}/.token"
+  . "${HOOK_DIR}/{{.TokenFile}}"
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 

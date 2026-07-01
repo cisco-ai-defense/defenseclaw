@@ -63,7 +63,7 @@ Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo
 <Tab value="Add scanning rigor">
 
 ```bash
-export DEFENSECLAW_LLM_KEY=<your-key>
+export DEFENSECLAW_LLM_KEY='replace-with-your-key'
 
 defenseclaw setup copilot                                 # global hooks first
 defenseclaw setup guardrail \
@@ -92,7 +92,7 @@ connector_hooks:
     fail_mode: open       # open | closed
 ```
 
-Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, `preToolUse` surfaces a native ask in Copilot when the gateway returns a HITL verdict; the other block events (`permissionRequest`, `agentStop`, `subagentStop`, `postToolUseFailure`) downgrade to a confirm verdict in the DefenseClaw TUI.
+Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, `preToolUse` surfaces a native ask in Copilot when the gateway returns a HITL verdict. The other block events (`permissionRequest`, `agentStop`, `subagentStop`, `postToolUseFailure`) use a non-pausing alert/context fallback with the raw confirm action retained in audit.
 
 </Tab>
 
@@ -101,7 +101,7 @@ Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, `p
 #### Decision aids — should I turn this on?
 
 <Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Copilot supports native ask on preToolUse; the other block events downgrade to confirm." />
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Copilot supports native ask on preToolUse; other events use a non-pausing fallback." />
   <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector copilot` when tuning Copilot." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />

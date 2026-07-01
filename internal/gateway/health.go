@@ -48,6 +48,7 @@ type SubsystemHealth struct {
 type ConnectorHealth struct {
 	Name               string                       `json:"name"`
 	State              SubsystemState               `json:"state"`
+	Source             string                       `json:"source,omitempty"`
 	Since              time.Time                    `json:"since"`
 	LastActivityAt     *time.Time                   `json:"last_activity_at,omitempty"`
 	ToolInspectionMode connector.ToolInspectionMode `json:"tool_inspection_mode"`
@@ -60,14 +61,16 @@ type ConnectorHealth struct {
 }
 
 type HealthSnapshot struct {
-	StartedAt   time.Time       `json:"started_at"`
-	UptimeMs    int64           `json:"uptime_ms"`
-	Gateway     SubsystemHealth `json:"gateway"`
-	Watcher     SubsystemHealth `json:"watcher"`
-	API         SubsystemHealth `json:"api"`
-	Guardrail   SubsystemHealth `json:"guardrail"`
-	Telemetry   SubsystemHealth `json:"telemetry"`
-	AIDiscovery SubsystemHealth `json:"ai_discovery"`
+	StartedAt             time.Time       `json:"started_at"`
+	UptimeMs              int64           `json:"uptime_ms"`
+	Gateway               SubsystemHealth `json:"gateway"`
+	Watcher               SubsystemHealth `json:"watcher"`
+	Config                SubsystemHealth `json:"config"`
+	API                   SubsystemHealth `json:"api"`
+	Guardrail             SubsystemHealth `json:"guardrail"`
+	Telemetry             SubsystemHealth `json:"telemetry"`
+	AIDiscovery           SubsystemHealth `json:"ai_discovery"`
+	ApplicationProtection SubsystemHealth `json:"application_protection"`
 	// Sinks reports the aggregate health of all configured audit sinks
 	// (splunk_hec, otlp_logs, http_jsonl, …). Details["sinks"] holds
 	// per-sink state for the TUI/CLI to render individual rows.
@@ -81,16 +84,18 @@ type HealthSnapshot struct {
 }
 
 type SidecarHealth struct {
-	mu          sync.RWMutex
-	gateway     SubsystemHealth
-	watcher     SubsystemHealth
-	api         SubsystemHealth
-	guardrail   SubsystemHealth
-	telemetry   SubsystemHealth
-	aiDiscovery SubsystemHealth
-	sinks       SubsystemHealth
-	sandbox     *SubsystemHealth
-	startedAt   time.Time
+	mu                    sync.RWMutex
+	gateway               SubsystemHealth
+	watcher               SubsystemHealth
+	config                SubsystemHealth
+	api                   SubsystemHealth
+	guardrail             SubsystemHealth
+	telemetry             SubsystemHealth
+	aiDiscovery           SubsystemHealth
+	applicationProtection SubsystemHealth
+	sinks                 SubsystemHealth
+	sandbox               *SubsystemHealth
+	startedAt             time.Time
 
 	// Per-connector health + counters. In multi-connector mode every active
 	// connector gets its own ConnectorHealth so live counters are truthful
@@ -109,6 +114,7 @@ type SidecarHealth struct {
 type connectorStats struct {
 	name               string
 	state              SubsystemState
+	source             string
 	since              time.Time
 	toolInspectionMode connector.ToolInspectionMode
 	subprocessPolicy   connector.SubprocessPolicy
@@ -134,6 +140,7 @@ func (s *connectorStats) snapshot() ConnectorHealth {
 	return ConnectorHealth{
 		Name:               s.name,
 		State:              s.state,
+		Source:             s.source,
 		Since:              s.since,
 		LastActivityAt:     lastActivityAt,
 		ToolInspectionMode: s.toolInspectionMode,
@@ -169,14 +176,27 @@ func NewSidecarHealth() *SidecarHealth {
 	initial := SubsystemHealth{State: StateStarting, Since: now}
 	disabled := SubsystemHealth{State: StateDisabled, Since: now}
 	return &SidecarHealth{
-		gateway:     initial,
-		watcher:     initial,
-		api:         initial,
-		guardrail:   disabled,
-		telemetry:   disabled,
-		aiDiscovery: disabled,
-		sinks:       disabled,
-		startedAt:   now,
+		gateway:               initial,
+		watcher:               initial,
+		config:                initial,
+		api:                   initial,
+		guardrail:             disabled,
+		telemetry:             disabled,
+		aiDiscovery:           disabled,
+		applicationProtection: disabled,
+		sinks:                 disabled,
+		startedAt:             now,
+	}
+}
+
+func (h *SidecarHealth) SetConfig(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.config = SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
 	}
 }
 
@@ -246,6 +266,17 @@ func (h *SidecarHealth) SetAIDiscovery(state SubsystemState, lastErr string, det
 	}
 }
 
+func (h *SidecarHealth) SetApplicationProtection(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.applicationProtection = SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+}
+
 // SetSinks reports the aggregate audit-sink health. Details should
 // include "count" (int), "kinds" ([]string), and optionally "sinks"
 // ([]map) with per-sink rows for richer rendering.
@@ -276,17 +307,21 @@ func (h *SidecarHealth) SetSandbox(state SubsystemState, lastErr string, details
 // field. Counters for an already-registered connector are preserved across
 // re-registration (e.g. a connector hot-swap) so live totals are not reset.
 func (h *SidecarHealth) SetConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy) {
-	h.registerConnector(name, mode, policy, true)
+	h.registerConnector(name, mode, policy, "manual", true)
 }
 
 // RegisterConnector registers (or updates) a connector's health entry WITHOUT
 // changing which connector is primary. The multi-connector boot loop calls
 // this for every active connector so each appears with its own live counters.
 func (h *SidecarHealth) RegisterConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy) {
-	h.registerConnector(name, mode, policy, false)
+	h.registerConnector(name, mode, policy, "manual", false)
 }
 
-func (h *SidecarHealth) registerConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy, primary bool) {
+func (h *SidecarHealth) RegisterConnectorWithSource(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy, source string) {
+	h.registerConnector(name, mode, policy, source, false)
+}
+
+func (h *SidecarHealth) registerConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy, source string, primary bool) {
 	key := connName(name)
 	if key == "" {
 		return
@@ -302,11 +337,38 @@ func (h *SidecarHealth) registerConnector(name string, mode connector.ToolInspec
 		h.connStats[key] = s
 	}
 	s.state = StateRunning
+	if strings.TrimSpace(source) == "" {
+		source = "manual"
+	}
+	s.source = strings.ToLower(strings.TrimSpace(source))
 	s.toolInspectionMode = mode
 	s.subprocessPolicy = policy
 	if primary {
 		h.primaryConn = key
 	}
+}
+
+func (h *SidecarHealth) HasConnector(name string) bool {
+	key := connName(name)
+	if key == "" {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	s := h.connStats[key]
+	return s != nil && s.state == StateRunning
+}
+
+func (h *SidecarHealth) HasConnectorSource(name, source string) bool {
+	key := connName(name)
+	wantSource := strings.ToLower(strings.TrimSpace(source))
+	if key == "" || wantSource == "" {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	s := h.connStats[key]
+	return s != nil && s.state == StateRunning && strings.EqualFold(strings.TrimSpace(s.source), wantSource)
 }
 
 // statsFor returns the counter bucket for a connector, lazily creating it so
@@ -378,16 +440,18 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	defer h.mu.RUnlock()
 
 	snap := HealthSnapshot{
-		StartedAt:   h.startedAt,
-		UptimeMs:    time.Since(h.startedAt).Milliseconds(),
-		Gateway:     h.gateway,
-		Watcher:     h.watcher,
-		API:         h.api,
-		Guardrail:   h.guardrail,
-		Telemetry:   h.telemetry,
-		AIDiscovery: h.aiDiscovery,
-		Sinks:       h.sinks,
-		Sandbox:     h.sandbox,
+		StartedAt:             h.startedAt,
+		UptimeMs:              time.Since(h.startedAt).Milliseconds(),
+		Gateway:               h.gateway,
+		Watcher:               h.watcher,
+		Config:                h.config,
+		API:                   h.api,
+		Guardrail:             h.guardrail,
+		Telemetry:             h.telemetry,
+		AIDiscovery:           h.aiDiscovery,
+		ApplicationProtection: h.applicationProtection,
+		Sinks:                 h.sinks,
+		Sandbox:               h.sandbox,
 	}
 
 	if len(h.connStats) > 0 {

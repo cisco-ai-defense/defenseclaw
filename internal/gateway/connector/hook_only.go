@@ -717,6 +717,7 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 		APIAddr:  opts.APIAddr,
 		APIToken: opts.APIToken,
 		FailMode: failMode,
+		Managed:  opts.ManagedEnterprise,
 	})
 	if err != nil {
 		return fmt.Errorf("%s render plugin template: %w", c.name, err)
@@ -1777,7 +1778,7 @@ func ensureJSONObject(obj map[string]interface{}, key string) map[string]interfa
 func appendUniqueFlatHook(raw interface{}, hookScript string, entry map[string]interface{}) []interface{} {
 	list, _ := raw.([]interface{})
 	for _, item := range list {
-		if containsHookScript(item, hookScript) {
+		if managedHookCommandEntry(item, hookScript) {
 			return list
 		}
 	}
@@ -1787,7 +1788,7 @@ func appendUniqueFlatHook(raw interface{}, hookScript string, entry map[string]i
 func appendUniqueGeminiHookGroup(raw interface{}, hookScript string, group map[string]interface{}) []interface{} {
 	list, _ := raw.([]interface{})
 	for _, item := range list {
-		if containsHookScript(item, hookScript) {
+		if managedGeminiHookGroup(item, hookScript) {
 			return list
 		}
 	}
@@ -1913,8 +1914,6 @@ func pruneEmptyMapArrays(obj map[string]interface{}) {
 
 func containsHookScript(raw interface{}, hookScript string) bool {
 	switch v := raw.(type) {
-	case string:
-		return strings.Contains(v, hookScript) || strings.Contains(v, filepath.Base(hookScript))
 	case []interface{}:
 		for _, item := range v {
 			if containsHookScript(item, hookScript) {
@@ -1922,10 +1921,40 @@ func containsHookScript(raw interface{}, hookScript string) bool {
 			}
 		}
 	case map[string]interface{}:
-		for _, item := range v {
-			if containsHookScript(item, hookScript) {
-				return true
-			}
+		if managedHookCommandEntry(v, hookScript) {
+			return true
+		}
+		if hooks, ok := v["hooks"]; ok {
+			return containsHookScript(hooks, hookScript)
+		}
+	}
+	return false
+}
+
+func managedHookCommandEntry(raw interface{}, hookScript string) bool {
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"command", "bash"} {
+		command, _ := entry[key].(string)
+		command = strings.TrimSpace(command)
+		if command == strings.TrimSpace(hookScript) || command == strings.TrimSpace(shellWord(hookScript)) {
+			return true
+		}
+	}
+	return false
+}
+
+func managedGeminiHookGroup(raw interface{}, hookScript string) bool {
+	group, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	hooks, _ := group["hooks"].([]interface{})
+	for _, hook := range hooks {
+		if managedHookCommandEntry(hook, hookScript) {
+			return true
 		}
 	}
 	return false

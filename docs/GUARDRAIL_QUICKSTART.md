@@ -102,7 +102,7 @@ openclaw gateway restart
 
 ```bash
 # Check sidecar health (should show guardrail subsystem as HEALTHY)
-defenseclaw sidecar status
+defenseclaw-gateway status
 
 # Check guardrail proxy is responding
 curl -s http://localhost:4000/health/liveliness

@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -190,6 +191,18 @@ func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) erro
 	if lock.Connectors == nil {
 		lock.Connectors = map[string]HookContractLockEntry{}
 	}
+	if previous, ok := lock.Connectors[entry.Connector]; ok {
+		previousComparison := previous
+		entryComparison := entry
+		previousComparison.UpdatedAt = ""
+		entryComparison.UpdatedAt = ""
+		if reflect.DeepEqual(previousComparison, entryComparison) {
+			return nil
+		}
+	}
+	if entry.UpdatedAt == "" {
+		entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 	lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	lock.Connectors[entry.Connector] = entry
 	data, err := json.MarshalIndent(lock, "", "  ")
@@ -293,29 +306,18 @@ func surfaceLocations(cap SurfaceCapability) SurfaceLocations {
 	}
 }
 
+// HookContractLockDrifted reports compatibility changes that must gate boot or
+// reconciliation. Generated artifact digest changes are repairable and are not
+// included in this signal.
 func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
-	if HookContractCompatibilityDrifted(previous, current) {
-		return true
-	}
-	if len(previous.HookScriptDigests) > 0 && len(current.HookScriptDigests) > 0 {
-		for name, digest := range previous.HookScriptDigests {
-			if current.HookScriptDigests[name] != "" && current.HookScriptDigests[name] != digest {
-				return true
-			}
-		}
-	}
-	return false
+	return HookContractCompatibilityDrifted(previous, current)
 }
 
 // HookContractCompatibilityDrifted reports only upstream compatibility
 // changes: the installed agent version or the selected hook contract changed.
-// It deliberately excludes generated hook-script digests.
-//
-// A digest mismatch means an installed DefenseClaw hook is stale or was
-// edited. Connector Setup is the repair path for that state, so rejecting
-// startup before Setup runs makes an explicit setup/restart unable to refresh
-// the hook. Callers that need the broader integrity signal (for doctor/status)
-// should continue to use HookContractLockDrifted.
+// It deliberately excludes generated hook-script digests. Changed script
+// bytes are the thing setup/guardian repair is supposed to overwrite, so
+// treating them as compatibility drift would prevent the repair path itself.
 func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" {
 		return false

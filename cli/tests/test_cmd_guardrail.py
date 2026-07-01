@@ -380,6 +380,31 @@ class DisableCommandTests(unittest.TestCase):
         # the operator hasn't actually disabled yet.
         restart_mock.assert_not_called()
 
+    def test_managed_disable_rejects_before_confirmation_prompt(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="codex")
+        denial = PermissionError(
+            "managed_enterprise config changes require operating-system "
+            "administrator privileges"
+        )
+        with (
+            patch.object(
+                cmd_guardrail,
+                "_assert_config_write_allowed",
+                side_effect=denial,
+            ),
+            patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock,
+        ):
+            result = runner.invoke(cmd_guardrail.disable_cmd, [], obj=app)
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Failed to save config", result.output)
+        self.assertIn("administrator privileges", result.output)
+        self.assertNotIn("Proceed?", result.output)
+        self.assertTrue(app.cfg.guardrail.enabled)
+        app.cfg.save.assert_not_called()
+        restart_mock.assert_not_called()
+
     def test_disable_declined_aborts(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="openclaw")
@@ -512,6 +537,26 @@ class PerConnectorToggleTests(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("already disabled", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_managed_disable_one_connector_rejects_before_prompt(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with patch.object(
+            cmd_guardrail,
+            "_assert_config_write_allowed",
+            side_effect=PermissionError("administrator privileges required"),
+        ):
+            result = runner.invoke(
+                cmd_guardrail.disable_cmd,
+                ["--connector", "codex"],
+                obj=app,
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("administrator privileges required", result.output)
+        self.assertNotIn("Proceed?", result.output)
+        self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
         app.cfg.save.assert_not_called()
 
     def test_case_insensitive_member_match(self):

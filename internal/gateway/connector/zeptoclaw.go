@@ -433,8 +433,10 @@ func (c *ZeptoClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
 			managedFileBackupPath(opts.DataDir, c.Name(), "config.json"),
 			filepath.Join(opts.DataDir, "zeptoclaw_backup.json"),
 		},
-		HookScripts: hookScriptPathsForConnector(opts, c),
-		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
+		HookScripts:          hookScriptPathsForConnector(opts, c),
+		GeneratedFiles:       subprocessGeneratedFiles(opts),
+		GeneratedExecutables: subprocessGeneratedExecutables(opts),
+		CreatedDirs:          subprocessCreatedDirs(opts),
 	}
 }
 

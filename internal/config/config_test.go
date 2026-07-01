@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -160,6 +161,72 @@ func TestConfigPath(t *testing.T) {
 	}
 }
 
+func TestConfigPath_ExplicitEnvOverride(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "managed.yaml")
+	t.Setenv("DEFENSECLAW_CONFIG", want)
+	if got := ConfigPath(); got != want {
+		t.Fatalf("ConfigPath() = %q, want %q", got, want)
+	}
+}
+
+func TestLoadFromFile_ConfigOverrideKeepsRuntimeDataInDefenseClawHome(t *testing.T) {
+	configDir := t.TempDir()
+	dataDir := t.TempDir()
+	path := filepath.Join(configDir, "managed.yaml")
+	t.Setenv(managed.ConfigPathEnv, path)
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
+	if err := os.WriteFile(path, []byte("config_version: 6\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if cfg.DataDir != dataDir {
+		t.Fatalf("DataDir = %q, want DEFENSECLAW_HOME %q", cfg.DataDir, dataDir)
+	}
+}
+
+func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatalf("chmod untrusted config dir: %v", err)
+		}
+	}
+	path := filepath.Join(dir, DefaultConfigName)
+	data := []byte("config_version: 6\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := LoadFromFile(path)
+	if err == nil {
+		t.Fatal("LoadFromFile succeeded for untrusted managed_enterprise config path")
+	}
+	if !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
+		t.Fatalf("LoadFromFile error = %v, want managed trust check failure", err)
+	}
+}
+
+func TestLoadFromFile_ManagedEnterpriseEnvPinRejectsUntrustedUnmanagedFile(t *testing.T) {
+	dir := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatalf("chmod untrusted config dir: %v", err)
+		}
+	}
+	path := filepath.Join(dir, DefaultConfigName)
+	if err := os.WriteFile(path, []byte("config_version: 6\ndeployment_mode: unmanaged_byod\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv(managed.DeploymentModeEnv, string(DeploymentModeManagedEnterprise))
+	_, err := LoadFromFile(path)
+	if err == nil || !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
+		t.Fatalf("LoadFromFile error = %v, want pre-parse managed trust failure", err)
+	}
+}
+
 func TestDetectEnvironment(t *testing.T) {
 	env := DetectEnvironment()
 	switch runtime.GOOS {
@@ -191,6 +258,12 @@ func TestDefaultConfig(t *testing.T) {
 	if got, want := cfg.AIDiscovery.ConfidencePolicyPath, filepath.Join(cfg.DataDir, "confidence.yaml"); got != want {
 		t.Errorf("ai_discovery.confidence_policy_path = %q, want %q", got, want)
 	}
+	if cfg.AIDiscovery.RequireTrustedBinaryPaths {
+		t.Error("ai_discovery.require_trusted_binary_paths = true, want false")
+	}
+	if len(cfg.AIDiscovery.TrustedBinaryPrefixes) != 0 {
+		t.Errorf("ai_discovery.trusted_binary_prefixes = %v, want empty", cfg.AIDiscovery.TrustedBinaryPrefixes)
+	}
 	if cfg.Claw.Mode != ClawOpenClaw {
 		t.Errorf("expected mode %q, got %q", ClawOpenClaw, cfg.Claw.Mode)
 	}
@@ -202,6 +275,9 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Gateway.APIPort != 18970 {
 		t.Errorf("expected gateway api_port 18970, got %d", cfg.Gateway.APIPort)
+	}
+	if cfg.Gateway.ConfigReload.Mode != "hot" {
+		t.Errorf("expected gateway config_reload.mode hot, got %q", cfg.Gateway.ConfigReload.Mode)
 	}
 	if !cfg.Gateway.Watcher.Enabled {
 		t.Error("expected gateway watcher enabled by default")
@@ -429,6 +505,36 @@ func TestValidateDeploymentMode_Valid(t *testing.T) {
 func TestValidateDeploymentMode_Invalid(t *testing.T) {
 	if err := validateDeploymentMode("freeform"); err == nil {
 		t.Fatal("expected validateDeploymentMode to reject free-form value")
+	}
+}
+
+func TestValidateGatewayConfigReloadMode(t *testing.T) {
+	for _, mode := range []string{"", "hot", "restart", "HOT", " Restart "} {
+		t.Run(mode, func(t *testing.T) {
+			if err := validateGatewayConfigReloadMode(mode); err != nil {
+				t.Fatalf("validateGatewayConfigReloadMode(%q) returned unexpected error: %v", mode, err)
+			}
+		})
+	}
+	if err := validateGatewayConfigReloadMode("reload"); err == nil {
+		t.Fatal("expected validateGatewayConfigReloadMode to reject reload")
+	}
+}
+
+func TestLoadFromFileNormalizesGatewayConfigReloadMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DefaultConfigName)
+	raw := "config_version: 6\ndata_dir: " + dir + "\ngateway:\n  config_reload:\n    mode: ' Restart '\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if got := cfg.Gateway.ConfigReload.Mode; got != "restart" {
+		t.Fatalf("config reload mode = %q, want restart", got)
 	}
 }
 

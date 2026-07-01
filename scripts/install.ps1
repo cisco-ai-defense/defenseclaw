@@ -38,7 +38,9 @@
     %USERPROFILE%\.defenseclaw\.venv, so an installed setup upgrades in place.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.ps1 | iex
+    $Version = "0.8.3"
+    $InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
+    & ([scriptblock]::Create((irm $InstallUrl))) -Version $Version
 
 .EXAMPLE
     # Pin a version and pick a connector, non-interactively:
@@ -90,15 +92,16 @@ $InstallDir = Join-Path $env:USERPROFILE ".local\bin"
 $ConnectorChoices = @(
     "codex",
     "claudecode",
+    "hermes",
     "cursor",
     "windsurf",
     "geminicli",
     "copilot",
     "antigravity",
     "opencode",
-    "hermes",
     "none"
 )
+$HookConnectors = $ConnectorChoices | Where-Object { $_ -notin @("codex", "claudecode", "none") }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -115,14 +118,16 @@ function Show-Help {
 DefenseClaw Installer (Windows)
 
 Usage:
-  irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex
+  `$Version = "0.8.3"
+  `$InstallUrl = "https://raw.githubusercontent.com/$Repo/`$Version/scripts/install.ps1"
+  & ([scriptblock]::Create((irm `$InstallUrl))) -Version `$Version
   .\install.ps1 -Local .\dist                 # from a local build
   .\install.ps1 -Yes                          # non-interactive
   .\install.ps1 -Connector codex -Quickstart  # pick connector + bootstrap
 
 Options:
   -Connector <name>    Pick agent connector ($($ConnectorChoices -join '|'))
-  -NoOpenclaw          Legacy alias for -Connector none when used alone
+  -NoOpenclaw          Legacy alias for -Connector none; installs gateway/CLI only
   -Version <x.y.z>     Install a specific release version
   -Local <dir>         Install from a local dist directory instead of downloading
   -Quickstart          Run 'defenseclaw quickstart --non-interactive' post-install

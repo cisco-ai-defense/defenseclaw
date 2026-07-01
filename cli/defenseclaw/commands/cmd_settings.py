@@ -6,12 +6,11 @@
 
 from __future__ import annotations
 
-import os
-
 import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
+from defenseclaw.config import config_path_for_data_dir
 from defenseclaw.context import AppContext, pass_ctx
 
 
@@ -24,7 +23,7 @@ def settings_cmd() -> None:
 @pass_ctx
 def settings_save(app: AppContext) -> None:
     """Write the current resolved configuration to disk and record an activity event."""
-    cfg_path = os.path.join(app.cfg.data_dir, "config.yaml")
+    cfg_path = str(config_path_for_data_dir(app.cfg.data_dir))
     before_txt = ""
     try:
         with open(cfg_path, encoding="utf-8") as f:
@@ -32,7 +31,11 @@ def settings_save(app: AppContext) -> None:
     except OSError:
         before_txt = ""
 
-    app.cfg.save()
+    try:
+        app.cfg.save()
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}")
+        raise SystemExit(1) from exc
 
     after_txt = ""
     try:

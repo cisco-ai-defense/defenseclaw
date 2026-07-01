@@ -1,6 +1,6 @@
 {
   "_source": "Hand-curated from internal/gateway/connector hook profiles plus cli/defenseclaw/inventory/hook_contracts.json. Re-extract on every connector or hook-contract change.",
-  "_lastVerified": "2026-06-26",
+  "_lastVerified": "2026-07-01",
   "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/meta.json).",
   "connectors": [
     {
@@ -13,7 +13,7 @@
         "canBlock": true,
         "canAskNative": true,
         "askEvents": ["PreToolUse"],
-        "blockEvents": ["PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "PermissionRequest"],
+        "blockEvents": ["UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest", "PostToolUse", "PostToolBatch", "TaskCreated", "TaskCompleted", "TeammateIdle", "Stop", "SubagentStop", "PreCompact", "Elicitation", "ElicitationResult"],
         "supportsFailClosed": true,
         "scope": "user"
       },
@@ -30,11 +30,11 @@
         "canBlock": true,
         "canAskNative": false,
         "askEvents": [],
-        "blockEvents": ["UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "SessionStart"],
+        "blockEvents": ["UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"],
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "hilt": "Codex has no native ask surface here; confirm verdicts are downgraded with raw_action preserved. HITL routes through TUI / OpenClaw plugin.",
+      "hilt": "Codex has no native ask surface here; confirm becomes an alert/systemMessage with raw_action preserved. The TUI can review the event but cannot resume it.",
       "notes": "Three telemetry channels at boot: hooks, native OTel, and the notify bridge for agent-turn-complete events. Hook-only connector — no proxy data path."
     },
     {
@@ -100,7 +100,7 @@
       "id": "opencode",
       "label": "OpenCode",
       "family": "hooks",
-      "toolInspection": "pre-execution",
+      "toolInspection": "pre-execution + response-scan",
       "subprocessPolicy": "none",
       "hooks": {
         "canBlock": true,
@@ -156,18 +156,13 @@
       "hooks": {
         "canBlock": true,
         "canAskNative": true,
-        "askEvents": ["preToolUse", "PreToolUse"],
+        "askEvents": ["preToolUse"],
         "blockEvents": [
           "preToolUse",
-          "PreToolUse",
           "permissionRequest",
-          "PermissionRequest",
           "agentStop",
-          "Stop",
           "subagentStop",
-          "SubagentStop",
-          "postToolUseFailure",
-          "PostToolUseFailure"
+          "postToolUseFailure"
         ],
         "supportsFailClosed": false,
         "scope": "user,workspace"
@@ -201,13 +196,13 @@
       "hooks": {
         "canBlock": true,
         "canAskNative": true,
-        "askEvents": ["PreInvocation", "PreToolUse"],
-        "blockEvents": ["PreInvocation", "PreToolUse", "Stop"],
+        "askEvents": ["PreToolUse"],
+        "blockEvents": ["PreToolUse"],
         "supportsFailClosed": false,
         "scope": "user"
       },
-      "hilt": "Antigravity is the only DefenseClaw connector with an unbypassable native ask: returning decision=ask from a PreInvocation or PreToolUse hook overrides agy's --dangerously-skip-permissions flag. The literal force_ask string is not recognized by agy v1.0.0 and is preserved internally as raw_action only.",
-      "notes": "Hooks v2 covers the full Antigravity 2.0 lifecycle (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) registered as separate DefenseClaw-owned keys in ~/.gemini/config/hooks.json (the path agy v1.0.x actually evaluates; the marketing-facing ~/.gemini/antigravity-cli/hooks.json is silently ignored at runtime). PreToolUse is empirically verified on agy v1.0.1; the other four events are spec-conformant and gated on upstream agy parity. MCP read/write uses ~/.gemini/config/mcp_config.json and <workspace>/.agents/mcp_config.json. AgentSkills folder form is read/write at ~/.gemini/config/skills and <workspace>/.agents/skills. Plugins install to ~/.gemini/config/plugins or <workspace>/.agents/plugins; the CLI staging path is also discovered. CLI direct markdown skills, rules, and plugin-contained agents remain discovery/scan only."
+      "hilt": "Antigravity has an empirically verified native ask on PreToolUse. Returning decision=ask there overrides agy's --dangerously-skip-permissions flag; force_ask is retained only as internal raw_action telemetry.",
+      "notes": "DefenseClaw registers the full Antigravity 2.0 lifecycle (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) as separate owned keys in ~/.gemini/config/hooks.json (the path agy v1.0.x evaluates). Only PreToolUse is currently advertised as block/ask-capable because it is empirically verified on agy v1.0.1; the other four registrations remain telemetry/spec-parity surfaces until upstream behavior is verified. MCP read/write uses ~/.gemini/config/mcp_config.json and <workspace>/.agents/mcp_config.json. AgentSkills folder form is read/write at ~/.gemini/config/skills and <workspace>/.agents/skills. Plugins install to ~/.gemini/config/plugins or <workspace>/.agents/plugins; the CLI staging path is also discovered. CLI direct markdown skills, rules, and plugin-contained agents remain discovery/scan only."
     },
     {
       "id": "windsurf",
@@ -246,7 +241,7 @@
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "hilt": "ZeptoClaw has no native ask surface; confirm verdicts are downgraded with raw_action preserved so operators can review in TUI/audit.",
+      "hilt": "ZeptoClaw has no native ask surface; confirm uses its explicit fallback with raw_action preserved for TUI/audit review. There is no resumable approval.",
       "notes": "api_base redirect into the DefenseClaw proxy plus response-scan."
     }
   ]

@@ -15,6 +15,12 @@ agent/runtime and a DefenseClaw integration that can be wired without WSL are
 both required.  The resulting status is one of ``supported``, ``preview``, or
 ``unsupported`` and always carries an operator-facing reason.
 
+DefenseClaw runs hook-only on Windows: agents invoke the native Go hook
+entrypoint (``defenseclaw-hook``) directly, and there is no Windows
+guardrail-proxy lifecycle. The proxy/chat connectors (``openclaw`` and
+``zeptoclaw``) therefore cannot run on Windows, so the TUI/CLI must not offer
+or accept them there.
+
 This module mirrors ``internal/gateway/connector/platform_support.go``.  Tests
 pin the two taxonomies and all Python presentation lists together.  macOS and
 Linux retain their historical behavior: every built-in and plugin connector is

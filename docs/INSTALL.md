@@ -49,13 +49,13 @@ and the complete DefenseClaw hook path to run directly on Windows.
 - **Unsupported:** OpenHands and OmniGent. OpenHands CLI requires WSL;
   OmniGent has no supported native Windows terminal/sandbox path.
 
-Supported command-hook connectors invoke `defenseclaw hook --connector <name>
---event <event>` through the native `defenseclaw-gateway.exe`; OpenCode loads
-the native JavaScript bridge plugin. DefenseClaw's hook entrypoint does not add
-a WSL, Git Bash, `jq`, or POSIX-shell dependency; upstream agent prerequisites
-still apply (for example, Claude Code's native Windows setup requires Git for
-Windows). Cursor support here means the Windows IDE hook surface; Cursor's
-separate CLI remains WSL-only.
+Supported command-hook connectors invoke the native, no-console
+`defenseclaw-hook.exe --connector <name> --event <event>` launcher; OpenCode
+loads its JavaScript bridge plugin and calls the gateway over HTTP directly.
+DefenseClaw's hook entrypoint does not add a WSL, Git Bash, `jq`, or POSIX-shell
+dependency; upstream agent prerequisites still apply (for example, Claude
+Code's native Windows setup requires Git for Windows). Cursor support here means
+the Windows IDE hook surface; Cursor's separate CLI remains WSL-only.
 
 WSL availability is tracked for upstream research in
 [`CONNECTOR-MATRIX.md`](CONNECTOR-MATRIX.md), but it is not part of the current
@@ -336,7 +336,7 @@ make clean        # Full clean (binaries, venv, node_modules, coverage)
 End users can install a released version without cloning the repo:
 
 ```bash
-VERSION=0.8.2
+VERSION=0.8.3
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
@@ -349,7 +349,7 @@ confirmations.
 Pin a specific version:
 
 ```bash
-VERSION=0.8.2
+VERSION=0.8.3
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
@@ -361,7 +361,7 @@ OpenClaw runtime and the DefenseClaw plugin). You can pick a different
 connector — or skip connector setup entirely — with `--connector`:
 
 ```bash
-VERSION=0.8.2
+VERSION=0.8.3
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 
 # Codex (no OpenClaw, no plugin tarball; patches ~/.codex/config.toml + hooks)
@@ -463,7 +463,7 @@ What guardrail setup does:
 3. Installs the DefenseClaw OpenClaw plugin
 4. Patches `openclaw.json` to route LLM calls through the proxy
 5. Saves settings to `config.yaml` and API keys to `.env`
-6. Writes `guardrail_runtime.json` for live mode toggling
+6. Uses the gateway config watcher to apply supported `config.yaml` changes at runtime
 
 ```bash
 # Non-interactive with specific mode

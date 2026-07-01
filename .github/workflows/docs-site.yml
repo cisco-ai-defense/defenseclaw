@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - 'docs-site/**'
+      - 'docs/**'
       - '.github/workflows/docs-site.yml'
   pull_request:
     paths:
       - 'docs-site/**'
+      - 'docs/**'
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 
@@ -82,6 +84,9 @@ jobs:
         # Gate the deploy on the share/highlighter/cmdk-filter tests so
         # silent regressions in the policy creator can't ship to Pages.
         run: npm run test:policy-creator
+
+      - name: Validate documentation shell snippets
+        run: npm run validate-snippets
 
       - name: Build static export
         env:

@@ -141,16 +141,27 @@ func TestTriagePatterns_ReviewBare9Digit(t *testing.T) {
 }
 
 func TestTriagePatterns_HighSignalCreditCard(t *testing.T) {
-	signals := triagePatterns("prompt", "card number is 4111-1111-1111-1111")
-	hasHigh := false
-	for _, s := range signals {
-		if s.Level == "HIGH_SIGNAL" && s.FindingID == "TRIAGE-PII-CC" {
-			hasHigh = true
-			break
+	for _, card := range []string{"4111-1111-1111-1111", "3782-822463-10005"} {
+		signals := triagePatterns("prompt", "card number is "+card)
+		hasHigh := false
+		for _, s := range signals {
+			if s.Level == "HIGH_SIGNAL" && s.FindingID == "TRIAGE-PII-CC" {
+				hasHigh = true
+				break
+			}
+		}
+		if !hasHigh {
+			t.Errorf("expected HIGH_SIGNAL for credit card %s", card)
 		}
 	}
-	if !hasHigh {
-		t.Error("expected HIGH_SIGNAL for credit card")
+}
+
+func TestTriagePatterns_RejectsSixteenDigitAmExShape(t *testing.T) {
+	signals := triagePatterns("prompt", "card number is 3782-8224-6310-0059")
+	for _, signal := range signals {
+		if signal.FindingID == "TRIAGE-PII-CC" {
+			t.Fatalf("unexpected credit-card signal for invalid 16-digit AmEx shape: %+v", signal)
+		}
 	}
 }
 

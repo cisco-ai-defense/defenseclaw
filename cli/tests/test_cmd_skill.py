@@ -33,6 +33,7 @@ from click.testing import CliRunner
 from defenseclaw.commands.cmd_skill import (
     _apply_scan_enforcement,
     _build_scan_map,
+    _get_openclaw_skill_info,
     _skill_display_name,
     _skill_status_display,
     skill,
@@ -62,6 +63,12 @@ class SkillCommandTestBase(unittest.TestCase):
 
     def invoke(self, args: list[str]):
         return self.runner.invoke(skill, args, obj=self.app, catch_exceptions=False)
+
+
+class TestOpenClawSkillInfo(unittest.TestCase):
+    @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value='{"error": ""}')
+    def test_empty_error_field_is_still_an_error(self, _mock_run):
+        self.assertIsNone(_get_openclaw_skill_info("missing"))
 
 
 class TestSkillBlock(SkillCommandTestBase):

@@ -36,6 +36,14 @@ from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 
+def _trusted_prefixes_from_config(data_dir: str) -> list[str]:
+    import yaml
+
+    with open(os.path.join(data_dir, "config.yaml"), encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+    return list((raw.get("ai_discovery") or {}).get("trusted_binary_prefixes") or [])
+
+
 class TestInitCommand(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-test-")
@@ -1532,6 +1540,27 @@ class TestIsSidecarRunning(unittest.TestCase):
         with patch("defenseclaw.commands.cmd_init._pid_looks_like_gateway", return_value=True):
             self.assertTrue(_is_sidecar_running(pid_file))
 
+    def test_liveness_uses_cross_platform_probe(self):
+        from defenseclaw.commands.cmd_init import _is_sidecar_running
+
+        pid_file = os.path.join(self.tmp_dir, "gateway.pid")
+        with open(pid_file, "w") as f:
+            f.write(str(os.getpid()))
+        with (
+            patch("defenseclaw.process_liveness.pid_alive", return_value=True) as alive,
+            patch(
+                "defenseclaw.commands.cmd_init.os.kill",
+                side_effect=AssertionError("os.kill(pid, 0) is unsafe on Windows"),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_init._pid_looks_like_gateway",
+                return_value=True,
+            ),
+        ):
+            self.assertTrue(_is_sidecar_running(pid_file))
+
+        alive.assert_called_once_with(os.getpid())
+
     def test_stale_pid(self):
         from defenseclaw.commands.cmd_init import _is_sidecar_running
         pid_file = os.path.join(self.tmp_dir, "gateway.pid")
@@ -1579,6 +1608,7 @@ class TestDetectOpenclawHome(unittest.TestCase):
             result = _detect_openclaw_home()
             self.assertEqual(result, self.oc_home)
 
+    @unittest.skipIf(os.name == "nt", "SUDO_USER and pwd are POSIX-only")
     def test_prefers_sudo_user_home(self):
         from defenseclaw.commands.cmd_init_sandbox import _detect_openclaw_home
 
@@ -1635,6 +1665,7 @@ class TestSaveOwnershipBackup(unittest.TestCase):
         self.assertEqual(backup_path, expected)
 
 
+@unittest.skipIf(os.name == "nt", "OpenClaw sandbox ownership is POSIX-only")
 class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
     """Tests for _integrate_openclaw_home idempotency."""
 
@@ -1683,6 +1714,7 @@ class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
             self.assertFalse(result)
 
 
+@unittest.skipIf(os.name == "nt", "OpenClaw sandbox ownership is POSIX-only")
 class TestRestoreOpenclawOwnership(unittest.TestCase):
     """Tests for _restore_openclaw_ownership in cmd_setup."""
 
@@ -2247,11 +2279,9 @@ class TestMultiConnectorInit(unittest.TestCase):
 
         self.assertEqual(got, ["hermes"])
         self.assertEqual(discover.call_count, 2)
-        dotenv = os.path.join(self.tmp_dir, ".env")
-        with open(dotenv, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn(os.path.realpath(hermes_dir), text)
-        self.assertNotIn(os.path.realpath(codex_dir), text)
+        prefixes = _trusted_prefixes_from_config(self.tmp_dir)
+        self.assertIn(os.path.realpath(hermes_dir), prefixes)
+        self.assertNotIn(os.path.realpath(codex_dir), prefixes)
 
     def test_prompt_first_run_explicit_action_declined_trust_downgrades_with_remediation(self):
         from defenseclaw.commands import cmd_init
@@ -2346,9 +2376,7 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertEqual(settings[0]["profile"], "action")
         self.assertIsNone(settings[0]["mode_warning"])
 
-        dotenv = os.path.join(self.tmp_dir, ".env")
-        with open(dotenv, encoding="utf-8") as fh:
-            self.assertIn(os.path.realpath(bin_dir), fh.read())
+        self.assertIn(os.path.realpath(bin_dir), _trusted_prefixes_from_config(self.tmp_dir))
 
     def test_checkbox_selector_toggles_with_keys(self):
         from defenseclaw.commands import cmd_init
@@ -2488,10 +2516,7 @@ class TestMultiConnectorInit(unittest.TestCase):
 
         self.assertEqual(got, ["codex"])
         self.assertEqual(discover.call_count, 2)
-        dotenv = os.path.join(self.tmp_dir, ".env")
-        self.assertTrue(os.path.isfile(dotenv))
-        with open(dotenv, encoding="utf-8") as fh:
-            self.assertIn(os.path.realpath(bin_dir), fh.read())
+        self.assertIn(os.path.realpath(bin_dir), _trusted_prefixes_from_config(self.tmp_dir))
 
 
 class TestInitObserveAllActionConnectors(unittest.TestCase):

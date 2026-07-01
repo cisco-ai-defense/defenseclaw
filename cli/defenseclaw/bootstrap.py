@@ -403,8 +403,10 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
 def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult]:
     """Run scoped readiness checks for the choices made during first run."""
+    from defenseclaw.config import config_path_for_data_dir
+
     steps: list[StepResult] = []
-    cfg_path = os.path.join(cfg.data_dir, "config.yaml")
+    cfg_path = str(config_path_for_data_dir(cfg.data_dir))
     steps.append(
         StepResult(
             "Config file",

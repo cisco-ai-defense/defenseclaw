@@ -61,11 +61,22 @@ type ConnectorSignals struct {
 
 // SetupOpts is passed to Setup/Teardown during `defenseclaw setup`.
 type SetupOpts struct {
-	DataDir     string // ~/.defenseclaw/
-	ProxyAddr   string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
-	APIAddr     string // 127.0.0.1:18970 (API server — inspection endpoints)
-	APIToken    string // gateway bearer token; baked into hook curl -H
-	Interactive bool
+	DataDir   string // ~/.defenseclaw/
+	ProxyAddr string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
+	APIAddr   string // 127.0.0.1:18970 (API server — inspection endpoints)
+	APIToken  string // gateway bearer token; baked into hook curl -H
+	// HookAPIToken is the least-privilege credential written beside generated
+	// hook artifacts. Proxy connectors keep APIToken as the master credential
+	// for their in-process/plugin integration while their generic shell hooks
+	// receive this connector-scoped token instead.
+	HookAPIToken       string
+	HookAPITokenScoped bool
+	Interactive        bool
+	// ManagedEnterprise marks hook scripts installed by the privileged
+	// enterprise guardian. Managed scripts ignore user-controlled home and
+	// disable-sentinel overrides and derive their data directory from the
+	// verified script location instead.
+	ManagedEnterprise bool
 	// WorkspaceDir is the project/workspace root for connectors whose
 	// hook configuration is intentionally repository-scoped (for
 	// example Copilot CLI's .github/hooks/*.json files). When empty,
@@ -519,6 +530,19 @@ type AgentPaths struct {
 	// PatchedFiles.
 	HookScripts []string
 
+	// GeneratedFiles are DefenseClaw-owned non-executable files written
+	// under opts.DataDir at Setup time that are not backups. They are
+	// declared separately so privileged enterprise repair can preflight
+	// an existing file before writing through it.
+	GeneratedFiles []string
+
+	// GeneratedExecutables are DefenseClaw-owned executable files written
+	// under opts.DataDir at Setup time that are not native hook scripts
+	// under hooks/. For example Codex's notify bridge is invoked by
+	// Codex's notify integration, not by the hook event bus, but still
+	// carries hook credentials and must be preflighted/hardened.
+	GeneratedExecutables []string
+
 	// CreatedDirs are directories the connector creates and owns
 	// (e.g. ~/.openclaw/extensions/defenseclaw/). Distinct from
 	// PatchedFiles because the entire directory is owned by
@@ -618,6 +642,28 @@ type HookRuntimeArtifactProvider interface {
 // never silently no-ops.
 type HookScriptOwner interface {
 	HookScriptNames(opts SetupOpts) []string
+}
+
+// HookConfigReferenceOwner is implemented by connectors whose managed hook
+// runtime is a policy module or other non-shell artifact. The returned values
+// are exact references written into the connector's native config and are used
+// by the enterprise guardian to verify and repair that integration without
+// pretending the connector owns a shell script.
+type HookConfigReferenceOwner interface {
+	HookConfigReferenceNeedles(opts SetupOpts) []string
+}
+
+// OwnsManagedHookRuntime reports whether the enterprise guardian can install
+// and verify this connector's native enforcement surface.
+func OwnsManagedHookRuntime(conn Connector) bool {
+	if conn == nil {
+		return false
+	}
+	if _, ok := conn.(HookScriptOwner); ok {
+		return true
+	}
+	_, ok := conn.(HookConfigReferenceOwner)
+	return ok
 }
 
 // ProviderProbe — optional, connectors that can self-diagnose whether

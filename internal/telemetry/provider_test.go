@@ -28,7 +28,9 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/log/global"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -74,6 +76,41 @@ func disabledCfg() *config.Config {
 			Port: 18789,
 		},
 		Environment: "test",
+	}
+}
+
+func TestNewProviderInactiveDoesNotReplaceOpenTelemetryGlobals(t *testing.T) {
+	beforeTracer := otel.GetTracerProvider()
+	beforeLogger := global.GetLoggerProvider()
+	beforeMeter := otel.GetMeterProvider()
+
+	provider, err := NewProviderInactive(context.Background(), disabledCfg(), "test")
+	if err != nil {
+		t.Fatalf("NewProviderInactive: %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	if got := otel.GetTracerProvider(); got != beforeTracer {
+		t.Fatal("inactive provider replaced global tracer provider")
+	}
+	if got := global.GetLoggerProvider(); got != beforeLogger {
+		t.Fatal("inactive provider replaced global logger provider")
+	}
+	if got := otel.GetMeterProvider(); got != beforeMeter {
+		t.Fatal("inactive provider replaced global meter provider")
+	}
+}
+
+func TestActivateProviderNilClearsErrorHandler(t *testing.T) {
+	called := false
+	previous := otel.GetErrorHandler()
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) { called = true }))
+	t.Cleanup(func() { otel.SetErrorHandler(previous) })
+
+	ActivateProvider(nil)
+	otel.Handle(errors.New("after shutdown"))
+	if called {
+		t.Fatal("ActivateProvider(nil) left the previous OpenTelemetry error handler installed")
 	}
 }
 
@@ -170,6 +207,29 @@ func TestNewProvider_Disabled(t *testing.T) {
 	}
 	if err := p.Shutdown(context.Background()); err != nil {
 		t.Errorf("shutdown disabled: %v", err)
+	}
+}
+
+func TestNewProviderInactiveDoesNotInstallGlobals(t *testing.T) {
+	tracerBefore := otel.GetTracerProvider()
+	loggerBefore := global.GetLoggerProvider()
+	meterBefore := otel.GetMeterProvider()
+	cfg := disabledCfg()
+	cfg.OTel.Enabled = true
+
+	p, err := NewProviderInactive(context.Background(), cfg, "test")
+	if err != nil {
+		t.Fatalf("NewProviderInactive: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
+	if otel.GetTracerProvider() != tracerBefore {
+		t.Fatal("inactive provider replaced the global tracer provider")
+	}
+	if global.GetLoggerProvider() != loggerBefore {
+		t.Fatal("inactive provider replaced the global logger provider")
+	}
+	if otel.GetMeterProvider() != meterBefore {
+		t.Fatal("inactive provider replaced the global meter provider")
 	}
 }
 

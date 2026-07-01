@@ -48,6 +48,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -73,6 +74,13 @@ type APIServer struct {
 	// ScannerMode) which can be changed at runtime via the PATCH
 	// /v1/guardrail/config endpoint while other goroutines read them.
 	cfgMu sync.RWMutex
+
+	// configReloader and configSnapshot bind API writes to the same central
+	// transaction and immutable snapshot used by live enforcement. The PATCH
+	// endpoint refuses to write when this coordination is unavailable.
+	configReloader func(context.Context, string) error
+	configSnapshot func() *config.Config
+	configWriteMu  sync.Mutex
 
 	// otlpPathTokenMu guards otlpPathTokens — the in-memory map of
 	// per-source OTLP path tokens loaded from
@@ -108,6 +116,9 @@ type APIServer struct {
 	otlpPathTokens          map[connector.OTLPPathTokenScope]otlpPathTokenEntry
 	otlpPathTokenReloadAt   map[connector.OTLPPathTokenScope]time.Time
 	otlpPathTokenLastStatAt map[connector.OTLPPathTokenScope]time.Time
+
+	hookAPITokenMu sync.RWMutex
+	hookAPITokens  map[string]string
 
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
@@ -208,6 +219,9 @@ func (a *APIServer) SetHookJudge(j *LLMJudge) {
 // can be recorded as metrics.
 func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 	a.otel = p
+	if a.ciscoInspector != nil {
+		a.ciscoInspector.SetTelemetry(p)
+	}
 }
 
 // otlpPathTokenEntry bundles the cached path-token with the mtime of
@@ -256,6 +270,27 @@ func (a *APIServer) SetOTLPPathTokens(tokens map[connector.OTLPPathTokenScope]st
 		cp[k] = entry
 	}
 	a.otlpPathTokens = cp
+}
+
+// SetHookAPITokens replaces the in-memory snapshot of connector-scoped hook
+// API tokens. These tokens are narrower than gateway.token: tokenAuth accepts
+// them only for the matching connector hook/notify routes.
+func (a *APIServer) SetHookAPITokens(tokens map[string]string) {
+	a.hookAPITokenMu.Lock()
+	defer a.hookAPITokenMu.Unlock()
+	if tokens == nil {
+		a.hookAPITokens = nil
+		return
+	}
+	cp := make(map[string]string, len(tokens))
+	for k, v := range tokens {
+		name := strings.ToLower(strings.TrimSpace(k))
+		tok := strings.TrimSpace(v)
+		if name != "" && tok != "" {
+			cp[name] = tok
+		}
+	}
+	a.hookAPITokens = cp
 }
 
 // otlpPathTokenReloadMinInterval bounds disk I/O on the loopback OTLP auth
@@ -441,6 +476,67 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	return tok
 }
 
+func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	presented = strings.TrimSpace(presented)
+	if name == "" || presented == "" {
+		return false
+	}
+
+	dataDir := a.configDataDir()
+	if dataDir == "" {
+		a.hookAPITokenMu.RLock()
+		cached := ""
+		if a.hookAPITokens != nil {
+			cached = a.hookAPITokens[name]
+		}
+		a.hookAPITokenMu.RUnlock()
+		return cached != "" && constantTimeStringMatch(presented, cached)
+	}
+	tok, err := connector.LoadHookAPIToken(dataDir, name)
+	if err != nil || tok == "" {
+		a.hookAPITokenMu.Lock()
+		if a.hookAPITokens != nil {
+			delete(a.hookAPITokens, name)
+		}
+		a.hookAPITokenMu.Unlock()
+		return false
+	}
+	a.hookAPITokenMu.Lock()
+	if a.hookAPITokens == nil {
+		a.hookAPITokens = map[string]string{}
+	}
+	a.hookAPITokens[name] = tok
+	a.hookAPITokenMu.Unlock()
+	return constantTimeStringMatch(presented, tok)
+}
+
+func (a *APIServer) hookTokenScopeForPath(path string) (string, bool) {
+	if path == "/api/v1/codex/notify" {
+		return "codex", true
+	}
+	if a.connectorRegistry != nil {
+		for _, name := range a.connectorRegistry.Names() {
+			conn, ok := a.connectorRegistry.Get(name)
+			if !ok {
+				continue
+			}
+			he, ok := conn.(connector.HookEndpoint)
+			if ok && he.HookAPIPath() == path {
+				return strings.ToLower(name), true
+			}
+		}
+		return "", false
+	}
+	switch path {
+	case "/api/v1/codex/hook":
+		return "codex", true
+	case "/api/v1/claude-code/hook":
+		return "claudecode", true
+	}
+	return "", false
+}
+
 func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
 	a.hilt = m
 }
@@ -586,6 +682,28 @@ func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 		s.scannerCfg = cfg[0]
 	}
 	return s
+}
+
+// SetConfigRuntime connects configuration mutations to ConfigManager and the
+// authoritative live sidecar snapshot.
+func (a *APIServer) SetConfigRuntime(reload func(context.Context, string) error, snapshot func() *config.Config) {
+	if a == nil {
+		return
+	}
+	a.configReloader = reload
+	a.configSnapshot = snapshot
+}
+
+func (a *APIServer) runtimeConfigSnapshot() *config.Config {
+	if a == nil {
+		return nil
+	}
+	if a.configSnapshot != nil {
+		return a.configSnapshot()
+	}
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return cloneConfig(a.scannerCfg)
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled.
@@ -753,7 +871,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// API never comes up, and every connector hook posting to this port fails.
 	// Retrying for a few seconds lets the OS reclaim the port so the restarted
 	// gateway binds the same address the agent's hooks call.
-	ln, lnErr := listenWithRetry(ctx, a.addr, 6*time.Second)
+	ln, lnErr := listenWithRetry(ctx, a.addr, 30*time.Second)
 	if lnErr != nil {
 		a.health.SetAPI(StateError, lnErr.Error(), nil)
 		return fmt.Errorf("api: listen %s: %w", a.addr, lnErr)
@@ -989,12 +1107,7 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 			"proxy_intercept":     false,
 		}
 	}
-	name := a.connectorName()
-	policyMode := "observe"
-	if a.scannerCfg != nil {
-		policyMode = a.scannerCfg.Guardrail.EffectiveMode(name)
-	}
-	return connectorModeFor(name, policyMode)
+	return connectorModeForConfig(a.scannerCfg, a.connectorName())
 }
 
 // connectorModesSummary returns one connectorModeFor entry per active
@@ -1017,12 +1130,7 @@ func (a *APIServer) connectorModesSummary() []map[string]interface{} {
 	}
 	out := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
-		name = strings.ToLower(strings.TrimSpace(name))
-		policyMode := "observe"
-		if a.scannerCfg != nil {
-			policyMode = a.scannerCfg.Guardrail.EffectiveMode(name)
-		}
-		out = append(out, connectorModeFor(name, policyMode))
+		out = append(out, connectorModeForConfig(a.scannerCfg, strings.ToLower(strings.TrimSpace(name))))
 	}
 	return out
 }
@@ -1084,6 +1192,20 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		"telemetry":           telemetry,
 		"proxy_intercept":     intercept,
 	}
+}
+
+func connectorModeForConfig(cfg *config.Config, name string) map[string]interface{} {
+	guardrailMode := "observe"
+	if cfg != nil {
+		guardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
+	}
+	out := connectorModeFor(name, guardrailMode)
+	if guardrailMode != "" {
+		out["guardrail_mode"] = guardrailMode
+	}
+	proxyIntercept, _ := out["proxy_intercept"].(bool)
+	out["hook_enforcement"] = !proxyIntercept && strings.EqualFold(guardrailMode, "action")
+	return out
 }
 
 type skillActionRequest struct {
@@ -2431,15 +2553,18 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 			"mode":         "observe",
 			"scanner_mode": "local",
 		}
-		if a.scannerCfg != nil {
-			a.cfgMu.RLock()
-			cfg["mode"] = a.scannerCfg.Guardrail.Mode
-			cfg["scanner_mode"] = a.scannerCfg.Guardrail.ScannerMode
-			a.cfgMu.RUnlock()
+		if live := a.runtimeConfigSnapshot(); live != nil {
+			cfg["mode"] = live.Guardrail.Mode
+			cfg["scanner_mode"] = live.Guardrail.ScannerMode
+			cfg["block_message"] = live.Guardrail.BlockMessage
+			cfg["connector"] = live.Guardrail.Connector
+			cfg["hilt_enabled"] = live.Guardrail.HILT.Enabled
+			cfg["hilt_min_severity"] = live.Guardrail.HILT.MinSeverity
 		}
 		a.writeJSON(w, http.StatusOK, cfg)
 
 	case http.MethodPatch:
+		current := a.runtimeConfigSnapshot()
 		// PR #141 audit C1: defense-in-depth gate. tokenAuth already
 		// fail-closes when no gateway token is configured, but mode
 		// changes are too security-sensitive to depend on a single
@@ -2448,97 +2573,331 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		// custom mux) must not silently downgrade `action` → `observe`
 		// without an authenticated caller. Re-validate here with the
 		// same constant-time compare tokenAuth uses.
-		if a.scannerCfg != nil {
-			token := ""
-			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-				token = strings.TrimPrefix(auth, "Bearer ")
-			}
-			if token == "" {
-				token = r.Header.Get("X-DefenseClaw-Token")
-			}
-			expected := a.scannerCfg.Gateway.Token
-			if expected == "" || token == "" || !constantTimeStringMatch(token, expected) {
-				a.writeJSON(w, http.StatusForbidden, map[string]string{
-					"error": "guardrail config changes require a valid gateway token — set DEFENSECLAW_GATEWAY_TOKEN",
-				})
-				return
-			}
+		if status, authErr := guardrailConfigPatchAuthorization(r, current); authErr != "" {
+			a.writeJSON(w, status, map[string]string{"error": authErr})
+			return
 		}
 
-		var req map[string]string
+		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 			return
 		}
 
-		if a.scannerCfg == nil {
+		if current == nil {
 			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config not available"})
 			return
 		}
-
-		a.cfgMu.Lock()
-
-		oldMode := a.scannerCfg.Guardrail.Mode
-		oldScannerMode := a.scannerCfg.Guardrail.ScannerMode
-
-		changed := []string{}
-		if mode, ok := req["mode"]; ok && (mode == "observe" || mode == "action") {
-			a.scannerCfg.Guardrail.Mode = mode
-			changed = append(changed, "mode="+mode)
-		}
-		if sm, ok := req["scanner_mode"]; ok && (sm == "local" || sm == "remote" || sm == "both") {
-			a.scannerCfg.Guardrail.ScannerMode = sm
-			changed = append(changed, "scanner_mode="+sm)
-		}
-
-		if len(changed) == 0 {
-			a.cfgMu.Unlock()
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no valid fields to update"})
+		if a.configReloader == nil {
+			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"error": "central config reload is unavailable; refusing an uncoordinated config write",
+			})
 			return
 		}
 
-		if err := a.writeGuardrailRuntime(); err != nil {
-			a.scannerCfg.Guardrail.Mode = oldMode
-			a.scannerCfg.Guardrail.ScannerMode = oldScannerMode
-			a.cfgMu.Unlock()
+		changed := []string{}
+		updates := map[string]any{}
+		if raw, ok := req["mode"]; ok {
+			mode, ok := raw.(string)
+			if !ok || (mode != "observe" && mode != "action") {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mode must be observe or action"})
+				return
+			}
+			updates["guardrail.mode"] = mode
+			changed = append(changed, "mode="+mode)
+		}
+		if raw, ok := req["scanner_mode"]; ok {
+			sm, ok := raw.(string)
+			if !ok || (sm != "local" && sm != "remote" && sm != "both") {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "scanner_mode must be local, remote, or both"})
+				return
+			}
+			updates["guardrail.scanner_mode"] = sm
+			changed = append(changed, "scanner_mode="+sm)
+		}
+		if raw, ok := req["block_message"]; ok {
+			bm, ok := raw.(string)
+			if !ok {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "block_message must be a string"})
+				return
+			}
+			updates["guardrail.block_message"] = bm
+			changed = append(changed, "block_message")
+		}
+		if raw, ok := req["connector"]; ok {
+			conn, ok := raw.(string)
+			if !ok || strings.TrimSpace(conn) == "" {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "connector must be a non-empty string"})
+				return
+			}
+			conn = strings.ToLower(strings.TrimSpace(conn))
+			updates["guardrail.connector"] = conn
+			changed = append(changed, "connector="+conn)
+		}
+		if raw, ok := req["hilt_enabled"]; ok {
+			enabled, ok := raw.(bool)
+			if !ok {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hilt_enabled must be a boolean"})
+				return
+			}
+			updates["guardrail.hilt.enabled"] = enabled
+			changed = append(changed, fmt.Sprintf("hilt_enabled=%v", enabled))
+		}
+		if raw, ok := req["hilt_min_severity"]; ok {
+			minSev, ok := raw.(string)
+			if !ok || strings.TrimSpace(minSev) == "" {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hilt_min_severity must be a non-empty string"})
+				return
+			}
+			minSev = strings.ToUpper(strings.TrimSpace(minSev))
+			updates["guardrail.hilt.min_severity"] = minSev
+			changed = append(changed, "hilt_min_severity="+minSev)
+		}
+
+		if len(updates) == 0 {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no valid fields to update"})
+			return
+		}
+		a.configWriteMu.Lock()
+		defer a.configWriteMu.Unlock()
+
+		// Re-snapshot after entering the write transaction. An administrator
+		// may have switched the gateway into managed mode, rotated the token,
+		// or changed the authoritative config path while this request body was
+		// being decoded or waiting behind another PATCH.
+		current = a.runtimeConfigSnapshot()
+		if current == nil {
+			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config not available"})
+			return
+		}
+		if status, authErr := guardrailConfigPatchAuthorization(r, current); authErr != "" {
+			a.writeJSON(w, status, map[string]string{"error": authErr})
+			return
+		}
+
+		configPath := configFilePathForSnapshot(current)
+		original, err := captureConfigFileState(configPath)
+		if err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := a.patchGuardrailConfigFile(configPath, updates); err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		candidate, err := config.LoadFromFile(configPath)
+		if err != nil {
+			_ = restoreConfigFileState(configPath, original)
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		diff := diffConfigs(current, candidate)
+		if configReloadMode(candidate) == "hot" && len(diff.RestartRequired) > 0 {
+			if err := restoreConfigFileState(configPath, original); err != nil {
+				a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			a.writeJSON(w, http.StatusConflict, map[string]interface{}{
+				"error":            "guardrail config change requires gateway restart",
+				"restart_required": diff.RestartRequired,
+				"changed":          changed,
+			})
+			return
+		}
+
+		if err := a.configReloader(r.Context(), "guardrail_api"); err != nil {
+			rollbackErr := restoreConfigFileState(configPath, original)
+			if rollbackErr == nil {
+				rollbackErr = a.configReloader(r.Context(), "guardrail_api_rollback")
+			}
+			if rollbackErr != nil {
+				err = fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+			}
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
 
-		resp := map[string]interface{}{
-			"status":       "updated",
-			"changed":      changed,
-			"mode":         a.scannerCfg.Guardrail.Mode,
-			"scanner_mode": a.scannerCfg.Guardrail.ScannerMode,
+		statusCode := http.StatusOK
+		status := "updated"
+		live := true
+		responseCfg := a.runtimeConfigSnapshot()
+		if configReloadMode(candidate) == "restart" && !onlyConfigReloadModeChanged(current, candidate) {
+			statusCode = http.StatusAccepted
+			status = "restart_requested"
+			live = false
+			responseCfg = candidate
+		} else if !guardrailConfigContainsUpdates(responseCfg, updates) {
+			rollbackErr := restoreConfigFileState(configPath, original)
+			if rollbackErr == nil {
+				rollbackErr = a.configReloader(r.Context(), "guardrail_api_rollback")
+			}
+			err := fmt.Errorf("central config reload returned without applying the guardrail update")
+			if rollbackErr != nil {
+				err = fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+			}
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
 		}
 
-		a.cfgMu.Unlock()
+		resp := guardrailConfigResponse(responseCfg)
+		resp["status"] = status
+		resp["live"] = live
+		resp["changed"] = changed
 
 		if a.logger != nil {
 			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailConfigReload), "", strings.Join(changed, " "))
 		}
 
-		a.writeJSON(w, http.StatusOK, resp)
+		a.writeJSON(w, statusCode, resp)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (a *APIServer) writeGuardrailRuntime() error {
-	if a.scannerCfg == nil {
-		return fmt.Errorf("api: no config available")
+func guardrailConfigPatchAuthorization(r *http.Request, current *config.Config) (int, string) {
+	if current == nil {
+		return 0, ""
 	}
-	runtimeFile := filepath.Join(a.scannerCfg.DataDir, "guardrail_runtime.json")
-	data, err := json.Marshal(map[string]string{
-		"mode":          a.scannerCfg.Guardrail.Mode,
-		"scanner_mode":  a.scannerCfg.Guardrail.ScannerMode,
-		"block_message": a.scannerCfg.Guardrail.BlockMessage,
-	})
+	if managed.IsManagedEnterprise(current.DeploymentMode) {
+		return http.StatusForbidden, "managed_enterprise config changes require operating-system administrator privileges; edit the managed config file or use the enterprise guardian"
+	}
+	token := ""
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		token = strings.TrimPrefix(auth, "Bearer ")
+	}
+	if token == "" {
+		token = r.Header.Get("X-DefenseClaw-Token")
+	}
+	expected := current.Gateway.Token
+	if expected == "" || token == "" || !constantTimeStringMatch(token, expected) {
+		return http.StatusForbidden, "guardrail config changes require a valid gateway token — set DEFENSECLAW_GATEWAY_TOKEN"
+	}
+	return 0, ""
+}
+
+func (a *APIServer) configFilePath() string {
+	return configFilePathForSnapshot(a.runtimeConfigSnapshot())
+}
+
+func configFilePathForSnapshot(cfg *config.Config) string {
+	if cfg != nil {
+		if p := strings.TrimSpace(cfg.ConfigFilePath); p != "" {
+			return p
+		}
+		if d := strings.TrimSpace(cfg.DataDir); d != "" {
+			return filepath.Join(d, config.DefaultConfigName)
+		}
+	}
+	return config.ConfigPath()
+}
+
+type configFileState struct {
+	data    []byte
+	mode    os.FileMode
+	existed bool
+}
+
+func captureConfigFileState(path string) (configFileState, error) {
+	state := configFileState{mode: 0o600}
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("api: marshal runtime config: %w", err)
+		if os.IsNotExist(err) {
+			return state, nil
+		}
+		return state, fmt.Errorf("api: read config before patch: %w", err)
 	}
-	return os.WriteFile(runtimeFile, data, 0o600)
+	state.data = data
+	state.existed = true
+	if info, statErr := os.Stat(path); statErr == nil {
+		state.mode = info.Mode().Perm()
+	}
+	return state, nil
+}
+
+func restoreConfigFileState(path string, state configFileState) error {
+	if state.existed {
+		if err := config.WriteFileAtomic(path, state.data, state.mode); err != nil {
+			return fmt.Errorf("api: restore config after failed live apply: %w", err)
+		}
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("api: remove config after failed live apply: %w", err)
+	}
+	return nil
+}
+
+func (a *APIServer) patchGuardrailConfigFile(path string, updates map[string]any) error {
+	original, err := captureConfigFileState(path)
+	if err != nil {
+		return err
+	}
+	if err := config.PatchYAMLFile(path, updates); err != nil {
+		return err
+	}
+	if _, err := config.LoadFromFile(path); err != nil {
+		if restoreErr := restoreConfigFileState(path, original); restoreErr != nil {
+			return fmt.Errorf("api: patched config invalid: %w; restore failed: %v", err, restoreErr)
+		}
+		return fmt.Errorf("api: patched config invalid: %w", err)
+	}
+	return nil
+}
+
+func guardrailConfigContainsUpdates(cfg *config.Config, updates map[string]any) bool {
+	if cfg == nil {
+		return false
+	}
+	for key, value := range updates {
+		switch key {
+		case "guardrail.mode":
+			want, ok := value.(string)
+			if !ok || cfg.Guardrail.Mode != want {
+				return false
+			}
+		case "guardrail.scanner_mode":
+			want, ok := value.(string)
+			if !ok || cfg.Guardrail.ScannerMode != want {
+				return false
+			}
+		case "guardrail.block_message":
+			want, ok := value.(string)
+			if !ok || cfg.Guardrail.BlockMessage != want {
+				return false
+			}
+		case "guardrail.connector":
+			want, ok := value.(string)
+			if !ok || cfg.Guardrail.Connector != want {
+				return false
+			}
+		case "guardrail.hilt.enabled":
+			want, ok := value.(bool)
+			if !ok || cfg.Guardrail.HILT.Enabled != want {
+				return false
+			}
+		case "guardrail.hilt.min_severity":
+			want, ok := value.(string)
+			if !ok || cfg.Guardrail.HILT.MinSeverity != want {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func guardrailConfigResponse(cfg *config.Config) map[string]interface{} {
+	resp := map[string]interface{}{}
+	if cfg == nil {
+		return resp
+	}
+	resp["mode"] = cfg.Guardrail.Mode
+	resp["scanner_mode"] = cfg.Guardrail.ScannerMode
+	resp["block_message"] = cfg.Guardrail.BlockMessage
+	resp["connector"] = cfg.Guardrail.Connector
+	resp["hilt_enabled"] = cfg.Guardrail.HILT.Enabled
+	resp["hilt_min_severity"] = cfg.Guardrail.HILT.MinSeverity
+	return resp
 }
 
 func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {
@@ -2719,6 +3078,23 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			// would turn a single connector settings-file leak into
 			// full gateway authority.
 			if token == "" && constantTimeStringMatch(pathToken, expected) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
+			if a.hookAPITokenMatches(hookScope, token) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
+			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
+			registered := false
+			if a.connectorRegistry != nil {
+				_, registered = a.connectorRegistry.Get(hookScope)
+			}
+			if registered && a.hookAPITokenMatches(hookScope, token) {
 				next.ServeHTTP(w, r)
 				return
 			}

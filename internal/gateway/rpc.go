@@ -125,8 +125,9 @@ func (c *Client) setPluginEnabled(ctx context.Context, pluginName string, enable
 	}
 
 	params := ConfigPatchRawParams{
-		Raw:      string(raw),
-		BaseHash: snapshot.Hash,
+		Raw:          string(raw),
+		BaseHash:     snapshot.Hash,
+		ReplacePaths: []string{"plugins.allow"},
 	}
 	_, err = c.Request(ctx, "config.patch", params)
 	if err != nil {

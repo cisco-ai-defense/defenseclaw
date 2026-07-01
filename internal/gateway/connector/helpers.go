@@ -29,14 +29,48 @@ import (
 	"sync"
 )
 
+var userHomeOverrideSessionMu sync.Mutex
+var userHomeOverrideMu sync.RWMutex
+var userHomeOverride string
+
 // userHomeDir returns the current user's home directory in a cross-platform
 // way. It prefers os.UserHomeDir() (which uses USERPROFILE on Windows,
 // HOME on Unix) and falls back to os.Getenv("HOME") for legacy compatibility.
 func userHomeDir() string {
+	userHomeOverrideMu.RLock()
+	override := strings.TrimSpace(userHomeOverride)
+	userHomeOverrideMu.RUnlock()
+	if override != "" {
+		return override
+	}
 	if h, err := os.UserHomeDir(); err == nil && h != "" {
 		return h
 	}
 	return os.Getenv("HOME")
+}
+
+// WithUserHomeDir runs fn while connector path resolution uses home instead
+// of the process user's home directory. It is intentionally serialized because
+// connector path globals are process-scoped and Setup/Teardown implementations
+// were originally designed around one current user.
+func WithUserHomeDir(home string, fn func() error) error {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return fmt.Errorf("connector: user home override is empty")
+	}
+	userHomeOverrideSessionMu.Lock()
+	defer userHomeOverrideSessionMu.Unlock()
+
+	userHomeOverrideMu.Lock()
+	prev := userHomeOverride
+	userHomeOverride = home
+	userHomeOverrideMu.Unlock()
+	defer func() {
+		userHomeOverrideMu.Lock()
+		userHomeOverride = prev
+		userHomeOverrideMu.Unlock()
+	}()
+	return fn()
 }
 
 // nativeHookFlag is the distinctive argument fragment that marks a command as

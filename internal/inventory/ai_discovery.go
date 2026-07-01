@@ -117,23 +117,25 @@ var allowedAISignalCategories = map[string]bool{
 
 // AIDiscoveryOptions is the sidecar-local runtime view of config.AIDiscoveryConfig.
 type AIDiscoveryOptions struct {
-	Enabled                  bool
-	Mode                     string
-	ScanInterval             time.Duration
-	ProcessInterval          time.Duration
-	ScanRoots                []string
-	SignaturePacks           []string
-	AllowWorkspaceSignatures bool
-	DisabledSignatureIDs     []string
-	IncludeShellHistory      bool
-	IncludePackageManifests  bool
-	IncludeEnvVarNames       bool
-	IncludeNetworkDomains    bool
-	MaxFilesPerScan          int
-	MaxFileBytes             int64
-	EmitOTel                 bool
-	StoreRawLocalPaths       bool
-	ConfidencePolicyPath     string
+	Enabled                   bool
+	Mode                      string
+	ScanInterval              time.Duration
+	ProcessInterval           time.Duration
+	ScanRoots                 []string
+	SignaturePacks            []string
+	AllowWorkspaceSignatures  bool
+	DisabledSignatureIDs      []string
+	IncludeShellHistory       bool
+	IncludePackageManifests   bool
+	IncludeEnvVarNames        bool
+	IncludeNetworkDomains     bool
+	MaxFilesPerScan           int
+	MaxFileBytes              int64
+	EmitOTel                  bool
+	StoreRawLocalPaths        bool
+	ConfidencePolicyPath      string
+	RequireTrustedBinaryPaths bool
+	TrustedBinaryPrefixes     []string
 	// DisableRedaction mirrors config.Privacy.DisableRedaction. When
 	// true, on-the-wire AIDiscovery payloads (gateway events, OTel
 	// logs) carry full Evidence rows including the raw_path field
@@ -308,6 +310,10 @@ type AIDiscoveryReport struct {
 	Signals []AISignal         `json:"signals"`
 }
 
+// AIDiscoveryReportObserver receives a clone of each completed discovery
+// report after the service has persisted state and emitted telemetry/events.
+type AIDiscoveryReportObserver func(context.Context, AIDiscoveryReport)
+
 // aiStoredSignal is the on-disk shape persisted under the data dir's
 // `ai_discovery_state.json`. v2 added `StoredEvidenceHash` and
 // `StoredEvidence` because `AISignal.{EvidenceHash,Evidence}` are
@@ -348,10 +354,12 @@ type ContinuousDiscoveryService struct {
 	otel             *telemetry.Provider
 	events           *gatewaylog.Writer
 
-	mu       sync.RWMutex
-	last     AIDiscoveryReport
-	lastErr  error
-	triggers chan chan scanResponse
+	mu              sync.RWMutex
+	last            AIDiscoveryReport
+	lastErr         error
+	triggers        chan chan scanResponse
+	observerMu      sync.RWMutex
+	reportObservers []AIDiscoveryReportObserver
 
 	// scanMu serializes runScan invocations so the scheduled-tick
 	// path, the process-tick path, and the API-triggered ScanNow
@@ -467,23 +475,25 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 	home, _ := os.UserHomeDir()
 	ad := cfg.AIDiscovery
 	return normalizeAIDiscoveryOptions(AIDiscoveryOptions{
-		Enabled:                  ad.Enabled,
-		Mode:                     ad.Mode,
-		ScanInterval:             time.Duration(ad.ScanIntervalMin) * time.Minute,
-		ProcessInterval:          time.Duration(ad.ProcessIntervalSec) * time.Second,
-		ScanRoots:                append([]string{}, ad.ScanRoots...),
-		SignaturePacks:           append([]string{}, ad.SignaturePacks...),
-		AllowWorkspaceSignatures: ad.AllowWorkspaceSignatures,
-		DisabledSignatureIDs:     append([]string{}, ad.DisabledSignatureIDs...),
-		IncludeShellHistory:      ad.IncludeShellHistory,
-		IncludePackageManifests:  ad.IncludePackageManifests,
-		IncludeEnvVarNames:       ad.IncludeEnvVarNames,
-		IncludeNetworkDomains:    ad.IncludeNetworkDomains,
-		MaxFilesPerScan:          ad.MaxFilesPerScan,
-		MaxFileBytes:             int64(ad.MaxFileBytes),
-		EmitOTel:                 ad.EmitOTel,
-		StoreRawLocalPaths:       ad.StoreRawLocalPaths,
-		ConfidencePolicyPath:     ad.ConfidencePolicyPath,
+		Enabled:                   ad.Enabled,
+		Mode:                      ad.Mode,
+		ScanInterval:              time.Duration(ad.ScanIntervalMin) * time.Minute,
+		ProcessInterval:           time.Duration(ad.ProcessIntervalSec) * time.Second,
+		ScanRoots:                 append([]string{}, ad.ScanRoots...),
+		SignaturePacks:            append([]string{}, ad.SignaturePacks...),
+		AllowWorkspaceSignatures:  ad.AllowWorkspaceSignatures,
+		DisabledSignatureIDs:      append([]string{}, ad.DisabledSignatureIDs...),
+		IncludeShellHistory:       ad.IncludeShellHistory,
+		IncludePackageManifests:   ad.IncludePackageManifests,
+		IncludeEnvVarNames:        ad.IncludeEnvVarNames,
+		IncludeNetworkDomains:     ad.IncludeNetworkDomains,
+		MaxFilesPerScan:           ad.MaxFilesPerScan,
+		MaxFileBytes:              int64(ad.MaxFileBytes),
+		EmitOTel:                  ad.EmitOTel,
+		StoreRawLocalPaths:        ad.StoreRawLocalPaths,
+		ConfidencePolicyPath:      ad.ConfidencePolicyPath,
+		RequireTrustedBinaryPaths: ad.RequireTrustedBinaryPaths,
+		TrustedBinaryPrefixes:     append([]string{}, ad.TrustedBinaryPrefixes...),
 		// Mirror the global redaction kill-switch so detectors and
 		// emitters know whether they should scrub raw_path / full
 		// evidence before a payload leaves the local process.
@@ -620,6 +630,18 @@ func (s *ContinuousDiscoveryService) LastError() error {
 	return s.lastErr
 }
 
+// AddReportObserver registers a post-scan observer. Observers are called
+// asynchronously with a cloned report so slow setup/reconcile work cannot
+// block discovery persistence or telemetry fanout.
+func (s *ContinuousDiscoveryService) AddReportObserver(fn AIDiscoveryReportObserver) {
+	if s == nil || fn == nil {
+		return
+	}
+	s.observerMu.Lock()
+	defer s.observerMu.Unlock()
+	s.reportObservers = append(s.reportObservers, fn)
+}
+
 func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, source string) (AIDiscoveryReport, error) {
 	// Single-flight: the scheduled-tick path, the process-tick
 	// path, and the API-triggered ScanNow path can all reach this
@@ -690,7 +712,33 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 	s.mu.Unlock()
 
 	s.fanoutReport(ctx, report)
+	s.notifyReportObservers(ctx, report)
 	return report, nil
+}
+
+func (s *ContinuousDiscoveryService) notifyReportObservers(ctx context.Context, report AIDiscoveryReport) {
+	if s == nil {
+		return
+	}
+	s.observerMu.RLock()
+	observers := append([]AIDiscoveryReportObserver(nil), s.reportObservers...)
+	s.observerMu.RUnlock()
+	if len(observers) == 0 {
+		return
+	}
+	baseCtx := context.WithoutCancel(ctx)
+	for _, observer := range observers {
+		observer := observer
+		cloned := cloneAIDiscoveryReport(report)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "[ai-discovery] report observer panic: %v\n", r)
+				}
+			}()
+			observer(baseCtx, cloned)
+		}()
+	}
 }
 
 // fanoutReport runs the OTel + gateway-events emitters off a

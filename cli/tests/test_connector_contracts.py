@@ -235,9 +235,12 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "claudecode")
 
     def test_action_mode_allows_supported_installed_version(self) -> None:
-        with patch(
-            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            return_value=_discovery("claudecode", installed=True, version="2.1.144"),
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                return_value=_discovery("claudecode", installed=True, version="2.1.144"),
+            ),
+            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa") as sync_hilt,
         ):
             ok = _apply_hook_connector_setup(
                 self.app,
@@ -250,6 +253,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.save_calls, 1)
         self.assertEqual(self.app.cfg.claw.mode, "claudecode")
         self.assertEqual(self.app.cfg.guardrail.mode, "action")
+        sync_hilt.assert_called_once_with(self.app.cfg.policy_dir, self.app.cfg.guardrail)
 
     def test_action_mode_blocks_unversioned_installed_connector(self) -> None:
         with patch(

@@ -47,7 +47,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_SETUP_WEBHOOK
-from defenseclaw.config import locked_config_yaml, write_config_yaml_secure
+from defenseclaw.config import config_path_for_data_dir, locked_config_yaml, write_config_yaml_secure
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.webhooks import (
     DispatchResult,
@@ -62,7 +62,6 @@ from defenseclaw.webhooks import (
     validate_webhook_url,
 )
 from defenseclaw.webhooks.writer import (
-    CONFIG_FILE_NAME,
     DEFAULT_MIN_SEVERITY,
     DEFAULT_TIMEOUT_SECONDS,
     VALID_EVENT_CATEGORIES,
@@ -735,7 +734,7 @@ def _apply_webhook_to_connector(
 
     warnings = list(probe.warnings)
     if not dry_run:
-        cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+        cfg_path = str(config_path_for_data_dir(data_dir))
         with locked_config_yaml(cfg_path):
             raw = _wh_load_raw(cfg_path)
             whs = _connector_webhook_list(raw, connector, create=True)
@@ -801,7 +800,7 @@ def _view_from_dict(entry: dict[str, Any]) -> WebhookView:
 
 def _connector_webhook_views(data_dir: str, connector: str) -> list[WebhookView] | None:
     """Return a connector's per-connector webhooks, or None if unset."""
-    raw = _wh_load_raw(os.path.join(data_dir, CONFIG_FILE_NAME))
+    raw = _wh_load_raw(str(config_path_for_data_dir(data_dir)))
     whs = _connector_webhook_list(raw, connector, create=False)
     if whs is None:
         return None
@@ -811,7 +810,7 @@ def _connector_webhook_views(data_dir: str, connector: str) -> list[WebhookView]
 def _set_connector_webhook_enabled(
     data_dir: str, connector: str, name: str, enabled: bool,
 ) -> WebhookWriteResult:
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     with locked_config_yaml(cfg_path):
         raw = _wh_load_raw(cfg_path)
         whs = _connector_webhook_list(raw, connector, create=False)
@@ -841,7 +840,7 @@ def _set_connector_webhook_enabled(
 def _remove_connector_webhook(
     data_dir: str, connector: str, name: str,
 ) -> WebhookWriteResult:
-    cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
+    cfg_path = str(config_path_for_data_dir(data_dir))
     with locked_config_yaml(cfg_path):
         raw = _wh_load_raw(cfg_path)
         whs = _connector_webhook_list(raw, connector, create=False)

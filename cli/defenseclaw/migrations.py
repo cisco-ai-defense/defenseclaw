@@ -48,6 +48,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import click
+import yaml
 
 from defenseclaw import ux
 from defenseclaw.file_permissions import copy_windows_dacl, set_file_mode
@@ -98,9 +99,7 @@ def _ensure_legacy_openclaw_restart_shim(
         os.makedirs(shim_dir, mode=0o700, exist_ok=True)
         with open(shim_path, "w", encoding="utf-8") as fh:
             fh.write(
-                "#!/bin/sh\n"
-                "printf '%s\\n' 'openclaw CLI not found; skipping automatic gateway restart' >&2\n"
-                "exit 127\n"
+                "#!/bin/sh\nprintf '%s\\n' 'openclaw CLI not found; skipping automatic gateway restart' >&2\nexit 127\n"
             )
         os.chmod(shim_path, 0o700)
     except OSError as exc:
@@ -135,10 +134,19 @@ class MigrationContext:
     data_dir: str
     from_version: str = ""
     to_version: str = ""
+    config_path: str = ""
     # changes accumulates a one-line summary per applied step. The
     # upgrade command surfaces these so an operator can audit what the
     # no-touch migration actually changed under their HOME.
     changes: list[str] = field(default_factory=list)
+
+    def active_config_path(self) -> str:
+        if self.config_path:
+            return self.config_path
+        override = os.environ.get("DEFENSECLAW_CONFIG", "").strip()
+        if override:
+            return override
+        return os.path.join(self.data_dir, "config.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -237,9 +245,7 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
                 existing["enabled"] = True
                 changes.append("enabled plugins.entries.defenseclaw")
                 changed = True
-        install_path = os.path.join(
-            os.path.dirname(oc_json), "extensions", "defenseclaw"
-        )
+        install_path = os.path.join(os.path.dirname(oc_json), "extensions", "defenseclaw")
         load = plugins.setdefault("load", {})
         if isinstance(load, dict):
             paths = load.setdefault("paths", [])
@@ -419,9 +425,7 @@ def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
             updates={"DEFENSECLAW_GATEWAY_TOKEN": legacy},
             removes=("OPENCLAW_GATEWAY_TOKEN",),
         ):
-            ctx.changes.append(
-                "renamed legacy OPENCLAW_GATEWAY_TOKEN → DEFENSECLAW_GATEWAY_TOKEN in .env"
-            )
+            ctx.changes.append("renamed legacy OPENCLAW_GATEWAY_TOKEN → DEFENSECLAW_GATEWAY_TOKEN in .env")
         return
 
     # No token at all — synthesise a 32-byte CSPRNG hex string. Use
@@ -432,10 +436,7 @@ def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
         env_path,
         updates={"DEFENSECLAW_GATEWAY_TOKEN": token},
     ):
-        ctx.changes.append(
-            "generated first-boot DEFENSECLAW_GATEWAY_TOKEN at "
-            f"{env_path} (mode 0600, 32-byte CSPRNG)"
-        )
+        ctx.changes.append(f"generated first-boot DEFENSECLAW_GATEWAY_TOKEN at {env_path} (mode 0600, 32-byte CSPRNG)")
 
 
 def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
@@ -453,7 +454,7 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
     ``config.yaml`` to the new name so the upgraded clients read the
     same key the sidecar minted.
     """
-    config_path = os.path.join(ctx.data_dir, "config.yaml")
+    config_path = ctx.active_config_path()
     if not os.path.isfile(config_path):
         return
     try:
@@ -471,10 +472,8 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
     rewritten = 0
     for line in content.splitlines(keepends=True):
         stripped = line.lstrip()
-        if (stripped.startswith("token_env:")
-                and "OPENCLAW_GATEWAY_TOKEN" in line):
-            new_lines.append(line.replace(
-                "OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN", 1))
+        if stripped.startswith("token_env:") and "OPENCLAW_GATEWAY_TOKEN" in line:
+            new_lines.append(line.replace("OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN", 1))
             rewritten += 1
             continue
         new_lines.append(line)
@@ -491,10 +490,7 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
     except OSError as exc:
         ux.warn(f"could not migrate token_env in {config_path}: {exc}", indent="    ")
         return
-    ctx.changes.append(
-        f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml "
-        "()"
-    )
+    ctx.changes.append(f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml")
 
 
 # Files under data_dir that carry credentials or pristine backups and
@@ -564,8 +560,7 @@ def _migrate_0_4_0_remove_legacy_codex_env(ctx: MigrationContext) -> None:
         try:
             os.remove(path)
             ctx.changes.append(
-                f"removed legacy codex env override {name} "
-                "(S8.1: replaced by ~/.codex/config.toml patch)"
+                f"removed legacy codex env override {name} (S8.1: replaced by ~/.codex/config.toml patch)"
             )
         except OSError as exc:
             ux.warn(f"could not remove {path}: {exc}", indent="    ")
@@ -590,7 +585,7 @@ def _migrate_0_4_0_normalize_claw_mode(ctx: MigrationContext) -> None:
     so the operator either edited them manually or the upgrade is
     harmless.
     """
-    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    cfg_path = ctx.active_config_path()
     if not os.path.isfile(cfg_path):
         return
 
@@ -619,15 +614,13 @@ def _migrate_0_4_0_normalize_claw_mode(ctx: MigrationContext) -> None:
         )
         new_body, count = pattern.subn(
             lambda m, repl=replacement: (
-                f"{m.group('prefix')}{m.group('quote')}{repl}"
-                f"{m.group('quote')}{m.group('suffix')}"
+                f"{m.group('prefix')}{m.group('quote')}{repl}{m.group('quote')}{m.group('suffix')}"
             ),
             new_body,
         )
         if count:
             ctx.changes.append(
-                f"normalized claw.mode: {legacy} → {replacement} "
-                "(S3.1: legacy enum dropped from OTel schema)"
+                f"normalized claw.mode: {legacy} → {replacement} (S3.1: legacy enum dropped from OTel schema)"
             )
 
     if new_body == body:
@@ -658,9 +651,7 @@ def _migrate_0_4_0_seed_active_connector(ctx: MigrationContext) -> None:
     # Best-effort active-connector inference. We don't load the full
     # config (it has v3-only fields) but we do read claw.mode out of
     # the raw YAML so the seed reflects the operator's actual setup.
-    name = _read_active_connector_from_yaml(
-        os.path.join(ctx.data_dir, "config.yaml")
-    )
+    name = _read_active_connector_from_yaml(ctx.active_config_path())
     if not name:
         # Pre-v3 default — config.yaml's claw.mode defaulted to
         # "openclaw" and that is the only connector that pre-v3
@@ -669,10 +660,7 @@ def _migrate_0_4_0_seed_active_connector(ctx: MigrationContext) -> None:
 
     payload = json.dumps({"name": name}, ensure_ascii=False)
     if _atomic_write_text(state_path, payload, mode=0o600):
-        ctx.changes.append(
-            f"seeded active_connector.json with {name!r} "
-            "(pre-v3 had no connector state file)"
-        )
+        ctx.changes.append(f"seeded active_connector.json with {name!r} (pre-v3 had no connector state file)")
 
 
 _GUARDRAIL_BLOCK_RE = re.compile(
@@ -737,7 +725,7 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     file. Everything else under ``guardrail:`` (comments, alphabetic
     or grouped key ordering, embedded blanks) survives byte-for-byte.
     """
-    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    cfg_path = ctx.active_config_path()
     if not os.path.isfile(cfg_path):
         return
 
@@ -770,7 +758,9 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     terminator = "\r\n" if block_match.group(0).endswith("\r\n") else "\n"
     insertion = f"{indent}hook_fail_mode: open{terminator}"
     new_text = _GUARDRAIL_BLOCK_RE.sub(
-        lambda m: m.group(0) + insertion, text, count=1,
+        lambda m: m.group(0) + insertion,
+        text,
+        count=1,
     )
 
     if new_text == text:
@@ -1382,9 +1372,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
     # flat layout. ``hasRegoFiles`` in the Go loader is satisfied by a
     # single .rego file, so we mirror that contract here.
     canonical_rego_present = any(
-        name.endswith(".rego")
-        for name in os.listdir(nested_dir)
-        if os.path.isfile(os.path.join(nested_dir, name))
+        name.endswith(".rego") for name in os.listdir(nested_dir) if os.path.isfile(os.path.join(nested_dir, name))
     )
     if not canonical_rego_present:
         return
@@ -1455,10 +1443,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
     if identical:
         try:
             os.remove(flat_data)
-            ctx.changes.append(
-                f"removed duplicate {flat_data} "
-                f"(canonical {nested_data} is the one the loader reads)"
-            )
+            ctx.changes.append(f"removed duplicate {flat_data} (canonical {nested_data} is the one the loader reads)")
         except OSError as exc:
             ux.warn(f"could not remove {flat_data}: {exc}", indent="    ")
         return
@@ -1475,8 +1460,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
         suffix += 1
         if suffix > 100:  # noqa: PLR2004 — sanity cap on degenerate dirs
             ux.warn(
-                f"too many existing backups at {base_backup}.* — "
-                "leaving flat data.json in place",
+                f"too many existing backups at {base_backup}.* — leaving flat data.json in place",
                 indent="    ",
             )
             return
@@ -1566,7 +1550,7 @@ def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
     ``observe`` is left at observe — the same posture they had before
     the upgrade, just expressed through the surviving knob.
     """
-    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    cfg_path = ctx.active_config_path()
     if not os.path.isfile(cfg_path):
         return
 
@@ -1689,7 +1673,7 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     name via ``defenseclaw setup gateway``), the migration leaves it
     alone. Operator intent always wins over migration defaults.
     """
-    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    cfg_path = ctx.active_config_path()
     if not os.path.isfile(cfg_path):
         return
 
@@ -1738,7 +1722,9 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     )
 
     new_body, count = pattern.subn(
-        lambda m: f"{m.group('prefix')}{m.group('quote')}DEFENSECLAW_GATEWAY_TOKEN{m.group('quote')}{m.group('suffix')}",
+        lambda m: (
+            f"{m.group('prefix')}{m.group('quote')}DEFENSECLAW_GATEWAY_TOKEN{m.group('quote')}{m.group('suffix')}"
+        ),
         body,
     )
     if count == 0:
@@ -1787,6 +1773,7 @@ def _migrate_0_8_0(ctx: MigrationContext) -> None:
     new explicit fields so a clean 0.7.2 -> 0.8.0 upgrade does not silently
     change runtime behavior.
     """
+    _migrate_0_8_0_guardrail_runtime_json(ctx)
     _migrate_0_4_0_seed_hook_fail_mode(ctx)
     _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx)
 
@@ -1851,19 +1838,282 @@ def _migrate_config_v7_named_otel_destinations(ctx: MigrationContext) -> bool:
     try:
         payload = json.loads(payload_line)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            "isolated observability migration returned an invalid result"
-        ) from exc
+        raise RuntimeError("isolated observability migration returned an invalid result") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("yaml_changes"), list):
         raise RuntimeError("isolated observability migration returned an invalid result")
     if not payload["yaml_changes"]:
         return False
     name = str(payload.get("name") or "generic-otlp")
     ctx.changes.append(
-        "migrated the legacy flat OTel exporter to named "
-        f"otel.destinations[{name}] and saved a pre-migration backup"
+        f"migrated the legacy flat OTel exporter to named otel.destinations[{name}] and saved a pre-migration backup"
     )
     return True
+
+
+def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
+    """Fold the removed guardrail_runtime.json overlay into config.yaml."""
+    cfg_path = ctx.active_config_path()
+    runtime_path = os.path.join(ctx.data_dir, "guardrail_runtime.json")
+    if not os.path.isfile(runtime_path):
+        return
+    if not os.path.isfile(cfg_path):
+        ux.warn(
+            f"found {runtime_path} but config.yaml is missing; gateway startup will retry migration",
+            indent="    ",
+        )
+        return
+
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+    if _guardrail_runtime_migration_is_managed(text):
+        ux.warn(
+            "managed_enterprise config will not consume the service-owned "
+            f"legacy overlay at {runtime_path}; migrate it only through an "
+            "explicit administrator-controlled config change",
+            indent="    ",
+        )
+        return
+
+    try:
+        with open(runtime_path, encoding="utf-8") as fh:
+            runtime = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        ux.warn(f"could not read {runtime_path}: {exc}", indent="    ")
+        return
+    if not isinstance(runtime, dict):
+        ux.warn(f"{runtime_path} is not an object; gateway startup will retry migration", indent="    ")
+        return
+
+    if _guardrail_runtime_has_invalid_supported_values(runtime):
+        ux.warn(
+            f"{runtime_path} contains invalid supported values; preserving it for repair",
+            indent="    ",
+        )
+        return
+    updates = _guardrail_runtime_updates(runtime)
+    if runtime and not updates:
+        ux.warn(
+            f"{runtime_path} contains no valid supported values; preserving it for repair",
+            indent="    ",
+        )
+        return
+    new_text = _patch_guardrail_runtime_yaml(text, updates)
+    if not _guardrail_runtime_yaml_contains_updates(new_text, updates):
+        ux.warn(
+            f"could not verify guardrail runtime values in {cfg_path}; preserving {runtime_path}",
+            indent="    ",
+        )
+        return
+    if new_text != text and not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+
+    try:
+        os.remove(runtime_path)
+    except OSError as exc:
+        ux.warn(f"could not delete {runtime_path}: {exc}", indent="    ")
+        return
+
+    migrated = ", ".join(path for path, _ in updates) if updates else "no supported values"
+    ctx.changes.append(f"migrated guardrail_runtime.json into config.yaml ({migrated})")
+
+
+def _guardrail_runtime_migration_is_managed(config_text: str) -> bool:
+    """Return whether legacy runtime state must not mutate this config.
+
+    The service definition can pin managed mode even when an older config does
+    not contain the field, so the immutable environment wins. Parsing failures
+    return false here because the normal migration verification will preserve
+    both files rather than write an invalid config.
+    """
+    pinned = os.environ.get("DEFENSECLAW_DEPLOYMENT_MODE", "").strip().lower()
+    if pinned in {"managed", "managed_enterprise"}:
+        return True
+    try:
+        parsed = yaml.safe_load(config_text) or {}
+    except yaml.YAMLError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    mode = str(parsed.get("deployment_mode") or "").strip().lower()
+    return mode in {"managed", "managed_enterprise"}
+
+
+def _guardrail_runtime_yaml_contains_updates(
+    text: str,
+    updates: list[tuple[str, str]],
+) -> bool:
+    try:
+        parsed = yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    guardrail = parsed.get("guardrail")
+    if not isinstance(guardrail, dict):
+        return not updates
+    for path, rendered in updates:
+        current: object = guardrail
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False
+            current = current[part]
+        try:
+            expected = yaml.safe_load(rendered)
+        except yaml.YAMLError:
+            return False
+        if current != expected:
+            return False
+    return True
+
+
+def _guardrail_runtime_updates(runtime: dict) -> list[tuple[str, str]]:
+    updates: list[tuple[str, str]] = []
+    if isinstance(runtime.get("mode"), str):
+        mode = runtime["mode"].strip().lower()
+        if mode in {"observe", "action"}:
+            updates.append(("mode", mode))
+    if isinstance(runtime.get("scanner_mode"), str):
+        scanner_mode = runtime["scanner_mode"].strip().lower()
+        if scanner_mode in {"local", "remote", "both"}:
+            updates.append(("scanner_mode", scanner_mode))
+    if isinstance(runtime.get("block_message"), str):
+        updates.append(("block_message", _yaml_scalar(runtime["block_message"])))
+    if isinstance(runtime.get("connector"), str) and runtime["connector"].strip():
+        updates.append(("connector", _yaml_scalar(runtime["connector"].strip().lower())))
+    if isinstance(runtime.get("hilt_enabled"), bool):
+        updates.append(("hilt.enabled", "true" if runtime["hilt_enabled"] else "false"))
+    if isinstance(runtime.get("hilt_min_severity"), str) and runtime["hilt_min_severity"].strip():
+        updates.append(("hilt.min_severity", _yaml_scalar(runtime["hilt_min_severity"].strip().upper())))
+    return updates
+
+
+def _guardrail_runtime_has_invalid_supported_values(runtime: dict) -> bool:
+    validators = {
+        "mode": lambda value: isinstance(value, str) and value.strip().lower() in {"observe", "action"},
+        "scanner_mode": lambda value: isinstance(value, str) and value.strip().lower() in {"local", "remote", "both"},
+        "block_message": lambda value: isinstance(value, str),
+        "connector": lambda value: isinstance(value, str) and bool(value.strip()),
+        "hilt_enabled": lambda value: isinstance(value, bool),
+        "hilt_min_severity": lambda value: (
+            isinstance(value, str) and value.strip().upper() in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}
+        ),
+    }
+    return any(key in runtime and not validator(runtime[key]) for key, validator in validators.items())
+
+
+def _patch_guardrail_runtime_yaml(text: str, updates: list[tuple[str, str]]) -> str:
+    if not updates:
+        return text
+    eol = _line_ending(text.splitlines(keepends=True)[0]) if text else "\n"
+    block_span = _find_top_level_yaml_block_body_span(text, "guardrail")
+    if block_span is None:
+        prefix = text if not text or text.endswith(("\n", "\r")) else text + eol
+        return prefix + _render_guardrail_block_from_updates(updates, eol)
+
+    body_start, body_end = block_span
+    body = text[body_start:body_end]
+    new_body = _patch_guardrail_body(body, updates, eol)
+    return text[:body_start] + new_body + text[body_end:]
+
+
+def _render_guardrail_block_from_updates(updates: list[tuple[str, str]], eol: str) -> str:
+    simple = [(p, v) for p, v in updates if not p.startswith("hilt.")]
+    hilt = [(p.removeprefix("hilt."), v) for p, v in updates if p.startswith("hilt.")]
+    lines = [f"guardrail:{eol}"]
+    for path, value in simple:
+        lines.append(f"  {path}: {value}{eol}")
+    if hilt:
+        lines.append(f"  hilt:{eol}")
+        for path, value in hilt:
+            lines.append(f"    {path}: {value}{eol}")
+    return "".join(lines)
+
+
+def _patch_guardrail_body(body: str, updates: list[tuple[str, str]], eol: str) -> str:
+    lines = body.splitlines(keepends=True)
+    simple = [(p, v) for p, v in updates if not p.startswith("hilt.")]
+    hilt = [(p.removeprefix("hilt."), v) for p, v in updates if p.startswith("hilt.")]
+    direct_indent = _first_child_indent(lines, 0, "  ")
+    for path, value in simple:
+        _set_direct_yaml_scalar(lines, path, value, direct_indent, eol)
+    if hilt:
+        _patch_hilt_body(lines, hilt, direct_indent, eol)
+    return "".join(lines)
+
+
+def _patch_hilt_body(lines: list[str], updates: list[tuple[str, str]], direct_indent: str, eol: str) -> None:
+    hilt_idx = _find_direct_yaml_key(lines, "hilt", len(direct_indent))
+    if hilt_idx is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += eol
+        lines.append(f"{direct_indent}hilt:{eol}")
+        child_indent = direct_indent + "  "
+        for path, value in updates:
+            lines.append(f"{child_indent}{path}: {value}{eol}")
+        return
+
+    hilt_indent = _parse_yaml_key_line(lines[hilt_idx]).indent
+    child_indent = _first_child_indent(lines[hilt_idx + 1 :], len(hilt_indent), hilt_indent + "  ")
+    end = hilt_idx + 1
+    while end < len(lines):
+        child = _parse_yaml_key_line(lines[end])
+        if child is not None and len(child.indent) <= len(hilt_indent):
+            break
+        end += 1
+
+    body = lines[hilt_idx + 1 : end]
+    for path, value in updates:
+        _set_direct_yaml_scalar(body, path, value, child_indent, eol)
+    lines[hilt_idx + 1 : end] = body
+
+
+def _set_direct_yaml_scalar(lines: list[str], key: str, rendered_value: str, indent: str, eol: str) -> None:
+    idx = _find_direct_yaml_key(lines, key, len(indent))
+    if idx is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += eol
+        lines.append(f"{indent}{key}: {rendered_value}{eol}")
+        return
+    lines[idx] = _replace_yaml_value(lines[idx], rendered_value)
+
+
+def _find_direct_yaml_key(lines: list[str], key: str, indent_len: int) -> int | None:
+    for idx, line in enumerate(lines):
+        parsed = _parse_yaml_key_line(line)
+        if parsed is not None and parsed.key == key and len(parsed.indent) == indent_len:
+            return idx
+    return None
+
+
+def _first_child_indent(lines: list[str], parent_indent_len: int, fallback: str) -> str:
+    for line in lines:
+        parsed = _parse_yaml_key_line(line)
+        if parsed is not None and len(parsed.indent) > parent_indent_len:
+            return parsed.indent
+    return fallback
+
+
+def _replace_yaml_value(line: str, rendered_value: str) -> str:
+    eol = _line_ending(line)
+    body = line.rstrip("\r\n")
+    comment = ""
+    value_start = body.find(":") + 1
+    existing_value = body[value_start:]
+    if "#" in existing_value:
+        before, after = existing_value.split("#", 1)
+        if before.strip():
+            comment = "  #" + after
+    return body[:value_start] + " " + rendered_value + comment + eol
+
+
+def _yaml_scalar(value: str) -> str:
+    if re.match(r"^[A-Za-z0-9_.-]+$", value):
+        parsed = yaml.safe_load(value)
+        if isinstance(parsed, str) and parsed == value:
+            return value
+    return json.dumps(value)
 
 
 def _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx: MigrationContext) -> None:
@@ -1880,7 +2130,7 @@ def _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx: MigrationContext) -> None
     block. It does not YAML round-trip the file, so comments, ordering, scalar
     quoting, and CRLF line endings survive.
     """
-    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    cfg_path = ctx.active_config_path()
     if not os.path.isfile(cfg_path):
         return
 
@@ -1942,11 +2192,7 @@ def _preserve_legacy_sink_tls_skip_verify_in_yaml_block(body: str) -> tuple[str,
 
             if child.key == "insecure_skip_verify":
                 has_insecure_skip_verify = True
-            elif (
-                child.key == "verify_tls"
-                and verify_idx is None
-                and _is_falsey_yaml_bool_literal(child.value)
-            ):
+            elif child.key == "verify_tls" and verify_idx is None and _is_falsey_yaml_bool_literal(child.value):
                 verify_idx = j
                 verify_indent = child.indent
             j += 1
@@ -2106,10 +2352,7 @@ def run_migrations(
     """
     from defenseclaw import migration_state
 
-    if not all(
-        hasattr(migration_state, attr)
-        for attr in ("detect_schema", "is_future_schema", "FutureSchemaError")
-    ):
+    if not all(hasattr(migration_state, attr) for attr in ("detect_schema", "is_future_schema", "FutureSchemaError")):
         migration_state = importlib.reload(migration_state)
     import defenseclaw as defenseclaw_pkg
 
@@ -2254,7 +2497,9 @@ def run_migrations(
             continue
 
         migration_state.mark_applied(
-            state, ver, package_version=to_version,
+            state,
+            ver,
+            package_version=to_version,
         )
         applied_count += 1
 

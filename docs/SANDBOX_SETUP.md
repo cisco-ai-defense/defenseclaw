@@ -31,7 +31,7 @@ What happens:
 ## Step 2: Configure
 
 ```bash
-sudo defenseclaw sandbox setup [OPTIONS]
+sudo defenseclaw sandbox setup --help
 ```
 
 Options (all have sensible defaults):

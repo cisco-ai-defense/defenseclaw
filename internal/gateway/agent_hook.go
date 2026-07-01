@@ -1652,11 +1652,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// verdicts only. The audit row + notification dispatched above keep the
 	// original verdict reason, so telemetry retains the "why" while the agent
 	// shows the operator's message. Resolved per connector.
-	var blockMsgCfg *config.GuardrailConfig
-	if a.scannerCfg != nil {
-		blockMsgCfg = &a.scannerCfg.Guardrail
-	}
-	responseReason := resolveHookBlockReason(blockMsgCfg, req.ConnectorName, action, reason)
+	responseReason := resolveHookBlockReasonForConfig(a.scannerCfg, req.ConnectorName, action, reason)
 	resp := agentHookResponseForProfile(profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps)
 	// Stamp the unified-pipeline correlation keys so the HTTP
 	// response, the audit envelope (HookAuditEnvelope.EvaluationID
@@ -1808,10 +1804,13 @@ func (a *APIServer) agentHookEnabled(name string) bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if !a.scannerCfg.Guardrail.EffectiveEnabled(name) {
+	if a.scannerCfg.ManualConnectorConfigured(name) && !a.scannerCfg.Guardrail.EffectiveEnabled(name) {
 		return false
 	}
 	if a.scannerCfg.ConnectorHookConfig(name).Enabled {
+		return true
+	}
+	if a.health != nil && a.health.HasConnectorSource(name, "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled(name) {
 		return true
 	}
 	// Multi-connector: every member of guardrail.connectors is active
@@ -1834,7 +1833,7 @@ func (a *APIServer) agentHookMode(name string) string {
 			// Per-connector guardrail override (guardrail.connectors[name].mode)
 			// wins over the global mode; EffectiveMode encapsulates that
 			// precedence and falls back to the global mode then "observe".
-			mode = strings.TrimSpace(a.scannerCfg.Guardrail.EffectiveMode(name))
+			mode = strings.TrimSpace(a.scannerCfg.EffectiveGuardrailModeForConnector(name))
 		}
 	}
 	return normalizeAgentHookMode(mode)
@@ -2115,6 +2114,16 @@ func resolveHookBlockReason(gc *config.GuardrailConfig, connector, action, reaso
 		return reason
 	}
 	if custom := strings.TrimSpace(gc.EffectiveBlockMessage(connector)); custom != "" {
+		return custom
+	}
+	return reason
+}
+
+func resolveHookBlockReasonForConfig(cfg *config.Config, connector, action, reason string) string {
+	if action != "block" || cfg == nil {
+		return reason
+	}
+	if custom := strings.TrimSpace(cfg.EffectiveBlockMessageForConnector(connector)); custom != "" {
 		return custom
 	}
 	return reason

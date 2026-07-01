@@ -50,6 +50,7 @@ import shutil
 import click
 
 from defenseclaw import ux
+from defenseclaw.config import _assert_config_write_allowed, config_path_for_data_dir
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 
@@ -79,6 +80,16 @@ _CONNECTOR_LABELS = {
     "opencode": "OpenCode",
     "omnigent": "OmniGent",
 }
+
+
+def _preflight_config_write(app: AppContext) -> None:
+    """Surface managed-mode write rejection before an interactive prompt."""
+    cfg_path = str(config_path_for_data_dir(app.cfg.data_dir))
+    try:
+        _assert_config_write_allowed(cfg_path)
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}", indent="  ")
+        raise SystemExit(1) from exc
 
 
 def _resolve_active_connector(cfg) -> str:
@@ -188,6 +199,9 @@ def _toggle_connector_guardrail(
         state = "enabled" if enable else "disabled"
         click.echo(f"  {ux.dim(f'Connector {label} is already {state}.')}")
         return
+
+    if not enable:
+        _preflight_config_write(app)
 
     # Disabling the last remaining enabled connector is effectively a global
     # disable — warn so the operator can use the clearer command.
@@ -691,6 +705,8 @@ def disable_cmd(
     if not gc.enabled:
         click.echo(f"  {ux.dim('Guardrail is already disabled')} ({_active_connector_display(app.cfg, connector)}).")
         return
+
+    _preflight_config_write(app)
 
     click.echo()
     click.echo(f"  {ux.bold('Disabling guardrail')} for {_active_connector_display(app.cfg, connector)}")

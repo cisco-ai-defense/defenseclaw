@@ -28,6 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import click
 import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -1338,7 +1339,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn("does not exist", result.output)
         self.assertEqual(self.app.cfg.guardrail.rule_pack_dir, "")
 
-    def test_block_message_written_to_runtime_json(self):
+    def test_block_message_written_to_config_yaml(self):
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.guardrail.model_name = "claude-opus"
@@ -1354,14 +1355,12 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
 
-        runtime_file = os.path.join(self.tmp_dir, "guardrail_runtime.json")
-        self.assertTrue(os.path.isfile(runtime_file))
-        with open(runtime_file) as f:
-            runtime = json.load(f)
-        self.assertEqual(runtime["block_message"], custom_msg)
-        self.assertEqual(runtime["mode"], "action")
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            doc = yaml.safe_load(f)
+        self.assertEqual(doc["guardrail"]["block_message"], custom_msg)
+        self.assertEqual(doc["guardrail"]["mode"], "action")
 
-    def test_block_message_empty_by_default_in_runtime_json(self):
+    def test_block_message_empty_by_default_in_config_yaml(self):
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.guardrail.model_name = "claude-opus"
@@ -1375,11 +1374,9 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
 
-        runtime_file = os.path.join(self.tmp_dir, "guardrail_runtime.json")
-        self.assertTrue(os.path.isfile(runtime_file))
-        with open(runtime_file) as f:
-            runtime = json.load(f)
-        self.assertEqual(runtime["block_message"], "")
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            doc = yaml.safe_load(f)
+        self.assertEqual(doc["guardrail"]["block_message"], "")
 
     def test_help_shows_block_message_option(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1919,6 +1916,42 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
         self.assertTrue(any("native lifecycle surfaces" in message for message in messages))
         self.assertTrue(all("via the hook bus" not in message for message in messages))
         self.assertTrue(all("custom policy API" not in message for message in messages))
+
+    @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
+    def test_hook_connector_waits_for_verified_runtime(self, _mock_restart, mock_wait):
+        from defenseclaw.commands.cmd_setup import _restart_services
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _restart_services(tmpdir, connector="codex", wait_for_connector_ready=True)
+
+        mock_wait.assert_called_once_with(tmpdir, ["codex"], None)
+
+    @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=False)
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
+    def test_hook_connector_readiness_timeout_fails_setup(self, _mock_restart, _mock_wait):
+        from defenseclaw.commands.cmd_setup import _restart_services
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(click.ClickException) as raised:
+                _restart_services(tmpdir, connector="codex", wait_for_connector_ready=True)
+
+        self.assertIn("connector runtime readiness", str(raised.exception))
+
+    def test_wait_for_connector_runtime_requires_fresh_matching_state(self):
+        from defenseclaw.commands.cmd_setup import (
+            _active_connector_state_marker,
+            _wait_for_connector_runtime,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = os.path.join(tmpdir, "active_connector.json")
+            with open(state_path, "w", encoding="utf-8") as state_file:
+                json.dump({"version": 2, "name": "codex", "names": ["codex"]}, state_file)
+            marker = _active_connector_state_marker(tmpdir)
+            self.assertIsNotNone(marker)
+            self.assertFalse(_wait_for_connector_runtime(tmpdir, ["codex"], marker, timeout=0.01))
+            self.assertTrue(_wait_for_connector_runtime(tmpdir, ["codex"], marker - 1, timeout=0.01))
 
 
 class TestCheckOpenclawGateway(unittest.TestCase):

@@ -20,10 +20,12 @@ import contextlib
 import io
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -39,6 +41,7 @@ from defenseclaw.config import (
     ClawConfig,
     Config,
     GatewayConfig,
+    GatewayConfigReloadConfig,
     GatewayWatcherPluginConfig,
     GuardrailConfig,
     InspectLLMConfig,
@@ -163,6 +166,165 @@ class TestPaths(unittest.TestCase):
         cp = config_path()
         self.assertTrue(str(cp).endswith("config.yaml"))
 
+    def test_config_path_explicit_env_override(self):
+        override = Path(tempfile.mkdtemp()) / "managed-config.yaml"
+        with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": str(override)}):
+            self.assertEqual(config_path(), override)
+
+    def test_load_uses_explicit_config_path_override(self):
+        data_dir = Path(tempfile.mkdtemp())
+        override_dir = Path(tempfile.mkdtemp())
+        default_cfg = data_dir / "config.yaml"
+        override_cfg = override_dir / "system-config.yaml"
+        default_cfg.write_text(
+            f"data_dir: {data_dir}\ndeployment_mode: unmanaged_byod\n",
+            encoding="utf-8",
+        )
+        override_cfg.write_text(
+            f"data_dir: {override_dir}\ndeployment_mode: managed_enterprise\n",
+            encoding="utf-8",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "DEFENSECLAW_HOME": str(data_dir),
+                "DEFENSECLAW_CONFIG": str(override_cfg),
+            },
+        ):
+            cfg = load()
+        self.assertEqual(cfg.data_dir, str(override_dir))
+        self.assertEqual(cfg.deployment_mode, "managed_enterprise")
+
+    @unittest.skipIf(os.name == "nt", "Unix ownership diagnostic")
+    def test_managed_config_trust_problem_reports_untrusted_owner(self):
+        cfg_path = os.path.abspath("/managed/config.yaml")
+
+        def fake_lstat(path):
+            if os.path.abspath(path) == cfg_path:
+                return SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o644,
+                    st_uid=501,
+                )
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o755,
+                st_uid=0,
+            )
+
+        with (
+            patch.object(config_mod.os, "lstat", side_effect=fake_lstat),
+            patch.object(config_mod, "_macos_write_acl_problem", return_value=None),
+        ):
+            problem = config_mod._managed_config_trust_problem(cfg_path)
+
+        self.assertIn("owner uid 501", problem)
+        self.assertIn("expected root/admin uid 0", problem)
+
+    def test_load_warns_when_managed_config_is_not_gateway_trusted(self):
+        data_dir = Path(tempfile.mkdtemp())
+        cfg_path = data_dir / "config.yaml"
+        cfg_path.write_text(
+            f"data_dir: {data_dir}\ndeployment_mode: managed_enterprise\n",
+            encoding="utf-8",
+        )
+        stderr = io.StringIO()
+        config_mod._untrusted_managed_config_warned_paths.discard(str(cfg_path))
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DEFENSECLAW_HOME": str(data_dir),
+                    "DEFENSECLAW_CONFIG": str(cfg_path),
+                },
+            ),
+            patch(
+                "defenseclaw.config._managed_config_trust_problem",
+                return_value=f"{cfg_path}: owner uid 501 is not trusted",
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            cfg = load()
+
+        self.assertEqual(cfg.deployment_mode, "managed_enterprise")
+        warning = stderr.getvalue()
+        self.assertIn("managed_enterprise config trust check failed", warning)
+        self.assertIn("gateway will reject this config", warning)
+        self.assertIn("CLI-reported state is not authoritative", warning)
+
+    def test_macos_write_acl_problem_rejects_effective_write_entry(self):
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "-rw-r-----+ 1 root defenseclaw 1 Jan 1 00:00 config.yaml\n"
+                " 0: group:everyone allow write,append,writeattr,writesecurity,chown\n"
+            ),
+            stderr="",
+        )
+        with (
+            patch.object(config_mod.platform, "system", return_value="Darwin"),
+            patch.object(config_mod.subprocess, "run", return_value=completed),
+        ):
+            problem = config_mod._macos_write_acl_problem("/managed/config.yaml")
+
+        self.assertIn("write-capable macOS ACL", problem)
+
+    def test_macos_write_acl_problem_accepts_acl_free_path(self):
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout="-rw-r----- 1 root defenseclaw 1 Jan 1 00:00 config.yaml\n",
+            stderr="",
+        )
+        with (
+            patch.object(config_mod.platform, "system", return_value="Darwin"),
+            patch.object(config_mod.subprocess, "run", return_value=completed),
+        ):
+            problem = config_mod._macos_write_acl_problem("/managed/config.yaml")
+
+        self.assertIsNone(problem)
+
+    def test_managed_enterprise_save_requires_admin(self):
+        cfg = Config(data_dir=tempfile.mkdtemp(), deployment_mode="managed_enterprise")
+        with patch("defenseclaw.config._is_admin_process", return_value=False):
+            with self.assertRaises(PermissionError):
+                cfg.save()
+
+    def test_secure_write_rejects_managed_enterprise_for_non_admin(self):
+        path = Path(tempfile.mkdtemp()) / "config.yaml"
+        path.write_text(
+            "config_version: 6\ndeployment_mode: managed_enterprise\n",
+            encoding="utf-8",
+        )
+        with patch("defenseclaw.config._is_admin_process", return_value=False):
+            with self.assertRaises(PermissionError):
+                config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
+
+    def test_secure_write_honors_managed_enterprise_env_pin(self):
+        path = Path(tempfile.mkdtemp()) / "config.yaml"
+        path.write_text("config_version: 6\n", encoding="utf-8")
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_DEPLOYMENT_MODE": "managed_enterprise"}),
+            patch("defenseclaw.config._is_admin_process", return_value=False),
+        ):
+            with self.assertRaises(PermissionError):
+                config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
+
+    def test_secure_write_preserves_group_read_without_write(self):
+        path = Path(tempfile.mkdtemp()) / "config.yaml"
+        path.write_text("config_version: 6\n")
+        os.chmod(path, 0o640)
+        config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+
+    def test_secure_write_uses_path_chmod_without_fchmod(self):
+        path = Path(tempfile.mkdtemp()) / "config.yaml"
+        with patch.object(config_mod.os, "fchmod", None):
+            config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
+        self.assertEqual(config_mod.yaml.safe_load(path.read_text()), {"config_version": 6})
+
+    def test_load_dotenv_ignores_unreadable_file(self):
+        with patch("builtins.open", side_effect=PermissionError("denied")):
+            config_mod._load_dotenv_into_os(tempfile.mkdtemp())
+
 
 class TestDetectEnvironment(unittest.TestCase):
     @patch("defenseclaw.config.platform.system", return_value="Windows")
@@ -238,6 +400,8 @@ class TestAIDiscoveryConfig(unittest.TestCase):
             cfg.ai_discovery.confidence_policy_path,
             os.path.join(cfg.data_dir, "confidence.yaml"),
         )
+        self.assertFalse(cfg.ai_discovery.require_trusted_binary_paths)
+        self.assertEqual(cfg.ai_discovery.trusted_binary_prefixes, [])
 
     def test_disabled_default_is_omitted_on_save_round_trip(self):
         cfg = Config(data_dir=tempfile.mkdtemp(), ai_discovery=AIDiscoveryConfig(enabled=False))
@@ -249,6 +413,35 @@ class TestAIDiscoveryConfig(unittest.TestCase):
             {"enabled": True, "confidence_policy_path": "/tmp/custom-confidence.yaml"}
         )
         self.assertEqual(cfg.confidence_policy_path, "/tmp/custom-confidence.yaml")
+
+    def test_merge_trusted_binary_policy(self):
+        cfg = config_mod._merge_ai_discovery(
+            {
+                "enabled": True,
+                "require_trusted_binary_paths": True,
+                "trusted_binary_prefixes": ["/opt/tools"],
+            }
+        )
+        self.assertTrue(cfg.require_trusted_binary_paths)
+        self.assertEqual(cfg.trusted_binary_prefixes, ["/opt/tools"])
+
+
+class TestApplicationProtectionConfig(unittest.TestCase):
+    def test_default_auto_modes_are_observe(self):
+        cfg = config_mod.ApplicationProtectionConfig()
+        self.assertFalse(cfg.enabled)
+        self.assertEqual(cfg.effective_guardrail_mode("codex"), "observe")
+        self.assertEqual(cfg.effective_asset_policy_mode("codex"), "observe")
+
+    def test_top_level_action_opt_in(self):
+        cfg = config_mod._merge_application_protection(
+            {
+                "guardrail": {"mode": "action"},
+                "asset_policy": {"mode": "action"},
+            }
+        )
+        self.assertEqual(cfg.effective_guardrail_mode("codex"), "action")
+        self.assertEqual(cfg.effective_asset_policy_mode("codex"), "action")
 
 
 class TestHookJudgeGateRoundTrip(unittest.TestCase):
@@ -523,6 +716,66 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(raw["environment"], "macos")
             self.assertEqual(raw["data_dir"], tmpdir)
             self.assertEqual(raw["gateway"]["api_bind"], "10.0.0.8")
+            self.assertNotIn("config_reload", raw["gateway"])
+
+    def test_gateway_config_reload_restart_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                gateway=GatewayConfig(
+                    config_reload=GatewayConfigReloadConfig(mode="restart"),
+                ),
+            )
+            cfg.save()
+
+            import yaml
+            config_file = os.path.join(tmpdir, "config.yaml")
+            with open(config_file) as f:
+                raw = yaml.safe_load(f)
+            self.assertEqual(raw["gateway"]["config_reload"]["mode"], "restart")
+
+            with patch("defenseclaw.config.default_data_path", return_value=Path(tmpdir)):
+                reloaded = load()
+            self.assertEqual(reloaded.gateway.config_reload.mode, "restart")
+
+    def test_gateway_config_reload_mode_is_normalized(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                gateway=GatewayConfig(
+                    config_reload=GatewayConfigReloadConfig(mode=" Restart "),
+                ),
+            )
+            cfg.save()
+
+            import yaml
+
+            with open(os.path.join(tmpdir, "config.yaml")) as handle:
+                raw = yaml.safe_load(handle)
+            self.assertEqual(raw["gateway"]["config_reload"]["mode"], "restart")
+
+            with patch("defenseclaw.config.default_data_path", return_value=Path(tmpdir)):
+                reloaded = load()
+            self.assertEqual(reloaded.gateway.config_reload.mode, "restart")
+
+    def test_gateway_config_reload_mode_rejects_unknown_value(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = Path(tmpdir) / "config.yaml"
+            config_file.write_text(
+                "gateway:\n  config_reload:\n    mode: reload\n",
+                encoding="utf-8",
+            )
+            with patch("defenseclaw.config.default_data_path", return_value=Path(tmpdir)):
+                with self.assertRaisesRegex(ValueError, "config_reload.mode"):
+                    load()
 
     def test_save_and_reload_preserves_watch_rescan_fields(self):
         import yaml

@@ -1052,6 +1052,29 @@ func TestAgentHookEnabled_SingleConnectorUnchanged(t *testing.T) {
 	}
 }
 
+func TestAgentHookEnabled_AutomaticSourceNotLazyHealthCounter(t *testing.T) {
+	cfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
+	cfg.ApplicationProtection.Enabled = true
+	health := NewSidecarHealth()
+	health.RecordConnectorRequestFor("codex")
+	a := &APIServer{scannerCfg: cfg, health: health}
+
+	if !health.HasConnector("codex") {
+		t.Fatal("lazy counter setup should still create the connector stats bucket")
+	}
+	if health.HasConnectorSource("codex", "automatic") {
+		t.Fatal("lazy counter bucket must not masquerade as automatic activation")
+	}
+	if a.agentHookEnabled("codex") {
+		t.Fatal("lazy health counter enabled codex without automatic activation")
+	}
+
+	health.RegisterConnectorWithSource("codex", connector.ToolModeBoth, connector.SubprocessNone, "automatic")
+	if !a.agentHookEnabled("codex") {
+		t.Fatal("source=automatic registration should enable automatic codex hook inspection")
+	}
+}
+
 // TestAgentHookEnabled_PerConnectorDisableShortCircuits pins the
 // defense-in-depth gate for `guardrail disable --connector X`: a connector
 // that is still a member of guardrail.connectors but explicitly disabled

@@ -117,15 +117,14 @@ type GuardrailProxy struct {
 	// Defaults to 100 req/s with a burst of 200.
 	limiter *rate.Limiter
 
-	// Runtime config protected by rtMu. The PATCH /v1/guardrail/config
-	// endpoint on the API server writes guardrail_runtime.json; the proxy
-	// reads it with a TTL cache.
+	// Runtime config protected by rtMu. The central config reconciler pushes
+	// validated config.yaml snapshots into these fields.
 	rtMu         sync.RWMutex
 	mode         string
 	blockMessage string
 
 	// registry + setupOpts enable runtime connector hot-swap when the
-	// "connector" key appears in guardrail_runtime.json.
+	// active connector changes in config.yaml.
 	registry  *connector.Registry
 	setupOpts connector.SetupOpts
 
@@ -182,6 +181,54 @@ func (p *GuardrailProxy) SetHILTApprovalManager(m *HILTApprovalManager) {
 // stays clean.
 func (p *GuardrailProxy) SetNotifier(n *notifier.Dispatcher) {
 	p.notifier = n
+}
+
+func (p *GuardrailProxy) SetOTelProvider(tel *telemetry.Provider) {
+	if p == nil {
+		return
+	}
+	p.otel = tel
+	if inspector, ok := p.inspector.(*GuardrailInspector); ok {
+		configureGuardrailInspectorTelemetry(inspector, tel)
+		if inspector.ciscoClient != nil {
+			inspector.ciscoClient.SetTelemetry(tel)
+		}
+	}
+	if p.hookGuard != nil {
+		p.hookGuard.SetOTelProvider(tel)
+	}
+}
+
+func configureGuardrailInspectorTelemetry(inspector *GuardrailInspector, tel *telemetry.Provider) {
+	if inspector == nil {
+		return
+	}
+	if tel == nil {
+		inspector.SetPanicRecorderFunc(nil)
+		inspector.SetTracerFunc(nil)
+		inspector.SetPhaseTracerFunc(nil)
+		return
+	}
+	inspector.SetPanicRecorderFunc(func(ctx context.Context) {
+		tel.RecordPanic(ctx, gatewaylog.SubsystemGuardrail)
+	})
+	if !tel.TracesEnabled() {
+		inspector.SetTracerFunc(nil)
+		inspector.SetPhaseTracerFunc(nil)
+		return
+	}
+	inspector.SetTracerFunc(func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64)) {
+		ctx, span := tel.StartGuardrailStageSpan(ctx, stage, direction, model)
+		return ctx, func(action, severity, reason string, latencyMs int64) {
+			tel.EndGuardrailStageSpan(span, action, severity, reason, latencyMs)
+		}
+	})
+	inspector.SetPhaseTracerFunc(func(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64)) {
+		ctx, span := tel.StartGuardrailPhaseSpan(ctx, phase)
+		return ctx, func(action, severity string, latencyMs int64) {
+			tel.EndGuardrailPhaseSpan(span, action, severity, latencyMs)
+		}
+	})
 }
 
 // agentNameForRequest picks the most specific agent name available.
@@ -372,31 +419,7 @@ func NewGuardrailProxy(
 	// over `data.guardrail.hilt` (the data path is preserved as a fallback
 	// for non-gateway callers like direct `opa eval` runs).
 	inspector.SetHILTConfig(cfg.HILT.Enabled, cfg.HILT.MinSeverity)
-	if otel != nil {
-		inspector.SetPanicRecorderFunc(func(ctx context.Context) {
-			otel.RecordPanic(ctx, gatewaylog.SubsystemGuardrail)
-		})
-	}
-	// Wire OTel span emission when telemetry is enabled. The
-	// inspector only sees a closure, so the telemetry dep stays
-	// localized to the proxy wiring layer.
-	if otel != nil && otel.TracesEnabled() {
-		inspector.SetTracerFunc(func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64)) {
-			ctx, span := otel.StartGuardrailStageSpan(ctx, stage, direction, model)
-			return ctx, func(action, severity, reason string, latencyMs int64) {
-				otel.EndGuardrailStageSpan(span, action, severity, reason, latencyMs)
-			}
-		})
-		// Phase 2: child spans for each sub-stage so operators can
-		// drill into latency per phase (regex, cisco_ai_defense,
-		// judge.*, opa) without sampling every span at the same depth.
-		inspector.SetPhaseTracerFunc(func(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64)) {
-			ctx, span := otel.StartGuardrailPhaseSpan(ctx, phase)
-			return ctx, func(action, severity string, latencyMs int64) {
-				otel.EndGuardrailPhaseSpan(span, action, severity, latencyMs)
-			}
-		})
-	}
+	configureGuardrailInspectorTelemetry(inspector, otel)
 
 	masterKey := deriveMasterKey(dataDir)
 
@@ -438,10 +461,41 @@ func NewGuardrailProxy(
 }
 
 // SetConnectorSwitchState stores the registry and setup options so the proxy
-// can hot-swap connectors at runtime when guardrail_runtime.json changes.
+// can hot-swap connectors when config.yaml changes.
 func (p *GuardrailProxy) SetConnectorSwitchState(reg *connector.Registry, opts connector.SetupOpts) {
 	p.registry = reg
 	p.setupOpts = opts
+}
+
+// ApplyGuardrailConfig applies a validated config.yaml guardrail snapshot to
+// the live proxy without rereading any side files.
+func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
+	if p == nil || cfg == nil {
+		return
+	}
+	p.rtMu.Lock()
+	p.cfg = cfg
+	p.mode = cfg.Mode
+	p.blockMessage = cfg.BlockMessage
+	if cfg.ScannerMode == "local" || cfg.ScannerMode == "remote" || cfg.ScannerMode == "both" {
+		p.inspector.SetScannerMode(cfg.ScannerMode)
+	}
+	p.inspector.SetHILTConfig(cfg.HILT.Enabled, cfg.HILT.MinSeverity)
+	if strategySetter, ok := p.inspector.(interface {
+		SetDetectionStrategy(global, prompt, completion, toolCall string, sweep bool)
+	}); ok {
+		strategySetter.SetDetectionStrategy(
+			cfg.DetectionStrategy,
+			cfg.DetectionStrategyPrompt,
+			cfg.DetectionStrategyCompletion,
+			cfg.DetectionStrategyToolCall,
+			cfg.JudgeSweep,
+		)
+	}
+	if newName := strings.TrimSpace(cfg.Connector); newName != "" {
+		p.switchConnectorLocked(strings.ToLower(newName))
+	}
+	p.rtMu.Unlock()
 }
 
 // StartHookConfigGuard launches the connector hook self-heal guard bound to
@@ -888,7 +942,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	_ = json.Unmarshal(body, &partial)
 
-	p.reloadRuntimeConfig()
 	p.rtMu.RLock()
 	mode := p.mode
 	customBlockMsg := p.blockMessage
@@ -2451,7 +2504,6 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	p.reloadRuntimeConfig()
 	p.rtMu.RLock()
 	mode := p.mode
 	customBlockMsg := p.blockMessage
@@ -3840,52 +3892,8 @@ func deriveMasterKey(dataDir string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime config hot-reload
+// Runtime config apply helpers
 // ---------------------------------------------------------------------------
-
-var (
-	runtimeCacheMu sync.Mutex
-	runtimeCache   map[string]any
-	runtimeCacheTs time.Time
-)
-
-const runtimeCacheTTL = 5 * time.Second
-
-func (p *GuardrailProxy) reloadRuntimeConfig() {
-	runtimeCacheMu.Lock()
-	defer runtimeCacheMu.Unlock()
-
-	if time.Since(runtimeCacheTs) < runtimeCacheTTL && runtimeCache != nil {
-		p.applyRuntime(runtimeCache)
-		return
-	}
-
-	runtimeFile := filepath.Join(p.dataDir, "guardrail_runtime.json")
-	data, err := os.ReadFile(runtimeFile)
-	if err != nil {
-		runtimeCache = nil
-		runtimeCacheTs = time.Now()
-		return
-	}
-
-	// Decode into map[string]any so heterogeneous value types
-	// (string for mode, bool for hilt_enabled, etc.) round-trip
-	// without breaking the whole reload. The Python writer in
-	// cli/defenseclaw/commands/cmd_setup.py::_write_guardrail_runtime
-	// owns the wire schema; per-key extraction below validates each
-	// field independently so a future schema addition can't poison
-	// existing fields.
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		runtimeCache = nil
-		runtimeCacheTs = time.Now()
-		return
-	}
-
-	runtimeCache = cfg
-	runtimeCacheTs = time.Now()
-	p.applyRuntime(cfg)
-}
 
 // runtimeString extracts a string value from the heterogeneous runtime
 // cache and reports whether the caller should treat it as set. We
@@ -3946,15 +3954,10 @@ func (p *GuardrailProxy) applyRuntime(cfg map[string]any) {
 		p.switchConnectorLocked(newName)
 	}
 
-	// HILT hot-reload. The inspector caches the HILT view that the
-	// Rego policy reads as `input.hilt`; without re-applying it here
-	// an operator who flips guardrail.hilt.enabled in config.yaml (or
-	// runs ``defenseclaw config set guardrail.hilt.enabled ...``)
-	// keeps the boot-time value until the next sidecar restart. Both
-	// fields must be present together — a partial update (just one
-	// of the two) would let a half-edited runtime file rotate the
-	// inspector into an unintended state, so we only re-sync when
-	// hilt_enabled is explicitly set.
+	// Legacy map-based apply path retained for focused proxy tests and older
+	// in-process callers. The file-backed runtime overlay has been removed;
+	// production reloads now call ApplyGuardrailConfig with a validated
+	// config.yaml snapshot.
 	if enabled, ok := runtimeBool(cfg, "hilt_enabled"); ok {
 		minSev, _ := runtimeString(cfg, "hilt_min_severity")
 		p.inspector.SetHILTConfig(enabled, minSev)
@@ -3994,7 +3997,9 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	// this the guard (still pointed at oldConn until Repoint) could race the
 	// teardown and re-install hooks for a connector we just deactivated.
 	// Repoint at the end re-targets the guard at newConn.
-	p.hookGuard.SuppressHealing(hookGuardSwitchSuppressWindow)
+	if p.hookGuard != nil {
+		p.hookGuard.SuppressHealing(hookGuardSwitchSuppressWindow)
+	}
 
 	if oldConn != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: tearing down %s\n", oldConn.Name())
@@ -4008,7 +4013,11 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 
 	fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: setting up %s\n", newName)
 	if err := newConn.Setup(ctx, p.setupOpts); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] setup %s failed: %v — rolling back to %s\n", newName, err, oldConn.Name())
+		oldName := "<none>"
+		if oldConn != nil {
+			oldName = oldConn.Name()
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] setup %s failed: %v — rolling back to %s\n", newName, err, oldName)
 		if oldConn != nil {
 			if reErr := oldConn.Setup(ctx, p.setupOpts); reErr != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] rollback setup %s also failed: %v\n", oldConn.Name(), reErr)
@@ -4024,7 +4033,9 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 
 	// Follow the active connector so self-heal watches the new
 	// connector's config file rather than the torn-down one's.
-	p.hookGuard.Repoint(newConn, p.setupOpts)
+	if p.hookGuard != nil {
+		p.hookGuard.Repoint(newConn, p.setupOpts)
+	}
 
 	if p.health != nil {
 		p.health.SetConnector(newConn.Name(), newConn.ToolInspectionMode(), newConn.SubprocessPolicy())

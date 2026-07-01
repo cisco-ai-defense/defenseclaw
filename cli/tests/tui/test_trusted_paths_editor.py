@@ -33,7 +33,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import Input, Static
 
 _DEFAULT_ROW = TrustedPathRow("/usr/bin", "default", "ok", False)
-_OPERATOR_ROW = TrustedPathRow("/opt/acme/bin", ".env", "missing", True)
+_OPERATOR_ROW = TrustedPathRow("/opt/acme/bin", "config", "missing", True)
 
 
 @pytest.fixture(autouse=True)
@@ -119,7 +119,7 @@ def test_rows_from_config_reflect_collect_view() -> None:
     assert "/usr/bin" in resolved  # a built-in default
     assert not resolved["/usr/bin"].removable
     assert "/opt/acme/bin" in resolved  # operator-added via .env
-    assert resolved["/opt/acme/bin"].source == ".env"
+    assert resolved["/opt/acme/bin"].source == "legacy .env"
     assert resolved["/opt/acme/bin"].removable
 
 
@@ -324,7 +324,7 @@ async def test_editor_routing_context_wins_over_summary() -> None:
 
 
 def test_refresh_merges_persisted_env(tmp_path, monkeypatch):
-    """A prefix persisted to .env after launch is unioned into the live env,
+    """A prefix persisted to legacy .env after launch is unioned into the live env,
     without dropping anything already exported."""
     (tmp_path / ".env").write_text(
         "DEFENSECLAW_TRUSTED_BIN_PREFIXES=/opt/foo\n", encoding="utf-8"
@@ -334,6 +334,18 @@ def test_refresh_merges_persisted_env(tmp_path, monkeypatch):
     parts = os.environ["DEFENSECLAW_TRUSTED_BIN_PREFIXES"].split(os.pathsep)
     assert "/opt/bar" in parts  # exported value preserved
     assert "/opt/foo" in parts  # persisted value merged in
+
+
+def test_refresh_merges_config_prefixes(tmp_path, monkeypatch):
+    (tmp_path / "config.yaml").write_text(
+        "ai_discovery:\n  trusted_binary_prefixes:\n    - /opt/config-tools\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "/opt/bar")
+    _refresh_trusted_prefix_env(str(tmp_path))
+    parts = os.environ["DEFENSECLAW_TRUSTED_BIN_PREFIXES"].split(os.pathsep)
+    assert "/opt/bar" in parts
+    assert "/opt/config-tools" in parts
 
 
 def test_refresh_noop_without_persisted_env(tmp_path, monkeypatch):
@@ -358,7 +370,7 @@ def test_untrusted_dirs_forces_fresh_discovery() -> None:
 
 
 def test_untrusted_dir_reflects_newly_trusted_prefix(tmp_path, monkeypatch) -> None:
-    """End-to-end for fix (a): once a dir is persisted to .env, a connector
+    """End-to-end for fix (a): once a dir is persisted to config.yaml, a connector
     whose binary lives there is no longer reported untrusted."""
     bindir = tmp_path / "tools"
     bindir.mkdir()
@@ -373,8 +385,9 @@ def test_untrusted_dir_reflects_newly_trusted_prefix(tmp_path, monkeypatch) -> N
     with patch.object(ad, "discover_agents", side_effect=_disc_respecting_env):
         # Before trusting: codex is flagged.
         assert untrusted_connector_dir("codex", str(tmp_path)) == str(bindir)
-        # Persist the trust to .env, then re-scan: codex drops off.
-        (tmp_path / ".env").write_text(
-            f"DEFENSECLAW_TRUSTED_BIN_PREFIXES={bindir}\n", encoding="utf-8"
+        # Persist the trust to config.yaml, then re-scan: codex drops off.
+        (tmp_path / "config.yaml").write_text(
+            f"ai_discovery:\n  trusted_binary_prefixes:\n    - {bindir}\n",
+            encoding="utf-8",
         )
         assert untrusted_connector_dir("codex", str(tmp_path)) is None

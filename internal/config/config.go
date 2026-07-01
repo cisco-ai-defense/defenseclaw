@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -146,7 +147,8 @@ type AgentConfig struct {
 const CurrentConfigVersion = 7
 
 type Config struct {
-	ConfigVersion int `mapstructure:"config_version"        yaml:"config_version"`
+	ConfigVersion  int    `mapstructure:"config_version"        yaml:"config_version"`
+	ConfigFilePath string `mapstructure:"-" yaml:"-"`
 
 	// LLM is the top-level unified LLM configuration. Every LLM-using
 	// component (guardrail, judge, mcp scanner, skill scanner, plugin
@@ -223,10 +225,11 @@ type Config struct {
 	// goes through the ObservabilityConfig.Effective* resolvers. Mirrors the
 	// Python `observability:` block written by `defenseclaw setup
 	// observability/webhook --connector`.
-	Observability ObservabilityConfig `mapstructure:"observability"    yaml:"observability,omitempty"`
-	Privacy       PrivacyConfig       `mapstructure:"privacy"          yaml:"privacy,omitempty"`
-	AIDiscovery   AIDiscoveryConfig   `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
-	Notifications NotificationsConfig `mapstructure:"notifications"    yaml:"notifications,omitempty"`
+	Observability         ObservabilityConfig         `mapstructure:"observability"    yaml:"observability,omitempty"`
+	Privacy               PrivacyConfig               `mapstructure:"privacy"          yaml:"privacy,omitempty"`
+	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
+	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
+	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
 }
 
 // PrivacyConfig groups privacy/redaction toggles. Today it carries
@@ -262,23 +265,25 @@ type PrivacyConfig struct {
 // telemetry is sanitized by the inventory service; this config only controls
 // which local metadata sources are inspected.
 type AIDiscoveryConfig struct {
-	Enabled                  bool     `mapstructure:"enabled"                   yaml:"enabled"`
-	Mode                     string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
-	ScanIntervalMin          int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
-	ProcessIntervalSec       int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
-	ScanRoots                []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
-	SignaturePacks           []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
-	AllowWorkspaceSignatures bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
-	DisabledSignatureIDs     []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
-	IncludeShellHistory      bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
-	IncludePackageManifests  bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
-	IncludeEnvVarNames       bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
-	IncludeNetworkDomains    bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
-	MaxFilesPerScan          int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
-	MaxFileBytes             int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
-	EmitOTel                 bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
-	StoreRawLocalPaths       bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
-	ConfidencePolicyPath     string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
+	Enabled                   bool     `mapstructure:"enabled"                   yaml:"enabled"`
+	Mode                      string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
+	ScanIntervalMin           int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
+	ProcessIntervalSec        int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
+	ScanRoots                 []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
+	SignaturePacks            []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
+	AllowWorkspaceSignatures  bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
+	DisabledSignatureIDs      []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
+	IncludeShellHistory       bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
+	IncludePackageManifests   bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
+	IncludeEnvVarNames        bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
+	IncludeNetworkDomains     bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	MaxFilesPerScan           int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
+	MaxFileBytes              int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
+	EmitOTel                  bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
+	StoreRawLocalPaths        bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
+	ConfidencePolicyPath      string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
+	RequireTrustedBinaryPaths bool     `mapstructure:"require_trusted_binary_paths" yaml:"require_trusted_binary_paths"`
+	TrustedBinaryPrefixes     []string `mapstructure:"trusted_binary_prefixes" yaml:"trusted_binary_prefixes,omitempty"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -1944,11 +1949,20 @@ type GatewayConfig struct {
 	// in gatewayShouldConnectForConfiguredConnector — unknown values
 	// fall through to "auto" so a typo doesn't accidentally disable
 	// fleet integration on production.
-	FleetMode   string               `mapstructure:"fleet_mode"        yaml:"fleet_mode,omitempty"`
-	Watcher     GatewayWatcherConfig `mapstructure:"watcher"            yaml:"watcher"`
-	Watchdog    WatchdogConfig       `mapstructure:"watchdog"           yaml:"watchdog"`
-	SandboxHome string               `mapstructure:"-"                  yaml:"-"`
-	ClawHome    string               `mapstructure:"-"                  yaml:"-"`
+	FleetMode    string                    `mapstructure:"fleet_mode"        yaml:"fleet_mode,omitempty"`
+	ConfigReload GatewayConfigReloadConfig `mapstructure:"config_reload"     yaml:"config_reload,omitempty"`
+	Watcher      GatewayWatcherConfig      `mapstructure:"watcher"           yaml:"watcher"`
+	Watchdog     WatchdogConfig            `mapstructure:"watchdog"          yaml:"watchdog"`
+	SandboxHome  string                    `mapstructure:"-"                 yaml:"-"`
+	ClawHome     string                    `mapstructure:"-"                 yaml:"-"`
+}
+
+type GatewayConfigReloadConfig struct {
+	// Mode controls what the running gateway does after config.yaml changes.
+	// "hot" validates and reconciles in process. "restart" validates the new
+	// file, records the reload, then shuts down so an external supervisor can
+	// start a fresh process with the full config.
+	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
 }
 
 // WatchdogConfig controls the health watchdog that notifies users when the
@@ -2096,6 +2110,18 @@ type PluginActionsConfig struct {
 }
 
 func Load() (*Config, error) {
+	return LoadFromFileWithRuntimeMigration(ConfigPath())
+}
+
+func LoadFromFile(configFile string) (*Config, error) {
+	return loadFromFile(configFile, false)
+}
+
+func LoadFromFileWithRuntimeMigration(configFile string) (*Config, error) {
+	return loadFromFile(configFile, true)
+}
+
+func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	// viper holds a process-global keystore. Without resetting it, a
 	// previous Load() (e.g. from another binary path or test case)
 	// leaves stale keys behind — including a legacy `splunk.*` block
@@ -2104,8 +2130,27 @@ func Load() (*Config, error) {
 	// and BindEnv() bindings immediately after.
 	viper.Reset()
 
-	dataDir := DefaultDataPath()
-	configFile := filepath.Join(dataDir, DefaultConfigName)
+	if strings.TrimSpace(configFile) == "" {
+		configFile = ConfigPath()
+	}
+	configFile = filepath.Clean(configFile)
+	dataDir := filepath.Dir(configFile)
+	if configuredPath := strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)); configuredPath != "" &&
+		filepath.Clean(configuredPath) == configFile {
+		dataDir = DefaultDataPath()
+	}
+	pinnedDeploymentMode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
+	if err := validateDeploymentMode(pinnedDeploymentMode); err != nil {
+		return nil, fmt.Errorf("config: %s: %w", managed.DeploymentModeEnv, err)
+	}
+	if managed.IsManagedEnterprise(pinnedDeploymentMode) {
+		if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+			}
+			return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
+		}
+	}
 
 	viper.SetConfigFile(configFile)
 	viper.SetConfigType("yaml")
@@ -2179,6 +2224,7 @@ func Load() (*Config, error) {
 		}
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
+	cfg.ConfigFilePath = configFile
 
 	// Reinstate the dot-preserving OTel resource attributes that we
 	// stripped before handing bytes to Viper.
@@ -2190,10 +2236,40 @@ func Load() (*Config, error) {
 	migrateFlatOTelConfigFromViper(&cfg)
 	warnDisableRedactionConfig(&cfg)
 	cfg.DeploymentMode = normalizeDeploymentMode(cfg.DeploymentMode)
+	if pinnedDeploymentMode != "" {
+		if cfg.DeploymentMode != "" && cfg.DeploymentMode != pinnedDeploymentMode {
+			return nil, fmt.Errorf("config: deployment_mode=%q conflicts with immutable %s=%q", cfg.DeploymentMode, managed.DeploymentModeEnv, pinnedDeploymentMode)
+		}
+		cfg.DeploymentMode = pinnedDeploymentMode
+	}
 
 	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
+		}
+		return nil, err
+	}
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if !managed.IsManagedEnterprise(pinnedDeploymentMode) {
+			if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
+				if ReportConfigLoadError != nil {
+					ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+				}
+				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
+			}
+		}
+		if err := managed.ValidateTrustedRuntimeDir(cfg.DataDir, "managed data_dir"); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
+			}
+			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
+		}
+	}
+
+	cfg.Gateway.ConfigReload.Mode = normalizeGatewayConfigReloadMode(cfg.Gateway.ConfigReload.Mode)
+	if err := validateGatewayConfigReloadMode(cfg.Gateway.ConfigReload.Mode); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "gateway_config_reload_invalid")
 		}
 		return nil, err
 	}
@@ -2267,6 +2343,12 @@ func Load() (*Config, error) {
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
 	}
+	if err := cfg.ApplicationProtection.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "application_protection_invalid")
+		}
+		return nil, fmt.Errorf("config: application_protection: %w", err)
+	}
 
 	// Validate registry source kind/content shapes. The Python CLI
 	// is the authoritative writer for ``registries.sources`` (it
@@ -2322,7 +2404,29 @@ func Load() (*Config, error) {
 	// hash is still stable across identical in-memory configs.
 	seedProvenanceOnLoad(configFile, &cfg)
 
+	// Managed-enterprise config is an administrator-owned trust boundary while
+	// data_dir is intentionally writable by the lower-privilege service account.
+	// Never let ordinary gateway or root guardian startup promote legacy runtime
+	// state across that boundary. Managed upgrades must migrate config through an
+	// explicit administrator-controlled workflow; config.yaml remains authoritative.
+	if guardrailRuntimeMigrationAllowed(migrateRuntime, cfg.DeploymentMode) {
+		migrated, err := MigrateGuardrailRuntimeFile(configFile, cfg.DataDir)
+		if err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "guardrail_runtime_migration")
+			}
+			return nil, err
+		}
+		if migrated {
+			return loadFromFile(configFile, false)
+		}
+	}
+
 	return &cfg, nil
+}
+
+func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
+	return requested && !managed.IsManagedEnterprise(deploymentMode)
 }
 
 func warnDisableRedactionConfig(cfg *Config) {
@@ -2920,6 +3024,22 @@ func validateDeploymentMode(mode string) error {
 	return fmt.Errorf("config: deployment_mode=%q is invalid (allowed: managed_enterprise, unmanaged_byod, ci_cd, sandboxed, server, saas)", mode)
 }
 
+func validateGatewayConfigReloadMode(mode string) error {
+	switch normalizeGatewayConfigReloadMode(mode) {
+	case "", "hot", "restart":
+		return nil
+	}
+	return fmt.Errorf("config: gateway.config_reload.mode=%q is invalid (allowed: hot, restart)", mode)
+}
+
+func normalizeGatewayConfigReloadMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return "hot"
+	}
+	return mode
+}
+
 func normalizeDeploymentMode(mode string) string {
 	switch strings.TrimSpace(mode) {
 	case "managed":
@@ -3120,6 +3240,18 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("ai_discovery.emit_otel", true)
 	viper.SetDefault("ai_discovery.store_raw_local_paths", false)
 	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
+	viper.SetDefault("ai_discovery.require_trusted_binary_paths", false)
+	viper.SetDefault("ai_discovery.trusted_binary_prefixes", []string{})
+
+	viper.SetDefault("application_protection.enabled", false)
+	viper.SetDefault("application_protection.min_confidence", DefaultApplicationProtectionMinConfidence)
+	viper.SetDefault("application_protection.remove_when_gone", false)
+	viper.SetDefault("application_protection.gone_after_min", DefaultApplicationProtectionGoneAfterMin)
+	viper.SetDefault("application_protection.include_connectors", []string{})
+	viper.SetDefault("application_protection.exclude_connectors", []string{})
+	viper.SetDefault("application_protection.guardrail.mode", "observe")
+	viper.SetDefault("application_protection.asset_policy.mode", AssetPolicyModeObserve)
+	viper.SetDefault("application_protection.connectors", map[string]any{})
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
@@ -3200,6 +3332,7 @@ func setDefaults(dataDir string) {
 	// in gatewayShouldConnectForConfiguredConnector. See the field
 	// doc on GatewayConfig.FleetMode for the override semantics.
 	viper.SetDefault("gateway.fleet_mode", "auto")
+	viper.SetDefault("gateway.config_reload.mode", "hot")
 	viper.SetDefault("gateway.device_key_file", filepath.Join(dataDir, "device.key"))
 	viper.SetDefault("gateway.auto_approve_safe", false)
 	viper.SetDefault("gateway.reconnect_ms", 800)

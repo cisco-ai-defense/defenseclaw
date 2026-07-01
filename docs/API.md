@@ -322,19 +322,24 @@ POST /v1/guardrail/evaluate
 
 ### GET/PATCH /v1/guardrail/config
 
-Read or update guardrail runtime configuration (mode and scanner_mode).
-Changes are persisted to `~/.defenseclaw/guardrail_runtime.json` and
-take effect immediately without restarting the sidecar.
+Read or update selected guardrail runtime configuration. PATCH writes the
+supported fields into `~/.defenseclaw/config.yaml`, validates the full YAML
+config, updates the API server's in-memory guardrail view, and lets the central
+config watcher/reconciler apply the latest effective config.
 
-**Callers:** No production callers currently. Available for runtime
-toggling between observe and action mode.
+**Callers:** No production callers currently. Available for runtime toggling of
+guardrail mode, scanner mode, connector, block message, and HILT settings.
 
 **GET response:**
 
 ```json
 {
   "mode": "observe",
-  "scanner_mode": "local"
+  "scanner_mode": "local",
+  "block_message": "Request blocked by security policy",
+  "connector": "claudecode",
+  "hilt_enabled": true,
+  "hilt_min_severity": "MEDIUM"
 }
 ```
 
@@ -346,6 +351,16 @@ toggling between observe and action mode.
   "scanner_mode": "both"
 }
 ```
+
+Supported PATCH fields are `mode`, `scanner_mode`, `block_message`,
+`connector`, `hilt_enabled`, and `hilt_min_severity`. The request body is JSON,
+not a raw `config.yaml` upload. Changing `connector` uses restart semantics so
+listener and hook state are rebuilt rather than silently hot-swapped in place.
+
+With the default `gateway.config_reload.mode: hot`, simple guardrail changes are
+applied without a process restart. If `gateway.config_reload.mode: restart` is
+configured, substantive config changes are validated and then the gateway
+performs or requests a full `defenseclaw-gateway` restart.
 
 ---
 
@@ -664,12 +679,12 @@ the scan result.
 
 **Callers:**
 - Python CLI: `OrchestratorClient.scan_skill()` in `cli/defenseclaw/gateway.py`
-- `defenseclaw scan` command with `--remote` flag in `cli/defenseclaw/commands/cmd_skill.py`
+- `defenseclaw skill scan` command with `--remote` flag in `cli/defenseclaw/commands/cmd_skill.py`
 
 **Code flow:**
 
-```
-defenseclaw scan /path/to/skill --remote
+```text
+defenseclaw skill scan /path/to/skill --remote
   → cmd_skill.py POST /v1/skill/scan
     → api.go handleSkillScan()
       → scanner.NewSkillScanner().Scan() (shells out to Python skill-scanner)

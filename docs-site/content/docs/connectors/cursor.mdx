@@ -57,7 +57,7 @@ Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo
 <Tab value="Add scanning rigor">
 
 ```bash
-export DEFENSECLAW_LLM_KEY=<your-key>
+export DEFENSECLAW_LLM_KEY='replace-with-your-key'
 
 defenseclaw setup cursor                                  # base alias first
 defenseclaw setup guardrail \
@@ -86,7 +86,7 @@ connector_hooks:
     fail_mode: open       # open | closed
 ```
 
-Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, `beforeShellExecution` and `beforeMCPExecution` will surface a native ask in Cursor when the gateway returns a HITL verdict; the other block events (`beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt`, `stop`) downgrade to a confirm verdict in the DefenseClaw TUI.
+Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, `beforeShellExecution` and `beforeMCPExecution` surface a native ask in Cursor when the gateway returns a HITL verdict. The other block events (`beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt`, `stop`) use an alert/context fallback with `raw_action` preserved; the TUI can review but not resume them.
 
 </Tab>
 
@@ -95,7 +95,7 @@ Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, `b
 #### Decision aids — should I turn this on?
 
 <Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Cursor supports native ask only on beforeShellExecution and beforeMCPExecution; other events downgrade to confirm." />
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Cursor supports native ask only on beforeShellExecution and beforeMCPExecution; other events use a non-pausing fallback." />
   <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector cursor` when tuning Cursor." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
@@ -125,7 +125,7 @@ Cursor's MCP / skills / rules surfaces are discovered from user-global Cursor lo
 <HookEventsList connector="cursor" />
 
 <Callout type="info">
-Cursor supports native ask only on documented ask-capable hook events: `beforeShellExecution` and `beforeMCPExecution`. The other block events (`beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt`, `stop`) downgrade HITL to a confirm verdict.
+Cursor supports native ask only on documented ask-capable hook events: `beforeShellExecution` and `beforeMCPExecution`. The other block events (`beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt`, `stop`) return an alert/context fallback and retain the original confirm intent in audit.
 </Callout>
 
 ## Disable

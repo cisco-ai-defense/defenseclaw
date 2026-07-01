@@ -56,12 +56,27 @@ def _pin_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
 
+def test_discovery_trust_config_honors_config_override(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    config_path = tmp_path / "managed" / "config.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        "ai_discovery:\n  require_trusted_binary_paths: true\n  trusted_binary_prefixes: [/opt/enterprise/bin]\n"
+    )
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(config_path))
+
+    required, prefixes = ad._ai_discovery_trust_config(data_dir)
+
+    assert required is True
+    assert prefixes == ("/opt/enterprise/bin",)
+
+
 def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     now = datetime(2026, 5, 4, 18, 21, tzinfo=timezone.utc)
     calls: list[str] = []
 
-    def fake_scan(name: str) -> ad.AgentSignal:
+    def fake_scan(name: str, **_kwargs) -> ad.AgentSignal:
         calls.append(name)
         return _signal(name, name == "codex")
 
@@ -81,7 +96,7 @@ def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
         assert stat.S_IMODE(cache_file.stat().st_mode) == 0o600
 
     calls.clear()
-    monkeypatch.setattr(ad, "_scan_agent", lambda name: (_ for _ in ()).throw(AssertionError(name)))
+    monkeypatch.setattr(ad, "_scan_agent", lambda name, **_kwargs: (_ for _ in ()).throw(AssertionError(name)))
     cached = ad.discover_agents()
     assert cached.cache_hit is True
     assert cached.agents["codex"].installed is True
@@ -89,7 +104,7 @@ def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
 
     expired = now + timedelta(seconds=ad.CACHE_TTL_SECONDS + 1)
     monkeypatch.setattr(ad, "_now_utc", lambda: expired)
-    monkeypatch.setattr(ad, "_scan_agent", lambda name: _signal(name, name == "claudecode"))
+    monkeypatch.setattr(ad, "_scan_agent", lambda name, **_kwargs: _signal(name, name == "claudecode"))
     refreshed = ad.discover_agents()
     assert refreshed.cache_hit is False
     assert refreshed.agents["codex"].installed is False
@@ -101,16 +116,18 @@ def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
     data_dir = Path(os.environ["DEFENSECLAW_HOME"])
     data_dir.mkdir(parents=True)
     (data_dir / ad.CACHE_FILENAME).write_text(
-        json.dumps({
-            "version": 999,
-            "scanned_at": "2026-05-04T18:21:00Z",
-            "ttl_seconds": ad.CACHE_TTL_SECONDS,
-            "agents": {},
-        }),
+        json.dumps(
+            {
+                "version": 999,
+                "scanned_at": "2026-05-04T18:21:00Z",
+                "ttl_seconds": ad.CACHE_TTL_SECONDS,
+                "agents": {},
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(ad, "_now_utc", lambda: datetime(2026, 5, 4, 18, 22, tzinfo=timezone.utc))
-    monkeypatch.setattr(ad, "_scan_agent", lambda name: _signal(name, name == "openclaw"))
+    monkeypatch.setattr(ad, "_scan_agent", lambda name, **_kwargs: _signal(name, name == "openclaw"))
 
     disc = ad.discover_agents()
 
@@ -291,7 +308,7 @@ def test_hermes_native_windows_venv_is_discovered_without_path(monkeypatch, tmp_
     monkeypatch.setattr(
         ad,
         "_version_for_agent_binary",
-        lambda name, path, _args: (
+        lambda name, path, _args, **_kwargs: (
             ("Hermes Agent v0.17.0", "")
             if name == "hermes" and ad._path_key(path) == ad._path_key(str(binary))
             else ("", "bad")
@@ -319,7 +336,9 @@ def test_antigravity_windows_cli_fallback_is_detected(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ad,
         "_version_for_agent_binary",
-        lambda name, path, _args: ("1.0.13", "") if name == "antigravity" and path == str(agy) else ("", "bad"),
+        lambda name, path, _args, **_kwargs: (
+            ("1.0.13", "") if name == "antigravity" and path == str(agy) else ("", "bad")
+        ),
     )
 
     signal = ad._scan_agent("antigravity")
@@ -339,7 +358,7 @@ def test_antigravity_gui_fallback_reads_metadata_without_launch(monkeypatch, tmp
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
     monkeypatch.setattr(ad.os, "name", "nt")
-    monkeypatch.setattr(ad, "_windows_file_version_for_binary", lambda path: ("2.2.1", ""))
+    monkeypatch.setattr(ad, "_windows_file_version_for_binary", lambda path, **_kwargs: ("2.2.1", ""))
     monkeypatch.setattr(
         ad.subprocess,
         "run",
@@ -541,7 +560,7 @@ def test_version_probe_decodes_utf8_hermes_output_from_isolated_subprocess(
         ")\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path: True)
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
 
     version, error = ad._version_for_binary(sys.executable, (str(fixture),))
 
@@ -560,7 +579,7 @@ def test_version_probe_decoder_preserves_legacy_windows_output(monkeypatch):
 
 def test_windows_executable_suffixes_preserve_agent_specific_probe_rules(monkeypatch):
     calls = []
-    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path: True)
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
 
     def fake_run(args, **kwargs):
         calls.append((args, kwargs))
@@ -583,7 +602,7 @@ def test_windows_executable_suffixes_preserve_agent_specific_probe_rules(monkeyp
 
 def test_claude_version_probe_gets_longer_timeout_with_exe_suffix(monkeypatch):
     calls = []
-    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path: True)
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
 
     def fake_run(args, **kwargs):
         calls.append((args, kwargs))
@@ -677,7 +696,31 @@ def test_omnigent_discovery_does_not_fall_back_when_config_home_is_set(monkeypat
 # binary that lives outside the canonical install prefixes (an attacker
 # who can prepend a hostile directory to PATH could otherwise have us
 # run their binary as part of a passive discovery scan).
-def test_version_probe_refuses_binary_outside_trusted_prefix(monkeypatch, tmp_path):
+def test_version_probe_probes_untrusted_prefix_by_default(monkeypatch, tmp_path):
+    hostile = tmp_path / "hostile_bin" / "codex"
+    hostile.parent.mkdir(parents=True, exist_ok=True)
+    hostile.write_text("#!/bin/sh\nexit 0\n")
+    hostile.chmod(0o755)
+    monkeypatch.setattr(ad.shutil, "which", lambda name: str(hostile))
+
+    called = []
+
+    def fake_run(*args, **kwargs):
+        called.append((args, kwargs))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="codex 0.0\n", stderr="")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+
+    signal = ad._scan_agent("codex")
+
+    assert called, "default discovery should probe without trusted-prefix enforcement"
+    assert signal.binary_path == str(hostile)
+    assert signal.version == "codex 0.0"
+    assert signal.error == ""
+
+
+def test_version_probe_refuses_binary_outside_trusted_prefix_when_enabled(monkeypatch, tmp_path):
     hostile = tmp_path / "hostile_bin" / "codex"
     hostile.parent.mkdir(parents=True, exist_ok=True)
     hostile.write_text("#!/bin/sh\nexit 0\n")
@@ -693,7 +736,7 @@ def test_version_probe_refuses_binary_outside_trusted_prefix(monkeypatch, tmp_pa
     monkeypatch.setattr(ad.subprocess, "run", fake_run)
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
 
-    signal = ad._scan_agent("codex")
+    signal = ad._scan_agent("codex", require_trusted_binary_paths=True)
 
     assert called == [], "version probe exec'd a binary outside the trusted prefix"
     assert signal.binary_path == str(hostile)
@@ -771,6 +814,34 @@ def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path
     assert ad._is_trusted_binary_path(str(alias / "bin" / "omnigent")) is True
 
 
+def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    binary = tmp_path / "tools" / ("codex.exe" if os.name == "nt" else "codex")
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    binary.parent.chmod(0o755)
+    (data_dir / "config.yaml").write_text(
+        f"ai_discovery:\n  require_trusted_binary_paths: true\n  trusted_binary_prefixes:\n    - {binary.parent}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ad.shutil, "which", lambda name: str(binary))
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="codex 1.2.3\n", stderr="")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    signal = ad._scan_agent(
+        "codex",
+        data_dir=data_dir,
+        require_trusted_binary_paths=True,
+    )
+
+    assert signal.installed is True
+    assert signal.version == "codex 1.2.3"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX Homebrew layout")
 def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
     homebrew = tmp_path / "homebrew"
@@ -805,14 +876,7 @@ def test_operator_prefix_still_applies_after_default_prefix_ownership_failure(
 ):
     """A default prefix match must not mask a later operator-added prefix."""
     default_prefix = tmp_path / "homebrew"
-    operator_prefix = (
-        default_prefix
-        / "lib"
-        / "node_modules"
-        / "@openai"
-        / "codex"
-        / "bin"
-    )
+    operator_prefix = default_prefix / "lib" / "node_modules" / "@openai" / "codex" / "bin"
     binary = operator_prefix / "codex.js"
     operator_prefix.mkdir(parents=True)
     binary.write_text("#!/usr/bin/env node\n")
@@ -822,7 +886,7 @@ def test_operator_prefix_still_applies_after_default_prefix_ownership_failure(
     monkeypatch.setattr(
         ad,
         "_trusted_bin_prefixes",
-        lambda: (str(default_prefix), str(operator_prefix)),
+        lambda *_args: (str(default_prefix), str(operator_prefix)),
     )
     monkeypatch.setattr(
         ad,
@@ -832,6 +896,33 @@ def test_operator_prefix_still_applies_after_default_prefix_ownership_failure(
     monkeypatch.setattr(ad, "_bin_chain_is_system_owned", lambda _resolved, _prefix: False)
 
     assert ad._is_trusted_binary_path(str(binary)) is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX Homebrew ownership and symlink semantics")
+def test_trust_check_operator_prefix_wins_over_failed_default_ownership(monkeypatch, tmp_path):
+    # Regression: Homebrew npm globals live under a default prefix
+    # (/opt/homebrew/lib/node_modules) that fails F-0421 root-ownership on
+    # user-owned installs. Setup's "trust this directory?" prompt adds only
+    # the package bin dir; _is_trusted_binary_path must not return False
+    # when that narrower operator prefix matches after the default fails.
+    homebrew = tmp_path / "homebrew"
+    real = homebrew / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_text("#!/usr/bin/env node\n")
+    real.chmod(0o755)
+    real.parent.chmod(0o755)
+    link_dir = homebrew / "bin"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / "codex"
+    link.symlink_to(real)
+
+    monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+    monkeypatch.setenv(
+        "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
+        str(homebrew / "lib" / "node_modules" / "@openai" / "codex" / "bin"),
+    )
+
+    assert ad._is_trusted_binary_path(str(link)) is True
 
 
 @pytest.mark.skipif(os.name == "nt", reason="requires unprivileged POSIX symlinks")
@@ -919,16 +1010,7 @@ def test_trust_check_codex_standalone_symlink_requires_opt_in(monkeypatch, tmp_p
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
 
-    real = (
-        home
-        / ".codex"
-        / "packages"
-        / "standalone"
-        / "releases"
-        / "0.136.0-aarch64-apple-darwin"
-        / "bin"
-        / "codex"
-    )
+    real = home / ".codex" / "packages" / "standalone" / "releases" / "0.136.0-aarch64-apple-darwin" / "bin" / "codex"
     real.parent.mkdir(parents=True, exist_ok=True)
     real.write_text("#!/bin/sh\nexit 0\n")
     real.chmod(0o755)

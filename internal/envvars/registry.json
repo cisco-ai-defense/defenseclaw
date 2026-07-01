@@ -16,7 +16,7 @@
     {
       "name": "DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY",
       "category": "security_opt_out",
-      "purpose": "Bypass the provenance-sentinel check during 'defenseclaw setup sandbox' pre-pairing. When the gateway has not yet created the .provenance sibling next to device.key, set this to 1 to fall back to the legacy loose acceptance of any 32-byte blob found at data_dir/device.key.",
+      "purpose": "Bypass the provenance-sentinel check during 'defenseclaw sandbox setup' pre-pairing. When the gateway has not yet created the .provenance sibling next to device.key, set this to 1 to fall back to the legacy loose acceptance of any 32-byte blob found at data_dir/device.key.",
       "default": "unset (fail-closed)",
       "accepted_values": ["1", "unset"],
       "security_impact": "high",
@@ -295,13 +295,13 @@
     {
       "name": "DEFENSECLAW_FAIL_MODE",
       "category": "security_opt_out",
-      "purpose": "Per-shell override of guardrail.hook_fail_mode. 'open' allows on transport errors; 'closed' blocks. Templated into every *-hook.sh.",
+      "purpose": "Per-shell override of guardrail.hook_fail_mode for malformed, unauthorized, or incomplete gateway responses. Transport failures are controlled separately by DEFENSECLAW_STRICT_AVAILABILITY. Templated into every *-hook.sh.",
       "default": "(value from guardrail.hook_fail_mode in config.yaml)",
       "accepted_values": ["open", "closed", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/gateway/connector/hooks/inspect-tool.sh:43", "description": "Read by every inspect-*.sh hook"}
+        {"location": "internal/gateway/connector/hooks/inspect-tool.sh:83", "description": "Representative shared template; every generated hook reads the same override"}
       ],
       "since": "0.4.0"
     },
@@ -585,6 +585,82 @@
       "since": "0.1.0"
     },
     {
+      "name": "DEFENSECLAW_CONFIG",
+      "category": "runtime_path",
+      "purpose": "Override the config.yaml path independently from DEFENSECLAW_HOME. Used by managed-enterprise services to keep administrator-owned config under /etc/defenseclaw while runtime state remains under /var/lib/defenseclaw.",
+      "default": "${DEFENSECLAW_HOME}/config.yaml",
+      "accepted_values": ["any-absolute-path", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/config/defaults.go:78", "description": "Go config path resolver"},
+        {"location": "cli/defenseclaw/config.py:187", "description": "Python config path resolver"},
+        {"location": "cli/defenseclaw/migrations.py:145", "description": "Migration config path resolver"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Managed config path separation — lets system services read admin-owned policy without making the runtime data directory admin-writable."
+    },
+    {
+      "name": "DEFENSECLAW_DEPLOYMENT_MODE",
+      "category": "runtime_path",
+      "purpose": "Pin the process deployment mode independently from config.yaml. Managed service definitions set this to managed_enterprise so a service-writable config replacement cannot downgrade enterprise trust enforcement.",
+      "default": "unset (use config.yaml deployment_mode)",
+      "accepted_values": ["managed_enterprise", "unmanaged_byod", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/config/config.go", "description": "Pins deployment mode before parsing or trusting config.yaml"},
+        {"location": "packaging/systemd/defenseclaw-gateway.service", "description": "Managed Linux service pin"},
+        {"location": "packaging/launchd/com.defenseclaw.gateway.plist", "description": "Managed macOS service pin"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks."
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR",
+      "category": "runtime_path",
+      "purpose": "Select the administrator-owned directory containing the hook guardian protected-target authorization ledger.",
+      "default": "${DEFENSECLAW_HOME}-hook-guardian",
+      "accepted_values": ["any-absolute-admin-owned-path", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/managed/managed.go", "description": "Resolves the protected-target authorization path"},
+        {"location": "internal/cli/enterprise_hooks.go", "description": "Privileged guardian writes successful protected targets"},
+        {"location": "internal/gateway/sidecar.go", "description": "Managed health verifies connector coverage before advertising enforcement"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Privileged repair authorization — must remain root/admin-owned and non-writable by the DefenseClaw service account."
+    },
+    {
+      "name": "DEFENSECLAW_GUARDIAN_CONNECTOR",
+      "category": "runtime_path",
+      "purpose": "Systemd template override naming the connector reconciled by an enterprise hook guardian instance.",
+      "default": "unset",
+      "accepted_values": ["registered hook-native connector name"],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "docs-site/content/docs/setup/enterprise-deployment.mdx:123", "description": "Documented systemd template override for per-user hook guardian instances"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Template-scoped connector selection — avoids broad home scanning by keeping each privileged guardian instance bound to an explicit connector target."
+    },
+    {
+      "name": "DEFENSECLAW_GUARDIAN_AGENT_VERSION",
+      "category": "runtime_path",
+      "purpose": "Systemd template override supplying the local agent version used for enterprise hook-contract validation.",
+      "default": "unset (falls back to cached discovery version when available)",
+      "accepted_values": ["agent version string", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "docs-site/content/docs/setup/enterprise-deployment.mdx:124", "description": "Documented systemd template override for action-mode hook contract validation"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Action-mode hook contract validation — lets managed deployments pin the agent version the guardian validates before writing blocking hooks."
+    },
+    {
       "name": "DEFENSECLAW_GATEWAY_BIN",
       "category": "runtime_path",
       "purpose": "Override path to the defenseclaw-gateway binary. Used by CI / packagers when the binary isn't on PATH.",
@@ -766,6 +842,21 @@
       "surface_in_doctor": false,
       "consumers": [{"location": "internal/gateway/connector/hooks/_hardening.sh:346", "description": "Body-cap enforcement"}],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_MANAGED_HOOK",
+      "category": "hook_internal",
+      "purpose": "Immutable sentinel baked into managed-enterprise hook scripts so missing authentication material and unavailable enforcement fail closed even when an inherited environment requests permissive availability behavior.",
+      "default": "unset (set to 1 only by generated managed hooks)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/connector/hooks/*-hook.sh", "description": "Managed hook templates set and export the sentinel from trusted generated script content"},
+        {"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "Missing-token and transport-failure handling forces fail-closed behavior when the sentinel is set"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Managed enforcement fail-closed boundary — the value is generated by the privileged hook installer and is not an operator security opt-out."
     },
     {
       "name": "DEFENSECLAW_DAEMON",
