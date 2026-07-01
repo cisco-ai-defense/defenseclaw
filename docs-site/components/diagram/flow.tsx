@@ -4,6 +4,7 @@ import type { GraphLabel, NodeLabel as DagreNodeLabel, EdgeLabel } from '@dagrej
 import {
   type DiagramKind,
   type EdgeVariant,
+  ARTICLE_WIDTH_TARGET,
   KIND_TO_STYLE,
   STRIPE_WIDTH,
   DiagramDefs,
@@ -69,6 +70,7 @@ interface ResolvedEdge {
   variant: EdgeVariant;
   emphasis: boolean;
   points: { x: number; y: number }[];
+  labelPoint?: { x: number; y: number };
 }
 
 // Three rendering strategies for the underlying SVG:
@@ -134,7 +136,7 @@ export function Flow({
   direction = 'LR',
   caption,
   fit = 'auto',
-  compact = false,
+  compact,
   oversize = false,
   children,
 }: FlowProps) {
@@ -150,6 +152,28 @@ export function Flow({
     );
   }
 
+  // A short, unbranched process is more legible as a horizontal operating
+  // rail than as a narrow vertical ladder. Preserve explicit topology, but
+  // promote a TB chain when its measured width still fits the article.
+  const isLinear = isLinearChain(nodeProps, edgeProps);
+  const compactCandidateWidth = nodeProps.reduce((sum, node) => {
+    const kind = node.kind ?? 'generic';
+    const measured = measureLabel(flattenToLines(node.children), {
+      kind,
+      compact: true,
+    });
+    return sum + measured.width;
+  }, 0) + Math.max(0, nodeProps.length - 1) * 54 + 56;
+  const autoLinearHorizontal =
+    direction === 'TB' &&
+    isLinear &&
+    nodeProps.length <= 5 &&
+    compactCandidateWidth <= ARTICLE_WIDTH_TARGET;
+  const layoutDirection: 'LR' | 'TB' = autoLinearHorizontal ? 'LR' : direction;
+  const compactMode = compact ?? (layoutDirection === 'TB' || autoLinearHorizontal);
+  const processRail = direction === 'TB' && isLinear && !autoLinearHorizontal;
+  const denseMode = layoutDirection === 'TB' && !processRail && nodeProps.length >= 10;
+
   // Resolve node labels and dimensions. We do this once before the
   // dagre layout so the engine has correct widths to work with.
   // Gateway nodes are always emphasized — every diagram in the docs
@@ -158,13 +182,21 @@ export function Flow({
     const kind: DiagramKind = p.kind ?? 'generic';
     const emphasis = Boolean(p.emphasis) || kind === 'gateway';
     const lines = flattenToLines(p.children);
-    const measured = measureLabel(lines, { kind, compact });
+    const measured = measureLabel(lines, {
+      kind,
+      compact: compactMode,
+      dense: denseMode,
+    });
     return {
       id: p.id,
       kind,
       emphasis,
       lines: measured.lines,
-      width: measured.width,
+      // A vertical process should read like an intentional operating
+      // procedure, not a skinny stack of unrelated cards. Give each step a
+      // consistent rail width while leaving branched architecture diagrams
+      // topology-sized.
+      width: processRail ? Math.max(420, measured.width) : measured.width,
       height: measured.height,
       x: 0,
       y: 0,
@@ -179,11 +211,12 @@ export function Flow({
   // graph is structurally fine but bumping up against the column.
   const g = new dagre.graphlib.Graph<GraphLabel, DagreNodeLabel, EdgeLabel>();
   g.setGraph({
-    rankdir: direction,
-    nodesep: compact ? 30 : 50,
-    ranksep: compact ? 50 : 80,
-    marginx: 16,
-    marginy: 16,
+    rankdir: layoutDirection,
+    nodesep: denseMode ? 10 : compactMode ? 38 : 56,
+    ranksep: denseMode ? 50 : compactMode ? 54 : 78,
+    edgesep: denseMode ? 12 : 24,
+    marginx: denseMode ? 16 : compactMode ? 26 : 28,
+    marginy: denseMode ? 16 : 28,
   });
   g.setDefaultEdgeLabel(() => ({}));
 
@@ -228,6 +261,10 @@ export function Flow({
         variant: e.variant ?? 'solid',
         emphasis: Boolean(e.emphasis),
         points,
+        labelPoint:
+          typeof dEdge?.x === 'number' && typeof dEdge?.y === 'number'
+            ? { x: dEdge.x, y: dEdge.y }
+            : undefined,
       };
     });
 
@@ -240,7 +277,7 @@ export function Flow({
   // columns, TB → top-to-bottom rows). Edges inherit their source
   // node's rank + a half-step so each edge starts as soon as its
   // source has landed.
-  const rankAxis = (n: ResolvedNode) => (direction === 'LR' ? n.x : n.y);
+  const rankAxis = (n: ResolvedNode) => (layoutDirection === 'LR' ? n.x : n.y);
   const nodesByRank = [...resolved].sort((a, b) => rankAxis(a) - rankAxis(b));
   const rankById = new Map<string, number>();
   nodesByRank.forEach((n, i) => rankById.set(n.id, i));
@@ -268,6 +305,10 @@ export function Flow({
           width: '100%',
           height: 'auto',
           maxWidth: width,
+          // On phones, wide flows retain enough width for labels to stay
+          // legible and pan inside the diagram frame. Narrow vertical flows
+          // keep their natural width and are not artificially enlarged.
+          ['--diagram-mobile-width' as string]: `${Math.min(width, 620)}px`,
         };
 
   const svgAttrs =
@@ -277,6 +318,9 @@ export function Flow({
 
   const svg = (
     <svg
+      className="fd-flow-svg"
+      data-layout={layoutDirection.toLowerCase()}
+      data-process-rail={processRail ? 'true' : undefined}
       viewBox={`0 0 ${width} ${height}`}
       {...svgAttrs}
       style={sizeStyle}
@@ -300,9 +344,8 @@ export function Flow({
         <FlowNode
           key={node.id}
           node={node}
-          filterId={id}
-          gradientId={id}
           rank={rankById.get(node.id) ?? 0}
+          processStep={processRail ? (rankById.get(node.id) ?? 0) + 1 : undefined}
         />
       ))}
     </svg>
@@ -321,6 +364,28 @@ export function Flow({
   );
 }
 
+function isLinearChain(nodes: NodeProps[], edges: EdgeProps[]): boolean {
+  if (nodes.length < 2 || edges.length !== nodes.length - 1) return false;
+  const ids = new Set(nodes.map((node) => node.id));
+  const incoming = new Map(nodes.map((node) => [node.id, 0]));
+  const outgoing = new Map(nodes.map((node) => [node.id, 0]));
+  for (const edge of edges) {
+    if (!ids.has(edge.from) || !ids.has(edge.to)) return false;
+    incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
+    outgoing.set(edge.from, (outgoing.get(edge.from) ?? 0) + 1);
+  }
+  let starts = 0;
+  let ends = 0;
+  for (const id of ids) {
+    const inCount = incoming.get(id) ?? 0;
+    const outCount = outgoing.get(id) ?? 0;
+    if (inCount === 0 && outCount === 1) starts += 1;
+    else if (inCount === 1 && outCount === 0) ends += 1;
+    else if (inCount !== 1 || outCount !== 1) return false;
+  }
+  return starts === 1 && ends === 1;
+}
+
 function FlowContainer({
   caption,
   children,
@@ -329,12 +394,12 @@ function FlowContainer({
   children: React.ReactNode;
 }) {
   return (
-    <figure className="my-6 not-prose">
-      <div className="overflow-x-auto rounded-xl border border-fd-border bg-fd-card/60 p-5">
+    <figure className="diagram-figure my-8 not-prose">
+      <div className="diagram-canvas overflow-x-auto">
         {children}
       </div>
       {caption && (
-        <figcaption className="mt-2 text-center text-sm text-fd-muted-foreground">
+        <figcaption className="diagram-caption">
           {caption}
         </figcaption>
       )}
@@ -344,70 +409,25 @@ function FlowContainer({
 
 function FlowNode({
   node,
-  filterId,
-  gradientId,
   rank,
+  processStep,
 }: {
   node: ResolvedNode;
-  filterId: string;
-  gradientId: string;
   // Layout-axis rank (left-to-right or top-to-bottom column index).
   // Used to stagger the entrance animation in reading order; the
   // class is gated on the parent figure's `data-animate="entered"`,
   // so the SSR render paints the final state until JS hydrates.
   rank: number;
+  processStep?: number;
 }) {
   const style = KIND_TO_STYLE[node.kind];
   const x = node.x - node.width / 2;
   const y = node.y - node.height / 2;
-  const rx = style.pill ? node.height / 2 : 12;
   const strokeColor = node.emphasis
-    ? `url(#${gradientId}-emphasis)`
-    : 'var(--color-fd-border)';
-  const strokeWidth = node.emphasis ? 1.75 : 1;
+    ? 'var(--diagram-accent-blue)'
+    : 'var(--diagram-node-border)';
+  const strokeWidth = node.emphasis ? 1.6 : 1;
   const nodeAnimDelay = `${rank * 60}ms`;
-
-  if (style.diamond) {
-    // Diamond shape: vertices at top/right/bottom/left of the bounding box.
-    const w = node.width;
-    const h = node.height;
-    const points = [
-      `${node.x},${y}`,
-      `${node.x + w / 2},${node.y}`,
-      `${node.x},${y + h}`,
-      `${node.x - w / 2},${node.y}`,
-    ].join(' ');
-    return (
-      <g className="fd-flow-node" style={{ animationDelay: nodeAnimDelay }}>
-        <polygon
-          points={points}
-          style={{
-            fill: 'var(--color-fd-card)',
-            stroke: style.accent || strokeColor,
-            strokeWidth: 1.25,
-          }}
-          filter={`url(#${filterId}-shadow)`}
-        />
-        {/* Slight inner highlight stripe along the top-left to suggest
-            the warm decision flag. Pure aesthetic. */}
-        <line
-          x1={node.x - node.width / 2 + 8}
-          y1={node.y - 1}
-          x2={node.x}
-          y2={y + 8}
-          style={{ stroke: style.accent, strokeWidth: 2, strokeLinecap: 'round', opacity: 0.7 }}
-        />
-        <g transform={`translate(${x}, ${y})`}>
-          <NodeLabel
-            width={node.width}
-            height={node.height}
-            lines={node.lines}
-            emphasis={node.emphasis}
-          />
-        </g>
-      </g>
-    );
-  }
 
   return (
     <g className="fd-flow-node" style={{ animationDelay: nodeAnimDelay }}>
@@ -416,48 +436,29 @@ function FlowNode({
         y={y}
         width={node.width}
         height={node.height}
-        rx={rx}
-        ry={rx}
+        rx={6}
+        ry={6}
         style={{
-          fill: 'var(--color-fd-card)',
+          fill: node.emphasis
+            ? 'var(--diagram-node-emphasis-bg)'
+            : 'var(--diagram-node-bg)',
           stroke: strokeColor,
           strokeWidth,
         }}
-        filter={`url(#${filterId}-shadow)`}
       />
 
-      {/* Kind accent stripe — left edge, rounded so it tucks behind the
-          rectangle's corner radius. Skipped when the kind has no accent
-          (generic) or when the node is emphasized (the gradient border
-          carries the visual weight instead). */}
-      {style.accent && !node.emphasis && (
+      {/* Role rail pairs a stable icon and text label with color. This keeps
+          the diagram accessible without turning every component into a
+          different pictogram shape. */}
+      {style.accent && (
         <rect
           x={x}
           y={y}
           width={STRIPE_WIDTH}
           height={node.height}
-          rx={STRIPE_WIDTH / 2}
-          ry={STRIPE_WIDTH / 2}
-          style={{ fill: style.accent }}
-          clipPath={`inset(0 0 0 0 round ${rx}px)`}
-        />
-      )}
-
-      {/* Datastore footer — a thin line near the bottom that reads as
-          a stacked DB. Kept subtle so it doesn't become a visual
-          obstacle when many datastore nodes are in one diagram. */}
-      {style.datastoreFooter && (
-        <line
-          x1={x + 12}
-          y1={y + node.height - 8}
-          x2={x + node.width - 12}
-          y2={y + node.height - 8}
-          style={{
-            stroke: 'var(--color-fd-muted-foreground)',
-            strokeWidth: 1,
-            strokeDasharray: '2 3',
-            opacity: 0.5,
-          }}
+          rx={3}
+          ry={3}
+          style={{ fill: node.emphasis ? 'var(--diagram-accent-blue)' : style.accent }}
         />
       )}
 
@@ -466,9 +467,28 @@ function FlowNode({
           width={node.width}
           height={node.height}
           lines={node.lines}
+          kind={node.kind}
           emphasis={node.emphasis}
         />
       </g>
+
+      {processStep !== undefined && (
+        <text
+          x={x + node.width - 14}
+          y={y + 19}
+          textAnchor="end"
+          aria-hidden="true"
+          style={{
+            fill: 'var(--diagram-row-number)',
+            fontFamily: 'var(--font-mono), ui-monospace, monospace',
+            fontSize: 9,
+            fontWeight: 720,
+            letterSpacing: '0.08em',
+          }}
+        >
+          {String(processStep).padStart(2, '0')}
+        </text>
+      )}
     </g>
   );
 }
@@ -487,9 +507,9 @@ function FlowEdge({
 }) {
   if (edge.points.length < 2) return null;
   const isEmphasis = edge.emphasis;
-  const stroke = isEmphasis ? 'var(--brand-cisco)' : 'var(--color-fd-border)';
-  const strokeWidth = isEmphasis ? 1.5 : 1.25;
-  const dasharray = edge.variant === 'dashed' ? '6 4' : undefined;
+  const stroke = isEmphasis ? 'var(--diagram-accent-blue)' : 'var(--diagram-edge)';
+  const strokeWidth = isEmphasis ? 1.75 : 1.25;
+  const dasharray = edge.variant === 'dashed' ? '6 5' : undefined;
   const arrow = isEmphasis ? `${markerId}-arrow-emphasis` : `${markerId}-arrow`;
 
   const d = smoothPath(edge.points);
@@ -503,7 +523,12 @@ function FlowEdge({
   // Place the edge label at the midpoint. Dagre also computes an
   // (x, y) for edge labels but only when we set width/height on the
   // edge — which we did — so prefer that for accuracy.
-  const mid = midpoint(edge.points);
+  const firstPoint = edge.points[0];
+  const lastPoint = edge.points[edge.points.length - 1];
+  const mid = edge.labelPoint ?? {
+    x: (firstPoint.x + lastPoint.x) / 2,
+    y: (firstPoint.y + lastPoint.y) / 2,
+  };
 
   // Edge starts as soon as the source node has settled (rank * 60ms +
   // half a step). The label fades in 240ms after the line begins so
@@ -555,8 +580,8 @@ function EdgeLabelChip({
   // Estimate chip width from char count. The chip uses an HTML
   // foreignObject so we get full font fallback and crisp anti-aliased
   // text instead of SVG <text> spacing quirks.
-  const chipW = Math.min(220, Math.max(40, label.length * 6.6 + 18));
-  const chipH = 22;
+  const chipW = Math.min(220, Math.max(40, label.length * 6.4 + 14));
+  const chipH = 20;
   return (
     <foreignObject
       className="fd-flow-edge-label"
@@ -573,15 +598,13 @@ function EdgeLabelChip({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          padding: '0 8px',
+          padding: '0 6px',
           boxSizing: 'border-box',
-          fontFamily: 'var(--font-sans), system-ui, sans-serif',
-          fontSize: '11.5px',
-          fontWeight: 500,
-          color: 'var(--color-fd-muted-foreground)',
-          background: 'var(--color-fd-card)',
-          border: '1px solid var(--color-fd-border)',
-          borderRadius: '999px',
+          fontFamily: 'var(--font-mono), ui-monospace, monospace',
+          fontSize: '10px',
+          fontWeight: 650,
+          color: 'var(--diagram-edge-label)',
+          background: 'var(--diagram-canvas)',
           whiteSpace: 'nowrap',
           overflow: 'hidden',
           textOverflow: 'ellipsis',
@@ -592,34 +615,4 @@ function EdgeLabelChip({
       </ForeignDiv>
     </foreignObject>
   );
-}
-
-// Geometric midpoint along a polyline of points. We walk the segments
-// and find the one that contains the half-length mark, then
-// interpolate. Beats picking the literal middle index, which biases
-// toward edges with non-uniform segment lengths.
-function midpoint(points: { x: number; y: number }[]): { x: number; y: number } {
-  if (points.length === 1) return points[0];
-  let total = 0;
-  const lens: number[] = [];
-  for (let i = 1; i < points.length; i++) {
-    const dx = points[i].x - points[i - 1].x;
-    const dy = points[i].y - points[i - 1].y;
-    const l = Math.hypot(dx, dy);
-    lens.push(l);
-    total += l;
-  }
-  const target = total / 2;
-  let walked = 0;
-  for (let i = 0; i < lens.length; i++) {
-    if (walked + lens[i] >= target) {
-      const remain = target - walked;
-      const t = lens[i] === 0 ? 0 : remain / lens[i];
-      const a = points[i];
-      const b = points[i + 1];
-      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-    }
-    walked += lens[i];
-  }
-  return points[Math.floor(points.length / 2)];
 }

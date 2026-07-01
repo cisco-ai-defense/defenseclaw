@@ -510,7 +510,7 @@ export function CommandGenerator() {
   const selected = CONNECTORS.find((c) => c.id === state.connector);
 
   return (
-    <div className="not-prose my-6 grid gap-6 rounded-2xl border border-fd-border bg-fd-card/60 p-5 lg:grid-cols-[1.1fr_1fr]">
+    <div className="command-generator not-prose my-6 grid gap-6 border border-fd-border bg-fd-card/60 p-5 lg:grid-cols-[1.1fr_1fr]">
       <div className="grid gap-6">
         <Section title="Connector" subtitle="Pick the agent framework.">
           <div className="grid gap-2 sm:grid-cols-2">
@@ -958,7 +958,7 @@ export function CommandGenerator() {
               <span className="text-fd-foreground">
                 {selected?.label ?? state.connector}
               </span>{' '}
-              <span className="text-fd-muted-foreground/80">/ {state.mode}</span>
+              <span className="text-fd-muted-foreground">/ {state.mode}</span>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -978,7 +978,11 @@ export function CommandGenerator() {
               </button>
             </div>
           </div>
-          <pre className="m-0 overflow-x-auto whitespace-pre p-4 font-mono text-[12.5px] leading-6 text-fd-foreground">
+          <pre
+            className="m-0 overflow-x-auto whitespace-pre p-4 font-mono text-[12.5px] leading-6 text-fd-foreground"
+            tabIndex={0}
+            aria-label="Generated setup command"
+          >
             {script}
           </pre>
         </div>
@@ -1030,7 +1034,7 @@ export function CommandGenerator() {
               See{' '}
               <a
                 href={`${basePath}/docs/connectors/${selected.id}`}
-                className="text-[var(--brand-cisco-strong)] hover:underline"
+                className="text-[var(--brand-cisco-strong)] underline decoration-current/50 underline-offset-2 hover:decoration-current"
               >
                 /docs/connectors/{selected.id}
               </a>{' '}

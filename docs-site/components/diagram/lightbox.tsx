@@ -116,6 +116,9 @@ export function DiagramLightbox({
       if (e.key === 'Escape') {
         e.preventDefault();
         setOpen(false);
+        requestAnimationFrame(() => {
+          triggerRef.current?.focus();
+        });
       }
     };
     document.addEventListener('keydown', onKey);
@@ -162,12 +165,12 @@ export function DiagramLightbox({
   return (
     <figure
       ref={figureRef}
-      className="my-6 not-prose relative group"
+      className="diagram-figure my-8 not-prose relative group"
       data-oversize={oversize ? 'true' : undefined}
       data-natural-width={naturalWidth}
       data-natural-height={naturalHeight}
     >
-      <div className="overflow-x-auto rounded-xl border border-fd-border bg-fd-card/60 p-5">
+      <div className="diagram-canvas overflow-x-auto">
         {children}
       </div>
 
@@ -181,7 +184,7 @@ export function DiagramLightbox({
           // can find the expand affordance; reveal-on-hover at sm+
           // keeps the button from competing with the diagram itself
           // at desktop reading widths.
-          className="absolute right-3 top-3 inline-flex items-center justify-center rounded-md border border-fd-border bg-fd-card/90 p-1.5 text-fd-muted-foreground shadow-sm transition hover:bg-fd-muted hover:text-fd-foreground focus:outline-2 focus:outline-(--brand-cisco) sm:opacity-0 sm:focus:opacity-100 sm:group-hover:opacity-100"
+          className="diagram-expand absolute right-3 top-3 inline-flex items-center justify-center p-2 transition focus:outline-2 focus:outline-(--brand-cisco) sm:opacity-0 sm:focus:opacity-100 sm:group-hover:opacity-100"
         >
           <svg
             aria-hidden
@@ -205,7 +208,7 @@ export function DiagramLightbox({
       {caption && (
         <figcaption
           id={captionId}
-          className="mt-2 text-center text-sm text-fd-muted-foreground"
+          className="diagram-caption"
         >
           {caption}
         </figcaption>
@@ -219,11 +222,11 @@ export function DiagramLightbox({
           aria-labelledby={titleId}
           aria-describedby={caption ? captionId : undefined}
           onClick={handleSurfaceClick}
-          className="fixed inset-0 z-50 flex items-stretch justify-stretch bg-black/70 p-4 backdrop-blur-sm sm:p-8"
+          className="fixed inset-0 z-50 flex items-stretch justify-stretch bg-black/75 p-4 sm:p-8"
         >
           <div
             data-animate="entered"
-            className="relative flex h-full w-full flex-col rounded-xl border border-fd-border bg-fd-background shadow-2xl"
+            className="diagram-modal-panel relative flex h-full w-full flex-col border bg-fd-background shadow-2xl"
           >
             <div className="flex items-center justify-between gap-4 border-b border-fd-border px-4 py-3">
               <h2
@@ -237,10 +240,10 @@ export function DiagramLightbox({
                 type="button"
                 onClick={handleClose}
                 aria-label="Close diagram"
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-fd-border bg-fd-card px-2.5 py-1 text-xs font-medium text-fd-muted-foreground transition hover:bg-fd-muted hover:text-fd-foreground"
+                className="inline-flex shrink-0 items-center gap-1.5 border border-fd-border bg-fd-card px-2.5 py-1 text-xs font-medium text-fd-muted-foreground transition hover:border-(--brand-cisco) hover:text-fd-foreground"
               >
                 <span>Close</span>
-                <kbd className="rounded border border-fd-border bg-fd-background px-1 font-mono text-[10px]">
+                <kbd className="border border-fd-border bg-fd-background px-1 font-mono text-[10px]">
                   Esc
                 </kbd>
               </button>

@@ -57,22 +57,29 @@ export const baseOptions: BaseLayoutProps = {
       url: '/docs/stories',
       active: 'nested-url',
     },
-    // Interactive builders — surfaced as top-level nav after the
-    // content sections (Connectors, Stories) so operators can jump
-    // straight to the two "do something" pages: assemble a
-    // non-interactive `setup guardrail` command, or author a policy
-    // with live OPA-WASM evaluation.
+    // Keep the two interactive builders one click away without letting
+    // their long labels force the tablet navbar onto two lines. The
+    // menu preserves both destinations and gives each tool enough room
+    // for a useful description.
     {
-      type: 'main',
-      text: 'Command generator',
-      url: '/docs/command-generator',
-      active: 'nested-url',
-    },
-    {
-      type: 'main',
-      text: 'Policy creator',
-      url: '/docs/policies/creator',
-      active: 'nested-url',
+      type: 'menu',
+      text: 'Tools',
+      items: [
+        {
+          type: 'main',
+          text: 'Command generator',
+          description: 'Build a non-interactive setup command.',
+          url: '/docs/command-generator',
+          active: 'nested-url',
+        },
+        {
+          type: 'main',
+          text: 'Policy creator',
+          description: 'Author and evaluate a policy in the browser.',
+          url: '/docs/policies/creator',
+          active: 'nested-url',
+        },
+      ],
     },
     // Secondary nav anchors the project to its sibling community
     // surfaces. Order is intentional: parent-org → Discord → repo
@@ -124,7 +131,7 @@ export const baseOptions: BaseLayoutProps = {
     {
       type: 'custom',
       secondary: true,
-      children: <RepoStats variant="nav" />,
+      children: <li className="flex items-center"><RepoStats variant="nav" /></li>,
     },
     {
       type: 'icon',

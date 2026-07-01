@@ -4,8 +4,8 @@
 // the actual SSR HTML, not a guess based on source-time props.
 //
 // Thresholds match the CSS layout in app/global.css:
-//   ARTICLE_WIDTH_TARGET = 1168px  → ideal cap; warn above this
-//   ARTICLE_WIDTH_HARD_LIMIT = 1500px → fail above this unless opted in
+//   ARTICLE_WIDTH_TARGET = 840px  → native-size cap at 1536px viewport
+//   ARTICLE_WIDTH_HARD_LIMIT = 1168px → fail above this unless opted in
 //
 // Opt-out: `<Flow oversize />` / `<Sequence oversize />`. Both add
 // `data-oversize="true"` to the figure element via lightbox.tsx,
@@ -20,8 +20,8 @@ const OUT_ROOT = resolve(process.cwd(), 'out');
 // Keep these in sync with components/diagram/shared.ts. We don't
 // import from there to avoid pulling tsx through the React tree at
 // postbuild time (the lightbox is a client component).
-const ARTICLE_WIDTH_TARGET = 1168;
-const ARTICLE_WIDTH_HARD_LIMIT = 1500;
+const ARTICLE_WIDTH_TARGET = 840;
+const ARTICLE_WIDTH_HARD_LIMIT = 1168;
 
 interface DiagramHit {
   file: string;
