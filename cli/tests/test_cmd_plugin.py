@@ -1310,7 +1310,9 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertTrue(os.path.isdir(os.path.join(self.hermes_root, "narrow")))
         self.assertEqual(mock_scan.call_count, 1)
 
-    def test_install_antigravity_remains_unsupported_despite_discovery_dirs(self):
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_antigravity_uses_documented_plugin_dir(self, mock_scan):
+        mock_scan.side_effect = lambda path, **_kwargs: self._clean_scan_result(path)
         antigravity_root = os.path.join(self.tmp_dir, "antigravity", "plugins")
         os.makedirs(antigravity_root)
         self.app.cfg.active_connector = lambda: "antigravity"  # type: ignore[method-assign]
@@ -1319,12 +1321,38 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
             "antigravity": [antigravity_root],
         }.get(connector or "antigravity", [])
         src = self._create_plugin_dir("agy-plugin")
+        with open(os.path.join(src, "plugin.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+                "name": "agy-plugin",
+                "description": "Antigravity plugin fixture",
+            }, fh)
+
+        result = self.invoke(["install", src, "--connector", "antigravity"])
+
+        installed = os.path.join(antigravity_root, "agy-plugin")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isdir(installed))
+        self.assertTrue(os.path.isfile(os.path.join(installed, "plugin.json")))
+        mock_scan.assert_called_once_with(installed)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_antigravity_requires_root_plugin_manifest(self, mock_scan):
+        antigravity_root = os.path.join(self.tmp_dir, "antigravity", "plugins")
+        os.makedirs(antigravity_root)
+        self.app.cfg.active_connector = lambda: "antigravity"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["antigravity"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: {  # type: ignore[method-assign]
+            "antigravity": [antigravity_root],
+        }.get(connector or "antigravity", [])
+        src = self._create_plugin_dir("not-an-antigravity-plugin")
 
         result = self.invoke(["install", src, "--connector", "antigravity"])
 
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("does not expose a plugin install directory", result.output)
-        self.assertFalse(os.path.exists(os.path.join(antigravity_root, "agy-plugin")))
+        self.assertIn("require a regular root plugin.json", result.output)
+        self.assertFalse(os.path.exists(os.path.join(antigravity_root, "not-an-antigravity-plugin")))
+        mock_scan.assert_not_called()
 
     def test_policy_verbs_reject_unknown_connector_without_writing_rows(self):
         commands = [

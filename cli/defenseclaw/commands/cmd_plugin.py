@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from typing import Any
@@ -718,6 +719,8 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
             click.echo(f"error: invalid plugin name: {plugin_name!r}", err=True)
             raise SystemExit(1)
 
+        _validate_connector_plugin_source(source_path, targets)
+
         if not pre_decisions:
             pre_decisions = _check_plugin_pre_install_admission(
                 app,
@@ -861,13 +864,16 @@ def _check_plugin_pre_install_admission(
 def _plugin_install_targets(
     app: AppContext, connectors: list[str], *, explicit_connector: bool = False,
 ) -> list[tuple[str, str]]:
-    """Return ``(connector, install_root)`` targets for plugin installs."""
+    """Return ``(connector, install_root)`` targets for plugin installs.
+
+    Antigravity is a normal filesystem-backed target: its documented global
+    plugin directory is returned by ``cfg.plugin_dirs("antigravity")`` just
+    like Claude Code, Codex, and Hermes. Keep capability decisions in the path
+    adapter instead of hard-coding connector exclusions here.
+    """
     targets: list[tuple[str, str]] = []
     skipped: list[str] = []
     for connector in connectors:
-        if connector == "antigravity":
-            skipped.append(connector)
-            continue
         dirs = [d for d in app.cfg.plugin_dirs(connector) if d]
         if not dirs:
             skipped.append(connector)
@@ -892,6 +898,57 @@ def _plugin_install_targets(
             f"[install] skipping connector={connector}: no plugin install directory"
         )
     return targets
+
+
+def _validate_connector_plugin_source(
+    source_path: str,
+    targets: list[tuple[str, str]],
+) -> None:
+    """Fail before copying a bundle that Antigravity cannot load.
+
+    Google's manual-install contract requires a regular root ``plugin.json``.
+    The IDE permits an omitted ``name`` (directory-name fallback), while the
+    CLI requires a restricted name. Accept their common contract: a JSON
+    object marker, with a valid CLI-shaped name whenever one is supplied.
+    """
+    if not any(connector == "antigravity" for connector, _root in targets):
+        return
+
+    source_root = os.path.realpath(source_path)
+    manifest_path = os.path.join(source_path, "plugin.json")
+    manifest_real = os.path.realpath(manifest_path)
+    if (
+        manifest_real == source_root
+        or not manifest_real.startswith(source_root + os.sep)
+        or os.path.islink(manifest_path)
+        or not os.path.isfile(manifest_path)
+    ):
+        click.echo(
+            "error: Antigravity plugins require a regular root plugin.json",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    try:
+        with open(manifest_path, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        click.echo(f"error: invalid Antigravity plugin.json: {exc}", err=True)
+        raise SystemExit(1) from exc
+    if not isinstance(manifest, dict):
+        click.echo("error: Antigravity plugin.json must contain a JSON object", err=True)
+        raise SystemExit(1)
+
+    declared_name = manifest.get("name")
+    if declared_name is not None and (
+        not isinstance(declared_name, str)
+        or re.fullmatch(r"[A-Za-z0-9_-]+", declared_name) is None
+    ):
+        click.echo(
+            "error: Antigravity plugin.json name must match [A-Za-z0-9_-]+",
+            err=True,
+        )
+        raise SystemExit(1)
 
 
 def _copy_plugin_tree_to_connector(

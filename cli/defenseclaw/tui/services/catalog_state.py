@@ -1736,9 +1736,9 @@ def connector_source_label(connector: str, category: str) -> str:
         ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("antigravity", "plugins"): (
-            "~/.gemini/config/plugins/<plugin>/ (discovery-only)",
+            "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
-            "<workspace>/.agents/plugins/<plugin>/ (discovery-only)",
+            "<workspace>/.agents/plugins/<plugin>/ (read/write)",
         ),
         ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("omnigent", "config"): ("$OMNIGENT_CONFIG_HOME/config.yaml or ~/.omnigent/config.yaml",),

@@ -131,7 +131,7 @@ documented local customization surface. For Antigravity, the PR #365 contract is
 | MCP | `~/.gemini/config/mcp_config.json`, `<workspace>/.agents/mcp_config.json` | Read/write global and workspace MCP configs. Plugin-contained `<plugin>/mcp_config.json` is discovery-only. |
 | Skills | `~/.gemini/config/skills/<skill>/SKILL.md`, `<workspace>/.agents/skills/<skill>/SKILL.md` | Read/write AgentSkills folder form. CLI direct markdown skills under `~/.gemini/antigravity-cli/skills/` are discovery-only. |
 | Rules | `~/.gemini/GEMINI.md`, `<workspace>/.agents/rules/`, `<plugin>/rules/*.md` | Discovery-only until activation metadata and naming are documented. |
-| Plugins | `~/.gemini/config/plugins/<plugin>/`, `~/.gemini/antigravity-cli/plugins/<plugin>/`, `<workspace>/.agents/plugins/<plugin>/` | Discovery/scan only. DefenseClaw does not install or disable Antigravity plugins in this PR. |
+| Plugins | `~/.gemini/config/plugins/<plugin>/`, `~/.gemini/antigravity-cli/plugins/<plugin>/`, `<workspace>/.agents/plugins/<plugin>/` | Install/list/scan/remove at the documented global or workspace path. The CLI-managed `antigravity-cli/plugins` path is also discovered; runtime disable remains policy/advisory state rather than a native `agy plugin disable` call. |
 | Agents | `<plugin>/agents/` | Plugin-contained agents are discovery-only; standalone Antigravity agent paths are not documented. |
 
 The legacy Antigravity marketing-path hook file
