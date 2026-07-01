@@ -22,16 +22,24 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
-func TestWaitForGatewayReadinessWaitsForRunningAPI(t *testing.T) {
+func readinessSnapshot(guardrailState, gatewayState gateway.SubsystemState) gateway.HealthSnapshot {
+	return gateway.HealthSnapshot{
+		API:       gateway.SubsystemHealth{State: gateway.StateRunning},
+		Gateway:   gateway.SubsystemHealth{State: gatewayState},
+		Watcher:   gateway.SubsystemHealth{State: gateway.StateDisabled},
+		Guardrail: gateway.SubsystemHealth{State: guardrailState},
+		Telemetry: gateway.SubsystemHealth{State: gateway.StateDisabled},
+	}
+}
+
+func TestWaitForGatewayReadinessWaitsForDelayedGuardrailRunning(t *testing.T) {
 	var probes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		state := gateway.StateStarting
+		state := gateway.StateDisabled
 		if probes.Add(1) >= 3 {
 			state = gateway.StateRunning
 		}
-		_ = json.NewEncoder(w).Encode(gateway.HealthSnapshot{
-			API: gateway.SubsystemHealth{State: state},
-		})
+		_ = json.NewEncoder(w).Encode(readinessSnapshot(state, gateway.StateDisabled))
 	}))
 	defer srv.Close()
 
@@ -40,6 +48,7 @@ func TestWaitForGatewayReadinessWaitsForRunningAPI(t *testing.T) {
 		srv.URL,
 		time.Second,
 		5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true},
 		func() bool { return true },
 	)
 	if err != nil {
@@ -48,19 +57,17 @@ func TestWaitForGatewayReadinessWaitsForRunningAPI(t *testing.T) {
 	if !ready {
 		t.Fatal("waitForGatewayReadiness() ready = false, want true")
 	}
-	if snap.API.State != gateway.StateRunning {
-		t.Fatalf("API state = %q, want %q", snap.API.State, gateway.StateRunning)
+	if snap.Guardrail.State != gateway.StateRunning {
+		t.Fatalf("guardrail state = %q, want %q", snap.Guardrail.State, gateway.StateRunning)
 	}
 	if got := probes.Load(); got != 3 {
 		t.Fatalf("health probes = %d, want 3", got)
 	}
 }
 
-func TestWaitForGatewayReadinessReturnsStableStartingOnTimeout(t *testing.T) {
+func TestWaitForGatewayReadinessReturnsTimeoutForEnabledGuardrailStillDisabled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(gateway.HealthSnapshot{
-			API: gateway.SubsystemHealth{State: gateway.StateStarting},
-		})
+		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled))
 	}))
 	defer srv.Close()
 
@@ -69,16 +76,17 @@ func TestWaitForGatewayReadinessReturnsStableStartingOnTimeout(t *testing.T) {
 		srv.URL,
 		50*time.Millisecond,
 		5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true},
 		func() bool { return true },
 	)
-	if err != nil {
-		t.Fatalf("waitForGatewayReadiness() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("waitForGatewayReadiness() error = %v, want timeout", err)
 	}
 	if ready {
 		t.Fatal("waitForGatewayReadiness() ready = true, want false")
 	}
-	if snap.API.State != gateway.StateStarting {
-		t.Fatalf("API state = %q, want %q", snap.API.State, gateway.StateStarting)
+	if snap.Guardrail.State != gateway.StateDisabled {
+		t.Fatalf("guardrail state = %q, want %q", snap.Guardrail.State, gateway.StateDisabled)
 	}
 }
 
@@ -95,6 +103,7 @@ func TestWaitForGatewayReadinessFailsFastWhenProcessExits(t *testing.T) {
 		srv.URL,
 		time.Second,
 		5*time.Millisecond,
+		daemonReadinessRequirements{},
 		func() bool { return false },
 	)
 	if err == nil || !strings.Contains(err.Error(), "exited before readiness") {
@@ -124,6 +133,7 @@ func TestWaitForGatewayReadinessFailsFastOnAPIError(t *testing.T) {
 		srv.URL,
 		time.Second,
 		5*time.Millisecond,
+		daemonReadinessRequirements{},
 		func() bool { return true },
 	)
 	if err == nil || !strings.Contains(err.Error(), "bind failed") {
@@ -131,6 +141,172 @@ func TestWaitForGatewayReadinessFailsFastOnAPIError(t *testing.T) {
 	}
 	if ready {
 		t.Fatal("waitForGatewayReadiness() ready = true, want false")
+	}
+}
+
+func TestWaitForGatewayReadinessFailsFastOnGuardrailError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		snap := readinessSnapshot(gateway.StateError, gateway.StateDisabled)
+		snap.Guardrail.LastError = "connector setup failed"
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(),
+		srv.URL,
+		time.Second,
+		5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true},
+		func() bool { return true },
+	)
+	if err == nil || !strings.Contains(err.Error(), "connector setup failed") {
+		t.Fatalf("error = %v, want guardrail failure diagnostic", err)
+	}
+	if ready {
+		t.Fatal("waitForGatewayReadiness() ready = true, want false")
+	}
+}
+
+func TestWaitForGatewayReadinessAcceptsConfiguredDisabledGuardrail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateDisabled, gateway.StateRunning))
+	}))
+	defer srv.Close()
+
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: false},
+		func() bool { return true },
+	)
+	if err != nil || !ready {
+		t.Fatalf("disabled guardrail readiness = %v, error = %v", ready, err)
+	}
+}
+
+func TestWaitForGatewayReadinessWaitsForDisabledGuardrailFinalization(t *testing.T) {
+	startedAt := time.Now()
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		snap := readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled)
+		snap.StartedAt = startedAt
+		snap.Guardrail.Since = startedAt
+		if probes.Add(1) >= 2 {
+			snap.Guardrail.Since = startedAt.Add(time.Millisecond)
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: false},
+		func() bool { return true },
+	)
+	if err != nil || !ready {
+		t.Fatalf("disabled guardrail finalization readiness = %v, error = %v", ready, err)
+	}
+	if got := probes.Load(); got != 2 {
+		t.Fatalf("health probes = %d, want 2", got)
+	}
+}
+
+func TestWaitForGatewayReadinessAcceptsHookOnlyGatewayDisabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateRunning, gateway.StateDisabled))
+	}))
+	defer srv.Close()
+
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true},
+		func() bool { return true },
+	)
+	if err != nil || !ready {
+		t.Fatalf("hook-only gateway disabled readiness = %v, error = %v", ready, err)
+	}
+}
+
+func TestWaitForGatewayReadinessRejectsPreviousProcessGeneration(t *testing.T) {
+	startAttemptedAt := time.Now()
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+		if probes.Add(1) < 3 {
+			snap.StartedAt = startAttemptedAt.Add(-time.Minute)
+		} else {
+			snap.StartedAt = startAttemptedAt.Add(time.Millisecond)
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	snap, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{
+			guardrailEnabled: true,
+			startedNotBefore: startAttemptedAt,
+		},
+		func() bool { return true },
+	)
+	if err != nil || !ready {
+		t.Fatalf("new process generation readiness = %v, error = %v", ready, err)
+	}
+	if snap.StartedAt.Before(startAttemptedAt) {
+		t.Fatalf("accepted stale started_at %s before %s", snap.StartedAt, startAttemptedAt)
+	}
+	if got := probes.Load(); got != 3 {
+		t.Fatalf("health probes = %d, want 3", got)
+	}
+}
+
+func TestWaitForGatewayReadinessWaitsForConfiguredWatcher(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+		snap.Watcher.State = gateway.StateStarting
+		if probes.Add(1) >= 2 {
+			snap.Watcher.State = gateway.StateRunning
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true, watcherEnabled: true},
+		func() bool { return true },
+	)
+	if err != nil || !ready {
+		t.Fatalf("configured watcher readiness = %v, error = %v", ready, err)
+	}
+	if got := probes.Load(); got != 2 {
+		t.Fatalf("health probes = %d, want 2", got)
+	}
+}
+
+func TestWaitForGatewayReadinessAllowsRecoveringGatewayError(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		snap := readinessSnapshot(gateway.StateRunning, gateway.StateError)
+		snap.Gateway.LastError = "upstream unavailable"
+		if probes.Add(1) >= 2 {
+			snap.Gateway = gateway.SubsystemHealth{State: gateway.StateRunning}
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true},
+		func() bool { return true },
+	)
+	if err != nil || !ready {
+		t.Fatalf("recovering gateway readiness = %v, error = %v", ready, err)
+	}
+	if got := probes.Load(); got != 2 {
+		t.Fatalf("health probes = %d, want 2", got)
 	}
 }
 

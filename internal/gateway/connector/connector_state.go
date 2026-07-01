@@ -531,17 +531,7 @@ func surfaceLocations(cap SurfaceCapability) SurfaceLocations {
 }
 
 func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
-	if HookContractCompatibilityDrifted(previous, current) {
-		return true
-	}
-	if len(previous.HookScriptDigests) > 0 && len(current.HookScriptDigests) > 0 {
-		for name, digest := range previous.HookScriptDigests {
-			if current.HookScriptDigests[name] != "" && current.HookScriptDigests[name] != digest {
-				return true
-			}
-		}
-	}
-	return false
+	return HookContractCompatibilityDrifted(previous, current)
 }
 
 // HookContractCompatibilityDrifted reports only upstream compatibility
