@@ -13,7 +13,7 @@ keywords:
   - config.yaml
 ---
 
-Enterprise deployment is for endpoints where DefenseClaw policy must be controlled by administrators, not by the interactive user running Codex, Claude Code, Cursor, Antigravity, or another AI agent.
+Enterprise deployment is for centrally managed endpoints where DefenseClaw policy must remain under administrator control instead of the interactive user running Codex, Claude Code, Cursor, Antigravity, or another AI agent. Start with the rollout sequence below, then follow the platform section for Linux or macOS.
 
 <Callout title="Managed mode boundary">
 Set `deployment_mode: managed_enterprise` when DefenseClaw is installed as an operating-system service. In this mode, `config.yaml` is treated as an administrator-owned policy file and runtime HTTP PATCH changes are rejected.
@@ -27,23 +27,33 @@ An AI agent running as a standard, non-privileged user cannot stop the system se
 
 Enterprise hardening separates **policy authority**, **inspection runtime**, and **user-agent integration**:
 
-```mermaid
-flowchart LR
-    Admin["Administrator or MDM"] --> RootConfig["Root-owned config and policy"]
-    Admin --> RootBinary["Root-owned binaries and service definitions"]
-    Admin --> Manifest["Root-owned target allow-list"]
-    RootConfig --> Gateway["DefenseClaw gateway service"]
-    RootBinary --> Gateway
-    Manifest --> Guardian["Privileged hook guardian"]
-    Guardian --> Ledger["Root-owned authorization ledger"]
-    Guardian --> UserHooks["User-owned native agent hooks"]
-    UserHooks --> ScopedToken["Connector-scoped raw token"]
-    ScopedToken --> HookAPI["Loopback connector hook route"]
-    HookAPI --> Gateway
-    Ledger --> Readiness["Managed readiness and enforcement health"]
-    Gateway --> Readiness
-    Agent["Codex, Claude Code, Cursor, or other agent"] --> UserHooks
-```
+<Flow
+  direction="TB"
+  compact
+  caption="Administrator policy and target authorization remain outside the agent user's authority. The gateway evaluates hook traffic; the guardian repairs only allow-listed user integrations."
+>
+  <Node id="admin" kind="operator">Administrator / MDM</Node>
+  <Node id="policy" kind="policy">{`Root-owned\nconfig + services`}</Node>
+  <Node id="manifest" kind="policy">{`Target allow-list\nusers · connectors`}</Node>
+  <Node id="guardian" kind="operator">{`Hook guardian\nprivileged repair`}</Node>
+  <Node id="agent" kind="agent">{`User AI agent\nCodex · Claude · …`}</Node>
+  <Node id="hooks" kind="connector">{`Native hooks\nscoped token`}</Node>
+  <Node id="api" kind="connector">Loopback hook API</Node>
+  <Node id="gateway" kind="gateway">DefenseClaw gateway</Node>
+  <Node id="ledger" kind="datastore">{`Authorization ledger\nroot-owned`}</Node>
+  <Node id="readiness" kind="generic">{`Managed readiness\nenforcement health`}</Node>
+  <Edge from="admin" to="policy" />
+  <Edge from="admin" to="manifest" />
+  <Edge from="policy" to="gateway" />
+  <Edge from="manifest" to="guardian" />
+  <Edge from="guardian" to="hooks" label="install + repair" />
+  <Edge from="guardian" to="ledger" label="authorize" />
+  <Edge from="agent" to="hooks" />
+  <Edge from="hooks" to="api" />
+  <Edge from="api" to="gateway" />
+  <Edge from="gateway" to="readiness" />
+  <Edge from="ledger" to="readiness" />
+</Flow>
 
 The gateway is intentionally unable to write broadly into user homes. The guardian is the only privileged component that repairs allow-listed per-user integrations, and it does not discover arbitrary users or applications on its own.
 
@@ -141,7 +151,7 @@ Use a staged deployment rather than enabling action mode everywhere at once:
 5. **Run one manual reconcile.** Review JSON/status output and resolve every failed target before enabling the watcher.
 6. **Enable event-driven and periodic repair.** On Linux, run the watcher plus timer. On macOS, the packaged LaunchDaemon performs periodic reconcile; use MDM/EDR for stronger native-config prevention.
 7. **Move selected connectors to action mode.** Confirm allow and deterministic block events, then monitor error/block counters and guardian health.
-8. **Run the adversarial validation plan.** Use a dedicated test endpoint and account; see [Linux enterprise hardening validation](/docs/setup/enterprise-hardening-validation).
+8. **Record deployment acceptance.** On a dedicated test endpoint, confirm the evidence under [Verify](#verify), exercise one allowed and one blocked request, and record the recovery window for an authorized user-hook repair. Keep destructive tamper testing in your controlled endpoint-validation pipeline rather than on a production user workstation.
 
 ### Prerequisites
 
@@ -171,7 +181,7 @@ sudo install -d -o root -g defenseclaw -m 0750 /etc/defenseclaw
 sudo install -d -o root -g root -m 0750 /etc/defenseclaw/hook-guardian
 sudo install -d -o root -g root -m 0755 /opt/defenseclaw/bin
 sudo install -d -o defenseclaw -g defenseclaw -m 0750 /var/lib/defenseclaw /var/log/defenseclaw
-sudo install -d -o root -g root -m 0755 /var/lib/defenseclaw-hook-guardian
+sudo install -d -o root -g defenseclaw -m 0750 /var/lib/defenseclaw-hook-guardian
 ```
 
 Install the binaries and service files:
@@ -200,7 +210,7 @@ stat -c '%U:%G %a %n' \
 Create `/etc/defenseclaw/config.yaml`:
 
 ```yaml
-config_version: 6
+config_version: 7
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw
 audit_db: /var/lib/defenseclaw/audit.db
@@ -610,7 +620,7 @@ Expected evidence:
 - user-owned hook tamper repaired within the organization's measured and accepted recovery window;
 - no continuing reconciles after the repaired footprint settles.
 
-See [Linux enterprise hardening validation](/docs/setup/enterprise-hardening-validation) for a lab-safe test plan and evidence template.
+Treat this evidence as a release gate for the managed endpoint image. Run destructive tamper scenarios only in a dedicated validation environment with an independent administrator recovery channel.
 
 ## Production checklist
 
