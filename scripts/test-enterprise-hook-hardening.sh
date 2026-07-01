@@ -43,6 +43,76 @@ protected_file_owner_uid() {
     fi
 }
 
+protected_file_owner_gid() {
+    if [ "$(uname -s)" = Darwin ]; then
+        sudo -n stat -f '%g' "$1"
+    else
+        sudo -n stat -c '%g' "$1"
+    fi
+}
+
+protected_file_mode() {
+    if [ "$(uname -s)" = Darwin ]; then
+        sudo -n stat -f '%Lp' "$1"
+    else
+        sudo -n stat -c '%a' "$1"
+    fi
+}
+
+ensure_service_identity() {
+    if id defenseclaw >/dev/null 2>&1; then
+        [ "$(id -gn defenseclaw 2>/dev/null)" = defenseclaw ] || fail "existing defenseclaw user has the wrong primary group"
+        return
+    fi
+
+    case "$(uname -s)" in
+        Darwin)
+            if dscl . -read /Groups/defenseclaw >/dev/null 2>&1; then
+                fail "defenseclaw group exists without a matching service user"
+            fi
+            used_ids="$(
+                dscl . -list /Users UniqueID 2>/dev/null | awk '{print $NF}'
+                dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $NF}'
+            )"
+            service_id=499
+            while printf '%s\n' "$used_ids" | grep -qx "$service_id"; do
+                service_id=$((service_id - 1))
+                [ "$service_id" -ge 400 ] || fail "no free macOS service uid/gid available"
+            done
+            sudo -n /usr/bin/dscl . -create /Groups/defenseclaw
+            service_group_created=true
+            sudo -n /usr/bin/dscl . -create /Groups/defenseclaw RealName "DefenseClaw Service"
+            sudo -n /usr/bin/dscl . -create /Groups/defenseclaw PrimaryGroupID "$service_id"
+            sudo -n /usr/bin/dscl . -create /Users/defenseclaw
+            service_user_created=true
+            sudo -n /usr/bin/dscl . -create /Users/defenseclaw RealName "DefenseClaw Service"
+            sudo -n /usr/bin/dscl . -create /Users/defenseclaw UniqueID "$service_id"
+            sudo -n /usr/bin/dscl . -create /Users/defenseclaw PrimaryGroupID "$service_id"
+            sudo -n /usr/bin/dscl . -create /Users/defenseclaw NFSHomeDirectory /var/empty
+            sudo -n /usr/bin/dscl . -create /Users/defenseclaw UserShell /usr/bin/false
+            sudo -n /usr/bin/dscl . -create /Users/defenseclaw IsHidden 1
+            sudo -n /usr/bin/dscacheutil -flushcache
+            ;;
+        Linux)
+            if getent group defenseclaw >/dev/null 2>&1; then
+                fail "defenseclaw group exists without a matching service user"
+            fi
+            sudo -n /usr/sbin/groupadd --system defenseclaw
+            service_group_created=true
+            sudo -n /usr/sbin/useradd --system --gid defenseclaw --home-dir /nonexistent --shell /usr/sbin/nologin defenseclaw
+            service_user_created=true
+            ;;
+        *) fail "unsupported operating system: $(uname -s)" ;;
+    esac
+
+    attempt=0
+    until id defenseclaw >/dev/null 2>&1 && [ "$(id -gn defenseclaw 2>/dev/null)" = defenseclaw ]; do
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 50 ] || fail "service identity did not become visible"
+        sleep 0.1
+    done
+}
+
 wait_for_file() {
     local path="$1"
     local max_attempts="${2:-100}"
@@ -120,6 +190,8 @@ server_ready="${target_home}/fake-gateway.ready"
 server_result="${target_home}/fake-gateway-result.json"
 server_log="${target_home}/fake-gateway.log"
 fake_server_pid=''
+service_user_created=false
+service_group_created=false
 
 cleanup() {
     local status=$?
@@ -130,10 +202,31 @@ cleanup() {
     fi
     sudo -n rm -rf -- "$root_prefix" >/dev/null 2>&1 || true
     rm -rf -- "$target_home"
+    case "$(uname -s)" in
+        Darwin)
+            if [ "$service_user_created" = true ]; then
+                sudo -n /usr/bin/dscl . -delete /Users/defenseclaw >/dev/null 2>&1 || true
+            fi
+            if [ "$service_group_created" = true ]; then
+                sudo -n /usr/bin/dscl . -delete /Groups/defenseclaw >/dev/null 2>&1 || true
+            fi
+            sudo -n /usr/bin/dscacheutil -flushcache >/dev/null 2>&1 || true
+            ;;
+        Linux)
+            if [ "$service_user_created" = true ]; then
+                sudo -n /usr/sbin/userdel defenseclaw >/dev/null 2>&1 || true
+            fi
+            if [ "$service_group_created" = true ]; then
+                sudo -n /usr/sbin/groupdel defenseclaw >/dev/null 2>&1 || true
+            fi
+            ;;
+    esac
     exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
+
+ensure_service_identity
 
 rm -rf -- "$target_home"
 install -d -m 0700 "$target_home" "$(dirname "$native_config")"
@@ -262,7 +355,14 @@ run_reconcile >"${target_home}/reconcile-initial.json"
 [ -f "$hook_script" ] || fail "managed hook was not installed"
 [ -f "$user_token" ] || fail "connector-scoped user token was not installed"
 sudo -n test -f "$service_token" || fail "connector-scoped service token was not created"
-[ -f "$auth_record" ] || fail "root-owned authorization record was not created"
+sudo -n test -f "$auth_record" || fail "root-owned authorization record was not created"
+[ "$(protected_file_owner_uid "$auth_record")" = 0 ] || fail "authorization record is not root-owned"
+[ "$(protected_file_owner_gid "$auth_record")" = "$(id -g defenseclaw)" ] || fail "authorization record group is not defenseclaw"
+[ "$(protected_file_mode "$auth_record")" = 640 ] || fail "authorization record mode is not 0640"
+sudo -n -u defenseclaw test -r "$auth_record" || fail "defenseclaw service identity cannot read the authorization record"
+if cat "$auth_record" >/dev/null 2>&1; then
+    fail "ordinary user can read the authorization record"
+fi
 [ "$(file_mode "$hook_script")" = '700' ] || fail "hook mode is not 0700"
 [ "$(file_mode "$user_token")" = '600' ] || fail "user token mode is not 0600"
 [ "$(file_mode "$native_config")" = '600' ] || fail "native config mode is not 0600"
@@ -275,7 +375,7 @@ sudo -n test -f "$service_token" || fail "connector-scoped service token was not
 grep -Fq "$hook_script" "$native_config" || fail "native agent config does not reference the managed hook"
 sudo -n cmp -s "$service_token" "$user_token" || fail "service and user scoped tokens differ"
 
-python3 - "$auth_record" "$connector" "$target_home" <<'PY'
+sudo -n -u defenseclaw python3 - "$auth_record" "$connector" "$target_home" <<'PY'
 import json
 import pathlib
 import sys
