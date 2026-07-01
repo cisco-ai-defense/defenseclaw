@@ -33,6 +33,7 @@ from defenseclaw.observability.v8_status import (
 from defenseclaw.tui.app import (
     _DEFENSECLAW_LOGO,
     DefenseClawTUI,
+    _activity_refresh_bucket,
     _catalog_panel_invalidated_by_command,
     _enforcement_label,
     _event_histogram,
@@ -69,7 +70,7 @@ from defenseclaw.tui.services.gateway_log_views import GatewayLogRow
 from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, CredentialRow
 from defenseclaw.tui.services.tui_state import STATE_FILENAME
 from defenseclaw.tui.widgets.action_menu import ActionMenu
-from defenseclaw.tui.widgets.native_metrics import MetricTile, OverviewMetrics
+from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
@@ -422,6 +423,170 @@ def test_overview_body_signature_ignores_clock_only_labels() -> None:
 
     app.body_text = "DefenseClaw v0.0.0 uptime=13s\nCodex 1s ago\nDoctor 2m ago\nCalls 7"
     assert app._overview_body_signature() != first
+
+
+def test_activity_refresh_bucket_uses_bounded_clock_steps() -> None:
+    now = datetime(2026, 7, 1, 16, 0, tzinfo=timezone.utc)
+
+    assert _activity_refresh_bucket(None, now) == ("none", 0)
+    assert _activity_refresh_bucket(now - timedelta(seconds=9), now) == ("10s", 0)
+    assert _activity_refresh_bucket(now - timedelta(seconds=10), now) == ("10s", 1)
+    assert _activity_refresh_bucket(now - timedelta(seconds=59), now) == ("10s", 5)
+    assert _activity_refresh_bucket(now - timedelta(seconds=60), now) == ("minute", 1)
+    assert _activity_refresh_bucket(now - timedelta(minutes=59), now) == ("minute", 59)
+    assert _activity_refresh_bucket(now - timedelta(hours=1), now) == ("hour", 1)
+    assert _activity_refresh_bucket(now - timedelta(hours=23), now) == ("hour", 23)
+    assert _activity_refresh_bucket(now - timedelta(days=1), now) == ("day", 1)
+
+
+def test_connector_signature_detects_raw_activity_change_without_count_change() -> None:
+    now = datetime.now(timezone.utc)
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "observe"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    def set_activity(at: datetime) -> None:
+        overview.set_health(
+            HealthSnapshot(
+                gateway=SubsystemHealth(state="running"),
+                connectors=(
+                    ConnectorHealth(
+                        name="codex",
+                        state="running",
+                        since=(now - timedelta(minutes=5)).isoformat(),
+                        requests=4,
+                        last_activity_at=at.isoformat(),
+                    ),
+                    ConnectorHealth(name="cursor", state="running"),
+                ),
+            )
+        )
+
+    set_activity(now - timedelta(seconds=20))
+    first = app._overview_connector_rows_signature()
+    set_activity(now)
+    second = app._overview_connector_rows_signature()
+
+    assert first != second
+    row = next(row for row in app._overview_connector_rows() if row.connector == "codex")
+    assert row.calls == 4
+    assert row.last_activity_at == now
+
+
+def test_live_overview_signature_covers_scans_alerts_and_large_tiles() -> None:
+    now = datetime.now(timezone.utc)
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "observe"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="running"),
+            connectors=(
+                ConnectorHealth(
+                    name="codex",
+                    state="running",
+                    since=(now - timedelta(minutes=5)).isoformat(),
+                    requests=1,
+                    last_activity_at=(now - timedelta(seconds=5)).isoformat(),
+                ),
+                ConnectorHealth(name="cursor", state="running"),
+            ),
+        )
+    )
+
+    class LiveStore:
+        def __init__(self) -> None:
+            self.scans = 1
+            self.events: list[Event] = []
+
+        def count_scan_results_since(self, _since: datetime | None) -> int:
+            return self.scans
+
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(self.events[-limit:])
+
+        def connector_hook_event_stats(self) -> dict[str, dict[str, object]]:
+            return {}
+
+    store = LiveStore()
+    app = DefenseClawTUI(
+        overview_model=overview,
+        audit_model=AuditPanelModel(store),
+    )
+    with app._connector_hook_event_render_cache():
+        first = app._overview_live_data_signature()
+
+    store.scans = 2
+    store.events.append(
+        Event(
+            id="live-alert",
+            timestamp=now,
+            action="connector-hook",
+            target="PostToolUse",
+            severity="HIGH",
+            details="connector=codex action=alert severity=HIGH",
+        )
+    )
+    with app._connector_hook_event_render_cache():
+        second = app._overview_live_data_signature()
+        metrics = {metric.key: metric.value for metric in app._overview_metric_data()}
+        enforcement = app._overview_session_enforcement_counts()
+        connector = next(
+            row for row in app._overview_connector_rows() if row.connector == "codex"
+        )
+
+    assert first != second
+    assert enforcement.total_scans == 2
+    assert metrics["hook_calls"] == 1
+    assert metrics["findings"] == 1
+    assert connector.alerts == 1
+
+
+def test_live_overview_signature_ignores_clock_driven_sparkline_motion(
+    monkeypatch,
+) -> None:
+    app = DefenseClawTUI()
+    metric = MetricDatum(
+        key="hook_calls",
+        label="Hook Calls",
+        value=4,
+        progress=4.0,
+        detail="session a4 w0 b0",
+        trend=(0.0, 4.0),
+        state="ok",
+    )
+    monkeypatch.setattr(app, "_overview_connector_rows_signature", lambda: ())
+    monkeypatch.setattr(app, "_overview_metric_data", lambda: (metric,))
+    monkeypatch.setattr(app, "_active_connector_names", lambda: [])
+    monkeypatch.setattr(app, "_enforcement_scope_breakdown", lambda _scope: (4, 0, 0))
+
+    first = app._overview_live_data_signature()
+    monkeypatch.setattr(
+        app,
+        "_overview_metric_data",
+        lambda: (
+            MetricDatum(
+                key="hook_calls",
+                label="Hook Calls",
+                value=4,
+                progress=4.0,
+                detail="session a4 w0 b0",
+                trend=(4.0, 0.0),
+                state="ok",
+            ),
+        ),
+    )
+
+    assert app._overview_live_data_signature() == first
 
 
 @pytest.mark.asyncio
@@ -1938,6 +2103,77 @@ async def test_background_poll_wrappers_clear_single_flight_flags(tmp_path) -> N
     await app._refresh_credentials_once()  # noqa: SLF001
     assert app._credentials_refresh_running is False  # noqa: SLF001
     assert calls == ["health", "ai:False", "credentials"]
+
+
+@pytest.mark.asyncio
+async def test_health_poll_allows_scrolled_repaint_when_live_overview_changes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    cfg = OverviewConfig(
+        data_dir=str(tmp_path),
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "observe"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="running"),
+            connectors=(
+                ConnectorHealth(
+                    name="codex",
+                    state="running",
+                    since=(now - timedelta(minutes=5)).isoformat(),
+                    requests=1,
+                    last_activity_at=(now - timedelta(seconds=30)).isoformat(),
+                ),
+                ConnectorHealth(name="cursor", state="running"),
+            ),
+        )
+    )
+    config = SimpleNamespace(
+        data_dir=str(tmp_path),
+        gateway=SimpleNamespace(api_port=18970, host="127.0.0.1", token="token"),
+    )
+    app = DefenseClawTUI(config=config, overview_model=overview)
+    with app._connector_hook_event_render_cache():
+        app._overview_live_data_signature_cache = app._overview_live_data_signature()
+
+    fresh = HealthSnapshot(
+        gateway=SubsystemHealth(state="running"),
+        connectors=(
+            ConnectorHealth(
+                name="codex",
+                state="running",
+                since=(now - timedelta(minutes=5)).isoformat(),
+                requests=5,
+                last_activity_at=now.isoformat(),
+            ),
+            ConnectorHealth(name="cursor", state="running"),
+        ),
+    )
+    monkeypatch.setattr("defenseclaw.tui.app._fetch_gateway_health", lambda _cfg: fresh)
+    monkeypatch.setattr(app, "_propagate_connector", lambda _snapshot: None)
+    monkeypatch.setattr(app, "_mark_restart_if_gateway_restarted", lambda _snapshot: None)
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: None)
+    monkeypatch.setattr(app, "_render_overview_scope_indicator", lambda: None)
+    scheduled: list[bool] = []
+    monkeypatch.setattr(
+        app,
+        "_schedule_overview_sampled_refresh",
+        lambda *, allow_scrolled=False, **_kwargs: scheduled.append(allow_scrolled),
+    )
+    app.active_panel = "overview"
+    app.help_open = False
+
+    await app._poll_health()
+
+    assert scheduled == [True]
+    rows = {row.connector: row for row in app._overview_connector_rows()}
+    assert rows["codex"].calls == 5
+    assert rows["codex"].last_activity_at == now
 
 
 def test_slow_refresh_scheduler_is_single_flight(tmp_path) -> None:
