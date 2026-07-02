@@ -320,6 +320,48 @@ class TestScanAllUX(_SkillScanUXBase):
         self.assertIn("blocked=0", result.output)
         self.assertIn("findings=1", result.output)
 
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch(
+        "defenseclaw.commands.cmd_skill._list_openclaw_skills_full",
+        return_value={"skills": [{"name": "alpha"}]},
+    )
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_name_only_listing_falls_back_for_missing_path(
+        self,
+        mock_cls,
+        _mock_list,
+        _mock_info,
+    ) -> None:
+        root = self._make_skills_dir(["alpha"])
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+        mock_cls.return_value.scan.side_effect = self._clean_result
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_cls.return_value.scan.assert_called_once_with(os.path.join(root, "alpha"))
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_complete_listing_remains_authoritative(
+        self,
+        mock_cls,
+        mock_list,
+        mock_info,
+    ) -> None:
+        root = self._make_skills_dir(["alpha", "filesystem-only"])
+        alpha = os.path.join(root, "alpha")
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+        mock_list.return_value = {"skills": [{"name": "alpha", "baseDir": alpha}]}
+        mock_cls.return_value.scan.side_effect = self._clean_result
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_cls.return_value.scan.assert_called_once_with(alpha)
+        mock_info.assert_not_called()
+
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scan_all_filesystem_fallback_expands_codex_system_children(

@@ -226,6 +226,21 @@ def test_codex_bundled_node_repl_is_admitted_only_from_trusted_layout(
     outside.write_bytes(b"test executable fixture")
     assert mcp_scanner.is_safe_stdio_scan_command(str(outside), []) is False
 
+    sibling_prefix = (
+        tmp_path
+        / "Local"
+        / "OpenAI"
+        / "Codex"
+        / "runtimes-evil"
+        / "cua_node"
+        / "runtime-id"
+        / "bin"
+        / "node_repl.exe"
+    )
+    sibling_prefix.parent.mkdir(parents=True)
+    sibling_prefix.write_bytes(b"test executable fixture")
+    assert mcp_scanner.is_safe_stdio_scan_command(str(sibling_prefix), []) is False
+
 
 # ---------------------------------------------------------------------------
 # F-0343 — registry MCP scan must not forward operator env secrets

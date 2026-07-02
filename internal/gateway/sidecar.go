@@ -27,7 +27,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1687,7 +1686,11 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	}
 
 	if len(skillDirs) == 0 && len(pluginDirs) == 0 {
-		s.health.SetWatcher(StateError, "no directories configured", nil)
+		s.health.SetWatcher(StateRunning, "", map[string]interface{}{
+			"skill_dirs":  0,
+			"plugin_dirs": 0,
+			"idle":        "no directories configured",
+		})
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: no directories to watch\n")
 		<-ctx.Done()
 		return nil
@@ -2223,14 +2226,13 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	} else if guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: skipping connector setup/teardown for %s; hooks are installed and repaired by the enterprise hook guardian\n", conn.Name())
 	} else {
-		support := connector.ConnectorSupportOnHostOS(conn.Name())
-		if support.Status == connector.PlatformUnsupported {
-			err := fmt.Errorf("connector %q is not supported on %s: %s", conn.Name(), runtime.GOOS, support.Reason)
-			s.health.SetGuardrail(StateError, err.Error(), nil)
-			return err
+		warning, supportErr := connector.CheckPlatformSupportOnHost(conn.Name())
+		if supportErr != nil {
+			s.health.SetGuardrail(StateError, supportErr.Error(), nil)
+			return supportErr
 		}
-		if support.Status == connector.PlatformPreview {
-			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
+		if warning != "" {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %s\n", warning)
 		}
 		if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
@@ -3092,12 +3094,12 @@ func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayTo
 // back just this connector's Setup before returning so a half-installed
 // connector never lingers.
 func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connector, opts connector.SetupOpts, masterKey string, cache *guardrail.RulePackCache) error {
-	support := connector.ConnectorSupportOnHostOS(conn.Name())
-	if support.Status == connector.PlatformUnsupported {
-		return fmt.Errorf("connector %q is not supported on %s: %s", conn.Name(), runtime.GOOS, support.Reason)
+	warning, supportErr := connector.CheckPlatformSupportOnHost(conn.Name())
+	if supportErr != nil {
+		return supportErr
 	}
-	if support.Status == connector.PlatformPreview {
-		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
+	if warning != "" {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %s\n", warning)
 	}
 	// Inject credentials before Setup so probes keyed off them succeed.
 	conn.SetCredentials(opts.APIToken, masterKey)

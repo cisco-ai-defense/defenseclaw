@@ -66,7 +66,7 @@ func TestWaitForGatewayReadinessWaitsForDelayedGuardrailRunning(t *testing.T) {
 	}
 }
 
-func TestWaitForGatewayReadinessReturnsTimeoutForEnabledGuardrailStillDisabled(t *testing.T) {
+func TestWaitForGatewayReadinessLeavesSlowLiveProcessStarting(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled))
 	}))
@@ -80,14 +80,89 @@ func TestWaitForGatewayReadinessReturnsTimeoutForEnabledGuardrailStillDisabled(t
 		daemonReadinessRequirements{guardrailEnabled: true},
 		func() bool { return true },
 	)
-	if err == nil || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("waitForGatewayReadiness() error = %v, want timeout", err)
+	if err != nil {
+		t.Fatalf("waitForGatewayReadiness() error = %v, want nil", err)
 	}
 	if ready {
 		t.Fatal("waitForGatewayReadiness() ready = true, want false")
 	}
 	if snap.Guardrail.State != gateway.StateDisabled {
 		t.Fatalf("guardrail state = %q, want %q", snap.Guardrail.State, gateway.StateDisabled)
+	}
+}
+
+type fakeReadinessProcess struct {
+	running   bool
+	pid       int
+	stopCalls int
+	stopErr   error
+}
+
+func (p *fakeReadinessProcess) IsRunning() (bool, int) {
+	return p.running, p.pid
+}
+
+func (p *fakeReadinessProcess) Stop(time.Duration) error {
+	p.stopCalls++
+	return p.stopErr
+}
+
+func TestWaitForStartedDaemonDoesNotStopSlowLiveProcess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled))
+	}))
+	defer srv.Close()
+
+	process := &fakeReadinessProcess{running: true, pid: 42}
+	_, ready, err := waitForStartedDaemon(
+		process,
+		42,
+		srv.Client(),
+		srv.URL,
+		25*time.Millisecond,
+		5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true},
+	)
+	if err != nil || ready {
+		t.Fatalf("waitForStartedDaemon() ready = %v, error = %v", ready, err)
+	}
+	if process.stopCalls != 0 {
+		t.Fatalf("Stop() calls = %d, want 0 for a slow live process", process.stopCalls)
+	}
+}
+
+func TestWaitForStartedDaemonStopsProcessOnFatalReadinessError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(gateway.HealthSnapshot{
+			API: gateway.SubsystemHealth{State: gateway.StateError, LastError: "bind failed"},
+		})
+	}))
+	defer srv.Close()
+
+	process := &fakeReadinessProcess{running: true, pid: 42}
+	_, ready, err := waitForStartedDaemon(
+		process,
+		42,
+		srv.Client(),
+		srv.URL,
+		time.Second,
+		5*time.Millisecond,
+		daemonReadinessRequirements{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "bind failed") || ready {
+		t.Fatalf("waitForStartedDaemon() ready = %v, error = %v, want fatal bind error", ready, err)
+	}
+	if process.stopCalls != 1 {
+		t.Fatalf("Stop() calls = %d, want 1 for a fatal readiness error", process.stopCalls)
+	}
+}
+
+func TestPrintDaemonStartResultUsesActualTimeout(t *testing.T) {
+	out := captureStdout(t, func() {
+		printDaemonStartResult(42, gateway.HealthSnapshot{}, false, 3*time.Second)
+	})
+	if !strings.Contains(out, "still starting after 3s") {
+		t.Fatalf("output = %q, want actual timeout", out)
 	}
 }
 

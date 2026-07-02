@@ -110,9 +110,15 @@ class TestInitFirstRunBackend(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-first-run-")
         self.runner = CliRunner()
+        self._had_llm_key = "DEFENSECLAW_LLM_KEY" in os.environ
+        self._llm_key = os.environ.get("DEFENSECLAW_LLM_KEY", "")
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        if self._had_llm_key:
+            os.environ["DEFENSECLAW_LLM_KEY"] = self._llm_key
+        else:
+            os.environ.pop("DEFENSECLAW_LLM_KEY", None)
 
     def _invoke(self, args):
         return self.runner.invoke(

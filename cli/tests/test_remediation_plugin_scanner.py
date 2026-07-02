@@ -36,6 +36,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -620,15 +621,16 @@ class F0302DisableMeta(unittest.TestCase):
         try:
             with open(os.path.join(self.plugin, "index.js"), "w") as f:
                 f.write("console.log('demo')\n")
-            PluginScannerWrapper().scan(
-                self.plugin, disable_meta=True, use_llm=True, llm_model="poc-model"
-            )
-            self.assertEqual(meta_calls, [], "MetaAnalyzer LLM hook ran despite disable_meta=True")
+            with patch.dict(os.environ, {"DEFENSECLAW_LLM_KEY": "test-key"}, clear=False):
+                PluginScannerWrapper().scan(
+                    self.plugin, disable_meta=True, use_llm=True, llm_model="poc-model"
+                )
+                self.assertEqual(meta_calls, [], "MetaAnalyzer LLM hook ran despite disable_meta=True")
 
-            PluginScannerWrapper().scan(
-                self.plugin, disable_meta=False, use_llm=True, llm_model="poc-model"
-            )
-            self.assertTrue(meta_calls, "MetaAnalyzer LLM hook should run when meta enabled")
+                PluginScannerWrapper().scan(
+                    self.plugin, disable_meta=False, use_llm=True, llm_model="poc-model"
+                )
+                self.assertTrue(meta_calls, "MetaAnalyzer LLM hook should run when meta enabled")
         finally:
             llm_analyzer.run_meta_llm = orig_run_meta
             llm_analyzer.call_llm = orig_call

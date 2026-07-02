@@ -2046,6 +2046,23 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, "response exceeds 128-byte limit")
 
+    @patch(
+        "defenseclaw.commands.cmd_doctor._http_probe",
+        return_value=(200, "response exceeds 1048576-byte limit"),
+    )
+    def test_sidecar_health_surfaces_oversized_document_reason(self, _probe):
+        cfg = SimpleNamespace(
+            openshell=None,
+            gateway=SimpleNamespace(api_port=self.port),
+        )
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        row = next(c for c in result.checks if c["label"] == "Sidecar health JSON")
+        self.assertEqual(row["status"], "warn")
+        self.assertEqual(row["detail"], "response exceeds 1048576-byte limit")
+
 
 class GuardrailProxyMultiConnectorTests(unittest.TestCase):
     """D6: whether the proxy port is 'intentionally closed' is decided over the

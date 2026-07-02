@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import locale
+import ntpath
 import os
 import shutil
 import subprocess
@@ -980,7 +981,7 @@ def _is_trusted_binary_path(
 
 def _binary_command_name(binary_path: str) -> str:
     """Normalize a CLI basename, stripping Windows executable wrappers."""
-    name = os.path.basename(binary_path).lower()
+    name = ntpath.basename(binary_path).lower()
     stem, extension = os.path.splitext(name)
     return stem if extension in _WINDOWS_EXECUTABLE_EXTENSIONS else name
 
@@ -1205,7 +1206,7 @@ def _binary_path_for_agent(name: str, spec: _AgentSpec) -> str:
     if not spec.binary_name:
         return ""
     path = _which(spec.binary_name)
-    if path or os.name != "nt":
+    if path or not _is_windows_host():
         return path
 
     for candidate in _windows_binary_candidates(name, spec.binary_name):
@@ -1225,6 +1226,15 @@ def _binary_path_for_agent(name: str, spec: _AgentSpec) -> str:
         if os.path.isfile(candidate):
             return os.path.abspath(candidate)
     return ""
+
+
+def _is_windows_host() -> bool:
+    """Return whether native Windows lookup rules apply.
+
+    Kept behind a helper so cross-platform tests can exercise documented
+    Windows install locations without mutating ``os.name`` process-wide.
+    """
+    return os.name == "nt"
 
 
 def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, ...]:

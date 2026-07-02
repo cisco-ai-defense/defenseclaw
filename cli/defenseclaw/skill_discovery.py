@@ -36,7 +36,13 @@ class SkillDirectory:
 
 def skill_dir_is_eligible(path: str) -> bool:
     """Return whether *path* contains a recognized skill marker."""
-    return any(os.path.isfile(os.path.join(path, marker)) for marker in _SKILL_MARKERS)
+    for marker in _SKILL_MARKERS:
+        marker_path = os.path.join(path, marker)
+        if os.path.islink(marker_path):
+            continue
+        if os.path.isfile(marker_path):
+            return True
+    return False
 
 
 def discover_skill_directories(

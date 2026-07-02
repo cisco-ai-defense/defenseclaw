@@ -675,6 +675,65 @@ func TestCodexNotifyRequestWiring(t *testing.T) {
 	}
 }
 
+func TestCodexNotifyGuardBranchesDoNotSendRequests(t *testing.T) {
+	validHome := t.TempDir()
+	disabledHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(disabledHome, ".disabled"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	emptyHookDir := t.TempDir()
+
+	tests := []struct {
+		name    string
+		home    string
+		hookDir string
+		token   string
+		maxBody int64
+		payload []byte
+	}{
+		{
+			name: "missing home", home: filepath.Join(t.TempDir(), "missing"),
+			hookDir: emptyHookDir, token: "token", payload: []byte(`{}`),
+		},
+		{
+			name: "disabled", home: disabledHome,
+			hookDir: emptyHookDir, token: "token", payload: []byte(`{}`),
+		},
+		{
+			name: "empty payload", home: validHome,
+			hookDir: emptyHookDir, token: "token", payload: nil,
+		},
+		{
+			name: "oversized payload", home: validHome,
+			hookDir: emptyHookDir, token: "token", maxBody: 1, payload: []byte(`{}`),
+		},
+		{
+			name: "missing token", home: validHome,
+			hookDir: emptyHookDir, payload: []byte(`{}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := ok(`{"status":"ok"}`)
+			code := RunCodexNotify(context.Background(), Options{
+				APIAddr:    "127.0.0.1:8787",
+				Home:       tt.home,
+				HookDir:    tt.hookDir,
+				Token:      tt.token,
+				MaxBody:    tt.maxBody,
+				HTTPClient: &http.Client{Transport: rt},
+			}, tt.payload)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0", code)
+			}
+			if rt.requests != 0 {
+				t.Fatalf("gateway called %d times, want 0", rt.requests)
+			}
+		})
+	}
+}
+
 func TestEnvTokenTakesPrecedence(t *testing.T) {
 	rt := ok(`{"action":"allow"}`)
 	run(t, "codex", rt, func(o *Options) { o.Token = "env-wins" })

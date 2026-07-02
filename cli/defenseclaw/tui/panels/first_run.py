@@ -18,7 +18,7 @@ from typing import Literal
 from defenseclaw.platform_support import connector_preview_on_os, supported_connectors
 from defenseclaw.tui.services.setup_state import SetupCommandIntent
 
-FirstRunKind = Literal["choice", "bool"]
+FirstRunKind = Literal["connector", "choice", "bool"]
 FirstRunOutcome = Literal["unavailable", "handed", "declined"]
 
 CONNECTOR_CHOICES: tuple[str, ...] = (
@@ -63,7 +63,7 @@ class FirstRunField:
     @property
     def display_value(self) -> str:
         if self.kind != "bool":
-            if self.label == "Connector" and connector_preview_on_os(self.value):
+            if self.kind == "connector" and connector_preview_on_os(self.value):
                 return f"{self.value} (preview)"
             return self.value
         return "on" if self.value == "true" else "off"
@@ -163,7 +163,7 @@ class FirstRunPanelModel:
         if field.kind == "bool":
             self.fields[self.cursor] = _replace_field(field, value="false" if field.value == "true" else "true")
             return
-        if field.kind == "choice" and field.options:
+        if field.kind in {"connector", "choice"} and field.options:
             try:
                 current = field.options.index(field.value)
             except ValueError:
@@ -179,7 +179,7 @@ def default_first_run_fields() -> tuple[FirstRunField, ...]:
     return (
         FirstRunField(
             "Connector",
-            "choice",
+            "connector",
             "codex",
             visible_connector_choices(),
             "Agent framework to protect. OpenClaw is optional, not assumed.",

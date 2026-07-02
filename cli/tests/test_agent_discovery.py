@@ -29,6 +29,8 @@ from defenseclaw.config import PerConnectorGuardrailConfig, default_config
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.inventory import agent_discovery as ad
 
+from tests.permissions import grant_everyone
+
 
 def _signal(name: str, installed: bool = False) -> ad.AgentSignal:
     return ad.AgentSignal(
@@ -303,7 +305,7 @@ def test_hermes_native_windows_venv_is_discovered_without_path(monkeypatch, tmp_
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(ad.os, "name", "nt")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
     monkeypatch.setattr(ad, "hermes_config_path", lambda: str(config))
     monkeypatch.setattr(
         ad,
@@ -332,7 +334,7 @@ def test_antigravity_windows_cli_fallback_is_detected(monkeypatch, tmp_path):
     agy.write_bytes(b"test executable")
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(ad.os, "name", "nt")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
     monkeypatch.setattr(
         ad,
         "_version_for_agent_binary",
@@ -357,7 +359,7 @@ def test_antigravity_gui_fallback_reads_metadata_without_launch(monkeypatch, tmp
     gui.write_bytes(b"test executable")
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(ad.os, "name", "nt")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
     monkeypatch.setattr(ad, "_windows_file_version_for_binary", lambda path, **_kwargs: ("2.2.1", ""))
     monkeypatch.setattr(
         ad.subprocess,
@@ -455,7 +457,7 @@ def test_windows_discovery_finds_known_binary_outside_path(
     monkeypatch.setenv("LOCALAPPDATA", str(local))
     monkeypatch.setenv("APPDATA", str(roaming))
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(ad.os, "name", "nt")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
 
     resolved = ad._binary_path_for_agent(connector, ad._SPECS[connector])
 
@@ -774,12 +776,7 @@ def test_windows_acl_distinguishes_owner_control_from_everyone_write(tmp_path):
     unsafe = tmp_path / "everyone-write"
     safe.mkdir()
     unsafe.mkdir()
-    subprocess.run(
-        ["icacls", str(unsafe), "/grant", "*S-1-1-0:(OI)(CI)F"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    grant_everyone(unsafe)
 
     _safe_path, safe_error = ad.validate_trusted_prefix(str(safe))
     _unsafe_path, unsafe_error = ad.validate_trusted_prefix(str(unsafe))

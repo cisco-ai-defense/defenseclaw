@@ -1754,6 +1754,7 @@ def _scan_all(
     targets: list[tuple[str, str]] = []  # (name, base_dir)
     sources: list[str] = []
     scan_dirs = list(app.cfg.skill_dirs(resolved_connector))
+    unresolved_names: set[str] = set()
 
     if skill_entries:
         from defenseclaw.safety import is_symlink, is_within_roots
@@ -1762,7 +1763,14 @@ def _scan_all(
             name = str(info["name"])
             base_dir = _skill_info_path(info)
             if not base_dir:
-                click.echo(f"[scan] warning: no baseDir for {name}", err=True)
+                resolved_info = _get_openclaw_skill_info(
+                    name,
+                    app,
+                    connector=resolved_connector,
+                )
+                base_dir = _skill_info_path(resolved_info)
+            if not base_dir:
+                unresolved_names.add(name)
                 continue
             # Connector homes are untrusted. Apply the same containment gate
             # to list-adapter paths as the filesystem fallback below so
@@ -1783,15 +1791,17 @@ def _scan_all(
                 continue
             targets.append((name, base_dir))
         sources = sorted({os.path.dirname(p) for _, p in targets if p})
-    else:
+    if not skill_entries or unresolved_names:
         # Fall back to directory scan — resolve the target connector's
         # skill dirs so the selected configured connector's skills are scanned.
+        # For an incomplete authoritative listing, supplement only entries that
+        # lacked usable paths; complete listings never enter this branch.
         from defenseclaw.safety import is_symlink, is_within_roots
         from defenseclaw.skill_discovery import discover_skill_directories
 
         dirs = scan_dirs
-        sources = list(dirs)
-        seen_names: set[str] = set()
+        sources = sorted({*sources, *dirs})
+        seen_names: set[str] = {name for name, _path in targets}
         for skill_dir in dirs:
             if not os.path.isdir(skill_dir):
                 continue
@@ -1801,6 +1811,8 @@ def _scan_all(
                 entry = discovered.name
                 path = discovered.path
                 if entry in seen_names:
+                    continue
+                if skill_entries and entry not in unresolved_names:
                     continue
                 # F-0502: ``os.path.isdir`` follows symlinks, so a symlinked
                 # entry under a skill root (connector homes are UNTRUSTED)
@@ -1823,7 +1835,11 @@ def _scan_all(
                     )
                     continue
                 seen_names.add(entry)
+                unresolved_names.discard(entry)
                 targets.append((entry, path))
+
+        for name in sorted(unresolved_names):
+            click.echo(f"[scan] warning: no baseDir for {name}", err=True)
 
     if not targets:
         if not as_json:

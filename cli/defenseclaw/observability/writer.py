@@ -39,7 +39,8 @@ from __future__ import annotations
 import copy
 import os
 import re
-from contextlib import nullcontext
+import tempfile
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -1312,24 +1313,25 @@ def _load_dotenv(path: str) -> dict[str, str]:
 
 def _write_dotenv(path: str, entries: dict[str, str]) -> None:
     lines = [f"{k}={sanitize_dotenv_value(v, key=k)}\n" for k, v in sorted(entries.items())]
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    # O_NOFOLLOW (where available) refuses to open through a symlink so a
-    # pre-planted symlink cannot redirect the secret write elsewhere.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
     fd = -1
+    tmp = ""
     try:
-        fd = os.open(path, flags, 0o600)
-        # The 0o600 mode argument to os.open only applies when the file is
-        # newly CREATED. Tighten existing files too, and on Windows replace
-        # inherited access with a real owner-only DACL before writing secrets.
-        set_file_mode(fd, path, 0o600)
-        stream = os.fdopen(fd, "w")
+        fd, tmp = tempfile.mkstemp(prefix=".dotenv.", suffix=".tmp", dir=directory)
+        set_file_mode(fd, tmp, 0o600)
+        stream = os.fdopen(fd, "w", encoding="utf-8")
         fd = -1  # ownership transferred; stream closes on every with-path
         with stream as f:
             f.writelines(lines)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        tmp = ""
     finally:
         if fd != -1:
-            try:
+            with suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
+        if tmp:
+            with suppress(OSError):
+                os.unlink(tmp)

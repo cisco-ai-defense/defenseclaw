@@ -18,6 +18,7 @@ import inspect
 import os
 import subprocess
 import sys
+from unittest.mock import patch
 
 import defenseclaw.tui.app as app_module
 import pytest
@@ -94,6 +95,25 @@ def test_self_cli_resolves_via_current_python_not_path_shim() -> None:
     )
     assert shim_argv[:3] == argv[:3]
     assert shim_argv[3:] == ("doctor",)
+
+
+def test_gateway_resolves_to_installed_binary() -> None:
+    with patch(
+        "defenseclaw.tui.executor.resolve_gateway_binary",
+        return_value=r"C:\Program Files\DefenseClaw\defenseclaw-gateway.exe",
+    ):
+        argv = resolve_subprocess_argv("defenseclaw-gateway", ("status",))
+
+    assert argv == (
+        r"C:\Program Files\DefenseClaw\defenseclaw-gateway.exe",
+        "status",
+    )
+
+
+def test_gateway_resolution_fails_clearly_when_missing() -> None:
+    with patch("defenseclaw.tui.executor.resolve_gateway_binary", return_value=None):
+        with pytest.raises(RuntimeError, match="gateway executable"):
+            resolve_subprocess_argv("defenseclaw-gateway", ("status",))
 
 
 def test_captured_subprocess_flags_match_platform() -> None:

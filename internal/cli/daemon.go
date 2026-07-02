@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -108,23 +109,21 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
-	snap, ready, err := waitForGatewayReadiness(
+	snap, ready, err := waitForStartedDaemon(
+		d,
+		pid,
 		&http.Client{Timeout: defaultReadinessHTTPTimeout},
 		sidecarHealthURL(cfg),
 		defaultStartReadinessTimeout,
 		defaultReadinessPollInterval,
 		daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt),
-		func() bool {
-			running, currentPID := d.IsRunning()
-			return running && currentPID == pid
-		},
 	)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("start daemon readiness: %w (check %s for errors)", err, d.LogFile())
 	}
 
-	printDaemonStartResult(pid, snap, ready)
+	printDaemonStartResult(pid, snap, ready, defaultStartReadinessTimeout)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
@@ -200,23 +199,21 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
-	snap, ready, err := waitForGatewayReadiness(
+	snap, ready, err := waitForStartedDaemon(
+		d,
+		pid,
 		&http.Client{Timeout: defaultReadinessHTTPTimeout},
 		sidecarHealthURL(cfg),
 		defaultStartReadinessTimeout,
 		defaultReadinessPollInterval,
 		daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt),
-		func() bool {
-			running, currentPID := d.IsRunning()
-			return running && currentPID == pid
-		},
 	)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)", err, d.LogFile())
 	}
 
-	printDaemonStartResult(pid, snap, ready)
+	printDaemonStartResult(pid, snap, ready, defaultStartReadinessTimeout)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Println()
@@ -296,6 +293,44 @@ type daemonReadinessRequirements struct {
 	startedNotBefore time.Time
 }
 
+type daemonReadinessProcess interface {
+	IsRunning() (bool, int)
+	Stop(time.Duration) error
+}
+
+// waitForStartedDaemon centralizes the readiness and fatal-startup cleanup
+// shared by start and restart. A live process that is merely slow returns a
+// non-ready snapshot without an error and is deliberately left running.
+func waitForStartedDaemon(
+	d daemonReadinessProcess,
+	pid int,
+	client *http.Client,
+	healthURL string,
+	timeout time.Duration,
+	pollInterval time.Duration,
+	requirements daemonReadinessRequirements,
+) (gateway.HealthSnapshot, bool, error) {
+	snap, ready, err := waitForGatewayReadiness(
+		client,
+		healthURL,
+		timeout,
+		pollInterval,
+		requirements,
+		func() bool {
+			running, currentPID := d.IsRunning()
+			return running && currentPID == pid
+		},
+	)
+	if err == nil {
+		return snap, ready, nil
+	}
+
+	if stopErr := d.Stop(defaultStopTimeout); stopErr != nil && !errors.Is(stopErr, daemon.ErrNotRunning) {
+		return snap, false, fmt.Errorf("%w; cleanup failed: %v", err, stopErr)
+	}
+	return snap, false, err
+}
+
 func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore time.Time) daemonReadinessRequirements {
 	if cfg == nil {
 		return daemonReadinessRequirements{startedNotBefore: startedNotBefore}
@@ -368,19 +403,7 @@ func waitForGatewayReadiness(
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			detail := summarizeHealthSnapshot(lastSnap)
-			if lastProbeErr != nil {
-				return lastSnap, false, fmt.Errorf(
-					"gateway readiness timed out after %s (last health probe: %v)",
-					timeout,
-					lastProbeErr,
-				)
-			}
-			return lastSnap, false, fmt.Errorf(
-				"gateway readiness timed out after %s (last health: %s)",
-				timeout,
-				detail,
-			)
+			return lastSnap, false, nil
 		}
 		delay := pollInterval
 		if remaining < delay {
@@ -491,7 +514,7 @@ func subsystemMatchesConfiguredState(state gateway.SubsystemState, enabled bool)
 	return state == gateway.StateDisabled
 }
 
-func printDaemonStartResult(pid int, snap gateway.HealthSnapshot, ready bool) {
+func printDaemonStartResult(pid int, snap gateway.HealthSnapshot, ready bool, timeout time.Duration) {
 	if ready {
 		fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
 		fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
@@ -501,7 +524,7 @@ func printDaemonStartResult(pid int, snap gateway.HealthSnapshot, ready bool) {
 	fmt.Printf("%s (PID %d)\n", Style("STARTING", "fg=yellow", "bold"), pid)
 	fmt.Printf(
 		"  Health: still starting after %s (use 'defenseclaw-gateway status')\n",
-		defaultStartReadinessTimeout,
+		timeout,
 	)
 }
 

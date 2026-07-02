@@ -14,11 +14,18 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Direct coverage for shared plugin-directory filtering."""
+
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from unittest.mock import patch
 
-from defenseclaw.inventory.plugin_directories import discover_plugin_directories
+from defenseclaw.inventory.plugin_directories import (
+    discover_plugin_directories,
+    plugin_directory_entries,
+)
 
 from tests.helpers import seed_cached_plugin
 
@@ -31,10 +38,17 @@ def test_codex_cache_discovers_manifests_uses_activation_and_deduplicates(
     browser = seed_cached_plugin(cache, "openai-bundled", "browser", "2.0.0")
     sites_active = seed_cached_plugin(cache, "openai-bundled", "sites", "1.2.0")
     seed_cached_plugin(cache, "openai-curated-remote", "sites", "9.0.0")
-    github_old = seed_cached_plugin(cache, "openai-curated-remote", "github", "0.1.0")
-    github_new = seed_cached_plugin(cache, "openai-curated-remote", "github", "0.2.0")
+    github_old = seed_cached_plugin(
+        cache, "openai-curated-remote", "github", "0.1.0"
+    )
+    github_new = seed_cached_plugin(
+        cache, "openai-curated-remote", "github", "0.2.0"
+    )
     (codex_home / "config.toml").write_text(
-        "[plugins.'browser@openai-bundled']\nenabled = true\n[plugins.'sites@openai-bundled']\nenabled = true\n",
+        "[plugins.'browser@openai-bundled']\n"
+        "enabled = true\n"
+        "[plugins.'sites@openai-bundled']\n"
+        "enabled = true\n",
         encoding="utf-8",
     )
 
@@ -63,4 +77,31 @@ def test_regular_plugin_root_still_returns_immediate_plugins(tmp_path: Path) -> 
 
     entries = discover_plugin_directories(str(root), connector="codex")
 
-    assert [(entry.id, entry.path) for entry in entries] == [("real-plugin", str(root / "real-plugin"))]
+    assert [(entry.id, entry.path) for entry in entries] == [
+        ("real-plugin", str(root / "real-plugin"))
+    ]
+
+
+def test_plugin_directory_entries_missing_root(tmp_path: Path) -> None:
+    assert plugin_directory_entries(os.fspath(tmp_path / "missing")) == []
+
+
+def test_plugin_directory_entries_handles_list_error(tmp_path: Path) -> None:
+    with patch(
+        "defenseclaw.inventory.plugin_directories.os.listdir",
+        side_effect=OSError("unreadable"),
+    ):
+        assert plugin_directory_entries(os.fspath(tmp_path)) == []
+
+
+def test_plugin_directory_entries_filters_and_sorts(tmp_path: Path) -> None:
+    for name in ("zeta", "alpha", "cache", ".hidden", "..plugin-appserver.staging-1"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "ordinary-file").write_text(
+        "not a plugin directory", encoding="utf-8"
+    )
+
+    assert plugin_directory_entries(os.fspath(tmp_path)) == [
+        ("alpha", os.fspath(tmp_path / "alpha")),
+        ("zeta", os.fspath(tmp_path / "zeta")),
+    ]
