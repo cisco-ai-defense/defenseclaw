@@ -3311,6 +3311,14 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 	}
 }
 
+// RequiresFleetGateway reports whether the configured topology depends on the
+// OpenClaw fleet WebSocket subsystem. Keep external health/readiness consumers
+// on this predicate so they cannot drift from the sidecar's actual topology
+// decision (including the explicit gateway.fleet_mode override).
+func RequiresFleetGateway(cfg *config.Config) bool {
+	return gatewayShouldConnectForConfiguredConnector(cfg)
+}
+
 // isLoopbackGatewayHost reports whether host points at the local
 // machine. Treats empty / "localhost" / any 127.0.0.0/8 IPv4 / ::1
 // IPv6 as loopback. 0.0.0.0 (bind-all) is intentionally NOT loopback

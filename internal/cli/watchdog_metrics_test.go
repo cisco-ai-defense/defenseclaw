@@ -103,7 +103,7 @@ func TestWatchdogRecordsWatcherRestart(t *testing.T) {
 
 	loopDone := make(chan struct{})
 	go func() {
-		runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, debounce, nil, prov)
+		runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, debounce, watchdogHealthRequirements{requireFleet: true}, nil, prov)
 		close(loopDone)
 	}()
 
@@ -154,7 +154,7 @@ func TestWatchdogDoesNotRecordRestartOnSteadyHealthy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
 
-	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, nil, prov)
+	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, watchdogHealthRequirements{requireFleet: true}, nil, prov)
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {

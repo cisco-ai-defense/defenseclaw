@@ -46,6 +46,8 @@ const (
 
 type watchdogState int
 
+const maxWatchdogHealthBytes = 64 << 10
+
 const (
 	stateHealthy watchdogState = iota
 	stateDegraded
@@ -63,6 +65,86 @@ func (s watchdogState) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+// watchdogHealthRequirements is an immutable snapshot of the protection
+// surfaces required by the configuration loaded when the watchdog starts.
+// Optional observability subsystems are deliberately absent: disabling local
+// telemetry or sinks does not remove protection from an agent traffic path.
+type watchdogHealthRequirements struct {
+	requireFleet     bool
+	requireGuardrail bool
+	requireWatcher   bool
+	connectors       []string
+}
+
+func watchdogHealthRequirementsFromConfig(cfg *config.Config) watchdogHealthRequirements {
+	if cfg == nil {
+		return watchdogHealthRequirements{}
+	}
+	configured := cfg.ActiveConnectors()
+	connectors := make([]string, 0, len(configured))
+	for _, name := range configured {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name != "" {
+			connectors = append(connectors, name)
+		}
+	}
+	return watchdogHealthRequirements{
+		requireFleet:     gateway.RequiresFleetGateway(cfg),
+		requireGuardrail: cfg.Guardrail.Enabled,
+		requireWatcher:   cfg.Gateway.Watcher.Enabled,
+		connectors:       connectors,
+	}
+}
+
+type watchdogAssessment struct {
+	state        watchdogState
+	notification string
+	action       string
+	severity     string
+	details      string
+}
+
+func healthyWatchdogAssessment() watchdogAssessment {
+	return watchdogAssessment{state: stateHealthy}
+}
+
+func degradedWatchdogAssessment(details string) watchdogAssessment {
+	return watchdogAssessment{
+		state:        stateDegraded,
+		notification: "A required DefenseClaw protection subsystem is unavailable. Check gateway status.",
+		action:       string(audit.ActionGuardrailDegraded),
+		severity:     "HIGH",
+		details:      details,
+	}
+}
+
+func downWatchdogAssessment(details string) watchdogAssessment {
+	return watchdogAssessment{
+		state:        stateDown,
+		notification: "DefenseClaw sidecar health is unavailable. Protection status cannot be verified.",
+		action:       string(audit.ActionGatewayDown),
+		severity:     "CRITICAL",
+		details:      details,
+	}
+}
+
+func fleetDownWatchdogAssessment(state gateway.SubsystemState) watchdogAssessment {
+	return watchdogAssessment{
+		state:        stateDown,
+		notification: "The required OpenClaw fleet gateway is unavailable. Agent traffic protection is interrupted.",
+		action:       string(audit.ActionGatewayDown),
+		severity:     "CRITICAL",
+		details:      fmt.Sprintf("Required OpenClaw fleet gateway is %s", displayHealthState(state)),
+	}
+}
+
+func displayHealthState(state gateway.SubsystemState) string {
+	if state == "" {
+		return "missing from the health response"
+	}
+	return string(state)
 }
 
 var watchdogCmd = &cobra.Command{
@@ -119,6 +201,7 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	}
 
 	healthURL := watchdogHealthURL(cfg)
+	requirements := watchdogHealthRequirementsFromConfig(cfg)
 
 	var webhooks *gateway.WebhookDispatcher
 	// Include per-connector webhook overrides (D5b) so a global-empty install
@@ -182,7 +265,7 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 		}
 	}()
 
-	runWatchdogLoop(ctx, healthURL, interval, debounce, webhooks, tel)
+	runWatchdogLoop(ctx, healthURL, interval, debounce, requirements, webhooks, tel)
 	if webhooks != nil {
 		webhooks.Close()
 	}
@@ -208,7 +291,7 @@ func watchdogHealthURL(cfg *config.Config) string {
 	return fmt.Sprintf("http://%s:%d/health", apiBind, apiPort)
 }
 
-func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int, webhooks *gateway.WebhookDispatcher, tel *telemetry.Provider) {
+func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int, requirements watchdogHealthRequirements, webhooks *gateway.WebhookDispatcher, tel *telemetry.Provider) {
 	dataDir := config.DefaultDataPath()
 	current := loadWatchdogState(dataDir)
 	failCount := 0
@@ -225,9 +308,9 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			probed := probeHealth(client, healthURL)
+			assessment := probeHealth(client, healthURL, requirements)
 
-			switch probed {
+			switch assessment.state {
 			case stateHealthy:
 				failCount = 0
 				if current != stateHealthy {
@@ -250,9 +333,9 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 			case stateDegraded:
 				failCount++
 				if failCount >= debounce && current == stateHealthy {
-					fmt.Fprintf(os.Stderr, "[watchdog] gateway degraded\n")
-					_ = notify.Send("DefenseClaw", "Gateway guardrail is disconnected. Prompt protection is disabled.")
-					dispatchHealthEvent(webhooks, string(audit.ActionGuardrailDegraded), "HIGH", "Guardrail proxy is disconnected; prompt protection is disabled")
+					fmt.Fprintf(os.Stderr, "[watchdog] protection degraded: %s\n", assessment.details)
+					_ = notify.Send("DefenseClaw", assessment.notification)
+					dispatchHealthEvent(webhooks, assessment.action, assessment.severity, assessment.details)
 					current = stateDegraded
 					saveWatchdogState(dataDir, current)
 				}
@@ -260,9 +343,9 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 			default: // stateDown
 				failCount++
 				if failCount >= debounce && current != stateDown {
-					fmt.Fprintf(os.Stderr, "[watchdog] gateway down (after %d failures)\n", failCount)
-					_ = notify.Send("DefenseClaw", "Gateway is not running. Your AI agent traffic is unprotected.")
-					dispatchHealthEvent(webhooks, string(audit.ActionGatewayDown), "CRITICAL", fmt.Sprintf("Gateway unreachable after %d consecutive failures", failCount))
+					fmt.Fprintf(os.Stderr, "[watchdog] protection down (after %d failures): %s\n", failCount, assessment.details)
+					_ = notify.Send("DefenseClaw", assessment.notification)
+					dispatchHealthEvent(webhooks, assessment.action, assessment.severity, assessment.details)
 					current = stateDown
 					saveWatchdogState(dataDir, current)
 				}
@@ -304,36 +387,94 @@ func dispatchHealthEvent(webhooks *gateway.WebhookDispatcher, action, severity, 
 	})
 }
 
-func probeHealth(client *http.Client, url string) watchdogState {
+func probeHealth(client *http.Client, url string, requirements watchdogHealthRequirements) watchdogAssessment {
 	resp, err := client.Get(url)
 	if err != nil {
-		return stateDown
+		return downWatchdogAssessment("Sidecar health API is unreachable")
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return stateDown
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxWatchdogHealthBytes+1))
+	if err != nil {
+		return downWatchdogAssessment("Sidecar health response could not be read")
+	}
+	if len(body) > maxWatchdogHealthBytes {
+		return downWatchdogAssessment("Sidecar health response exceeds the size limit")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return downWatchdogAssessment(fmt.Sprintf("Sidecar health API returned HTTP %d", resp.StatusCode))
 	}
 
 	var snap struct {
-		Gateway struct {
-			State string `json:"state"`
-		} `json:"gateway"`
-		Guardrail struct {
-			State string `json:"state"`
-		} `json:"guardrail"`
+		Gateway    *gateway.SubsystemHealth   `json:"gateway"`
+		Watcher    *gateway.SubsystemHealth   `json:"watcher"`
+		Guardrail  *gateway.SubsystemHealth   `json:"guardrail"`
+		Connector  *gateway.ConnectorHealth   `json:"connector"`
+		Connectors *[]gateway.ConnectorHealth `json:"connectors"`
 	}
 	if err := json.Unmarshal(body, &snap); err != nil {
-		return stateDown
+		return downWatchdogAssessment("Sidecar health response is malformed")
 	}
 
-	if snap.Gateway.State != "running" {
-		return stateDown
+	if requirements.requireFleet {
+		if snap.Gateway == nil || snap.Gateway.State != gateway.StateRunning {
+			var state gateway.SubsystemState
+			if snap.Gateway != nil {
+				state = snap.Gateway.State
+			}
+			return fleetDownWatchdogAssessment(state)
+		}
 	}
-	if snap.Guardrail.State != "" && snap.Guardrail.State != "running" {
-		return stateDegraded
+	if requirements.requireGuardrail && (snap.Guardrail == nil || snap.Guardrail.State != gateway.StateRunning) {
+		var state gateway.SubsystemState
+		if snap.Guardrail != nil {
+			state = snap.Guardrail.State
+		}
+		return degradedWatchdogAssessment("Required guardrail is " + displayHealthState(state))
 	}
-	return stateHealthy
+	if requirements.requireWatcher && (snap.Watcher == nil || snap.Watcher.State != gateway.StateRunning) {
+		var state gateway.SubsystemState
+		if snap.Watcher != nil {
+			state = snap.Watcher.State
+		}
+		return degradedWatchdogAssessment("Required watcher is " + displayHealthState(state))
+	}
+	if assessment := assessRequiredConnectors(snap.Connector, snap.Connectors, requirements.connectors); assessment.state != stateHealthy {
+		return assessment
+	}
+	return healthyWatchdogAssessment()
+}
+
+func assessRequiredConnectors(primary *gateway.ConnectorHealth, connectors *[]gateway.ConnectorHealth, required []string) watchdogAssessment {
+	if len(required) == 0 {
+		return healthyWatchdogAssessment()
+	}
+	byName := make(map[string]gateway.SubsystemState)
+	if connectors != nil {
+		for _, health := range *connectors {
+			name := strings.ToLower(strings.TrimSpace(health.Name))
+			if name != "" {
+				byName[name] = health.State
+			}
+		}
+	}
+	// Older sidecars exposed only the singular connector field. Accept that
+	// representation when it identifies one of the configured connectors.
+	if primary != nil {
+		name := strings.ToLower(strings.TrimSpace(primary.Name))
+		if name != "" {
+			byName[name] = primary.State
+		}
+	}
+	for _, name := range required {
+		state, ok := byName[name]
+		if !ok {
+			return degradedWatchdogAssessment(fmt.Sprintf("Required connector %s is missing from the health response", name))
+		}
+		if state != gateway.StateRunning {
+			return degradedWatchdogAssessment(fmt.Sprintf("Required connector %s is %s", name, displayHealthState(state)))
+		}
+	}
+	return healthyWatchdogAssessment()
 }
 
 func runWatchdogStart(_ *cobra.Command, _ []string) error {
