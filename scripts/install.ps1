@@ -166,7 +166,7 @@ function Invoke-Uv {
     $exitCode = 1
     try {
         $ErrorActionPreference = "Continue"
-        $output = & uv @Arguments 2>&1
+        $output = & uv --no-config @Arguments 2>&1
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -178,6 +178,75 @@ function Invoke-Uv {
         }
     }
     return [int]$exitCode
+}
+
+function Invoke-ManagedCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Executable,
+        [string[]]$Arguments = @()
+    )
+
+    $hadPythonPath = Test-Path Env:\PYTHONPATH
+    $hadPythonHome = Test-Path Env:\PYTHONHOME
+    $savedPythonPath = $env:PYTHONPATH
+    $savedPythonHome = $env:PYTHONHOME
+    $previousErrorActionPreference = $ErrorActionPreference
+    $lastExitVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+    $hadLastExitCode = $null -ne $lastExitVariable
+    $savedLastExitCode = if ($hadLastExitCode) { $lastExitVariable.Value } else { $null }
+    $output = @()
+    $exitCode = 1
+    try {
+        Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
+        Remove-Item Env:\PYTHONHOME -ErrorAction SilentlyContinue
+        $ErrorActionPreference = "Continue"
+        $global:LASTEXITCODE = 1
+        $output = & $Executable @Arguments 2>&1
+        $exitCode = $global:LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($hadLastExitCode) { $global:LASTEXITCODE = $savedLastExitCode }
+        else { Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue }
+        if ($hadPythonPath) { $env:PYTHONPATH = $savedPythonPath }
+        else { Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue }
+        if ($hadPythonHome) { $env:PYTHONHOME = $savedPythonHome }
+        else { Remove-Item Env:\PYTHONHOME -ErrorAction SilentlyContinue }
+    }
+    return [pscustomobject]@{ ExitCode = [int]$exitCode; Output = @($output) }
+}
+
+function Test-ManagedCli {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Venv,
+        [Parameter(Mandatory = $true)]
+        [string]$CliExe
+    )
+
+    if (-not (Test-Path -LiteralPath $CliExe -PathType Leaf)) {
+        throw "Managed CLI executable not found after repair: $CliExe"
+    }
+
+    $versionResult = Invoke-ManagedCommand -Executable $CliExe -Arguments @("--version")
+    if ($versionResult.ExitCode -ne 0) {
+        $detail = ($versionResult.Output | Select-Object -First 5) -join " | "
+        throw "Managed CLI smoke test failed (exit $($versionResult.ExitCode)): $detail"
+    }
+
+    $venvPython = Join-Path $Venv "Scripts\python.exe"
+    $importCode = "import pathlib, defenseclaw; print(pathlib.Path(defenseclaw.__file__).resolve())"
+    $importResult = Invoke-ManagedCommand -Executable $venvPython -Arguments @("-I", "-c", $importCode)
+    if ($importResult.ExitCode -ne 0) {
+        $detail = ($importResult.Output | Select-Object -First 5) -join " | "
+        throw "Managed CLI import validation failed (exit $($importResult.ExitCode)): $detail"
+    }
+
+    $importedPath = [System.IO.Path]::GetFullPath((($importResult.Output | Select-Object -Last 1).ToString()).Trim())
+    $siteRoot = [System.IO.Path]::GetFullPath((Join-Path $Venv "Lib\site-packages")).TrimEnd('\') + '\'
+    if (-not $importedPath.StartsWith($siteRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Managed CLI import escaped the target venv: $importedPath"
+    }
 }
 
 function Publish-CliLauncher {
@@ -197,7 +266,9 @@ function Publish-CliLauncher {
     $temporaryShim = Join-Path $InstallDir (".defenseclaw.cmd." + [guid]::NewGuid() + ".tmp")
 
     try {
-        $contents = "@echo off`r`n`"$CliExe`" %*`r`n"
+        $contents = "@echo off`r`nsetlocal`r`nset `"PYTHONPATH=`"`r`nset `"PYTHONHOME=`"`r`n" + `
+            "`"$CliExe`" %*`r`nset `"defenseclawExit=%errorlevel%`"`r`n" + `
+            "endlocal & exit /b %defenseclawExit%`r`n"
         [System.IO.File]::WriteAllText($temporaryShim, $contents, [System.Text.Encoding]::ASCII)
 
         $shadowEntry = $null
@@ -439,7 +510,10 @@ function Install-Cli {
             $resolved = Get-Artifact -Name $whlName -Dest $whlPath
             Test-Checksum -File $whlPath -FileName $resolved
         }
-        $pipExit = Invoke-Uv -Arguments @("pip", "install", "--python", $venvPython, "--quiet", $whlPath) -ShowFailureOutput
+        $pipExit = Invoke-Uv -Arguments @(
+            "pip", "install", "--python", $venvPython, "--quiet",
+            "--reinstall", "--no-cache", "--strict", $whlPath
+        ) -ShowFailureOutput
         if ($pipExit -ne 0) { Die "Failed to install CLI from wheel" }
     } finally {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
@@ -447,6 +521,7 @@ function Install-Cli {
 
     $cliExe = Join-Path $Venv "Scripts\defenseclaw.exe"
     try {
+        Test-ManagedCli -Venv $Venv -CliExe $cliExe
         # PowerShell resolves .EXE before .CMD. Publish the managed-venv shim
         # only after removing the exact same-directory stale launcher.
         $shim = Publish-CliLauncher -CliExe $cliExe -InstallDir $InstallDir

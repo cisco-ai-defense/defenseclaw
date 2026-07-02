@@ -16,6 +16,8 @@ import os
 import re
 import shutil
 import subprocess
+import textwrap
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -48,10 +50,48 @@ Invoke-Expression $fn.Extent.Text
 """
 
 
+def _fixture_wheel(
+    directory: Path,
+    distribution: str,
+    version: str,
+    package_files: dict[str, str],
+    *,
+    dependencies: tuple[str, ...] = (),
+    scripts: dict[str, str] | None = None,
+) -> Path:
+    wheel_name = distribution.replace("-", "_")
+    wheel = directory / f"{wheel_name}-{version}-py3-none-any.whl"
+    dist_info = f"{wheel_name}-{version}.dist-info"
+    members = dict(package_files)
+    requires = "".join(f"Requires-Dist: {dependency}\n" for dependency in dependencies)
+    members[f"{dist_info}/METADATA"] = (
+        "Metadata-Version: 2.1\n"
+        f"Name: {distribution}\n"
+        f"Version: {version}\n"
+        f"{requires}\n"
+    )
+    members[f"{dist_info}/WHEEL"] = (
+        "Wheel-Version: 1.0\n"
+        "Generator: defenseclaw-test\n"
+        "Root-Is-Purelib: true\n"
+        "Tag: py3-none-any\n"
+    )
+    if scripts:
+        entries = "".join(f"{name} = {target}\n" for name, target in scripts.items())
+        members[f"{dist_info}/entry_points.txt"] = f"[console_scripts]\n{entries}"
+    members[f"{dist_info}/RECORD"] = "".join(f"{name},,\n" for name in members)
+
+    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, contents in members.items():
+            archive.writestr(name, contents)
+    return wheel
+
+
 def test_all_uv_calls_use_explicit_exit_status_wrapper() -> None:
     text = INSTALL_PS1.read_text()
 
     assert "function Invoke-Uv" in text
+    assert "& uv --no-config @Arguments" in text
     assert "& uv python install" not in text
     assert "& uv venv" not in text
     assert "& uv pip install" not in text
@@ -59,7 +99,20 @@ def test_all_uv_calls_use_explicit_exit_status_wrapper() -> None:
     assert 'Invoke-Uv -Arguments @("venv", $Venv' in text
     assert 'Invoke-Uv -Arguments @("venv", $Venv, "--allow-existing", "--quiet")' in text
     assert 'Invoke-Uv -Arguments @("venv", $Venv, "--clear"' not in text
-    assert 'Invoke-Uv -Arguments @("pip", "install"' in text
+    assert '"pip", "install", "--python", $venvPython, "--quiet"' in text
+    assert '"--reinstall", "--no-cache", "--strict", $whlPath' in text
+
+
+def test_cli_smoke_precedes_launcher_publication() -> None:
+    text = INSTALL_PS1.read_text()
+    install_cli = text.split("function Install-Cli", 1)[1].split("function Select-Connector", 1)[0]
+
+    assert install_cli.index("Test-ManagedCli") < install_cli.index("Publish-CliLauncher")
+    assert install_cli.index("Publish-CliLauncher") < install_cli.index('Write-Ok "CLI installed')
+    assert 'set `"PYTHONPATH=`"' in text
+    assert 'set `"PYTHONHOME=`"' in text
+    assert "setlocal" in text
+    assert "endlocal & exit /b %defenseclawExit%" in text
 
 
 def test_windows_installer_offers_only_native_connector_surface() -> None:
@@ -185,6 +238,298 @@ $null = Publish-CliLauncher -CliExe '{_ps_quote(cli_exe)}' -InstallDir '{_ps_quo
     assert completed.returncode == 0, completed.stderr
     assert (install_dir / "defenseclaw.cmd").is_file()
     assert not (install_dir / "defenseclaw.exe").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_managed_command_sanitizes_and_restores_python_environment(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    child = tmp_path / "show-python-env.cmd"
+    child.write_text(
+        "@echo PYTHONPATH=[%PYTHONPATH%]\r\n"
+        "@echo PYTHONHOME=[%PYTHONHOME%]\r\n"
+        "@exit /b 7\r\n",
+        encoding="ascii",
+    )
+    command = _extract_powershell_function("Invoke-ManagedCommand") + rf"""
+$env:PYTHONPATH = 'parent-path'
+$env:PYTHONHOME = 'parent-home'
+$result = Invoke-ManagedCommand -Executable '{_ps_quote(child)}'
+Write-Output "EXIT=$($result.ExitCode)"
+$result.Output | ForEach-Object {{ Write-Output "CHILD=$_" }}
+Write-Output "PARENT_PATH=$env:PYTHONPATH"
+Write-Output "PARENT_HOME=$env:PYTHONHOME"
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "EXIT=7" in completed.stdout
+    assert "CHILD=PYTHONPATH=[]" in completed.stdout
+    assert "CHILD=PYTHONHOME=[]" in completed.stdout
+    assert "PARENT_PATH=parent-path" in completed.stdout
+    assert "PARENT_HOME=parent-home" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell and uv")
+def test_same_version_reinstall_repairs_managed_venv_and_ignores_checkout_pythonpath(
+    tmp_path: Path,
+) -> None:
+    powershell = shutil.which("powershell.exe")
+    uv = shutil.which("uv.exe") or shutil.which("uv")
+    if not powershell or not uv:
+        pytest.skip("Windows PowerShell and uv are required")
+
+    fixtures = tmp_path / "fixtures"
+    fixtures.mkdir()
+    dependency_wheel = _fixture_wheel(
+        fixtures,
+        "dc-certifi-fixture",
+        "1.0.0",
+        {"certifi_fixture/__init__.py": "def where():\n    return 'fixture-ca.pem'\n"},
+    )
+    cli_source = textwrap.dedent(
+        """
+        import shutil
+        import sys
+        from pathlib import Path
+
+        from certifi_fixture import where
+
+
+        def scanner():
+            print("scanner fixture")
+            return 0
+
+
+        def main():
+            where()
+            if "--version" in sys.argv:
+                print("defenseclaw 1.0.0")
+                return 0
+            if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+                scripts = Path(sys.executable).resolve().parent
+                for name in ("skill-scanner", "mcp-scanner"):
+                    resolved = shutil.which(name, path=str(scripts))
+                    if not resolved:
+                        return 5
+                    print(f"SCANNER={Path(resolved).resolve()}")
+            return 0
+        """
+    )
+    cli_wheel = _fixture_wheel(
+        fixtures,
+        "defenseclaw",
+        "1.0.0",
+        {
+            "defenseclaw/__init__.py": "__version__ = '1.0.0'\n",
+            "defenseclaw/cli.py": cli_source,
+        },
+        dependencies=("dc-certifi-fixture==1.0.0",),
+        scripts={
+            "defenseclaw": "defenseclaw.cli:main",
+            "skill-scanner": "defenseclaw.cli:scanner",
+            "mcp-scanner": "defenseclaw.cli:scanner",
+        },
+    )
+    assert dependency_wheel.is_file() and cli_wheel.is_file()
+
+    profile = tmp_path / "profile"
+    defenseclaw_home = profile / ".defenseclaw"
+    venv = defenseclaw_home / ".venv"
+    scripts = venv / "Scripts"
+    install_dir = profile / ".local" / "bin"
+    install_dir.mkdir(parents=True)
+    fake_checkout = tmp_path / "fake-checkout"
+    (fake_checkout / "defenseclaw").mkdir(parents=True)
+    (fake_checkout / "defenseclaw" / "__init__.py").write_text(
+        "raise RuntimeError('checkout contamination')\n"
+    )
+
+    clean_env = os.environ.copy()
+    clean_env.pop("PYTHONPATH", None)
+    clean_env.pop("PYTHONHOME", None)
+    subprocess.run(
+        [uv, "--no-config", "venv", str(venv), "--python", "3.12"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=clean_env,
+    )
+    subprocess.run(
+        [
+            uv,
+            "--no-config",
+            "pip",
+            "install",
+            "--python",
+            str(scripts / "python.exe"),
+            "--no-index",
+            "--find-links",
+            str(fixtures),
+            str(cli_wheel),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=clean_env,
+    )
+    damaged_file = venv / "Lib" / "site-packages" / "certifi_fixture" / "__init__.py"
+    assert damaged_file.is_file()
+    damaged_file.unlink()
+    assert not damaged_file.exists()
+
+    functions = "".join(
+        _extract_powershell_function(name)
+        for name in (
+            "Invoke-Uv",
+            "Invoke-ManagedCommand",
+            "Test-ManagedCli",
+            "Publish-CliLauncher",
+            "Install-Cli",
+        )
+    )
+    command = functions + rf"""
+$ErrorActionPreference = 'Stop'
+$Local = '{_ps_quote(fixtures)}'
+$Venv = '{_ps_quote(venv)}'
+$InstallDir = '{_ps_quote(install_dir)}'
+function Write-Step {{ param([string]$Msg) }}
+function Write-Info {{ param([string]$Msg) }}
+function Write-Ok {{ param([string]$Msg) Write-Output "OK=$Msg" }}
+function Die {{ param([string]$Msg) throw $Msg }}
+Install-Cli
+Install-Cli
+"""
+    install_env = clean_env.copy()
+    install_env.update(
+        {
+            "USERPROFILE": str(profile),
+            "DEFENSECLAW_HOME": str(defenseclaw_home),
+            "PYTHONPATH": str(fake_checkout),
+            "UV_FIND_LINKS": str(fixtures),
+            "UV_NO_INDEX": "1",
+        }
+    )
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env=install_env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.count("OK=CLI installed") == 2
+    assert damaged_file.is_file()
+    assert not (install_dir / "defenseclaw.exe").exists()
+    shim = install_dir / "defenseclaw.cmd"
+    assert shim.is_file()
+    shim_text = shim.read_text(encoding="ascii")
+    assert str(scripts / "defenseclaw.exe") in shim_text
+    assert 'set "PYTHONPATH="' in shim_text
+    assert 'set "PYTHONHOME="' in shim_text
+
+    contaminated_env = install_env.copy()
+    contaminated_env["PYTHONHOME"] = str(fake_checkout)
+    version = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", f"& '{_ps_quote(shim)}' --version"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=contaminated_env,
+    )
+    assert version.returncode == 0, version.stderr
+    assert "defenseclaw 1.0.0" in version.stdout
+
+    imported = subprocess.run(
+        [
+            scripts / "python.exe",
+            "-I",
+            "-c",
+            "import pathlib, defenseclaw; print(pathlib.Path(defenseclaw.__file__).resolve())",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=install_env,
+    )
+    assert imported.returncode == 0, imported.stderr
+    assert str(venv / "Lib" / "site-packages") in imported.stdout.strip()
+
+    doctor = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", f"& '{_ps_quote(shim)}' doctor"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=contaminated_env,
+    )
+    assert doctor.returncode == 0, doctor.stderr
+    scanner_lines = [line.removeprefix("SCANNER=").strip() for line in doctor.stdout.splitlines() if "SCANNER=" in line]
+    assert len(scanner_lines) == 2
+    assert all(Path(line).is_relative_to(scripts) for line in scanner_lines)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_failed_managed_smoke_prevents_launcher_publication_and_success(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    local = tmp_path / "dist"
+    venv = tmp_path / ".defenseclaw" / ".venv"
+    install_dir = tmp_path / ".local" / "bin"
+    local.mkdir()
+    install_dir.mkdir(parents=True)
+    (local / "defenseclaw-1.0.0-py3-none-any.whl").write_text("fixture")
+    existing_shim = install_dir / "defenseclaw.cmd"
+    existing_shim.write_text("existing launcher")
+    publish_marker = tmp_path / "published"
+    success_marker = tmp_path / "success"
+
+    command = _extract_powershell_function("Install-Cli") + rf"""
+$ErrorActionPreference = 'Stop'
+$Local = '{_ps_quote(local)}'
+$Venv = '{_ps_quote(venv)}'
+$InstallDir = '{_ps_quote(install_dir)}'
+function Write-Step {{ param([string]$Msg) }}
+function Write-Info {{ param([string]$Msg) }}
+function Write-Ok {{
+    param([string]$Msg)
+    if ($Msg -like 'CLI installed*') {{ Set-Content -LiteralPath '{_ps_quote(success_marker)}' -Value 'success' }}
+}}
+function Invoke-Uv {{ return 0 }}
+function Test-ManagedCli {{ throw 'managed smoke failed' }}
+function Publish-CliLauncher {{ Set-Content -LiteralPath '{_ps_quote(publish_marker)}' -Value 'published' }}
+function Die {{ param([string]$Msg) throw $Msg }}
+Install-Cli
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "managed smoke failed" in completed.stderr
+    assert not publish_marker.exists()
+    assert not success_marker.exists()
+    assert existing_shim.read_text() == "existing launcher"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell native stderr semantics")
