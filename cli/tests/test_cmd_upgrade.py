@@ -28,6 +28,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _normalize_target_version,
     _preflight_wheel_install,
     _print_migration_cursor_summary,
+    _publish_windows_cli_launcher,
     _run_installed_migrations,
     _run_silent,
     _validate_upgrade_manifest,
@@ -116,6 +117,127 @@ class TestUpgradeWheelInstall(unittest.TestCase):
         pip_call = run_mock.call_args_list[-1].args[0]
         self.assertEqual(pip_call[:5], ["/usr/bin/uv", "--no-config", "pip", "install", "--python"])
         self.assertEqual(pip_call[5], venv_python)
+
+    @staticmethod
+    def _seed_windows_install(home):
+        venv = os.path.join(home, ".defenseclaw", ".venv")
+        scripts = os.path.join(venv, "Scripts")
+        install_dir = os.path.join(home, ".local", "bin")
+        os.makedirs(scripts, exist_ok=True)
+        os.makedirs(install_dir, exist_ok=True)
+        for name in ("python.exe", "defenseclaw.exe"):
+            with open(os.path.join(scripts, name), "w") as stream:
+                stream.write("managed")
+        return venv, install_dir
+
+    @staticmethod
+    def _expand_home(home):
+        def expand(path):
+            expanded = path.replace("~", home, 1) if path.startswith("~") else path
+            return os.path.normpath(expanded)
+
+        return expand
+
+    def test_windows_install_removes_exe_shadow_before_publishing_cmd(self):
+        with TemporaryDirectory() as home:
+            venv, install_dir = self._seed_windows_install(home)
+            shadow = os.path.join(install_dir, "defenseclaw.exe")
+            shim = os.path.join(install_dir, "defenseclaw.cmd")
+            with open(shadow, "w") as stream:
+                stream.write("untrusted; must never execute")
+
+            events = []
+            real_unlink = os.unlink
+            real_replace = os.replace
+
+            def unlink(path):
+                if path == shadow:
+                    events.append("remove-shadow")
+                return real_unlink(path)
+
+            def replace(source, destination):
+                if destination == shim:
+                    events.append("publish-shim")
+                return real_replace(source, destination)
+
+            with patch("os.path.expanduser", side_effect=self._expand_home(home)), \
+                 patch("shutil.which", return_value="uv"), \
+                 patch("subprocess.run"), \
+                 patch("os.unlink", side_effect=unlink), \
+                 patch("os.replace", side_effect=replace):
+                _install_wheel("wheel.whl", "windows")
+
+            self.assertEqual(events, ["remove-shadow", "publish-shim"])
+            self.assertFalse(os.path.lexists(shadow))
+            with open(shim, encoding="ascii") as stream:
+                self.assertIn(os.path.join(venv, "Scripts", "defenseclaw.exe"), stream.read())
+
+    def test_windows_install_fails_without_publishing_when_exe_shadow_cannot_be_removed(self):
+        with TemporaryDirectory() as home:
+            _venv, install_dir = self._seed_windows_install(home)
+            shadow = os.path.join(install_dir, "defenseclaw.exe")
+            shim = os.path.join(install_dir, "defenseclaw.cmd")
+            with open(shadow, "w") as stream:
+                stream.write("untrusted; must never execute")
+            with open(shim, "w") as stream:
+                stream.write("existing shim")
+
+            real_unlink = os.unlink
+
+            def refuse_shadow(path):
+                if path == shadow:
+                    raise PermissionError("launcher is locked")
+                return real_unlink(path)
+
+            with patch("os.path.expanduser", side_effect=self._expand_home(home)), \
+                 patch("shutil.which", return_value="uv"), \
+                 patch("subprocess.run"), \
+                 patch("os.unlink", side_effect=refuse_shadow), \
+                 patch("defenseclaw.commands.cmd_upgrade.ux.err") as err:
+                with self.assertRaises(SystemExit) as ctx:
+                    _install_wheel("wheel.whl", "windows")
+
+            self.assertEqual(ctx.exception.code, 1)
+            self.assertTrue(os.path.lexists(shadow))
+            with open(shim) as stream:
+                self.assertEqual(stream.read(), "existing shim")
+            self.assertIn("Cannot remove shadowing CLI launcher", err.call_args.args[0])
+
+    def test_windows_launcher_publication_is_idempotent_without_exe_shadow(self):
+        with TemporaryDirectory() as home:
+            venv, install_dir = self._seed_windows_install(home)
+            cli_exe = os.path.join(venv, "Scripts", "defenseclaw.exe")
+
+            _publish_windows_cli_launcher(cli_exe, install_dir)
+            _publish_windows_cli_launcher(cli_exe, install_dir)
+
+            self.assertFalse(os.path.lexists(os.path.join(install_dir, "defenseclaw.exe")))
+            self.assertTrue(os.path.isfile(os.path.join(install_dir, "defenseclaw.cmd")))
+
+    def test_non_windows_install_leaves_windows_exe_name_untouched(self):
+        with TemporaryDirectory() as home:
+            venv = os.path.join(home, ".defenseclaw", ".venv")
+            install_dir = os.path.join(home, ".local", "bin")
+            os.makedirs(os.path.join(venv, "bin"), exist_ok=True)
+            os.makedirs(install_dir, exist_ok=True)
+            for name in ("python", "defenseclaw"):
+                with open(os.path.join(venv, "bin", name), "w") as stream:
+                    stream.write("managed")
+            shadow = os.path.join(install_dir, "defenseclaw.exe")
+            with open(shadow, "w") as stream:
+                stream.write("unrelated on non-Windows")
+
+            with patch("os.path.expanduser", side_effect=self._expand_home(home)), \
+                 patch("shutil.which", return_value="uv"), \
+                 patch("subprocess.run"), \
+                 patch("os.symlink") as symlink:
+                _install_wheel("wheel.whl", "darwin")
+
+            self.assertTrue(os.path.isfile(shadow))
+            symlink.assert_called_once_with(
+                os.path.join(venv, "bin", "defenseclaw"),
+                os.path.join(install_dir, "defenseclaw"),
+            )
 
     def test_preflight_wheel_install_uses_dry_run_without_managed_venv(self):
         with TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}), \

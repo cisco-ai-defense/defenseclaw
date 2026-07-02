@@ -1395,12 +1395,7 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
 
     if os_name == "windows":
         cli_exe = os.path.join(venv, "Scripts", "defenseclaw.exe")
-        shim = os.path.join(install_dir, "defenseclaw.cmd")
-        if os.path.isfile(cli_exe):
-            # PATHEXT includes .CMD, so `defenseclaw` and
-            # shutil.which("defenseclaw") both resolve to this shim.
-            with open(shim, "w", encoding="ascii", newline="\r\n") as f:
-                f.write(f'@echo off\r\n"{cli_exe}" %*\r\n')
+        _publish_windows_cli_launcher(cli_exe, install_dir)
     else:
         symlink = os.path.join(install_dir, "defenseclaw")
         venv_bin = os.path.join(venv, "bin", "defenseclaw")
@@ -1409,6 +1404,43 @@ def _install_wheel(whl_path: str, os_name: str | None = None) -> None:
                 os.remove(symlink)
             os.symlink(venv_bin, symlink)
     ux.ok("Python CLI installed")
+
+
+def _publish_windows_cli_launcher(cli_exe: str, install_dir: str) -> None:
+    """Atomically publish the Windows CLI shim after removing an exact .exe shadow."""
+    if not os.path.isfile(cli_exe):
+        ux.err(f"Managed CLI executable not found: {cli_exe}", indent="  ")
+        raise SystemExit(1)
+
+    shim = os.path.join(install_dir, "defenseclaw.cmd")
+    shadow = os.path.join(install_dir, "defenseclaw.exe")
+    fd, temporary_shim = tempfile.mkstemp(
+        prefix=".defenseclaw.cmd.", suffix=".tmp", dir=install_dir
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="ascii", newline="") as stream:
+            fd = -1
+            stream.write(f'@echo off\r\n"{cli_exe}" %*\r\n')
+
+        if os.path.lexists(shadow):
+            try:
+                # unlink removes the exact directory entry and never follows a
+                # symlink or launches/inspects the untrusted executable.
+                os.unlink(shadow)
+            except OSError as exc:
+                ux.err(f"Cannot remove shadowing CLI launcher '{shadow}': {exc}", indent="  ")
+                raise SystemExit(1) from exc
+            if os.path.lexists(shadow):
+                ux.err(f"Cannot remove shadowing CLI launcher '{shadow}': entry still exists", indent="  ")
+                raise SystemExit(1)
+
+        os.replace(temporary_shim, shim)
+        temporary_shim = ""
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if temporary_shim and os.path.lexists(temporary_shim):
+            os.unlink(temporary_shim)
 
 
 def _run_installed_migrations(

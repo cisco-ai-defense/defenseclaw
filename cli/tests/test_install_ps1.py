@@ -28,6 +28,26 @@ ROOT = Path(__file__).resolve().parents[2]
 INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
 
 
+def _ps_quote(path: Path) -> str:
+    return str(path).replace("'", "''")
+
+
+def _extract_powershell_function(name: str) -> str:
+    return rf"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    '{_ps_quote(INSTALL_PS1)}', [ref]$tokens, [ref]$errors
+)
+$fn = $ast.Find({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq '{name}'
+}}, $true)
+if ($null -eq $fn) {{ throw 'Function {name} not found' }}
+Invoke-Expression $fn.Extent.Text
+"""
+
+
 def test_all_uv_calls_use_explicit_exit_status_wrapper() -> None:
     text = INSTALL_PS1.read_text()
 
@@ -60,6 +80,111 @@ def test_windows_installer_requires_and_installs_no_console_hook_launcher() -> N
     assert 'Join-Path $tmp "defenseclaw-hook.exe"' in text
     assert 'Die "defenseclaw-hook.exe missing from archive"' in text
     assert 'Join-Path $InstallDir "defenseclaw-hook.exe"' in text
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows command resolution")
+def test_windows_launcher_removes_exe_shadow_and_publishes_managed_cmd(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    install_dir = tmp_path / ".local" / "bin"
+    cli_exe = tmp_path / ".defenseclaw" / ".venv" / "Scripts" / "defenseclaw.exe"
+    install_dir.mkdir(parents=True)
+    cli_exe.parent.mkdir(parents=True)
+    cli_exe.write_text("managed test launcher; never executed")
+    (install_dir / "defenseclaw.exe").write_text("untrusted test launcher; never executed")
+    (install_dir / "defenseclaw.cmd").write_text("@exit /b 99\r\n")
+
+    command = _extract_powershell_function("Publish-CliLauncher") + rf"""
+$env:PATH = '{_ps_quote(install_dir)}'
+$env:PATHEXT = '.EXE;.CMD'
+$before = (Get-Command defenseclaw -CommandType Application).Source
+$null = Publish-CliLauncher -CliExe '{_ps_quote(cli_exe)}' -InstallDir '{_ps_quote(install_dir)}'
+$after = (Get-Command defenseclaw -CommandType Application).Source
+Write-Output "BEFORE=$before"
+Write-Output "AFTER=$after"
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert f"BEFORE={install_dir / 'defenseclaw.exe'}" in completed.stdout
+    assert f"AFTER={install_dir / 'defenseclaw.cmd'}" in completed.stdout
+    assert not (install_dir / "defenseclaw.exe").exists()
+    assert str(cli_exe) in (install_dir / "defenseclaw.cmd").read_text(encoding="ascii")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_windows_launcher_fails_when_exe_shadow_cannot_be_removed(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    install_dir = tmp_path / ".local" / "bin"
+    cli_exe = tmp_path / ".defenseclaw" / ".venv" / "Scripts" / "defenseclaw.exe"
+    shadow = install_dir / "defenseclaw.exe"
+    shim = install_dir / "defenseclaw.cmd"
+    install_dir.mkdir(parents=True)
+    cli_exe.parent.mkdir(parents=True)
+    cli_exe.write_text("managed test launcher; never executed")
+    shadow.write_text("untrusted test launcher; never executed")
+    shim.write_text("existing shim")
+
+    command = _extract_powershell_function("Publish-CliLauncher") + rf"""
+function Remove-Item {{
+    param([string]$LiteralPath, [switch]$Force, [object]$ErrorAction)
+    if ($LiteralPath -eq '{_ps_quote(shadow)}') {{ throw 'launcher is locked' }}
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Force -ErrorAction $ErrorAction
+}}
+$null = Publish-CliLauncher -CliExe '{_ps_quote(cli_exe)}' -InstallDir '{_ps_quote(install_dir)}'
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "Cannot remove shadowing CLI launcher" in completed.stderr
+    assert shadow.exists()
+    assert shim.read_text() == "existing shim"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_windows_launcher_is_idempotent_without_exe_shadow(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is not installed")
+
+    install_dir = tmp_path / ".local" / "bin"
+    cli_exe = tmp_path / ".defenseclaw" / ".venv" / "Scripts" / "defenseclaw.exe"
+    install_dir.mkdir(parents=True)
+    cli_exe.parent.mkdir(parents=True)
+    cli_exe.write_text("managed test launcher; never executed")
+
+    command = _extract_powershell_function("Publish-CliLauncher") + rf"""
+$null = Publish-CliLauncher -CliExe '{_ps_quote(cli_exe)}' -InstallDir '{_ps_quote(install_dir)}'
+$null = Publish-CliLauncher -CliExe '{_ps_quote(cli_exe)}' -InstallDir '{_ps_quote(install_dir)}'
+"""
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (install_dir / "defenseclaw.cmd").is_file()
+    assert not (install_dir / "defenseclaw.exe").exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell native stderr semantics")

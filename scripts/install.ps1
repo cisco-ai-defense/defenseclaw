@@ -180,6 +180,56 @@ function Invoke-Uv {
     return [int]$exitCode
 }
 
+function Publish-CliLauncher {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CliExe,
+        [Parameter(Mandatory = $true)]
+        [string]$InstallDir
+    )
+
+    if (-not (Test-Path -LiteralPath $CliExe -PathType Leaf)) {
+        throw "Managed CLI executable not found: $CliExe"
+    }
+
+    $shim = Join-Path $InstallDir "defenseclaw.cmd"
+    $shadow = Join-Path $InstallDir "defenseclaw.exe"
+    $temporaryShim = Join-Path $InstallDir (".defenseclaw.cmd." + [guid]::NewGuid() + ".tmp")
+
+    try {
+        $contents = "@echo off`r`n`"$CliExe`" %*`r`n"
+        [System.IO.File]::WriteAllText($temporaryShim, $contents, [System.Text.Encoding]::ASCII)
+
+        $shadowEntry = $null
+        try {
+            $shadowEntry = Get-Item -LiteralPath $shadow -Force -ErrorAction Stop
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            # Idempotent: there is no same-directory .exe shadow to remove.
+        }
+
+        if ($null -ne $shadowEntry) {
+            try {
+                # Remove only this exact entry.  No recursion and no execution or
+                # inspection of the untrusted executable is permitted here.
+                Remove-Item -LiteralPath $shadow -Force -ErrorAction Stop
+            } catch {
+                throw "Cannot remove shadowing CLI launcher '$shadow': $($_.Exception.Message)"
+            }
+            try {
+                $null = Get-Item -LiteralPath $shadow -Force -ErrorAction Stop
+                throw "Cannot remove shadowing CLI launcher '$shadow': entry still exists"
+            } catch [System.Management.Automation.ItemNotFoundException] {
+                # The exact shadow entry is gone.
+            }
+        }
+
+        Move-Item -LiteralPath $temporaryShim -Destination $shim -Force -ErrorAction Stop
+        return $shim
+    } finally {
+        Remove-Item -LiteralPath $temporaryShim -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Confirm-YesNo {
     param([string]$Prompt, [string]$Default = "y")
     if ($Yes) { return $true }
@@ -395,18 +445,15 @@ function Install-Cli {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
 
-    # A .cmd shim on PATH is more robust than relying on the venv's Scripts dir
-    # (which would also expose uv/python). PATHEXT includes .CMD, so
-    # `defenseclaw` and shutil.which("defenseclaw") both resolve to it.
     $cliExe = Join-Path $Venv "Scripts\defenseclaw.exe"
-    $shim = Join-Path $InstallDir "defenseclaw.cmd"
-    "@echo off`r`n`"$cliExe`" %*`r`n" | Set-Content -Path $shim -Encoding Ascii -NoNewline
-
-    if (Test-Path $cliExe) {
-        Write-Ok "CLI installed -> $shim"
-    } else {
-        Write-Warn2 "CLI installed but $cliExe not found - check dependencies"
+    try {
+        # PowerShell resolves .EXE before .CMD. Publish the managed-venv shim
+        # only after removing the exact same-directory stale launcher.
+        $shim = Publish-CliLauncher -CliExe $cliExe -InstallDir $InstallDir
+    } catch {
+        Die $_.Exception.Message
     }
+    Write-Ok "CLI installed -> $shim"
 }
 
 # ── Connector selection ───────────────────────────────────────────────────────
