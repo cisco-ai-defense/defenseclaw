@@ -24,6 +24,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import click
@@ -43,6 +44,7 @@ def capture_click_output():
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         yield buf
+
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -137,8 +139,7 @@ class ResetCommandTests(unittest.TestCase):
         def fake_execute(plan):
             captured["plan"] = plan
 
-        with patch("defenseclaw.commands.cmd_uninstall._execute_plan",
-                   side_effect=fake_execute):
+        with patch("defenseclaw.commands.cmd_uninstall._execute_plan", side_effect=fake_execute):
             result = runner.invoke(cmd_uninstall.reset_cmd, ["--yes"])
             self.assertEqual(result.exit_code, 0, msg=result.output)
             plan = captured["plan"]
@@ -146,6 +147,24 @@ class ResetCommandTests(unittest.TestCase):
             self.assertTrue(plan.remove_data_dir)
             self.assertFalse(plan.remove_plugin)
             self.assertFalse(plan.remove_binaries)
+            self.assertEqual(plan.preserve_data_entries, (".venv",))
+            self.assertIn("preserve runtime:", result.output)
+
+    def test_reset_failure_is_nonzero_and_never_reports_complete(self):
+        runner = CliRunner()
+        with (
+            patch("defenseclaw.commands.cmd_uninstall._stop_gateway"),
+            patch("defenseclaw.commands.cmd_uninstall._connector_teardown"),
+            patch("defenseclaw.commands.cmd_uninstall._remove_data_dir", side_effect=OSError("locked native module")),
+        ):
+            result = runner.invoke(cmd_uninstall.reset_cmd, ["--yes"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("gateway stop: succeeded", result.output)
+        self.assertIn("connector teardown: succeeded", result.output)
+        self.assertIn("data removal: failed", result.output)
+        self.assertIn("locked native module", result.output)
+        self.assertNotIn("Reset complete", result.output)
 
 
 class ResolveActiveConnectorTests(unittest.TestCase):
@@ -153,22 +172,28 @@ class ResolveActiveConnectorTests(unittest.TestCase):
         class Cfg:
             def active_connector(self):
                 return "Codex"
+
         self.assertEqual(cmd_uninstall._resolve_active_connector(Cfg()), "codex")
 
     def test_falls_back_to_guardrail_connector(self):
         class Guardrail:
             connector = "claudecode"
+
         class Cfg:
             guardrail = Guardrail()
+
         self.assertEqual(cmd_uninstall._resolve_active_connector(Cfg()), "claudecode")
 
     def test_method_exception_falls_back(self):
         class Guardrail:
             connector = "zeptoclaw"
+
         class Cfg:
             guardrail = Guardrail()
+
             def active_connector(self):
                 raise RuntimeError("boom")
+
         self.assertEqual(cmd_uninstall._resolve_active_connector(Cfg()), "zeptoclaw")
 
     def test_none_cfg_defaults_to_openclaw(self):
@@ -205,15 +230,16 @@ class BuildPlanConnectorTests(unittest.TestCase):
     def test_plan_records_active_connector(self):
         class Guardrail:
             connector = "codex"
+
         class Claw:
             home_dir = "~/.codex"
             config_file = "~/.codex/config.toml"
+
         class Cfg:
             guardrail = Guardrail()
             claw = Claw()
 
-        with patch("defenseclaw.commands.cmd_uninstall.config_module.load",
-                   return_value=Cfg()):
+        with patch("defenseclaw.commands.cmd_uninstall.config_module.load", return_value=Cfg()):
             plan = cmd_uninstall._build_plan(
                 wipe_data=False,
                 binaries=False,
@@ -244,8 +270,7 @@ class BuildPlanConnectorTests(unittest.TestCase):
             def active_connectors(self):
                 return ["antigravity", "claudecode", "codex"]
 
-        with patch("defenseclaw.commands.cmd_uninstall.config_module.load",
-                   return_value=Cfg()):
+        with patch("defenseclaw.commands.cmd_uninstall.config_module.load", return_value=Cfg()):
             plan = cmd_uninstall._build_plan(
                 wipe_data=True,
                 binaries=False,
@@ -259,18 +284,20 @@ class BuildPlanConnectorTests(unittest.TestCase):
     def test_keep_openclaw_still_tears_down_non_openclaw_active_connector(self):
         class Guardrail:
             connector = "codex"
+
         class Claw:
             home_dir = "~/.openclaw"
             config_file = "~/.openclaw/openclaw.json"
+
         class Cfg:
             guardrail = Guardrail()
             claw = Claw()
 
-        with tempfile.TemporaryDirectory() as data_dir, \
-             patch("defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
-                   return_value=data_dir), \
-             patch("defenseclaw.commands.cmd_uninstall.config_module.load",
-                   return_value=Cfg()):
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            patch("defenseclaw.commands.cmd_uninstall.config_module.default_data_path", return_value=data_dir),
+            patch("defenseclaw.commands.cmd_uninstall.config_module.load", return_value=Cfg()),
+        ):
             plan = cmd_uninstall._build_plan(
                 wipe_data=False,
                 binaries=False,
@@ -280,8 +307,7 @@ class BuildPlanConnectorTests(unittest.TestCase):
         self.assertEqual(plan.connectors, ("codex",))
 
     def test_plan_defaults_to_openclaw_when_load_fails(self):
-        with patch("defenseclaw.commands.cmd_uninstall.config_module.load",
-                   side_effect=Exception("boom")):
+        with patch("defenseclaw.commands.cmd_uninstall.config_module.load", side_effect=Exception("boom")):
             plan = cmd_uninstall._build_plan(
                 wipe_data=False,
                 binaries=False,
@@ -359,27 +385,29 @@ class ConnectorTeardownDispatchTests(unittest.TestCase):
         )
 
     def test_uses_gateway_sentinel_when_supported(self):
-        with patch.object(cmd_uninstall, "_gateway_supports_connector_teardown",
-                          return_value=True), \
-             patch.object(cmd_uninstall, "_run_gateway_connector_teardown",
-                          return_value=True) as run_mock, \
-             patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback:
+        with (
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=True),
+            patch.object(cmd_uninstall, "_run_gateway_connector_teardown", return_value=True) as run_mock,
+            patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback,
+        ):
             cmd_uninstall._connector_teardown(self._plan("codex"))
             run_mock.assert_called_once_with("codex")
             fallback.assert_not_called()
 
     def test_falls_back_to_python_for_openclaw_when_gateway_old(self):
-        with patch.object(cmd_uninstall, "_gateway_supports_connector_teardown",
-                          return_value=False), \
-             patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback:
+        with (
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=False),
+            patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback,
+        ):
             cmd_uninstall._connector_teardown(self._plan("openclaw"))
             fallback.assert_called_once()
 
     def test_hard_fails_when_non_openclaw_and_gateway_old(self):
-        with patch.object(cmd_uninstall, "_gateway_supports_connector_teardown",
-                          return_value=False), \
-             patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback, \
-             self.assertRaises(click.ClickException) as raised:
+        with (
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=False),
+            patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback,
+            self.assertRaises(click.ClickException) as raised,
+        ):
             cmd_uninstall._connector_teardown(self._plan("codex"))
         text = str(raised.exception)
         fallback.assert_not_called()
@@ -388,22 +416,22 @@ class ConnectorTeardownDispatchTests(unittest.TestCase):
         self.assertIn("connector teardown", text)
 
     def test_falls_back_when_gateway_sentinel_errors_for_openclaw(self):
-        with patch.object(cmd_uninstall, "_gateway_supports_connector_teardown",
-                          return_value=True), \
-             patch.object(cmd_uninstall, "_run_gateway_connector_teardown",
-                          return_value=False), \
-             patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback:
+        with (
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=True),
+            patch.object(cmd_uninstall, "_run_gateway_connector_teardown", return_value=False),
+            patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback,
+        ):
             cmd_uninstall._connector_teardown(self._plan("openclaw"))
             fallback.assert_called_once()
 
     def test_does_not_fall_back_for_codex_when_sentinel_errors(self):
-        with capture_click_output() as buf, \
-             patch.object(cmd_uninstall, "_gateway_supports_connector_teardown",
-                          return_value=True), \
-             patch.object(cmd_uninstall, "_run_gateway_connector_teardown",
-                          return_value=False), \
-             patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback, \
-             self.assertRaises(click.ClickException) as raised:
+        with (
+            capture_click_output() as buf,
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=True),
+            patch.object(cmd_uninstall, "_run_gateway_connector_teardown", return_value=False),
+            patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback,
+            self.assertRaises(click.ClickException) as raised,
+        ):
             cmd_uninstall._connector_teardown(self._plan("codex"))
         fallback.assert_not_called()
         self.assertIn("reported errors", buf.getvalue())
@@ -416,31 +444,153 @@ class GatewaySupportProbeTests(unittest.TestCase):
         with patch("shutil.which", return_value=None):
             self.assertFalse(cmd_uninstall._gateway_supports_connector_teardown())
 
-    def test_returns_true_for_modern_gateway(self):
-        with patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"), \
-             patch("subprocess.run") as run_mock:
+    def test_gateway_help_is_decoded_as_utf8(self):
+        with patch("shutil.which", return_value="defenseclaw-gateway.exe"), patch("subprocess.run") as run_mock:
             run_mock.return_value.returncode = 0
-            run_mock.return_value.stdout = (
-                "Available Commands:\n  list-backups ...\n  teardown ...\n  verify ...\n"
-            )
+            run_mock.return_value.stdout = "teardown\nlist-backups\n"
+            run_mock.return_value.stderr = ""
+            self.assertTrue(cmd_uninstall._gateway_supports_connector_teardown())
+
+        kwargs = run_mock.call_args.kwargs
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
+        self.assertNotIn("text", kwargs)
+
+    def test_returns_true_for_modern_gateway(self):
+        with patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"), patch("subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 0
+            run_mock.return_value.stdout = "Available Commands:\n  list-backups ...\n  teardown ...\n  verify ...\n"
             run_mock.return_value.stderr = ""
             self.assertTrue(cmd_uninstall._gateway_supports_connector_teardown())
 
     def test_returns_false_when_help_lacks_subcommand(self):
-        with patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"), \
-             patch("subprocess.run") as run_mock:
+        with patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"), patch("subprocess.run") as run_mock:
             run_mock.return_value.returncode = 0
             run_mock.return_value.stdout = "Usage:\n  defenseclaw-gateway [command]\n"
             run_mock.return_value.stderr = ""
             self.assertFalse(cmd_uninstall._gateway_supports_connector_teardown())
 
     def test_returns_false_when_help_exits_nonzero(self):
-        with patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"), \
-             patch("subprocess.run") as run_mock:
+        with patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"), patch("subprocess.run") as run_mock:
             run_mock.return_value.returncode = 1
             run_mock.return_value.stdout = ""
-            run_mock.return_value.stderr = "unknown command \"connector\""
+            run_mock.return_value.stderr = 'unknown command "connector"'
             self.assertFalse(cmd_uninstall._gateway_supports_connector_teardown())
+
+
+class GatewayTeardownOutputTests(unittest.TestCase):
+    def test_gateway_teardown_uses_utf8_and_preserves_checkmark(self):
+        completed = type(
+            "Completed",
+            (),
+            {"returncode": 0, "stdout": "✓ restored\n", "stderr": ""},
+        )()
+        with (
+            patch("shutil.which", return_value="defenseclaw-gateway.exe"),
+            patch("subprocess.run", return_value=completed) as run_mock,
+            capture_click_output() as buf,
+        ):
+            self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("codex"))
+
+        self.assertIn("✓ restored", buf.getvalue())
+        kwargs = run_mock.call_args.kwargs
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
+        self.assertNotIn("text", kwargs)
+
+    def test_gateway_stop_uses_utf8(self):
+        completed = type("Completed", (), {"returncode": 0, "stdout": "✓ stopped\n", "stderr": ""})()
+        with (
+            patch("shutil.which", return_value="defenseclaw-gateway.exe"),
+            patch("subprocess.run", return_value=completed) as run_mock,
+        ):
+            cmd_uninstall._stop_gateway()
+
+        kwargs = run_mock.call_args.kwargs
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
+
+
+class RemoveDataDirTests(unittest.TestCase):
+    def test_reset_preserves_only_managed_venv_and_removes_all_user_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            venv = data_dir / ".venv"
+            venv.mkdir(parents=True)
+            (venv / "runtime.pyd").write_bytes(b"loaded")
+
+            resettable = {
+                "config.yaml": "config",
+                "audit.db": "audit",
+                "audit-history.db": "history",
+                ".env": "tokens",
+                "logs/gateway.log": "log",
+                "policies/default.yaml": "policy",
+                "quarantine/item": "quarantine",
+                "connector_backups/codex/config.toml.json": "connector",
+                "tokens/session": "token",
+                "arbitrary/new-state.bin": "future state",
+            }
+            for relative, content in resettable.items():
+                target = data_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+
+            cmd_uninstall._remove_data_dir(str(data_dir), preserve_entries=(".venv",))
+
+            self.assertTrue(venv.is_dir())
+            self.assertTrue((venv / "runtime.pyd").is_file())
+            self.assertEqual({path.name for path in data_dir.iterdir()}, {".venv"})
+
+    def test_full_uninstall_removes_managed_venv_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            (data_dir / ".venv").mkdir(parents=True)
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+
+            cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertFalse(data_dir.exists())
+
+    def test_reset_rejects_symlinked_preserved_venv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / ".defenseclaw"
+            outside = root / "outside"
+            data_dir.mkdir()
+            outside.mkdir()
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+            try:
+                (data_dir / ".venv").symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._remove_data_dir(str(data_dir), preserve_entries=(".venv",))
+
+            self.assertTrue(outside.is_dir())
+
+    def test_partial_failure_retains_identity_marker_for_safe_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            data_dir.mkdir()
+            marker = data_dir / "config.yaml"
+            marker.write_text("config", encoding="utf-8")
+            blocked = data_dir / "blocked.log"
+            blocked.write_text("locked", encoding="utf-8")
+
+            original_remove = cmd_uninstall._remove_tree_entry
+
+            def fail_blocked(entry):
+                if entry.name == "blocked.log":
+                    raise OSError("access denied")
+                original_remove(entry)
+
+            with patch.object(cmd_uninstall, "_remove_tree_entry", side_effect=fail_blocked):
+                with self.assertRaises(OSError):
+                    cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertTrue(marker.is_file())
 
 
 class ExecutePlanConnectorTests(unittest.TestCase):

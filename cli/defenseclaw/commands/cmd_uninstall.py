@@ -18,9 +18,10 @@
 
 Removes DefenseClaw artifacts from the system in a predictable,
 scriptable way so operators aren't left with a mess after evaluating
-the tool. ``reset`` is the "lose my data" button — it wipes
-``~/.defenseclaw`` but keeps the binaries and the agent framework's
-plugin in place so ``defenseclaw quickstart`` can reinstall cleanly.
+the tool. ``reset`` is the "lose my data" button — it wipes user state
+under ``~/.defenseclaw`` but keeps an in-tree managed runtime, the
+binaries, and the agent framework's plugin in place so
+``defenseclaw quickstart`` can reinstall cleanly.
 
 Connector polymorphism (S7.3)
 -----------------------------
@@ -42,8 +43,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import click
 
@@ -55,10 +59,9 @@ from defenseclaw import ux
 # is the conservative fallback path used when the gateway binary is too
 # old to expose the connector subcommand.
 _PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
+_RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv",)
 _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
-    "openclaw": (
-        os.path.join("connector_backups", "openclaw", "openclaw.json.json"),
-    ),
+    "openclaw": (os.path.join("connector_backups", "openclaw", "openclaw.json.json"),),
     "codex": (
         "codex_backup.json",
         "codex_config_backup.json",
@@ -95,11 +98,35 @@ class UninstallPlan:
     # connector unless OpenClaw was explicitly excluded, plus any inactive
     # connector with rollback markers still present under data_dir.
     connectors: tuple[str, ...] = ()
+    # Reset keeps the in-tree Windows runtime that is executing this command.
+    # Full uninstall deliberately leaves this empty and removes everything.
+    preserve_data_entries: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ExecutionPhaseResult:
+    """Outcome of one externally visible uninstall/reset phase."""
+
+    name: str
+    status: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    """Structured outcome used by commands and automation-facing tests."""
+
+    phases: tuple[ExecutionPhaseResult, ...]
+
+    @property
+    def succeeded(self) -> bool:
+        return all(phase.status == "succeeded" for phase in self.phases)
 
 
 # ---------------------------------------------------------------------------
 # uninstall
 # ---------------------------------------------------------------------------
+
 
 @click.command("uninstall")
 @click.option("--all", "wipe_data", is_flag=True, help="Also delete ~/.defenseclaw (audit log, config, secrets).")
@@ -147,26 +174,29 @@ def uninstall_cmd(
 # reset
 # ---------------------------------------------------------------------------
 
+
 @click.command("reset")
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 def reset_cmd(yes: bool) -> None:
-    """Wipe ~/.defenseclaw so 'defenseclaw quickstart' starts clean.
+    """Wipe user state so 'defenseclaw quickstart' starts clean.
 
-    Keeps binaries and the OpenClaw plugin installed so reinstall is
-    fast. For a full uninstall use 'defenseclaw uninstall --all
-    --binaries'.
+    Keeps a managed .venv runtime, binaries, and the OpenClaw plugin
+    installed so reinstall is fast. For a full uninstall use
+    'defenseclaw uninstall --all --binaries'.
     """
     plan = _build_plan(
         wipe_data=True,
         binaries=False,
         revert_openclaw=True,
         remove_plugin=False,  # keep plugin around for quick re-enable
+        preserve_data_entries=_RESET_PRESERVED_ENTRIES,
     )
     ux.banner("DefenseClaw Reset")
     _render_plan(plan, dry_run=False)
 
     if not yes and not click.confirm(
-        f"  This will DELETE {plan.data_dir}. Continue?", default=False
+        f"  This will DELETE resettable state under {plan.data_dir}. Continue?",
+        default=False,
     ):
         ux.subhead("Cancelled.")
         raise SystemExit(1)
@@ -178,6 +208,7 @@ def reset_cmd(yes: bool) -> None:
 # ---------------------------------------------------------------------------
 # Planning + execution
 # ---------------------------------------------------------------------------
+
 
 def _resolve_active_connector(cfg) -> str:
     """Return the active connector for ``cfg``, lowercased.
@@ -232,6 +263,7 @@ def _build_plan(
     binaries: bool,
     revert_openclaw: bool,
     remove_plugin: bool,
+    preserve_data_entries: tuple[str, ...] = (),
 ) -> UninstallPlan:
     data_dir = str(config_module.default_data_path())
 
@@ -268,6 +300,7 @@ def _build_plan(
         openclaw_home=openclaw_home,
         connector=connector,
         connectors=connectors,
+        preserve_data_entries=preserve_data_entries,
     )
 
 
@@ -339,29 +372,67 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             f"  • {ux.bold('revert openclaw.json:')} {'yes' if plan.revert_openclaw else 'no'} "
             f"({plan.openclaw_config_file})"
         )
-        click.echo(
-            f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}"
-        )
+        click.echo(f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}")
     click.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
+    if plan.preserve_data_entries:
+        click.echo(f"  • {ux.bold('preserve runtime:')}      {', '.join(plan.preserve_data_entries)}")
     click.echo(f"  • {ux.bold('remove binaries:')}     {'yes' if plan.remove_binaries else 'no'}")
     click.echo()
 
 
-def _execute_plan(plan: UninstallPlan) -> None:
+def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
+    """Execute *plan*, surfacing the exact phase that failed.
+
+    Destructive phases are intentionally sequential: connector restoration
+    must finish before data containing its rollback state is removed. A phase
+    failure stops later work, prints the completed/failed phase ledger, and
+    propagates as a Click error so callers receive a non-zero exit status.
+    """
+    phases: list[ExecutionPhaseResult] = []
+
+    def run_phase(name: str, action: Callable[[], None]) -> None:
+        try:
+            action()
+        except Exception as exc:
+            phases.append(ExecutionPhaseResult(name, "failed", str(exc)))
+            _render_execution_result(ExecutionResult(tuple(phases)))
+            if isinstance(exc, click.ClickException):
+                raise
+            raise click.ClickException(f"{name} failed: {exc}") from exc
+        phases.append(ExecutionPhaseResult(name, "succeeded"))
+
     if plan.stop_gateway:
-        _stop_gateway()
+        run_phase("gateway stop", _stop_gateway)
     if plan.connectors or plan.revert_openclaw:
-        _connector_teardown(plan)
+        run_phase("connector teardown", lambda: _connector_teardown(plan))
     if plan.remove_plugin:
         # Plugin removal is OpenClaw-specific. For other connectors the
         # gateway sentinel teardown above already removed their hook
         # scripts and config patches. This helper is idempotent and
         # reports "not installed" when OpenClaw was never used.
-        _remove_plugin(plan)
+        run_phase("plugin removal", lambda: _remove_plugin(plan))
     if plan.remove_data_dir:
-        _remove_data_dir(plan.data_dir)
+        run_phase(
+            "data removal",
+            lambda: _remove_data_dir(
+                plan.data_dir,
+                preserve_entries=plan.preserve_data_entries,
+            ),
+        )
     if plan.remove_binaries:
-        _remove_binaries()
+        run_phase("binary removal", _remove_binaries)
+
+    result = ExecutionResult(tuple(phases))
+    _render_execution_result(result)
+    return result
+
+
+def _render_execution_result(result: ExecutionResult) -> None:
+    """Render a compact, stable phase ledger for humans and automation."""
+    ux.subhead("Phase results:")
+    for phase in result.phases:
+        suffix = f" ({phase.detail})" if phase.detail else ""
+        click.echo(f"  {phase.name}: {phase.status}{suffix}")
 
 
 def _stop_gateway() -> None:
@@ -370,10 +441,19 @@ def _stop_gateway() -> None:
         ux.subhead("sidecar not on PATH — nothing to stop")
         return
     try:
-        subprocess.run([gw, "stop"], capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(
+            [gw, "stop"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "unknown error").strip()
+            raise click.ClickException(f"could not stop sidecar: {detail}")
         ux.ok("sidecar stopped")
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-        ux.warn(f"could not stop sidecar: {exc}")
+        raise click.ClickException(f"could not stop sidecar: {exc}") from exc
 
 
 def _gateway_supports_connector_teardown() -> bool:
@@ -392,7 +472,8 @@ def _gateway_supports_connector_teardown() -> bool:
         proc = subprocess.run(
             [gw, "connector", "--help"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -419,10 +500,7 @@ def _connector_teardown(plan: UninstallPlan) -> None:
         if gateway_supported:
             if _run_gateway_connector_teardown(name):
                 continue
-            ux.warn(
-                f"gateway connector teardown for {name} reported errors — "
-                "see output above"
-            )
+            ux.warn(f"gateway connector teardown for {name} reported errors — see output above")
             if name != "openclaw":
                 raise click.ClickException(
                     f"aborting uninstall: {name} teardown failed, so "
@@ -455,7 +533,8 @@ def _run_gateway_connector_teardown(connector: str) -> bool:
         proc = subprocess.run(
             [gw, "connector", "teardown", "--connector", connector],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -517,7 +596,42 @@ def _remove_plugin(plan: UninstallPlan) -> None:
         ux.warn("plugin uninstall failed (check permissions)")
 
 
-def _remove_data_dir(data_dir: str) -> None:
+def _is_reparse_path(path: str | os.PathLike[str]) -> bool:
+    """Return whether *path* is a symlink or Windows reparse point."""
+    if os.path.islink(path):
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction and isjunction(path):
+        return True
+    # Python 3.10/3.11 do not expose os.path.isjunction(). Windows lstat
+    # still exposes the reparse attribute, covering junctions and mount
+    # points without resolving or traversing them.
+    try:
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _remove_tree_entry(entry: os.DirEntry[str]) -> None:
+    """Remove one direct child without following symlinks/reparse points."""
+    if _is_reparse_path(entry.path):
+        if os.path.isdir(entry.path):
+            os.rmdir(entry.path)
+        else:
+            os.unlink(entry.path)
+        return
+    if entry.is_dir(follow_symlinks=False):
+        shutil.rmtree(entry.path)
+        return
+    os.unlink(entry.path)
+
+
+def _remove_data_dir(
+    data_dir: str,
+    *,
+    preserve_entries: tuple[str, ...] = (),
+) -> None:
     # Safety guard: an empty / root-like path here would be catastrophic
     # because we're about to recursively delete. Bail out unless the
     # directory genuinely looks like a DefenseClaw data dir (i.e.
@@ -527,23 +641,81 @@ def _remove_data_dir(data_dir: str) -> None:
     if not data_dir or not os.path.isdir(data_dir):
         ux.subhead(f"{data_dir} does not exist — skipping")
         return
+    if _is_reparse_path(data_dir):
+        raise click.ClickException(f"refusing to remove symlink or reparse-point data path {data_dir}")
+
+    unknown_preserves = set(preserve_entries) - set(_RESET_PRESERVED_ENTRIES)
+    if unknown_preserves:
+        raise click.ClickException(
+            "refusing unrecognized reset preservation entries: " + ", ".join(sorted(unknown_preserves))
+        )
+
     # Disallow top-level / root-ish paths outright.
     resolved = os.path.realpath(data_dir)
-    if resolved in ("/", os.path.expanduser("~"), os.path.realpath(os.path.expanduser("~"))):
-        ux.warn(f"refusing to remove protected path {resolved}")
-        return
-    markers = ("config.yaml", "audit.db", ".env", "policies", "quarantine")
+    protected = {
+        os.path.normcase(os.path.realpath(os.path.expanduser("~"))),
+        os.path.normcase(str(Path(resolved).anchor)),
+        os.path.normcase(os.path.realpath("/")),
+    }
+    if os.path.normcase(resolved) in protected:
+        raise click.ClickException(f"refusing to remove protected path {resolved}")
+
+    preserved: set[str] = set()
+    for name in preserve_entries:
+        candidate = os.path.join(data_dir, name)
+        if not os.path.lexists(candidate):
+            continue
+        if _is_reparse_path(candidate) or not os.path.isdir(candidate):
+            raise click.ClickException(f"refusing to preserve unsafe managed runtime {candidate}")
+        if os.path.commonpath((resolved, os.path.realpath(candidate))) != resolved:
+            raise click.ClickException(f"managed runtime resolves outside the data directory: {candidate}")
+        preserved.add(name)
+
+    markers = (
+        "config.yaml",
+        "audit.db",
+        ".env",
+        "policies",
+        "quarantine",
+        ".venv",
+    )
     if not any(os.path.exists(os.path.join(data_dir, m)) for m in markers):
-        click.echo(
-            f"  ⚠ {data_dir} does not look like a DefenseClaw data dir "
-            "(no config.yaml / audit.db / policies) — skipping"
+        raise click.ClickException(
+            f"refusing to remove {data_dir}: path does not look like a DefenseClaw data directory"
         )
+
+    failures: list[str] = []
+    with os.scandir(data_dir) as entries:
+        children = list(entries)
+
+    # Delete non-markers first. If one fails, retain the known markers so a
+    # later retry can still prove this is a DefenseClaw directory instead of
+    # getting stranded after a partial deletion.
+    for marker_pass in (False, True):
+        if failures:
+            break
+        for entry in children:
+            if entry.name in preserved:
+                continue
+            if (entry.name in markers) != marker_pass:
+                continue
+            try:
+                _remove_tree_entry(entry)
+            except OSError as exc:
+                failures.append(f"{entry.name}: {exc}")
+
+    if failures:
+        raise OSError("; ".join(failures))
+
+    if preserved:
+        ux.ok(f"removed resettable state from {data_dir} (preserved {', '.join(sorted(preserved))})")
         return
+
     try:
-        shutil.rmtree(data_dir)
-        ux.ok(f"removed {data_dir}")
+        os.rmdir(data_dir)
     except OSError as exc:
-        ux.warn(f"failed to remove {data_dir}: {exc}")
+        raise OSError(f"could not remove data directory: {exc}") from exc
+    ux.ok(f"removed {data_dir}")
 
 
 def _remove_binaries() -> None:
@@ -573,10 +745,7 @@ def _remove_binaries() -> None:
     # Clean up the pip-installed Python package symlink if operators
     # used ``pip install defenseclaw`` — we don't shell out to pip
     # because we can't be sure which environment they used.
-    ux.subhead(
-        "if you installed the Python CLI via pip, run "
-        "'pip uninstall defenseclaw' manually"
-    )
+    ux.subhead("if you installed the Python CLI via pip, run 'pip uninstall defenseclaw' manually")
 
 
 def _expand(p: str) -> str:

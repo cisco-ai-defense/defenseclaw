@@ -56,8 +56,15 @@ from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
 
 SKIP_LOAD_COMMANDS = {
-    "agent", "init", "migrations", "quickstart", "sandbox", "tui",
-    "uninstall", "reset", "version",
+    "agent",
+    "init",
+    "migrations",
+    "quickstart",
+    "sandbox",
+    "tui",
+    "uninstall",
+    "reset",
+    "version",
 }
 
 # Commands that may legitimately run before config.yaml exists or while
@@ -107,6 +114,17 @@ def cli(ctx: click.Context) -> None:
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
 
+    # ``status`` must not turn a clean post-reset home back into a phantom
+    # initialized install. Config.load() intentionally supplies defaults for
+    # some recovery workflows, so check the durable initialization marker
+    # before loading and before Store.init() can recreate audit.db.
+    if invoked == "status" and not cfg_mod.config_path().is_file():
+        click.echo(
+            "DefenseClaw initialization required — run 'defenseclaw init' first.",
+            err=True,
+        )
+        raise SystemExit(1)
+
     try:
         app.cfg = cfg_mod.load()
     except Exception as exc:
@@ -130,8 +148,10 @@ def cli(ctx: click.Context) -> None:
                 click.echo(f"  ✗ {result.parse_error}", err=True)
             for issue in result.errors:
                 click.echo(f"  ✗ {issue}", err=True)
-            click.echo("  Run 'defenseclaw config validate' for details, or "
-                      "'defenseclaw doctor --fix' to auto-repair.", err=True)
+            click.echo(
+                "  Run 'defenseclaw config validate' for details, or 'defenseclaw doctor --fix' to auto-repair.",
+                err=True,
+            )
             raise SystemExit(1)
 
     try:
