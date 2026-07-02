@@ -6,6 +6,7 @@ import {
   createInitialPlayerState,
   playerReducer,
 } from '../components/feature-demo/reducer';
+import { scenarioConnectorMappings } from '../components/feature-demo/types';
 import type { ScenarioStep } from '../components/feature-demo/types';
 
 const connectorIds = new Set(matrix.connectors.map((connector) => connector.id));
@@ -163,5 +164,24 @@ describe('scenario player reducer', () => {
     assert.equal(complete.stepIndex, 3);
     assert.equal(complete.completed, true);
     assert.equal(complete.isPlaying, false);
+  });
+});
+
+describe('scenario connector mappings', () => {
+  it('renders one connector per highlighted range when evidence outnumbers highlights', () => {
+    assert.deepStrictEqual(
+      scenarioConnectorMappings(['success'], ['danger', 'success']),
+      [{ highlightIndex: 0, evidenceIndex: 1 }],
+    );
+  });
+
+  it('selects the tone-matched evidence for each highlighted range', () => {
+    assert.deepStrictEqual(
+      scenarioConnectorMappings(['warning', 'danger'], ['warning', 'info', 'danger']),
+      [
+        { highlightIndex: 0, evidenceIndex: 0 },
+        { highlightIndex: 1, evidenceIndex: 2 },
+      ],
+    );
   });
 });

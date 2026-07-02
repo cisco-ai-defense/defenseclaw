@@ -2,7 +2,7 @@
 
 import { motion, useReducedMotion } from 'motion/react';
 import { useCallback, useId, useLayoutEffect, useRef, useState } from 'react';
-import { evidenceHighlightIndex, type ScenarioTone } from './types';
+import { scenarioConnectorMappings, type ScenarioTone } from './types';
 
 interface ConnectorGeometry {
   id: string;
@@ -19,12 +19,12 @@ interface GeometryState {
 }
 
 export function ScenarioAnnotations({
-  tones,
-  highlightCount,
+  evidenceTones,
+  highlightTones,
   stepId,
 }: {
-  tones: ScenarioTone[];
-  highlightCount: number;
+  evidenceTones: ScenarioTone[];
+  highlightTones: ScenarioTone[];
   stepId: string;
 }) {
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -39,7 +39,7 @@ export function ScenarioAnnotations({
   const measure = useCallback(() => {
     const svg = svgRef.current;
     const stage = svg?.closest<HTMLElement>('.scenario-stage');
-    if (!svg || !stage || highlightCount === 0 || tones.length === 0) {
+    if (!svg || !stage || highlightTones.length === 0 || evidenceTones.length === 0) {
       setGeometry({ width: 0, height: 0, connectors: [] });
       return;
     }
@@ -58,9 +58,12 @@ export function ScenarioAnnotations({
       stage.querySelectorAll<HTMLElement>('[data-scenario-evidence-index]'),
     );
 
-    const connectors = evidence.flatMap((item, evidenceIndex): ConnectorGeometry[] => {
-      const resolvedEvidenceIndex = Number(item.dataset.scenarioEvidenceIndex ?? evidenceIndex);
-      const highlightIndex = evidenceHighlightIndex(resolvedEvidenceIndex, highlightCount);
+    const connectors = scenarioConnectorMappings(highlightTones, evidenceTones).flatMap((mapping): ConnectorGeometry[] => {
+      const { evidenceIndex, highlightIndex } = mapping;
+      const item = evidence.find(
+        (candidate, domIndex) => Number(candidate.dataset.scenarioEvidenceIndex ?? domIndex) === evidenceIndex,
+      );
+      if (!item) return [];
       const lines = highlights.filter(
         (line) => Number(line.dataset.scenarioHighlightIndex) === highlightIndex,
       );
@@ -81,11 +84,11 @@ export function ScenarioAnnotations({
       const bend = Math.max(28, Math.abs(targetX - sourceX) * 0.42);
 
       return [{
-        id: `${stepId}-${evidenceIndex}`,
+        id: `${stepId}-${highlightIndex}`,
         path: `M ${targetX} ${targetY} C ${targetX - bend} ${targetY}, ${sourceX + bend} ${sourceY}, ${sourceX} ${sourceY}`,
         sourceX,
         sourceY,
-        tone: tones[evidenceIndex] ?? tones.at(-1) ?? 'info',
+        tone: highlightTones[highlightIndex] ?? 'info',
       }];
     });
 
@@ -94,7 +97,7 @@ export function ScenarioAnnotations({
       height: stageRect.height,
       connectors,
     });
-  }, [highlightCount, stepId, tones]);
+  }, [evidenceTones, highlightTones, stepId]);
 
   useLayoutEffect(() => {
     const svg = svgRef.current;

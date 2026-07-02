@@ -20,6 +20,27 @@ export function evidenceHighlightIndex(evidenceIndex: number, highlightCount: nu
   return highlightCount > 0 ? Math.min(evidenceIndex, highlightCount - 1) : -1;
 }
 
+export interface ScenarioConnectorMapping {
+  highlightIndex: number;
+  evidenceIndex: number;
+}
+
+export function scenarioConnectorMappings(
+  highlightTones: ScenarioTone[],
+  evidenceTones: ScenarioTone[],
+): ScenarioConnectorMapping[] {
+  return highlightTones.flatMap((highlightTone, highlightIndex) => {
+    const candidates = evidenceTones.flatMap((evidenceTone, evidenceIndex) => (
+      evidenceHighlightIndex(evidenceIndex, highlightTones.length) === highlightIndex
+        ? [{ evidenceIndex, evidenceTone }]
+        : []
+    ));
+    const matchingTone = candidates.filter((candidate) => candidate.evidenceTone === highlightTone).at(-1);
+    const selected = matchingTone ?? candidates.at(-1);
+    return selected ? [{ highlightIndex, evidenceIndex: selected.evidenceIndex }] : [];
+  });
+}
+
 export interface ScenarioTab {
   id: string;
   label: string;

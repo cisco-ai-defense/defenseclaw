@@ -73,6 +73,10 @@ export function ScenarioPlayer({
     () => activeEvidence.map((item) => item.tone),
     [activeEvidence],
   );
+  const highlightTones = useMemo(
+    () => activeHighlights.map((item) => item.tone),
+    [activeHighlights],
+  );
   const outcome = scenario.outcomes.find((item) => item.id === activeStep.outcomeId);
   useEffect(() => {
     if (!autoplay || prefersReducedMotion || autoplayStarted.current) return;
@@ -154,13 +158,13 @@ export function ScenarioPlayer({
           <ScenarioCode
             tab={activeTab}
             highlights={activeHighlights}
-            evidenceCount={activeEvidence.length}
+            evidenceTones={connectionTones}
             instanceId={instanceId}
           />
           <EvidenceRail items={activeEvidence} stepId={activeStep.id} />
           <ScenarioAnnotations
-            tones={connectionTones}
-            highlightCount={activeHighlights.length}
+            evidenceTones={connectionTones}
+            highlightTones={highlightTones}
             stepId={activeStep.id}
           />
         </div>

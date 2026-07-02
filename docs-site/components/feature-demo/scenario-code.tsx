@@ -4,20 +4,26 @@ import { motion } from 'motion/react';
 import type {
   HighlightedScenarioTab,
   ScenarioHighlight,
+  ScenarioTone,
 } from './types';
-import { evidenceHighlightIndex } from './types';
+import { scenarioConnectorMappings } from './types';
 
 function TokenLines({
   lines,
   theme,
   highlights,
-  evidenceCount,
+  evidenceTones,
 }: {
   lines: HighlightedScenarioTab['lightTokens'];
   theme: 'light' | 'dark';
   highlights: ScenarioHighlight[];
-  evidenceCount: number;
+  evidenceTones: ScenarioTone[];
 }) {
+  const connectorMappings = scenarioConnectorMappings(
+    highlights.map((highlight) => highlight.tone),
+    evidenceTones,
+  );
+
   return (
     <code className={`scenario-code-theme scenario-code-theme-${theme}`}>
       {lines.map((line, index) => {
@@ -28,9 +34,9 @@ function TokenLines({
         const highlight = highlightIndex >= 0 ? highlights[highlightIndex] : undefined;
         const markerNumbers = highlights.flatMap((range, rangeIndex) => {
           if (lineNumber !== range.end) return [];
-          return Array.from({ length: evidenceCount }, (_, evidenceIndex) => evidenceIndex)
-            .filter((evidenceIndex) => evidenceHighlightIndex(evidenceIndex, highlights.length) === rangeIndex)
-            .map((evidenceIndex) => evidenceIndex + 1);
+          return connectorMappings
+            .filter((mapping) => mapping.highlightIndex === rangeIndex)
+            .map((mapping) => mapping.evidenceIndex + 1);
         });
         return (
           <span
@@ -70,12 +76,12 @@ function TokenLines({
 export function ScenarioCode({
   tab,
   highlights,
-  evidenceCount,
+  evidenceTones,
   instanceId,
 }: {
   tab: HighlightedScenarioTab;
   highlights: ScenarioHighlight[];
-  evidenceCount: number;
+  evidenceTones: ScenarioTone[];
   instanceId: string;
 }) {
   return (
@@ -88,8 +94,8 @@ export function ScenarioCode({
       aria-label={`${tab.label} source with ${highlights.length} active annotation range${highlights.length === 1 ? '' : 's'}`}
     >
       <pre>
-        <TokenLines lines={tab.lightTokens} theme="light" highlights={highlights} evidenceCount={evidenceCount} />
-        <TokenLines lines={tab.darkTokens} theme="dark" highlights={highlights} evidenceCount={evidenceCount} />
+        <TokenLines lines={tab.lightTokens} theme="light" highlights={highlights} evidenceTones={evidenceTones} />
+        <TokenLines lines={tab.darkTokens} theme="dark" highlights={highlights} evidenceTones={evidenceTones} />
       </pre>
     </div>
   );
