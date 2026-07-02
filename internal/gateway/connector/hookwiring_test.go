@@ -98,14 +98,18 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 
 	// Antigravity's direct-exec parser does not dequote command paths. Use the
-	// installer-provided PATH entry so an install root containing spaces still
-	// works without quote characters becoming part of argv[0].
+	// managed launcher path without quotes so the hook does not resolve a bare
+	// executable through an untrusted workspace current directory.
+	setHookBinaryOverride(t, `C:\DefenseClaw\bin\defenseclaw-hook.exe`)
 	agy := hookInvocationCommandFor("windows", "antigravity", unix)
-	if agy != `defenseclaw-hook.exe hook --connector antigravity` {
+	if agy != `C:\DefenseClaw\bin\defenseclaw-hook.exe hook --connector antigravity` {
 		t.Errorf("antigravity command = %q", agy)
 	}
 	if strings.ContainsAny(agy, `"'`) {
 		t.Errorf("antigravity direct-exec command contains literal quotes: %q", agy)
+	}
+	if strings.HasPrefix(agy, windowsHookBinaryName) {
+		t.Errorf("antigravity command uses bare executable: %q", agy)
 	}
 }
 

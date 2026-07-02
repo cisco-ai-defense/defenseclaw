@@ -589,6 +589,7 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 	prev := AntigravityHooksPathOverride
 	AntigravityHooksPathOverride = cfgPath
 	t.Cleanup(func() { AntigravityHooksPathOverride = prev })
+	setHookBinaryOverride(t, `C:\DefenseClaw\bin\defenseclaw-hook.exe`)
 
 	conn := NewAntigravityConnector()
 	opts := SetupOpts{
@@ -666,11 +667,11 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 	if command != wantCommand {
 		t.Fatalf("command=%q want %q", command, wantCommand)
 	}
-	// Unix runs the absolute shell hook. Windows uses the stable no-console hook
-	// basename through PATH because agy's direct-exec tokenizer cannot dequote
-	// an absolute executable path containing spaces.
+	// Unix runs the absolute shell hook. Windows uses the stable managed
+	// no-console hook path without quotes because agy's direct-exec tokenizer
+	// cannot dequote an executable path.
 	if runtime.GOOS == "windows" {
-		if command != `defenseclaw-hook.exe hook --connector antigravity` {
+		if command != `C:\DefenseClaw\bin\defenseclaw-hook.exe hook --connector antigravity` {
 			t.Fatalf("windows command=%q", command)
 		}
 	} else {
